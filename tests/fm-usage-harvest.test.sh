@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Behavior tests for the fleet usage harvester and its report reader.
 # Covers claude-log request dedupe and cache folding, codex per-request delta
-# sums with cwd/window matching, cursor/unavailable null rows, the
+# sums with cwd/window matching, pi/pi-signed session parsing over the shared
+# ~/.pi/agent/sessions tree, the durable spawn_gen task start that survives a
+# meta rewritten after the fact, cursor/unavailable null rows, the
 # no-double-append idempotency guard, the ledger report rendering, and the
-# teardown integration property that a harvest failure never blocks teardown.
+# teardown integration properties that the harvest sees the status log and
+# that a harvest failure never blocks teardown.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -31,6 +34,16 @@ file_birth_epoch() {  # <file>
   printf '%s' "$t"
 }
 
+# Portable epoch formatters: BSD date reads an epoch with -r, GNU date with
+# -d @<epoch>. Both forms are tried so the fixtures pin the same timestamps on
+# macOS and on the Linux CI runners.
+touch_stamp() {  # <epoch> : touch -t argument
+  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$1" +%Y%m%d%H%M.%S
+}
+iso_utc() {  # <epoch> : the harvester's ledger timestamp spelling
+  date -r "$1" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
 # harvest_case <id> <harness> [model] [effort] : create a home with one task
 # whose worktree is $TMP_ROOT/wt-<id>, status and meta included, and echo the
 # data dir. Exports the FM_USAGE_* fixture dirs per case.
@@ -54,7 +67,9 @@ export_harvest_env() {  # <home-data>
   FM_DATA_OVERRIDE="$1/data"
   FM_USAGE_CLAUDE_DIR="$TMP_ROOT/fake-claude/projects"
   FM_USAGE_CODEX_DIR="$TMP_ROOT/fake-codex/sessions"
+  FM_USAGE_PI_DIR="$TMP_ROOT/fake-pi/sessions"
   export FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_USAGE_CLAUDE_DIR FM_USAGE_CODEX_DIR
+  export FM_USAGE_PI_DIR
 }
 
 # --- claude: request dedupe, cache folding, encoding resolution, window -----
@@ -88,7 +103,7 @@ JSON
   cat > "$logdir/session-future.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgX","model":"claude-test","usage":{"input_tokens":999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":999}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
+  touch -t "$(touch_stamp $(( $(file_mtime_epoch "$state/$id.status") + 7200 )))" \
     "$logdir/session-future.jsonl"
   mkdir -p "$FM_USAGE_CLAUDE_DIR/wrong-encoded-dir"
   printf '%s\n' '{"type":"assistant","message":{"id":"msgY","model":"claude-test","usage":{"input_tokens":777,"output_tokens":777}}}' \
@@ -159,7 +174,7 @@ JSON
 {"type":"session_meta","payload":{"cwd":"$wt"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":999,"output_tokens":999}}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$home/state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
+  touch -t "$(touch_stamp $(( $(file_mtime_epoch "$home/state/$id.status") + 7200 )))" \
     "$d1/rollout-future.jsonl"
   touch -m -r "$d1/rollout-match.jsonl" "$home/state/$id.status"
 
@@ -176,6 +191,155 @@ JSON
   assert_contains "$row" '"output_tokens":31' "codex output sums deltas (20+11)"
   assert_contains "$row" '"reasoning_tokens":11' "codex reasoning sums deltas (8+3)"
   pass "codex harvest: cwd/window matching, delta sums, model capture"
+}
+
+# --- pi / pi-signed: shared session tree, cwd match, per-message usage -------
+
+# pi_session_log <file> <cwd> : one realistic Pi session log. The session
+# record carries the cwd; each assistant message record carries one request's
+# usage. The second record repeats the first record's id, standing in for a
+# replayed line that must not be counted twice.
+pi_session_log() {  # <file> <cwd>
+  cat > "$1" <<JSON
+{"type":"session","version":3,"id":"sess-1","timestamp":"2026-08-31T04:46:40.383Z","cwd":"$2"}
+{"type":"model_change","id":"mc1","timestamp":"2026-08-31T04:46:57.742Z","provider":"zai","modelId":"glm-5.3-flash"}
+{"type":"message","id":"m1","timestamp":"2026-08-31T04:47:00.000Z","message":{"role":"assistant","provider":"zai","model":"glm-5.3-flash","usage":{"input":100,"output":20,"cacheRead":30,"cacheWrite":4,"reasoning":7,"totalTokens":150}}}
+{"type":"message","id":"m1","timestamp":"2026-08-31T04:47:00.000Z","message":{"role":"assistant","provider":"zai","model":"glm-5.3-flash","usage":{"input":100,"output":20,"cacheRead":30,"cacheWrite":4,"reasoning":7,"totalTokens":150}}}
+{"type":"message","id":"u1","timestamp":"2026-08-31T04:47:05.000Z","message":{"role":"user"}}
+{"type":"message","id":"m2","timestamp":"2026-08-31T04:47:09.000Z","message":{"role":"assistant","provider":"zai","model":"glm-5.3-flash","usage":{"input":11,"output":3,"cacheRead":5,"cacheWrite":0,"reasoning":1,"totalTokens":19}}}
+{"type":"message","id":"tr1","timestamp":"2026-08-31T04:47:11.000Z","message":{"role":"toolResult"}}
+JSON
+}
+
+pi_case() {  # <task-id> <harness>
+  local id=$1 harness=$2 wt="$TMP_ROOT/wt-$1"
+  local data home ledger row out d1
+  data=$(harvest_case "$id" "$harness" "$wt" default high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+
+  # Pi keys its session directories off the worker cwd, but the cwd recorded
+  # inside the session record is what binds a log to this task, so the fixture
+  # directory names are deliberately opaque here.
+  d1="$FM_USAGE_PI_DIR/--encoded-match--"
+  mkdir -p "$d1"
+  pi_session_log "$d1/session-match.jsonl" "$wt"
+  # Same window, different cwd: must be excluded.
+  mkdir -p "$FM_USAGE_PI_DIR/--encoded-other--"
+  pi_session_log "$FM_USAGE_PI_DIR/--encoded-other--/session-other.jsonl" /elsewhere
+  # Matching cwd but outside the task window: must be excluded.
+  pi_session_log "$d1/session-future.jsonl" "$wt"
+  touch -t "$(touch_stamp $(( $(file_mtime_epoch "$home/state/$id.status") + 7200 )))" \
+    "$d1/session-future.jsonl"
+  touch -m -r "$d1/session-match.jsonl" "$home/state/$id.status"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "$harness harvest should succeed"$'\n'"$out"
+  ledger="$home/data/usage-ledger.jsonl"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 1 ] || fail "$harness harvest wrote more than one row"
+  row=$(cat "$ledger")
+  assert_contains "$row" "\"harness\":\"$harness\"" "$harness row names the harness"
+  assert_contains "$row" '"source":"pi-sessions"' "$harness row names its source"
+  assert_contains "$row" '"model":"zai/glm-5.3-flash"' \
+    "$harness row reports the provider-qualified log model"
+  assert_contains "$row" '"input_tokens":111' \
+    "$harness input sums one entry per request, replay deduped (100+11)"
+  assert_contains "$row" '"cached_input_tokens":39' \
+    "$harness cached folds cacheRead+cacheWrite (30+4+5+0)"
+  assert_contains "$row" '"output_tokens":23' "$harness output sums per request (20+3)"
+  assert_contains "$row" '"reasoning_tokens":8' "$harness reasoning sums per request (7+1)"
+  assert_contains "$row" '"effort":"high"' "$harness row carries meta effort"
+  pass "$harness harvest: cwd/window matching, per-request sums, replay dedupe"
+}
+
+# --- spawn_gen: the task start survives a meta rewritten after the fact ------
+
+# fm-spawn records spawn_gen=s<epoch>.<pid>.<random> once per incarnation and
+# never rewrites it, while later meta writes (PR registration, busy-state
+# updates) move the meta mtime forward to near the end of the task. Deriving
+# the start from that mtime collapsed the window to zero and dropped every
+# session log; the durable token must win.
+spawn_gen_case() {
+  local id=usagespawngen1 wt="$TMP_ROOT/.no-mistakes/wt-usagespawngen1"
+  local data home state ledger row out base encoded logdir
+  data=$(harvest_case "$id" claude "$wt" default default)
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgS","model":"claude-test","usage":{"input_tokens":42,"output_tokens":6}}}
+JSON
+
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.4242.7\n' "$((base - 300))" >> "$state/$id.meta"
+  # The worker's last status line lands at the end of the task; the meta is
+  # then rewritten (PR registration), dragging its mtime up to the same point.
+  touch -t "$(touch_stamp "$base")" "$state/$id.status"
+  touch -t "$(touch_stamp "$base")" "$state/$id.meta"
+  # A real request logged 200s into the task, inside the true window only.
+  touch -t "$(touch_stamp $((base - 200)))" "$logdir/session.jsonl"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "spawn_gen harvest should succeed"$'\n'"$out"
+  ledger="$data/usage-ledger.jsonl"
+  row=$(cat "$ledger")
+  assert_contains "$row" '"wall_secs":300' \
+    "wall clock spans the spawn token epoch -> last status append"
+  assert_contains "$row" "\"spawned_at\":\"$(iso_utc $((base - 300)))\"" \
+    "spawned_at reports the spawn token epoch"
+  assert_contains "$row" '"source":"claude-projects"' \
+    "the durable window still covers the mid-task session log"
+  assert_contains "$row" '"input_tokens":42' "the in-window request is summed"
+  pass "usage harvest: spawn_gen is the durable start, immune to later meta writes"
+}
+
+# A spawn_gen token that is absent or malformed (a task spawned before the
+# token existed, or a corrupt record) must fall back to the file-timestamp
+# chain rather than producing a bogus start.
+spawn_gen_malformed_case() {
+  local id=usagespawngen2 wt="$TMP_ROOT/wt-usagespawngen2"
+  local data home state ledger row out base
+  data=$(harvest_case "$id" cursor "$wt" cursor-x "")
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+  printf 'spawn_gen=not-a-token\n' >> "$state/$id.meta"
+  base=$(file_mtime_epoch "$state/$id.status")
+  touch -t "$(touch_stamp "$base")" "$state/$id.status"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "malformed spawn_gen harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" "\"completed_at\":\"$(iso_utc "$base")\"" \
+    "malformed spawn_gen still reports the status-mtime end"
+  assert_contains "$row" '"wall_secs":0' \
+    "malformed spawn_gen falls back to the file-timestamp chain, never a bogus start"
+  pass "usage harvest: a malformed spawn_gen falls back to file timestamps"
+}
+
+# A spawn token that postdates the last status append (a relaunch with no
+# status line after it) must pin the start to the end, never invert the window.
+spawn_gen_future_case() {
+  local id=usagespawngen3 wt="$TMP_ROOT/wt-usagespawngen3"
+  local data home state row out base
+  data=$(harvest_case "$id" cursor "$wt" cursor-x "")
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.1.1\n' "$((base + 600))" >> "$state/$id.meta"
+  touch -t "$(touch_stamp "$base")" "$state/$id.status"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "future spawn_gen harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"wall_secs":0' "an impossible start never reports a negative duration"
+  assert_contains "$row" "\"spawned_at\":\"$(iso_utc "$base")\"" \
+    "an impossible start is pinned to the end, never postdating completed_at"
+  pass "usage harvest: a start later than the end is pinned, not inverted"
 }
 
 # --- cursor: unavailable logs render nulls ----------------------------------
@@ -246,9 +410,9 @@ JSON
   # and the session log lands mid-window. Without the meta-mtime start fallback
   # the birthless window collapses to [T, T] and drops the earlier log.
   base=$(file_mtime_epoch "$state/$id.status")
-  touch -t "$(date -r "$base" +%Y%m%d%H%M.%S)" "$state/$id.status"
-  touch -t "$(date -r $((base - 100)) +%Y%m%d%H%M.%S)" "$state/$id.meta"
-  touch -t "$(date -r $((base - 50)) +%Y%m%d%H%M.%S)" "$logdir/session.jsonl"
+  touch -t "$(touch_stamp "$base")" "$state/$id.status"
+  touch -t "$(touch_stamp $((base - 100)))" "$state/$id.meta"
+  touch -t "$(touch_stamp $((base - 50)))" "$logdir/session.jsonl"
 
   fb="$TMP_ROOT/nobirth-fakebin"
   nobirth_stat_bin "$fb"
@@ -352,14 +516,19 @@ lock_bound_case() {
 report_case() {
   local out ledger
   ledger="$TMP_ROOT/home-usageclaude1/data/usage-ledger.jsonl"
-  cat "$TMP_ROOT/home-usagecodex1/data/usage-ledger.jsonl" >> "$ledger"
-  cat "$TMP_ROOT/home-usagecursor1/data/usage-ledger.jsonl" >> "$ledger"
+  {
+    cat "$TMP_ROOT/home-usagecodex1/data/usage-ledger.jsonl"
+    cat "$TMP_ROOT/home-usagepi1/data/usage-ledger.jsonl"
+    cat "$TMP_ROOT/home-usagecursor1/data/usage-ledger.jsonl"
+  } >> "$ledger"
   out=$(FM_DATA_OVERRIDE="$(dirname "$ledger")" "$REPORT" 2>&1)
   expect_code 0 "$?" "report should succeed"$'\n'"$out"
-  assert_contains "$out" "usage ledger: $ledger (3 rows)" "report names the ledger and row count"
+  assert_contains "$out" "usage ledger: $ledger (4 rows)" "report names the ledger and row count"
   assert_contains "$out" "per-model totals" "report prints per-model totals"
   assert_contains "$out" "claude-test" "report lists the claude model"
   assert_contains "$out" "glm-5.3" "report lists the codex model"
+  assert_contains "$out" "zai/glm-5.3-flash" "report lists the provider-qualified pi model"
+  assert_contains "$out" "usagepi1" "report lists the pi task row"
   assert_contains "$out" "usageclaude1" "report lists each task row"
   assert_contains "$out" "usagecursor1" "report lists the unavailable task row"
   assert_contains "$out" "unavailable" "report shows the unavailable source"
@@ -368,6 +537,57 @@ report_case() {
   expect_code 0 "$?" "report without a ledger should exit 0"
   assert_contains "$out" "no usage ledger" "report names the missing ledger"
   pass "usage report: per-model totals, per-task rows, missing-ledger tolerance"
+}
+
+# --- teardown integration: the harvest still sees the task status log -------
+
+# Teardown deletes state/<id>.status when it retires the task's status
+# presentation. The harvest has to run before that, or it loses both the task
+# window and the turn count and every row degrades to a zero-duration,
+# zero-turn, source-unavailable line.
+teardown_status_case() {
+  local proj wt id fb state data config out row
+  id=usageharvtd2
+  proj="$TMP_ROOT/td2-proj"; wt="$TMP_ROOT/td2-wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb="$TMP_ROOT/td2-fakebin"
+  mkdir -p "$fb"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/treehouse"
+  chmod +x "$fb/tmux" "$fb/treehouse"
+  state="$TMP_ROOT/td2-state"; config="$TMP_ROOT/td2-config"; data="$TMP_ROOT/td2-data"
+  mkdir -p "$state" "$config" "$data/$id"
+  printf 'scout findings\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" \
+    "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "decisions_reviewed=1" "decision_keys="
+  {
+    printf 'working: scouting\n'
+    printf 'working: still scouting\n'
+    printf 'done: report written\n'
+  } > "$state/$id.status"
+  # A spawn 500s before the last status append, and a meta rewritten right at
+  # the end, exactly as a real PR registration leaves it.
+  local base
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.99.3\n' "$((base - 500))" >> "$state/$id.meta"
+  touch -t "$(touch_stamp "$base")" "$state/$id.meta"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/td2-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/td2-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/td2-fake-pi" \
+    "$TEARDOWN" "$id" 2>&1)
+  expect_code 0 "$?" "teardown should succeed"$'\n'"$out"
+  assert_contains "$out" "teardown $id complete" "teardown completes"
+  [ ! -e "$state/$id.status" ] || fail "teardown left the status log behind"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"turns":2' \
+    "the harvest counted the status log's working lines before teardown removed it"
+  assert_contains "$row" '"wall_secs":500' \
+    "the harvest measured the task window before teardown removed the status log"
+  pass "teardown integration: the harvest runs while the status log still exists"
 }
 
 # --- teardown integration: harvest failure never blocks teardown ------------
@@ -413,9 +633,15 @@ SH
 claude_case
 claude_nobirth_case
 codex_case
+pi_case usagepi1 pi
+pi_case usagepisigned1 pi-signed
+spawn_gen_case
+spawn_gen_malformed_case
+spawn_gen_future_case
 cursor_case
 remote_case
 race_case
 lock_bound_case
 report_case
+teardown_status_case
 teardown_case

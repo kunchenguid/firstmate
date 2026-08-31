@@ -17,13 +17,20 @@
 #    "wall_secs":<int>,"turns":<int>,
 #    "input_tokens":<int|null>,"cached_input_tokens":<int|null>,
 #    "output_tokens":<int|null>,"reasoning_tokens":<int|null>,
-#    "source":<claude-projects|codex-sessions|unavailable>}
+#    "source":<claude-projects|codex-sessions|pi-sessions|unavailable>}
 #
-# Wall clock: status-file birth epoch -> status-file mtime epoch; the meta
-# file's mtime is the fallback end when the status file is absent, and a
-# missing birth timestamp falls back to the meta-file mtime (the spawn-time
-# marker, portable where birth time is unavailable) and then the status mtime
-# as the start.
+# Wall clock: task start epoch -> status-file mtime epoch; the meta file's
+# mtime is the fallback end when the status file is absent.
+# The start comes from the epoch embedded in the meta's
+# spawn_gen=s<epoch>.<pid>.<random> incarnation token, which fm-spawn writes
+# once per spawn or relaunch and never rewrites afterwards. The meta file's
+# own mtime is NOT a start source in its own right: later meta writes (PR
+# registration, busy-state updates) move it forward to near the end of the
+# task and collapse the window. Only when spawn_gen is absent or malformed
+# (a task spawned before that token existed) does the start fall back to the
+# status-file birth epoch, then the meta mtime, then the status mtime.
+# A start later than the end (a relaunch with no status append after it) is
+# pinned to the end so spawned_at never postdates completed_at.
 # Turn estimate: count of "^working:" lines in the status file.
 #
 # Per-request usage sources:
@@ -43,6 +50,18 @@
 #     output_tokens, reasoning_output_tokens); summing those deltas equals the
 #     final cumulative total. cached_input_tokens folds cached + cache_write
 #     (subsets of input_tokens); the model comes from the turn_context.
+#   harness=pi, harness=pi-signed: <pi-sessions>/**/*.jsonl in the task window
+#     whose "session" record's cwd equals the meta worktree. Both adapters run
+#     the same Pi application and share one ~/.pi/agent state tree, so one
+#     scan covers them. Each assistant "message" record carries one API
+#     request's usage at .message.usage (input, cacheRead, cacheWrite, output,
+#     reasoning) and Pi writes one record per message rather than one per
+#     content block; records are still deduped by the record's own .id where
+#     present so a replayed line cannot double-count. cached_input_tokens
+#     folds cacheRead + cacheWrite; reasoning_tokens captures .reasoning (a
+#     subset of output). The model is reported provider-qualified as
+#     "<provider>/<model>" to match the model spelling fm-spawn records in the
+#     meta, and bare when the record carries no provider.
 #   harness=cursor, a task with a recorded remote_host (its worker ran on
 #     another machine, so its logs are not on this filesystem), an absent log
 #     tree, or no in-window match: token fields are null with source
@@ -56,6 +75,7 @@
 #   FM_ROOT_OVERRIDE, FM_HOME, FM_STATE_OVERRIDE, FM_DATA_OVERRIDE  as usual
 #   FM_USAGE_CLAUDE_DIR   default $HOME/.claude/projects
 #   FM_USAGE_CODEX_DIR    default $HOME/.codex/sessions
+#   FM_USAGE_PI_DIR       default $HOME/.pi/agent/sessions
 #
 # Exit status: 0 on a successful or already-present harvest, 1 on a missing
 # task record, missing jq, or an unwritable ledger. Callers that must not
@@ -69,6 +89,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CLAUDE_DIR="${FM_USAGE_CLAUDE_DIR:-${HOME:-}/.claude/projects}"
 CODEX_DIR="${FM_USAGE_CODEX_DIR:-${HOME:-}/.codex/sessions}"
+PI_DIR="${FM_USAGE_PI_DIR:-${HOME:-}/.pi/agent/sessions}"
 
 # Portable directory-lock helpers (fm_lock_try_acquire / fm_lock_release) let
 # the idempotent check-and-append below run as one critical section, so two
@@ -104,6 +125,7 @@ EFFORT_META=$(meta_get effort)
 # session that happens to match the worktree path, so a task with a recorded
 # remote_host is recorded as source=unavailable without a local scan.
 REMOTE_HOST=$(meta_get remote_host)
+SPAWN_GEN=$(meta_get spawn_gen)
 
 file_mtime_epoch() {  # <file>
   local t
@@ -126,10 +148,24 @@ iso_from_epoch() {  # <epoch>
     || return 1
 }
 
+spawn_gen_epoch() {  # <spawn_gen token>
+  local e
+  case "$1" in s[0-9]*) ;; *) return 1 ;; esac
+  e=${1#s}
+  e=${e%%.*}
+  # The same plausible-epoch guard used for birth times rejects a token whose
+  # leading field is not a real second count.
+  case "$e" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$e" -ge 1000000000 ] 2>/dev/null || return 1
+  printf '%s' "$e"
+}
+
 END_EPOCH=$(file_mtime_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META")
-START_EPOCH=$(file_birth_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
+START_EPOCH=$(spawn_gen_epoch "$SPAWN_GEN" 2>/dev/null || file_birth_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
+# Pin an impossible start to the end rather than inverting the window, which
+# would both report a negative duration and drop every session log.
+[ "$START_EPOCH" -le "$END_EPOCH" ] 2>/dev/null || START_EPOCH=$END_EPOCH
 WALL=$((END_EPOCH - START_EPOCH))
-[ "$WALL" -ge 0 ] || WALL=0
 TURNS=$(grep -c '^working:' "$STATUS" 2>/dev/null || true)
 case "$TURNS" in ''|*[!0-9]*) TURNS=0 ;; esac
 
@@ -243,6 +279,52 @@ FMINNER
           [ "$cwd" = "$WORKTREE" ] || continue
           found=1
           SRC=codex-sessions
+          [ -n "$m" ] && [ -z "$MODEL_LOG" ] && MODEL_LOG=$m
+          IT=$((IT + ${it:-0}))
+          CT=$((CT + ${ct:-0}))
+          OT=$((OT + ${ot:-0}))
+          RT=$((RT + ${rt:-0}))
+        done <<FMINNER
+$files
+FMINNER
+        [ "$found" -eq 1 ] || SRC=unavailable
+      fi
+    fi
+    ;;
+  pi|pi-signed)
+    if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
+      files=$(matched_files "$PI_DIR" "")
+      if [ -n "$files" ]; then
+        IT=0; CT=0; OT=0; RT=0
+        found=0
+        while IFS= read -r f; do
+          row=$(jq -rn '
+            reduce inputs as $l ({cwd:null,seen:{},m:null,it:0,ct:0,ot:0,rt:0};
+              if $l.type == "session" then
+                .cwd = ($l.cwd // .cwd)
+              elif $l.type == "message" and $l.message.role == "assistant"
+                   and ($l.message.usage // null) != null then
+                ($l.id // null) as $id
+                | if $id != null and .seen[$id] then . else
+                    (if $id == null then . else .seen[$id] = 1 end)
+                    | .it += ($l.message.usage.input // 0)
+                    | .ct += (($l.message.usage.cacheRead // 0)
+                              + ($l.message.usage.cacheWrite // 0))
+                    | .ot += ($l.message.usage.output // 0)
+                    | .rt += ($l.message.usage.reasoning // 0)
+                    | (if .m == null and ($l.message.model // null) != null then
+                         .m = (if ($l.message.provider // null) != null
+                               then ($l.message.provider + "/" + $l.message.model)
+                               else $l.message.model end)
+                       else . end)
+                  end
+              else . end)
+            | [.cwd, .m, .it, .ct, .ot, .rt] | @tsv' "$f" 2>/dev/null || true)
+          [ -n "$row" ] || continue
+          IFS=$'\t' read -r cwd m it ct ot rt <<<"$row"
+          [ "$cwd" = "$WORKTREE" ] || continue
+          found=1
+          SRC=pi-sessions
           [ -n "$m" ] && [ -z "$MODEL_LOG" ] && MODEL_LOG=$m
           IT=$((IT + ${it:-0}))
           CT=$((CT + ${ct:-0}))
