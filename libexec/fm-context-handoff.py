@@ -45,6 +45,7 @@ APPROVAL_SCHEMA = "firstmate.context-handoff.approval.v1"
 BINDING_SCHEMA = "firstmate.context-handoff.consumer-binding.v1"
 STATE_INITIALIZED_BYTES = b"firstmate.context-handoff.state.v1\n"
 COMPACTION_BINDING_SCHEMA = "firstmate.context-handoff.compaction-binding.v1"
+COMPACTION_ATTEMPT_SCHEMA = "firstmate.context-handoff.compaction-attempt.v1"
 EXECUTION_CLAIM_SCHEMA = "firstmate.context-handoff.execution-claim.v1"
 HANDOFF_SCHEMA = "claude-obsidian.handoff.v1"
 TRANSACTION_SCHEMA = "claude-obsidian.transaction.v1"
@@ -60,6 +61,7 @@ MAX_CORE_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_TRANSACTION_BUNDLE_BYTES = 128 * 1024
 MAX_TRANSACTION_WRITES = 16
 MAX_COMPACTION_RECORDS = 32
+HERDR_PROBE_TIMEOUT_SECONDS = 3.0
 PROMPT_TEXT = "/firstmate-context-handoff:consume"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 RECORD_ID = re.compile(r"^handoff-[0-9a-f]{48}$")
@@ -970,7 +972,12 @@ def read_candidate_binding(path: Path) -> dict[str, Any]:
 
 def validate_candidate(value: Mapping[str, Any], path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     item = validate_item(value.get("item"), config)
-    if item["item_id"] != value.get("candidate_id") or path.stem != value.get("candidate_id"):
+    bound = candidate_identity(
+        str(value.get("source_harness")),
+        str(value.get("source_session_hash")),
+        {key: entry for key, entry in item.items() if key != "item_id"},
+    )
+    if item["item_id"] != value.get("candidate_id") or path.stem != value.get("candidate_id") or bound != value.get("candidate_id"):
         raise HandoffError("CANDIDATE_ID", "candidate stable ID is invalid")
     return {**value, "item": item}
 
@@ -1196,123 +1203,147 @@ def compaction_attempt_result(status: str, bindings: Sequence[Mapping[str, str]]
     return result
 
 
-def seal_candidates(home: Path, source_harness: str, session_hash: str, trigger: str) -> dict[str, Any]:
+def seal_candidates(
+    home: Path,
+    source_harness: str,
+    session_hash: str,
+    trigger: str,
+    *,
+    verify_locked: Callable[[StateLayout, Mapping[str, Any]], None] | None = None,
+    commit_locked: Callable[[StateLayout, Mapping[str, Any], Mapping[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     config = load_config(home)
     if not config_enabled(config, "sealing_enabled"):
         return {"status": "disabled"}
     assert config is not None
     layout = StateLayout(home)
     with state_lock(layout):
-        recover_orphan_queues_from_claims(layout, config)
-        attempt_bindings = {
-            item["record_id"]: item["envelope_sha256"]
-            for item in retryable_records(layout, source_harness, session_hash, config)
-        }
-        claimed = claimed_candidate_ids(layout)
-        matching: dict[str, dict[str, Any]] = {}
-        for path in sorted(layout.candidates.glob("candidate-*.json")):
-            if path.stem in claimed:
-                continue
-            try:
-                candidate_binding = read_candidate_binding(path)
-            except HandoffError as exc:
-                write_receipt(
-                    layout,
-                    "seal",
-                    "failed",
-                    "registered-candidate-validation-failed",
-                    source_harness=source_harness,
-                    trigger=trigger,
-                    failure_code=exc.code,
-                )
-                return {
-                    "status": "seal-failed",
-                    "had_candidates": True,
-                    "reason": "registered-candidate-validation-failed",
-                }
-            if candidate_binding["source_harness"] != source_harness or candidate_binding["source_session_hash"] != session_hash:
-                continue
-            try:
-                candidate = validate_candidate(candidate_binding, path, config)
-            except HandoffError as exc:
-                write_receipt(
-                    layout,
-                    "seal",
-                    "failed",
-                    "registered-candidate-validation-failed",
-                    source_harness=source_harness,
-                    trigger=trigger,
-                    failure_code=exc.code,
-                )
-                return {
-                    "status": "seal-failed",
-                    "had_candidates": True,
-                    "reason": "registered-candidate-validation-failed",
-                }
-            matching[candidate["candidate_id"]] = candidate
-        recovered = recover_unclaimed_records(layout, config, matching)
-        matching = {key: value for key, value in matching.items() if key not in recovered}
-        for record_id in sorted(set(recovered.values())):
-            _, digest = read_envelope(layout, record_id, config, verify_sources=False)
-            attempt_bindings[record_id] = digest
-        if not matching:
-            if attempt_bindings:
-                return compaction_attempt_result("already-sealed", [{"record_id": key, "envelope_sha256": value} for key, value in attempt_bindings.items()])
-            write_receipt(layout, "seal", "empty", "no-registered-candidates", source_harness=source_harness, trigger=trigger)
-            return {"status": "empty"}
-        if len(attempt_bindings) >= MAX_COMPACTION_RECORDS:
-            return compaction_attempt_result("already-sealed", [{"record_id": key, "envelope_sha256": value} for key, value in attempt_bindings.items()])
-        selected: dict[str, dict[str, Any]] = {}
-        envelope: dict[str, Any] = {}
-        data = b""
-        created_at = now_utc()
-        for candidate_id in sorted(matching):
-            proposed = {**selected, candidate_id: matching[candidate_id]}
-            proposed_envelope: dict[str, Any] = {
-                "schema": HANDOFF_SCHEMA,
-                "record_id": "",
-                "source_harness": source_harness,
-                "source_session_hash": session_hash,
-                "trigger": trigger,
-                "created_at": created_at,
-                "items": [proposed[key]["item"] for key in sorted(proposed)],
-            }
-            proposed_envelope["record_id"] = envelope_identity(proposed_envelope)
-            proposed_data = canonical_json(proposed_envelope)
-            if len(proposed) > MAX_ITEMS or len(proposed_data) > MAX_ENVELOPE_BYTES:
-                break
-            selected = proposed
-            envelope = proposed_envelope
-            data = proposed_data
-        if not selected:
-            write_receipt(layout, "seal", "failed", "byte-cap-exceeded", source_harness=source_harness, trigger=trigger, candidate_count=len(matching))
-            return {"status": "seal-failed", "had_candidates": True, "reason": "byte-cap-exceeded"}
-        items = envelope["items"]
-        validate_envelope(envelope, config)
+        if verify_locked is not None:
+            verify_locked(layout, config)
+        result = _seal_candidates_locked(layout, config, source_harness, session_hash, trigger)
+        if commit_locked is not None:
+            commit_locked(layout, config, result)
+        return result
+
+
+def _seal_candidates_locked(
+    layout: StateLayout,
+    config: Mapping[str, Any],
+    source_harness: str,
+    session_hash: str,
+    trigger: str,
+) -> dict[str, Any]:
+    replay_compaction_attempts(layout, config)
+    recover_orphan_queues_from_claims(layout, config)
+    attempt_bindings = {
+        item["record_id"]: item["envelope_sha256"]
+        for item in retryable_records(layout, source_harness, session_hash, config)
+    }
+    claimed = claimed_candidate_ids(layout)
+    matching: dict[str, dict[str, Any]] = {}
+    for path in sorted(layout.candidates.glob("candidate-*.json")):
+        if path.stem in claimed:
+            continue
         try:
-            digest = atomic_create(record_file(layout, envelope["record_id"]), data)
-            update_queue(layout, envelope["record_id"], envelope_sha256=digest)
-            for candidate_id in sorted(selected):
-                claim = {
-                    "schema": "firstmate.context-handoff.claim.v1",
-                    "candidate_id": candidate_id,
-                    "record_id": envelope["record_id"],
-                    "envelope_sha256": digest,
-                    "claimed_at": envelope["created_at"],
-                }
-                atomic_create(layout.claims / f"{candidate_id}.json", canonical_json(claim))
-            write_receipt(layout, "seal", "sealed", "durable-before-compaction", record_id=envelope["record_id"], envelope_sha256=digest, source_harness=source_harness, trigger=trigger, item_count=len(items), envelope_bytes=len(data))
-        except BaseException as exc:
-            reason = "atomic-seal-failed"
-            try:
-                write_receipt(layout, "seal", "failed", reason, source_harness=source_harness, trigger=trigger, candidate_count=len(items))
-            except BaseException:
-                pass
-            if isinstance(exc, HandoffError) and exc.code == "CREATE_ONLY_MISMATCH":
-                quarantine(layout, envelope["record_id"], "record-id-payload-mismatch")
-            return {"status": "seal-failed", "had_candidates": True, "reason": reason}
-        attempt_bindings[envelope["record_id"]] = digest
-        return compaction_attempt_result("sealed", [{"record_id": key, "envelope_sha256": value} for key, value in attempt_bindings.items()])
+            candidate_binding = read_candidate_binding(path)
+        except HandoffError as exc:
+            write_receipt(
+                layout,
+                "seal",
+                "failed",
+                "registered-candidate-validation-failed",
+                source_harness=source_harness,
+                trigger=trigger,
+                failure_code=exc.code,
+            )
+            return {
+                "status": "seal-failed",
+                "had_candidates": True,
+                "reason": "registered-candidate-validation-failed",
+            }
+        if candidate_binding["source_harness"] != source_harness or candidate_binding["source_session_hash"] != session_hash:
+            continue
+        try:
+            candidate = validate_candidate(candidate_binding, path, config)
+        except HandoffError as exc:
+            write_receipt(
+                layout,
+                "seal",
+                "failed",
+                "registered-candidate-validation-failed",
+                source_harness=source_harness,
+                trigger=trigger,
+                failure_code=exc.code,
+            )
+            return {
+                "status": "seal-failed",
+                "had_candidates": True,
+                "reason": "registered-candidate-validation-failed",
+            }
+        matching[candidate["candidate_id"]] = candidate
+    recovered = recover_unclaimed_records(layout, config, matching)
+    matching = {key: value for key, value in matching.items() if key not in recovered}
+    for record_id in sorted(set(recovered.values())):
+        _, digest = read_envelope(layout, record_id, config, verify_sources=False)
+        attempt_bindings[record_id] = digest
+    if not matching:
+        if attempt_bindings:
+            return compaction_attempt_result("already-sealed", [{"record_id": key, "envelope_sha256": value} for key, value in attempt_bindings.items()])
+        write_receipt(layout, "seal", "empty", "no-registered-candidates", source_harness=source_harness, trigger=trigger)
+        return {"status": "empty"}
+    if len(attempt_bindings) >= MAX_COMPACTION_RECORDS:
+        return compaction_attempt_result("already-sealed", [{"record_id": key, "envelope_sha256": value} for key, value in attempt_bindings.items()])
+    selected: dict[str, dict[str, Any]] = {}
+    envelope: dict[str, Any] = {}
+    data = b""
+    created_at = now_utc()
+    for candidate_id in sorted(matching):
+        proposed = {**selected, candidate_id: matching[candidate_id]}
+        proposed_envelope: dict[str, Any] = {
+            "schema": HANDOFF_SCHEMA,
+            "record_id": "",
+            "source_harness": source_harness,
+            "source_session_hash": session_hash,
+            "trigger": trigger,
+            "created_at": created_at,
+            "items": [proposed[key]["item"] for key in sorted(proposed)],
+        }
+        proposed_envelope["record_id"] = envelope_identity(proposed_envelope)
+        proposed_data = canonical_json(proposed_envelope)
+        if len(proposed) > MAX_ITEMS or len(proposed_data) > MAX_ENVELOPE_BYTES:
+            break
+        selected = proposed
+        envelope = proposed_envelope
+        data = proposed_data
+    if not selected:
+        write_receipt(layout, "seal", "failed", "byte-cap-exceeded", source_harness=source_harness, trigger=trigger, candidate_count=len(matching))
+        return {"status": "seal-failed", "had_candidates": True, "reason": "byte-cap-exceeded"}
+    items = envelope["items"]
+    validate_envelope(envelope, config)
+    try:
+        digest = atomic_create(record_file(layout, envelope["record_id"]), data)
+        update_queue(layout, envelope["record_id"], envelope_sha256=digest)
+        for candidate_id in sorted(selected):
+            claim = {
+                "schema": "firstmate.context-handoff.claim.v1",
+                "candidate_id": candidate_id,
+                "record_id": envelope["record_id"],
+                "envelope_sha256": digest,
+                "claimed_at": envelope["created_at"],
+            }
+            atomic_create(layout.claims / f"{candidate_id}.json", canonical_json(claim))
+        write_receipt(layout, "seal", "sealed", "durable-before-compaction", record_id=envelope["record_id"], envelope_sha256=digest, source_harness=source_harness, trigger=trigger, item_count=len(items), envelope_bytes=len(data))
+    except BaseException as exc:
+        reason = "atomic-seal-failed"
+        try:
+            write_receipt(layout, "seal", "failed", reason, source_harness=source_harness, trigger=trigger, candidate_count=len(items))
+        except BaseException:
+            pass
+        if isinstance(exc, HandoffError) and exc.code == "CREATE_ONLY_MISMATCH":
+            quarantine(layout, envelope["record_id"], "record-id-payload-mismatch")
+        return {"status": "seal-failed", "had_candidates": True, "reason": reason}
+    attempt_bindings[envelope["record_id"]] = digest
+    return compaction_attempt_result("sealed", [{"record_id": key, "envelope_sha256": value} for key, value in attempt_bindings.items()])
 
 
 def parse_event_stdin(max_bytes: int = MAX_HOOK_BYTES) -> dict[str, Any]:
@@ -1363,10 +1394,20 @@ def block_failed_claude_precompact(home: Path, config: Mapping[str, Any], trigge
     return {"decision": "block", "reason": "Already-curated handoff candidates could not be bound to the exact Claude endpoint; compaction was stopped."}
 
 
-def seal_with_failure_receipt(home: Path, source_harness: str, session_hash: str, trigger: str) -> dict[str, Any]:
+def seal_with_failure_receipt(
+    home: Path,
+    source_harness: str,
+    session_hash: str,
+    trigger: str,
+    *,
+    verify_locked: Callable[[StateLayout, Mapping[str, Any]], None] | None = None,
+    commit_locked: Callable[[StateLayout, Mapping[str, Any], Mapping[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     try:
-        return seal_candidates(home, source_harness, session_hash, trigger)
+        return seal_candidates(home, source_harness, session_hash, trigger, verify_locked=verify_locked, commit_locked=commit_locked)
     except HandoffError as exc:
+        if exc.code == "GENERATION_REPLACED":
+            raise
         layout = StateLayout(home)
         with state_lock(layout):
             try:
@@ -1380,14 +1421,34 @@ def seal_with_failure_receipt(home: Path, source_harness: str, session_hash: str
         return {"status": "seal-failed", "had_candidates": True, "reason": "registered-candidate-validation-failed"}
 
 
+def seal_binding_failure_receipt(
+    home: Path,
+    static_config: Mapping[str, Any],
+    source_harness: str,
+    session_hash: str,
+    trigger: str,
+    exc: HandoffError,
+) -> dict[str, Any]:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        try:
+            candidate_present = matching_candidate_present(layout, source_harness, session_hash)
+        except HandoffError:
+            candidate_present = True
+        if not candidate_present and not retryable_records(layout, source_harness, session_hash, static_config):
+            raise exc
+        write_receipt(layout, "seal", "failed", "seal-binding-failed", source_harness=source_harness, trigger=trigger, failure_code=exc.code)
+    return {"status": "seal-failed", "had_candidates": True, "reason": "seal-binding-failed"}
+
+
 def command_seal(args: argparse.Namespace) -> dict[str, Any]:
     if args.source_harness not in SOURCE_HARNESSES or args.trigger not in TRIGGERS:
         raise HandoffError("SEAL_ENUM", "seal source or trigger is invalid")
     home = resolve_home(args.fm_home)
-    config = load_config(home)
-    if not config_enabled(config, "sealing_enabled"):
+    static_config = load_config(home, validate_active_bindings=False)
+    if not config_enabled(static_config, "sealing_enabled"):
         return {"status": "disabled"}
-    assert config is not None
+    assert static_config is not None
     event = parse_event_stdin()
     supplied = event.get("session_id")
     if supplied is not None and not isinstance(supplied, str):
@@ -1396,16 +1457,88 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
         if not supplied:
             raise HandoffError("SESSION_ID", "Claude sealing requires its hook session_id")
         session_hash = hash_session("claude", supplied)
-        expected = source_session_hash(config, "claude")
+        expected = source_session_hash(static_config, "claude")
         if session_hash != expected:
             return {"status": "recipient-mismatch"}
     else:
-        session_hash = source_session_hash(config, "pi", supplied)
+        session_hash = source_session_hash(static_config, "pi", supplied)
+    try:
+        config = load_config(home)
+    except HandoffError as exc:
+        return seal_binding_failure_receipt(home, static_config, args.source_harness, session_hash, args.trigger, exc)
+    if not config_enabled(config, "sealing_enabled"):
+        return {"status": "disabled"}
     result = seal_with_failure_receipt(home, args.source_harness, session_hash, args.trigger)
     if args.standalone and result.get("status") in {"sealed", "already-sealed"}:
         mark_compaction(home, normalize_compaction_bindings(result.get("bindings")), True, args.trigger, "standalone-manual-seal")
         deliver_pending(home)
     return result
+
+
+def compaction_attempt_journal(bindings: Sequence[Mapping[str, str]], status: str, trigger: str, reason: str) -> dict[str, Any]:
+    body = {
+        "schema": COMPACTION_ATTEMPT_SCHEMA,
+        "bindings": normalize_compaction_bindings([dict(item) for item in bindings]),
+        "status": status,
+        "trigger": trigger,
+        "reason": reason,
+        "recorded_at": now_utc(),
+    }
+    return {"attempt_id": "attempt-" + sha256_bytes(canonical_json(body))[:48], **body}
+
+
+def read_compaction_attempt(path: Path) -> dict[str, Any]:
+    value = read_json_file(path, max_bytes=16 * 1024)
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != COMPACTION_ATTEMPT_SCHEMA
+        or value.get("attempt_id") != path.stem
+        or value.get("status") not in {"succeeded", "failed"}
+        or value.get("trigger") not in TRIGGERS
+        or not isinstance(value.get("reason"), str)
+        or not isinstance(value.get("recorded_at"), str)
+    ):
+        raise HandoffError("COMPACTION_ATTEMPT", "durable compaction attempt result is invalid")
+    return {**value, "bindings": normalize_compaction_bindings(value.get("bindings"))}
+
+
+def apply_compaction_attempt(layout: StateLayout, config: Mapping[str, Any], journal: Mapping[str, Any]) -> dict[str, Any]:
+    verified: list[tuple[str, str]] = []
+    for item in journal["bindings"]:
+        record_id = item["record_id"]
+        _, actual = read_envelope(layout, record_id, config, verify_sources=False)
+        queue = read_queue(layout, record_id)
+        if actual != item["envelope_sha256"] or queue.get("envelope_sha256") != actual:
+            quarantine(layout, record_id, "record-payload-mismatch", expected_sha256=str(queue.get("envelope_sha256", "")), observed_sha256=actual)
+            update_queue(layout, record_id, status="quarantined", reason="record-payload-mismatch")
+            raise HandoffError("PAYLOAD_MISMATCH", "stable record ID binds changed payload bytes")
+        verified.append((record_id, actual))
+    status = str(journal["status"])
+    queue_reason = "consumer-not-yet-notified" if status == "succeeded" else "source-compaction-failed"
+    for record_id, actual in verified:
+        if read_queue(layout, record_id).get("status") not in {"acknowledged", "quarantined"}:
+            update_queue(layout, record_id, status="pending", reason=queue_reason, compaction=status)
+        write_receipt(
+            layout,
+            "compaction",
+            status,
+            str(journal["reason"]),
+            record_id=record_id,
+            envelope_sha256=actual,
+            trigger=str(journal["trigger"]),
+            attempt_record_count=len(verified),
+            recorded_at=str(journal["recorded_at"]),
+        )
+    return {"status": f"compaction-{status}", "record_ids": [record_id for record_id, _ in verified]}
+
+
+def replay_compaction_attempts(layout: StateLayout, config: Mapping[str, Any]) -> None:
+    for path in sorted(layout.bindings.glob("attempt-*.json")):
+        journal = read_compaction_attempt(path)
+        try:
+            apply_compaction_attempt(layout, config, journal)
+        finally:
+            durable_unlink(path)
 
 
 def _mark_compaction_locked(
@@ -1416,23 +1549,15 @@ def _mark_compaction_locked(
     trigger: str,
     reason: str,
 ) -> dict[str, Any]:
-    normalized = normalize_compaction_bindings([dict(item) for item in bindings])
-    verified: list[tuple[str, str]] = []
-    for item in normalized:
-        record_id = item["record_id"]
-        _, actual = read_envelope(layout, record_id, config, verify_sources=False)
-        queue = read_queue(layout, record_id)
-        if actual != item["envelope_sha256"] or queue.get("envelope_sha256") != actual:
-            quarantine(layout, record_id, "record-payload-mismatch", expected_sha256=str(queue.get("envelope_sha256", "")), observed_sha256=actual)
-            update_queue(layout, record_id, status="quarantined", reason="record-payload-mismatch")
-            raise HandoffError("PAYLOAD_MISMATCH", "stable record ID binds changed payload bytes")
-        verified.append((record_id, actual))
-    status = "succeeded" if succeeded else "failed"
-    queue_reason = "consumer-not-yet-notified" if succeeded else "source-compaction-failed"
-    for record_id, actual in verified:
-        update_queue(layout, record_id, status="pending", reason=queue_reason, compaction=status)
-        write_receipt(layout, "compaction", status, reason, record_id=record_id, envelope_sha256=actual, trigger=trigger, attempt_record_count=len(verified))
-    return {"status": f"compaction-{status}", "record_ids": [record_id for record_id, _ in verified]}
+    replay_compaction_attempts(layout, config)
+    journal = compaction_attempt_journal(bindings, "succeeded" if succeeded else "failed", trigger, reason)
+    path = layout.bindings / f"{journal['attempt_id']}.json"
+    atomic_create(path, canonical_json(journal))
+    failpoint("after-compaction-attempt-before-queues")
+    try:
+        return apply_compaction_attempt(layout, config, journal)
+    finally:
+        durable_unlink(path)
 
 
 def mark_compaction(home: Path, bindings: Sequence[Mapping[str, str]], succeeded: bool, trigger: str, reason: str) -> dict[str, Any]:
@@ -1632,7 +1757,7 @@ def run_bounded(
 def probe_recipient(config: Mapping[str, Any], *, require_idle: bool = True) -> tuple[bool, str, Path]:
     recipient = config["recipient"]
     herdr = validate_executable(recipient["herdr_cli_path"], recipient["herdr_cli_sha256"], "HERDR_IDENTITY")
-    completed = run_bounded([str(herdr), "agent", "get", recipient["pane_id"], "--session", recipient["session"]], timeout=10.0)
+    completed = run_bounded([str(herdr), "agent", "get", recipient["pane_id"], "--session", recipient["session"]], timeout=HERDR_PROBE_TIMEOUT_SECONDS)
     if completed.returncode != 0:
         return False, "recipient-unavailable", herdr
     try:
@@ -1678,6 +1803,7 @@ def deliver_pending(home: Path) -> dict[str, Any]:
     assert config is not None
     layout = StateLayout(home)
     with state_lock(layout):
+        replay_compaction_attempts(layout, config)
         pending: list[str] = []
         for path in sorted(layout.queue.glob("handoff-*.json")):
             queue = read_queue(layout, path.stem)
@@ -1848,33 +1974,27 @@ def durable_unlink(path: Path) -> None:
     fsync_directory(path.parent)
 
 
-def persist_compaction_binding(home: Path, config: Mapping[str, Any], result: Mapping[str, Any], trigger: str) -> None:
-    layout = StateLayout(home)
-    pausepoint("before-compaction-binding-lock")
-    with state_lock(layout):
-        current_config = load_config(home)
-        if current_config != config:
-            raise HandoffError("CONFIG_CHANGED", "handoff configuration changed during Claude compaction binding")
-        require_active_process_binding(config, layout)
-        path = compaction_binding_path(layout, config)
-        if result.get("status") not in {"sealed", "already-sealed"}:
-            durable_unlink(path)
-            return
-        bindings = normalize_compaction_bindings(result.get("bindings"))
-        for item in bindings:
-            envelope, actual = read_envelope(layout, item["record_id"], config, verify_sources=False)
-            if actual != item["envelope_sha256"] or envelope.get("source_harness") != "claude" or envelope.get("source_session_hash") != config["recipient"]["agent_session_sha256"]:
-                raise HandoffError("COMPACTION_BINDING", "Claude PreCompact seal binding is inconsistent")
-        binding = {
-            "schema": COMPACTION_BINDING_SCHEMA,
-            "binding_key": endpoint_binding_key(config),
-            "session_hash": config["recipient"]["agent_session_sha256"],
-            "process_capability_sha256": current_process_capability(),
-            "bindings": bindings,
-            "trigger": trigger,
-            "bound_at": now_utc(),
-        }
-        atomic_replace(path, canonical_json(binding))
+def _persist_compaction_binding_locked(layout: StateLayout, config: Mapping[str, Any], result: Mapping[str, Any], trigger: str) -> None:
+    require_active_process_binding(config, layout)
+    path = compaction_binding_path(layout, config)
+    if result.get("status") not in {"sealed", "already-sealed"}:
+        durable_unlink(path)
+        return
+    bindings = normalize_compaction_bindings(result.get("bindings"))
+    for item in bindings:
+        envelope, actual = read_envelope(layout, item["record_id"], config, verify_sources=False)
+        if actual != item["envelope_sha256"] or envelope.get("source_harness") != "claude" or envelope.get("source_session_hash") != config["recipient"]["agent_session_sha256"]:
+            raise HandoffError("COMPACTION_BINDING", "Claude PreCompact seal binding is inconsistent")
+    binding = {
+        "schema": COMPACTION_BINDING_SCHEMA,
+        "binding_key": endpoint_binding_key(config),
+        "session_hash": config["recipient"]["agent_session_sha256"],
+        "process_capability_sha256": current_process_capability(),
+        "bindings": bindings,
+        "trigger": trigger,
+        "bound_at": now_utc(),
+    }
+    atomic_replace(path, canonical_json(binding))
 
 
 def load_compaction_binding(home: Path, config: Mapping[str, Any]) -> tuple[list[dict[str, str]], str] | None:
@@ -1996,7 +2116,12 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
             return None
         layout = StateLayout(home)
         with state_lock(layout):
-            pending = sum(1 for path in layout.queue.glob("handoff-*.json") if read_queue(layout, path.stem).get("status") in {"pending", "notified"})
+            pending = sum(
+                1
+                for path in layout.queue.glob("handoff-*.json")
+                for queue in [read_queue(layout, path.stem)]
+                if queue.get("status") in {"pending", "notified"} and queue.get("compaction") == "succeeded"
+            )
         if pending:
             output: dict[str, Any] = {"systemMessage": f"Curated context handoff: {pending} bounded record(s) await Claude curation."}
             if payload.get("source") == "compact":
@@ -2016,8 +2141,35 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
             failure_code = "CONSUMER_ENDPOINT"
         if not bound:
             return block_failed_claude_precompact(home, config, precompact_trigger, failure_code)
-        result = seal_with_failure_receipt(home, "claude", config["recipient"]["agent_session_sha256"], precompact_trigger)
-        persist_compaction_binding(home, config, result, precompact_trigger)
+
+        def verify_live_generation(layout: StateLayout, locked_config: Mapping[str, Any]) -> None:
+            if locked_config != config:
+                raise HandoffError("GENERATION_REPLACED", "the exact Claude endpoint changed before sealing")
+            try:
+                require_active_process_binding(config, layout)
+                recipient_ready, _reason, _herdr = probe_recipient(config, require_idle=False)
+            except HandoffError as generation_exc:
+                raise HandoffError("GENERATION_REPLACED", "the exact live Claude generation could not be revalidated") from generation_exc
+            if not recipient_ready:
+                raise HandoffError("GENERATION_REPLACED", "the exact live Claude generation was replaced before sealing")
+
+        def commit_live_binding(layout: StateLayout, locked_config: Mapping[str, Any], sealed: Mapping[str, Any]) -> None:
+            _persist_compaction_binding_locked(layout, locked_config, sealed, precompact_trigger)
+
+        pausepoint("before-compaction-binding-lock")
+        try:
+            result = seal_with_failure_receipt(
+                home,
+                "claude",
+                config["recipient"]["agent_session_sha256"],
+                precompact_trigger,
+                verify_locked=verify_live_generation,
+                commit_locked=commit_live_binding,
+            )
+        except HandoffError as exc:
+            if exc.code != "GENERATION_REPLACED":
+                raise
+            return block_failed_claude_precompact(home, config, precompact_trigger, exc.code)
         if result.get("status") == "seal-failed" and result.get("had_candidates"):
             return {"decision": "block", "reason": "Already-curated handoff candidates could not be sealed durably; compaction was stopped."}
         return None

@@ -147,6 +147,10 @@ if [ "$mode" = flood ]; then
   printf '%s\n' "$$" > "$FAKE_HERDR_PID"
   exec yes x
 fi
+if [ "$mode" = hang ]; then
+  printf '%s\n' "$$" > "$FAKE_HERDR_PID"
+  exec sleep 30
+fi
 if [ "$1 $2" = "agent get" ]; then
   [ "$mode" = unavailable ] && exit 1
   value=$FAKE_CLAUDE_SESSION
@@ -639,7 +643,7 @@ test_claude_precompact_binding_failure() {
 }
 
 test_lifecycle_and_authority_snapshots() {
-  local seal outcome statement arguments registered marker release stale_pid i record result lock_marker lock_release holder request_pid
+  local seal outcome statement arguments registered marker release stale_pid stale_status i record result lock_marker lock_release holder request_pid
   new_env immutable-lifecycle
   register_statement 'Producer lifecycle transitions bind immutable envelope bytes.' >/dev/null || fail "immutable lifecycle fixture did not register"
   seal=$(seal_pi) || fail "immutable lifecycle fixture did not seal"
@@ -678,8 +682,10 @@ test_lifecycle_and_authority_snapshots() {
   bind_claude >/dev/null || fail "replacement Claude generation did not bind"
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "replacement PreCompact did not publish"
   : > "$release"
-  if wait "$stale_pid"; then
-    fail "retired PreCompact retained publication authority"
+  stale_status=0
+  wait "$stale_pid" || stale_status=$?
+  if [ "$stale_status" -eq 0 ]; then
+    jq -e '.decision=="block"' "$EROOT/stale-output" >/dev/null || fail "retired PreCompact retained publication authority"
   fi
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "replacement PostCompact lost its exact attempt"
   record=$(find "$FM_HOME/state/context-handoff/queue" -type f -name 'handoff-*.json' -exec basename {} .json \;)
@@ -1369,13 +1375,147 @@ test_claude_lifecycle_and_plugin_discovery() {
     fail "Claude lifecycle persisted summary or transcript input"
   fi
   jq -e '.name=="firstmate-context-handoff" and (.version | type=="string")' "$PLUGIN/.claude-plugin/plugin.json" >/dev/null || fail "Claude plugin manifest is not discoverable"
-  jq -e '(.hooks | keys | sort)==["PostCompact","PreCompact","PreToolUse","SessionStart","StopFailure"] and all(.hooks[]; length>0 and all(.[]; (.hooks | length)==1 and .hooks[0].type=="command" and .hooks[0].command=="python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook" and .hooks[0].timeout==10))' "$PLUGIN/hooks/hooks.json" >/dev/null || fail "Claude plugin hook lifecycle contract is incomplete"
+  jq -e '(.hooks | keys | sort)==["PostCompact","PreCompact","PreToolUse","SessionStart","StopFailure"] and all(.hooks[]; length>0 and all(.[]; (.hooks | length)==1 and .hooks[0].type=="command" and .hooks[0].command=="python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py\" claude-hook" and (.hooks[0].timeout | type=="number") and .hooks[0].timeout>=10))' "$PLUGIN/hooks/hooks.json" >/dev/null || fail "Claude plugin hook lifecycle contract is incomplete"
   jq -e '.mcpServers["firstmate-context-handoff"] | .command=="python3" and .args==["${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py","mcp-server"]' "$PLUGIN/.mcp.json" >/dev/null || fail "Claude plugin MCP discovery contract is incomplete"
   jq -nc --arg session "$CLAUDE_SESSION" --arg path "$VAULT/blocked.md" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"Write",tool_input:{file_path:$path,content:"x"}}' | plugin_cli claude-hook > "$EROOT/plugin-out" 2> "$EROOT/plugin-error"
   adapter_status=$?
   [ "$adapter_status" -eq 2 ] && [ ! -s "$EROOT/plugin-out" ] || fail "Claude plugin adapter changed deny transport status"
   jq -e '.hookSpecificOutput.permissionDecision=="deny"' "$EROOT/plugin-error" >/dev/null || fail "Claude plugin adapter did not preserve the mutation guard"
   pass "Claude lifecycle and model-free plugin discovery"
+}
+
+test_candidate_identity_binding() {
+  local candidate foreign_hash seal
+  new_env candidate-identity-binding
+  register_statement 'Candidate identity binds its exact source session.' project-fact >/dev/null || fail "candidate identity fixture did not register"
+  candidate=$(find "$FM_HOME/state/context-handoff/candidates" -name 'candidate-*.json' -print -quit)
+  [ -n "$candidate" ] || fail "candidate identity fixture wrote no candidate"
+  foreign_hash=$(session_hash pi pi-session-foreign)
+  jq -c --arg hash "$foreign_hash" '.source_session_hash=$hash' "$candidate" > "$EROOT/retargeted.json" || fail "could not retarget the candidate binding"
+  cat "$EROOT/retargeted.json" > "$candidate"
+  chmod 600 "$candidate"
+  seal=$(printf '{"session_id":"pi-session-foreign"}\n' | cli seal --source-harness pi --trigger threshold) || fail "retargeted candidate seal transport failed"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = seal-failed ] || fail "retargeted candidate sealed into another session"
+  [ -z "$(find "$FM_HOME/state/context-handoff/records" -type f -print -quit)" ] || fail "retargeted candidate produced a sealed record"
+  jq -se 'any(.[]; .reason=="registered-candidate-validation-failed" and .failure_code=="CANDIDATE_ID")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "retargeted candidate wrote no durable identity receipt"
+  pass "candidate identity binds its exact source session"
+}
+
+test_seal_binding_failure_receipt() {
+  local seal
+  new_env seal-binding-receipt
+  register_statement 'Durable seal receipts survive an unhealthy Vault binding.' >/dev/null || fail "seal binding fixture did not register"
+  jq '.vault.inode=999999999' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not break the reviewed Vault binding"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
+  seal=$(seal_pi) || fail "unhealthy Vault binding escaped the seal receipt boundary"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = seal-failed ] || fail "unhealthy Vault binding did not cancel Pi compaction"
+  [ "$(printf '%s' "$seal" | jq -r .reason)" = seal-binding-failed ] || fail "unhealthy Vault binding reported an unrelated seal reason"
+  [ -z "$(find "$FM_HOME/state/context-handoff/records" -type f -print -quit)" ] || fail "unhealthy Vault binding sealed a record"
+  jq -se 'any(.[]; .reason=="seal-binding-failed" and .failure_code=="VAULT_IDENTITY")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "unhealthy seal-time binding wrote no durable receipt"
+  pass "durable receipt for unhealthy seal-time bindings"
+}
+
+test_durable_compaction_attempt() {
+  local first second succeeded queues
+  new_env durable-compaction-attempt
+  register_statement 'First bounded record must survive a crashed compaction outcome.' >/dev/null || fail "first attempt record did not register"
+  first=$(seal_pi) || fail "first attempt record did not seal"
+  complete "$first" failure >/dev/null || fail "first attempt failure was not recorded"
+  register_statement 'Second bounded record joins the same compaction attempt.' next-step >/dev/null || fail "second attempt record did not register"
+  second=$(seal_pi) || fail "second attempt seal failed"
+  [ "$(printf '%s' "$second" | jq '.bindings | length')" = 2 ] || fail "retry attempt did not bind both records"
+  if (
+    export FM_HANDOFF_TEST_FAILPOINT=after-compaction-attempt-before-queues
+    complete "$second" success
+  ) > "$EROOT/attempt-crash-out" 2> "$EROOT/attempt-crash-error"; then
+    fail "compaction attempt failpoint unexpectedly completed"
+  fi
+  succeeded=$(jq -s '[.[] | select(.compaction=="succeeded")] | length' "$FM_HOME"/state/context-handoff/queue/handoff-*.json) || fail "could not read queue state"
+  [ "$succeeded" -eq 0 ] || fail "crashed attempt applied a queue transition before persisting its exact result"
+  seal_pi >/dev/null || fail "compaction attempt replay transport failed"
+  queues=$(find "$FM_HOME/state/context-handoff/queue" -name 'handoff-*.json' | wc -l)
+  [ "$queues" -eq 2 ] || fail "durable attempt fixture did not seal two records"
+  succeeded=$(jq -s '[.[] | select(.compaction=="succeeded")] | length' "$FM_HOME"/state/context-handoff/queue/handoff-*.json) || fail "could not read replayed queue state"
+  [ "$succeeded" -eq 2 ] || fail "crashed compaction attempt lost its exact terminal result"
+  pass "durable compaction attempt result replay"
+}
+
+test_precompact_generation_and_timeout_margin() {
+  local statement arguments registered marker release paused_pid paused_status blocked started elapsed budget i
+  new_env precompact-generation-at-seal
+  enable_consumer
+  bind_claude >/dev/null || fail "generation-at-seal fixture did not bind"
+  statement='Seal only while the exact live Claude generation is still bound.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "generation-at-seal fixture did not register"
+  marker="$EROOT/seal-paused"
+  release="$EROOT/seal-release"
+  (
+    export FM_HANDOFF_TEST_PAUSEPOINT=before-compaction-binding-lock
+    export FM_HANDOFF_TEST_PAUSE_MARKER="$marker"
+    export FM_HANDOFF_TEST_PAUSE_RELEASE="$release"
+    jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook
+  ) > "$EROOT/paused-output" 2> "$EROOT/paused-error" &
+  paused_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -f "$marker" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -f "$marker" ] || fail "PreCompact did not reach its sealing boundary"
+  printf 'mismatch\n' > "$HERDR_MODE"
+  : > "$release"
+  paused_status=0
+  wait "$paused_pid" || paused_status=$?
+  [ "$paused_status" -eq 0 ] || fail "replaced-generation PreCompact transport failed"
+  jq -e '.decision=="block"' "$EROOT/paused-output" >/dev/null || fail "endpoint replacement between binding and sealing failed open"
+  [ -z "$(find "$FM_HOME/state/context-handoff/records" -type f -print -quit)" ] || fail "replaced Claude generation still sealed work"
+  jq -se 'any(.[]; .reason=="claude-precompact-binding-failed")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "replaced generation wrote no durable failure receipt"
+
+  new_env precompact-hang-margin
+  enable_consumer
+  bind_claude >/dev/null || fail "hanging endpoint fixture did not bind"
+  statement='A hanging Herdr probe must still block compaction in time.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "hanging endpoint fixture did not register"
+  budget=$(jq -r '.hooks.PreCompact[0].hooks[0].timeout' "$PLUGIN/hooks/hooks.json") || fail "could not read the PreCompact hook budget"
+  printf 'hang\n' > "$HERDR_MODE"
+  started=$(date +%s)
+  blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "hanging Herdr probe escaped the PreCompact hook"
+  elapsed=$(( $(date +%s) - started ))
+  printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "hanging Herdr endpoint failed open"
+  [ "$elapsed" -lt "$budget" ] || fail "the Herdr probe consumed the whole PreCompact hook budget"
+  [ "$(( elapsed * 2 ))" -le "$budget" ] || fail "PreCompact reserved no fail-closed margin for its receipt and block response"
+  jq -se 'any(.[]; .reason=="claude-precompact-binding-failed")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "hanging Herdr endpoint wrote no durable failure receipt"
+  pass "fail-closed Claude generation and probe budget margin"
+}
+
+test_sessionstart_pending_eligibility() {
+  local statement arguments registered output
+  new_env sessionstart-eligibility
+  enable_consumer
+  bind_claude >/dev/null || fail "SessionStart eligibility fixture did not bind"
+  statement='Announce only handoff records the consumer can actually claim.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "SessionStart eligibility fixture did not register"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "SessionStart eligibility fixture did not seal"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"SessionStart",session_id:$session,source:"startup"}' | cli claude-hook) || fail "SessionStart transport failed after sealing"
+  [ -z "$output" ] || fail "SessionStart announced a record whose compaction never completed"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "SessionStart eligibility fixture did not record its failure"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"SessionStart",session_id:$session,source:"startup"}' | cli claude-hook) || fail "SessionStart transport failed after a compaction failure"
+  [ -z "$output" ] || fail "SessionStart announced a failed compaction record"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "SessionStart eligibility retry did not seal"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "SessionStart eligibility retry did not complete"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"SessionStart",session_id:$session,source:"startup"}' | cli claude-hook) || fail "SessionStart transport failed after a successful compaction"
+  printf '%s' "$output" | jq -e '.systemMessage | test("1 bounded record")' >/dev/null || fail "SessionStart omitted the one consumable record"
+  pass "SessionStart announces only consumable records"
 }
 
 if [ "${FM_CONTEXT_HANDOFF_PI_SUCCESS_PROBE_ONLY:-0}" = 1 ]; then
@@ -1386,6 +1526,11 @@ fi
 test_required_prerequisite_status
 test_sensitive_contracts
 test_foreign_candidate_isolation
+test_candidate_identity_binding
+test_seal_binding_failure_receipt
+test_durable_compaction_attempt
+test_precompact_generation_and_timeout_margin
+test_sessionstart_pending_eligibility
 test_single_create_save
 test_queue_first_recovery
 test_invalid_candidate_receipts
