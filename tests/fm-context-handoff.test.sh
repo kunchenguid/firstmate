@@ -1195,7 +1195,7 @@ PY
 }
 
 test_pi_result_validation() {
-  local adapter_root body stale_root inert_home no_config_home symlink_home held_pipe_root
+  local adapter_root body stale_root inert_home no_config_home symlink_home symlinked_home_alias held_pipe_root
   new_env pi-result-validation
   register_statement 'Cancel Pi compaction only when a non-empty durable register cannot seal.' >/dev/null || fail "Pi lifecycle candidate did not register"
   for case_name in malformed unknown polluted empty disabled exited hanging; do
@@ -1234,9 +1234,11 @@ EOF
   inert_home="$EROOT/inert-home"
   no_config_home="$EROOT/no-config-home"
   symlink_home="$EROOT/symlink-home"
+  symlinked_home_alias="$EROOT/inert-home-alias"
   mkdir -p "$inert_home/config" "$no_config_home" "$symlink_home/config"
   jq '.registration_enabled=false | .sealing_enabled=false | .delivery_enabled=false | .consumer_enabled=false' "$FM_HOME/config/context-handoff.json" > "$inert_home/config/context-handoff.json" || fail "could not create exact default-off configuration"
   ln -s "$inert_home/config/context-handoff.json" "$symlink_home/config/context-handoff.json"
+  ln -s "$inert_home" "$symlinked_home_alias"
   held_pipe_root="$EROOT/held-pipe"
   mkdir -p "$held_pipe_root/bin"
   cat > "$held_pipe_root/bin/fm-context-handoff.py" <<'EOF'
@@ -1280,7 +1282,7 @@ EOF
   FM_HOME="$FM_HOME" FM_HANDOFF_TESTING=1 FM_HANDOFF_TEST_NOW="$FIXED_NOW" PI_SESSION_ID=pi-session-1 \
   EXT="$ROOT/.pi/extensions/lib/fm-context-handoff.ts" REAL_ROOT="$ROOT" MISSING="$EROOT/missing" \
   MALFORMED="$EROOT/malformed" UNKNOWN="$EROOT/unknown" POLLUTED="$EROOT/polluted" EMPTY="$EROOT/empty" DISABLED="$EROOT/disabled" EXITED="$EROOT/exited" HANGING="$EROOT/hanging" STALE="$stale_root" \
-  INERT_HOME="$inert_home" NO_CONFIG_HOME="$no_config_home" SYMLINK_HOME="$symlink_home" HELD_PIPE="$held_pipe_root" FM_HELD_PIPE_PID="$EROOT/held-pipe-pid" \
+  INERT_HOME="$inert_home" NO_CONFIG_HOME="$no_config_home" SYMLINK_HOME="$symlink_home" SYMLINKED_HOME_ALIAS="$symlinked_home_alias" HELD_PIPE="$held_pipe_root" FM_HELD_PIPE_PID="$EROOT/held-pipe-pid" \
   FM_HANGING_DESCENDANT_PID="$EROOT/hanging-descendant-pid" \
   FM_STALE_BINDING_MODE="$stale_root/mode" FM_STALE_BINDING_LOG="$stale_root/log" \
   node --input-type=module <<'EOF' || fail "Pi result validation failed"
@@ -1293,7 +1295,7 @@ mod.registerContextHandoff({on(name, handler){lifecycle.set(name, handler);}}, p
 for (const name of ["session_before_compact","session_compact","session_compact_failed"]) {
   if (!lifecycle.has(name)) throw new Error(`missing lifecycle handler ${name}`);
 }
-for (const home of [process.env.INERT_HOME, process.env.NO_CONFIG_HOME]) {
+for (const home of [process.env.INERT_HOME, process.env.NO_CONFIG_HOME, process.env.SYMLINKED_HOME_ALIAS]) {
   const inert = new Map();
   mod.registerContextHandoff({on(name, handler){inert.set(name, handler);}}, process.env.MISSING, home);
   process.env.FM_HANDOFF_CONFIG = "";
@@ -1580,6 +1582,21 @@ PY
   result=$(commit_save "$record" "$approval")
   [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "transaction replay was not idempotent"
   [ ! -e "$VAULT/.vault-meta/mutation.lock" ] || fail "transaction replay left its mutation lock"
+
+  new_env transaction-bundle-mismatch
+  enable_consumer
+  seal=$(make_ready 'Quarantine an approved bundle whose bytes changed before apply.') || fail "bundle mismatch fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  bind_claude >/dev/null || fail "bundle mismatch fixture did not bind Claude"
+  bundle=$(make_bundle "$record")
+  prepared=$(prepare_save "$record" "$bundle") || fail "bundle mismatch inspect failed"
+  approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
+  bundle_path="$FM_HOME/state/context-handoff/bundles/$record/$(printf '%s' "$prepared" | jq -r .bundle_sha256).json"
+  printf '\n' >> "$bundle_path"
+  result=$(commit_save "$record" "$approval")
+  [ "$(printf '%s' "$result" | jq -r .code)" = BUNDLE_MISMATCH ] || fail "changed approved bundle retained apply authority"
+  [ "$(jq -r '.status + ":" + .reason' "$FM_HOME/state/context-handoff/queue/$record.json")" = quarantined:approved-bundle-payload-mismatch ] || fail "changed approved bundle lost its quarantine transition"
+  jq -se --arg record "$record" 'any(.[]; .record_id==$record and .reason=="approved-bundle-payload-mismatch")' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "changed approved bundle left no quarantine evidence"
 
   saved_core=$TRANSACTION_CORE
   saved_module=$TRANSACTION_MODULE
@@ -2326,28 +2343,35 @@ test_pi_attempt_authority_and_immutable_outcome() {
 }
 
 test_pi_process_liveness_recovery() {
-  local seal binding old_attempt recovered conflict replacement
+  local seal binding old_attempt recovered conflict replacement dead_pid boot_id
 
-  new_env pi-linux-missing-owner
-  CAPABILITY=pi-linux-owner
-  PROCESS_GENERATION=301
-  LIVE_PROCESS_CAPABILITY=pi-linux-owner
-  register_statement 'A missing Linux Pi owner must release its durable attempt.' >/dev/null || fail "Linux missing-owner fixture did not register"
-  seal=$(seal_pi) || fail "Linux missing-owner fixture did not seal"
-  binding=$(find "$FM_HOME/state/context-handoff/bindings" -name 'pi-compaction-*.json' -print -quit)
-  old_attempt=$(printf '%s' "$seal" | jq -r .attempt_id)
-  jq --arg boot linux-test-boot '.process_platform="linux" | .process_boot_id=$boot' "$binding" > "$binding.tmp" || fail "could not create the Linux missing-owner binding"
-  chmod 600 "$binding.tmp"
-  mv "$binding.tmp" "$binding"
-  CAPABILITY=pi-linux-replacement
-  PROCESS_GENERATION=302
-  LIVE_PROCESS_CAPABILITY=
-  FM_HANDOFF_TEST_PI_BOOT_ID=linux-test-boot
-  FM_HANDOFF_TEST_PI_LIVENESS=linux-missing
-  recovered=$(seal_pi) || fail "proven missing Linux Pi owner escaped bounded recovery"
-  [ "$(printf '%s' "$recovered" | jq -r .attempt_id)" != "$old_attempt" ] || fail "proven missing Linux Pi owner retained exclusive authority"
-  [ "$(jq -r .process_platform "$binding")" = test ] || fail "replacement Pi process did not acquire the recovered attempt"
-  jq -se --arg attempt "$old_attempt" 'any(.[]; .reason=="dead-pi-compaction-attempt-retired" and .record_id==$attempt)' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "missing Linux Pi owner left no retirement evidence"
+  if [ "$(uname -s)" = Linux ]; then
+    new_env pi-linux-missing-owner
+    CAPABILITY=pi-linux-owner
+    PROCESS_GENERATION=301
+    LIVE_PROCESS_CAPABILITY=pi-linux-owner
+    register_statement 'A missing Linux Pi owner must release its durable attempt.' >/dev/null || fail "Linux missing-owner fixture did not register"
+    seal=$(seal_pi) || fail "Linux missing-owner fixture did not seal"
+    binding=$(find "$FM_HOME/state/context-handoff/bindings" -name 'pi-compaction-*.json' -print -quit)
+    old_attempt=$(printf '%s' "$seal" | jq -r .attempt_id)
+    sh -c 'exit 0' &
+    dead_pid=$!
+    wait "$dead_pid"
+    [ ! -e "/proc/$dead_pid/stat" ] || fail "Linux missing-owner fixture PID was reused before binding"
+    boot_id=$(cat /proc/sys/kernel/random/boot_id) || fail "Linux missing-owner fixture could not read the current boot identity"
+    jq --arg boot "$boot_id" --argjson pid "$dead_pid" '.process_platform="linux" | .process_boot_id=$boot | .process_pid=$pid' "$binding" > "$binding.tmp" || fail "could not create the Linux missing-owner binding"
+    chmod 600 "$binding.tmp"
+    mv "$binding.tmp" "$binding"
+    CAPABILITY=pi-linux-replacement
+    PROCESS_GENERATION=302
+    LIVE_PROCESS_CAPABILITY=
+    FM_HANDOFF_TEST_PI_BOOT_ID=
+    FM_HANDOFF_TEST_PI_LIVENESS=
+    recovered=$(seal_pi) || fail "proven missing Linux Pi owner escaped bounded recovery"
+    [ "$(printf '%s' "$recovered" | jq -r .attempt_id)" != "$old_attempt" ] || fail "proven missing Linux Pi owner retained exclusive authority"
+    [ "$(jq -r .process_platform "$binding")" = test ] || fail "replacement Pi process did not acquire the recovered attempt"
+    jq -se --arg attempt "$old_attempt" 'any(.[]; .reason=="dead-pi-compaction-attempt-retired" and .record_id==$attempt)' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "missing Linux Pi owner left no retirement evidence"
+  fi
 
   new_env pi-linux-transient-owner
   CAPABILITY=pi-linux-owner

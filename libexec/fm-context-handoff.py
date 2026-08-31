@@ -2791,8 +2791,6 @@ def pi_process_binding_owner_is_live(value: Mapping[str, Any]) -> bool | None:
         return isinstance(boot_id, str) and bool(live) and value.get("process_capability_sha256") == sha256_bytes(f"test\0{boot_id}\0{live}".encode("utf-8"))
     forced = os.environ.get("FM_HANDOFF_TEST_PI_LIVENESS") if os.environ.get("FM_HANDOFF_TESTING") == "1" else None
     try:
-        if forced == "linux-missing" and platform == "linux":
-            raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is unavailable") from ProcessLookupError(errno.ESRCH, "process not found")
         if forced == "linux-transient" and platform == "linux":
             raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is unavailable") from PermissionError(errno.EACCES, "process probe unavailable")
         if forced == "darwin-match" and platform == "darwin":
@@ -4024,6 +4022,8 @@ def run_approved_transaction_apply(
     vault = validate_vault_binding(config)
     bundle_path = Path(str(approval.get("bundle_path", "")))
     if sha256_file(bundle_path, max_bytes=MAX_TRANSACTION_BUNDLE_BYTES) != approval.get("bundle_file_sha256"):
+        quarantine(layout, record_id, "approved-bundle-payload-mismatch")
+        update_queue(layout, record_id, status="quarantined", reason="approved-bundle-payload-mismatch")
         raise HandoffError("BUNDLE_MISMATCH", "approved Save bundle bytes changed")
     claim_path = execution_claim_path(layout, record_id)
     owner_identity = process_identity(os.getpid())
@@ -4402,58 +4402,7 @@ def _mcp_commit_save_locked(home: Path, config: Mapping[str, Any], arguments: Ma
         verified = verify_completed_transaction(home, config, record_id, approval)
         return {"status": "acknowledged", "record_id": record_id, "operation_id": verified["operation_id"], "changed_path_hashes": verified["changed_path_hashes"]}
     require_active_save_authority(layout, record_id, queue, approval)
-    vault = validate_vault_binding(config)
-    bundle_path = Path(approval["bundle_path"])
-    if sha256_file(bundle_path, max_bytes=MAX_TRANSACTION_BUNDLE_BYTES) != approval["bundle_file_sha256"]:
-        quarantine(layout, record_id, "approved-bundle-payload-mismatch")
-        update_queue(layout, record_id, status="quarantined", reason="approved-bundle-payload-mismatch")
-        raise HandoffError("BUNDLE_MISMATCH", "approved Save bundle bytes changed")
-    claim_path = execution_claim_path(layout, record_id)
-    owner_identity = process_identity(os.getpid())
-    if owner_identity is None:
-        raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "transaction owner identity could not be bound")
-    claim = {
-        "schema": EXECUTION_CLAIM_SCHEMA,
-        "record_id": record_id,
-        "operation_id": approval["operation_id"],
-        "approval_sha256": approval_sha,
-        "bundle_file_sha256": approval["bundle_file_sha256"],
-        "state": "spawning",
-        "owner_pid": os.getpid(),
-        "owner_start_token": owner_identity[0],
-        "claimed_at": now_utc(),
-    }
-    atomic_create(claim_path, canonical_json(claim))
-    if os.environ.get("FM_HANDOFF_TESTING") == "1" and os.environ.get("FM_HANDOFF_TEST_EXIT_AFTER_EXECUTION_CLAIM") == "1":
-        os._exit(87)
-
-    def bind_child(process: subprocess.Popen[bytes]) -> None:
-        identity = process_identity(process.pid)
-        if identity is None:
-            raise HandoffError("TRANSACTION_EXECUTION_CLAIM", "transaction child identity could not be bound")
-        atomic_replace(
-            claim_path,
-            canonical_json(
-                {
-                    **claim,
-                    "state": "running",
-                    "child_pid": process.pid,
-                    "child_start_token": identity[0],
-                }
-            ),
-        )
-    try:
-        with transaction_runtime(config, layout) as (transaction_command, manifest_sha):
-            if approval.get("dependency_manifest_sha256") != manifest_sha:
-                raise HandoffError("SAVE_AUTHORITY_REVOKED", "reviewed Save plan does not bind the current transaction dependency manifest")
-            result, code = core_json_call(
-                [*transaction_command, "transaction", "apply", str(bundle_path), "--vault", str(vault), "--approved-plan-sha256", approval_sha],
-                expected_codes={0, 75},
-                on_spawn=bind_child,
-                release_gate=True,
-            )
-    finally:
-        durable_unlink(claim_path)
+    result, code = run_approved_transaction_apply(home, config, layout, record_id, approval)
     if code == 75:
         update_queue(layout, record_id, status="pending", reason="fresh-inspect-required", active_bundle_sha256=None)
         write_receipt(layout, "consumer", "pending", "fresh-inspect-required", record_id=record_id, operation_id=approval["operation_id"])

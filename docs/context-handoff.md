@@ -30,13 +30,11 @@ A configuration or active-binding failure at seal time still writes the durable 
 Each terminal outcome persists the complete attempt result before any per-record queue transition, so a crash mid-attempt is replayed idempotently instead of leaving records reachable by an opposite outcome.
 An attempt journal that no longer reads back as its own exact record is quarantined with its observed digest and retired, so a corrupt artifact cannot wedge sealing, outcome recording, or delivery.
 
-The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, serialized durable creation and fsync of every new state-directory entry, durable repair of non-private directory modes without repeatedly syncing unchanged directories, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
-A candidate record binds its own stable ID to the registering harness, session generation, and item bytes, so a retargeted candidate cannot be sealed into another session's attempt.
-A retry recovers valid orphan envelopes, missing queues for claimed records, and incomplete claim sets without resealing different bytes.
-Sealing selects the deterministic candidate-ID prefix that fits both caps, preserves every remaining candidate identity for a later attempt, and drains a full retry set before sealing more candidates.
-Registration applies bounded backpressure to retryable records and unsealed candidates, so a reachable sequence of successful attempts always drains the register.
+Each envelope is limited to 32 items and 32 KiB, preserves candidate ownership, and remains recoverable after an interrupted seal or retry.
+Registration applies bounded backpressure so a reachable sequence of successful attempts can drain the register without silently dropping candidates.
 Sealed envelopes, queue state, receipts, approval records, transaction bundle staging, quarantine records, and acknowledgements remain below `state/context-handoff/` in the effective Firstmate home and never enter the Vault.
 Disabling the feature leaves every one of those records intact.
+Maintainer-facing publication, claim, retry, and transaction-application sequencing is documented in [`architecture.md`](architecture.md#context-handoff-publication-and-recovery).
 
 Delivery reads the local queue first.
 It addresses only the configured Herdr session, workspace, tab, pane, Claude agent identity, and hashed Claude session generation.
