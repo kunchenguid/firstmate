@@ -96,6 +96,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   Cursor is the broader case: it is refused for ship, scout, and secondmate alike, because its `--auto-review` classifier can park an unattended pane on a prompt nobody answers while the pane still reads as busy.
   That pre-stop answer is keyed on the grant the relaunch will actually run under, not on the raw `cursor_exemption=` value recorded in the task's own meta.
   `relaunch` forwards no exemption of its own, so it asks about exactly what the launch owner will inherit: an `envelope:<name>` grant survives the relaunch and the task relaunches, while an `attended` grant does not survive it and the relaunch is refused before its agent is stopped rather than after.
+  A grant also survives only onto cursor, so a relaunch that switches to another adapter succeeds and drops `cursor_exemption=` from the record rather than refusing a legitimate harness switch.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
 - `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.

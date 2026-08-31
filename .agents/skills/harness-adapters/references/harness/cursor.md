@@ -67,7 +67,8 @@ Example of the ordinary case, which is REFUSED because nobody is watching a scou
 Pass a grant only when it is true of this launch, because `attended` is an attestation that a person is sitting in the pane and `envelope:<name>` names the outer isolation envelope an audit can go check.
 A captain who will watch the pane themself adds `--cursor-exemption attended`; a worker running inside the approved routing benchmark adds `--cursor-exemption envelope:routing-benchmark` instead.
 An envelope name is bounded to letters, digits, `.`, `_`, and `-` starting on a letter or digit, so a grant cannot be unauditable or carry a line break into the task record.
-The grant is refused on a non-cursor harness rather than recorded, and across a relaunch an `envelope:<name>` grant is inherited while an `attended` one is not, because the person who attested may be gone by the time stuck-worker recovery relaunches.
+An explicitly passed grant is refused on a non-cursor harness rather than recorded, while one inherited from a task's own record is dropped when that task restarts onto another harness.
+Across any restart of an existing task, including firstmate's own secondmate recovery, an `envelope:<name>` grant is inherited while an `attended` one is not, because the person who attested may be gone by the time stuck-worker recovery relaunches.
 Without that flag the spawn is refused, so route ordinary unattended scouting to Codex or Claude instead.
 
 ## Primary integration

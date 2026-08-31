@@ -469,6 +469,19 @@ else
   fi
 fi
 
+# The grant recorded on an EXISTING task's own durable record, or nothing when
+# the task has no record yet. This is not ambient inheritance: it reads THIS
+# task's own meta and nothing else, which is the same durable-record source
+# --relaunch reads. Every path that restarts an existing task asks it, then
+# passes the answer through fm_control_cursor_exemption_inherited so one rule -
+# envelope survives, attended never does, and only onto cursor - governs the
+# relaunch verb and firstmate's own secondmate liveness recovery alike.
+spawn_recorded_cursor_exemption() {  # <state-dir> <id>
+  local meta="$1/$2.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  fm_meta_get "$meta" cursor_exemption
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
@@ -518,6 +531,15 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
     return 1
   fi
+  # firstmate's own secondmate liveness recovery re-runs `fm-spawn.sh <id>
+  # --secondmate` with no flag, so without this an enveloped cursor secondmate
+  # could never be brought back after its endpoint died - the durable envelope
+  # that justified the grant still governs the replacement, which is the whole
+  # reason an envelope grant is inheritable and an attended one is not.
+  if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
+    CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
+      "$(spawn_recorded_cursor_exemption "$STATE" "$id")" "$harness")
+  fi
   # This path launches and returns long before the shared guards below, so it
   # asks the same owners rather than carrying its own copy of either rule: a
   # remote cursor secondmate is the least observable parked pane there is, and it
@@ -525,8 +547,10 @@ spawn_remote_secondmate() {
   # a non-cursor harness HERE, before the round trip, for the same reason the
   # local path refuses it: forwarding it would both record a stale cursor grant
   # in this parent's task meta and hand the remote host a flag its own fm-spawn.sh
-  # refuses anyway.
-  if [ "$CURSOR_EXEMPTION_SET" -eq 1 ] && ! fm_control_cursor_exemption_applies "$harness"; then
+  # refuses anyway. Both routes ask about the EFFECTIVE grant rather than about
+  # how it arrived, so neither can be walked around by a future source the way
+  # the flag-keyed form was.
+  if [ -n "$CURSOR_EXEMPTION" ] && ! fm_control_cursor_exemption_applies "$harness"; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: $(fm_control_cursor_exemption_harness_refusal "$harness")" >&2
@@ -1215,13 +1239,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
-  # Only CAPTURED here; which of it survives depends on the harness this relaunch
-  # resolves to, which is not known until below. fm_control_cursor_exemption_
-  # inherited in bin/fm-control-lib.sh is the one owner of that rule, and
-  # bin/fm-control.sh asks the SAME helper before it stops anything, so its
-  # pre-stop capability answer is computed against the grant this launch will
-  # really run under rather than the raw recorded value.
-  RELAUNCH_RECORDED_EXEMPTION=$(fm_meta_get "$RELAUNCH_META" cursor_exemption)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1492,13 +1509,14 @@ esac
 # An unverified harness is skipped, not refused: a raw launch command is the
 # documented escape hatch for an adapter with no template. The canonicalization
 # inside the table still holds a raw `cursor-agent` command to the cursor rule.
-# The harness this spawn resolved to is finally known here, so a relaunch can now
-# ask the inheritance owner what its recorded grant is still worth. A grant that
-# does not survive onto this harness is dropped rather than carried into the
-# record below.
-if [ "$RELAUNCH" -eq 1 ] && [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
+# The harness this spawn resolved to is finally known here, so a restart can now
+# ask the inheritance owner what the grant on this task's own record is still
+# worth. A grant that does not survive onto this harness is dropped rather than
+# carried into the record below. A fresh spawn has no record, so this resolves to
+# nothing and the flag remains the only way in.
+if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
   CURSOR_EXEMPTION=$(fm_control_cursor_exemption_inherited \
-    "${RELAUNCH_RECORDED_EXEMPTION:-}" "$HARNESS")
+    "$(spawn_recorded_cursor_exemption "$STATE" "$ID")" "$HARNESS")
 fi
 
 # A cursor exemption is meaningful only for a cursor launch. Accepting and

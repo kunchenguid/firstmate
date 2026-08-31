@@ -372,4 +372,39 @@ grep -q '^cursor_exemption=envelope:routing-benchmark$' "$REMOTE_HOME/state/pare
   || fail "the remote endpoint record must carry the grant its own spawn ran under"
 pass "remote route: an envelope grant and a carrier both cross the wire and reach the remote spawn"
 
+# RECOVERY, not relaunch. firstmate's secondmate liveness sweep brings a dead
+# secondmate back by re-running exactly `fm-spawn.sh <id> --secondmate` with no
+# --cursor-exemption (bin/fm-bootstrap.sh's dead/missing remote branch), which is
+# the invocation driven here. The envelope that justified the grant is a durable
+# property of the environment and still governs the replacement, so recovery must
+# work; before the recorded grant was honored on this path the respawn was
+# refused by the unattended bar and the secondmate stayed down.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$PARENT/state/ios.meta" \
+  || fail "the recovery case needs the enveloped record the previous spawn published"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
+  || fail "an enveloped cursor secondmate must be recoverable by an unflagged respawn"
+grep -q -- '--trust --auto-review --sandbox enabled' "$HERDR_LOG" \
+  || fail "the recovered secondmate should have relaunched cursor under its sandboxed review posture"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$PARENT/state/ios.meta" \
+  || fail "recovery must republish the grant it ran under, so the next recovery still has it"
+pass "recovery: an unflagged respawn inherits the recorded envelope grant and brings the secondmate back"
+
+# The other half of the same rule. `attended` attests to a person in the pane
+# RIGHT NOW, and recovery runs unattended by definition, so a recorded attended
+# grant must NOT resurrect a cursor secondmate the way an envelope grant does.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+sed 's/^cursor_exemption=.*/cursor_exemption=attended/' "$PARENT/state/ios.meta" > "$PARENT/state/ios.meta.attended"
+mv "$PARENT/state/ios.meta.attended" "$PARENT/state/ios.meta"
+if ATTENDED_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "a recorded attended grant must not bring a cursor secondmate back unattended"
+fi
+assert_contains "$ATTENDED_OUT" "refused for an unattended secondmate launch" \
+  "the attended record must fall back to the ordinary unattended bar"
+! grep -q 'FM_TRACE_CONTEXT=' "$HERDR_LOG" \
+  || fail "the attended refusal must land before any remote launch is dispatched"
+pass "recovery: a recorded attended grant is never inherited, so it cannot resurrect a cursor secondmate"
+
 echo "ALL TESTS PASSED"
