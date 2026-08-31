@@ -16,6 +16,8 @@ Task chronology and delivery evidence stay outside this record.
 
 Recorded 2026-08-21 on Darwin 25.5.0 (arm64) with GNU bash 5.3.9, tasks-axi 0.2.5, jq 1.8.1, and ShellCheck 0.11.0 (the version `bin/fm-lint.sh` pins).
 The stock macOS compatibility lane additionally runs the focused first-registration regression with `/bin/bash` 3.2.57 and a real `tasks-axi` installation.
+The suite transcript below was re-run 2026-08-31 on Linux 7.0.12-linuxkit (aarch64) with GNU bash 5.2.21, tasks-axi 0.2.5, jq 1.7, and the same pinned ShellCheck, and reproduced every earlier line unchanged plus the oversized-outcome-text case.
+The measurement later in this record is still from the recorded environment above.
 The relay is a fakebin `curl` in every case, so no public post is ever made; `tasks-axi` and `jq` are the real tools, because stubbing the obligation state machine would verify nothing.
 
 ## Restart end-to-end and regressions
@@ -26,6 +28,7 @@ bash tests/fm-public-followup.test.sh
 
 ```
 ok - outcome text is collapsed to one line, bounded by codepoint, and never corrupts characters
+ok - an outcome text past the single-argument size cap still publishes its terminal event
 ok - restart end-to-end: typed result reconciles from disk and delivers one reply to the original thread
 ok - duplicate terminal results, restart replay, and repeated delivery are all no-ops
 ok - wrong source, wrong work id, stale generation, malformed, unsupported deliverable, and forged identity are all refused
