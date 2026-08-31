@@ -67,6 +67,7 @@ test_custom_prefix_names_renamed_branch_consistently() {
   assert_present "$instr" "custom-prefix: ship instructions were not written"
   assert_grep 'git checkout -b ardy/promote-x1' "$instr" \
     "custom-prefix: instructions must name the renamed branch"
+  # shellcheck disable=SC2016 # single quotes are deliberate: the backticks must stay literal
   assert_grep 'committed on your branch `ardy/promote-x1`' "$instr" \
     "custom-prefix: Definition of done must name the same renamed branch"
   assert_grep 'ready in branch ardy/promote-x1' "$instr" \

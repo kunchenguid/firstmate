@@ -41,6 +41,8 @@ fm_branch_prefix_fail() {  # <message>
 # back.
 fm_branch_prefix_resolve() {  # <config-dir>
   local config_dir=$1 path value
+  local LC_ALL=C
+  # shellcheck disable=SC2034 # Output global, read by the sourcing tests.
   FM_BRANCH_PREFIX_ERROR=""
   path="$config_dir/$FM_BRANCH_PREFIX_FILE"
   if [ ! -e "$path" ] && [ ! -L "$path" ]; then
@@ -55,11 +57,15 @@ fm_branch_prefix_resolve() {  # <config-dir>
     fm_branch_prefix_fail "$path is not a regular file"
     return 1
   fi
-  # Read the whole file (newline-terminated or not) and strip one trailing
-  # newline so both "ardy" and "ardy\n" are accepted; anything else - extra
-  # lines, whitespace, a slash - is rejected by the charset check below.
+  # Read the whole file (newline-terminated or not); read succeeds only when
+  # a NUL byte stops it, so that is refused here. Strip one trailing newline
+  # so both "ardy" and "ardy\n" are accepted; anything else - extra lines,
+  # whitespace, a slash - is rejected by the charset check below.
   value=""
-  IFS= read -r -d '' value < "$path" || true
+  if IFS= read -r -d '' value < "$path"; then
+    fm_branch_prefix_fail "$path contains a NUL byte; it must hold one line of letters, digits, and dashes with no slash"
+    return 1
+  fi
   value=${value%$'\n'}
   if [ -z "$value" ]; then
     fm_branch_prefix_fail "$path is empty; expected one line holding the prefix, e.g. 'ardy'"
