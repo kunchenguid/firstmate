@@ -642,7 +642,15 @@ test_spawn_unattended_cursor_secondmate_is_refused() {
   assert_contains "$out" "refused for an unattended secondmate launch" \
     "the cursor secondmate refusal did not name the refused kind"
   [ ! -s "$launchlog" ] || fail "the cursor secondmate refusal must happen before any launch is sent"
-  pass "an unattended Cursor secondmate is refused before it can stall invisibly"
+  # The remedy has to name the knob that actually governs THIS kind's resolution.
+  # A secondmate resolves config/secondmate-harness before config/crew-harness,
+  # so an operator told to edit crew-harness would hit the identical refusal
+  # again, and crew-dispatch profiles are never consulted for a secondmate.
+  assert_contains "$out" "set config/secondmate-harness" \
+    "the secondmate refusal must name the knob that governs secondmate resolution"
+  assert_not_contains "$out" "add a crew-dispatch profile" \
+    "a secondmate refusal must not offer a dispatch profile, which it never consults"
+  pass "an unattended Cursor secondmate is refused before it can stall invisibly, naming the knob that clears it"
 }
 
 # ===========================================================================
