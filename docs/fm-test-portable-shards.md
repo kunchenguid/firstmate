@@ -73,11 +73,11 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of4` | 30 | 705591 ms (~705.6 s) |
-| `portable-serial-2of4` | 34 | 705607 ms (~705.6 s) |
-| `portable-serial-3of4` | 33 | 705596 ms (~705.6 s) |
-| `portable-serial-4of4` | 34 | 705600 ms (~705.6 s) |
-| imbalance | | 16 ms |
+| `portable-serial-1of4` | 33 | 729614 ms (~729.6 s) |
+| `portable-serial-2of4` | 36 | 729615 ms (~729.6 s) |
+| `portable-serial-3of4` | 35 | 729617 ms (~729.6 s) |
+| `portable-serial-4of4` | 34 | 729615 ms (~729.6 s) |
+| imbalance | | 3 ms |
 
 The single longest script, `tests/fm-pr-check-security.test.sh` at 250417 ms, is the floor for any shard count.
 
