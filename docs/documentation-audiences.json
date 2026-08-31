@@ -220,6 +220,34 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".cursor/skills/verify-firstmate/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".cursor/skills/verify-firstmate/features/README.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".cursor/skills/verify-firstmate/features/ahoy.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".cursor/skills/verify-firstmate/features/bearings.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".cursor/skills/verify-firstmate/features/inbox.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".cursor/skills/verify-firstmate/features/session-start.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".cursor/skills/verify-firstmate/features/watcher.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".greptile/rules.md",
       "audience": "maintainer-architecture"
     },
