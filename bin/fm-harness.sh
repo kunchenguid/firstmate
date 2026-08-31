@@ -86,14 +86,17 @@ detect_own() {
         case "$(basename -- "$comm")" in
           codex-linux-sandbox) echo codex; return ;;
         esac
-        # Linux can truncate comm to TASK_COMM_LEN, so confirm the exact
-        # executable from argv[0] before accepting a shortened process name.
-        args=$(ps -o args= -p "$pid" 2>/dev/null || true)
-        if [ -n "$args" ]; then
-          case "$(basename -- "${args%% *}")" in
-            codex-linux-sandbox) echo codex; return ;;
-          esac
-        fi
+        # Linux truncates comm to TASK_COMM_LEN, so accept only the known
+        # truncated sandbox name after argv[0] confirms the exact executable.
+        # Do not let an arbitrary PID-1 command borrow Codex's argv[0].
+        case "$(basename -- "$comm")" in
+          codex-linux-san)
+            args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+            case "$(basename -- "${args%% *}")" in
+              codex-linux-sandbox) echo codex; return ;;
+            esac
+            ;;
+        esac
       fi
       break
     fi

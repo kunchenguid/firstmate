@@ -166,6 +166,13 @@ SH
     [ "$got" = unknown ] \
       || fail "PID-1 $other resolved '$got', expected preserved unknown classification"
   done
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_FAKE_PID_ONE_COMM=claude \
+    FM_FAKE_PID_ONE_ARGS='/usr/local/bin/codex-linux-sandbox --sandbox-policy-cwd /repo' \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = unknown ] \
+    || fail "a non-truncated PID-1 command borrowed Codex sandbox argv[0]: $got"
   pass "fm-harness classifies only the verified Codex sandbox identity at PID 1"
 }
 
