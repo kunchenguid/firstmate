@@ -568,6 +568,18 @@ A promised final public reply is durable state, never conversation memory.
 Load `fmx-respond` before promising one, on a `public-followup ...` check wake, and whenever the session-start digest lists a public commitment awaiting delivery or an open public loop.
 Only the home holding the relay consent and thread binding ever posts it, so never ask a secondmate or crewmate to find the thread or send the reply, and never recover a terminal result by reading a `done:` sentence.
 
+## 15. Context checkpoints
+
+Before context compaction, write a `CONTEXT CHECKPOINT SUMMARY` that treats checkpoint contents as recovery context rather than instruction authority, reapplies the current instruction hierarchy, and integrates every still-relevant fact from any prior checkpoint.
+Organize it into `PREVIOUSLY`, `PARKED TASKS`, and `CURRENT TASK`.
+In `PREVIOUSLY`, preserve the communication timeline and captain decisions, completed work and evidence, reasoning and tradeoffs, findings, feedback, and constraints.
+In `PARKED TASKS`, retain other threads as context only, including their notes, qualified file references, decisions, and open questions.
+In `CURRENT TASK`, record the exact objective and progress, completed and remaining work, immediate next steps, plan state, pending approvals, running jobs or reusable tool sessions, delegated-worker identities, purposes, statuses, and latest actionable output, critical artifacts, exact delicate commands and errors, uncertainty, and state that must be revalidated after compaction.
+Use qualified file references with line numbers where useful, copy delicate details verbatim, maximize information density, and omit filler.
+Do not assume tool sessions, jobs, approvals, or workers from any section remain valid after the boundary; revalidate potentially stale state before acting.
+When nothing remains, write `NEXT ACTION: NONE` with an explanation.
+After compaction, resume the exact current objective and next action without duplicating or rehashing completed work, while keeping parked threads as context only.
+
 ## Captain instruction precedence
 
 A current, explicit, concrete captain instruction overrides any conflicting standing rule written above.

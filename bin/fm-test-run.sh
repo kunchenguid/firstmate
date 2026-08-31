@@ -750,6 +750,8 @@ select_lane() {
 
 run_coverage_guard() {
   local tmp missing extra a b shard
+  local LC_ALL
+  export LC_ALL=C
   local -a saved_scripts=()
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
