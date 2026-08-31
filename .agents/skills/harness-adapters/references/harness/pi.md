@@ -31,7 +31,7 @@ Multiple positional arguments become separate queued messages; the spawn templat
 
 A project trust dialog can appear on the first Pi run in any not-yet-trusted directory, including a clean worktree.
 Keep Pi's project-trust fallback at `ask`: never grant parent-wide or global trust, select automatic approval for unknown project resources, or add an automatic trust handler.
-One-run `--approve` is permitted only when a guarded launch cryptographically and structurally verifies the isolated copy's provenance immediately before launch and does not persist trust; every other unknown or uncertain copy stays at `ask`.
+A captain-authorized one-run `--approve` is permitted only when a guarded launch cryptographically and structurally verifies the isolated copy's provenance immediately before launch and does not persist trust; every other unknown or uncertain copy stays at `ask`.
 Accept an authorized exact-path prompt with Enter, then verify the instructions begin useful processing.
 The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same pooled slot skip it.
 
