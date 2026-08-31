@@ -1490,7 +1490,8 @@ EOF
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted for a sidecar whose project was swapped"
 
-  # Arming is where a missing CLI can still be reported, so it refuses there.
+  # GitLab parsing and existing static polls remain inactive migration
+  # compatibility, but new arming refuses before any forge CLI dependency.
   write_task_meta "$dir" task-b
   set +e
   out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
@@ -1498,10 +1499,10 @@ EOF
     "$PR_CHECK" task-b "$url" 2>&1)
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "arming a GitLab watch succeeded with glab absent"
+  [ "$rc" -ne 0 ] || fail "arming a GitLab watch succeeded after exact-head support became GitHub-only"
   case "$out" in
-    *"requires glab on PATH"*) ;;
-    *) fail "arming a GitLab watch with glab absent did not report the missing CLI" ;;
+    *"exact-head PR verification currently supports GitHub only"*) ;;
+    *) fail "GitLab arming did not report its inactive exact-head compatibility boundary" ;;
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
