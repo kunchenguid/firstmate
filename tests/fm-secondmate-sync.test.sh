@@ -310,7 +310,9 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" node chrome-devtools-axi
+  # jq is stubbed for presence detection only (it is part of the universal
+  # toolchain); cases that exercise real jq behavior call add_real_jq on top.
+  fm_fake_exit0 "$fakebin" node chrome-devtools-axi jq
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
