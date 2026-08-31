@@ -475,6 +475,7 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
+  local remote_exemption_note
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -1344,9 +1345,10 @@ launch_template() {
     # crewmate runs fully autonomously, no permission gate), which an unattended
     # crewmate needs. grok's launch was deliberately left unchanged by the
     # hardening that moved claude, codex, and cursor onto their own approval and
-    # sandbox controls: grok exposes no sandbox or classifier equivalent, so full
-    # auto-approval remains the only posture that keeps an unattended grok pane
-    # running. grok's turn-end signal does NOT ride the
+    # sandbox controls. That is a scope decision, not a claim about grok: grok is
+    # not installed on the machine this change was verified on, so its available
+    # approval and sandbox controls were NOT re-examined here and no conclusion
+    # about them is asserted. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;

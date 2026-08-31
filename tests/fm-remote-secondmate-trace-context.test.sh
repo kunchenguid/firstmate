@@ -307,4 +307,37 @@ try_flag 'requires a non-empty value' \
   --secondmate --traceparent=
 pass "delivery: a parent-supplied carrier is accepted only for a secondmate launch and only as a strict W3C value"
 
+# --- cursor unattended bar on the REMOTE secondmate route -------------------
+# spawn_remote_secondmate launches and returns long before the shared capability
+# guard the local path reaches, so it asks fm_control_harness_supports_kind
+# itself. The local refusal in tests/fm-secondmate-harness.test.sh hits the other
+# guard, so only a remote-route case fails if this one is removed.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+printf 'cursor\n' > "$PARENT/config/secondmate-harness"
+if CURSOR_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "an unattended cursor remote secondmate must be refused, not launched on the remote host"
+fi
+assert_contains "$CURSOR_OUT" "refused for an unattended secondmate launch" \
+  "the remote route must refuse cursor with the shared capability-table reason"
+assert_contains "$CURSOR_OUT" "--cursor-exemption" \
+  "the remote refusal must name the per-spawn grant that would permit it"
+! grep -q 'FM_TRACE_CONTEXT=' "$HERDR_LOG" \
+  || fail "the remote cursor refusal must land before any remote launch is dispatched"
+pass "remote route: an unattended cursor secondmate is refused before the remote host is reached"
+
+# The remote meta block records the grant, which is what makes the control
+# plane's pre-stop answer correct for a remote task. The grant is exercised on
+# codex because the launch verb's positional protocol carries no exemption to
+# the remote host, so a remote cursor secondmate cannot complete even when the
+# parent grants it.
+reset_remote_herdr_fixture "$HERDR_STATE"
+: > "$HERDR_LOG"
+printf 'codex\n' > "$PARENT/config/secondmate-harness"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --cursor-exemption envelope:routing-benchmark >/dev/null 2>&1 \
+  || fail "a granted remote secondmate spawn should still launch"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$PARENT/state/ios.meta" \
+  || fail "the remote meta must record the grant this launch was made under"
+pass "remote route: the exemption grant is recorded in the published remote task record"
+
 echo "ALL TESTS PASSED"

@@ -14,6 +14,8 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
 | Model discovery | Open the current interactive session's `/model` picker. |
+| Autonomy | `-s workspace-write -a never` with `-c sandbox_workspace_write.network_access=true`, so the worker runs under codex's own sandbox and never prompts, rather than with both switched off as `--dangerously-bypass-approvals-and-sandbox` did. Verified on codex-cli 0.150.1. |
+| Sandbox | `workspace-write` confines the worker's writes to the task worktree plus `/tmp` and `$TMPDIR`. The explicit `network_access` grant is a separate axis, because that sandbox otherwise denies network egress by default and a crewmate could not push, use `gh`, or install dependencies. |
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
