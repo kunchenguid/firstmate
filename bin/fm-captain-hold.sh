@@ -114,6 +114,8 @@
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
 # identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
 # unchanged. An entry that exists as a task id is always that task.
+# The attestation is written before any preserved `pr=` identity line, so
+# completing over a PR-armed origin never breaks its armed merge poll.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -140,10 +142,15 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
+CAPTAIN_META_TMP=
 captain_hold_cleanup() {
+  [ -z "$CAPTAIN_META_TMP" ] || rm -f -- "$CAPTAIN_META_TMP"
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
     CAPTAIN_META_LOCK_HELD=0
@@ -280,6 +287,48 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# The completion attestation must never land after a preserved pr= identity
+# line. fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh) rejects unknown fields
+# after pr=, so a blind append would break the armed PR merge poll exactly the
+# way a relaunch rewrite once did: the watcher would reject the poll every
+# cycle. A record with no pr= line is appended in place; with one, the record
+# is rewritten through a state-local temporary so the attestation lands before
+# the identity block, and the staged rewrite is validated by the same parser
+# before it replaces the live record.
+write_reviewed_attestation() {  # <meta> <keys>
+  local meta=$1 keys=$2 line inserted=0
+  if ! grep -q '^pr=' "$meta"; then
+    printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta" \
+      || fail "could not append the completion attestation to $meta"
+    return 0
+  fi
+  if [ -L "$meta" ] || [ "$(fm_pr_file_link_count "$meta")" != 1 ]; then
+    fail "task metadata is unavailable for a PR-armed completion: $meta"
+  fi
+  CAPTAIN_META_TMP=$(mktemp "$(dirname "$meta")/.fm-captain-hold-meta.XXXXXX") \
+    || fail "could not stage the completion attestation for $meta"
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$inserted" = 0 ]; then
+      case "$line" in
+        pr=*)
+          printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$CAPTAIN_META_TMP" \
+            || fail "could not stage the completion attestation for $meta"
+          inserted=1
+          ;;
+      esac
+    fi
+    printf '%s\n' "$line" >> "$CAPTAIN_META_TMP" \
+      || fail "could not stage the completion attestation for $meta"
+  done < "$meta"
+  chmod 0600 "$CAPTAIN_META_TMP" \
+    || fail "could not secure the staged completion attestation for $meta"
+  fm_pr_metadata_identity_parse "$CAPTAIN_META_TMP" \
+    || fail "the completion attestation cannot keep $meta's PR identity valid"
+  mv -f -- "$CAPTAIN_META_TMP" "$meta" \
+    || fail "could not publish the completion attestation for $meta"
+  CAPTAIN_META_TMP=
 }
 
 origin_open_decisions() {  # <origin-id>
@@ -813,7 +862,7 @@ EOF
 
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      write_reviewed_attestation "$meta" "$keys"
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0

@@ -8,6 +8,9 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-pr-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -224,6 +227,68 @@ EOF
       and (.in_flight | any(.id == "sample-systems-review") | not)
   ' >/dev/null || fail "teardown or archival erased a captain-held task: $json"
   pass "the completion gate attests captain-held inventory and transfers open status decisions"
+}
+
+# The completion attestation must keep a preserved pr= identity line terminal in
+# the origin's record: fm_pr_metadata_identity_parse rejects unknown fields
+# after pr=, so a blind append would break the armed PR merge poll exactly the
+# way a relaunch rewrite once did (commit 52b8576). Mirrors that fix's
+# regression test for the captain-hold completion path, covering the fresh
+# attestation, an inventory-growing second pass, and the idempotent no-op.
+test_completion_attestation_keeps_the_pr_identity_terminal() {
+  local home id url head before
+  home=$(make_home pr-armed-completion)
+  id=sample-armed-review
+  tasks_in "$home" add "$id" "Investigate armed poll ordering" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create investigation backlog fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report and visual review complete\n' > "$home/state/$id.status"
+  url=https://github.com/example/repo/pull/20
+  head=0123456789abcdef0123456789abcdef01234567
+  # The exact shape fm-pr-check.sh leaves behind, with the x-mode tail an armed
+  # Relay-linked record can carry: the pr= and pr_head= identity lines
+  # terminate the record, and the watcher's merge poll validates that identity
+  # every cycle. A completion attestation that lets any non-identity field
+  # land after them breaks that validation.
+  {
+    printf '%s\n' "pr=$url"
+    printf '%s\n' "pr_head=$head"
+    printf '%s\n' "x_followups=0"
+  } >> "$home/state/$id.meta"
+
+  run_captain "$home" complete "$id" --none > "$home/attest.out" 2> "$home/attest.err" \
+    || fail "--none completion of a PR-armed origin failed: $(cat "$home/attest.err")"
+  fm_pr_metadata_identity_parse "$home/state/$id.meta" \
+    || fail "the completion attestation left the origin record unparseable as a PR identity, so the armed merge poll is rejected every cycle"
+  [ "$FM_PR_META_URL" = "$url" ] \
+    || fail "the attested origin record reports the wrong PR identity URL"
+  [ "$FM_PR_META_PROVIDER" = github ] \
+    && [ "$FM_PR_META_HOST" = github.com ] \
+    && [ "$FM_PR_META_PATH" = example/repo ] \
+    && [ "$FM_PR_META_NUMBER" = 20 ] \
+    || fail "the attested origin record reports the wrong PR identity fields"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
+
+  # A later review pass grows the inventory: the new attestation must still
+  # land before the identity block, and the newest decision_keys must win.
+  run_captain "$home" hold sample-armed-call \
+    --title "Choose the armed poll fallback" --reason "captain fallback choice pending" \
+    --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+  run_captain "$home" complete "$id" sample-armed-call > "$home/grow.out" 2> "$home/grow.err" \
+    || fail "an inventory-growing completion over the PR-armed origin failed: $(cat "$home/grow.err")"
+  fm_pr_metadata_identity_parse "$home/state/$id.meta" \
+    || fail "a grown attestation left the origin record unparseable as a PR identity"
+  [ "$(grep '^decision_keys=' "$home/state/$id.meta" | tail -1 | cut -d= -f2-)" = "sample-armed-call" ] \
+    || fail "the grown inventory was not recorded as the newest decision_keys"
+
+  # An idempotent re-run writes nothing, so the record stays byte-identical.
+  before=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  run_captain "$home" complete "$id" sample-armed-call >/dev/null \
+    || fail "idempotent completion retry failed"
+  [ "$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')" = "$before" ] \
+    || fail "an idempotent completion rewrote the origin record"
+  pass "the completion attestation keeps a PR-armed origin's pr identity terminal"
 }
 
 # The recorded-answer rule: answering closes with the captain's exact words, an
@@ -1170,6 +1235,7 @@ EOF
 
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
+test_completion_attestation_keeps_the_pr_identity_terminal
 test_answer_records_and_closes
 test_release_frees_held_work
 test_deferral_leaves_captains_call_until_due
