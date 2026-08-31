@@ -6,6 +6,15 @@ The [README](../README.md) carries the high-level diagram and a short synopsis.
 This document expands every part of it.
 firstmate's always-loaded operating contract and routing index for conditional procedures is [`AGENTS.md`](../AGENTS.md); this is the human-facing companion.
 
+## Context handoff publication and recovery
+
+[`libexec/fm-context-handoff.py`](../libexec/fm-context-handoff.py) owns the context-handoff state machine, while [`context-handoff.md`](context-handoff.md) owns operator-facing guarantees, limits, activation, and rollback.
+Sealing derives a content-bound stable ID from canonical JSON, writes a mode-0600 temporary file, fsyncs the file, publishes create-only, fsyncs the containing directory, and publishes the queue before claims under one serialized state lock.
+State initialization durably creates and syncs every directory entry, repairs non-private directory modes without repeatedly syncing unchanged directories, and accepts an identical concurrent publication only after reading its exact bytes back.
+A candidate stable ID binds the registering harness, session generation, and item bytes, while sealing chooses the deterministic candidate-ID prefix that fits the 32-item and 32-KiB caps and preserves the remainder for later attempts.
+Retries first recover valid orphan envelopes, missing queues for claimed records, and incomplete claim sets, then drain the complete retry set before sealing new candidates so recovery never publishes different bytes for an existing identity.
+Transaction commit and recovery both enter `run_approved_transaction_apply()` for the execution claim, child-process identity binding, installed dependency-manifest verification, apply call, and durable claim cleanup before their caller validates the terminal result and acknowledgement.
+
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.

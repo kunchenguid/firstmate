@@ -38,7 +38,16 @@ type SessionContext = {
 
 function exactDefaultOff(fmHome: string): boolean {
   const configured = process.env.FM_HANDOFF_CONFIG;
-  const rawPath = configured || `${fmHome}/config/context-handoff.json`;
+  let rawPath: string;
+  if (configured) {
+    rawPath = configured;
+  } else {
+    try {
+      rawPath = `${realpathSync.native(fmHome)}/config/context-handoff.json`;
+    } catch {
+      return false;
+    }
+  }
   if (rawPath.startsWith("~") && rawPath !== "~" && !rawPath.startsWith("~/")) return false;
   const expanded = rawPath === "~" ? homedir() : rawPath.startsWith("~/") ? `${homedir()}/${rawPath.slice(2)}` : rawPath;
   const path = isAbsolute(expanded) ? expanded : resolvePath(expanded);
