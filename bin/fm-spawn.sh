@@ -130,6 +130,9 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   A --secondmate candidate home and each of its operational directories must be distinct
+#   from, outside, and non-ancestral to the stable FM_HOME_IDENTITY; every refusal names
+#   the exact prohibited relation.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
@@ -234,6 +237,7 @@ esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+FM_HOME_IDENTITY="${FM_HOME_IDENTITY:-$FM_ROOT}"
 
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
@@ -258,6 +262,8 @@ resolve_directory_input() {
 }
 
 FM_HOME=$(resolve_directory_input FM_HOME "$FM_HOME") || exit 1
+FM_HOME_IDENTITY=$(resolve_directory_input FM_HOME_IDENTITY "$FM_HOME_IDENTITY") || exit 1
+export FM_HOME_IDENTITY
 if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
   FM_STATE_OVERRIDE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
 fi
@@ -1607,10 +1613,11 @@ path_is_ancestor_of() {
 }
 
 validate_firstmate_home_for_spawn() {
-  local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
+  local id=$1 home=$2 abs_home abs_active_home abs_root abs_home_identity marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
   abs_active_home=$(resolved_existing_dir "$FM_HOME")
   abs_root=$(resolved_existing_dir "$FM_ROOT")
+  abs_home_identity=$(resolved_existing_dir "$FM_HOME_IDENTITY")
   if [ "$abs_home" = "/" ]; then
     echo "error: secondmate home cannot be the filesystem root: $home" >&2
     return 1
@@ -1623,12 +1630,20 @@ validate_firstmate_home_for_spawn() {
     echo "error: secondmate home cannot be the firstmate repo: $home" >&2
     return 1
   fi
+  if [ "$abs_home" = "$abs_home_identity" ]; then
+    echo "error: secondmate home cannot be the firstmate home identity: $home" >&2
+    return 1
+  fi
   if path_is_ancestor_of "$abs_active_home" "$abs_home"; then
     echo "error: secondmate home cannot be inside the active firstmate home: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_root" "$abs_home"; then
     echo "error: secondmate home cannot be inside the firstmate repo: $home" >&2
+    return 1
+  fi
+  if path_is_ancestor_of "$abs_home_identity" "$abs_home"; then
+    echo "error: secondmate home cannot be inside the firstmate home identity: $home" >&2
     return 1
   fi
   if path_is_ancestor_of "$abs_home" "$abs_active_home"; then
@@ -1639,7 +1654,11 @@ validate_firstmate_home_for_spawn() {
     echo "error: secondmate home cannot be an ancestor of the firstmate repo: $home" >&2
     return 1
   fi
-  validate_firstmate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
+  if path_is_ancestor_of "$abs_home" "$abs_home_identity"; then
+    echo "error: secondmate home cannot be an ancestor of the firstmate home identity: $home" >&2
+    return 1
+  fi
+  validate_firstmate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" "$abs_home_identity" || return 1
   if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
     echo "error: firstmate home $home is not a seeded secondmate home" >&2
     return 1
@@ -1661,7 +1680,7 @@ validate_firstmate_home_for_spawn() {
 }
 
 validate_firstmate_operational_dirs() {
-  local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
+  local abs_home=$1 abs_active_home=$2 abs_root=$3 abs_home_identity=$4 name dir abs_dir
   for name in data state config projects; do
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
@@ -1675,6 +1694,18 @@ validate_firstmate_operational_dirs() {
       return 1
     else
       abs_dir="$abs_home/$name"
+    fi
+    if [ "$abs_dir" = "$abs_home_identity" ]; then
+      echo "error: secondmate $name directory cannot be the firstmate home identity: $dir" >&2
+      return 1
+    fi
+    if path_is_ancestor_of "$abs_home_identity" "$abs_dir"; then
+      echo "error: secondmate $name directory cannot be inside the firstmate home identity: $dir" >&2
+      return 1
+    fi
+    if path_is_ancestor_of "$abs_dir" "$abs_home_identity"; then
+      echo "error: secondmate $name directory cannot be an ancestor of the firstmate home identity: $dir" >&2
+      return 1
     fi
     if ! path_is_ancestor_of "$abs_home" "$abs_dir"; then
       echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
@@ -2988,6 +3019,7 @@ fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
+  sq_home_identity=$sq_home
   # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
   # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
   # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
@@ -3002,7 +3034,9 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_HOME_IDENTITY=$sq_home_identity FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+else
+  LAUNCH="FM_HOME_IDENTITY=$(shell_quote "$FM_HOME_IDENTITY") $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"

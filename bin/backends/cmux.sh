@@ -105,7 +105,8 @@
 
 # FM_HOME fallback: every real caller already sets FM_HOME as a global before
 # sourcing fm-backend.sh (which sources this file); this exists only so this
-# file's own unit tests, which source it directly, resolve sanely. Mirrors
+# file's own unit tests, which source it directly, resolve sanely. The shared
+# home-tag helper separately resolves FM_HOME_IDENTITY. Mirrors
 # bin/backends/zellij.sh's identical fallback.
 FM_BACKEND_CMUX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_CMUX_ROOT}}"

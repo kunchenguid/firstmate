@@ -1495,6 +1495,81 @@ test_secondmate_spawn_refuses_operational_dirs_outside_subhome() {
   pass "secondmate spawn refuses operational directories outside the subhome"
 }
 
+test_secondmate_spawn_refuses_home_identity_overlap() {
+  local home identity_base identity code_root subhome relation target expected opdir fakebin log err
+  home="$TMP_ROOT/spawn-identity-home"
+  identity_base="$TMP_ROOT/spawn-home-identity"
+  identity="$identity_base/primary"
+  code_root="$TMP_ROOT/spawn-identity-code-root"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-identity-fake")
+  log="$TMP_ROOT/spawn-identity-fake/tmux.log"
+  err="$TMP_ROOT/spawn-identity.err"
+  mkdir -p "$home/data" "$home/state" "$identity/data" "$code_root/bin"
+  cat > "$code_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$code_root/bin/fm-guard.sh"
+
+  while IFS='|' read -r relation expected; do
+    [ -n "$relation" ] || continue
+    case "$relation" in
+      exact) subhome="$identity" ;;
+      ancestor) subhome="$identity_base" ;;
+      descendant) subhome="$identity/nested" ;;
+    esac
+    mkdir -p "$subhome/data" "$subhome/state"
+    printf 'domain\n' > "$subhome/.fm-secondmate-home"
+    printf 'charter\n' > "$subhome/data/charter.md"
+    : > "$log"
+    if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$code_root" FM_HOME="$home" FM_HOME_IDENTITY="$identity" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-identity-fake/pane.txt" \
+      "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+      fail "secondmate spawn accepted a home $relation to the preserved home identity"
+    fi
+    grep -F "$expected" "$err" >/dev/null || fail "spawn did not explain $relation home-identity rejection"
+    grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before $relation home-identity rejection"
+  done <<'ROWS'
+exact|cannot be the firstmate home identity
+ancestor|cannot be an ancestor of the firstmate home identity
+descendant|cannot be inside the firstmate home identity
+ROWS
+
+  for opdir in data state config projects; do
+    for relation in exact descendant ancestor; do
+      subhome="$TMP_ROOT/spawn-identity-subhome-$opdir-$relation"
+      case "$relation" in
+        exact)
+          target="$identity"
+          expected="secondmate $opdir directory cannot be the firstmate home identity"
+          ;;
+        descendant)
+          target="$identity/operational-$opdir"
+          expected="secondmate $opdir directory cannot be inside the firstmate home identity"
+          ;;
+        ancestor)
+          target="$identity_base"
+          expected="secondmate $opdir directory cannot be an ancestor of the firstmate home identity"
+          ;;
+      esac
+      mkdir -p "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects" "$target"
+      printf 'domain\n' > "$subhome/.fm-secondmate-home"
+      printf 'charter\n' > "$subhome/data/charter.md"
+      rm -rf "${subhome:?}/${opdir:?}"
+      ln -s "$target" "$subhome/$opdir"
+      : > "$log"
+      if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$code_root" FM_HOME="$home" FM_HOME_IDENTITY="$identity" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-identity-fake/pane.txt" \
+        "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+        fail "secondmate spawn accepted $opdir $relation to the preserved home identity"
+      fi
+      grep -F "$expected" "$err" >/dev/null \
+        || fail "spawn did not explain unsafe $opdir $relation home-identity rejection"
+      grep -F 'new-window' "$log" >/dev/null \
+        && fail "spawn created a window before $opdir $relation home-identity rejection"
+    done
+  done
+  pass "secondmate spawn preserves the relocated home-identity boundary"
+}
+
 test_fm_send_refuses_bare_window_without_home_meta() {
   # The happy path (a bare fm-<id> resolves the window recorded in THIS home's
   # meta and never a foreign same-named window) is asserted in the lifecycle e2e.
@@ -2095,7 +2170,7 @@ test_secondmate_teardown_path_boundary_matrix() {
   # The teardown path-boundary matrix: a secondmate home is refused (and left
   # fully intact, with no window killed before validation) when it is unmarked,
   # an ancestor of the active firstmate home, inside the active firstmate home,
-  # or inside the firstmate repo. One row per hazard, one shared assertion block.
+  # or inside the firstmate home identity. One row per hazard, one shared assertion block.
   local row base home subhome fmroot fakebin log err expect tid
   while IFS='|' read -r row expect; do
     [ -n "$row" ] || continue
@@ -2150,9 +2225,125 @@ SH
 unmarked|not a seeded secondmate home
 ancestor|ancestor of the active firstmate home
 active-descendant|inside the active firstmate home
-repo-descendant|inside the firstmate repo
+repo-descendant|inside the firstmate home identity
 ROWS
   pass "secondmate teardown path-boundary matrix refuses unmarked/ancestor/active-descendant/repo-descendant homes"
+}
+
+prepare_relocated_identity_teardown_case() {
+  local base=$1 home=$2 identity=$3 subhome=$4 code_root=$5
+  rm -rf -- "$base"
+  mkdir -p "$home/state" "$home/data" "$identity" "$code_root/bin" "$subhome/state"
+  cat > "$code_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$code_root/bin/fm-guard.sh"
+  mark_firstmate_home "$subhome"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+  printf -- '- domain - design domain (home: %s; scope: design domain; projects: alpha; added 2026-08-11)\n' \
+    "$subhome" > "$home/data/secondmates.md"
+}
+
+install_relocated_identity_red_control() {
+  local control_root=$1 relation=$2 teardown
+  mkdir -p "$control_root/bin"
+  cp "$ROOT"/bin/*.sh "$control_root/bin/"
+  cp -R "$ROOT/bin/backends" "$control_root/bin/"
+  teardown="$control_root/bin/fm-teardown.sh"
+  case "$relation" in
+    exact)
+      perl -0pi -e 's/if \[ "\x24abs_target" = "\x24FM_HOME_IDENTITY" \]; then/if false; then/ or die "exact identity comparison not found\n"' "$teardown"
+      ;;
+    ancestor)
+      perl -0pi -e 's/if path_is_ancestor_of "\x24abs_target" "\x24FM_HOME_IDENTITY"; then/if false; then/ or die "ancestor identity comparison not found\n"' "$teardown"
+      ;;
+    descendant)
+      perl -0pi -e 's/if path_is_ancestor_of "\x24FM_HOME_IDENTITY" "\x24abs_target"; then/if false; then/ or die "descendant identity comparison not found\n"' "$teardown"
+      ;;
+  esac
+  printf '%s\n' "$teardown"
+}
+
+test_relocated_code_root_preserves_home_identity_removal_refusals() {
+  local selected=${FM_TEST_HOME_IDENTITY_CASE:-} relation base home identity subhome code_root control_root teardown fakebin log err rc expect
+  while IFS='|' read -r relation expect; do
+    [ -n "$relation" ] || continue
+    [ -z "$selected" ] || [ "$selected" = "$relation" ] || continue
+    base="$TMP_ROOT/relocated-identity-$relation"
+    home="$base/operator-home"
+    code_root="$base/relocated-code"
+    case "$relation" in
+      exact)
+        identity="$base/identity"
+        subhome="$identity"
+        ;;
+      ancestor)
+        identity="$base/identity/primary"
+        subhome="$base/identity"
+        ;;
+      descendant)
+        identity="$base/identity"
+        subhome="$identity/retired-home"
+        ;;
+      ordinary)
+        identity="$base/identity"
+        subhome="$base/ordinary-retired-home"
+        ;;
+    esac
+    control_root="$TMP_ROOT/relocated-identity-control-$relation"
+    prepare_relocated_identity_teardown_case "$base" "$home" "$identity" "$subhome" "$code_root"
+    fakebin=$(make_fake_tmux "$base/fake")
+    log="$base/fake/tmux.log"
+    err="$base/teardown.err"
+
+    if [ "$relation" != ordinary ]; then
+      rm -rf -- "$control_root"
+      teardown=$(install_relocated_identity_red_control "$control_root" "$relation")
+      set +e
+      PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$code_root" FM_HOME="$home" FM_HOME_IDENTITY="$identity" \
+        FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$base/fake/pane.txt" \
+        "$teardown" domain --force >/dev/null 2>"$err"
+      rc=$?
+      set -e
+      [ "$rc" -eq 0 ] || fail "relocated-root $relation RED control did not permit teardown: $(cat "$err")"
+      [ ! -d "$subhome" ] || fail "relocated-root $relation RED control did not delete the hazardous home"
+
+      cp "$ROOT/bin/fm-teardown.sh" "$teardown"
+      prepare_relocated_identity_teardown_case "$base" "$home" "$identity" "$subhome" "$code_root"
+      fakebin=$(make_fake_tmux "$base/fake")
+      log="$base/fake/tmux.log"
+      err="$base/teardown.err"
+    else
+      teardown="$ROOT/bin/fm-teardown.sh"
+    fi
+
+    set +e
+    PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$code_root" FM_HOME="$home" FM_HOME_IDENTITY="$identity" \
+      FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$base/fake/pane.txt" \
+      "$teardown" domain --force >/dev/null 2>"$err"
+    rc=$?
+    set -e
+
+    if [ "$relation" = ordinary ]; then
+      [ "$rc" -eq 0 ] || fail "relocated-root ordinary teardown was refused: $(cat "$err")"
+      [ ! -d "$subhome" ] || fail "relocated-root ordinary teardown retained its secondmate home"
+      continue
+    fi
+    [ "$rc" -ne 0 ] || fail "relocated-root $relation identity boundary did not refuse teardown"
+    [ -d "$subhome" ] || fail "relocated-root $relation identity boundary was deleted"
+    grep -F "$expect" "$err" >/dev/null \
+      || fail "relocated-root $relation identity refusal did not explain '$expect': $(cat "$err")"
+    grep -F 'kill-window' "$log" >/dev/null \
+      && fail "relocated-root $relation identity refusal killed an endpoint before validation"
+  done <<'ROWS'
+exact|is the firstmate home identity
+ancestor|is an ancestor of the firstmate home identity
+descendant|is inside the firstmate home identity
+ordinary|
+ROWS
+  pass "relocated code root keeps exact/ancestor/descendant home-identity refusals and permits ordinary teardown"
 }
 
 test_secondmate_teardown_refuses_registered_nested_home() {
@@ -2670,8 +2861,8 @@ EOF
   [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta after repo child validation refusal"
   [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta after repo child validation refusal"
   grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed windows before repo child validation refusal"
-  grep -F 'inside the firstmate repo' "$err" >/dev/null || fail "force teardown did not explain repo descendant rejection"
-  pass "force teardown refuses child worktrees inside the firstmate repo"
+  grep -F 'inside the firstmate home identity' "$err" >/dev/null || fail "force teardown did not explain identity descendant rejection"
+  pass "force teardown refuses child worktrees inside the firstmate home identity"
 }
 
 test_secondmate_force_teardown_refuses_unregistered_child_worktree() {
@@ -2894,6 +3085,11 @@ EOF
   pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
+if [ -n "${FM_TEST_HOME_IDENTITY_CASE:-}" ]; then
+  test_relocated_code_root_preserves_home_identity_removal_refusals
+  exit 0
+fi
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -2939,6 +3135,7 @@ test_home_seed_refuses_unsafe_leaf_files
 test_home_seed_preserves_existing_parent_binding
 test_secondmate_spawn_requires_seeded_matching_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
+test_secondmate_spawn_refuses_home_identity_overlap
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home
 test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings
@@ -2966,6 +3163,7 @@ test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant
 test_secondmate_force_teardown_refuses_unregistered_child_worktree
 test_secondmate_teardown_path_boundary_matrix
+test_relocated_code_root_preserves_home_identity_removal_refusals
 test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_aborts_safely

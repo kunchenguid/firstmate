@@ -157,6 +157,12 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+FM_HOME_IDENTITY="${FM_HOME_IDENTITY:-$FM_ROOT}"
+FM_HOME_IDENTITY=$(CDPATH='' cd -- "$FM_HOME_IDENTITY" 2>/dev/null && pwd -P) || {
+  echo "error: firstmate home identity cannot be resolved: $FM_HOME_IDENTITY" >&2
+  exit 1
+}
+export FM_HOME_IDENTITY
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
@@ -1820,11 +1826,11 @@ require_orca_worktree_path_match_if_present() {
 
 firstmate_home_has_treehouse_slot() {
   local home=$1
-  worktree_registered_for_project "$FM_ROOT" "$home"
+  worktree_registered_for_project "$FM_HOME_IDENTITY" "$home"
 }
 
 validate_removal_target() {
-  local target=$1 label=$2 abs_target abs_home abs_root
+  local target=$1 label=$2 abs_target abs_home
   [ -n "$target" ] || return 0
   [ -e "$target" ] || return 0
   abs_target=$(removal_target_abs_path "$target")
@@ -1833,7 +1839,6 @@ validate_removal_target() {
   else
     abs_home=
   fi
-  abs_root=$(cd "$FM_ROOT" && pwd -P)
   case "$abs_target" in
     ''|/) echo "REFUSED: unsafe $label removal target $target" >&2; return 1 ;;
   esac
@@ -1841,24 +1846,24 @@ validate_removal_target() {
     echo "REFUSED: unsafe $label removal target $target is the active firstmate home" >&2
     return 1
   fi
-  if [ "$abs_target" = "$abs_root" ]; then
-    echo "REFUSED: unsafe $label removal target $target is the firstmate repo" >&2
+  if [ "$abs_target" = "$FM_HOME_IDENTITY" ]; then
+    echo "REFUSED: unsafe $label removal target $target is the firstmate home identity" >&2
     return 1
   fi
   if [ -n "$abs_home" ] && path_is_ancestor_of "$abs_target" "$abs_home"; then
     echo "REFUSED: unsafe $label removal target $target is an ancestor of the active firstmate home" >&2
     return 1
   fi
-  if path_is_ancestor_of "$abs_target" "$abs_root"; then
-    echo "REFUSED: unsafe $label removal target $target is an ancestor of the firstmate repo" >&2
+  if path_is_ancestor_of "$abs_target" "$FM_HOME_IDENTITY"; then
+    echo "REFUSED: unsafe $label removal target $target is an ancestor of the firstmate home identity" >&2
     return 1
   fi
   if [ -n "$abs_home" ] && path_is_ancestor_of "$abs_home" "$abs_target"; then
     echo "REFUSED: unsafe $label removal target $target is inside the active firstmate home" >&2
     return 1
   fi
-  if path_is_ancestor_of "$abs_root" "$abs_target"; then
-    echo "REFUSED: unsafe $label removal target $target is inside the firstmate repo" >&2
+  if path_is_ancestor_of "$FM_HOME_IDENTITY" "$abs_target"; then
+    echo "REFUSED: unsafe $label removal target $target is inside the firstmate home identity" >&2
     return 1
   fi
   printf '%s\n' "$abs_target"
@@ -1919,7 +1924,7 @@ validate_firstmate_operational_dirs_for_removal() {
 }
 
 validate_child_worktree_for_removal() {
-  local target=$1 project=$2 abs_target abs_home abs_root
+  local target=$1 project=$2 abs_target abs_home
   [ -n "$target" ] || return 0
   [ -e "$target" ] || return 0
   abs_target=$(validate_removal_target "$target" "child worktree") || return 1
@@ -1929,9 +1934,8 @@ validate_child_worktree_for_removal() {
       return 1
     fi
   fi
-  abs_root=$(cd "$FM_ROOT" && pwd -P)
-  if path_is_ancestor_of "$abs_root" "$abs_target"; then
-    echo "REFUSED: unsafe child worktree removal target $target is inside the firstmate repo" >&2
+  if path_is_ancestor_of "$FM_HOME_IDENTITY" "$abs_target"; then
+    echo "REFUSED: unsafe child worktree removal target $target is inside the firstmate home identity" >&2
     return 1
   fi
   if ! worktree_registered_for_project "$project" "$target"; then
@@ -2023,7 +2027,7 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+    teardown_treehouse_return "$abs_home_path" "$FM_HOME_IDENTITY" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
@@ -2488,7 +2492,7 @@ cleanup_firstmate_home_children() {
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
-        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_HOME_IDENTITY=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
       else
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi

@@ -14,22 +14,21 @@
 #
 # fm_backend_hometag() derives a short, stable tag: a readable prefix
 # ("firstmate" for the primary home, "2ndmate-<id>" for a secondmate home
-# carrying .fm-secondmate-home) plus a short hash of the resolved FM_ROOT
-# path, so distinct installations - including multiple primaries on one
+# carrying .fm-secondmate-home) plus a short hash of the resolved home identity
+# path, so distinct homes - including multiple primaries on one
 # machine - never collide even though they share one backend-global
 # namespace. Callers source this file AFTER resolving their own
-# FM_HOME/FM_ROOT fallbacks (both adapters already do this for their own
-# purposes before any other function runs).
+# FM_HOME/FM_ROOT fallbacks. FM_HOME_IDENTITY defaults to FM_ROOT for backward
+# compatibility, but a relocated code installation sets it to the stable path
+# identity that owns backend titles and deletion authority.
 #
-# Moving/relocating a firstmate installation changes its FM_ROOT path and
-# therefore its tag; titles created under the old tag simply stop matching -
-# an accepted limitation, no worse than the existing fact that a task's
-# recorded absolute worktree path does not survive a move either.
+# Relocating only the installed code root does not change the tag when the
+# caller preserves FM_HOME_IDENTITY.
 
 FM_BACKEND_HOMETAG_SECONDMATE_MARKER=".fm-secondmate-home"
 
 fm_backend_hometag() {
-  local marker="$FM_HOME/$FM_BACKEND_HOMETAG_SECONDMATE_MARKER" id prefix root hash
+  local marker="$FM_HOME/$FM_BACKEND_HOMETAG_SECONDMATE_MARKER" id prefix identity hash
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
     if [ -n "$id" ]; then
@@ -40,13 +39,14 @@ fm_backend_hometag() {
   else
     prefix="firstmate"
   fi
-  root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root=$FM_ROOT
+  identity=${FM_HOME_IDENTITY:-$FM_ROOT}
+  identity=$(cd "$identity" 2>/dev/null && pwd -P) || identity=${FM_HOME_IDENTITY:-$FM_ROOT}
   if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,8)}')
+    hash=$(printf '%s' "$identity" | shasum -a 256 | awk '{print substr($1,1,8)}')
   elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | sha256sum | awk '{print substr($1,1,8)}')
+    hash=$(printf '%s' "$identity" | sha256sum | awk '{print substr($1,1,8)}')
   else
-    hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
+    hash=$(printf '%s' "$identity" | cksum | awk '{printf "%08x", $1}')
   fi
   printf '%s-%s' "$prefix" "$hash"
 }
