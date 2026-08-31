@@ -394,6 +394,28 @@ SH
   chmod +x "$1/stat"
 }
 
+fixedbirth_stat_bin() {  # <dir> <status-file> <birth-epoch>
+  mkdir -p "$1"
+  cat > "$1/stat" <<SH
+#!/usr/bin/env bash
+fmt=""; file=""
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -f) exit 1 ;;
+    -c) fmt="\$2"; shift 2 ;;
+    --) shift; file="\$1"; shift ;;
+    *) file="\$1"; shift ;;
+  esac
+done
+case "\$fmt" in
+  %W) if [ "\$file" = "$2" ]; then printf '%s\\n' "$3"; else printf '0\\n'; fi ;;
+  %Y) /usr/bin/stat -f %m -- "\$file" 2>/dev/null || /usr/bin/stat -c %Y -- "\$file" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$1/stat"
+}
+
 claude_nobirth_case() {
   local id=usagenobirth1 wt="$TMP_ROOT/.no-mistakes/wt-usagenobirth1"
   local data home state ledger row out fb base
@@ -516,6 +538,31 @@ lock_bound_case() {
 }
 
 # --- report: per-model totals and per-task rows -----------------------------
+
+# The ledger's harness field is null when a task record carries no harness=
+# line, and the report must keep every later column in its own slot rather
+# than shifting the model, effort and token columns one place left.
+report_no_harness_case() {
+  local id=usagenoharness1 wt="$TMP_ROOT/wt-usagenoharness1"
+  local home ledger out fields
+  home="$TMP_ROOT/home-$id"
+  mkdir -p "$home/state" "$home/data"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "model=nohar-model" "effort=default"
+  printf 'working: started\n' > "$home/state/$id.status"
+  FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$HARVEST" "$id" >/dev/null 2>&1 || fail "harness-less harvest failed"
+  ledger="$home/data/usage-ledger.jsonl"
+  assert_contains "$(cat "$ledger")" '"harness":null' \
+    "an absent harness is recorded as null, like an absent model or effort"
+
+  out=$(FM_DATA_OVERRIDE="$home/data" "$REPORT" 2>&1)
+  expect_code 0 "$?" "report of a harness-less row should succeed"$'\n'"$out"
+  fields=$(printf '%s\n' "$out" | awk -v t="$id" '$1 == t {print NF"|"$2"|"$3"|"$NF}')
+  [ "$fields" = "10|-|nohar-model|unavailable" ] \
+    || fail "report shifted the harness-less row's columns: [$fields]"
+  pass "usage report: an absent harness renders as a placeholder without shifting columns"
+}
 
 report_case() {
   local out ledger
@@ -643,7 +690,7 @@ SH
 # first incarnation's session logs.
 relaunch_scope_case() {
   local id=usagerelaunch1 wt="$TMP_ROOT/.no-mistakes/wt-usagerelaunch1"
-  local data home state row out base encoded logdir
+  local data home state row out base encoded logdir fb
   data=$(harvest_case "$id" claude "$wt" default default)
   home=$(dirname "$data")
   state="$home/state"
@@ -657,8 +704,10 @@ relaunch_scope_case() {
 {"type":"assistant","message":{"id":"msgR1","model":"claude-test","usage":{"input_tokens":21,"output_tokens":4}}}
 JSON
 
-  # The status file is born now; the task then runs for 600s and is relaunched
-  # 300s in, which rewrites spawn_gen with the relaunch epoch.
+  # The task is born at base, runs for 600s, and is relaunched 300s in, which
+  # rewrites spawn_gen with the relaunch epoch. The birth time is pinned by a
+  # stat shim so the case asserts the harvester's rule rather than the
+  # runner's filesystem support for birth times.
   base=$(file_mtime_epoch "$state/$id.status")
   printf 'spawn_gen=s%s.4242.9\n' "$((base + 300))" >> "$state/$id.meta"
   touch -t "$(touch_stamp $((base + 600)))" "$state/$id.status"
@@ -666,7 +715,9 @@ JSON
   # A request logged by the FIRST incarnation, before the relaunch token.
   touch -t "$(touch_stamp $((base + 100)))" "$logdir/first-incarnation.jsonl"
 
-  out=$("$HARVEST" "$id" 2>&1)
+  fb="$TMP_ROOT/relaunch-fakebin"
+  fixedbirth_stat_bin "$fb" "$state/$id.status" "$base"
+  out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "relaunch-scope harvest should succeed"$'\n'"$out"
   row=$(cat "$data/usage-ledger.jsonl")
   assert_contains "$row" '"wall_secs":600' \
@@ -679,6 +730,36 @@ JSON
   assert_contains "$row" '"source":"claude-projects"' \
     "a pre-relaunch session log is still matched"
   pass "usage harvest: a relaunch never narrows the row below the turn count's span"
+}
+
+# The one documented condition under which a row narrows below the whole task:
+# a filesystem with no birth time leaves spawn_gen as the only durable start,
+# and a relaunch has already rewritten it, so wall_secs covers the final
+# incarnation while turns still cover the whole task.
+relaunch_birthless_case() {
+  local id=usagerelaunch2 wt="$TMP_ROOT/wt-usagerelaunch2"
+  local data home state row out base fb
+  data=$(harvest_case "$id" cursor "$wt" cursor-x "")
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.4242.9\n' "$((base + 300))" >> "$state/$id.meta"
+  touch -t "$(touch_stamp $((base + 600)))" "$state/$id.status"
+  touch -t "$(touch_stamp $((base + 600)))" "$state/$id.meta"
+
+  fb="$TMP_ROOT/relaunch-nobirth-fakebin"
+  nobirth_stat_bin "$fb"
+  out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "birthless relaunch harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"wall_secs":300' \
+    "a birthless host narrows a relaunched row to the final incarnation"
+  assert_contains "$row" "\"spawned_at\":\"$(iso_utc $((base + 300)))\"" \
+    "the relaunch token is the only durable start left"
+  assert_contains "$row" '"turns":2' \
+    "turns still span the whole task, as the narrowing condition states"
+  pass "usage harvest: the birthless relaunch narrowing matches the stated contract"
 }
 
 # --- corrupt lines: one bad line costs that line, not the file --------------
@@ -719,6 +800,39 @@ JSON
 # The parser hands the loop a model field that can be empty. An empty field
 # must stay in its own slot, or the counts land in the wrong ledger columns
 # and the model string is reported as a token count.
+# A line that parses to valid JSON but is not an object must be skipped like
+# any other corrupt line, rather than aborting the parse and costing the file
+# its cwd binding along with all of its usage.
+nonobject_line_case() {
+  local id=usagenonobj1 wt="$TMP_ROOT/wt-usagenonobj1"
+  local data home row out d1
+  data=$(harvest_case "$id" pi "$wt" default high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  d1="$FM_USAGE_PI_DIR/--encoded-nonobj--"
+  mkdir -p "$d1"
+  cat > "$d1/session-nonobj.jsonl" <<JSON
+{"type":"session","id":"sess-o","cwd":"$wt"}
+"just a string"
+{"type":"message","id":"o1","message":{"role":"assistant","provider":"zai","model":"glm-5.3-flash","usage":{"input":12,"output":3,"cacheRead":1,"cacheWrite":0,"reasoning":2}}}
+[1,2,3]
+5
+{"type":"message","id":"o2","message":{"role":"assistant","provider":"zai","model":"glm-5.3-flash","usage":{"input":8,"output":1,"cacheRead":0,"cacheWrite":0,"reasoning":0}}}
+JSON
+  touch -m -r "$d1/session-nonobj.jsonl" "$home/state/$id.status"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "non-object-line harvest should succeed"$'
+'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"source":"pi-sessions"' \
+    "a non-object line does not cost the file's cwd binding"
+  assert_contains "$row" '"input_tokens":20' \
+    "records around a scalar or array line are still summed (12+8)"
+  assert_contains "$row" '"output_tokens":4' "output sums across the non-object lines (3+1)"
+  pass "usage harvest: a valid non-object log line is skipped, not fatal"
+}
+
 missing_model_case() {
   local id=usagenomodel1 wt="$TMP_ROOT/wt-usagenomodel1"
   local data home row out d1
@@ -788,7 +902,9 @@ spawn_gen_case
 spawn_gen_malformed_case
 spawn_gen_future_case
 relaunch_scope_case
+relaunch_birthless_case
 corrupt_line_case
+nonobject_line_case
 missing_model_case
 no_usage_case
 cursor_case
@@ -796,5 +912,6 @@ remote_case
 race_case
 lock_bound_case
 report_case
+report_no_harness_case
 teardown_status_case
 teardown_case

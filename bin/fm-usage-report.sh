@@ -8,7 +8,10 @@
 # consumes it). With no argument the ledger resolves from the operational
 # home exactly as the harvester does.
 #
-# Output is aligned plain text; unavailable token fields render as "-".
+# Output is aligned plain text; an absent or unavailable field renders as
+# "-". The ledger's @tsv rows are read over the unit separator rather than the
+# tab, because tab is an IFS whitespace character and an empty field would
+# otherwise collapse and shift every later column left.
 # Exit status: 0 including when the ledger is absent or empty.
 set -eu
 
@@ -37,8 +40,8 @@ jq -rs '
       (map(.cached_input_tokens // 0) | add | tostring),
       (map(.output_tokens // 0) | add | tostring),
       (map(.reasoning_tokens // 0) | add | tostring),
-      (map(.wall_secs // 0) | add | tostring) ] | @tsv' "$LEDGER" |
-while IFS=$'\t' read -r model tasks it ct ot rt wall; do
+      (map(.wall_secs // 0) | add | tostring) ] | @tsv' "$LEDGER" | tr '\t' '\037' |
+while IFS=$'\037' read -r model tasks it ct ot rt wall; do
   printf '%-24s %6s %12s %12s %12s %12s %10s\n' \
     "$model" "$tasks" "$it" "$ct" "$ot" "$rt" "$wall"
 done
@@ -47,12 +50,12 @@ echo "per-task rows:"
 printf '%-24s %-8s %-20s %-8s %12s %12s %12s %12s %10s %-16s\n' \
   task harness model effort input cached output reasoning wall_secs source
 jq -r '
-  [ .task, .harness,
+  [ (.task // "-"), (.harness // "-"),
     (.model // "-"), (.effort // "-"),
     (.input_tokens // "-"), (.cached_input_tokens // "-"),
     (.output_tokens // "-"), (.reasoning_tokens // "-"),
-    (.wall_secs // "-"), .source ] | @tsv' "$LEDGER" |
-while IFS=$'\t' read -r task harness model effort it ct ot rt wall source; do
+    (.wall_secs // "-"), (.source // "-") ] | @tsv' "$LEDGER" | tr '\t' '\037' |
+while IFS=$'\037' read -r task harness model effort it ct ot rt wall source; do
   printf '%-24s %-8s %-20s %-8s %12s %12s %12s %12s %10s %-16s\n' \
     "$task" "$harness" "$model" "$effort" "$it" "$ct" "$ot" "$rt" "$wall" "$source"
 done

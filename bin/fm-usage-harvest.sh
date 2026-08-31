@@ -12,7 +12,7 @@
 #
 # Ledger line schema (this file is the single owner of that schema; the
 # report script is a consumer):
-#   {"task":<id>,"harness":<name>,"model":<id|null>,"effort":<id|null>,
+#   {"task":<id>,"harness":<name|null>,"model":<id|null>,"effort":<id|null>,
 #    "spawned_at":<iso|null>,"completed_at":<iso|null>,
 #    "wall_secs":<int>,"turns":<int>,
 #    "input_tokens":<int|null>,"cached_input_tokens":<int|null>,
@@ -26,6 +26,15 @@
 # no incarnation delimiter; per-incarnation turns are therefore not derivable
 # from durable data, and scoping only the window to an incarnation would
 # report whole-task turns against a one-incarnation window and token sum.
+# ONE condition narrows a row below that span, and only for a task that was
+# actually relaunched: a filesystem that reports no birth time for
+# state/<task-id>.status leaves the meta's spawn_gen as the only durable
+# start, and fm-spawn rewrites that token on every relaunch, so wall_secs and
+# the token sum then cover the final incarnation while turns still cover the
+# whole task. No per-task record of the first spawn survives a relaunch on
+# such a host, so a relaunched row there is narrowed rather than wrong; a task
+# that was never relaunched always yields a whole-task row on every
+# filesystem.
 #
 # Wall clock: task start epoch -> status-file mtime epoch; the meta file's
 # mtime is the fallback end when the status file is absent.
@@ -37,7 +46,7 @@
 # relaunch and never rewrites it afterwards, so it carries the start on a host
 # whose filesystem reports no usable birth time; because a relaunch replaces
 # it with the relaunch epoch, the status birth is what holds the window open
-# over the whole task. The meta file's own mtime is NOT a start source in its
+# over the whole task, which is the narrowing condition stated above. The meta file's own mtime is NOT a start source in its
 # own right: later meta writes (PR registration, busy-state updates) move it
 # forward to near the end of the task and collapse the window. Only when
 # neither durable source is available (a task spawned before the token
@@ -294,7 +303,7 @@ case "$HARNESS" in
       # the row reports the worktree it was resolved from.
       # shellcheck disable=SC2016  # jq owns every $ expression in these literal programs.
       accumulate_usage "$CLAUDE_DIR/$encoded" 1 claude-projects '
-        reduce (inputs | try fromjson catch empty) as $l
+        reduce (inputs | try (fromjson | objects) catch empty) as $l
           ({seen:{},n:0,m:null,it:0,ct:0,ot:0,rt:0};
             if $l.type == "assistant" and ($l.message.usage // null) != null then
               ($l.message.id // "no-id") as $id
@@ -318,7 +327,7 @@ case "$HARNESS" in
     if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
       # shellcheck disable=SC2016  # jq owns every $ expression in these literal programs.
       accumulate_usage "$CODEX_DIR" "" codex-sessions '
-        reduce (inputs | try fromjson catch empty) as $l
+        reduce (inputs | try (fromjson | objects) catch empty) as $l
           ({cwd:null,n:0,m:null,it:0,ct:0,ot:0,rt:0};
             if $l.type == "session_meta" then
               .cwd = ($l.payload.cwd // .cwd)
@@ -340,7 +349,7 @@ case "$HARNESS" in
     if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
       # shellcheck disable=SC2016  # jq owns every $ expression in these literal programs.
       accumulate_usage "$PI_DIR" "" pi-sessions '
-        reduce (inputs | try fromjson catch empty) as $l
+        reduce (inputs | try (fromjson | objects) catch empty) as $l
           ({cwd:null,seen:{},n:0,m:null,it:0,ct:0,ot:0,rt:0};
             if $l.type == "session" then
               .cwd = ($l.cwd // .cwd)
@@ -415,7 +424,7 @@ jq -cn \
   --argjson wall "$WALL" --argjson turns "$TURNS" \
   --argjson it "$IT" --argjson ct "$CT" --argjson ot "$OT" --argjson rt "$RT" \
   --arg source "$SRC" \
-  '{task:$task, harness:$harness,
+  '{task:$task, harness:(if $harness == "" then null else $harness end),
     model:(if ($model == "" or $model == "default") then null else $model end),
     effort:(if ($effort == "" or $effort == "default") then null else $effort end),
     spawned_at:(if $spawned == "" then null else $spawned end),
