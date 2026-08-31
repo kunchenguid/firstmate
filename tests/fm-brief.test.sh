@@ -528,10 +528,10 @@ test_unresolved_scout_fallback_degrades_to_a_local_default() {
     "the scout fallback lost its origin-first zero-count command"
   assert_contains "$scout_setup" 'git rev-list --count $(git merge-base HEAD <default>)..<default>' \
     "the scout fallback never degrades to a local default when origin cannot be established"
-  assert_contains "$scout_setup" 'Only when this clone has no origin default at all' \
-    "the scout fallback did not gate its local degradation on origin being unavailable"
-  assert_contains "$scout_setup" 'Do not fetch in that case' \
-    "the scout local degradation did not forbid the network refresh"
+  assert_contains "$scout_setup" 'If no usable origin default remains after that single fetch' \
+    "the scout fallback did not gate its local degradation on origin being unusable after the fetch"
+  assert_contains "$scout_setup" 'NO further network refresh' \
+    "the scout local degradation did not forbid an additional network refresh"
   assert_contains "$scout_setup" 'blocked: cannot determine the default branch to verify base freshness' \
     "the scout fallback dropped its block-and-stop requirement"
   assert_not_contains "$scout_setup" 'This task lands locally' \
@@ -540,6 +540,57 @@ test_unresolved_scout_fallback_degrades_to_a_local_default() {
   assert_not_contains "$ship_setup" 'git rev-list --count $(git merge-base HEAD <default>)..<default>' \
     "a PR-path fallback degraded to a local base instead of requiring origin"
   pass "fm-brief.sh: an unresolved scout fallback degrades to a local default before blocking"
+}
+
+# The scout runtime fallback must not block where the same scaffold's resolved
+# path degrades. A clone whose origin/HEAD names a branch with a pruned or
+# never-fetched tracking ref is the case: the single permitted fetch is what
+# restores that ref, so verification must follow it, and the local degradation
+# must name the branch origin/HEAD points at rather than only main/master.
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
+test_scout_fallback_fetches_before_verifying_and_degrades_like_the_resolved_path() {
+  local home pruned resolved_setup unresolved_setup fetch_line verify_line
+  home="$TMP_ROOT/scout-pruned-home"
+  pruned="$BRIEF_PROJECTS/pruned"
+  mkdir -p "$home/data"
+
+  fm_git_init_commit "$pruned"
+  git -C "$pruned" branch -M develop
+  fm_git_add_origin "$pruned" "$pruned.origin.git"
+  git -C "$pruned" fetch --quiet origin
+  git -C "$pruned" remote set-head origin --auto >/dev/null
+  git -C "$pruned" update-ref -d refs/remotes/origin/develop
+  [ "$(git -C "$pruned" symbolic-ref --short refs/remotes/origin/HEAD)" = "origin/develop" ] \
+    || fail "fixture origin/HEAD does not name develop"
+  git -C "$pruned" rev-parse --verify --quiet refs/heads/develop >/dev/null \
+    || fail "fixture lost its local develop branch"
+  git -C "$pruned" rev-parse --verify --quiet refs/remotes/origin/develop >/dev/null 2>&1 \
+    && fail "fixture still has the origin/develop tracking ref"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" pruned-resolved pruned --scout >/dev/null 2>&1 \
+    || fail "a resolvable scout label must scaffold against a pruned tracking ref"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" pruned-unresolved comms --scout >/dev/null 2>&1 \
+    || fail "an unresolvable scout label must scaffold against the same state"
+  resolved_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/pruned-resolved/brief.md")
+  unresolved_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/pruned-unresolved/brief.md")
+
+  assert_contains "$resolved_setup" 'git rev-list --count $(git merge-base HEAD develop)..develop' \
+    "the resolved scout path stopped degrading to the local default branch"
+
+  fetch_line=$(printf '%s\n' "$unresolved_setup" | grep -n -F -m1 'git fetch origin --quiet' | cut -d: -f1)
+  verify_line=$(printf '%s\n' "$unresolved_setup" | grep -n -F -m1 'git rev-parse --verify origin/<default>' | cut -d: -f1)
+  [ -n "$fetch_line" ] || fail "the scout fallback dropped its single fetch"
+  [ -n "$verify_line" ] || fail "the scout fallback dropped its origin tracking-ref verification"
+  [ "$fetch_line" -lt "$verify_line" ] \
+    || fail "the scout fallback verifies origin/<default> before the fetch that would create it"
+
+  assert_contains "$unresolved_setup" 'that name with the leading `origin/` dropped IS `<default>`' \
+    "the scout local degradation does not name the branch origin/HEAD points at"
+  assert_contains "$unresolved_setup" 'Only when that ref is absent entirely may `<default>` be the local `main` or `master`' \
+    "the scout local degradation offered main/master without gating on an absent origin/HEAD"
+  assert_not_contains "$unresolved_setup" 'This task lands locally' \
+    "the scout fallback claimed the task lands locally"
+  pass "fm-brief.sh: the scout fallback fetches before verifying and degrades like its resolved path"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -1099,6 +1150,7 @@ test_absent_local_ref_for_origin_default_never_substitutes_another_branch
 test_local_only_rule_names_the_resolved_default_branch
 test_scout_local_fallback_uses_kind_neutral_wording
 test_unresolved_scout_fallback_degrades_to_a_local_default
+test_scout_fallback_fetches_before_verifying_and_degrades_like_the_resolved_path
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
