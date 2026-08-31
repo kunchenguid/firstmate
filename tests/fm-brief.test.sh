@@ -18,6 +18,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fm_git_identity
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
@@ -315,6 +316,7 @@ test_base_freshness_check_is_resolved_and_mode_aware() {
 # names repos this scaffold has no local view of, so an unresolvable label must
 # still produce a brief - and that brief must still carry the mandatory check
 # with the base determined by the worker at runtime.
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
 test_unresolvable_repo_label_still_mandates_the_base_check() {
   local home ship scout ship_setup scout_setup
   home="$TMP_ROOT/unresolvable-repo-home"
@@ -350,6 +352,7 @@ test_unresolvable_repo_label_still_mandates_the_base_check() {
 # A clone with no origin/HEAD that is stranded on a feature branch (the worktree
 # tangle bin/fm-tangle-lib.sh detects) must never have that feature branch
 # rendered as its own base - the brief would then certify a wrong base as fresh.
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
 test_missing_origin_head_never_relabels_the_current_branch() {
   local home stranded setup
   home="$TMP_ROOT/stranded-head-home"
@@ -379,6 +382,7 @@ test_missing_origin_head_never_relabels_the_current_branch() {
 # directory that is merely INSIDE a work tree must never resolve: it would render
 # the enclosing repo's default branch as an unrelated project's base - a
 # confidently-wrong base with no error, the exact class this check exists to stop.
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
 test_non_root_directory_never_resolves_to_its_enclosing_repo() {
   local home enclosing setup
   home="$TMP_ROOT/non-root-home"
@@ -409,6 +413,7 @@ test_non_root_directory_never_resolves_to_its_enclosing_repo() {
 # origin/HEAD is the authority on the default branch NAME. When the clone has no
 # local ref for it, no other branch may be presented as "your local default
 # branch"; the strict runtime fallback must take over instead.
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
 test_absent_local_ref_for_origin_default_never_substitutes_another_branch() {
   local home diverged setup
   home="$TMP_ROOT/absent-local-ref-home"
@@ -441,11 +446,16 @@ test_absent_local_ref_for_origin_default_never_substitutes_another_branch() {
     "an absent local ref for origin's default did not fall back to the runtime base check"
   assert_contains "$setup" 'blocked: cannot determine the default branch to verify base freshness' \
     "the runtime fallback dropped its blocked-and-stop requirement"
+  assert_contains "$setup" 'Only when that ref is absent entirely' \
+    "the runtime fallback did not gate the main/master guess on origin/HEAD being absent"
+  assert_contains "$setup" 'Never substitute `main`, `master`, or whatever branch happens to be checked out' \
+    "the runtime fallback did not forbid substituting a branch for a missing default"
   pass "fm-brief.sh: an absent local ref for origin's default never substitutes another branch"
 }
 
 # The generated brief must not contradict itself: a local-only task whose Setup
 # rebases onto `release` cannot tell the worker firstmate merges into `main`.
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
 test_local_only_rule_names_the_resolved_default_branch() {
   local home rules setup
   home="$TMP_ROOT/local-rule-home"
@@ -468,6 +478,7 @@ test_local_only_rule_names_the_resolved_default_branch() {
 # A scout lands nowhere - its deliverable is a report and it may never push. When
 # it falls back to a local comparison it must be told WHY (origin's default could
 # not be resolved), never that its task "lands locally".
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
 test_scout_local_fallback_uses_kind_neutral_wording() {
   local home remoteless setup
   home="$TMP_ROOT/scout-neutral-home"

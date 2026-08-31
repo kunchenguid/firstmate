@@ -443,8 +443,8 @@ EOF
   elif [ -n "$BASE_UNRESOLVED_REASON" ]; then
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
-   Determine \`<default>\` from \`git symbolic-ref --quiet --short refs/remotes/origin/HEAD\` with the leading \`origin/\` dropped, else the local \`main\` or \`master\` branch. Never substitute whatever branch happens to be checked out; verify the branch exists with \`git rev-parse --verify <default>\`.
-   If you cannot determine it, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
+   Read \`git symbolic-ref --quiet --short refs/remotes/origin/HEAD\`. If it names a branch, that name with the leading \`origin/\` dropped IS \`<default>\`: confirm the local branch exists with \`git rev-parse --verify <default>\`, and if it does not, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
+   Only when that ref is absent entirely may \`<default>\` be the local \`main\` or \`master\`, confirmed the same way. Never substitute \`main\`, \`master\`, or whatever branch happens to be checked out for a default branch this clone is missing, and append the same \`blocked:\` line and stop if none of these resolves.
    This task lands locally, so do not fetch; measure against the local branch:
    \`git rev-list --count \$(git merge-base HEAD <default>)..<default>\`
    Only \`0\` passes. If the count is not \`0\`, rebase onto \`<default>\` before reading or writing anything.
