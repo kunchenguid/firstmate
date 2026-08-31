@@ -89,7 +89,8 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "grok": "references/harness/grok.md",
     "kimi": "references/harness/kimi.md",
     "cursor": "references/harness/cursor.md",
-    "muse": "references/harness/muse.md"
+    "muse": "references/harness/muse.md",
+    "agy": "references/harness/agy.md"
   }
 }
 ```

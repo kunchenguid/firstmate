@@ -1,0 +1,34 @@
+{
+  "firstmate-turnend": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "bash \"$PWD/bin/fm-turnend-guard-agy.sh\"",
+        "timeout": 28800
+      }
+    ]
+  },
+  "firstmate-hardrule1": {
+    "PreToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$PWD/bin/fm-hardrule1-pretool-check.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "firstmate-sessionstart": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "bash \"$PWD/bin/fm-sessionstart-agy-nudge.sh\"",
+        "timeout": 30
+      }
+    ]
+  }
+}
