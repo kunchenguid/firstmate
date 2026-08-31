@@ -331,6 +331,24 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+## Crew Claude sandbox (config/crew-claude-config-dir / config/worker-sandbox-posture-check)
+
+`config/crew-claude-config-dir` is a default-off, home-local selection of the Claude configuration used by this home's ordinary Claude crewmates and scouts.
+When the file is absent, Claude launch composition stays exactly as before: an ambient `CLAUDE_CONFIG_DIR` is forwarded to the worker when set, and no prefix is added when it is unset.
+When the file is present, it contains exactly one absolute path to an existing non-symlink directory that is owned by the current account, exposes no group or other permission bits, and resolves somewhere distinct from Firstmate's own effective Claude configuration directory.
+A passing worker launch receives that directory as its only `CLAUDE_CONFIG_DIR`, replacing rather than supplementing Firstmate's own value.
+The primary Firstmate session, non-Claude workers, and Claude secondmate-agent launches keep their existing configuration behavior.
+This built-in sandbox handoff is Claude-only: Pi, Codex, OpenCode, Grok, Kimi, Cursor, and Muse crewmates receive no sandbox from this setting and remain unboxed unless their own launch command wraps them in a separate sandbox.
+
+A configured crew directory activates a mandatory pre-launch proof through the estate's `worker-sandbox-posture-check.sh`.
+Firstmate resolves that executable from `PATH` unless `config/worker-sandbox-posture-check` supplies exactly one absolute executable path, then runs it with the selected crew directory in `CLAUDE_CONFIG_DIR` and `--settings <crew-directory>/settings.json`.
+The check's zero exit is the proof boundary; a missing executable, invalid directory, or nonzero result refuses the spawn before a worker launch command is delivered, preserves the check's named `WORKER_SANDBOX` reason in the diagnostic, and never warns and continues unboxed.
+Run the printed check command directly and fix its reported host posture before retrying.
+
+Both config files remain local to each Firstmate home and are not in the inherited-local-material allowlist.
+They contain host-specific absolute paths and depend on that host's sandbox installation, so copying a Linux primary's values into a remote macOS secondmate home, or the reverse, would either select the wrong account path or make safe worker launch impossible.
+Configure them independently in every home that launches boxed Claude workers; a secondmate home then applies its own values to its own crewmates and scouts.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

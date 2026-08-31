@@ -46,7 +46,21 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/worker-sandbox-posture-check.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_SANDBOX_CHECK_LOG:-}" ]; then
+  printf 'CLAUDE_CONFIG_DIR=%s\n' "${CLAUDE_CONFIG_DIR:-}" > "$FM_FAKE_SANDBOX_CHECK_LOG"
+  printf 'arg=%s\n' "$@" >> "$FM_FAKE_SANDBOX_CHECK_LOG"
+fi
+status=${FM_FAKE_SANDBOX_CHECK_STATUS:-0}
+if [ "$status" -ne 0 ]; then
+  printf 'WORKER_SANDBOX=FAIL reason=%s\n' "${FM_FAKE_SANDBOX_CHECK_REASON:-posture_check_failed}" >&2
+  exit "$status"
+fi
+printf 'WORKER_SANDBOX=PASS\n'
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/worker-sandbox-posture-check.sh"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -95,6 +109,9 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_FAKE_SANDBOX_CHECK_LOG="${FM_TEST_SANDBOX_CHECK_LOG:-}" \
+    FM_FAKE_SANDBOX_CHECK_STATUS="${FM_TEST_SANDBOX_CHECK_STATUS:-0}" \
+    FM_FAKE_SANDBOX_CHECK_REASON="${FM_TEST_SANDBOX_CHECK_REASON:-posture_check_failed}" \
     GROK_HOME="$home/grok-home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
@@ -726,7 +743,7 @@ test_batch_forwards_shared_profile_flags() {
 }
 
 test_claude_forwards_firstmate_config_dir_when_set() {
-  local rec id out status launch
+  local rec id out status launch expected
   id=profile-claude-cfgdir-z17
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
@@ -736,9 +753,136 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
-    "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
-  pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
+  expected="CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] || fail "default Claude launch changed with no crew config knob"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "no crew config knob preserves the byte-identical firstmate CLAUDE_CONFIG_DIR launch"
+}
+
+test_crew_claude_config_replaces_firstmate_config_after_passing_posture() {
+  local rec id out status launch crew_dir check_log
+  id=profile-crew-claude-cfgdir-z17b
+  rec=$(make_spawn_case profile-crew-claude-cfgdir claude "$id")
+  read_case_record "$rec"
+  crew_dir="$CASE_DIR/crew claude"
+  check_log="$CASE_DIR/posture.log"
+  mkdir -m 700 "$crew_dir"
+  printf '{}\n' > "$crew_dir/settings.json"
+  printf '%s\n' "$crew_dir" > "$HOME_DIR/config/crew-claude-config-dir"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/firstmate-claude" \
+    FM_TEST_SANDBOX_CHECK_LOG="$check_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn with a private crew config and passing posture should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$crew_dir'" \
+    "Claude worker launch did not select the configured crew-only directory"
+  assert_not_contains "$launch" "/opt/test/firstmate-claude" \
+    "Claude worker launch leaked firstmate's own config directory alongside the crew directory"
+  assert_grep "CLAUDE_CONFIG_DIR=$crew_dir" "$check_log" \
+    "posture check did not run under the configured crew Claude directory"
+  assert_grep "arg=--settings" "$check_log" \
+    "posture check did not receive its settings argument"
+  assert_grep "arg=$crew_dir/settings.json" "$check_log" \
+    "posture check did not inspect the configured crew settings"
+  pass "passing posture replaces firstmate's Claude config with the crew-only directory"
+}
+
+test_crew_claude_config_refuses_invalid_and_non_private_directories() {
+  local rec relative_id private_id out status exposed_dir
+  relative_id=profile-crew-claude-relative-z17c
+  private_id=profile-crew-claude-exposed-z17d
+  rec=$(make_spawn_case profile-crew-claude-invalid claude "$relative_id" "$private_id")
+  read_case_record "$rec"
+
+  printf '%s\n' 'relative/crew-claude' > "$HOME_DIR/config/crew-claude-config-dir"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$relative_id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "relative crew Claude config directory should be refused"
+  assert_contains "$out" "must name an absolute directory path" \
+    "relative directory refusal did not name the absolute-path requirement"
+  assert_absent "$HOME_DIR/state/$relative_id.meta" "relative directory refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "relative directory refusal typed a launch command"
+
+  exposed_dir="$CASE_DIR/exposed-crew-claude"
+  mkdir -m 755 "$exposed_dir"
+  printf '{}\n' > "$exposed_dir/settings.json"
+  printf '%s\n' "$exposed_dir" > "$HOME_DIR/config/crew-claude-config-dir"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$private_id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "group/other-readable crew Claude config directory should be refused"
+  assert_contains "$out" "must be private to the current account" \
+    "non-private directory refusal did not name the account-privacy requirement"
+  assert_contains "$out" "chmod 700" \
+    "non-private directory refusal did not provide the actionable permission fix"
+  assert_absent "$HOME_DIR/state/$private_id.meta" "non-private directory refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "non-private directory refusal typed a launch command"
+  pass "invalid and non-private crew Claude config directories refuse before launch"
+}
+
+test_crew_claude_config_refuses_missing_and_failing_posture_checks() {
+  local rec missing_id failing_id out status crew_dir
+  missing_id=profile-crew-claude-check-missing-z17e
+  failing_id=profile-crew-claude-check-failing-z17f
+  rec=$(make_spawn_case profile-crew-claude-posture-refusal claude "$missing_id" "$failing_id")
+  read_case_record "$rec"
+  crew_dir="$CASE_DIR/crew-claude"
+  mkdir -m 700 "$crew_dir"
+  printf '{}\n' > "$crew_dir/settings.json"
+  printf '%s\n' "$crew_dir" > "$HOME_DIR/config/crew-claude-config-dir"
+
+  rm -f "$FAKEBIN_DIR/worker-sandbox-posture-check.sh"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$missing_id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "configured crew Claude sandbox without a posture check should refuse"
+  assert_contains "$out" "worker-sandbox-posture-check.sh was not found on PATH" \
+    "missing posture-check refusal did not name the missing estate check"
+  assert_contains "$out" "refusing to launch the Claude worker" \
+    "missing posture-check refusal did not name the affected harness"
+  assert_contains "$out" "config/worker-sandbox-posture-check" \
+    "missing posture-check refusal did not name the configured-path remedy"
+  assert_absent "$HOME_DIR/state/$missing_id.meta" "missing posture check wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing posture check typed a launch command"
+
+  make_spawn_fakebin "$CASE_DIR/fake" >/dev/null
+  out=$(FM_TEST_SANDBOX_CHECK_STATUS=7 FM_TEST_SANDBOX_CHECK_REASON=apparmor_profile_missing \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$failing_id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "failing crew Claude sandbox posture should refuse"
+  assert_contains "$out" "Claude worker sandbox posture could not be proven" \
+    "failing posture refusal did not name the security gate and affected harness"
+  assert_contains "$out" "WORKER_SANDBOX=FAIL reason=apparmor_profile_missing" \
+    "failing posture refusal did not relay the check's named reason"
+  assert_absent "$HOME_DIR/state/$failing_id.meta" "failing posture check wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "failing posture check typed a launch command"
+  pass "missing and failing worker-sandbox posture checks refuse without fallback"
+}
+
+test_crew_claude_config_accepts_configured_posture_check_path() {
+  local rec id out status crew_dir checker launch
+  id=profile-crew-claude-configured-check-z17g
+  rec=$(make_spawn_case profile-crew-claude-configured-check claude "$id")
+  read_case_record "$rec"
+  crew_dir="$CASE_DIR/crew-claude"
+  checker="$CASE_DIR/estate-worker-sandbox-check"
+  mkdir -m 700 "$crew_dir"
+  printf '{}\n' > "$crew_dir/settings.json"
+  printf '%s\n' "$crew_dir" > "$HOME_DIR/config/crew-claude-config-dir"
+  cat > "$checker" <<'SH'
+#!/usr/bin/env bash
+printf 'WORKER_SANDBOX=PASS\n'
+SH
+  chmod +x "$checker"
+  printf '%s\n' "$checker" > "$HOME_DIR/config/worker-sandbox-posture-check"
+  rm -f "$FAKEBIN_DIR/worker-sandbox-posture-check.sh"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an absolute configured posture-check path should allow a passing spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$crew_dir'" \
+    "configured posture-check path did not permit the crew-only Claude launch"
+  pass "configured absolute posture-check path is used when the check is not on PATH"
 }
 
 test_claude_omits_config_dir_prefix_when_unset() {
@@ -792,6 +936,32 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_secondmate_claude_launch_keeps_firstmate_config_behavior() {
+  local rec id sm out status launch crew_dir check_log
+  id=profile-secondmate-claude-crew-config-z16b
+  rec=$(make_spawn_case profile-secondmate-claude-crew-config claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  crew_dir="$CASE_DIR/crew-claude"
+  check_log="$CASE_DIR/posture.log"
+  make_seeded_secondmate_home "$sm" "$id"
+  mkdir -m 700 "$crew_dir"
+  printf '%s\n' "$crew_dir" > "$HOME_DIR/config/crew-claude-config-dir"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR=/opt/test/firstmate-claude \
+    FM_TEST_SANDBOX_CHECK_STATUS=9 FM_TEST_SANDBOX_CHECK_LOG="$check_log" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "Claude secondmate launch should ignore the ordinary-worker sandbox knob"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/firstmate-claude'" \
+    "Claude secondmate launch stopped forwarding firstmate's own config directory"
+  assert_not_contains "$launch" "$crew_dir" \
+    "Claude secondmate launch incorrectly received the ordinary-worker crew config directory"
+  assert_absent "$check_log" "Claude secondmate launch incorrectly ran the worker sandbox posture check"
+  pass "Claude secondmate launch keeps its prior config behavior and bypasses the crew-only gate"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -820,8 +990,13 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
+test_crew_claude_config_replaces_firstmate_config_after_passing_posture
+test_crew_claude_config_refuses_invalid_and_non_private_directories
+test_crew_claude_config_refuses_missing_and_failing_posture_checks
+test_crew_claude_config_accepts_configured_posture_check_path
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_secondmate_claude_launch_keeps_firstmate_config_behavior
 
 echo "# all fm-spawn-dispatch-profile tests passed"

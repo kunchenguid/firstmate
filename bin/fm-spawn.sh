@@ -122,6 +122,19 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
+#   config/crew-claude-config-dir is a default-off, home-local safety boundary for
+#   ordinary Claude crewmates and scouts. When absent, Claude launch composition
+#   is byte-for-byte unchanged: an ambient CLAUDE_CONFIG_DIR is forwarded as it
+#   was before this knob existed. When present, it must name one absolute,
+#   existing, account-owned directory with no group/other access, distinct from
+#   firstmate's own effective Claude config directory. The worker launch receives
+#   only that directory. Before any launch command is delivered, this script runs
+#   worker-sandbox-posture-check.sh from PATH, or the absolute executable named by
+#   config/worker-sandbox-posture-check, against that directory's settings.json;
+#   missing or failing proof refuses the spawn and relays the check's named reason.
+#   These host-specific absolute paths are not inherited into secondmate homes;
+#   configure each home on its worker host. The primary session, non-Claude
+#   workers, and secondmate-agent launches keep their existing behavior.
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
@@ -1194,6 +1207,159 @@ shell_quote() {
   printf "'"
 }
 
+read_single_path_config() { # <file> <home-relative-name>
+  local file=$1 label=$2 line_count value
+  if [ ! -f "$file" ] || [ -L "$file" ]; then
+    echo "error: $label must be a regular non-symlink file" >&2
+    return 1
+  fi
+  line_count=$(awk 'END { print NR }' "$file") || {
+    echo "error: $label could not be read" >&2
+    return 1
+  }
+  if [ "$line_count" -ne 1 ]; then
+    echo "error: $label must contain exactly one non-empty path line" >&2
+    return 1
+  fi
+  IFS= read -r value < "$file" || [ -n "$value" ] || {
+    echo "error: $label must contain exactly one non-empty path line" >&2
+    return 1
+  }
+  [ -n "$value" ] || {
+    echo "error: $label must contain exactly one non-empty path line" >&2
+    return 1
+  }
+  printf '%s\n' "$value"
+}
+
+path_owner_uid() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %u "$1" 2>/dev/null
+  else
+    stat -c %u "$1" 2>/dev/null
+  fi
+}
+
+path_permission_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1" 2>/dev/null
+  else
+    stat -c %a "$1" 2>/dev/null
+  fi
+}
+
+resolve_worker_sandbox_posture_check() {
+  local config_path="$CONFIG/worker-sandbox-posture-check" checker dir
+  if [ -e "$config_path" ] || [ -L "$config_path" ]; then
+    checker=$(read_single_path_config "$config_path" config/worker-sandbox-posture-check) || return 1
+    case "$checker" in
+      /*) ;;
+      *)
+        echo "error: config/worker-sandbox-posture-check must name an absolute executable path (got '$checker')" >&2
+        return 1
+        ;;
+    esac
+    if [ ! -f "$checker" ] || [ ! -x "$checker" ]; then
+      echo "error: config/worker-sandbox-posture-check does not name an existing executable file: $checker" >&2
+      return 1
+    fi
+    printf '%s\n' "$checker"
+    return 0
+  fi
+  checker=$(type -P -- worker-sandbox-posture-check.sh 2>/dev/null || true)
+  if [ -z "$checker" ]; then
+    echo "error: Claude worker sandbox posture could not be proven: worker-sandbox-posture-check.sh was not found on PATH and config/worker-sandbox-posture-check is absent; refusing to launch the Claude worker" >&2
+    echo "error: install the estate worker sandbox check on PATH or write its absolute executable path to config/worker-sandbox-posture-check" >&2
+    return 1
+  fi
+  case "$checker" in
+    /*) ;;
+    *)
+      dir=$(CDPATH='' cd -- "$(dirname "$checker")" 2>/dev/null && pwd -P) || {
+        echo "error: worker-sandbox-posture-check.sh resolved to an unusable path: $checker" >&2
+        return 1
+      }
+      checker="$dir/$(basename "$checker")"
+      ;;
+  esac
+  [ -f "$checker" ] && [ -x "$checker" ] || {
+    echo "error: worker-sandbox-posture-check.sh is not an executable file: $checker" >&2
+    return 1
+  }
+  printf '%s\n' "$checker"
+}
+
+prepare_crew_claude_sandbox() {
+  local config_path="$CONFIG/crew-claude-config-dir" crew_dir owner mode mode_value
+  local crew_real primary_dir primary_real checker posture_output posture_status
+  CREW_CLAUDE_CONFIG_DIR=
+  [ "$KIND" != secondmate ] || return 0
+  [ "$HARNESS" = claude ] || return 0
+  if [ ! -e "$config_path" ] && [ ! -L "$config_path" ]; then
+    return 0
+  fi
+  crew_dir=$(read_single_path_config "$config_path" config/crew-claude-config-dir) || return 1
+  case "$crew_dir" in
+    /*) ;;
+    *)
+      echo "error: config/crew-claude-config-dir must name an absolute directory path (got '$crew_dir')" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -d "$crew_dir" ] || [ -L "$crew_dir" ]; then
+    echo "error: config/crew-claude-config-dir does not name an existing non-symlink directory: $crew_dir" >&2
+    return 1
+  fi
+  owner=$(path_owner_uid "$crew_dir") || {
+    echo "error: config/crew-claude-config-dir ownership could not be verified: $crew_dir" >&2
+    return 1
+  }
+  if [ "$owner" != "$(id -u)" ]; then
+    echo "error: config/crew-claude-config-dir must be owned by the current account (owner uid $owner, current uid $(id -u)): $crew_dir" >&2
+    return 1
+  fi
+  mode=$(path_permission_mode "$crew_dir") || {
+    echo "error: config/crew-claude-config-dir permissions could not be verified: $crew_dir" >&2
+    return 1
+  }
+  case "$mode" in
+    ''|*[!0-7]*)
+      echo "error: config/crew-claude-config-dir returned an invalid permission mode '$mode': $crew_dir" >&2
+      return 1
+      ;;
+  esac
+  mode_value=$((8#$mode))
+  if [ $((mode_value & 077)) -ne 0 ]; then
+    echo "error: config/crew-claude-config-dir must be private to the current account (mode $mode exposes group or other access): $crew_dir" >&2
+    echo "error: run chmod 700 $(shell_quote "$crew_dir") and retry" >&2
+    return 1
+  fi
+  crew_real=$(CDPATH='' cd -- "$crew_dir" 2>/dev/null && pwd -P) || {
+    echo "error: config/crew-claude-config-dir could not be resolved: $crew_dir" >&2
+    return 1
+  }
+  primary_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  primary_real=
+  if [ -d "$primary_dir" ]; then
+    primary_real=$(CDPATH='' cd -- "$primary_dir" 2>/dev/null && pwd -P || true)
+  fi
+  if [ "$crew_dir" = "$primary_dir" ] || { [ -n "$primary_real" ] && [ "$crew_real" = "$primary_real" ]; }; then
+    echo "error: config/crew-claude-config-dir resolves to firstmate's own Claude config directory; select a distinct crew-only directory" >&2
+    return 1
+  fi
+  checker=$(resolve_worker_sandbox_posture_check) || return 1
+  if posture_output=$(CLAUDE_CONFIG_DIR="$crew_dir" "$checker" --settings "$crew_dir/settings.json" 2>&1); then
+    CREW_CLAUDE_CONFIG_DIR=$crew_dir
+    return 0
+  else
+    posture_status=$?
+  fi
+  echo "error: Claude worker sandbox posture could not be proven by $checker (exit $posture_status); refusing to launch the Claude worker" >&2
+  [ -z "$posture_output" ] || printf '%s\n' "$posture_output" >&2
+  echo "error: run $(shell_quote "$checker") --settings $(shell_quote "$crew_dir/settings.json") and fix the reported WORKER_SANDBOX reason before retrying" >&2
+  return 1
+}
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -1399,6 +1565,12 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
+
+# The crew-only Claude config is an all-or-nothing security posture. Resolve and
+# prove it after the final harness/kind are known but before any worktree or
+# endpoint is created. An absent knob returns immediately and preserves the
+# historical launch bytes; a configured knob never warns and falls back.
+prepare_crew_claude_sandbox || exit 1
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
@@ -2976,14 +3148,18 @@ case "$HARNESS" in
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# inherit firstmate's current environment. The default path therefore preserves
+# the historical explicit forwarding of firstmate's CLAUDE_CONFIG_DIR when set.
+# A proven crew-only config replaces that value for ordinary Claude workers,
+# never supplements it. Secondmate-agent launches remain on the historical path.
+if [ "$HARNESS" = claude ]; then
+  CLAUDE_LAUNCH_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}
+  if [ "$KIND" != secondmate ] && [ -n "${CREW_CLAUDE_CONFIG_DIR:-}" ]; then
+    CLAUDE_LAUNCH_CONFIG_DIR=$CREW_CLAUDE_CONFIG_DIR
+  fi
+  if [ -n "$CLAUDE_LAUNCH_CONFIG_DIR" ]; then
+    LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_LAUNCH_CONFIG_DIR") $LAUNCH"
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
