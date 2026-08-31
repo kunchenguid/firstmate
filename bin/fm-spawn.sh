@@ -1405,6 +1405,7 @@ share_beeline_node_modules() {
 
   exclude_path '.fm-node-modules.*/'
   publication_link=$(basename "$staging_root")
+  NODE_MODULES_ABORT_CLEANUP=0
   publication_signal_status=
   trap 'publication_signal_status=130' INT
   trap 'publication_signal_status=143' TERM
@@ -1419,28 +1420,25 @@ try {
   fs.symlinkSync(process.argv[2], process.argv[3], 'dir');
 } catch (error) {
   if (error.code === 'EEXIST') process.exit(3);
-  throw error;
+  process.exit(4);
 }
 JS
-  if [ "$publish_status" = 0 ]; then
-    NODE_MODULES_ABORT_CLEANUP=0
-  fi
   trap - INT TERM
-  if [ -n "$publication_signal_status" ]; then
-    cleanup_beeline_node_modules_staging
-    return "$publication_signal_status"
-  fi
   case "$publish_status" in
     0)
       NODE_MODULES_ABORT_STAGING=
       ;;
-    3)
+    3|4)
+      NODE_MODULES_ABORT_CLEANUP=1
       cleanup_beeline_node_modules_staging
       ;;
     *)
-      cleanup_beeline_node_modules_staging
-      return 1
       ;;
+  esac
+  [ -z "$publication_signal_status" ] || return "$publication_signal_status"
+  case "$publish_status" in
+    0|3) ;;
+    *) return 1 ;;
   esac
 }
 

@@ -70,6 +70,9 @@ fs.symlinkSync = function (source, target, type) {
     process.kill(process.ppid, 'SIGTERM');
     process.kill(process.pid, 'SIGTERM');
   }
+  if (process.env.FM_KILL_NODE_MODULES_PUBLISHER === '1') {
+    process.kill(process.pid, 'SIGKILL');
+  }
   return result;
 };
 JS
@@ -78,7 +81,7 @@ JS
   cat > "$fakebin/node" <<SH
 #!/usr/bin/env bash
 set -u
-if [ "\${1:-}" = - ] && { [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ] || [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ]; }; then
+if [ "\${1:-}" = - ] && { [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ] || [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_KILL_NODE_MODULES_PUBLISHER:-0}" = 1 ]; }; then
   export NODE_OPTIONS="--require=$fakebin/node-race-hook.cjs"
 fi
 exec "$real_node" "\$@"
@@ -135,6 +138,7 @@ run_spawn() {
     FM_NODE_MODULES_RACE_TARGET="${FM_NODE_MODULES_RACE_TARGET:-}" \
     FM_INTERRUPT_NODE_MODULES_CREATION="${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" \
     FM_INTERRUPT_NODE_MODULES_PUBLICATION="${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" \
+    FM_KILL_NODE_MODULES_PUBLISHER="${FM_KILL_NODE_MODULES_PUBLISHER:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -294,6 +298,22 @@ test_spawn_preserves_publication_after_interrupt() {
   pass "fm-spawn never cleans node_modules after publication"
 }
 
+test_spawn_preserves_backing_after_ambiguous_publisher_exit() {
+  local rec id out status publication
+  id=node-modules-publisher-kill-z8
+  rec=$(make_case publisher-kill "$id")
+  read_case "$rec"
+
+  out=$(FM_KILL_NODE_MODULES_PUBLISHER=1 run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should fail after an ambiguous publisher exit"
+  assert_not_contains "$out" "spawned $id" "failed publisher launched a worker"
+  [ -L "$WORKTREE_DIR/node_modules" ] || fail "ambiguous publisher exit removed node_modules"
+  publication=$(readlink "$WORKTREE_DIR/node_modules")
+  [ -d "$WORKTREE_DIR/$publication" ] || fail "ambiguous publisher exit removed dependency backing"
+  pass "fm-spawn retains dependency backing after ambiguous publisher exit"
+}
+
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_ignores_published_beeline_consumers
@@ -301,5 +321,6 @@ test_spawn_preserves_tree_created_during_publication
 test_spawn_cleans_staging_after_setup_failure
 test_spawn_cancels_after_staging_registration_interrupt
 test_spawn_preserves_publication_after_interrupt
+test_spawn_preserves_backing_after_ambiguous_publisher_exit
 
 echo "# all fm-spawn-node-modules tests passed"
