@@ -34,7 +34,7 @@ For recovery and control, use the exact `harness=` in `state/<id>.meta`; never i
 
 Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> interrupt|exit|relaunch`.
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
-Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
+Trust handling is complete only when inspection proves the target crossed any trust prompt and began useful processing of its instructions; delivery success or generic busy state alone is not proof.
 Muse is verified only for crewmate and scout work, never a secondmate or primary.
 
 ## Detection

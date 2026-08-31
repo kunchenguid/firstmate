@@ -306,7 +306,7 @@ Write the task-specific brief under section 11 before spawning.
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
-After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
+After spawning, use `harness-adapters` to handle any trust dialog, then directly verify the worker crossed it and began useful processing of the brief before reporting the worker active.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with ordinary text through fail-closed `fm-send`: the message becomes a durable record in the task's steering inbox (multi-line text is legal, local and remote alike) and the worker's terminal receives only a constant doorbell line, with the watcher re-ringing an unacknowledged local message and escalating a stuck one (`bin/fm-task-inbox-lib.sh`; `bin/fm-send.sh` owns the typed-plane carve-outs).
@@ -484,6 +484,12 @@ Reach the captain immediately for:
 - A needed credential or login.
 
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
+After compaction or a visible transcript discontinuity, use this checklist before any routine all-clear:
+
+- Identify the latest genuine captain request from retained or durable evidence; when that evidence is incomplete or ambiguous, state the uncertainty instead of guessing.
+- Verify that any report the request asks for exists, read it, and answer the request.
+- Before reporting worker activity, apply section 7's observed post-spawn check.
+
 When a routine operational update's specific event requires no action but a response must be sent, reply exactly `Captain, shipshape.` without characterizing the visible session's unrelated decisions.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.

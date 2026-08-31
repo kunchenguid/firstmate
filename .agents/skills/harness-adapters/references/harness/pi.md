@@ -30,7 +30,9 @@ Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
 A project trust dialog can appear on the first Pi run in any not-yet-trusted directory, including a clean worktree.
-Accept it with Enter and verify the instructions begin processing.
+Keep Pi's project-trust fallback at `ask`: never grant parent-wide or global trust, select automatic approval for unknown project resources, or add an automatic trust handler.
+One-run `--approve` is permitted only when a guarded launch cryptographically and structurally verifies the isolated copy's provenance immediately before launch and does not persist trust; every other unknown or uncertain copy stays at `ask`.
+Accept an authorized exact-path prompt with Enter, then verify the instructions begin useful processing.
 The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same pooled slot skip it.
 
 ## Worker turn-end extension
