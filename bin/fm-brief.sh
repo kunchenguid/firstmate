@@ -190,12 +190,19 @@ EOF
 
 # Gate-check clause: mode-independent, so defined once and appended to the
 # definition of done below rather than repeated in each mode's heredoc.
-GATE_CHECK="Gate check (verifiable-software builds): if this repo has a gate ledger (\`gates/\`), you are NOT done until \`gates/verify.sh\` reports all gates green (\`ledger wip\` empty). Gates are the machine-verified definition of done; never append \`done:\` over a red ledger. No \`gates/\` dir means this does not apply."
+#
+# It CITES the classifier instead of restating the rule. It used to say "all
+# gates green", which is a fourth statement of a rule that already lives in
+# gates/accepted-red.md, tests/run-all.sh and the verifier prompt - and which is
+# unsatisfiable in any repo holding a declared red. Four statements are four
+# things to drift, and they did: the verifier rejected work CI had accepted.
+GATES_LIB=$(shell_quote "$SCRIPT_DIR/fm-gates-lib.sh")
+GATE_CHECK="Gate check (verifiable-software builds): if this repo has a gate ledger (\`gates/\`), its state must be acceptable before you claim done. What counts as acceptable is defined in exactly one place - \`fm_gates_classify\` in \`$SCRIPT_DIR/fm-gates-lib.sh\`, whose header carries the rule and whose reasoning lives in the repo's own \`gates/accepted-red.md\`. Do not restate or reinterpret that rule from memory; ask it: run \`bash $GATES_LIB .\` from the repo root (exit 0 acceptable, 1 not, 2 cannot tell). A gate that is red but declared in \`gates/accepted-red.md\` is accepted on purpose - do not \"fix\" it by making its test pass, which is the false green the ledger exists to prevent. You may not declare your own red: a line you add to \`gates/accepted-red.md\` that your own ledger then leans on has been reviewed by nobody, and the Quarterdeck escalates it to the captain rather than accepting it. The Quarterdeck runs that same classifier against your worktree before either reviewing model, and adds two cross-checks of its own, scoped to the gates YOUR diff touches: every such gate must still point at a test file that exists on disk, and none may be \`unproven\`. Debt in gates you never touched is reported, not held against you. The \`$GATES_LIB\` CLI answers the classifier half only, so a ledger that is acceptable but cites a test you deleted passes your self-check and still rejects your \`done:\` structurally, as does an unacceptable one. No \`gates/\` dir means this does not apply."
 
 # Quarterdeck clause: ship-mode independent verification (spec:
 # docs/specs/2026-07-01-agent-os-council.md). Like GATE_CHECK it is
 # mode-independent, so defined once and appended to the definition of done.
-VERIFY_CHECK="Independent verification (the Quarterdeck): \`done:\` is a claim, not an acceptance. An independent verifier will re-prove your claims against your worktree - re-running gates, tests, and the definition of done above. If it rejects, firstmate relays the findings; fix them and append a fresh \`done:\` line. After 3 rejects the task escalates to the captain. Make the work reproducible; do not argue with the verifier through the status file."
+VERIFY_CHECK="Independent verification (the Quarterdeck): \`done:\` is a claim, not an acceptance. An independent verifier will re-prove your claims against your worktree - re-running the tests and the definition of done above. If it rejects, firstmate relays the findings; fix them and append a fresh \`done:\` line. After 3 rejects the task escalates to the captain. Make the work reproducible; do not argue with the verifier through the status file."
 
 case "$MODE" in
   direct-PR)

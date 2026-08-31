@@ -435,11 +435,25 @@ problems before the expensive pipeline, and the recorded `approve:` already
 satisfies fm-pr-check's gate at PR time; the later `done: PR {url} checks green`
 does not re-verify). For local-only and direct-PR tasks there is only one `done:`
 and it verifies. Run
-`bin/fm-verify.sh <id>`: it runs a foreign-lens review of the diff (Fugu ->
-codex -> none, degrading loudly), then an independent fresh-context verifier
-(default-REJECT) that re-proves the brief's definition of done from the
-crewmate's worktree. The decision lands in `state/<id>.verdict` (append-only:
-`approve:` / `reject:` / `escalate:` / `lens:` evidence lines).
+`bin/fm-verify.sh <id>`: it first adjudicates the worktree's gate ledger
+structurally - ahead of both models, so an unacceptable ledger costs neither -
+then runs a foreign-lens review of the diff (Fugu -> codex -> none, degrading
+loudly), then an independent fresh-context verifier (default-REJECT) that
+re-proves the brief's definition of done from the crewmate's worktree. The
+decision lands in `state/<id>.verdict` (append-only: `approve:` / `reject:` /
+`escalate:` / `lens:` evidence lines).
+
+What counts as an acceptable ledger is neither firstmate's judgment nor the
+verifier's: it is `fm_gates_classify` in `bin/fm-gates-lib.sh`, the rule's only
+implementation - `green`, `frozen`, or `red` **and** declared in the project's
+`gates/accepted-red.md` with a reason. A project with no gate machinery is not
+applicable and never escalates. An undeclared red rejects; so do an `unproven`
+gate and a `test_ref` naming a test file that is gone, but those two only for
+gates this branch's own diff touched - inherited ledger debt is named in the
+stage's own output instead, never held against the crewmate. A red the branch
+declared in its own diff escalates rather than rejects: authorizing a new red
+baseline is the captain's call, not something to bounce back to the crewmate
+that wrote it.
 
 - `approve:` - proceed with the normal delivery path. `fm-merge-local.sh` and
   `fm-pr-check.sh` structurally refuse to run without a trailing approve
@@ -447,7 +461,9 @@ crewmate's worktree. The decision lands in `state/<id>.verdict` (append-only:
 - `reject:` - fm-verify already relayed the findings to the crewmate; expect a
   fresh `done:`. Three rejects auto-escalate.
 - `escalate:` - the captain decides. Infrastructure failures (verifier would
-  not run) land here too: the stage fails closed, never open.
+  not run, an unreadable gate ledger, a status or a classifier answer this repo
+  has no rule for) and a self-declared red land here too: the stage fails
+  closed, never open.
 
 Scout and secondmate tasks skip the Quarterdeck (Phase 1 scope). Spec:
 `docs/specs/2026-07-01-agent-os-council.md`.

@@ -693,6 +693,40 @@
       "regression": false,
       "created": "2026-08-29T00:00:00Z",
       "last_verified": "2026-08-30T01:11:42.398Z"
+    },
+    {
+      "id": "gate-q8-gate-classifier",
+      "title": "Gate classifier: red AND declared is acceptable, frozen is acceptable, absence cases explicit, pure and fail-closed",
+      "observable": "fm_gates_classify classifies red+declared and frozen as ok, undeclared red as bad-red, unproven as bad-unproven, NOGATES/NOLEDGER/NOACCEPTED/BADLEDGER for the absence cases, BADLEDGER for a non-array gates value, for a tab or newline in any structural field, for a missing or non-string gate id or status and for a present-but-non-string test_ref, treats a missing or null test_ref as a legitimate absence of any freshness check, never invokes gates/verify.sh or the ledger CLI, and emits no rows on a partial parse",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-07-01-agent-os-council.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-quarterdeck-q8.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-08-29T21:28:42.902Z",
+      "mutation_verified": "2026-08-31T19:13:08.215Z",
+      "status": "frozen",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-08-29T00:00:00Z",
+      "last_verified": "2026-08-29T21:29:27.508Z"
+    },
+    {
+      "id": "gate-q9-verify-honours-declared-red",
+      "title": "Quarterdeck honours gates/accepted-red.md, ahead of both models",
+      "observable": "fm-verify approves over a declared-red ledger, rejects an undeclared red before the lens and verifier run, escalates a red declared only by a line this branch added, including one whose gate id carries a backslash escape and one reachable only from the local default while an origin exists, honours a declaration on origin/<default> past a stale local default, uses the local default as the authorisation base only when no origin is configured and escalates when an origin exists but origin/<default> cannot be resolved while still giving the foreign lens the whole branch diff, never escalates on a missing gates/ dir or on a gates/ dir holding no gate machinery, escalates on a missing ledger beside verify.sh, accepted-red.md or LEDGER.md, rejects an unproven gate or a stale test_ref only in gates this branch touched - decided per field over status and test_ref so a bookkeeping re-stamp is not a touch, and with --no-renames and a normalized test path so neither a renamed test nor a ./-prefixed test_ref can hide - while reporting inherited debt, says so on stdout and drops its \"this branch touched\" claim when scope cannot be determined while still rejecting, leaves a gate with no readable test path unchecked, escalates and names a classifier header outside the documented set instead of announcing acceptable over a ledger it read no gate from, and its prompt carries no gate rule",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-07-01-agent-os-council.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-quarterdeck-q9.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-08-29T21:28:42.902Z",
+      "mutation_verified": "2026-08-31T20:38:11.993Z",
+      "status": "frozen",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-08-29T00:00:00Z",
+      "last_verified": "2026-08-29T21:29:27.508Z"
     }
   ]
 }

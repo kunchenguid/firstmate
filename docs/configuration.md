@@ -109,6 +109,12 @@ FM_INTAKE_MAX_REVISES=2  # revises before intake stops re-running the panel and 
 FM_INTAKE_OVERRIDE=      # set to 1 for the captain's loud, logged bypass of the spawn gate
 FM_INTAKE_HEALTH_MIN=10  # decisions required before a 0% proceed rate reads as a fault in the severity bar
 FM_INTAKE_HEALTH_WINDOW=20   # most recent decisions that rate is read over; a rolling window, so the first proceed cannot disarm the detector for good
+# quarterdeck verifier (bin/fm-verify.sh); the gate a crewmate's done: claim passes before acceptance
+FM_VERIFY_CMD='claude -p --permission-mode bypassPermissions'   # verifier command; prompt as $1, cwd = crewmate worktree, stdout must end with one "VERDICT: approve|reject|escalate - reason" line
+FM_RELAY_CMD=            # reject relay; default bin/fm-send.sh, deliberately word-split. FM_LENS_CMD above is shared with this stage
+FM_VERIFY_MAX_ATTEMPTS=3 # verify attempts before the task escalates to the captain
+FM_VERIFY_FETCH_TIMEOUT=30   # seconds allowed for the one origin fetch that resolves the authorisation base for the gate stage; a slow or failed fetch degrades loudly rather than blocking
+FM_VERIFY_OVERRIDE=      # set to 1 for the captain's loud, logged bypass of the merge and PR-poll gates
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_TARGET=firstmate:0   # supervisor tmux target (override; auto-discovers from $TMUX_PANE)
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables

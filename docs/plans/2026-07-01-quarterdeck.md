@@ -2,6 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Superseded in part (2026-08-31).** Task 4's verifier prompt below still carries
+> "run: bash gates/verify.sh - every gate must be green; red or unproven gates are an
+> automatic reject", which is unsatisfiable in any repo holding a declared red and is
+> no longer what ships. Gate adjudication left the prompt entirely: it is now a
+> structural stage in `bin/fm-verify.sh` that runs ahead of both models against
+> `fm_gates_classify` (`bin/fm-gates-lib.sh`), and the shipped prompt states no gate
+> rule at all. See the *Gate adjudication* amendment in
+> `docs/specs/2026-07-01-agent-os-council.md`. The rest of this plan is as built.
+
 **Goal:** Make `done:` a claim, not an acceptance — an independent default-REJECT verifier (with a Fugu→codex→none foreign lens) must approve before firstmate can merge or arm a PR poll.
 
 **Architecture:** A new `bin/fm-verify.sh` runs on a ship task's `done:`; it records evidence in `data/<id>/` and appends decisions to an append-only `state/<id>.verdict` file via a shared `bin/fm-verdict-lib.sh`. `fm-merge-local.sh` and `fm-pr-check.sh` gain a hard gate: refuse unless the last decision line is `approve:`. Rejects round-trip to the crewmate with an attempt cap of 3, then escalate. All external calls (verifier, lens, relay) sit behind env seams so every test runs offline.

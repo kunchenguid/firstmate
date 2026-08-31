@@ -81,6 +81,16 @@ If either file is missing or unreadable, nothing is skipped at all and the runne
 
 This is gated by `gate-ci-declared-red`, so the narrowness is machine-checked rather than trusted.
 
+The rule has one implementation: `fm_gates_classify` in `bin/fm-gates-lib.sh`.
+`tests/run-all.sh` and `bin/fm-verify.sh` (the Quarterdeck) are its two callers, and `bin/fm-brief.sh` cites it; none of them restates it.
+It is a pure read of `gates/ledger.json` and `gates/accepted-red.md` and never invokes `gates/verify.sh` or the `ledger` CLI, which would re-run every gate and rewrite the ledger it is classifying.
+Ask it directly with `bash bin/fm-gates-lib.sh <repo-root>`: exit 0 acceptable, 1 unacceptable, 2 cannot tell.
+
+**You may not declare your own red.**
+A line added to `gates/accepted-red.md` in the same branch whose ledger then leans on it has been reviewed by nobody, which is exactly what the file's "deliberate, reviewable statement" means it is not.
+The Quarterdeck compares every declaration the ledger actually relies on against the merge base and escalates a self-authored one to the captain rather than accepting it.
+Declaring a gate that is green, or one the ledger does not carry at all, excuses nothing and is not flagged.
+
 ### A test whose prerequisite is missing
 
 The other skip is the test's own: one that needs a tool CI does not install (`loop-audit`, the `ledger` CLI) prints a line beginning `PREREQUISITE MISSING:` and exits 2.

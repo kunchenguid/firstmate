@@ -11,6 +11,13 @@ Listing a gate here is a deliberate, reviewable statement that its red is unders
 Every entry states the reason, and what would make it go away.
 An entry with no route back to green is a bug report, not a baseline.
 
+This file has two readers, and the rule they share has exactly one implementation: `fm_gates_classify` in `bin/fm-gates-lib.sh`, which `tests/run-all.sh` calls to decide what CI may skip and `bin/fm-verify.sh` (the Quarterdeck) calls to decide whether a crewmate's `done:` may be accepted.
+Neither restates the double condition; both ask the classifier.
+
+Nobody declares their own red.
+A line a branch adds here that its own ledger then leans on has been reviewed by nobody, so the Quarterdeck compares every relied-upon declaration against the merge base and escalates a self-authored one to the captain instead of honouring it.
+Adding a baseline is legitimate work; approving one is a human's call.
+
 Format, one per line: `- <gate-id> - <reason>`
 
 - gate-l2-loop-audit-level - Accepted red baseline, unrelated to any work in flight. `loop-audit` scores this repo L1 against a required L2 (score >= 58). Declared out of scope by the captain rather than repaired opportunistically, so that unrelated branches are not conscripted into fixing it. Goes away when the loop docs earn the score; see `docs/specs/2026-07-03-loop-conformance.md`.

@@ -7,16 +7,13 @@
 # the gate ledger exists precisely to prevent those. So the runner skips it, out
 # loud, and the ledger stays the honest record of what is red.
 #
-# THE SKIP IS DELIBERATELY NARROW. Two independent conditions must both hold:
-#
-#   1. the gate's status is "red" in gates/ledger.json, AND
-#   2. the gate's id is listed in gates/accepted-red.md, with a stated reason
-#
-# Skipping on (1) alone would mask a real regression the moment a working gate
-# went red - the failure would vanish from CI exactly when it mattered most.
-# Skipping on (2) alone would let a stale declaration silence a test that had
-# since been fixed. Requiring both means a skip is always someone's reviewed,
-# written-down decision about a gate that is actually red today.
+# WHICH REDS ARE EXCUSED IS NOT DECIDED HERE. That rule has exactly one
+# implementation - fm_gates_classify in bin/fm-gates-lib.sh - and this runner is
+# one of its two callers (bin/fm-verify.sh is the other). The rule's prose lives
+# in gates/accepted-red.md. Restating it here would make this the second copy,
+# which is how the verifier and the runner came to disagree in the first place.
+# What IS this runner's own decision is the policy below: what to do with the
+# classifier's answer, which is to skip that gate's test and say so out loud.
 #
 # NO SKIP IS SILENT. Each one prints a line naming the gate, the test, and the
 # reason, and the summary reports the counts. A reader of the CI log can always
@@ -43,58 +40,31 @@ annotate() {
   return 0
 }
 
-# --- resolve which test files may be skipped --------------------------------
+# --- resolve which test files may be skipped ----------------------------------
 #
-# Emits "<test-path>\t<gate-id>" for each gate that is both red and declared.
-# Any failure to read either input yields nothing, so the suite runs in full.
+# Delegates classification to bin/fm-gates-lib.sh and keeps only the policy:
+# a test is skippable when the classifier says the gate's red is acceptable AND
+# the gate is actually red today AND it names a test file. Emits
+# "<test-path>\t<gate-id>\t<reason>", or one of the sentinels handled below.
+#
+# The library is loaded from THIS runner's repo (via SUITE_DIR), never from
+# $ROOT: FM_SUITE_ROOT points at a fixture tree that has no bin/ of its own, and
+# a fixture that could supply its own classifier could authorise its own skips.
+# shellcheck source=bin/fm-gates-lib.sh
+. "$SUITE_DIR/../bin/fm-gates-lib.sh"
+
 skippable() {
-  [ -f "$LEDGER" ] || { echo "NOLEDGER"; return 0; }
-  [ -f "$ACCEPTED" ] || { echo "NOACCEPTED"; return 0; }
-  # The parse result is captured whole and emitted only if python exited
-  # cleanly. Appending a sentinel to the same stream with `|| echo` would mix
-  # it with any rows already printed before the failure, and the exact-match
-  # handling below would then miss the sentinel and skip on a PARTIAL parse -
-  # fail-open, in the one place this runner promises to fail closed.
-  local out
-  if out=$(python3 - "$LEDGER" "$ACCEPTED" <<'PY' 2>/dev/null
-import json, re, sys
-
-ledger_path, accepted_path = sys.argv[1], sys.argv[2]
-
-# Declared ids: "- <gate-id> - <reason>". The reason is required by the file's
-# own format, and an entry without one is ignored rather than trusted.
-declared = {}
-for line in open(accepted_path):
-    m = re.match(r"^\s*-\s+(\S+)\s+-\s+(.+?)\s*$", line)
-    if m:
-        declared[m.group(1)] = m.group(2)
-
-ledger = json.load(open(ledger_path))
-gates = ledger["gates"]
-if isinstance(gates, dict):
-    gates = list(gates.values())
-if not isinstance(gates, list) or not all(isinstance(g, dict) for g in gates):
-    raise SystemExit("ledger gates are not a list of objects")
-
-# Built whole, then printed. A raise partway through must yield NO rows at all,
-# never a half-list that would look like a complete answer.
-rows = []
-for g in gates:
-    gid = g.get("id")
-    if g.get("status") != "red" or gid not in declared:
-        continue
-    # test_ref is a shell command ("bash tests/x.test.sh"); take the path token.
-    for tok in str(g.get("test_ref") or "").split():
-        if tok.endswith(".test.sh"):
-            rows.append("%s\t%s\t%s" % (tok, gid, declared[gid]))
-            break
-sys.stdout.write("".join(r + "\n" for r in rows))
-PY
-  ); then
-    printf '%s\n' "$out"
-  else
-    echo "BADLEDGER"
-  fi
+  local raw
+  raw=$(fm_gates_classify "$ROOT")
+  case "$(printf '%s\n' "$raw" | head -1)" in
+    # No gates dir and no ledger are the same fact to this runner: there is
+    # nothing to read, so nothing may be skipped.
+    NOGATES|NOLEDGER) echo NOLEDGER; return 0 ;;
+    NOACCEPTED)       echo NOACCEPTED; return 0 ;;
+    BADLEDGER)        echo BADLEDGER; return 0 ;;
+  esac
+  printf '%s\n' "$raw" | tail -n +2 | awk -F'\t' '
+    $1 == "ok" && $3 == "red" && $4 != "" { print $4 "\t" $2 "\t" $5 }'
 }
 
 SKIP_RAW="$(skippable)"

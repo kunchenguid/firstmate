@@ -48,3 +48,5 @@
 | gate-h10-busy-agent-acknowledgment | green | Acknowledgment is real for a BUSY agent, or it is reported as unconfirmed rather than claimed |
 | gate-t1-severity-proceeds | green | Intake severity bar: non-blocking findings proceed with notes; a blocker, an escalate or a malformed verdict still stops the spawn |
 | gate-t1-proceed-rate-nonzero | green | The council reports its own proceed rate: a structurally zero rate over a meaningful sample is a fault, not strictness |
+| gate-q8-gate-classifier | frozen | Gate classifier: red AND declared is acceptable, frozen is acceptable, absence cases explicit, pure and fail-closed |
+| gate-q9-verify-honours-declared-red | frozen | Quarterdeck honours gates/accepted-red.md, ahead of both models |
