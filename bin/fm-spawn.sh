@@ -1341,9 +1341,15 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 exclude_path() {
-  local node=$1 rel=$2 EXCL
+  local rel=$1 node=${NODE_MODULES_ABORT_NODE:-} EXCL excl_dir
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
+  if [ -z "$node" ]; then
+    excl_dir=${EXCL%/*}
+    mkdir -p "$excl_dir"
+    grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
+    return 0
+  fi
   NODE_OPTIONS= "$node" - "$EXCL" "$rel" <<'JS'
 const fs = require('fs');
 const path = require('path');
@@ -1592,16 +1598,18 @@ function workspaceMap() {
   return result;
 }
 
-function materialize(sourcePath, targetPath, parents = new Set()) {
-  const real = fs.realpathSync(sourcePath);
+function materialize(sourcePath, targetPath, root = false) {
+  const sourceStat = fs.lstatSync(sourcePath);
+  if (sourceStat.isSymbolicLink() && !root) {
+    fs.symlinkSync(fs.readlinkSync(sourcePath), targetPath);
+    return;
+  }
+  const real = sourceStat.isSymbolicLink() ? fs.realpathSync(sourcePath) : sourcePath;
   const stat = fs.statSync(real);
   if (stat.isDirectory()) {
-    if (parents.has(real)) throw new Error('dependency cycle');
-    const next = new Set(parents);
-    next.add(real);
     fs.mkdirSync(targetPath);
     for (const name of fs.readdirSync(sourcePath)) {
-      materialize(path.join(sourcePath, name), path.join(targetPath, name), next);
+      materialize(path.join(sourcePath, name), path.join(targetPath, name));
     }
     return;
   }
@@ -1617,7 +1625,20 @@ const projectReal = fs.realpathSync(project);
 const workspaces = workspaceMap();
 for (const name of fs.readdirSync(source)) {
   if (name === '@beeline' || name === '.bin') continue;
-  materialize(path.join(source, name), path.join(staging, name));
+  const sourceEntry = path.join(source, name);
+  const targetEntry = path.join(staging, name);
+  if (name.startsWith('@') && fs.statSync(sourceEntry).isDirectory()) {
+    fs.mkdirSync(targetEntry);
+    for (const packageName of fs.readdirSync(sourceEntry)) {
+      materialize(
+        path.join(sourceEntry, packageName),
+        path.join(targetEntry, packageName),
+        true
+      );
+    }
+  } else {
+    materialize(sourceEntry, targetEntry, true);
+  }
 }
 
 const sourceScope = path.join(source, '@beeline');
@@ -1628,7 +1649,7 @@ for (const name of fs.readdirSync(sourceScope)) {
   const targetEntry = path.join(targetScope, name);
   const workspace = workspaces.get(name);
   if (!workspace) {
-    materialize(sourceEntry, targetEntry);
+    materialize(sourceEntry, targetEntry, true);
     continue;
   }
   if (!fs.lstatSync(sourceEntry).isSymbolicLink() || fs.realpathSync(sourceEntry) !== workspace.real) {
@@ -1655,8 +1676,9 @@ try {
       }
       const link = fs.readlinkSync(sourceEntry);
       const resolved = path.resolve(path.dirname(sourceEntry), link);
-      const target = path.isAbsolute(link) && inside(resolved, projectReal)
-        ? path.join(worktree, path.relative(projectReal, resolved))
+      const canonical = path.isAbsolute(link) ? fs.realpathSync(resolved) : resolved;
+      const target = path.isAbsolute(link) && inside(canonical, projectReal)
+        ? path.join(worktree, path.relative(projectReal, canonical))
         : link;
       fs.symlinkSync(target, targetEntry);
     }
@@ -1691,7 +1713,7 @@ JS
     return "$setup_signal_status"
   fi
 
-  exclude_path "$publisher_node" '.fm-node-modules.*/'
+  exclude_path '.fm-node-modules.*/'
   publication_link=${staging_root##*/}
   if [ -n "$setup_signal_status" ]; then
     cleanup_status=0

@@ -272,6 +272,54 @@ test_spawn_shared_dependency_imports_worktree_workspace() {
   pass "fm-spawn roots shared dependency workspace imports in the worktree"
 }
 
+test_spawn_preserves_shared_dependency_symlinks() {
+  local rec id out status result alias_link
+  id=node-modules-shared-symlink-z1aa
+  rec=$(make_case shared-symlink "$id")
+  read_case "$rec"
+  mkdir "$PROJECT_DIR/node_modules/shared"
+  printf 'module.exports = {};\n' > "$PROJECT_DIR/node_modules/shared/index.js"
+  ln -s ../shared "$PROJECT_DIR/node_modules/third-party/alias"
+  printf 'const direct = require("../shared");\nconst alias = require("./alias");\nmodule.exports = direct === alias;\n' \
+    > "$PROJECT_DIR/node_modules/third-party/index.js"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should preserve internal dependency symlinks"
+  assert_contains "$out" "spawned $id" "dependency symlink publication did not launch the worker"
+  alias_link=$(readlink "$WORKTREE_DIR/node_modules/third-party/alias")
+  [ "$alias_link" = ../shared ] || fail "shared dependency symlink topology changed"
+  result=$(NODE_OPTIONS= "$SYSTEM_NODE" -e \
+    'process.stdout.write(String(require(process.argv[1])));' \
+    "$WORKTREE_DIR/node_modules/third-party")
+  [ "$result" = true ] || fail "shared dependency symlink changed module identity"
+  pass "fm-spawn preserves shared dependency symlink topology and identity"
+}
+
+test_spawn_rebases_canonical_absolute_workspace_binary() {
+  local rec id out status project_alias bin_link bin_out
+  id=node-modules-canonical-bin-z1ab
+  rec=$(make_case canonical-bin "$id")
+  read_case "$rec"
+  project_alias="$TMP_ROOT/canonical-bin-project-alias"
+  ln -s "$PROJECT_DIR" "$project_alias"
+  rm "$PROJECT_DIR/node_modules/.bin/beeline-cli"
+  ln -s "$project_alias/packages/cli/bin.sh" "$PROJECT_DIR/node_modules/.bin/beeline-cli"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should rebase canonical absolute workspace binaries"
+  assert_contains "$out" "spawned $id" "canonical workspace binary publication did not launch the worker"
+  bin_link=$(readlink "$WORKTREE_DIR/node_modules/.bin/beeline-cli")
+  [ "$bin_link" = "$WORKTREE_DIR/packages/cli/bin.sh" ] \
+    || fail "canonical absolute workspace binary remained pointed at primary source"
+  printf '#!/usr/bin/env bash\nprintf "worker cli\\n"\n' > "$WORKTREE_DIR/packages/cli/bin.sh"
+  chmod +x "$WORKTREE_DIR/packages/cli/bin.sh"
+  bin_out=$("$WORKTREE_DIR/node_modules/.bin/beeline-cli")
+  [ "$bin_out" = 'worker cli' ] || fail "canonical absolute workspace binary executed primary source"
+  pass "fm-spawn rebases canonical absolute workspace binaries to the worktree"
+}
+
 test_spawn_publication_is_independent_of_path_node_wrappers() {
   local rec id out status publication
   id=node-modules-owner-safe-publisher-z1b
@@ -516,6 +564,26 @@ test_spawn_ignores_published_beeline_consumers() {
   pass "fm-spawn scopes dependency sharing to Beeline workspaces"
 }
 
+test_spawn_preserves_exclude_path_for_harness_files() {
+  local rec id out status
+  id=node-modules-harness-exclude-z3a
+  rec=$(make_case harness-exclude "$id")
+  read_case "$rec"
+  rm "$PROJECT_DIR/packages/lib/package.json" \
+    "$PROJECT_DIR/packages/absolute-lib/package.json" \
+    "$PROJECT_DIR/packages/cli/package.json"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  fm_fake_exit0 "$FAKEBIN_DIR" claude
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should preserve harness exclude-path setup"
+  assert_contains "$out" "spawned $id" "harness exclude-path setup did not launch the worker"
+  assert_present "$WORKTREE_DIR/.claude/settings.local.json" \
+    "Claude harness settings were not created"
+  pass "fm-spawn preserves one-argument exclude-path setup for harness files"
+}
+
 test_spawn_shares_published_beeline_dependencies_with_workspaces() {
   local rec id out status workspace_real expected_workspace_real
   id=node-modules-mixed-beeline-z3b
@@ -658,6 +726,8 @@ test_spawn_rejects_dangling_staged_workspace_link() {
 
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_shared_dependency_imports_worktree_workspace
+test_spawn_preserves_shared_dependency_symlinks
+test_spawn_rebases_canonical_absolute_workspace_binary
 test_spawn_publication_is_independent_of_path_node_wrappers
 test_spawn_resolves_script_managed_node_runtime
 test_spawn_does_not_accept_unvalidated_exact_contention
@@ -670,6 +740,7 @@ test_spawn_rejects_workspace_link_from_another_worktree
 test_spawn_rejects_worktree_workspace_alias
 test_spawn_rejects_stale_primary_workspace_link
 test_spawn_ignores_published_beeline_consumers
+test_spawn_preserves_exclude_path_for_harness_files
 test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
