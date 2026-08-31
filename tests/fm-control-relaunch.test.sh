@@ -362,6 +362,45 @@ test_relaunch_keeps_the_pr_identity_line_terminal() {
   pass "fm-control relaunch: the replacement record keeps the armed poll's pr identity terminal"
 }
 
+test_trace_enabled_relaunch_keeps_the_pr_identity_line_terminal() {
+  local dir out rc url head carrier traceparent
+  dir=$(new_case trace-poll-identity rl42)
+  add_ship_task "$dir" rl42 claude
+  url=https://github.com/example/repo/pull/22
+  head=0123456789abcdef0123456789abcdef01234567
+  carrier=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01
+  # The armed shape a trace-context home leaves behind: the task's recorded
+  # carrier sits before the pr= and pr_head= identity lines that fm-pr-check.sh
+  # appends terminally. A relaunch under the same frozen on decision re-records
+  # the carrier into the replacement, and that re-record must not land after the
+  # identity lines, or the merge poll is rejected every cycle.
+  {
+    printf '%s\n' "traceparent=$carrier"
+    printf '%s\n' "pr=$url"
+    printf '%s\n' "pr_head=$head"
+  } >> "$dir/home/state/rl42.meta"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+
+  out=$(run_control "$dir" rl42 relaunch --note "continue under tracing"); rc=$?
+  expect_code 0 "$rc" "a traced relaunch of a PR-armed task should succeed"$'\n'"$out"
+  fm_pr_metadata_identity_parse "$dir/home/state/rl42.meta" \
+    || fail "the traced relaunch recorded the carrier after the pr identity, so the armed merge poll is rejected every cycle"
+  [ "$FM_PR_META_URL" = "$url" ] \
+    || fail "the traced relaunch lost the armed poll's PR identity URL"
+  [ "$FM_PR_META_PROVIDER" = github ] \
+    && [ "$FM_PR_META_HOST" = github.com ] \
+    && [ "$FM_PR_META_PATH" = example/repo ] \
+    && [ "$FM_PR_META_NUMBER" = 22 ] \
+    || fail "the traced relaunch reports the wrong PR identity fields"
+  traceparent=$(meta_field "$dir" rl42 traceparent)
+  fm_trace_context_valid "$traceparent" \
+    || fail "the traced relaunch lost the task's trace carrier"
+  [ "$traceparent" = "$carrier" ] \
+    || fail "a traced relaunch must reuse the task's recorded carrier verbatim"
+  pass "fm-control relaunch: a traced relaunch keeps the armed poll's pr identity terminal"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -1511,6 +1550,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_keeps_the_pr_identity_line_terminal
+test_trace_enabled_relaunch_keeps_the_pr_identity_line_terminal
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

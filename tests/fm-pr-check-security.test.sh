@@ -416,6 +416,39 @@ test_meta_identity_orders_relaunch_fields_before_pr() {
   pass "the PR identity parse accepts relaunch fields before pr= and rejects them after"
 }
 
+test_meta_identity_orders_trace_carrier_before_pr() {
+  local dir state url head carrier
+  dir=$(make_case trace-identity-order)
+  state="$dir/home/state"
+  url=https://github.com/example/repo/pull/22
+  head=0123456789abcdef0123456789abcdef01234567
+  carrier=00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01
+  # A trace-context relaunch re-records the task's carrier before the preserved
+  # identity lines, so the armed poll's terminal pr= shape survives and the
+  # merge poll keeps validating the record every cycle. The same carrier
+  # landing after pr= is the rejected pollution shape, because anything other
+  # than pr_head= and the x-mode fields after pr= could be a field an
+  # unrelated writer appended to a validated identity.
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    "traceparent=$carrier" \
+    "pr=$url" \
+    "pr_head=$head"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a trace carrier before pr= broke the PR identity parse"
+  [ "$FM_PR_META_URL" = "$url" ] \
+    || fail "the pre-pr trace carrier changed the parsed PR identity"
+
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    "pr=$url" \
+    "pr_head=$head" \
+    "traceparent=$carrier"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    && fail "a trace carrier after pr= was accepted into the PR identity"
+  pass "the PR identity parse accepts the trace carrier before pr= and rejects it after"
+}
+
 test_invalid_entrypoints_have_zero_side_effects() {
   local dir before after value rc
   dir=$(make_case invalid-entrypoints)
@@ -2145,6 +2178,7 @@ test_gitlab_merged_poll_retires() {
 
 test_parser_matrix
 test_meta_identity_orders_relaunch_fields_before_pr
+test_meta_identity_orders_trace_carrier_before_pr
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
