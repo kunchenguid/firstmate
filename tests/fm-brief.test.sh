@@ -740,6 +740,41 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_scout_deepapi_guidance_requires_the_skill() {
+  local home brief
+  home="$TMP_ROOT/deepapi-guidance-home"
+  mkdir -p "$home/data"
+
+  HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" deepapi-absent firstmate --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold without DeepAPI skill exited non-zero"
+  brief="$home/data/deepapi-absent/brief.md"
+  assert_present "$brief" "scout brief without DeepAPI skill was not scaffolded"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_no_grep 'Use the `deepapi` skill' "$brief" \
+    "scout brief emitted DeepAPI guidance when the skill was absent"
+
+  mkdir -p "$home/.agents/skills/deepapi"
+  : > "$home/.agents/skills/deepapi/SKILL.md"
+  HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" deepapi-present firstmate --scout >/dev/null 2>&1
+  brief="$home/data/deepapi-present/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep 'Use the `deepapi` skill for web searches, page reads, PDF extraction, and platform lookups' "$brief" \
+    "scout brief omitted DeepAPI guidance when the skill was present"
+  assert_grep 'source ~/.deepapi/env' "$brief" \
+    "scout brief omitted the spawned-worker credential recovery"
+  assert_grep 'do not report it unavailable without trying that recovery' "$brief" \
+    "scout brief allowed an untried DeepAPI availability conclusion"
+  assert_grep 'an unreachable source is itself a finding' "$brief" \
+    "scout brief omitted the unreachable-source reporting requirement"
+
+  HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" deepapi-ship firstmate --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/deepapi-ship/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_no_grep 'Use the `deepapi` skill' "$brief" \
+    "ship brief received scout-only DeepAPI guidance"
+  pass "fm-brief.sh: DeepAPI guidance is conditional for scouts and absent from ships"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -782,4 +817,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_scout_deepapi_guidance_requires_the_skill
 test_scout_and_secondmate_scaffold

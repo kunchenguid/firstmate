@@ -11,6 +11,9 @@
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   When the canonical global `$HOME/.agents/skills/deepapi/SKILL.md` exists,
+#   scout briefs also include concise DeepAPI retrieval guidance; ship and
+#   secondmate briefs do not. The deepapi skill owns its usage details.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -321,6 +324,11 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+DEEPAPI_SECTION=
+if [ -n "${HOME:-}" ] && [ -f "$HOME/.agents/skills/deepapi/SKILL.md" ]; then
+  DEEPAPI_SECTION=$'Use the `deepapi` skill for web searches, page reads, PDF extraction, and platform lookups in preference to ordinary fetching or built-in browsing.\nSpawned workers do not inherit the credentials, so before concluding anything about DeepAPI availability run `source ~/.deepapi/env`; do not report it unavailable without trying that recovery.\nIf a source remains unreachable even with DeepAPI, say so explicitly in your report rather than reasoning around the gap - an unreachable source is itself a finding.'
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -335,6 +343,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
+$DEEPAPI_SECTION
 
 # Rules
 1. Never push to any remote and never open a PR.
