@@ -726,6 +726,11 @@ test_monotonic_claude_binding() {
   bind_claude >/dev/null || fail "lower generation from a new boot did not replace the dead prior owner"
   current=$(mcp_content next_curated_handoff)
   [ "$(printf '%s' "$current" | jq -r .status)" = empty ] || fail "new-boot replacement generation lost MCP authority"
+  LIVE_PROCESS_CAPABILITY=claude-process-generation-after-reboot
+  PROCESS_BOOT_ID=synthetic-boot-3
+  bind_claude >/dev/null || fail "reused capability token after a reboot did not rebind"
+  current=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$current" | jq -r .status)" = empty ] || fail "prior-boot owner with a reused capability token blocked rebinding"
   pass "replacement-monotonic Claude session binding"
 }
 
@@ -2128,6 +2133,50 @@ test_orphan_active_state_blocks_compaction() {
   pass "orphan active state blocks Pi and Claude compaction"
 }
 
+register_foreign_pi_candidate() {
+  local statement=${1:?} foreign_source current_source
+  current_source=$SOURCE_FILE
+  foreign_source="$SOURCE/foreign-nonblocking.md"
+  printf 'Foreign durable facts.\n' > "$foreign_source"
+  SOURCE_FILE=$foreign_source
+  authorize "$statement"
+  PI_SESSION_ID=pi-session-foreign cli register \
+    --source-harness pi \
+    --kind gotcha \
+    --statement "$statement" \
+    --source-record "$foreign_source" \
+    --source-sha256 "$(hash_file "$foreign_source")" \
+    --confidence verified \
+    --sphere privat \
+    --sensitivity-class ordinary-project-context \
+    --provider-class anthropic-claude-obsidian >/dev/null || fail "foreign candidate did not register"
+  SOURCE_FILE=$current_source
+}
+
+test_foreign_candidate_never_blocks_compaction() {
+  local seal blocked
+  new_env pi-foreign-candidate-nonblocking
+  register_foreign_pi_candidate 'Foreign Pi work must not cancel another session compaction.'
+  [ "$(find "$FM_HOME/state/context-handoff/candidates" -name 'candidate-*.json' | wc -l)" -eq 1 ] || fail "foreign fixture did not persist exactly one candidate"
+  printf '{\n' > "$FM_HOME/config/context-handoff.json"
+  chmod 600 "$FM_HOME/config/context-handoff.json"
+  seal=$(seal_pi) || fail "foreign candidate escaped the Pi seal boundary"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = disabled ] || fail "foreign candidate cancelled current Pi compaction"
+  jq -se 'any(.[]; .reason=="no-registered-candidates-unhealthy-binding")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "empty current Pi session wrote no durable evidence"
+
+  new_env claude-foreign-candidate-nonblocking
+  enable_consumer
+  bind_claude >/dev/null || fail "foreign-candidate fixture did not bind Claude"
+  register_foreign_pi_candidate 'Foreign Pi work must not cancel Claude compaction.'
+  printf 'unavailable\n' > "$HERDR_MODE"
+  blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "foreign candidate escaped the Claude hook"
+  [ -z "$blocked" ] || fail "foreign candidate cancelled Claude compaction"
+  if find "$FM_HOME/state/context-handoff/receipts" -name '*.json' -exec jq -e '.reason=="claude-precompact-binding-failed"' {} \; | grep -q true; then
+    fail "foreign candidate wrote a current-session failure receipt"
+  fi
+  pass "foreign candidates never cancel current-session compaction"
+}
+
 test_durable_compaction_attempt() {
   local first second succeeded queues journal
   new_env durable-compaction-attempt
@@ -2351,6 +2400,7 @@ test_global_register_bounds_and_stale_recovery
 test_candidate_identity_binding
 test_seal_binding_failure_receipt
 test_orphan_active_state_blocks_compaction
+test_foreign_candidate_never_blocks_compaction
 test_durable_compaction_attempt
 test_precompact_generation_and_timeout_margin
 test_sessionstart_pending_eligibility
