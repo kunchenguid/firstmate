@@ -841,22 +841,25 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
-    die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
-  }
   # Herdr can keep a shell registered after a rejected Fish command, so the
-  # observed Pi relaunch needs the native agent identity as its final proof.
+  # observed Pi relaunch needs one native identity/state snapshot as its proof.
   if [ "$BACKEND:$TARGET_HARNESS" = herdr:pi ]; then
     elapsed=0
     while :; do
       identity=$(fm_backend_herdr_composer_identity "$T" 2>/dev/null || true)
-      [ "${identity%%$'\t'*}" = pi ] && break
+      case "$identity" in
+        pi$'\t'working|pi$'\t'idle|pi$'\t'done|pi$'\t'blocked) break ;;
+      esac
       awk -v e="$elapsed" -v t="$LAUNCH_WAIT" 'BEGIN{exit !(e < t)}' || {
         die "the replacement Pi agent for $ID did not come up within ${LAUNCH_WAIT}s (Herdr reports '${identity%%$'\t'*}')"
       }
       sleep "$POLL"
       elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
     done
+  else
+    state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
+      die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
+    }
   fi
   RELAUNCH_AGENT_CONFIRMED=1
 
