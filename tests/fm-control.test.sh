@@ -641,7 +641,15 @@ test_relaunch_only_flags_are_rejected_on_other_verbs() {
   out=$(run_control "$dir" t1 exit --harness codex); rc=$?
   expect_code 1 "$rc" "--harness should not apply to exit"
   assert_contains "$out" "apply to 'relaunch' only" "the refusal should scope the flags"
-  pass "fm-control: profile and note flags belong to relaunch only"
+  # A grant is an attestation, so a verb that cannot act on one must refuse it
+  # rather than accept and ignore it the way a merely cosmetic flag could be.
+  out=$(run_control "$dir" t1 exit --cursor-exemption attended); rc=$?
+  expect_code 1 "$rc" "--cursor-exemption should not apply to exit"
+  assert_contains "$out" "--cursor-exemption" \
+    "the refusal should name the flag the caller actually passed"
+  out=$(run_control "$dir" t1 interrupt --cursor-exemption envelope:bench); rc=$?
+  expect_code 1 "$rc" "--cursor-exemption should not apply to interrupt"
+  pass "fm-control: profile, note, and exemption flags belong to relaunch only"
 }
 
 # --- 5. lifecycle states ----------------------------------------------------
