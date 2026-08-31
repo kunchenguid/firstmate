@@ -310,6 +310,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -1356,7 +1358,23 @@ pi_supports_tui_mode() {
 #     neither the append nor the touch needs the directory-create permission a
 #     file grant withholds; touching an existing turn-ended marker only bumps its
 #     mtime, which is exactly what the watcher ages (bin/fm-watch.sh
-#     busy_turn_over_age), so pre-creation changes no busy-state behavior.
+#     busy_turn_over_age). Pre-creating the turn-ended marker DOES make it a new
+#     signal file for bin/fm-watch.sh scan_signals, which reports any marker whose
+#     signature differs from its persisted state/.seen-* one, so this seeds that
+#     marker at creation time: codex has no semantic busy source that could absorb
+#     the wake, and a turn-end wake for a turn nobody took is a false report.
+#   ship crewmate and secondmate also get the task's OWN steering inbox DIRECTORY,
+#     state/<id>.inbox (path owned by fm_task_inbox_dir in
+#     bin/fm-task-inbox-lib.sh). Every brief kind carries the inbox section
+#     (bin/fm-brief.sh), and its acknowledgement IS a `mv` of the handled record
+#     into state/<id>.inbox/handled/; without write on that directory a sandboxed
+#     worker could read its steering messages and never acknowledge one, so the
+#     re-ring ladder would escalate it as stuck for complying. It has to be the
+#     directory rather than a file because the record names are allocated by
+#     firstmate after launch and cannot be named ahead of time; it is still the
+#     task's own path, strictly narrower than state/. The inbox and its handled/
+#     are created here so the root resolves at launch. A scout needs no separate
+#     inbox root: state/ already covers it.
 #   scout: state/ itself (a whole DIRECTORY root), because the captain-hold
 #     completion gate the scout runs creates a mktemp-named lock owner directory
 #     AND a lock symlink directly in state/ (fm_lock_owner_dir / fm_meta_lock_path
@@ -1375,33 +1393,73 @@ pi_supports_tui_mode() {
 # -c sandbox_workspace_write.writable_roots=[...] because it is additive: the -c
 # form REPLACES an operator's own configured roots. The brief's own rule against
 # writing outside the worktree stays stricter than this sandbox, so the grant is a
-# backstop, not a permission. The harness-adapters skill owns what this leaves a
-# codex worker able to finish (network stays denied on every root), and
+# backstop, not a permission. Every root is emitted CANONICALIZED, because the
+# launch's own __TURNEND__ is built from a `pwd -P` state dir and codex resolves a
+# granted root the same way: a home reached through a symlink (a /tmp home on
+# macOS, where /tmp -> /private/tmp) would otherwise name a path neither the
+# notify hook nor the sandbox ever sees. The harness-adapters skill owns what this
+# leaves a codex worker able to finish (network is granted separately by the
+# launch's own network_access flag, not by any root), and
 # docs/verification/codex-sandbox.md owns the measurements.
+
+# The canonical spelling of <path>, resolving symlinked components of its parent,
+# creating nothing. A path whose parent does not exist is returned unchanged
+# rather than dropped, so a root is never silently lost.
+codex_root_real() {  # <path>
+  local path=$1 parent base
+  if [ -d "$path" ]; then
+    (cd "$path" 2>/dev/null && pwd -P) && return 0
+  fi
+  parent=$(dirname "$path")
+  base=$(basename "$path")
+  if parent=$(cd "$parent" 2>/dev/null && pwd -P); then
+    printf '%s/%s\n' "${parent%/}" "$base"
+    return 0
+  fi
+  printf '%s\n' "$path"
+}
+
 codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per line
   local kind=$1 worktree=$2 id=$3 wt_real gitdir status_file turnend_file
+  local inbox_dir seen_marker turnend_sig
   status_file="$STATE/$id.status"
+  inbox_dir=$(fm_task_inbox_dir "$STATE" "$id")
   # A secondmate's own home IS its workspace, so its data/, state/, projects/ and
   # crewmate spawns are already inside the sandbox, and it runs its OWN completion
-  # gate in its own home. The one path it needs outside is the status file the
+  # gate in its own home. The paths it needs outside are the status file the
   # PARENT scaffolded in the parent's state dir, which is how every routed answer
-  # returns (bin/fm-brief.sh's charter). It gets ONLY that one file - not the
-  # parent's state dir, data/, or git objects. Pre-create it so the single-file
-  # root resolves and the append never needs directory-create permission.
+  # returns (bin/fm-brief.sh's charter), and the parent-side steering inbox its
+  # charter tells it to acknowledge in. It gets ONLY those two - not the parent's
+  # state dir, data/, or git objects. Both are pre-created so the roots resolve
+  # and the append never needs directory-create permission.
   if [ "$kind" = secondmate ]; then
     : >> "$status_file" 2>/dev/null || true
-    printf '%s\n' "$status_file"
+    mkdir -p "$(fm_task_inbox_handled_dir "$STATE" "$id")" 2>/dev/null || true
+    codex_root_real "$status_file"
+    codex_root_real "$inbox_dir"
     return 0
   fi
   if [ "$kind" = scout ]; then
-    printf '%s\n' "$STATE"
-    printf '%s\n' "$DATA/$id"
+    codex_root_real "$STATE"
+    codex_root_real "$DATA/$id"
   else
     turnend_file="$STATE/$id.turn-ended"
     : >> "$status_file" 2>/dev/null || true
-    : >> "$turnend_file" 2>/dev/null || true
-    printf '%s\n' "$status_file"
-    printf '%s\n' "$turnend_file"
+    if [ ! -e "$turnend_file" ] && : >> "$turnend_file" 2>/dev/null; then
+      # Seed the watcher's reported-state marker for a marker this spawn just
+      # created, using the same signature scan_signals compares against, so the
+      # pre-creation the file grant depends on is not surfaced as a turn that
+      # never happened. An already-existing marker is left alone: its unreported
+      # signature may be a real turn end nobody has surfaced yet.
+      seen_marker=$(fm_wake_signal_seen_path "$STATE" "$turnend_file")
+      if turnend_sig=$(fm_wake_signal_sig "$turnend_file") && [ -n "$turnend_sig" ]; then
+        printf '%s' "$turnend_sig" > "$seen_marker" 2>/dev/null || true
+      fi
+    fi
+    mkdir -p "$(fm_task_inbox_handled_dir "$STATE" "$id")" 2>/dev/null || true
+    codex_root_real "$status_file"
+    codex_root_real "$turnend_file"
+    codex_root_real "$inbox_dir"
   fi
   wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 0
   gitdir=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 0
@@ -1462,11 +1520,11 @@ launch_template() {
     # instead of running with both switched off. workspace-write confines writes
     # to the task worktree plus /tmp and $TMPDIR, which is the intended blast
     # radius for a crewmate. It also DENIES the supervision paths the crewmate
-    # contract needs outside that worktree; granting those back narrowly is a
-    # separate change and is deliberately not bundled here.
+    # contract needs outside that worktree; __CODEXADDDIRS__ grants exactly those
+    # back per kind (codex_writable_roots above).
     #
-    # sandbox_workspace_write.network_access=true is NOT part of that deferred
-    # write grant, it is a distinct axis: workspace-write confines NETWORK egress
+    # sandbox_workspace_write.network_access=true is NOT part of that write grant,
+    # it is a distinct axis: workspace-write confines NETWORK egress
     # as well as writes, and codex defaults that key to false. Verified on codex
     # 0.150.1 against a config-free CODEX_HOME - the worker's shell cannot resolve
     # a host at all under the default, which would break `git push`, `gh`, and
@@ -2148,15 +2206,16 @@ if [ "$KIND" = ship ]; then
   fi
   # codex's sandbox denies the no-mistakes data directory, and no writable root
   # changes that, so a codex worker cannot drive the validation pipeline itself
-  # (docs/verification/codex-sandbox.md). Network is deliberately NOT claimed here:
-  # sandbox_workspace_write.network_access is the OPERATOR's codex config, measured
-  # both ways on 0.150.1, so whether the worker can push or reach a forge depends on
-  # the machine and must not be asserted at dispatch. Say the reliable part at
-  # dispatch rather than leaving it to be rediscovered at the gate; this is a
+  # (docs/verification/codex-sandbox.md). No network limit is claimed here, and
+  # none applies: the codex launch above passes
+  # -c sandbox_workspace_write.network_access=true unconditionally, which overrides
+  # the operator's own config, so egress is on for every firstmate codex crewmate
+  # regardless of the machine. The pipeline denial is the reliable blocker, so say
+  # it at dispatch rather than leaving it to be rediscovered at the gate; this is a
   # notice, not a refusal, because local-only work and a firstmate-driven landing
   # are both legitimate.
   if [ "$HARNESS" = codex ] && [ "$MODE" != local-only ]; then
-    echo "notice: $ID ships mode=$MODE on codex, whose sandbox denies the no-mistakes data directory - the worker can commit but cannot run validation itself, and whether it can push depends on this machine's codex network setting; expect to land it another way or choose another harness" >&2
+    echo "notice: $ID ships mode=$MODE on codex, whose sandbox denies the no-mistakes data directory - the worker can commit and reach the network but cannot run validation itself; expect to land it another way or choose another harness" >&2
   fi
 fi
 
