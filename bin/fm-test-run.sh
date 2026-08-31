@@ -286,7 +286,8 @@ family_for_basename() {
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
-    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
+    fm-bearings-board-layout.test.sh|fm-bearings-board-render.test.sh|\
+    fm-bearings-snapshot.test.sh|\
     fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
@@ -996,10 +997,11 @@ select_family() {
 }
 
 families_for_test_reference() {
-  local needle=$1 s
+  local needle=$1 excluded_script=${2:-} s
   local found=0
   while IFS= read -r s; do
     [ -n "$s" ] || continue
+    [ "$s" = "$excluded_script" ] && continue
     if grep -Fq "$needle" "$s"; then
       family_for_basename "$(basename "$s")"
       found=1
@@ -1260,6 +1262,15 @@ families_for_changed_path() {
     tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh)
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
+      ;;
+    tests/assets/*)
+      # The selector suite embeds asset paths as fixture data; it exercises
+      # this mapping but does not consume those assets. Scan references even
+      # after deletion so an unchanged consumer still gets selected.
+      if ! families_for_test_reference "$path" tests/fm-test-run.test.sh \
+          && [ -e "$path" ]; then
+        printf '%s\n' "__unmapped__:$path"
+      fi
       ;;
     tests/fixtures/*/*)
       # A fixture belongs to whichever suite reads its directory, found by the

@@ -188,16 +188,23 @@ a { color: inherit; text-decoration: none; }
 .bb-call > .bb-decision[hidden] { display: none; }
 .bb-decision { display: flex; flex-direction: column; }
 .bb-decision__pad { padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; }
-.bb-decision__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.bb-decision__top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+/* Safety net for the risk-value contract owned by fm-bearings-board.sh: unlike
+   every other badge, this pin may still receive a long bare level. */
+.bb-decision__risk { white-space: normal; overflow-wrap: anywhere; text-align: left;
+  min-width: 0; flex: 0 1 auto; line-height: 1.35; }
 .bb-decision__repo { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-decision__title { margin: 0; font-size: var(--fs-h4); font-weight: 800; color: var(--text-strong); line-height: 1.25; }
 .bb-decision__detail { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
-/* about / decide / recommended - three scannable context rows */
+/* about / decide / recommended - three scannable context rows.
+   The shared value boundary also receives composed text moved off the risk pin,
+   so it must break a justification even when that text is one unbroken token. */
 .bb-ctx { display: flex; flex-direction: column; gap: 6px; }
 .bb-ctx__row { display: grid; grid-template-columns: 78px minmax(0,1fr); gap: 8px; align-items: baseline; }
 .bb-ctx__k { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-faint); white-space: nowrap; }
-.bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0; }
+.bb-ctx__v { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.4; min-width: 0;
+  overflow-wrap: anywhere; }
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .bb-decision__link:hover { text-decoration: underline; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
@@ -241,10 +248,17 @@ a { color: inherit; text-decoration: none; }
 }
 .bb-row:first-child { border-top: none; }
 .bb-row__main { min-width: 0; flex: 1 1 auto; }
+/* Row text wraps before it clips: a one-line clamp hid what these rows were
+   about, so the title gets three lines and its secondary line two.
+   overflow-wrap keeps an unbreakable URL or id from setting a min-content width
+   that the .bb-row__main min-width:0 shrink could not absorb, and overflow
+   hidden keeps whatever passes the clamp off the page's own horizontal axis. */
 .bb-row__title { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); line-height: 1.3;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
 .bb-row__sub { font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.3; margin-top: 1px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
 .bb-row__id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-row__pr { font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ocean-600); white-space: nowrap; }
 .bb-row__pr:hover { text-decoration: underline; }
@@ -466,6 +480,22 @@ __FM_BEARINGS_BOARD_DATA__
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
+  /* Implements the fm-bearings-board.v1 risk contract documented in the
+     builder header. */
+  function splitRisk(value) {
+    var text = String(value == null ? "" : value).trim();
+    var cut = text.indexOf(".");
+    if (cut < 0) return { level: text, detail: "" };
+    return { level: text.slice(0, cut).trim(), detail: text.slice(cut + 1).trim() };
+  }
+
+  /* Do not broaden this to substring matching; see the builder header's
+     fail-cautious tone contract. */
+  var LOW_RISK_LEVELS = ["low", "faible"];
+  function isLowRisk(level) {
+    return LOW_RISK_LEVELS.indexOf(String(level == null ? "" : level).trim().toLowerCase()) >= 0;
+  }
+
   function ctxRow(k, v, rec) {
     var row = el("div", "bb-ctx__row" + (rec ? " bb-ctx__row--rec" : ""));
     row.appendChild(el("span", "bb-ctx__k", k));
@@ -476,11 +506,18 @@ __FM_BEARINGS_BOARD_DATA__
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
     var pad = el("div", "bb-decision__pad");
+    var risk = item.type === "merge" ? splitRisk(item.risk) : null;
 
     var top = el("div", "bb-decision__top");
     if (item.type === "merge") {
       top.appendChild(badge("online", "checks green"));
-      top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
+      /* Preserve the builder header's empty-level rule: never announce a bare,
+         alert-colored "risk" badge. */
+      if (risk.level) {
+        var riskPin = badge(isLowRisk(risk.level) ? "neutral" : "warn", "risk " + risk.level);
+        riskPin.className += " bb-decision__risk";
+        top.appendChild(riskPin);
+      }
     } else {
       top.appendChild(badge("solid", "decision"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
@@ -491,6 +528,11 @@ __FM_BEARINGS_BOARD_DATA__
 
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
+      if (risk.detail) {
+        var riskCtx = el("div", "bb-ctx");
+        riskCtx.appendChild(ctxRow("risk", risk.detail));
+        pad.appendChild(riskCtx);
+      }
       if (item.pr_url) {
         var pr = el("a", "bb-decision__link", item.pr_url);
         pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";

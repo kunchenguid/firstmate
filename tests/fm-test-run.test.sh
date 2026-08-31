@@ -95,6 +95,7 @@ init_changed_fixture_repo() {
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
+    fm-test-run.test.sh \
     fm-ask-user-authority.test.sh \
     fm-documentation-audiences.test.sh \
     fm-test-isolation-proof.test.sh \
@@ -145,7 +146,8 @@ init_changed_fixture_repo() {
   mkdir -p \
     "$repo/.agents/skills/example" \
     "$repo/.agents/skills/harness-adapters/references/common" \
-    "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
+    "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src" \
+    "$repo/tests/assets"
   : >"$repo/.agents/skills/example/SKILL.md"
   : >"$repo/.agents/skills/harness-adapters/SKILL.md"
   : >"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
@@ -155,6 +157,11 @@ init_changed_fixture_repo() {
   : >"$repo/docs/fm-test-isolation-proof.md"
   : >"$repo/CONTRIBUTING.md"
   : >"$repo/src/unmapped.ts"
+  : >"$repo/tests/assets/board-render-harness.mjs"
+  : >"$repo/tests/assets/unreferenced-helper.mjs"
+  printf '# tests/assets/board-render-harness.mjs\n' >>"$repo/tests/fm-bearings-snapshot.test.sh"
+  printf '# tests/assets/board-render-harness.mjs\n# tests/assets/unreferenced-helper.mjs\n' \
+    >>"$repo/tests/fm-test-run.test.sh"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
@@ -219,6 +226,38 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" "shared helper selects snapshot dependents"
   git -C "$repo" add tests/lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm helper-change
+
+  printf '\n' >>"$repo/tests/assets/board-render-harness.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" \
+    "test asset selects its consuming test family"
+  assert_not_contains "$listed" "tests/fm-test-run.test.sh" \
+    "selector fixture literals are not treated as dependencies"
+  git -C "$repo" add tests/assets/board-render-harness.mjs
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm test-asset-change
+
+  printf '\n' >>"$repo/tests/assets/unreferenced-helper.mjs"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "unreferenced test asset must fail with exit 2, got $rc"
+  grep -Fq 'no changed-test mapping for source path: tests/assets/unreferenced-helper.mjs' "$tmp/err" \
+    || fail "unreferenced test asset failure is not actionable: $(cat "$tmp/err")"
+  git -C "$repo" add tests/assets/unreferenced-helper.mjs
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm unmapped-test-asset-change
+
+  rm "$repo/tests/assets/board-render-harness.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" \
+    "removed test asset selects its unchanged consumer"
+  printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/fm-bearings-snapshot.test.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-bearings-snapshot.test.sh" \
+    "removed test asset with an updated consumer remains selected"
+  git -C "$repo" add tests/assets/board-render-harness.mjs
+  git -C "$repo" add tests/fm-bearings-snapshot.test.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm removed-test-asset
 
   printf '\n' >>"$repo/tests/fm-backend-herdr-eventwait.test.py"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

@@ -11,7 +11,6 @@ TMP_ROOT=$(fm_test_tmproot fm-on)
 # and physicalize macOS's /var -> /private/var alias before transport validation.
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
@@ -20,6 +19,25 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
 SSH_LOG="$TMP_ROOT/ssh.log"
 SSH_COUNT="$TMP_ROOT/ssh.count"
 mkdir -p "$LOCAL_HOME/data" "$REMOTE_ROOT/bin" "$REMOTE_HOME"
+
+cleanup() {
+  local worker_pid
+  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ] && [ -f "$REMOTE_ROOT/bin/fm-remote-job-lib.sh" ]; then
+    worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid" 2>/dev/null || true)
+    if [ -n "$worker_pid" ]; then
+      (
+        # The recorded pid is the serving child, so stop its restart supervisor
+        # and every worker descendant before removing their state directory.
+        # shellcheck source=bin/fm-remote-job-lib.sh
+        . "$REMOTE_ROOT/bin/fm-remote-job-lib.sh"
+        fm_remote_job_stop_worker_tree "$worker_pid"
+      ) 2>/dev/null || true
+    fi
+  fi
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup EXIT
+
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-job-lib.sh" \
   "$ROOT/bin/fm-remote-job-worker.sh" "$REMOTE_ROOT/bin/"
