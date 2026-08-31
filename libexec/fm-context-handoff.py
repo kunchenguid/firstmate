@@ -61,6 +61,7 @@ MAX_HOOK_BYTES = 1024 * 1024
 MAX_CORE_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_TRANSACTION_BUNDLE_BYTES = 128 * 1024
 MAX_TRANSACTION_DEPENDENCY_BYTES = 8 * 1024 * 1024
+MAX_HERDR_EXECUTABLE_BYTES = 32 * 1024 * 1024
 MAX_ORPHAN_TRANSACTION_RUNTIMES = 8
 MAX_ORPHAN_HERDR_RUNTIMES = 8
 MAX_TRANSACTION_WRITES = 16
@@ -1547,7 +1548,21 @@ def matching_nonempty_state(layout: StateLayout, source_harness: str, session_ha
         candidate_present = matching_candidate_present(layout, source_harness, session_hash)
     except HandoffError:
         candidate_present = True
-    return candidate_present or bool(retryable_records(layout, source_harness, session_hash, {}))
+    return candidate_present or matching_record_present(layout, source_harness, session_hash)
+
+
+def matching_record_present(layout: StateLayout, source_harness: str, session_hash: str) -> bool:
+    paths = sorted(layout.records.glob("handoff-*.json"))
+    if len(paths) > MAX_COMPACTION_RECORDS:
+        return True
+    for path in paths:
+        try:
+            envelope, _digest = read_envelope(layout, path.stem, {}, verify_sources=False)
+        except HandoffError:
+            return True
+        if envelope["source_harness"] == source_harness and envelope["source_session_hash"] == session_hash:
+            return True
+    return False
 
 
 def block_failed_claude_precompact(
@@ -1569,7 +1584,7 @@ def block_failed_claude_precompact(
         except HandoffError as exc:
             write_receipt(layout, "seal", "failed", "registered-candidate-validation-failed", source_harness="claude", trigger=trigger, failure_code=exc.code)
             return {"decision": "block", "reason": "A registered handoff candidate could not be validated; compaction was stopped."}
-        if not candidate_present and not retryable_records(layout, "claude", session_hash, config or {}):
+        if not candidate_present and not matching_record_present(layout, "claude", session_hash):
             return None
         write_receipt(layout, "seal", "failed", "claude-precompact-binding-failed", source_harness="claude", trigger=trigger, failure_code=failure_code)
     return {"decision": "block", "reason": "Already-curated handoff candidates could not be bound to the exact Claude endpoint; compaction was stopped."}
@@ -1859,7 +1874,7 @@ def recover_herdr_runtime_snapshots(layout: StateLayout) -> None:
 def herdr_runtime(config: Mapping[str, Any], layout: StateLayout) -> Iterator[Path]:
     recipient = config["recipient"]
     source = validate_executable(recipient["herdr_cli_path"], recipient["herdr_cli_sha256"], "HERDR_IDENTITY")
-    data = read_file_bytes(source, max_bytes=MAX_TRANSACTION_DEPENDENCY_BYTES, require_private=False)
+    data = read_file_bytes(source, max_bytes=MAX_HERDR_EXECUTABLE_BYTES, require_private=False)
     if sha256_bytes(data) != recipient["herdr_cli_sha256"]:
         raise HandoffError("HERDR_IDENTITY", "Herdr executable bytes changed before snapshotting")
     recover_herdr_runtime_snapshots(layout)
@@ -2532,10 +2547,11 @@ def reuse_compaction_binding_locked(layout: StateLayout, config: Mapping[str, An
     if len(matches) != 1:
         raise HandoffError("COMPACTION_BINDING", "Claude hook session owns multiple unresolved compaction attempts")
     path, value, bindings = matches[0]
+    if value.get("terminal_outcome") is not None:
+        apply_terminal_compaction_binding_locked(layout, path, value, bindings)
+        return None
     if value["process_capability_sha256"] != current_process_capability():
         raise HandoffError("GENERATION_REPLACED", "another Claude process generation has an unresolved compaction attempt")
-    if value.get("terminal_outcome") is not None:
-        raise HandoffError("COMPACTION_RECOVERY_PENDING", "the durable Claude compaction outcome must recover before another attempt")
     return compaction_attempt_result("already-sealed", bindings)
 
 
@@ -2614,9 +2630,37 @@ def terminal_compaction_binding_locked(layout: StateLayout, session_hash: str) -
     return matches[0] if matches else None
 
 
+def apply_terminal_compaction_binding_locked(
+    layout: StateLayout,
+    path: Path,
+    value: Mapping[str, Any],
+    bindings: Sequence[Mapping[str, str]],
+) -> dict[str, Any]:
+    terminal = value.get("terminal_outcome")
+    if terminal not in {"succeeded", "failed"} or not isinstance(value.get("terminal_reason"), str):
+        raise HandoffError("COMPACTION_BINDING", "durable Claude compaction outcome is invalid")
+    failpoint("after-compaction-terminal-before-queues")
+    result = _mark_compaction_locked(
+        layout,
+        {},
+        bindings,
+        terminal == "succeeded",
+        str(value["trigger"]),
+        str(value["terminal_reason"]),
+    )
+    durable_unlink(path)
+    return result
+
+
 def consume_compaction_binding(home: Path, session_hash: str, succeeded: bool, reason: str) -> dict[str, Any] | None:
     layout = StateLayout(home)
     with state_lock(layout):
+        session_matches = session_compaction_bindings_locked(layout, session_hash)
+        terminal_matches = [item for item in session_matches if item[1].get("terminal_outcome") is not None]
+        if len(terminal_matches) > 1:
+            raise HandoffError("COMPACTION_BINDING", "Claude terminal recovery matches multiple durable attempts")
+        if terminal_matches:
+            return apply_terminal_compaction_binding_locked(layout, *terminal_matches[0])
         located = terminal_compaction_binding_locked(layout, session_hash)
         if located is None:
             return None
@@ -2631,19 +2675,7 @@ def consume_compaction_binding(home: Path, session_hash: str, succeeded: bool, r
                 "terminal_at": now_utc(),
             }
             atomic_replace(path, canonical_json(value))
-        elif terminal not in {"succeeded", "failed"} or not isinstance(value.get("terminal_reason"), str):
-            raise HandoffError("COMPACTION_BINDING", "durable Claude compaction outcome is invalid")
-        failpoint("after-compaction-terminal-before-queues")
-        result = _mark_compaction_locked(
-            layout,
-            {},
-            bindings,
-            terminal == "succeeded",
-            str(value["trigger"]),
-            str(value.get("terminal_reason") or reason),
-        )
-        durable_unlink(path)
-        return result
+        return apply_terminal_compaction_binding_locked(layout, path, value, bindings)
 
 
 def hook_output(value: Mapping[str, Any] | None = None, *, stderr: bool = False) -> None:
