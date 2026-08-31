@@ -1395,16 +1395,22 @@ fi
 # filesystem sandbox but accepts that cursor's server classifier prompts for any
 # call it does not deem safe. An unattended pane has no approver, and the
 # cursor-transcript busy fold keeps a parked pane reading as working, so the
-# stall would never surface as a hold. The non-prompting alternative (--force,
-# and its documented --yolo alias) defeats --sandbox enabled, so it is refused
-# as false hardening rather than shipped. cursor is therefore barred from
-# UNATTENDED IMPLEMENTATION, and this bar is deliberately scoped to kind=ship
-# alone: ship is the only kind that carries a delivery contract (--mode/--yolo
-# are required for it), so it is the narrowest kind that matches the reason for
-# the refusal. scout (a report deliverable) and secondmate (a firstmate instance
-# with its own supervision protocol) are NOT barred.
-if [ "$KIND" = ship ] && [ "$HARNESS" = cursor ]; then
-  echo "error: cursor cannot run an unattended ship spawn; its --auto-review classifier prompts for calls it does not deem safe, a crewmate pane has no approver, and the parked pane keeps reading as busy. Use codex or claude for unattended implementation, or spawn cursor with --scout." >&2
+# stall never surfaces as a hold. The non-prompting alternative (--force, and its
+# documented --yolo alias) defeats --sandbox enabled, so it is refused as false
+# hardening rather than shipped. cursor is therefore barred from every ordinary
+# unattended kind: ship, scout, and secondmate alike, the last being the worst
+# case because a whole firstmate instance stalls invisibly.
+#
+# fm_control_harness_supports_kind owns that rule so the control plane can refuse
+# an incompatible relaunch BEFORE it stops the running agent; asking it here
+# rather than repeating the table is what keeps the two owners from drifting.
+# FM_CURSOR_UNATTENDED_EXEMPTION is the single auditable opt-in, and no in-repo
+# caller sets it: there is no attended-launch flag and no isolation-envelope
+# caller in this repo to key on today, so rather than infer either condition the
+# variable must be set deliberately by whoever knows the launch is covered.
+if [ "$HARNESS" = cursor ] &&
+  ! fm_control_harness_supports_kind cursor "$KIND" "${FM_CURSOR_UNATTENDED_EXEMPTION-}"; then
+  echo "error: cursor is refused for an unattended $KIND spawn; its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. Use codex or claude for unattended work. If a person is in the pane or a proven outer isolation envelope governs this worker, set FM_CURSOR_UNATTENDED_EXEMPTION=attended or FM_CURSOR_UNATTENDED_EXEMPTION=isolation-envelope." >&2
   exit 1
 fi
 
