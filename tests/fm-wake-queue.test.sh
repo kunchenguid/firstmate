@@ -62,6 +62,7 @@ test_signal_catchup_without_running_watcher() {
   drain_out="$dir/drain.out"
   drain_err="$dir/drain.err"
   status_file="$state/task.status"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   # The durable-queue catch-up contract applies to ACTIONABLE wakes (the always-on
   # watcher can absorb no-verb working: notes when the crew is provably working).
   # Use a captain-relevant verb so the wake is surfaced and the catch-up path is

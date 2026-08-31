@@ -67,6 +67,7 @@ test_routine_then_terminal_after_restart() {
   drain_out="$dir/drain.out"
   drain_err="$dir/drain.err"
   status_file="$state/task-w1.status"
+  fm_write_meta "$state/task-w1.meta" "window=sess:fm-task-w1"
 
   # A routine status fires a signal; the watcher queues it and exits.
   printf 'working: building\n' > "$status_file"

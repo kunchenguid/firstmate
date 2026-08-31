@@ -169,6 +169,7 @@ test_attached_arm_reports_the_delivered_wake() {
 
   # A real captain-relevant status change: the watcher records it in the durable
   # queue, prints its one reason line to its own stdout, and exits.
+  fm_write_meta "$state/demo.meta" "window=sess:fm-demo"
   printf 'done: fixture finished\n' > "$state/demo.status"
   wait_for_exit "$SEED_PID" 120
   grep -q '^signal:' "$out" || fail "seed watcher did not surface the signal wake: $(cat "$out")"
@@ -199,6 +200,7 @@ test_attached_arm_reports_the_delivered_wake_after_drain() {
   # handling turn drains, which is the ordering this case exists to cover.
   start_attached_arm "$state" "$fakebin" "$armout" 5
 
+  fm_write_meta "$state/demo.meta" "window=sess:fm-demo"
   printf 'done: fixture finished\n' > "$state/demo.status"
   wait_for_exit "$SEED_PID" 120
   # The handling turn consumes the records before the attached arm closes: the
@@ -253,6 +255,11 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   armout="$dir/arm.out"
   drainout="$dir/drain.out"
   mkdir -p "$home/data"
+
+  # A registered secondmate always has a matching state/<id>.meta in the
+  # parent home (kind=secondmate), same as any live task; without one the
+  # watcher's orphan guard would absorb ios.status as belonging to no task.
+  fm_write_meta "$state/ios.meta" "kind=secondmate" "home=$dir/ios-home"
 
   # This is the real remote parent-reply ingest boundary. It writes the remote
   # secondmate's decision onto the parent status surface the shared fold owns.
@@ -408,6 +415,7 @@ test_delivery_gap_wake_is_recovered_once() {
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
 
+  fm_write_meta "$state/first.meta" "window=sess:fm-first"
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
   first_arm=$ARM_PID
   is_live_non_zombie "$first_arm" || fail "delivery-gap fixture watcher did not stay live"
@@ -447,6 +455,7 @@ test_interrupted_handling_is_redrained_on_rearm() {
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
 
+  fm_write_meta "$state/interrupted.meta" "window=sess:fm-interrupted"
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
   first_arm=$ARM_PID
   is_live_non_zombie "$first_arm" || fail "interrupted-handling fixture watcher did not stay live"
@@ -649,6 +658,9 @@ test_handling_window_close_keeps_the_acknowledgement_valid() {
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
 
+  fm_write_meta "$state/handled.meta" "window=sess:fm-handled"
+  fm_write_meta "$state/during-handling.meta" "window=sess:fm-during-handling"
+  fm_write_meta "$state/later.meta" "window=sess:fm-later"
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
   is_live_non_zombie "$ARM_PID" || fail "handling-window fixture watcher did not stay live"
   printf 'done: wake handled while a watcher cycle closes\n' > "$state/handled.status"
@@ -717,6 +729,8 @@ test_moved_generation_acknowledgement_is_self_healing() {
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
 
+  fm_write_meta "$state/first.meta" "window=sess:fm-first"
+  fm_write_meta "$state/second.meta" "window=sess:fm-second"
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
   is_live_non_zombie "$ARM_PID" || fail "moved-generation fixture watcher did not stay live"
   printf 'done: first handled wake\n' > "$state/first.status"

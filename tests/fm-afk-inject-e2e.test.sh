@@ -161,6 +161,11 @@ chmod +x "$TMUX_SHIM_DIR/tmux"
 # Create a fake crewmate window (the watcher lists fm-* windows for stale
 # detection). The pane is an inert shell - it just needs to exist.
 "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
+# A live task always has a matching state/<id>.meta (fm-spawn.sh writes it
+# before ever launching the window); without one the watcher's orphan guard
+# absorbs fake-c1.status as belonging to no task, before this suite's own
+# assertions ever get to run.
+printf 'window=supervisor:fm-fake-c1\n' > "$STATE_DIR/fake-c1.meta"
 
 start_daemon() {
   PATH="$TMUX_SHIM_DIR:$PATH" \

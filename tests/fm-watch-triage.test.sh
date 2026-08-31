@@ -47,7 +47,11 @@ ack_stopped_cycle() {  # <state>
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+  # A trailing "NAME=value" caller override must go through env: bash only
+  # recognizes a literal parse-time "NAME=value" token as an assignment
+  # prefix, never one produced by "$@" expansion, so passing it directly
+  # ahead of "$WATCH" would run it as a (nonexistent) command instead.
+  PATH="$fakebin:$PATH" env FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
 
@@ -691,6 +695,7 @@ test_secondmate_status_signal_never_absorbed_classifier() {
 test_provably_working_signal_absorbed() {
   local dir state fakebin out status_file pid
   dir=$(make_case provably-working-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   status_file="$state/task.status"
   printf 'working: compiling step 2\n' > "$status_file"
   # The crew's pipeline is in an actively-running step: positive evidence it is
@@ -713,6 +718,7 @@ test_provably_working_signal_absorbed() {
 test_turn_ended_provably_working_absorbed() {
   local dir state fakebin out pid
   dir=$(make_case turn-ended-working); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   : > "$state/task.turn-ended"
   # A busy pane is the second form of positive evidence (covers a queued
   # continuation right after the turn-end).
@@ -737,6 +743,7 @@ test_turn_ended_not_working_surfaced() {
   local dir state fakebin out drain_out pid
   dir=$(make_case turn-ended-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   : > "$state/task.turn-ended"
   # No running pipeline, no busy pane: the crew has stopped (e.g. it finished via
   # an interactive menu and wrote no done: status). Default unknown verdict.
@@ -1437,6 +1444,7 @@ test_working_note_not_working_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case working-note-stopped); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   status_file="$state/task.status"
   printf 'working: compiling step 2\n' > "$status_file"
   # A non-no-mistakes crew (no run) whose pane went idle: fm-crew-state falls back
@@ -1476,6 +1484,7 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
 test_self_announced_close_does_not_rewake_but_next_note_does() {
   local dir state fakebin out status_file pid rc
   dir=$(make_case self-close-quiet); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   status_file="$state/task.status"
   printf 'needs-decision [key=k1]: pick one\n' > "$status_file"
   prime_status_seen "$state" "$status_file" || fail "could not prime the announced baseline"
@@ -1504,12 +1513,194 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
   pass "a self-announced close never wakes its own home, and the next real note still does"
 }
 
+# --- an orphan marker with no matching state/<id>.meta NEVER surfaces --------
+# A live task always has a matching state/<id>.meta: fm-spawn.sh writes it
+# before the agent can produce a first status or turn-end, and fm-teardown.sh
+# removes .status/.turn-ended/.check.sh before it removes .meta (see
+# status_retire_presentation_task and remove_pr_poll_artifacts, both called
+# ahead of the backlog transition that drops .meta). A marker that survives
+# with no .meta belongs to no task firstmate can act on - most plausibly a
+# harness turn-end hook (e.g. a Claude Stop hook) whose command line baked in
+# the absolute state path before teardown ran, still firing if its owning
+# process outlives teardown's best-effort backend kill. Regression for the
+# orphan-signal-forever bug: such a marker must never wake firstmate, no
+# matter how many times it reappears with a fresh mtime, and the watcher
+# should clean it up rather than leave it sitting in state/ forever.
+
+test_orphan_turn_ended_never_surfaces() {
+  local dir state fakebin out pid
+  dir=$(make_case orphan-turn-ended); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # Deliberately NO state/orphan.meta: this id was torn down (or never spawned).
+  : > "$state/orphan.turn-ended"
+  # Even a verdict that would normally be surfaced (crew "not provably
+  # working") must not matter here - the orphan guard runs before any
+  # provably-working read.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for an orphan turn-end with no matching .meta (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "orphan turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "orphan turn-end enqueued a durable wake record"
+  [ ! -e "$state/orphan.turn-ended" ] || fail "orphan turn-end was not cleaned up"
+  reap "$pid"
+  pass "a turn-end marker with no matching state/<id>.meta never surfaces and is removed"
+}
+
+test_orphan_turn_ended_recreated_every_poll_never_surfaces() {
+  local dir state fakebin out pid i
+  dir=$(make_case orphan-turn-ended-recreated); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  # Simulate a leaked writer that keeps re-touching the orphan marker with a
+  # fresh mtime every poll (the exact reported symptom: recreated even when
+  # manually deleted between cycles). Across several poll cycles this must
+  # never once become an actionable wake.
+  i=0
+  while [ "$i" -lt 5 ]; do
+    : > "$state/ghost.turn-ended"
+    sleep 0.3
+    i=$((i + 1))
+  done
+  if ! wait_live "$pid" 10; then
+    reap "$pid"; fail "watcher exited while an orphan turn-end was repeatedly recreated (should never surface): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "repeatedly recreated orphan turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "repeatedly recreated orphan turn-end enqueued a durable wake record"
+  reap "$pid"
+  pass "an orphan turn-end recreated with a fresh mtime every poll never becomes actionable"
+}
+
+test_orphan_status_with_captain_relevant_verb_never_surfaces() {
+  local dir state fakebin out pid
+  dir=$(make_case orphan-status-verb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # No state/orphan.meta. Even a captain-relevant verb (which would normally
+  # be immediately actionable via signal_reason_is_actionable) must not
+  # surface for an unowned file - the orphan check runs before classification.
+  printf 'needs-decision: pick A or B\n' > "$state/orphan.status"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for an orphan captain-relevant status with no matching .meta (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "orphan captain-relevant status printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "orphan captain-relevant status enqueued a durable wake record"
+  [ ! -e "$state/orphan.status" ] || fail "orphan captain-relevant status was not cleaned up"
+  reap "$pid"
+  pass "a captain-relevant status with no matching state/<id>.meta never surfaces and is removed"
+}
+
+# --- an orphan check.sh with no matching state/<id>.meta never runs ----------
+# Custom and PR-poll checks are authorized by registration (state/<id>.check-
+# trust or a PR-poll snapshot), not by .meta - but a per-task check.sh still
+# always belongs to a live task with a matching .meta (fm-teardown.sh's
+# remove_pr_poll_artifacts removes .check.sh and .check-trust together with
+# .meta). A survivor with no .meta and no fixed-name exemption must never run
+# or wake firstmate, and the sweep must fold it into the same orphan-absorb
+# path as .status/.turn-ended rather than reporting it as a routine rejected-
+# unauthenticated check every CHECK_INTERVAL forever.
+test_orphan_check_sh_never_runs() {
+  local dir state fakebin out pid
+  dir=$(make_case orphan-check-sh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # No state/orphan.meta. A .check.sh that would otherwise print an actionable
+  # line must never even run once its owning task is torn down.
+  cat > "$state/orphan.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "should never run"
+SH
+  chmod 700 "$state/orphan.check.sh"
+  watch_bg "$state" "$fakebin" "$out" FM_CHECK_INTERVAL=1
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for an orphan check.sh with no matching .meta (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "orphan check.sh printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "orphan check.sh enqueued a durable wake record"
+  [ ! -e "$state/orphan.check.sh" ] || fail "orphan check.sh was not cleaned up"
+  reap "$pid"
+  pass "a check.sh with no matching state/<id>.meta never runs and is removed"
+}
+
+# A live task's own check.sh must keep surfacing exactly as before when its
+# registration is broken or missing - the orphan guard is keyed on .meta
+# presence alone and must never swallow a real, actionable rejection.
+test_live_task_unregistered_check_sh_still_surfaces() {
+  local dir state fakebin out pid
+  dir=$(make_case live-unregistered-check-sh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  fm_write_meta "$state/mytask.meta" "window=fm-mytask"
+  cat > "$state/mytask.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "should never run either, but must be reported"
+SH
+  chmod 700 "$state/mytask.check.sh"
+  watch_bg "$state" "$fakebin" "$out" FM_CHECK_INTERVAL=1
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not exit for a live task's unregistered check.sh"
+  grep -F "check: rejected unauthenticated state checks:" "$out" | grep -F "mytask.check.sh" >/dev/null \
+    || fail "a live task's unregistered check.sh was not reported: $(cat "$out")"
+  [ -e "$state/mytask.check.sh" ] || fail "a live task's check.sh was wrongly removed by the orphan guard"
+  pass "a live task's unregistered check.sh keeps surfacing as a rejected check, not silently absorbed"
+}
+
+# --- the fixed-name poll shims (no task id, so no .meta by design) are exempt -
+# x-watch.check.sh (Relay's poll shim) and tool-updates.check.sh (the watched-
+# tool update poll shim) are both keyed by a constant name rather than a
+# spawned task id, so neither ever has a matching state/<id>.meta. The orphan
+# guard must not treat either as an orphan: both must keep running and must
+# not be deleted.
+test_x_watch_check_sh_survives_orphan_guard_and_runs() {
+  local dir state fakebin out pid
+  dir=$(make_case x-watch-check-sh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # No state/x-watch.meta - by design, this shim is never task-keyed.
+  cat > "$state/x-watch.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "check: x-mention deadbeef"
+SH
+  chmod +x "$state/x-watch.check.sh"
+  watch_bg "$state" "$fakebin" "$out" FM_CHECK_INTERVAL=1
+  pid=$!
+  if wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher never fired for x-watch.check.sh's actionable output (should surface): $(cat "$out")"
+  fi
+  [ -s "$out" ] || fail "x-watch.check.sh's actionable output did not produce a wake reason"
+  [ -e "$state/x-watch.check.sh" ] || fail "x-watch.check.sh was wrongly deleted as an orphan"
+  pass "x-watch.check.sh survives the orphan guard and keeps running with no state/x-watch.meta"
+}
+
+test_tool_updates_check_sh_survives_orphan_guard_and_runs() {
+  local dir state fakebin out pid
+  dir=$(make_case tool-updates-check-sh); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # No state/tool-updates.meta - by design, this shim is never task-keyed.
+  # Unlike x-watch.check.sh it is authorized through the ordinary custom-check
+  # trust registration rather than a fixed-name bypass, so register it for
+  # real through the production entrypoint.
+  cat > "$state/tool-updates.check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "check: a watched tool has an update"
+SH
+  chmod 700 "$state/tool-updates.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" tool-updates \
+    || fail "could not register tool-updates.check.sh for the exemption test"
+  watch_bg "$state" "$fakebin" "$out" FM_CHECK_INTERVAL=1
+  pid=$!
+  if wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher never fired for tool-updates.check.sh's actionable output (should surface): $(cat "$out")"
+  fi
+  [ -s "$out" ] || fail "tool-updates.check.sh's actionable output did not produce a wake reason"
+  [ -e "$state/tool-updates.check.sh" ] || fail "tool-updates.check.sh was wrongly deleted as an orphan"
+  [ -e "$state/tool-updates.check-trust" ] || fail "tool-updates.check-trust was wrongly deleted as an orphan"
+  pass "tool-updates.check.sh survives the orphan guard and keeps running with no state/tool-updates.meta"
+}
+
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
 
 test_actionable_signal_surfaced() {
   local dir state fakebin out drain_out status_file pid
   dir=$(make_case actionable-signal); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   status_file="$state/task.status"
   printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
   watch_bg "$state" "$fakebin" "$out"
@@ -1533,6 +1724,7 @@ test_actionable_signal_survives_a_later_routine_append() {
   local dir state fakebin out drain_out status_file sig pid
   dir=$(make_case actionable-masked); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   status_file="$state/task.status"
   # Everything through "working: setup" was already classified, so this asserts
   # the newly appended span, not merely a whole-file re-read.
@@ -1559,6 +1751,7 @@ test_release_completion_survives_a_later_routine_append() {
   local dir state fakebin out drain_out status_file sig pid
   dir=$(make_case release-masked); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   status_file="$state/task.status"
   printf 'working: publishing\n' > "$status_file"
   sig=$(seen_sig "$status_file"); printf '%s' "$sig" > "$state/.seen-task_status"
@@ -1602,6 +1795,7 @@ test_unreadable_status_reports_once_per_file_state() {
   local dir state fakebin out status_file target marker sig pid
   dir=$(make_case unreadable-status); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; status_file="$state/task.status"; target="$dir/missing-status-target"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   ln -s "$target" "$status_file"
   marker="$state/.seen-task_status"
 
@@ -1648,6 +1842,7 @@ test_permission_recovery_surfaces_preserved_status() {
   local dir state fakebin out status_file marker before_ident after_ident pid
   dir=$(make_case permission-recovery); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; status_file="$state/task.status"; marker="$state/.seen-task_status"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   printf 'blocked: release approval required\nworking: preserving context\n' > "$status_file"
   before_ident=$(_fm_open_decisions_file_ident "$status_file")
   chmod 000 "$status_file"
@@ -3615,6 +3810,7 @@ test_procevent_marker_failure_exits_and_replays() {
 test_heartbeat_no_change_absorbed() {
   local dir state fakebin out pid i sig
   dir=$(make_case heartbeat-absorb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  fm_write_meta "$state/routine.meta" "window=sess:fm-routine"
   printf 'working: routine heartbeat history\n' > "$state/routine.status"
   sig=$(seen_sig "$state/routine.status"); printf '%s' "$sig" > "$state/.seen-routine_status"
   # A quiet fleet with a fast heartbeat cadence.
@@ -3648,6 +3844,7 @@ test_heartbeat_backstop_surfaces_a_masked_status() {
   local dir state fakebin out sig pid
   dir=$(make_case heartbeat-masked); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
+  fm_write_meta "$state/miss.meta" "window=sess:fm-miss"
   # Same miss as below, but the captain-relevant event is followed by a routine
   # append, so its last line reads benign. The backstop must still catch it.
   printf 'working: setup\nneeds-decision: pick A or B\nworking: tidying the branch\n' \
@@ -3669,6 +3866,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   local dir state fakebin out drain_out sig pid
   dir=$(make_case heartbeat-backstop); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
+  fm_write_meta "$state/miss.meta" "window=sess:fm-miss"
   # A captain-relevant status whose .seen-* signature ALREADY matches (so the
   # per-poll signal scan stays quiet) but which was never surfaced (no
   # .hb-surfaced-* marker). This stands in for a per-wake-path miss; the heartbeat
@@ -3686,6 +3884,29 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
   grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
+}
+
+# heartbeat_scan_finds_actionable is "the always-on twin of the daemon's
+# catch-all" (its own doc comment) and walks *.status independently of
+# scan_signals, so it needs the identical orphan guard: a captain-relevant
+# status with no matching state/<id>.meta must never trip the heartbeat wake.
+test_heartbeat_backstop_never_surfaces_an_orphan_status() {
+  local dir state fakebin out pid
+  dir=$(make_case heartbeat-orphan); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # No state/ghost.meta. Even a captain-relevant verb must not reach the
+  # heartbeat backstop for an unowned file.
+  printf 'needs-decision: pick A or B\n' > "$state/ghost.status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "heartbeat backstop surfaced an orphan status with no matching .meta: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "heartbeat backstop printed a wake reason for an orphan status: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "heartbeat backstop enqueued a durable wake record for an orphan status"
+  reap "$pid"
+  pass "the heartbeat backstop never surfaces a captain-relevant orphan status with no matching .meta"
 }
 
 # --- beacon stays fresh while absorbing -------------------------------------
@@ -3727,6 +3948,7 @@ test_afk_signal_records_heartbeat_endpoint() {
   local dir state fakebin out status_file pid
   dir=$(make_case afk-heartbeat-endpoint); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; status_file="$state/task.status"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   printf 'needs-decision: choose release target\nworking: preparing both targets\n' > "$status_file"
   date '+%s' > "$state/.afk"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
@@ -3745,6 +3967,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
   dir=$(make_case afk-coherence); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   status_file="$state/task.status"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task"
   printf 'working: routine note\n' > "$status_file"
   date '+%s' > "$state/.afk"   # away mode: the supervise-daemon owns triage
   # Set a PROVABLY-WORKING verdict: if afk failed to bypass the provably-working
@@ -3837,6 +4060,13 @@ test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
+test_orphan_turn_ended_never_surfaces
+test_orphan_turn_ended_recreated_every_poll_never_surfaces
+test_orphan_status_with_captain_relevant_verb_never_surfaces
+test_orphan_check_sh_never_runs
+test_live_task_unregistered_check_sh_still_surfaces
+test_x_watch_check_sh_survives_orphan_guard_and_runs
+test_tool_updates_check_sh_survives_orphan_guard_and_runs
 test_actionable_signal_surfaced
 test_actionable_signal_survives_a_later_routine_append
 test_release_completion_survives_a_later_routine_append
@@ -3883,6 +4113,7 @@ test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
+test_heartbeat_backstop_never_surfaces_an_orphan_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
