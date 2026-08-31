@@ -659,7 +659,10 @@ resolve_relaunch_profile() {
   # is only reached after the old agent has been stopped. Asking the same
   # capability table here keeps that refusal on the pre-stop side of the
   # transaction, where nothing has changed yet.
-  fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" \
+  # The exemption travels to the launch owner in the environment, so it has to be
+  # part of the question here too, or an exempted relaunch would be refused
+  # pre-stop for a launch that would in fact have succeeded.
+  fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" "${FM_CURSOR_UNATTENDED_EXEMPTION-}" \
     || die "'$TARGET_HARNESS' is not verified to run a $KIND task, so relaunching $ID onto it would stop the running agent for a launch that must be refused; choose an adapter verified for this kind"
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the

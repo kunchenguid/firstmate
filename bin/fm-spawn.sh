@@ -1423,6 +1423,12 @@ if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini 
   exit 1
 fi
 
+if [ "$HARNESS" = cursor ] &&
+  ! fm_control_harness_supports_kind cursor "$KIND" "${FM_CURSOR_UNATTENDED_EXEMPTION-}"; then
+  echo "error: cursor is refused for an unattended $KIND spawn; use codex or claude, or provide a valid Cursor exemption." >&2
+  exit 1
+fi
+
 case "$HARNESS" in
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {

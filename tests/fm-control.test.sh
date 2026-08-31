@@ -366,8 +366,9 @@ test_backend_key_capability_matrix() {
 # discovering that only after the running agent was stopped would strand the
 # secondmate with no agent at all.
 test_harness_kind_capability() {
-  local harness
+  local harness kind
   for harness in $VERIFIED_HARNESSES; do
+    [ "$harness" = cursor ] && continue
     fm_control_harness_supports_kind "$harness" ship \
       || fail "$harness should be able to run a ship task"
     fm_control_harness_supports_kind "$harness" scout \
@@ -382,6 +383,29 @@ test_harness_kind_capability() {
   fm_control_harness_supports_kind someagent ship \
     && fail "an unverified harness must not claim any kind"
   pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
+}
+
+# cursor can park on an --auto-review prompt that an unattended pane cannot
+# answer, so it claims no ordinary unattended kind. The exemption argument is the
+# only way through, and it must be one of the two recognized tokens.
+test_cursor_claims_no_unattended_kind_without_an_exemption() {
+  local kind
+  for kind in ship scout secondmate; do
+    fm_control_harness_supports_kind cursor "$kind" \
+      && fail "cursor must not claim an unattended $kind task"
+    fm_control_harness_supports_kind cursor "$kind" '' \
+      && fail "an empty exemption must not let cursor claim a $kind task"
+    fm_control_harness_supports_kind cursor "$kind" yes \
+      && fail "an unrecognized exemption token must not let cursor claim a $kind task"
+    fm_control_harness_supports_kind cursor "$kind" attended \
+      || fail "an attended launch should let cursor run a $kind task"
+    fm_control_harness_supports_kind cursor "$kind" isolation-envelope \
+      || fail "a proven isolation envelope should let cursor run a $kind task"
+  done
+  # The exemption is cursor's alone and must not widen any other adapter's table.
+  fm_control_harness_supports_kind muse secondmate attended \
+    && fail "the cursor exemption must not grant muse a secondmate"
+  pass "fm-control-lib: cursor claims an unattended kind only under a recognized exemption"
 }
 
 test_orca_refuses_an_escape_harness_interrupt() {
@@ -881,6 +905,7 @@ test_harness_family_resolution
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
+test_cursor_claims_no_unattended_kind_without_an_exemption
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
