@@ -1466,7 +1466,16 @@ try {
 JS
   case "$publish_status" in
     0)
-      NODE_MODULES_ABORT_STAGING=
+      if [ -L "$target" ] \
+         && [ "$(readlink "$target" 2>/dev/null || true)" = "$publication_link" ] \
+         && [ -d "$target" ]; then
+        NODE_MODULES_ABORT_STAGING=
+      else
+        publish_status=5
+      fi
+      ;;
+    3)
+      [ -d "$target" ] || publish_status=5
       ;;
     *)
       ;;

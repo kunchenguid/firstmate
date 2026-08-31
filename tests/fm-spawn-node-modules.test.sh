@@ -110,6 +110,9 @@ set -u
 if [ "\${1:-}" = - ] && [ "\${FM_FAIL_NODE_PUBLISHER_EXEC:-0}" = 1 ]; then
   exit 127
 fi
+if [ "\${1:-}" = - ] && [ -n "\${FM_NODE_PUBLISHER_EARLY_STATUS:-}" ]; then
+  exit "\$FM_NODE_PUBLISHER_EARLY_STATUS"
+fi
 if [ "\${1:-}" = - ] && [ "\${FM_INJECT_NODE_PUBLISHER_HOOK:-0}" = 1 ]; then
   exec "$real_node" --require="$fakebin/node-ambient-hook.cjs" "\$@"
 fi
@@ -174,6 +177,7 @@ run_spawn() {
     FM_INTERRUPT_NODE_MODULES_PUBLICATION="${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" \
     FM_KILL_NODE_MODULES_PUBLISHER="${FM_KILL_NODE_MODULES_PUBLISHER:-0}" \
     FM_FAIL_NODE_PUBLISHER_EXEC="${FM_FAIL_NODE_PUBLISHER_EXEC:-0}" \
+    FM_NODE_PUBLISHER_EARLY_STATUS="${FM_NODE_PUBLISHER_EARLY_STATUS:-}" \
     FM_INJECT_NODE_PUBLISHER_HOOK="${FM_INJECT_NODE_PUBLISHER_HOOK:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
@@ -446,6 +450,33 @@ test_spawn_retains_backing_after_wrapper_postpublication_failure() {
   pass "fm-spawn retains backing after wrapper-controlled publication failure"
 }
 
+test_spawn_rejects_wrapper_status_without_dependency_tree() {
+  local rec id out status candidate retained count early_status
+  for early_status in 0 3; do
+    id="node-modules-wrapper-status-${early_status}-z14"
+    rec=$(make_case "wrapper-status-$early_status" "$id")
+    read_case "$rec"
+
+    out=$(FM_NODE_PUBLISHER_EARLY_STATUS="$early_status" run_spawn "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn accepted wrapper status $early_status without node_modules"
+    assert_not_contains "$out" "spawned $id" "wrapper status $early_status launched a worker without dependencies"
+    [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+      || fail "wrapper status $early_status unexpectedly created node_modules"
+    retained=
+    count=0
+    for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+      [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+      retained=$candidate
+      count=$((count + 1))
+    done
+    [ "$count" -eq 1 ] || fail "wrapper status $early_status did not retain exactly one backing tree"
+    assert_present "$retained/third-party/index.js" \
+      "wrapper status $early_status retained an incomplete dependency backing"
+  done
+  pass "fm-spawn rejects wrapper statuses without a valid dependency tree"
+}
+
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_ignores_published_beeline_consumers
@@ -459,5 +490,6 @@ test_spawn_retains_staging_after_ambiguous_publisher_exec_failure
 test_spawn_cleans_staging_after_creator_termination
 test_spawn_cleans_known_unpublished_staging_during_interrupt
 test_spawn_retains_backing_after_wrapper_postpublication_failure
+test_spawn_rejects_wrapper_status_without_dependency_tree
 
 echo "# all fm-spawn-node-modules tests passed"
