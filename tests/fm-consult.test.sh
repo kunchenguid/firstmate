@@ -30,7 +30,7 @@ case "${1-}:${2-}" in
     ;;
   limits:--json)
     value=${PRO_CLI_LIMITS_JSON-}
-    [ -n "$value" ] || value='{"ok":true,"data":{"observed_at":"2026-08-30T00:00:00Z"}}'
+    [ -n "$value" ] || value=$(printf '{"ok":true,"data":{"account":{"planType":"pro"},"observedLimits":[{"featureName":"gpt-5-6-pro","remaining":1,"resetAfter":null,"observedAt":"%s","jobId":null}]}}' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')")
     printf '%s\n' "$value"
     ;;
   job:create)
@@ -102,6 +102,21 @@ prepare_id() {  # <home> <question file>
 
 json_result_for() {  # <answer>
   perl -MJSON::PP -e 'print encode_json({ok => JSON::PP::true, data => {jobId => "job_fixture", result => $ARGV[0]}})' "$1"
+}
+
+# Run one command under a real deadline. A credential FIFO has no writer, so a
+# direct cookie read would block and make this guard fail rather than merely
+# relying on a content scan after the fact.
+deadline_exec() {
+  perl -e '
+    my $pid = fork();
+    die "fork failed" unless defined $pid;
+    if ($pid == 0) { exec @ARGV; exit 127; }
+    $SIG{ALRM} = sub { kill "TERM", $pid; waitpid $pid, 0; exit 124; };
+    alarm 2;
+    waitpid $pid, 0;
+    exit($? >> 8);
+  ' "$@"
 }
 
 H1="$TMP_ROOT/home-one"
@@ -178,6 +193,28 @@ assert_not_contains "$(<"$FAKE_STATE/argv.log")" " ask " "consult capability nev
 assert_grep 'job create @question.md --json --retries 0 --temporary' "$FAKE_STATE/argv.log" "submission uses the required non-waiting durable invocation with retries disabled"
 pass "questions answers and credentials stay out of tracked files events and command output"
 
+# The script must delegate browser-session access to pro-cli, never inspect its
+# cookies itself. A direct read here would block on the unwritable FIFO and the
+# deadline would return 124; both the ordinary preparation and submit paths
+# must finish normally without copying or printing the credential sentinel.
+H_CREDENTIAL="$TMP_ROOT/home-credential-boundary"
+consult_home "$H_CREDENTIAL"
+CREDENTIAL_HOME="$TMP_ROOT/credential-home"
+mkdir -p "$CREDENTIAL_HOME/.pro-cli"
+mkfifo "$CREDENTIAL_HOME/.pro-cli/cookies"
+chmod 000 "$CREDENTIAL_HOME/.pro-cli/cookies"
+credential_prepare=$(HOME="$CREDENTIAL_HOME" FM_HOME="$H_CREDENTIAL" FM_ROOT_OVERRIDE="$ROOT" \
+  deadline_exec "$ROOT/bin/fm-consult.sh" prepare --question "$QUESTION_ONE" --privacy internal-research) \
+  || fail "preparation attempted to read the credential FIFO"
+id_credential=$(printf '%s\n' "$credential_prepare" | awk '/^prepared: / { print $2; exit }')
+case "$id_credential" in ????????-????-????-????-????????????) ;; *) fail "credential guard did not prepare a consult" ;; esac
+credential_submit=$(HOME="$CREDENTIAL_HOME" FM_HOME="$H_CREDENTIAL" FM_ROOT_OVERRIDE="$ROOT" \
+  deadline_exec "$ROOT/bin/fm-consult.sh" submit "$id_credential") \
+  || fail "submission attempted to read the credential FIFO"
+assert_contains "$credential_submit" "submitted: $id_credential" "submission completes without opening session credentials"
+assert_not_contains "$credential_prepare$credential_submit" "$credential_secret" "credential sentinel is never printed"
+pass "consult machinery never directly reads, copies, or prints session credentials"
+
 H2="$TMP_ROOT/home-ambiguous"
 consult_home "$H2"
 QUESTION_TWO="$TMP_ROOT/question-two.md"
@@ -224,10 +261,101 @@ assert_grep '"result_terminal":"STALLED"' "$H3/data/consults/$id_three/receipt.j
 assert_absent "$H3/data/consults/$id_three/advisory.md" "stalled job cannot manufacture an advisory"
 pass "a normal known job that remains running after bounded waiting records STALLED"
 
+# A transport failure from `job wait` is evidence to inspect, not proof that a
+# known job is terminal. The source must remain armed; a later event may safely
+# reconcile status/result but must never create a second consultation job.
+H_WAIT_FAILURE="$TMP_ROOT/home-wait-failure"
+consult_home "$H_WAIT_FAILURE"
+id_wait_failure=$(prepare_id "$H_WAIT_FAILURE" "$QUESTION_TWO")
+rm -f -- "$WAIT_STARTED" "$WAIT_RELEASE"
+export PRO_CLI_WAIT_JSON='{"ok":false,"error":{"code":"STREAM_INTERRUPTED"}}'
+export PRO_CLI_WAIT_EXIT=75
+before_wait_failure=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+fc "$H_WAIT_FAILURE" submit "$id_wait_failure" >/dev/null || fail "wait-failure fixture submit failed"
+pe "$H_WAIT_FAILURE" reconcile >/dev/null || fail "wait-failure fixture reconcile failed"
+wait_for_file "$WAIT_STARTED" || fail "wait-failure fixture wait did not start"
+: > "$WAIT_RELEASE"
+source_wait_failure="consult-$id_wait_failure"
+capture_wait_failure="$H_WAIT_FAILURE/state/procevent-inbox/$source_wait_failure.1.result"
+wait_for_file "$capture_wait_failure" || fail "nonzero wait outcome was not captured"
+terminal_status=0
+pa "$H_WAIT_FAILURE" terminal "$capture_wait_failure" >/dev/null 2>&1 || terminal_status=$?
+[ "$terminal_status" -ne 0 ] || fail "nonzero wait outcome was misclassified as terminal"
+assert_present "$H_WAIT_FAILURE/state/procevent/$source_wait_failure.source" "nonzero wait outcome must leave its source armed"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = $((before_wait_failure + 1)) ] \
+  || fail "nonzero wait outcome submitted another consultation job"
+unset PRO_CLI_WAIT_JSON PRO_CLI_WAIT_EXIT
+pass "a nonzero job wait result never retires or resubmits a consultation"
+
+# The first durable request is a pre-delivery checkpoint. Its presence without
+# the intent marker means the external call provably has not begun, so resume it
+# rather than converting a harmless pre-call crash into delivery ambiguity.
+H_RESUME="$TMP_ROOT/home-request-resume"
+consult_home "$H_RESUME"
+id_resume=$(prepare_id "$H_RESUME" "$QUESTION_TWO")
+record_resume="$H_RESUME/data/consults/$id_resume"
+prepared_model=$(perl -MJSON::PP -e 'my $v = decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }); print $v->{model}' "$record_resume/prepared.json")
+observed_now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+printf '{"schema_version":1,"preflight":{"doctor":{"available":true,"ready":true}},"limits_observed":{"available":true,"account":{"planType":"pro"},"observedLimits":[{"featureName":"%s","remaining":1,"observedAt":"%s"}]}}\n' \
+  "$prepared_model" "$observed_now" > "$record_resume/request.json"
+chmod 0600 "$record_resume/request.json"
+request_hash_before=$(shasum -a 256 "$record_resume/request.json" | awk '{print $1}')
+before_resume=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+resume_out=$(fc "$H_RESUME" submit "$id_resume") || fail "pre-attempt request checkpoint did not resume submission: $resume_out"
+after_resume=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+[ "$after_resume" = $((before_resume + 1)) ] \
+  || fail "resumed request checkpoint create count changed from $before_resume to $after_resume: $resume_out"
+[ "$request_hash_before" = "$(shasum -a 256 "$record_resume/request.json" | awk '{print $1}')" ] \
+  || fail "resumed request checkpoint overwrote immutable request evidence"
+assert_grep '"terminal":"SUBMITTED"' "$record_resume/submission.json" "request checkpoint resume records the known submitted job"
+pass "a request checkpoint before the attempt marker resumes without ambiguity"
+
+# A captured terminal belongs to its registration bytes, not a boot-volatile
+# device/inode. Reconcile must retire that exact source before it can start a
+# second wait after a runner crash between capture and retirement.
+H_CAPTURE_RECOVERY="$TMP_ROOT/home-capture-recovery"
+consult_home "$H_CAPTURE_RECOVERY"
+id_capture_recovery=$(prepare_id "$H_CAPTURE_RECOVERY" "$QUESTION_TWO")
+before_capture_recovery=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+fc "$H_CAPTURE_RECOVERY" submit "$id_capture_recovery" >/dev/null || fail "capture-recovery fixture submit failed"
+source_capture_recovery="consult-$id_capture_recovery"
+registration_capture_recovery="$H_CAPTURE_RECOVERY/state/procevent/$source_capture_recovery.source"
+generation_capture_recovery="sha256:$(shasum -a 256 "$registration_capture_recovery" | awk '{print $1}')"
+mkdir -p "$H_CAPTURE_RECOVERY/state/procevent-inbox"
+printf '{"schema":"fm-consult-wait/1","consult_id":"%s","job_id":"job_fixture","wait_exit":0,"wait_timed_out":false,"job_status":"succeeded","error_code":null}\n' \
+  "$id_capture_recovery" > "$H_CAPTURE_RECOVERY/state/procevent-inbox/$source_capture_recovery.1.result"
+printf 'consult\n' > "$H_CAPTURE_RECOVERY/state/procevent-inbox/$source_capture_recovery.1.adapter"
+printf 'schema=fm-procevent-capture-generation.v1\nregistration_generation=%s\n' \
+  "$generation_capture_recovery" > "$H_CAPTURE_RECOVERY/state/procevent-inbox/$source_capture_recovery.1.generation"
+chmod 0600 "$H_CAPTURE_RECOVERY/state/procevent-inbox/$source_capture_recovery.1.result" \
+  "$H_CAPTURE_RECOVERY/state/procevent-inbox/$source_capture_recovery.1.adapter" \
+  "$H_CAPTURE_RECOVERY/state/procevent-inbox/$source_capture_recovery.1.generation"
+rm -f -- "$WAIT_STARTED" "$WAIT_RELEASE"
+capture_recovery_out=$(pe "$H_CAPTURE_RECOVERY" reconcile) || fail "capture recovery reconcile failed: $capture_recovery_out"
+assert_contains "$capture_recovery_out" "terminal-recovered=1" "captured terminal is recovered before new work starts"
+assert_absent "$registration_capture_recovery" "captured terminal retirement removes its exact registration"
+assert_absent "$WAIT_STARTED" "captured terminal recovery started a second wait"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = $((before_capture_recovery + 1)) ] \
+  || fail "captured terminal recovery submitted another consultation job"
+pass "captured terminal recovery prevents a second known-job wait after a crash"
+
+H_LIMIT_STALE="$TMP_ROOT/home-limit-stale"
+consult_home "$H_LIMIT_STALE"
+id_limit_stale=$(prepare_id "$H_LIMIT_STALE" "$QUESTION_TWO")
+export PRO_CLI_LIMITS_JSON='{"ok":true,"data":{"account":{"planType":"pro"},"observedLimits":[{"featureName":"gpt-5-6-pro","remaining":1,"resetAfter":null,"observedAt":"2000-01-01T00:00:00Z"}]}}'
+before_limit_stale=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+fc "$H_LIMIT_STALE" submit "$id_limit_stale" >/dev/null || fail "stale limits terminal was not recorded"
+assert_grep '"terminal":"LIMITS_INDETERMINATE"' "$H_LIMIT_STALE/data/consults/$id_limit_stale/submission.json" "stale selected-model limit observation stops before submission"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_limit_stale" ] \
+  || fail "stale selected-model limit observation still created a job"
+unset PRO_CLI_LIMITS_JSON
+pass "a stale selected-model limit observation is never treated as unlimited"
+
 H_LIMIT="$TMP_ROOT/home-limit"
 consult_home "$H_LIMIT"
 id_limit=$(prepare_id "$H_LIMIT" "$QUESTION_TWO")
-export PRO_CLI_LIMITS_JSON='{"ok":true,"data":{"exhausted":true}}'
+limit_observation=$(printf '{"ok":true,"data":{"account":{"planType":"pro"},"observedLimits":[{"featureName":"gpt-5-6-pro","remaining":0,"resetAfter":null,"observedAt":"%s","jobId":null}]}}' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')")
+export PRO_CLI_LIMITS_JSON="$limit_observation"
 before_limit=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
 fc "$H_LIMIT" submit "$id_limit" >/dev/null || fail "limit terminal was not recorded"
 assert_grep '"terminal":"LIMIT_REACHED"' "$H_LIMIT/data/consults/$id_limit/submission.json" "explicit limits observation stops before submission"
@@ -254,7 +382,20 @@ assert_contains "$deep_out" "Deep Research is not enabled" "Deep Research is ref
 assert_absent "$H_DEEP/data/consults" "refused Deep Research creates no private consultation record"
 pass "Deep Research remains explicitly disabled pending saved-chat authorization"
 
+H_MODEL="$TMP_ROOT/home-model-deny"
+consult_home "$H_MODEL"
+model_status=0
+model_out=$(fc "$H_MODEL" prepare --question "$QUESTION_TWO" --privacy internal-research --model gpt-5-5 2>&1) || model_status=$?
+[ "$model_status" -ne 0 ] || fail "an unapproved temporary-chat model was accepted"
+assert_contains "$model_out" "model is not approved" "model default-deny is enforced at preparation"
+assert_absent "$H_MODEL/data/consults" "unapproved model creates no consultation record"
+pass "only the explicitly approved temporary-chat model may be prepared"
+
 PE_HOME="$H2"
 FM_HOME="$PE_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
 PE_HOME="$H3"
+FM_HOME="$PE_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+PE_HOME="$H_WAIT_FAILURE"
+FM_HOME="$PE_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+PE_HOME="$H_RESUME"
 FM_HOME="$PE_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true

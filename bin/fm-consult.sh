@@ -8,6 +8,7 @@
 #   fm-consult.sh collect <consult-id> <captured-result-file>
 #   fm-consult.sh job-id <consult-id>
 #   fm-consult.sh source-id <consult-id>
+#   fm-consult.sh wait-needed <consult-id>
 #   fm-consult.sh reconcile-ambiguous <consult-id> --human-record <reference>
 #
 # `prepare` writes a new private consultation record below FM_HOME/data/consults.
@@ -31,6 +32,11 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 CONSULT_ROOT="$FM_HOME/data/consults"
 PRO_CLI_VERSION=UNOBSERVED
 PRO_CLI_SOURCE_REVISION=UNAVAILABLE
+SUBMISSION_LOCK="$CONSULT_ROOT/.submission.lock"
+SUBMISSION_LOCK_HELD=0
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 umask 077
 
@@ -59,6 +65,18 @@ ensure_consult_root() {
   [ -d "$CONSULT_ROOT" ] && [ ! -L "$CONSULT_ROOT" ] || return 1
   chmod 0700 "$CONSULT_ROOT" || return 1
   private_mode "$CONSULT_ROOT" 700
+}
+
+submission_lock_acquire() {
+  ensure_consult_root || return 1
+  fm_lock_acquire_wait "$SUBMISSION_LOCK" || return 1
+  SUBMISSION_LOCK_HELD=1
+}
+
+submission_lock_release() {
+  [ "$SUBMISSION_LOCK_HELD" -eq 1 ] || return 0
+  fm_lock_release "$SUBMISSION_LOCK" || return 1
+  SUBMISSION_LOCK_HELD=0
 }
 
 consult_dir() { printf '%s/%s\n' "$CONSULT_ROOT" "$1"; }
@@ -141,37 +159,75 @@ new_consult_id() {
   printf '%s-%s-%s-%s-%s\n' "${raw:0:8}" "${raw:8:4}" "${raw:12:4}" "${raw:16:4}" "${raw:20:12}"
 }
 
-json_redact_capture() {  # <file>; prints only redacted valid JSON or a fixed unavailable object
+canonical_temporary_model() {  # <requested model>; prints the known temporary-chat model
+  local raw=${1-} compact
+  compact=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+  case "$compact" in
+    gpt56pro) printf 'gpt-5-6-pro\n' ;;
+    research|deepresearch|image) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
+submission_attempt_exists() {  # <dir>
+  [ -f "$1/submission-attempt.json" ] && [ ! -L "$1/submission-attempt.json" ] && private_mode "$1/submission-attempt.json" 600
+}
+
+request_exists() {  # <dir>
+  [ -f "$1/request.json" ] && [ ! -L "$1/request.json" ] && private_mode "$1/request.json" 600
+}
+
+json_redact_capture() {  # <doctor|limits> <file>; prints a strict non-secret observation
+  local kind=$1 file=$2
   perl -MJSON::PP -e '
     use strict;
     use warnings;
-    my $text = do { local $/; open my $fh, "<", $ARGV[0] or exit 2; <$fh> };
+    my ($kind, $file) = @ARGV;
+    my $text = do { local $/; open my $fh, "<", $file or exit 2; <$fh> };
     my $value;
     eval { $value = decode_json($text); 1 } or do {
-      print encode_json({ available => JSON::PP::false, format => "invalid_json" });
+      print JSON::PP->new->canonical->encode({ available => JSON::PP::false, format => "invalid_json", kind => $kind });
       exit 0;
     };
-    sub redact {
-      my ($v, $key) = @_;
-      if (defined $key && $key =~ /(?:cookie|token|secret|authorization|credential|cdp|endpoint|websocket)/i) {
-        return "[REDACTED]";
-      }
-      if (ref $v eq "HASH") {
-        return { map { $_ => redact($v->{$_}, $_) } keys %$v };
-      }
-      if (ref $v eq "ARRAY") {
-        return [ map { redact($_, undef) } @$v ];
-      }
-      return $v;
+    my $ok = ref($value) eq "HASH" && ref($value->{ok}) eq "JSON::PP::Boolean" ? $value->{ok} : JSON::PP::false;
+    my $out = { available => $ok, kind => $kind };
+    if ($kind eq "doctor" && $ok && ref($value->{data}) eq "HASH" && ref($value->{data}{ready}) eq "JSON::PP::Boolean") {
+      $out->{ready} = $value->{data}{ready};
     }
-    print JSON::PP->new->canonical->encode(redact($value, undef));
-  ' "$1"
+    if ($kind eq "limits" && $ok && ref($value->{data}) eq "HASH") {
+      my $data = $value->{data};
+      if (ref($data->{account}) eq "HASH") {
+        my %account;
+        for my $key (qw(planType subscriptionPlan expiresAt renewsAt billingPeriod)) {
+          $account{$key} = $data->{account}{$key} if defined($data->{account}{$key}) && !ref($data->{account}{$key});
+        }
+        $out->{account} = \%account;
+      }
+      if (ref($data->{observedLimits}) eq "ARRAY") {
+        my @limits;
+        for my $entry (@{$data->{observedLimits}}) {
+          next unless ref($entry) eq "HASH";
+          my %safe;
+          for my $key (qw(featureName remaining resetAfter observedAt)) {
+            $safe{$key} = $entry->{$key} if exists($entry->{$key}) && defined($entry->{$key}) && !ref($entry->{$key});
+          }
+          push @limits, \%safe;
+        }
+        $out->{observedLimits} = \@limits;
+      }
+    }
+    if (ref($value) eq "HASH" && ref($value->{error}) eq "HASH" && defined($value->{error}{code}) && $value->{error}{code} =~ /^[A-Z0-9_]+$/) {
+      $out->{error_code} = $value->{error}{code};
+    }
+    print JSON::PP->new->canonical->encode($out);
+  ' "$kind" "$file"
 }
 
 json_doctor_ready() {  # <file>
   perl -MJSON::PP -e '
     my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
-    exit 1 unless ref($v) eq "HASH" && $v->{ok} && ref($v->{data}) eq "HASH" && $v->{data}{ready};
+    exit 1 unless ref($v) eq "HASH" && ref($v->{ok}) eq "JSON::PP::Boolean" && $v->{ok};
+    exit 1 unless ref($v->{data}) eq "HASH" && ref($v->{data}{ready}) eq "JSON::PP::Boolean" && $v->{data}{ready};
   ' "$1"
 }
 
@@ -184,20 +240,55 @@ json_error_code() {  # <file>
   ' "$1"
 }
 
-json_explicitly_exhausted() {  # <file>
+limits_observation_terminal() {  # <file> <canonical model>; LIMIT_REACHED|LIMITS_READY|LIMITS_INDETERMINATE
   perl -MJSON::PP -e '
-    my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
-    exit 1 unless ref($v) eq "HASH";
-    exit 0 if ref($v->{error}) eq "HASH" && (($v->{error}{code} // "") =~ /(?:LIMIT|RATE)/);
-    exit 0 if ref($v->{data}) eq "HASH" && $v->{data}{exhausted};
-    exit 1;
-  ' "$1"
+    use Time::Piece;
+    my ($file, $model, $max_age) = @ARGV;
+    my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
+    sub indeterminate { print "LIMITS_INDETERMINATE\n"; exit 0 }
+    indeterminate() unless ref($v) eq "HASH" && ref($v->{ok}) eq "JSON::PP::Boolean" && $v->{ok};
+    my $data = $v->{data};
+    indeterminate() unless ref($data) eq "HASH" && ref($data->{account}) eq "HASH" && ref($data->{observedLimits}) eq "ARRAY";
+    my @matches = grep { ref($_) eq "HASH" && defined($_->{featureName}) && !ref($_->{featureName}) && $_->{featureName} eq $model } @{$data->{observedLimits}};
+    indeterminate() unless @matches == 1;
+    my $entry = $matches[0];
+    indeterminate() unless defined($entry->{remaining}) && !ref($entry->{remaining}) && $entry->{remaining} =~ /\A(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\z/;
+    indeterminate() unless defined($entry->{observedAt}) && !ref($entry->{observedAt}) && $entry->{observedAt} =~ /\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\z/;
+    my $observed = eval { Time::Piece->strptime($entry->{observedAt}, "%Y-%m-%dT%H:%M:%SZ")->epoch };
+    indeterminate() unless defined($observed) && time() >= $observed && time() - $observed <= $max_age;
+    print(($entry->{remaining} == 0 ? "LIMIT_REACHED" : "LIMITS_READY"), "\n");
+  ' "$1" "$2" "${FM_CONSULT_LIMITS_MAX_AGE_SECONDS:-900}"
+}
+
+request_preflight_terminal() {  # <request.json> <canonical model>
+  perl -MJSON::PP -e '
+    use Time::Piece;
+    my ($file, $model, $max_age) = @ARGV;
+    my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
+    sub out { print "$_[0]\n"; exit 0 }
+    out("AUTH_UNAVAILABLE") unless ref($v) eq "HASH" && ref($v->{preflight}) eq "HASH";
+    my $doctor = $v->{preflight}{doctor};
+    out("AUTH_UNAVAILABLE") unless ref($doctor) eq "HASH" && ref($doctor->{available}) eq "JSON::PP::Boolean" && $doctor->{available};
+    out("AUTH_UNAVAILABLE") unless ref($doctor->{ready}) eq "JSON::PP::Boolean" && $doctor->{ready};
+    my $limits = $v->{limits_observed};
+    out("LIMITS_INDETERMINATE") unless ref($limits) eq "HASH" && ref($limits->{available}) eq "JSON::PP::Boolean" && $limits->{available};
+    out("LIMITS_INDETERMINATE") unless ref($limits->{account}) eq "HASH" && ref($limits->{observedLimits}) eq "ARRAY";
+    my @matches = grep { ref($_) eq "HASH" && defined($_->{featureName}) && !ref($_->{featureName}) && $_->{featureName} eq $model } @{$limits->{observedLimits}};
+    out("LIMITS_INDETERMINATE") unless @matches == 1;
+    my $entry = $matches[0];
+    out("LIMITS_INDETERMINATE") unless defined($entry->{remaining}) && !ref($entry->{remaining}) && $entry->{remaining} =~ /\A(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\z/;
+    out("LIMITS_INDETERMINATE") unless defined($entry->{observedAt}) && !ref($entry->{observedAt}) && $entry->{observedAt} =~ /\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\z/;
+    my $observed = eval { Time::Piece->strptime($entry->{observedAt}, "%Y-%m-%dT%H:%M:%SZ")->epoch };
+    out("LIMITS_INDETERMINATE") unless defined($observed) && time() >= $observed && time() - $observed <= $max_age;
+    out($entry->{remaining} == 0 ? "LIMIT_REACHED" : "LIMITS_READY");
+  ' "$1" "$2" "${FM_CONSULT_LIMITS_MAX_AGE_SECONDS:-900}"
 }
 
 json_create_job_id() {  # <file>
   perl -MJSON::PP -e '
     my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
-    exit 1 unless ref($v) eq "HASH" && $v->{ok} && ref($v->{data}) eq "HASH" && ref($v->{data}{job}) eq "HASH";
+    exit 1 unless ref($v) eq "HASH" && ref($v->{ok}) eq "JSON::PP::Boolean" && $v->{ok};
+    exit 1 unless ref($v->{data}) eq "HASH" && ref($v->{data}{job}) eq "HASH";
     my $id = $v->{data}{job}{id};
     exit 1 unless defined $id && $id =~ /^job_[A-Za-z0-9_-]{1,128}$/;
     print "$id\n";
@@ -288,14 +379,20 @@ unreconciled_ambiguity() {  # [except consult id]
 
 cmd_prepare() {
   local question='' source_packet='' privacy='' model=gpt-5-6-pro reasoning=standard
-  local id dir question_hash source_hash contract
+  local id dir question_hash source_hash contract canonical_model
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --question) question=${2-}; shift 2 ;;
-      --source-packet) source_packet=${2-}; shift 2 ;;
-      --privacy) privacy=${2-}; shift 2 ;;
-      --model) model=${2-}; shift 2 ;;
-      --reasoning) reasoning=${2-}; shift 2 ;;
+      --question|--source-packet|--privacy|--model|--reasoning)
+        [ "$#" -ge 2 ] || usage
+        case "$1" in
+          --question) question=$2 ;;
+          --source-packet) source_packet=$2 ;;
+          --privacy) privacy=$2 ;;
+          --model) model=$2 ;;
+          --reasoning) reasoning=$2 ;;
+        esac
+        shift 2
+        ;;
       *) usage ;;
     esac
   done
@@ -304,7 +401,12 @@ cmd_prepare() {
   [ -z "$source_packet" ] || { [ -f "$source_packet" ] && [ ! -L "$source_packet" ] || die "source packet must be a regular file"; }
   case "$privacy" in *$'\n'*|*$'\r'*|'') die "privacy classification is invalid" ;; esac
   case "$model:$reasoning" in *$'\n'*|*$'\r'*) die "model or reasoning is invalid" ;; esac
-  case "$model" in research|deep-research|deep_research) die "Deep Research is not enabled by this consultation capability" ;; esac
+  canonical_model=$(canonical_temporary_model "$model")
+  case "$?" in
+    0) model=$canonical_model ;;
+    2) die "Deep Research is not enabled by this consultation capability; saved-chat-only models are refused" ;;
+    *) die "model is not approved for a temporary consultation" ;;
+  esac
   [ "${#privacy}" -le 128 ] && [ "${#model}" -le 128 ] && [ "${#reasoning}" -le 128 ] || die "consult metadata is too long"
   ensure_consult_root || die "cannot prepare private consultation root"
   for _ in $(seq 1 32); do
@@ -378,8 +480,8 @@ write_request_from_preflight() {  # <dir> <id> <doctor capture> <limits capture>
   model=$(json_path_string "$prepared" model) || return 1
   reasoning=$(json_path_string "$prepared" reasoning) || return 1
   privacy=$(json_path_string "$prepared" privacy_classification) || return 1
-  doctor_json=$(json_redact_capture "$doctor") || return 1
-  limits_json=$(json_redact_capture "$limits") || return 1
+  doctor_json=$(json_redact_capture doctor "$doctor") || return 1
+  limits_json=$(json_redact_capture limits "$limits") || return 1
   write_once "$dir/request.json" <<EOF
 {"schema_version":1,"consult_id":$(json_string "$id"),"created_at":$(json_string "$(timestamp)"),"question_sha256":$(json_string "$question_hash"),"contract_sha256":$(json_string "$contract_hash"),"source_packet_sha256":$(json_string "$source_hash"),"model":$(json_string "$model"),"reasoning":$(json_string "$reasoning"),"privacy_classification":$(json_string "$privacy"),"retries":0,"conversation_retention":"temporary","preflight":{"recorded_at":$(json_string "$(timestamp)"),"doctor":$doctor_json},"limits_observed_at":$(json_string "$(timestamp)"),"limits_observed":$limits_json,"redaction_declaration":"Credential, cookie, token, CDP, endpoint, websocket, and browser-target values are redacted."}
 EOF
@@ -397,10 +499,26 @@ submit_error_terminal() {  # <capture>; prints terminal
 }
 
 cmd_submit() {
-  local id=${1-} dir terminal existing_ambiguous doctor limits doctor_capture limits_capture rc limits_rc request_exists attempt_at submit_capture job_id code
+  local rc
+  submission_lock_acquire || die "cannot acquire the private submission lock"
+  trap 'submission_lock_release >/dev/null 2>&1 || true' EXIT
+  cmd_submit_locked "$@"
+  rc=$?
+  submission_lock_release || die "cannot release the private submission lock"
+  trap - EXIT
+  return "$rc"
+}
+
+cmd_submit_locked() {
+  local id=${1-} dir terminal existing_ambiguous doctor_capture limits_capture rc limits_rc limit_terminal
+  local request_present attempt_at submit_capture job_id code model reasoning
   [ "$#" -eq 1 ] || usage
   dir=$(require_consult_dir "$id")
   if terminal=$(submission_terminal "$dir" 2>/dev/null); then
+    if [ "$terminal" = SUBMITTED ]; then
+      "$SCRIPT_DIR/fm-procevent-consult.sh" arm "$id" \
+        || die "submitted job could not be checked for its background wait"
+    fi
     printf 'already-terminal: %s %s\n' "$id" "$terminal"
     return 0
   fi
@@ -416,53 +534,80 @@ cmd_submit() {
   if ! [ -f "$dir/prepared.json" ] || [ -L "$dir/prepared.json" ] || ! private_mode "$dir/prepared.json" 600; then
     die "prepared record is missing or unsafe"
   fi
-  request_exists=0
-  [ -e "$dir/request.json" ] && request_exists=1
-  if [ "$request_exists" -eq 1 ] || [ -e "$dir/submission-attempt.json" ]; then
-    # A crash can occur after request creation or after the durable attempt
-    # marker. No later invocation can prove which side of the submit boundary
-    # it reached, so preserve ambiguity instead of issuing another request.
+  request_present=0
+  if [ -e "$dir/request.json" ] || [ -L "$dir/request.json" ]; then
+    request_exists "$dir" || die "existing request record is missing or unsafe"
+    request_present=1
+  fi
+  if [ -e "$dir/submission-attempt.json" ] || [ -L "$dir/submission-attempt.json" ]; then
+    submission_attempt_exists "$dir" || die "existing submission attempt record is missing or unsafe"
+    # The durable intent marker is written immediately before the only external
+    # call. Its presence proves delivery may have crossed, so recovery stops.
     [ -e "$dir/submission.json" ] || write_submission "$dir" "$id" DELIVERY_AMBIGUOUS '' '' "$(timestamp)" \
       || die "cannot record ambiguous delivery terminal"
     die "submission boundary is already durable but not conclusively resolved; DELIVERY_AMBIGUOUS"
   fi
-  doctor_capture=$(private_capture "$dir" doctor pro-cli doctor --json); rc=$?
-  [ -n "$doctor_capture" ] || die "cannot capture redacted pro-cli doctor response"
-  limits_capture=$(private_capture "$dir" limits pro-cli limits --json); limits_rc=$?
-  [ -n "$limits_capture" ] || { rm -f -- "$doctor_capture"; die "cannot capture redacted pro-cli limits response"; }
-  write_request_from_preflight "$dir" "$id" "$doctor_capture" "$limits_capture" || {
+  model=$(json_path_string "$dir/prepared.json" model) || die "prepared model is unreadable"
+  reasoning=$(json_path_string "$dir/prepared.json" reasoning) || die "prepared reasoning is unreadable"
+  if [ "$request_present" -eq 0 ]; then
+    doctor_capture=$(private_capture "$dir" doctor pro-cli doctor --json); rc=$?
+    [ -n "$doctor_capture" ] || die "cannot capture redacted pro-cli doctor response"
+    limits_capture=$(private_capture "$dir" limits pro-cli limits --json); limits_rc=$?
+    [ -n "$limits_capture" ] || { rm -f -- "$doctor_capture"; die "cannot capture redacted pro-cli limits response"; }
+    write_request_from_preflight "$dir" "$id" "$doctor_capture" "$limits_capture" || {
+      rm -f -- "$doctor_capture" "$limits_capture"
+      die "cannot create immutable preflight request record"
+    }
+    if [ "$rc" -ne 0 ] || ! json_doctor_ready "$doctor_capture"; then
+      code=$(json_error_code "$doctor_capture" 2>/dev/null || true)
+      rm -f -- "$doctor_capture" "$limits_capture"
+      write_submission "$dir" "$id" AUTH_UNAVAILABLE '' "$code" "$(timestamp)" \
+        || die "cannot record auth-unavailable terminal"
+      printf 'terminal: %s AUTH_UNAVAILABLE\n' "$id"
+      return 0
+    fi
+    if [ "$limits_rc" -ne 0 ]; then
+      code=$(json_error_code "$limits_capture" 2>/dev/null || true)
+      rm -f -- "$doctor_capture" "$limits_capture"
+      case "$code" in SESSION_*|ACCOUNT_*|CHATGPT_PAGE_*|CDP_*|AUTH_*) terminal=AUTH_UNAVAILABLE ;; *) terminal=LIMITS_INDETERMINATE ;; esac
+      write_submission "$dir" "$id" "$terminal" '' "$code" "$(timestamp)" \
+        || die "cannot record limits terminal"
+      printf 'terminal: %s %s\n' "$id" "$terminal"
+      return 0
+    fi
+    limit_terminal=$(limits_observation_terminal "$limits_capture" "$model" 2>/dev/null || true)
     rm -f -- "$doctor_capture" "$limits_capture"
-    die "cannot create immutable preflight request record"
-  }
-  if [ "$rc" -ne 0 ] || ! json_doctor_ready "$doctor_capture"; then
-    code=$(json_error_code "$doctor_capture" 2>/dev/null || true)
-    rm -f -- "$doctor_capture" "$limits_capture"
-    write_submission "$dir" "$id" AUTH_UNAVAILABLE '' "$code" "$(timestamp)" \
-      || die "cannot record auth-unavailable terminal"
-    printf 'terminal: %s AUTH_UNAVAILABLE\n' "$id"
-    return 0
+    case "$limit_terminal" in
+      LIMITS_READY) ;;
+      LIMIT_REACHED|LIMITS_INDETERMINATE)
+        write_submission "$dir" "$id" "$limit_terminal" '' '' "$(timestamp)" \
+          || die "cannot record limits terminal"
+        printf 'terminal: %s %s\n' "$id" "$limit_terminal"
+        return 0
+        ;;
+      *) die "limits observation could not be classified" ;;
+    esac
+  else
+    limit_terminal=$(request_preflight_terminal "$dir/request.json" "$model" 2>/dev/null || true)
+    case "$limit_terminal" in
+      LIMITS_READY) ;;
+      AUTH_UNAVAILABLE|LIMIT_REACHED|LIMITS_INDETERMINATE)
+        write_submission "$dir" "$id" "$limit_terminal" '' '' "$(timestamp)" \
+          || die "cannot record recovered preflight terminal"
+        printf 'terminal: %s %s\n' "$id" "$limit_terminal"
+        return 0
+        ;;
+      *) die "durable preflight record could not be classified" ;;
+    esac
   fi
-  if [ "$limits_rc" -eq 0 ] && json_explicitly_exhausted "$limits_capture"; then
-    code=$(json_error_code "$limits_capture" 2>/dev/null || true)
-    rm -f -- "$doctor_capture" "$limits_capture"
-    write_submission "$dir" "$id" LIMIT_REACHED '' "$code" "$(timestamp)" \
-      || die "cannot record limit-reached terminal"
-    printf 'terminal: %s LIMIT_REACHED\n' "$id"
-    return 0
-  fi
-  rm -f -- "$doctor_capture" "$limits_capture"
+  submit_capture=$(umask 077; mktemp "$dir/.submit.XXXXXX") || die "cannot stage pro-cli submission"
+  chmod 0600 "$submit_capture" || { rm -f -- "$submit_capture"; die "cannot secure pro-cli submission staging"; }
   attempt_at=$(timestamp)
+  cd "$dir" || { rm -f -- "$submit_capture"; die "cannot enter private consultation record"; }
   write_once "$dir/submission-attempt.json" <<EOF
 {"schema_version":1,"consult_id":$(json_string "$id"),"attempted_at":$(json_string "$attempt_at"),"state":"SUBMISSION_ATTEMPTED","retries":0}
 EOF
-  submit_capture=$(umask 077; mktemp "$dir/.submit.XXXXXX") || die "cannot stage pro-cli submission"
-  chmod 0600 "$submit_capture" || { rm -f -- "$submit_capture"; die "cannot secure pro-cli submission staging"; }
-  (
-    cd "$dir" || exit 125
-    pro-cli job create @question.md --json --retries 0 --temporary \
-      --model "$(json_path_string "$dir/prepared.json" model)" \
-      --reasoning "$(json_path_string "$dir/prepared.json" reasoning)"
-  ) > "$submit_capture" 2>&1
+  pro-cli job create @question.md --json --retries 0 --temporary --model "$model" --reasoning "$reasoning" > "$submit_capture" 2>&1
   rc=$?
   chmod 0600 "$submit_capture" || { rm -f -- "$submit_capture"; die "cannot secure pro-cli submission capture"; }
   if [ "$rc" -eq 0 ] && job_id=$(json_create_job_id "$submit_capture"); then
@@ -493,6 +638,23 @@ cmd_source_id() {
   printf 'consult-%s\n' "$id"
 }
 
+cmd_wait_needed() {  # <consult-id>: succeeds only when a known job has no terminal capture or receipt
+  local id=${1-} dir terminal source result
+  [ "$#" -eq 1 ] || usage
+  dir=$(require_consult_dir "$id")
+  terminal=$(submission_terminal "$dir") || return 1
+  [ "$terminal" = SUBMITTED ] || return 1
+  if [ -e "$dir/receipt.json" ] || [ -L "$dir/receipt.json" ]; then
+    return 1
+  fi
+  source=$(cmd_source_id "$id") || return 1
+  for result in "$FM_HOME/state/procevent-inbox/$source".*.result; do
+    [ -f "$result" ] && [ ! -L "$result" ] || continue
+    "$SCRIPT_DIR/fm-procevent-consult.sh" terminal "$result" && return 1
+  done
+  return 0
+}
+
 cmd_arm() {
   local id=${1-}
   [ "$#" -eq 1 ] || usage
@@ -511,7 +673,7 @@ result_event_matches() {  # <file> <consult id> <job id>
 result_event_timed_out() {  # <file>
   perl -MJSON::PP -e '
     my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
-    exit 1 unless ref($v) eq "HASH" && $v->{wait_timed_out};
+    exit 1 unless ref($v) eq "HASH" && ref($v->{wait_timed_out}) eq "JSON::PP::Boolean" && $v->{wait_timed_out};
   ' "$1"
 }
 
@@ -519,7 +681,7 @@ json_status() {  # <file> <job id>; prints job status
   perl -MJSON::PP -e '
     my ($file, $job) = @ARGV;
     my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
-    my $j = ref($v) eq "HASH" && $v->{ok} && ref($v->{data}) eq "HASH" ? $v->{data}{job} : undef;
+    my $j = ref($v) eq "HASH" && ref($v->{ok}) eq "JSON::PP::Boolean" && $v->{ok} && ref($v->{data}) eq "HASH" ? $v->{data}{job} : undef;
     exit 1 unless ref($j) eq "HASH" && ($j->{id} // "") eq $job && ($j->{status} // "") =~ /^(?:queued|running|succeeded|failed|cancelled)$/;
     print "$j->{status}\n";
   ' "$1" "$2"
@@ -530,7 +692,7 @@ json_result() {  # <file> <job id>; prints exact answer bytes
     my ($file, $job) = @ARGV;
     my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
     exit 10 unless ref($v) eq "HASH";
-    exit 11 unless $v->{ok} && ref($v->{data}) eq "HASH";
+    exit 11 unless ref($v->{ok}) eq "JSON::PP::Boolean" && $v->{ok} && ref($v->{data}) eq "HASH";
     exit 12 unless ($v->{data}{jobId} // "") eq $job;
     exit 13 unless defined($v->{data}{result}) && !ref($v->{data}{result});
     binmode STDOUT;
@@ -618,6 +780,7 @@ case "${1-}" in
   collect) shift; cmd_collect "$@" ;;
   job-id) shift; cmd_job_id "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
+  wait-needed) shift; cmd_wait_needed "$@" ;;
   reconcile-ambiguous) shift; cmd_reconcile_ambiguous "$@" ;;
   *) usage ;;
 esac

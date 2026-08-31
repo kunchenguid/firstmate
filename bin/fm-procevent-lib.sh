@@ -155,6 +155,23 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   return 1
 }
 
+# Stable across reboot, unlike the filesystem device/inode pair used only for
+# live-process custody. A captured terminal binds to these immutable
+# registration bytes so restart recovery can prove it belongs to the source it
+# retires without treating an APFS device reassignment as a new generation.
+fm_procevent_registration_generation_locked() {  # <state> <source-id>
+  local state=$1 id=$2 registration hash
+  fm_procevent_source_id_valid "$id" || return 1
+  registration="$(fm_procevent_registry_dir "$state")/$id.source"
+  [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
+  [ "$(fm_pr_file_mode "$registration")" = 600 ] || return 1
+  hash=$(fm_pr_sha256 "$registration") || return 1
+  case "$hash" in ??????*) ;; *) return 1 ;; esac
+  case "$hash" in *[!0-9a-f]*) return 1 ;; esac
+  [ "${#hash}" -eq 64 ] || return 1
+  printf 'sha256:%s\n' "$hash"
+}
+
 # Publish one extension-owned registration. Its identity fields and random
 # registration token are immutable owner evidence; the executable argv is never
 # stored because the tracked host constructs that command at run time.
@@ -558,7 +575,7 @@ fm_procevent_claim_release_locked() {
 # --- durable capture and publication ----------------------------------------
 
 fm_procevent_path_normalize() {
-  local path=${1-} part
+  local path=${1-} part normalized_path
   local -a parts normalized=()
   [ -n "$path" ] || return 1
   case "$path" in
@@ -573,7 +590,15 @@ fm_procevent_path_normalize() {
       *) normalized+=("$part") ;;
     esac
   done
-  printf '/%s\n' "$(IFS=/; printf '%s' "${normalized[*]}")"
+  normalized_path="/$(IFS=/; printf '%s' "${normalized[*]}")"
+  # Darwin presents /tmp and /var through /private.  When the normalized path
+  # exists, return its physical path so a private-dir guard does not reject a
+  # safe directory solely because the caller used that public spelling.
+  if [ -d "$normalized_path" ] && [ ! -L "$normalized_path" ]; then
+    CDPATH='' cd -P -- "$normalized_path" && pwd -P
+    return $?
+  fi
+  printf '%s\n' "$normalized_path"
 }
 
 fm_procevent_directory_owned_by_current_user() {
@@ -645,7 +670,7 @@ fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>
   done
 }
 
-# fm_procevent_capture <state> <source-id> <adapter> <output-file>
+# fm_procevent_capture <state> <source-id> <adapter> <output-file> [<registration-generation>]
 #   [<extension-id> <extension-version> <capability-version> <package-digest> <binding-digest>]
 # Atomically store the completed output at 0600 and print its durable path. The
 # rename is the commit point; nothing referencing this result may be published
@@ -653,12 +678,16 @@ fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>
 # identity beside the legacy adapter sidecar, so later classification cannot
 # silently move to a replacement binding.
 fm_procevent_capture() {
-  local state=$1 id=$2 adapter=$3 src=$4 extension_id=${5-} extension_version=${6-}
+  local state=$1 id=$2 adapter=$3 src=$4 registration_generation='' extension_id=${5-} extension_version=${6-}
   local capability_version=${7-} package_digest=${8-} binding_digest=${9-}
-  local inbox seq dest tmp adapter_dest adapter_tmp extension_dest='' extension_tmp=''
-  [ "$#" -eq 4 ] || [ "$#" -eq 9 ] || return 1
+  local inbox seq dest tmp adapter_dest adapter_tmp extension_dest='' extension_tmp='' generation_dest='' generation_tmp=''
+  [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || [ "$#" -eq 9 ] || return 1
   fm_procevent_source_id_valid "$id" || return 1
   fm_procevent_adapter_valid "$adapter" || return 1
+  if [ "$#" -eq 5 ]; then
+    registration_generation=$5
+    fm_procevent_digest_valid "$registration_generation" || return 1
+  fi
   if [ "$#" -eq 9 ]; then
     fm_procevent_extension_id_valid "$extension_id" || return 1
     fm_procevent_extension_version_valid "$extension_version" || return 1
@@ -693,6 +722,15 @@ fm_procevent_capture() {
   fi
   tmp=$(umask 077; mktemp "$inbox/.capture.XXXXXX") || return 1
   adapter_tmp=$(umask 077; mktemp "$inbox/.adapter.XXXXXX") || { rm -f -- "$tmp"; return 1; }
+  if [ -n "$registration_generation" ]; then
+    generation_dest="$inbox/$id.$seq.generation"
+    [ ! -e "$generation_dest" ] && [ ! -L "$generation_dest" ] || {
+      rm -f -- "$tmp" "$adapter_tmp"
+      return 1
+    }
+    generation_tmp=$(umask 077; mktemp "$inbox/.generation.XXXXXX") \
+      || { rm -f -- "$tmp" "$adapter_tmp"; return 1; }
+  fi
   if [ "$#" -eq 9 ]; then
     extension_dest="$inbox/$id.$seq.extension"
     [ ! -e "$extension_dest" ] && [ ! -L "$extension_dest" ] || {
@@ -702,8 +740,15 @@ fm_procevent_capture() {
     extension_tmp=$(umask 077; mktemp "$inbox/.extension.XXXXXX") \
       || { rm -f -- "$tmp" "$adapter_tmp"; return 1; }
   fi
-  if ! cat "$src" > "$tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
-  if ! printf '%s\n' "$adapter" > "$adapter_tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
+  if ! cat "$src" > "$tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"; return 1; fi
+  if ! printf '%s\n' "$adapter" > "$adapter_tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"; return 1; fi
+  if [ -n "$registration_generation" ] && ! {
+    printf 'schema=fm-procevent-capture-generation.v1\n'
+    printf 'registration_generation=%s\n' "$registration_generation"
+  } > "$generation_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"
+    return 1
+  fi
   if [ "$#" -eq 9 ] && ! {
     printf 'schema=fm-procevent-extension-owner.v1\n'
     printf 'extension_id=%s\n' "$extension_id"
@@ -712,25 +757,34 @@ fm_procevent_capture() {
     printf 'package_digest=%s\n' "$package_digest"
     printf 'binding_digest=%s\n' "$binding_digest"
   } > "$extension_tmp"; then
-    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"
     return 1
   fi
   if ! chmod 0600 "$tmp" "$adapter_tmp"; then
-    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"
+    return 1
+  fi
+  if [ -n "$generation_tmp" ] && ! chmod 0600 "$generation_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"
     return 1
   fi
   if [ "$#" -eq 9 ] && ! chmod 0600 "$extension_tmp"; then
     rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
     return 1
   fi
-  if ! mv -f -- "$adapter_tmp" "$adapter_dest"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
+  if ! mv -f -- "$adapter_tmp" "$adapter_dest"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"; return 1; fi
+  if [ -n "$generation_dest" ] && ! mv -f -- "$generation_tmp" "$generation_dest"; then
+    rm -f -- "$tmp" "$adapter_dest" "$generation_tmp" "$extension_tmp"
+    return 1
+  fi
   if [ "$#" -eq 9 ] && ! mv -f -- "$extension_tmp" "$extension_dest"; then
-    rm -f -- "$tmp" "$adapter_dest" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_dest" "$generation_dest" "$extension_tmp"
     return 1
   fi
   if ! mv -f -- "$tmp" "$dest"; then
     rm -f -- "$tmp" "$adapter_dest"
     [ -z "$extension_dest" ] || rm -f -- "$extension_dest"
+    [ -z "$generation_dest" ] || rm -f -- "$generation_dest"
     return 1
   fi
   if [ "$#" -eq 9 ]; then
@@ -852,6 +906,22 @@ fm_procevent_result_adapter() {
   [ -z "$extra" ] || return 1
   fm_procevent_adapter_valid "$adapter" || return 1
   printf '%s\n' "$adapter"
+}
+
+fm_procevent_result_registration_generation() {  # <result-path>
+  local result=$1 file="${1%.result}.generation" schema_line generation_line extra
+  [ -f "$result" ] && [ ! -L "$result" ] || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(fm_pr_file_mode "$file")" = 600 ] || return 1
+  {
+    IFS= read -r schema_line \
+      && IFS= read -r generation_line \
+      && ! IFS= read -r extra
+  } < "$file" || return 1
+  [ "$schema_line" = schema=fm-procevent-capture-generation.v1 ] || return 1
+  FM_PROCEVENT_RESULT_REGISTRATION_GENERATION=${generation_line#registration_generation=}
+  [ "$generation_line" = "registration_generation=$FM_PROCEVENT_RESULT_REGISTRATION_GENERATION" ] || return 1
+  fm_procevent_digest_valid "$FM_PROCEVENT_RESULT_REGISTRATION_GENERATION" || return 1
 }
 
 # Load immutable extension identity for one captured result.

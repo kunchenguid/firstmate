@@ -5,6 +5,7 @@
 #
 # Usage:
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
+#   fm-procevent.sh register-if-absent <adapter> <source-id> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh reconcile
@@ -23,6 +24,11 @@
 #            executed directly, so there is no shell surface and no argument
 #            splitting. Built-in adapters register sources; nothing here parses
 #            user text.
+# register-if-absent
+#            Atomically publish a built-in source only when that canonical
+#            registration is absent. An existing registration is left byte-for-
+#            byte untouched, so an adapter replay cannot replace its runner
+#            identity or launch a second waiter.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -404,6 +410,37 @@ cmd_register() {
   printf 'registered: %s (%s)\n' "$id" "$adapter"
 }
 
+cmd_register_if_absent() {
+  local adapter=${1-} id=${2-} sep=${3-}
+  shift 3 2>/dev/null || usage
+  fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
+  [ "$sep" = -- ] || usage
+  [ "$#" -ge 1 ] || die "register-if-absent needs at least one argv element after --"
+  local arg registration
+  for arg in "$@"; do
+    case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
+  done
+  [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  registration=$(source_file "$id")
+  if [ -e "$registration" ] || [ -L "$registration" ]; then
+    [ -f "$registration" ] && [ ! -L "$registration" ] || {
+      fm_procevent_source_lock_release "$id"
+      die "existing registration is unsafe: $id"
+    }
+    fm_procevent_source_lock_release "$id"
+    printf 'already-registered: %s (%s)\n' "$id" "$adapter"
+    return 0
+  fi
+  if ! fm_procevent_registration_publish_locked "$STATE" "$adapter" "$id" "$@"; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot publish the absent-only registration"
+  fi
+  fm_procevent_source_lock_release "$id"
+  printf 'registered: %s (%s)\n' "$id" "$adapter"
+}
+
 new_extension_registration_token() {
   local hex
   hex=$(LC_ALL=C od -An -v -tx1 -N 32 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
@@ -591,7 +628,7 @@ cmd_start_public() {
 
 cmd_start() {
   local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0
-  local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
+  local extension_owner=0 extension_load_state extension_sequence='' extension_request_id='' registration_generation=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
@@ -645,6 +682,10 @@ cmd_start() {
       die "extension registration owner is unreadable: $id"
       ;;
   esac
+  if [ "$extension_owner" -eq 0 ]; then
+    registration_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id") \
+      || { fm_procevent_source_lock_release "$id"; die "cannot derive stable registration generation: $id"; }
+  fi
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")"
   claimed=$?
   fm_procevent_source_lock_release "$id"
@@ -787,7 +828,7 @@ EOF
   if [ "$extension_owner" -eq 1 ]; then
     :
   else
-    durable=$(fm_procevent_capture "$STATE" "$id" "$adapter" "$out") \
+    durable=$(fm_procevent_capture "$STATE" "$id" "$adapter" "$out" "$registration_generation") \
       || { rm -f -- "$out"; die "cannot durably capture the result"; }
   fi
   [ "$extension_owner" -eq 1 ] || rm -f -- "$out"
@@ -889,8 +930,58 @@ detach_runner() {  # <source-id>
   isolate_runner detach "$1"
 }
 
+# A completed capture is durable evidence, not merely a wake payload. Before
+# reconcile decides whether a registration lacks an owner, retire a matching
+# terminal generation that a crashed runner left behind. This happens under the
+# same source lock as registration/claim transitions, so the next loop cannot
+# launch a second known-job waiter between observing the capture and retiring
+# its source. The comparison uses the content generation sidecar rather than a
+# device/inode identity, which is intentionally volatile across a reboot.
+recover_captured_terminal_sources() {
+  local inbox result id adapter capture_generation current_generation claim_state recovered=0
+  inbox=$(fm_procevent_inbox_dir "$STATE")
+  [ -d "$inbox" ] || { printf '0\n'; return 0; }
+  for result in "$inbox"/*.result; do
+    [ -f "$result" ] && [ ! -L "$result" ] || continue
+    id=$(fm_procevent_result_source_id "$result") || continue
+    fm_procevent_source_id_valid "$id" || continue
+    adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+    [ -n "$adapter" ] || continue
+    adapter_result_is_terminal "$adapter" "$result" || continue
+    fm_procevent_source_lock_acquire "$id" || continue
+    if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
+      fm_procevent_source_lock_release "$id"
+      continue
+    fi
+    if fm_procevent_result_registration_generation "$result"; then
+      capture_generation=$FM_PROCEVENT_RESULT_REGISTRATION_GENERATION
+      current_generation=$(fm_procevent_registration_generation_locked "$STATE" "$id" 2>/dev/null || true)
+      if [ "$capture_generation" != "$current_generation" ]; then
+        fm_procevent_source_lock_release "$id"
+        continue
+      fi
+    else
+      # A legacy capture predates generation sidecars. It still proves this
+      # source reached its adapter's terminal verdict, so fail closed by
+      # retiring it instead of launching another wait against the same source.
+      :
+    fi
+    fm_procevent_claim_state_locked "$id"
+    claim_state=$?
+    if [ "$claim_state" -eq 1 ] \
+      && rm -f -- "$(source_file "$id")" \
+      && [ ! -e "$(source_file "$id")" ] \
+      && [ ! -L "$(source_file "$id")" ]; then
+      recovered=$((recovered + 1))
+    fi
+    fm_procevent_source_lock_release "$id"
+  done
+  printf '%s\n' "$recovered"
+}
+
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  local rec id published started=0 stopped=0 uncertain=0 retired=0 claim owner pid token identity claim_state stop_state
+  retired=$(recover_captured_terminal_sources) || uncertain=$((uncertain + 1))
   published=$(publish_pending)
 
   # Stop a runner this home owns whose source is no longer registered. Without
@@ -1000,7 +1091,7 @@ cmd_reconcile() {
       fm_procevent_source_lock_release "$id"
     done
   fi
-  printf 'reconciled: published=%s started=%s stopped=%s uncertain=%s\n' "$published" "$started" "$stopped" "$uncertain"
+  printf 'reconciled: published=%s started=%s stopped=%s terminal-recovered=%s uncertain=%s\n' "$published" "$started" "$stopped" "$retired" "$uncertain"
 }
 
 # Stop a runner and the child it is blocked on. A runner started by reconcile is
@@ -1448,6 +1539,7 @@ unset FM_PROCEVENT_CAPTURE_PINNED_INBOX FM_PROCEVENT_CAPTURE_ABSOLUTE_INBOX \
 
 case "${1-}" in
   register)           shift; cmd_register "$@" ;;
+  register-if-absent) shift; cmd_register_if_absent "$@" ;;
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
   _start)             shift; cmd_start "$@" ;;
