@@ -11,6 +11,9 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) config/branch-prefix -> the no-pr diff resolves <prefix>/<id>, not the
+#       hardcoded fm/<id> (bin/fm-branch-prefix-lib.sh)
+#   (g) invalid prefix -> refused with no diff at all
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -23,7 +26,7 @@ TMP_ROOT=$(fm_test_tmproot fm-review-diff-tests)
 make_case() {
   local name=$1 case_dir
   case_dir="$TMP_ROOT/$name"
-  mkdir -p "$case_dir/state"
+  mkdir -p "$case_dir/state" "$case_dir/home/state"
 
   git init -q --bare "$case_dir/origin.git"
   git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
@@ -71,6 +74,7 @@ run_review_diff() {
   local case_dir=$1
   shift
   FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/state" \
     "$REVIEW_DIFF" "$@"
 }
@@ -169,8 +173,90 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+# --- Task-branch prefix (config/branch-prefix) --------------------------------
+
+# Without pr=, the review compares the task branch named by the home's prefix
+# (as the scaffolded brief instructed the worker), not a hardcoded default.
+# Divergent content on both candidate branches proves WHICH one was used.
+test_custom_branch_prefix_reviews_renamed_branch() {
+  local case_dir out
+  case_dir=$(make_case custom-prefix)
+  mkdir -p "$case_dir/home/config"
+  printf 'ardy\n' > "$case_dir/home/config/branch-prefix"
+  printf 'fm-side\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "change on the default-named branch"
+  git -C "$case_dir/wt" checkout -q -b ardy/task-x1 main
+  printf 'ardy-side\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "change on the renamed branch"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+ardy-side' \
+    "custom-prefix: diff must come from the renamed ardy/<id> branch"
+  assert_not_contains "$out" '+fm-side' \
+    "custom-prefix: diff must not come from the default-named branch"
+  pass "fm-review-diff resolves the renamed <prefix>/<id> task branch"
+}
+
+# When the renamed branch is absent and the worktree is detached, the
+# refusal must name the branch the prefix resolved to, so the operator can
+# tell a prefix mismatch from a missing worktree.
+test_custom_prefix_missing_branch_errors_with_renamed_name() {
+  local case_dir out err status
+  case_dir=$(make_case prefix-missing)
+  mkdir -p "$case_dir/home/config"
+  printf 'ardy\n' > "$case_dir/home/config/branch-prefix"
+  git -C "$case_dir/wt" checkout -q --detach main
+  write_task_meta "$case_dir"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 1 "$status" "prefix-missing: review must refuse, got $status"
+  assert_contains "$err" 'branch ardy/task-x1 does not exist' \
+    "prefix-missing: refusal must name the renamed branch"
+  assert_not_contains "$err" 'fm/task-x1' \
+    "prefix-missing: refusal must not blame the default-prefixed branch"
+  [ -z "$out" ] || fail "prefix-missing: refusal still printed a diff"
+  pass "fm-review-diff names the renamed branch when it is missing"
+}
+
+# An invalid prefix must stop the review before any diff is produced, naming
+# the config file, rather than silently reviewing a default-named branch.
+test_invalid_branch_prefix_refuses_review() {
+  local case_dir out err status
+  case_dir=$(make_case invalid-prefix)
+  mkdir -p "$case_dir/home/config"
+  printf 'ar/dy\n' > "$case_dir/home/config/branch-prefix"
+  write_task_meta "$case_dir"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 1 "$status" "invalid-prefix: review must refuse, got $status"
+  assert_contains "$err" 'branch-prefix' \
+    "invalid-prefix: refusal must name the config file"
+  assert_contains "$err" 'error:' \
+    "invalid-prefix: refusal must be an error line"
+  [ -z "$out" ] || fail "invalid-prefix: refusal still printed a diff"
+  pass "fm-review-diff refuses an invalid prefix with no diff"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_custom_branch_prefix_reviews_renamed_branch
+test_custom_prefix_missing_branch_errors_with_renamed_name
+test_invalid_branch_prefix_refuses_review

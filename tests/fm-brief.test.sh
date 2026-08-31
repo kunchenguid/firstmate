@@ -762,6 +762,111 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# --- Task-branch prefix (config/branch-prefix) ------------------------------
+
+# The home's task-branch prefix must reach every site that names the task
+# branch: the Setup checkout instruction, the per-mode Rule 1, and the
+# local-only Definition of done. A prefix that missed any site would hand the
+# worker a branch the landing helper refuses to resolve.
+test_custom_branch_prefix_renders_every_branch_site() {
+  local home brief
+  home="$TMP_ROOT/branch-prefix-home"
+  mkdir -p "$home/data" "$home/config"
+  printf 'ardy\n' > "$home/config/branch-prefix"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-prefix-a1 some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "local-only scaffold with a custom prefix exited non-zero"
+  brief="$home/data/brief-prefix-a1/brief.md"
+  assert_grep 'git checkout -b ardy/brief-prefix-a1' "$brief" "custom prefix missing from the Setup checkout instruction"
+  # shellcheck disable=SC2016 # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Work only on your `ardy/brief-prefix-a1` branch' "$brief" "custom prefix missing from the local-only Rule 1"
+  # shellcheck disable=SC2016 # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'committed on your branch `ardy/brief-prefix-a1`' "$brief" "custom prefix missing from the local-only Definition of done"
+  assert_grep 'done: ready in branch ardy/brief-prefix-a1' "$brief" "custom prefix missing from the local-only completion line"
+  assert_no_grep 'fm/brief-prefix' "$brief" "default prefix leaked into a custom-prefix brief"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-prefix-a2 some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "direct-PR scaffold with a custom prefix exited non-zero"
+  brief="$home/data/brief-prefix-a2/brief.md"
+  # shellcheck disable=SC2016 # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'push only your `ardy/brief-prefix-a2` branch' "$brief" "custom prefix missing from the direct-PR Rule 1"
+  assert_no_grep 'fm/brief-prefix' "$brief" "default prefix leaked into a custom-prefix brief"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-prefix-a3 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "no-mistakes scaffold with a custom prefix exited non-zero"
+  brief="$home/data/brief-prefix-a3/brief.md"
+  assert_grep 'git checkout -b ardy/brief-prefix-a3' "$brief" "custom prefix missing from the Setup checkout instruction"
+  assert_no_grep 'fm/brief-prefix' "$brief" "default prefix leaked into a custom-prefix brief"
+  pass "fm-brief: a custom task-branch prefix renders at every branch-naming site"
+}
+
+# With no configured prefix every branch site must render the historical
+# default exactly: an absent file, an empty config dir, and a file literally
+# containing "fm" all produce the same bytes, so no home regresses by
+# upgrading, and the default never depends on config-dir shape.
+test_absent_branch_prefix_is_byte_identical_default() {
+  local home id cfg_empty cfg_fm brief_a brief_b brief_c
+  home="$TMP_ROOT/branch-prefix-default-home"
+  id='brief-prefix-default'
+  cfg_empty="$TMP_ROOT/branch-prefix-cfg-empty"
+  cfg_fm="$TMP_ROOT/branch-prefix-cfg-fm"
+  mkdir -p "$home" "$cfg_empty" "$cfg_fm"
+  printf 'fm\n' > "$cfg_fm/branch-prefix"
+
+  # No config dir under the home at all (the plain default path).
+  FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "default-prefix scaffold exited non-zero"
+  brief_a="$home/data/$id/brief.md"
+  assert_present "$brief_a" "default brief was not scaffolded"
+  assert_grep 'git checkout -b fm/' "$brief_a" "absent config must keep the default fm/ branch instruction"
+  assert_grep 'Work only on your `fm/' "$brief_a" "absent config must keep the default local-only Rule 1"
+  assert_grep 'ready in branch fm/' "$brief_a" "absent config must keep the default Definition-of-done branch"
+
+  rm -rf "$home/data"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_CONFIG_OVERRIDE="$cfg_empty" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "empty-config-dir scaffold exited non-zero"
+  brief_b="$home/data/$id/brief.md"
+  cmp -s "$brief_a" "$brief_b" \
+    || fail "a present-but-empty config dir must be byte-identical to the no-config-dir default"
+
+  rm -rf "$home/data"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_CONFIG_OVERRIDE="$cfg_fm" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "explicit-fm scaffold exited non-zero"
+  brief_c="$home/data/$id/brief.md"
+  cmp -s "$brief_a" "$brief_c" \
+    || fail "a config file of literal 'fm' must be byte-identical to the absent-config default"
+  pass "fm-brief: an absent branch-prefix config keeps the default brief byte for byte"
+}
+
+# An invalid prefix must stop the scaffold before any brief is written, with a
+# reason that names the config file, rather than silently falling back to the
+# default and briefing the worker onto a branch the helpers cannot resolve.
+test_invalid_branch_prefix_refuses_the_scaffold() {
+  local home id out status bad
+  home="$TMP_ROOT/branch-prefix-invalid-home"
+  id='brief-prefix-invalid'
+  mkdir -p "$home/data" "$home/config"
+  for bad in 'ardy/' 'ar/dy' '' 'ar dy' 'ardy
+more'; do
+    printf '%s' "$bad" > "$home/config/branch-prefix"
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only 2>&1)
+    status=$?
+    expect_code 1 "$status" "invalid prefix $(printf '%q' "$bad") must refuse the scaffold"
+    assert_contains "$out" 'branch-prefix' "refusal for $(printf '%q' "$bad") must name the config file"
+    assert_absent "$home/data/$id/brief.md" "refused scaffold for $(printf '%q' "$bad") still wrote a brief"
+  done
+  # Help stays available even while the home's prefix config is invalid.
+  printf 'ar/dy\n' > "$home/config/branch-prefix"
+  "$ROOT/bin/fm-brief.sh" --help >/dev/null 2>&1 \
+    || fail "--help must not depend on a valid branch-prefix config"
+  pass "fm-brief: an invalid branch-prefix refuses the scaffold loudly before writing"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -783,3 +888,6 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_custom_branch_prefix_renders_every_branch_site
+test_absent_branch_prefix_is_byte_identical_default
+test_invalid_branch_prefix_refuses_the_scaffold

@@ -12,9 +12,18 @@
 # line that bin/fm-spawn.sh checks a ship brief against.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+# The local-only branch name uses the home's task-branch prefix, resolved from
+# the same home as the scaffolded brief (bin/fm-branch-prefix-lib.sh), so the
+# Definition of done and the Setup section never name different branches.
+
+_FM_DOD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-branch-prefix-lib.sh
+. "$_FM_DOD_LIB_DIR/fm-branch-prefix-lib.sh"
+unset _FM_DOD_LIB_DIR
 
 fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+  local mode=$1 id=$2 prefix
+  prefix=$(fm_branch_prefix_resolve "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}") || return 1
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -31,9 +40,9 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+The task is complete only when committed on your branch \`$prefix/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
+When it is implemented and committed, append \`done: ready in branch $prefix/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;

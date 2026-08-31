@@ -198,6 +198,16 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Task-branch prefix (config/branch-prefix)
+
+The optional local, gitignored `config/branch-prefix` sets this home's task-branch prefix, replacing the default `fm/` in every crewmate-facing branch name.
+The file holds one line with the prefix itself - letters, digits, and dashes only, no slash - written without the trailing slash, for example `ardy`.
+A single trailing newline is accepted; an empty value, a slash anywhere, whitespace, multi-line content, CRLF endings, or a symlinked or otherwise non-regular file is refused loudly before any consumer acts.
+`bin/fm-branch-prefix-lib.sh` is the single owner of resolution, and every consumer - scaffolded briefs (`bin/fm-brief.sh`), the shared definition of done (`bin/fm-dod-lib.sh`), local landing (`bin/fm-merge-local.sh`), review (`bin/fm-review-diff.sh`), scout promotion (`bin/fm-promote.sh`), and the PR enrichment in `bin/fm-bearings-snapshot.sh` - derives the `<prefix>/<id>` task branch through that helper, so the branch a brief tells a worker to create is the branch the landing and review helpers later resolve.
+With the file absent the default is `fm/`, and byte-identical briefs are produced as before.
+The prefix only names new task branches; it does not rename existing local branches, PR heads, or remote refs, so land any old-prefix `local-only` work before switching, since the landing helper resolves only the current prefix.
+The setting is per-home and deliberately not inherited by secondmate homes, which resolve their own prefix from their own `FM_HOME` config; `FM_CONFIG_OVERRIDE` redirects the lookup for tests.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.

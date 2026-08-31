@@ -55,8 +55,8 @@ if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
 JSON
   exit 0
 fi
-cat <<'JSON'
-[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
+cat <<JSON
+[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"${FAKE_GH_HEADREF:-fm/ship-task}","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
 JSON
 SH
   cat > "$fb/gh-axi" <<'SH'
@@ -1041,6 +1041,41 @@ test_include_prs_is_the_only_fetch_path() {
   pass "--include-prs is the only path that fetches, and it enriches correctly"
 }
 
+# The PR-to-task mapping must use the home's task-branch prefix
+# (config/branch-prefix), so a home whose crews push ardy/<id> branches still
+# cross-references its PRs to tasks. A default-prefixed head under a custom
+# prefix maps to "-" rather than to a wrong task.
+test_pr_enrichment_uses_configured_branch_prefix() {
+  local home fakebin json
+  home=$(make_home prs-custom-prefix); write_fixture "$home"
+  printf 'ardy\n' > "$home/config/branch-prefix"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(FAKE_GH_HEADREF=ardy/ship-task run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    .candidate_prs | any(.[]; .num == "9" and .task == "ship-task")
+  ' >/dev/null || fail "a custom-prefixed PR head must still map to its task: $json"
+  json=$(FAKE_GH_HEADREF=fm/other-task run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    .candidate_prs | any(.[]; .num == "9" and .task == "-")
+  ' >/dev/null || fail "a default-prefixed head under a custom prefix must map to '-': $json"
+  pass "PR enrichment maps PR heads through the home's task-branch prefix"
+}
+
+# An invalid prefix must fail the --include-prs path loudly instead of silently
+# mapping every PR to "-".
+test_invalid_branch_prefix_refuses_pr_enrichment() {
+  local home fakebin json rc
+  home=$(make_home prs-invalid-prefix); write_fixture "$home"
+  printf 'ar/dy\n' > "$home/config/branch-prefix"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --include-prs --json 2> "$home/stderr")
+  rc=$?
+  expect_code 1 "$rc" "an invalid prefix must fail --include-prs, got $rc"
+  grep -q 'branch-prefix' "$home/stderr" \
+    || fail "PR-enrichment refusal must name the config file"
+  pass "--include-prs refuses an invalid branch-prefix loudly"
+}
+
 test_partial_github_failure_degrades() {
   local home fakebin json rc
   home=$(make_home partial); write_fixture "$home"
@@ -1981,6 +2016,8 @@ test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path
+test_pr_enrichment_uses_configured_branch_prefix
+test_invalid_branch_prefix_refuses_pr_enrichment
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
