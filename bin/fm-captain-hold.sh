@@ -157,6 +157,7 @@ captain_hold_cleanup() {
   fi
 }
 trap captain_hold_cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 usage() {
   awk '
