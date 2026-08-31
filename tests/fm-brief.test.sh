@@ -382,6 +382,33 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# Workers twice reset a real captain account to test with, so every generated
+# brief - ship and scout alike - must carry the standing account rule.
+test_account_rule_is_in_every_brief() {
+  local home id brief kind
+  home="$TMP_ROOT/account-rule-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-account-e1-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep "Never alter a real user's account to test with" "$brief" \
+      "$kind: brief lost the never-touch-a-real-account rule"
+    assert_grep "If the task needs an account, create one" "$brief" \
+      "$kind: brief lost the create-a-throwaway instruction"
+    assert_grep "never make that call yourself" "$brief" \
+      "$kind: brief lost the stop-and-report-blocked escalation"
+    assert_grep "say so in the status line itself" "$brief" \
+      "$kind: brief lost the report-an-already-made-change-in-the-status-line rule"
+  done
+  pass "fm-brief.sh: ship and scout briefs carry the real-account rule"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -772,6 +799,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_account_rule_is_in_every_brief
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

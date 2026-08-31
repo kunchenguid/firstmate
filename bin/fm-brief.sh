@@ -321,6 +321,21 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Shared standing rule for every generated ship and scout brief. Kept in one
+# variable so the two Rules blocks below cannot drift apart.
+IFS= read -r -d '' ACCOUNT_RULE <<'EOF' || true
+8. Never alter a real user's account to test with - not the password, not the role, not the
+   workspace membership, not the feature flags. Those accounts belong to people who are using
+   them. If the task needs an account, create one: a throwaway with an obviously disposable
+   address, and say in your report which account you created. If the task genuinely cannot
+   proceed without touching a real account, append `blocked: {which account, why}` and stop;
+   firstmate asks the captain - never make that call yourself. If you have already changed
+   something on a real account, say so in the status line itself
+   (`done: {summary} - reset the staging password for {account}`), not only in the report, so
+   it reaches the captain in the same breath as the work.
+EOF
+ACCOUNT_RULE=${ACCOUNT_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -358,6 +373,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$ACCOUNT_RULE
 
 $INBOX_SECTION
 
@@ -437,6 +453,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$ACCOUNT_RULE
 
 $INBOX_SECTION
 
