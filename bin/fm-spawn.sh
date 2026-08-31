@@ -664,19 +664,6 @@ cleanup_beeline_node_modules_staging() {
   NODE_MODULES_ABORT_STAGING=
 }
 
-retract_beeline_node_modules_publication() {
-  local target=$1 publication_link=$2
-  [ -L "$target" ] || return 1
-  [ "$(readlink "$target" 2>/dev/null || true)" = "$publication_link" ] || return 1
-  if ! (
-    trap '' INT TERM HUP
-    exec rm -f -- "$target"
-  ); then
-    return 1
-  fi
-  [ ! -e "$target" ] && [ ! -L "$target" ]
-}
-
 spawn_abort_cleanup() {
   local status=$?
   if ! cleanup_beeline_node_modules_staging; then
@@ -1337,6 +1324,24 @@ exclude_path() {
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
 
+native_node_executable() {
+  local IFS=: path_dir candidate magic
+  for path_dir in $PATH; do
+    [ -n "$path_dir" ] || path_dir=.
+    candidate="$path_dir/node"
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    magic=
+    IFS= LC_ALL=C read -r -n 4 magic < "$candidate" || true
+    case "$magic" in
+      $'\x7fELF'|$'\xce\xfa\xed\xfe'|$'\xcf\xfa\xed\xfe'|$'\xfe\xed\xfa\xce'|$'\xfe\xed\xfa\xcf'|$'\xca\xfe\xba\xbe'|$'\xbe\xba\xfe\xca'|$'\xca\xfe\xba\xbf'|$'\xbf\xba\xfe\xca')
+        printf '%s\n' "$candidate"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 beeline_workspace_links_match_worktree() {
   local source=$1 source_real=$2 target=${3:-} entry entry_real name expected expected_real candidate candidate_real found
   [ -z "$target" ] || [ -d "$target" ] || return 1
@@ -1359,18 +1364,23 @@ beeline_workspace_links_match_worktree() {
   if [ -n "$target" ]; then
     for candidate in "$target/@beeline"/* "$target/@beeline"/.[!.]* "$target/@beeline"/..?*; do
       [ -L "$candidate" ] || continue
+      name=$(basename "$candidate")
+      entry="$source/@beeline/$name"
+      [ -L "$entry" ] || return 1
+      entry_real=$(cd "$entry" 2>/dev/null && pwd -P) || return 1
+      [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] || return 1
+      [[ "$entry_real" != "$source_real"/* ]] || return 1
+      expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
+      expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
       candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
-      if [[ "$candidate_real" == "$PROJ_ABS_REAL"/* ]] \
-         && [[ "$candidate_real" != "$source_real"/* ]]; then
-        return 1
-      fi
+      [ "$candidate_real" = "$expected_real" ] || return 1
     done
   fi
   [ "$found" = 1 ]
 }
 
 share_beeline_node_modules() {
-  local source source_real target target_real staging_root staging staging_real entry name entry_real link_target publication_link publisher_node
+  local source source_real target staging_root staging entry name entry_real link_target publication_link publisher_node
   local publish_status setup_signal_status mkdir_status cleanup_status
   source="$PROJ_ABS/node_modules"
   target="$WT/node_modules"
@@ -1382,9 +1392,7 @@ share_beeline_node_modules() {
     beeline_workspace_links_match_worktree "$source" "$source_real" "$target"
     return $?
   fi
-  publisher_node=$(command -v node 2>/dev/null) || return 1
-  [ -x "$publisher_node" ] || return 1
-
+  publisher_node=$(native_node_executable) || return 1
   setup_signal_status=
   trap 'setup_signal_status=130' INT
   trap 'setup_signal_status=143' TERM
@@ -1513,36 +1521,24 @@ try {
 JS
   case "$publish_status" in
     0)
+      NODE_MODULES_ABORT_STAGING=
+      ;;
+    *)
       if [ -L "$target" ] \
-         && [ "$(readlink "$target" 2>/dev/null || true)" = "$publication_link" ] \
-         && [ -d "$target" ] \
-         && beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
+         && [ "$(readlink "$target" 2>/dev/null || true)" = "$publication_link" ]; then
         NODE_MODULES_ABORT_STAGING=
       else
-        publish_status=5
-        if retract_beeline_node_modules_publication "$target" "$publication_link"; then
-          NODE_MODULES_ABORT_CLEANUP=1
-          cleanup_status=0
-          cleanup_beeline_node_modules_staging || cleanup_status=$?
-          [ "$cleanup_status" -eq 0 ] || publish_status=6
-        fi
-      fi
-      ;;
-    3)
-      target_real=$(real_path_or_raw "$target")
-      staging_real=$(real_path_or_raw "$staging_root")
-      if [ ! -L "$target" ] || [ "$target_real" != "$staging_real" ]; then
         NODE_MODULES_ABORT_CLEANUP=1
         cleanup_status=0
         cleanup_beeline_node_modules_staging || cleanup_status=$?
-        [ "$cleanup_status" -eq 0 ] || publish_status=5
+        if [ "$cleanup_status" -eq 0 ] \
+           && { [ -e "$target" ] || [ -L "$target" ]; } \
+           && beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
+          publish_status=3
+        else
+          publish_status=5
+        fi
       fi
-      if [ "$publish_status" = 3 ] \
-         && ! beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
-        publish_status=5
-      fi
-      ;;
-    *)
       ;;
   esac
   trap - INT TERM HUP

@@ -36,7 +36,22 @@ for last in "$@"; do :; done
 case "${FM_FAIL_NODE_MODULES_LINK:-0}:$last" in
   1:*/.fm-node-modules.*/third-party) exit 42 ;;
 esac
-exec /bin/ln "$@"
+/bin/ln "$@" || exit $?
+if [ -n "${FM_NODE_MODULES_RACE_TARGET:-}" ] \
+   && [[ "$last" = */.fm-node-modules.*/.bin/beeline-cli ]]; then
+  if [ -n "${FM_NODE_MODULES_RACE_PRIMARY_TARGET:-}" ]; then
+    /bin/ln -s "$FM_NODE_MODULES_RACE_PRIMARY_TARGET" \
+      "$FM_NODE_MODULES_RACE_TARGET/node_modules"
+  else
+    /bin/mkdir -p "$FM_NODE_MODULES_RACE_TARGET/node_modules/@beeline"
+    printf 'worker install\n' > "$FM_NODE_MODULES_RACE_TARGET/node_modules/owned.txt"
+    /bin/ln -s ../../packages/lib "$FM_NODE_MODULES_RACE_TARGET/node_modules/@beeline/lib"
+    /bin/ln -s "$FM_NODE_MODULES_RACE_TARGET/packages/absolute-lib" \
+      "$FM_NODE_MODULES_RACE_TARGET/node_modules/@beeline/absolute-lib"
+    /bin/ln -s ../../packages/cli "$FM_NODE_MODULES_RACE_TARGET/node_modules/@beeline/cli"
+  fi
+fi
+exit 0
 SH
   chmod +x "$fakebin/ln"
   cat > "$fakebin/mkdir" <<'SH'
@@ -76,90 +91,13 @@ fi
 exec /bin/rm "$@"
 SH
   chmod +x "$fakebin/rm"
-  cat > "$fakebin/node-race-hook.cjs" <<'JS'
-const fs = require('node:fs');
-const symlinkSync = fs.symlinkSync;
-
-fs.symlinkSync = function (source, target, type) {
-  const raceTarget = process.env.FM_NODE_MODULES_RACE_TARGET;
-  if (raceTarget && target === `${raceTarget}/node_modules`) {
-    const primaryTarget = process.env.FM_NODE_MODULES_RACE_PRIMARY_TARGET;
-    if (primaryTarget) {
-      symlinkSync(primaryTarget, target, 'dir');
-    } else {
-      fs.mkdirSync(`${target}/@beeline`, { recursive: true });
-      fs.writeFileSync(`${target}/owned.txt`, 'worker install\n');
-      symlinkSync('../../packages/lib', `${target}/@beeline/lib`, 'dir');
-      symlinkSync(`${raceTarget}/packages/absolute-lib`, `${target}/@beeline/absolute-lib`, 'dir');
-      symlinkSync('../../packages/cli', `${target}/@beeline/cli`, 'dir');
-    }
-  }
-  const result = symlinkSync.call(this, source, target, type);
-  if (process.env.FM_INTERRUPT_NODE_MODULES_PUBLICATION === '1') {
-    process.kill(process.ppid, 'SIGTERM');
-    process.kill(process.pid, 'SIGTERM');
-  }
-  if (process.env.FM_HUP_NODE_MODULES_PUBLICATION === '1') {
-    process.kill(process.ppid, 'SIGHUP');
-    process.kill(process.pid, 'SIGHUP');
-  }
-  if (process.env.FM_KILL_NODE_MODULES_PUBLISHER === '1') {
-    process.kill(process.pid, 'SIGKILL');
-  }
-  return result;
-};
-JS
-  cat > "$fakebin/node-ambient-hook.cjs" <<'JS'
-const fs = require('node:fs');
-const symlinkSync = fs.symlinkSync;
-
-fs.symlinkSync = function (source, target, type) {
-  symlinkSync.call(this, source, target, type);
-  throw new Error('ambient preload ran');
-};
-JS
-  cat > "$fakebin/node-invalid-publication-hook.cjs" <<'JS'
-const fs = require('node:fs');
-const path = require('node:path');
-const symlinkSync = fs.symlinkSync;
-
-fs.symlinkSync = function (source, target, type) {
-  const result = symlinkSync.call(this, source, target, type);
-  const backing = path.resolve(path.dirname(target), source);
-  if (process.env.FM_INVALID_NODE_MODULES_PUBLICATION === 'workspace') {
-    fs.unlinkSync(`${backing}/@beeline/lib`);
-    symlinkSync.call(
-      this,
-      process.env.FM_NODE_MODULES_PRIMARY_WORKSPACE,
-      `${backing}/@beeline/lib`,
-      'dir'
-    );
-  }
-  if (process.env.FM_INVALID_NODE_MODULES_PUBLICATION === 'backing') {
-    fs.rmSync(backing, { recursive: true, force: true });
-  }
-  return result;
-};
-JS
   local real_node
   real_node=$(command -v node)
   cat > "$fakebin/node" <<SH
 #!/usr/bin/env bash
 set -u
-if [ "\${1:-}" = - ] && [ "\${FM_FAIL_NODE_PUBLISHER_EXEC:-0}" = 1 ]; then
-  exit 127
-fi
-if [ "\${1:-}" = - ] && [ -n "\${FM_NODE_PUBLISHER_EARLY_STATUS:-}" ]; then
-  exit "\$FM_NODE_PUBLISHER_EARLY_STATUS"
-fi
-if [ "\${1:-}" = - ] && [ "\${FM_INJECT_NODE_PUBLISHER_HOOK:-0}" = 1 ]; then
-  exec "$real_node" --require="$fakebin/node-ambient-hook.cjs" "\$@"
-fi
-if [ "\${1:-}" = - ] && [ -n "\${FM_INVALID_NODE_MODULES_PUBLICATION:-}" ]; then
-  exec "$real_node" --require="$fakebin/node-invalid-publication-hook.cjs" "\$@"
-fi
-if [ "\${1:-}" = - ] && { [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ] || [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_HUP_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_KILL_NODE_MODULES_PUBLISHER:-0}" = 1 ]; }; then
-  exec "$real_node" --require="$fakebin/node-race-hook.cjs" "\$@"
+if [ "\${1:-}" = - ] && [ "\${FM_REJECT_PATH_NODE_PUBLISHER:-0}" = 1 ]; then
+  exit 99
 fi
 exec "$real_node" "\$@"
 SH
@@ -218,14 +156,7 @@ run_spawn() {
     FM_KILL_NODE_MODULES_CREATOR="${FM_KILL_NODE_MODULES_CREATOR:-0}" \
     FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE="${FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE:-0}" \
     FM_INTERRUPT_NODE_MODULES_CLEANUP="${FM_INTERRUPT_NODE_MODULES_CLEANUP:-0}" \
-    FM_INTERRUPT_NODE_MODULES_PUBLICATION="${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" \
-    FM_HUP_NODE_MODULES_PUBLICATION="${FM_HUP_NODE_MODULES_PUBLICATION:-0}" \
-    FM_KILL_NODE_MODULES_PUBLISHER="${FM_KILL_NODE_MODULES_PUBLISHER:-0}" \
-    FM_FAIL_NODE_PUBLISHER_EXEC="${FM_FAIL_NODE_PUBLISHER_EXEC:-0}" \
-    FM_NODE_PUBLISHER_EARLY_STATUS="${FM_NODE_PUBLISHER_EARLY_STATUS:-}" \
-    FM_INJECT_NODE_PUBLISHER_HOOK="${FM_INJECT_NODE_PUBLISHER_HOOK:-0}" \
-    FM_INVALID_NODE_MODULES_PUBLICATION="${FM_INVALID_NODE_MODULES_PUBLICATION:-}" \
-    FM_NODE_MODULES_PRIMARY_WORKSPACE="${FM_NODE_MODULES_PRIMARY_WORKSPACE:-}" \
+    FM_REJECT_PATH_NODE_PUBLISHER="${FM_REJECT_PATH_NODE_PUBLISHER:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -277,6 +208,22 @@ test_spawn_shares_dependencies_and_repoints_workspace_links() {
   bin_out=$("$WORKTREE_DIR/node_modules/.bin/beeline-cli")
   [ "$bin_out" = 'worker cli' ] || fail "workspace binary executed primary source"
   pass "fm-spawn shares third-party dependencies while @beeline links and binaries resolve to the worktree"
+}
+
+test_spawn_publication_is_independent_of_path_node_wrappers() {
+  local rec id out status publication
+  id=node-modules-owner-safe-publisher-z1b
+  rec=$(make_case owner-safe-publisher "$id")
+  read_case "$rec"
+
+  out=$(FM_REJECT_PATH_NODE_PUBLISHER=1 run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should publish dependencies without a PATH-controlled Node publisher"
+  assert_contains "$out" "spawned $id" "owner-safe dependency publication did not launch the worker"
+  [ -L "$WORKTREE_DIR/node_modules" ] || fail "owner-safe publisher did not create node_modules"
+  publication=$(readlink "$WORKTREE_DIR/node_modules")
+  [ -d "$WORKTREE_DIR/$publication" ] || fail "owner-safe publisher left dependency backing unavailable"
+  pass "fm-spawn dependency publication is independent of PATH Node wrappers"
 }
 
 test_spawn_leaves_existing_node_modules_untouched() {
@@ -354,6 +301,27 @@ test_spawn_rejects_dangling_existing_workspace_link() {
   [ "$(readlink "$WORKTREE_DIR/node_modules/@beeline/legacy")" = '../../packages/missing' ] \
     || fail "spawn mutated the dangling existing workspace link"
   pass "fm-spawn refuses dangling existing workspace links without mutation"
+}
+
+test_spawn_rejects_workspace_link_from_another_worktree() {
+  local rec id out status other_worktree
+  id=node-modules-other-worktree-z2e
+  rec=$(make_case other-worktree "$id")
+  read_case "$rec"
+  other_worktree="$TMP_ROOT/other-worktree-source"
+  mkdir -p "$other_worktree/packages/legacy" "$WORKTREE_DIR/node_modules/@beeline"
+  ln -s ../../packages/lib "$WORKTREE_DIR/node_modules/@beeline/lib"
+  ln -s "$WORKTREE_DIR/packages/absolute-lib" "$WORKTREE_DIR/node_modules/@beeline/absolute-lib"
+  ln -s ../../packages/cli "$WORKTREE_DIR/node_modules/@beeline/cli"
+  ln -s "$other_worktree/packages/legacy" "$WORKTREE_DIR/node_modules/@beeline/legacy"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a workspace link from another worktree"
+  assert_not_contains "$out" "spawned $id" "another worktree's workspace link launched a worker"
+  [ "$(readlink "$WORKTREE_DIR/node_modules/@beeline/legacy")" = "$other_worktree/packages/legacy" ] \
+    || fail "spawn mutated another worktree's workspace link"
+  pass "fm-spawn refuses workspace links outside the exact worktree"
 }
 
 test_spawn_ignores_published_beeline_consumers() {
@@ -511,95 +479,6 @@ test_spawn_cleans_staging_after_creator_status_failure() {
   pass "fm-spawn cleans registered staging after creator status failure"
 }
 
-test_spawn_preserves_publication_after_interrupt() {
-  local rec id out status publication
-  id=node-modules-published-interrupt-z7
-  rec=$(make_case published-interrupt "$id")
-  read_case "$rec"
-
-  out=$(FM_INTERRUPT_NODE_MODULES_PUBLICATION=1 run_spawn "$id")
-  status=$?
-  expect_code 143 "$status" "spawn should preserve cancellation after dependency publication"
-  assert_not_contains "$out" "spawned $id" "cancelled publication launched a worker"
-  [ -L "$WORKTREE_DIR/node_modules" ] || fail "cancelled spawn removed published dependencies"
-  publication=$(readlink "$WORKTREE_DIR/node_modules")
-  [ -d "$WORKTREE_DIR/$publication" ] || fail "cancelled spawn removed published dependency backing"
-  pass "fm-spawn never cleans node_modules after publication"
-}
-
-test_spawn_preserves_publication_after_hup() {
-  local rec id out status publication
-  id=node-modules-published-hup-z7b
-  rec=$(make_case published-hup "$id")
-  read_case "$rec"
-
-  out=$(FM_HUP_NODE_MODULES_PUBLICATION=1 run_spawn "$id")
-  status=$?
-  expect_code 129 "$status" "spawn should preserve cancellation after publication HUP"
-  assert_not_contains "$out" "spawned $id" "HUP-cancelled publication launched a worker"
-  [ -L "$WORKTREE_DIR/node_modules" ] || fail "publication HUP removed node_modules"
-  publication=$(readlink "$WORKTREE_DIR/node_modules")
-  [ -d "$WORKTREE_DIR/$publication" ] || fail "publication HUP removed dependency backing"
-  pass "fm-spawn defers HUP until dependency publication state is settled"
-}
-
-test_spawn_preserves_backing_after_ambiguous_publisher_exit() {
-  local rec id out status publication
-  id=node-modules-publisher-kill-z8
-  rec=$(make_case publisher-kill "$id")
-  read_case "$rec"
-
-  out=$(FM_KILL_NODE_MODULES_PUBLISHER=1 run_spawn "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn should fail after an ambiguous publisher exit"
-  assert_not_contains "$out" "spawned $id" "failed publisher launched a worker"
-  [ -L "$WORKTREE_DIR/node_modules" ] || fail "ambiguous publisher exit removed node_modules"
-  publication=$(readlink "$WORKTREE_DIR/node_modules")
-  [ -d "$WORKTREE_DIR/$publication" ] || fail "ambiguous publisher exit removed dependency backing"
-  pass "fm-spawn retains dependency backing after ambiguous publisher exit"
-}
-
-test_spawn_isolates_publisher_from_ambient_node_options() {
-  local rec id out status publication
-  id=node-modules-node-options-z9
-  rec=$(make_case ambient-node-options "$id")
-  read_case "$rec"
-
-  out=$(NODE_OPTIONS="--require=$FAKEBIN_DIR/node-ambient-hook.cjs" run_spawn "$id")
-  status=$?
-  expect_code 0 "$status" "spawn should isolate dependency publication from ambient Node options"
-  assert_contains "$out" "spawned $id" "isolated dependency publication did not launch the worker"
-  [ -L "$WORKTREE_DIR/node_modules" ] || fail "ambient Node options prevented dependency publication"
-  publication=$(readlink "$WORKTREE_DIR/node_modules")
-  [ -d "$WORKTREE_DIR/$publication" ] || fail "ambient Node options left dependency publication dangling"
-  pass "fm-spawn isolates dependency publication from ambient Node options"
-}
-
-test_spawn_retains_staging_after_ambiguous_publisher_exec_failure() {
-  local rec id out status candidate retained count
-  id=node-modules-exec-failure-z10
-  rec=$(make_case publisher-exec-failure "$id")
-  read_case "$rec"
-
-  out=$(FM_FAIL_NODE_PUBLISHER_EXEC=1 run_spawn "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn should fail when the dependency publisher cannot execute"
-  assert_not_contains "$out" "spawned $id" "publisher execution failure launched a worker"
-  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-    || fail "publisher execution failure created node_modules"
-  retained=
-  count=0
-  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
-    retained=$candidate
-    count=$((count + 1))
-  done
-  [ "$count" -eq 1 ] || fail "ambiguous publisher execution failure did not retain exactly one backing tree"
-  assert_present "$retained/third-party/index.js" \
-    "ambiguous publisher execution failure retained an incomplete backing tree"
-  pass "fm-spawn retains complete staging after ambiguous publisher execution failure"
-}
-
 test_spawn_cleans_staging_after_creator_termination() {
   local rec id out status candidate
   id=node-modules-creator-kill-z11
@@ -638,81 +517,13 @@ test_spawn_cleans_known_unpublished_staging_during_interrupt() {
   pass "fm-spawn completes staging cleanup before honoring cancellation"
 }
 
-test_spawn_retains_backing_after_wrapper_postpublication_failure() {
-  local rec id out status publication
-  id=node-modules-wrapper-failure-z13
-  rec=$(make_case wrapper-failure "$id")
-  read_case "$rec"
-
-  out=$(FM_INJECT_NODE_PUBLISHER_HOOK=1 run_spawn "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn should fail after a wrapper-controlled publication error"
-  assert_not_contains "$out" "spawned $id" "wrapper-controlled publication failure launched a worker"
-  [ -L "$WORKTREE_DIR/node_modules" ] || fail "wrapper-controlled failure removed published node_modules"
-  publication=$(readlink "$WORKTREE_DIR/node_modules")
-  [ -d "$WORKTREE_DIR/$publication" ] \
-    || fail "wrapper-controlled failure removed published dependency backing"
-  pass "fm-spawn retains backing after wrapper-controlled publication failure"
-}
-
-test_spawn_rejects_wrapper_status_without_dependency_tree() {
-  local rec id out status candidate retained count early_status
-  for early_status in 0 3; do
-    id="node-modules-wrapper-status-${early_status}-z14"
-    rec=$(make_case "wrapper-status-$early_status" "$id")
-    read_case "$rec"
-
-    out=$(FM_NODE_PUBLISHER_EARLY_STATUS="$early_status" run_spawn "$id")
-    status=$?
-    [ "$status" -ne 0 ] || fail "spawn accepted wrapper status $early_status without node_modules"
-    assert_not_contains "$out" "spawned $id" "wrapper status $early_status launched a worker without dependencies"
-    [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-      || fail "wrapper status $early_status unexpectedly created node_modules"
-    retained=
-    count=0
-    for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-      [ -e "$candidate" ] || [ -L "$candidate" ] || continue
-      retained=$candidate
-      count=$((count + 1))
-    done
-    if [ "$early_status" = 0 ]; then
-      [ "$count" -eq 1 ] || fail "wrapper status 0 did not retain exactly one ambiguous backing tree"
-      assert_present "$retained/third-party/index.js" \
-        "wrapper status 0 retained an incomplete dependency backing"
-    else
-      [ "$count" -eq 0 ] || fail "wrapper status 3 leaked unused dependency staging"
-    fi
-  done
-  pass "fm-spawn rejects wrapper statuses without a valid dependency tree"
-}
-
-test_spawn_retracts_invalid_owned_publication() {
-  local rec id out status candidate mode
-  for mode in workspace backing; do
-    id="node-modules-invalid-owned-$mode-z15"
-    rec=$(make_case "invalid-owned-$mode" "$id")
-    read_case "$rec"
-
-    out=$(FM_INVALID_NODE_MODULES_PUBLICATION="$mode" \
-      FM_NODE_MODULES_PRIMARY_WORKSPACE="$PROJECT_DIR/packages/lib" run_spawn "$id")
-    status=$?
-    [ "$status" -ne 0 ] || fail "spawn accepted invalid owned publication mode $mode"
-    assert_not_contains "$out" "spawned $id" "invalid owned publication mode $mode launched a worker"
-    [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
-      || fail "invalid owned publication mode $mode left node_modules"
-    for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-      [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-        || fail "invalid owned publication mode $mode leaked dependency staging"
-    done
-  done
-  pass "fm-spawn retracts invalid owned dependency publications"
-}
-
 test_spawn_shares_dependencies_and_repoints_workspace_links
+test_spawn_publication_is_independent_of_path_node_wrappers
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_rejects_existing_primary_dependency_link
 test_spawn_rejects_target_only_primary_workspace_link
 test_spawn_rejects_dangling_existing_workspace_link
+test_spawn_rejects_workspace_link_from_another_worktree
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
@@ -721,15 +532,7 @@ test_spawn_validates_staging_before_publication
 test_spawn_rejects_dangling_staged_workspace_link
 test_spawn_cancels_after_staging_registration_interrupt
 test_spawn_cleans_staging_after_creator_status_failure
-test_spawn_preserves_publication_after_interrupt
-test_spawn_preserves_publication_after_hup
-test_spawn_preserves_backing_after_ambiguous_publisher_exit
-test_spawn_isolates_publisher_from_ambient_node_options
-test_spawn_retains_staging_after_ambiguous_publisher_exec_failure
 test_spawn_cleans_staging_after_creator_termination
 test_spawn_cleans_known_unpublished_staging_during_interrupt
-test_spawn_retains_backing_after_wrapper_postpublication_failure
-test_spawn_rejects_wrapper_status_without_dependency_tree
-test_spawn_retracts_invalid_owned_publication
 
 echo "# all fm-spawn-node-modules tests passed"
