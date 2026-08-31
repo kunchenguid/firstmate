@@ -1267,8 +1267,10 @@ families_for_changed_path() {
       # The selector suite embeds asset paths as fixture data; it exercises
       # this mapping but does not consume those assets. Scan references even
       # after deletion so an unchanged consumer still gets selected.
-      families_for_test_reference "$path" tests/fm-test-run.test.sh \
-        || printf '%s\n' "__unmapped__:$path"
+      if ! families_for_test_reference "$path" tests/fm-test-run.test.sh \
+          && [ -e "$path" ]; then
+        printf '%s\n' "__unmapped__:$path"
+      fi
       ;;
     tests/fixtures/*/*)
       # A fixture belongs to whichever suite reads its directory, found by the
