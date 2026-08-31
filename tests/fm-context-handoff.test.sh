@@ -1855,7 +1855,7 @@ EOF
 }
 
 test_claude_terminal_outcome_uses_durable_binding() {
-  local statement arguments registered record calls_before calls_after blocked
+  local statement arguments registered record calls_before calls_after output
   new_env claude-terminal-binding
   enable_consumer
   bind_claude >/dev/null || fail "terminal binding fixture did not bind Claude"
@@ -1869,10 +1869,12 @@ test_claude_terminal_outcome_uses_durable_binding() {
   CAPABILITY=claude-process-generation-2
   PROCESS_GENERATION=2
   bind_claude >/dev/null || fail "replacement generation did not supersede the active process binding"
-  blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "replacement PreCompact escaped its outstanding-attempt boundary"
-  printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "replacement generation overwrote an outstanding compaction attempt"
-  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "unbound replacement terminal event failed"
-  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "replacement generation applied an opposite outcome to the first attempt"
+  jq -e '.schema=="firstmate.context-handoff.compaction-retirement.v1" and .reason=="dead-process-capability-retired" and (.binding.terminal_outcome==null)' "$FM_HOME/state/context-handoff/quarantine"/retired-compaction-*.json >/dev/null || fail "dead PreCompact capability left no durable outcome-free retirement"
+  output=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "replacement PreCompact did not recover the sealed record"
+  [ -z "$output" ] || fail "replacement PreCompact did not create a new exact attempt"
+  [ "$(find "$FM_HOME/state/context-handoff/bindings" -name 'compaction-*.json' | wc -l)" -eq 1 ] || fail "replacement PreCompact did not own exactly one attempt"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"StopFailure",session_id:$session,trigger:"auto"}' | CAPABILITY=claude-process-generation-1 PROCESS_GENERATION=1 cli claude-hook >/dev/null || fail "retired terminal hook transport failed"
+  [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = sealed ] || fail "retired capability assigned an outcome to the replacement attempt"
   SEALING_ENABLED=false
   CONSUMER_ENABLED=false
   write_config
@@ -1881,7 +1883,7 @@ test_claude_terminal_outcome_uses_durable_binding() {
   mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
   calls_before=$(wc -l < "$HERDR_LOG")
   printf 'unavailable\n' > "$HERDR_MODE"
-  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | CAPABILITY=claude-process-generation-1 PROCESS_GENERATION=1 cli claude-hook >/dev/null || fail "authenticated PostCompact depended on current liveness or the new-seal switch"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "authenticated PostCompact depended on current liveness or the new-seal switch"
   calls_after=$(wc -l < "$HERDR_LOG")
   [ "$calls_after" -eq "$calls_before" ] || fail "terminal outcome performed a fresh Herdr probe"
   [ "$(jq -r .compaction "$FM_HOME/state/context-handoff/queue/$record.json")" = succeeded ] || fail "terminal outcome did not consume its durable PreCompact binding"
@@ -2021,6 +2023,37 @@ test_seal_binding_failure_receipt() {
   seal=$(seal_pi) || fail "foreign terminal history escaped the unhealthy configuration boundary"
   [ "$(printf '%s' "$seal" | jq -r .status)" = disabled ] || fail "foreign terminal history falsely blocked the current empty compaction"
   pass "durable receipt for unhealthy seal-time bindings"
+}
+
+test_orphan_active_state_blocks_compaction() {
+  local seal record statement arguments registered blocked
+  new_env pi-orphan-active-state
+  register_statement 'A claimed Pi candidate remains nonempty without its envelope.' >/dev/null || fail "Pi orphan-state fixture did not register"
+  seal=$(seal_pi) || fail "Pi orphan-state fixture did not seal"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  rm "$FM_HOME/state/context-handoff/records/$record.json"
+  printf '{\n' > "$FM_HOME/config/context-handoff.json"
+  chmod 600 "$FM_HOME/config/context-handoff.json"
+  seal=$(seal_pi) || fail "Pi orphan active state escaped the receipt boundary"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = seal-failed ] || fail "Pi orphan active state allowed compaction"
+  jq -se 'any(.[]; .reason=="seal-binding-failed" and .failure_code=="RECORD_JSON")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "Pi orphan active state wrote no durable failure receipt"
+
+  new_env claude-orphan-active-state
+  enable_consumer
+  bind_claude >/dev/null || fail "Claude orphan-state fixture did not bind"
+  statement='A claimed Claude candidate remains nonempty without its envelope.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "Claude orphan-state fixture did not register"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "Claude orphan-state fixture did not seal"
+  record=$(find "$FM_HOME/state/context-handoff/records" -name 'handoff-*.json' -printf '%f\n' | sed 's/\.json$//' | head -1)
+  rm "$FM_HOME/state/context-handoff/records/$record.json"
+  printf 'unavailable\n' > "$HERDR_MODE"
+  blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "Claude orphan active state escaped the hook"
+  printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "Claude orphan active state allowed compaction"
+  jq -se 'any(.[]; .reason=="claude-precompact-binding-failed")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "Claude orphan active state wrote no durable failure receipt"
+  pass "orphan active state blocks Pi and Claude compaction"
 }
 
 test_durable_compaction_attempt() {
@@ -2245,6 +2278,7 @@ test_foreign_candidate_isolation
 test_global_register_bounds_and_stale_recovery
 test_candidate_identity_binding
 test_seal_binding_failure_receipt
+test_orphan_active_state_blocks_compaction
 test_durable_compaction_attempt
 test_precompact_generation_and_timeout_margin
 test_sessionstart_pending_eligibility

@@ -46,6 +46,7 @@ APPROVAL_SCHEMA = "firstmate.context-handoff.approval.v1"
 BINDING_SCHEMA = "firstmate.context-handoff.consumer-binding.v1"
 STATE_INITIALIZED_BYTES = b"firstmate.context-handoff.state.v1\n"
 COMPACTION_BINDING_SCHEMA = "firstmate.context-handoff.compaction-binding.v1"
+COMPACTION_RETIREMENT_SCHEMA = "firstmate.context-handoff.compaction-retirement.v1"
 COMPACTION_ATTEMPT_SCHEMA = "firstmate.context-handoff.compaction-attempt.v1"
 EXECUTION_CLAIM_SCHEMA = "firstmate.context-handoff.execution-claim.v1"
 HANDOFF_SCHEMA = "claude-obsidian.handoff.v1"
@@ -1544,26 +1545,52 @@ def matching_candidate_present(layout: StateLayout, source_harness: str, session
 
 
 def matching_nonempty_state(layout: StateLayout, source_harness: str, session_hash: str) -> bool:
-    try:
-        candidate_present = matching_candidate_present(layout, source_harness, session_hash)
-    except HandoffError:
-        candidate_present = True
-    return candidate_present or matching_record_present(layout, source_harness, session_hash)
-
-
-def matching_record_present(layout: StateLayout, source_harness: str, session_hash: str) -> bool:
-    for path in sorted(layout.records.glob("handoff-*.json")):
+    layout.initialize()
+    candidate_owners: dict[str, bool | None] = {}
+    for path in sorted(layout.candidates.glob("candidate-*.json")):
         try:
-            envelope, _digest = read_envelope(layout, path.stem, {}, verify_sources=False)
+            value = read_candidate_binding(path)
         except HandoffError:
+            candidate_owners[path.stem] = None
             continue
-        if envelope["source_harness"] != source_harness or envelope["source_session_hash"] != session_hash:
+        if candidate_identity(value["source_harness"], value["source_session_hash"], value["item"]) != value["candidate_id"]:
+            candidate_owners[path.stem] = None
             continue
+        candidate_owners[path.stem] = value["source_harness"] == source_harness and value["source_session_hash"] == session_hash
+
+    claimed: set[str] = set()
+    record_claims: dict[str, list[str]] = {}
+    for path in sorted(layout.claims.glob("candidate-*.json")):
+        try:
+            value = read_json_file(path, max_bytes=4096)
+        except HandoffError:
+            return True
+        record_id = value.get("record_id") if isinstance(value, dict) else None
+        candidate_id = value.get("candidate_id") if isinstance(value, dict) else None
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"schema", "candidate_id", "record_id", "envelope_sha256", "claimed_at"}
+            or value.get("schema") != "firstmate.context-handoff.claim.v1"
+            or not isinstance(record_id, str)
+            or not RECORD_ID.fullmatch(record_id)
+            or not isinstance(candidate_id, str)
+            or candidate_id != path.stem
+            or not CANDIDATE_ID.fullmatch(candidate_id)
+            or not HEX64.fullmatch(str(value.get("envelope_sha256", "")))
+            or not isinstance(value.get("claimed_at"), str)
+        ):
+            return True
+        claimed.add(candidate_id)
+        record_claims.setdefault(record_id, []).append(candidate_id)
+
+    queue_states: dict[str, bool | None] = {}
+    for path in sorted(layout.queue.glob("handoff-*.json")):
         try:
             queue = read_queue(layout, path.stem)
         except HandoffError:
-            return True
-        terminal = (
+            queue_states[path.stem] = None
+            continue
+        queue_states[path.stem] = (
             queue.get("status") in {"acknowledged", "quarantined"}
             and queue.get("compaction") in {"sealed", "succeeded", "failed"}
             and isinstance(queue.get("reason"), str)
@@ -1573,10 +1600,31 @@ def matching_record_present(layout: StateLayout, source_harness: str, session_ha
             and isinstance(queue.get("updated_at"), str)
             and HEX64.fullmatch(str(queue.get("envelope_sha256", ""))) is not None
         )
-        if not terminal:
-            return True
-    return False
 
+    record_ids = set(queue_states) | set(record_claims) | {path.stem for path in layout.records.glob("handoff-*.json")}
+    for record_id in sorted(record_ids):
+        if queue_states.get(record_id) is True:
+            continue
+        try:
+            envelope, _digest = read_envelope(layout, record_id, {}, verify_sources=False)
+        except HandoffError:
+            envelope_owner = None
+        else:
+            envelope_owner = envelope["source_harness"] == source_harness and envelope["source_session_hash"] == session_hash
+        claim_owners = [candidate_owners.get(candidate_id) for candidate_id in record_claims.get(record_id, [])]
+        if envelope_owner is not None:
+            if any(owner is None or owner != envelope_owner for owner in claim_owners):
+                return True
+            if envelope_owner:
+                return True
+            continue
+        if any(owner is True for owner in claim_owners):
+            return True
+        if claim_owners and all(owner is False for owner in claim_owners):
+            continue
+        return True
+
+    return any(owner is not False for candidate_id, owner in candidate_owners.items() if candidate_id not in claimed)
 
 def block_failed_claude_precompact(
     home: Path,
@@ -1592,12 +1640,7 @@ def block_failed_claude_precompact(
             if config is None:
                 return None
             session_hash = str(config["recipient"]["agent_session_sha256"])
-        try:
-            candidate_present = matching_candidate_present(layout, "claude", session_hash)
-        except HandoffError as exc:
-            write_receipt(layout, "seal", "failed", "registered-candidate-validation-failed", source_harness="claude", trigger=trigger, failure_code=exc.code)
-            return {"decision": "block", "reason": "A registered handoff candidate could not be validated; compaction was stopped."}
-        if not candidate_present and not matching_record_present(layout, "claude", session_hash):
+        if not matching_nonempty_state(layout, "claude", session_hash):
             return None
         write_receipt(layout, "seal", "failed", "claude-precompact-binding-failed", source_harness="claude", trigger=trigger, failure_code=failure_code)
     return {"decision": "block", "reason": "Already-curated handoff candidates could not be bound to the exact Claude endpoint; compaction was stopped."}
@@ -2439,6 +2482,7 @@ def bind_claude_session(home: Path, config: Mapping[str, Any], payload: Mapping[
         claim["state"] = "active"
         claim["vault_path"] = str(validate_vault_binding(config))
         atomic_replace(path, canonical_json(claim))
+        retire_replaced_compaction_bindings_locked(layout, config, capability)
     return True
 
 
@@ -2566,6 +2610,23 @@ def reuse_compaction_binding_locked(layout: StateLayout, config: Mapping[str, An
     if value["process_capability_sha256"] != current_process_capability():
         raise HandoffError("GENERATION_REPLACED", "another Claude process generation has an unresolved compaction attempt")
     return compaction_attempt_result("already-sealed", bindings)
+
+
+def retire_replaced_compaction_bindings_locked(layout: StateLayout, config: Mapping[str, Any], replacement_capability: str) -> None:
+    for path, value, bindings in session_compaction_bindings_locked(layout, config["recipient"]["agent_session_sha256"]):
+        if value["process_capability_sha256"] == replacement_capability:
+            continue
+        if value.get("terminal_outcome") is not None:
+            apply_terminal_compaction_binding_locked(layout, path, value, bindings)
+            continue
+        retirement = {
+            "schema": COMPACTION_RETIREMENT_SCHEMA,
+            "reason": "dead-process-capability-retired",
+            "replacement_process_capability_sha256": replacement_capability,
+            "binding": value,
+        }
+        atomic_create(layout.quarantine / f"retired-{path.name}", canonical_json(retirement))
+        durable_unlink(path)
 
 
 def durable_unlink(path: Path) -> None:
