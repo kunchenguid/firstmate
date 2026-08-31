@@ -23,6 +23,10 @@ FALLBACK_OUTSTANDING="$STATE/.codex-present-fallback-outstanding"
 DIAGNOSTIC="$STATE/.codex-queue-diagnostic"
 QUEUE_TIMEOUT=${FM_CODEX_QUEUE_TIMEOUT:-10}
 DIAGNOSTIC_INTERVAL=${FM_CODEX_QUEUE_DIAGNOSTIC_INTERVAL:-300}
+SETTLE_INTERVAL=${FM_CODEX_QUEUE_SETTLE_INTERVAL:-0.05}
+SETTLE_SAMPLES=${FM_CODEX_QUEUE_SETTLE_SAMPLES:-5}
+SETTLE_ATTEMPTS=${FM_CODEX_QUEUE_SETTLE_ATTEMPTS:-200}
+CODEX_SESSIONS_ROOT=${FM_CODEX_SESSIONS_ROOT:-${CODEX_HOME:-${HOME:?}/.codex}/sessions}
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -35,6 +39,9 @@ DIAGNOSTIC_INTERVAL=${FM_CODEX_QUEUE_DIAGNOSTIC_INTERVAL:-300}
 
 case "$QUEUE_TIMEOUT" in ''|*[!0-9]*|0) QUEUE_TIMEOUT=10 ;; esac
 case "$DIAGNOSTIC_INTERVAL" in ''|*[!0-9]*) DIAGNOSTIC_INTERVAL=300 ;; esac
+case "$SETTLE_INTERVAL" in ''|*[!0-9.]*|*.*.*) SETTLE_INTERVAL=0.05 ;; esac
+case "$SETTLE_SAMPLES" in ''|*[!0-9]*|0) SETTLE_SAMPLES=5 ;; esac
+case "$SETTLE_ATTEMPTS" in ''|*[!0-9]*|0) SETTLE_ATTEMPTS=200 ;; esac
 
 fm_codex_queue_diagnostic() { # <code> <message>
   local code=$1 message=$2 now old_time old_code tmp
@@ -114,6 +121,88 @@ fm_codex_queue_capable() {
   rm -f -- "$help_tmp"
 }
 
+fm_codex_queue_session_file() { # <thread>
+  local thread=$1 candidate count=0 match=
+  [ -d "$CODEX_SESSIONS_ROOT" ] && [ ! -L "$CODEX_SESSIONS_ROOT" ] || return 1
+  while IFS= read -r candidate; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    if sed -n '1p' "$candidate" 2>/dev/null | jq -e --arg thread "$thread" \
+      '.type == "session_meta" and ((.payload.id // .payload.session_id) == $thread)' \
+      >/dev/null 2>&1; then
+      count=$((count + 1))
+      match=$candidate
+    fi
+  done < <(find "$CODEX_SESSIONS_ROOT" -type f -name "*-${thread}.jsonl" -print 2>/dev/null)
+  [ "$count" -eq 1 ] || return 1
+  printf '%s\n' "$match"
+}
+
+fm_codex_queue_terminal_snapshot() { # <session-file> <thread>
+  local session_file=$1 thread=$2 before after parsed meta=0
+  local event='' turn='' latest_start='' last_event='' last_turn='' invalid=false
+  before=$(wc -c < "$session_file" 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$before" in ''|*[!0-9]*) return 1 ;; esac
+  parsed=$(mktemp "$STATE/.codex-queue-lifecycle.XXXXXX") || return 1
+  if ! jq -r --arg thread "$thread" '
+      if .type == "session_meta" and ((.payload.id // .payload.session_id) == $thread) then
+        ["meta", $thread] | @tsv
+      elif .type == "event_msg" and (.payload.type == "task_started" or .payload.type == "task_complete") then
+        [.payload.type, (.payload.turn_id // "")] | @tsv
+      else empty end
+    ' "$session_file" > "$parsed" 2>/dev/null; then
+    rm -f -- "$parsed"
+    return 1
+  fi
+  after=$(wc -c < "$session_file" 2>/dev/null | tr -d '[:space:]') || { rm -f -- "$parsed"; return 1; }
+  [ "$before" = "$after" ] || { rm -f -- "$parsed"; return 1; }
+  while IFS=$'\t' read -r event turn; do
+    case "$event" in
+      meta) meta=$((meta + 1)) ;;
+      task_started) latest_start=$turn; last_event=$event; last_turn=$turn ;;
+      task_complete)
+        if [ -z "$latest_start" ] || [ "$turn" != "$latest_start" ]; then
+          invalid=true
+          break
+        fi
+        latest_start=
+        last_event=$event
+        last_turn=$turn
+        ;;
+    esac
+  done < "$parsed"
+  rm -f -- "$parsed"
+  [ "$invalid" = false ] && [ "$meta" -eq 1 ] && [ "$last_event" = task_complete ] \
+    && [ -z "$latest_start" ] && [ -n "$last_turn" ] || return 1
+  printf '%s\t%s\n' "$after" "$last_turn"
+}
+
+fm_codex_queue_wait_settled() { # <thread>
+  local thread=$1 session_file size stable=0 attempt=0
+  local snapshot='' previous_size='' checked_size=''
+  command -v jq >/dev/null 2>&1 || return 1
+  session_file=$(fm_codex_queue_session_file "$thread") || return 1
+  while [ "$attempt" -lt "$SETTLE_ATTEMPTS" ]; do
+    size=$(wc -c < "$session_file" 2>/dev/null | tr -d '[:space:]') || return 1
+    case "$size" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$size" = "$previous_size" ]; then
+      stable=$((stable + 1))
+    else
+      previous_size=$size
+      stable=0
+    fi
+    if [ "$stable" -ge "$SETTLE_SAMPLES" ] && [ "$checked_size" != "$size" ]; then
+      snapshot=$(fm_codex_queue_terminal_snapshot "$session_file" "$thread" 2>/dev/null || true)
+      checked_size=$size
+      case "$snapshot" in
+        "$size"$'\t'*) return 0 ;;
+      esac
+    fi
+    attempt=$((attempt + 1))
+    sleep "$SETTLE_INTERVAL"
+  done
+  return 1
+}
+
 fm_codex_queue_deliver() {
   local codex_bin call_tmp thread binding_generation prompt status=0
   mkdir -p "$STATE" || return 1
@@ -148,6 +237,11 @@ fm_codex_queue_deliver() {
   }
   if ! fm_codex_queue_capable; then
     fm_codex_queue_diagnostic unsupported 'native queue unavailable: installed codex does not expose the required queue --thread/--message capability; preserving wakes for terminal/checkpoint fallback'
+    fm_lock_release "$FM_CODEX_PRIMARY_LOCK"
+    return 1
+  fi
+  if ! fm_codex_queue_wait_settled "$thread"; then
+    fm_codex_queue_diagnostic unsettled-session 'native queue deferred: the exact Codex thread has not reached an observable stable post-completion boundary; preserving wakes for a later retry or safe fallback'
     fm_lock_release "$FM_CODEX_PRIMARY_LOCK"
     return 1
   fi

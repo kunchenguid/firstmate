@@ -232,12 +232,14 @@ test_handling_successor_does_not_go_blind() {
 # which stays live across more than one former rapid-loop interval without
 # emitting a synthetic rearm-resurface or changing the recovery generation.
 test_present_daemon_rearms_one_live_successor_without_storm() {
-  local dir state fakebin daemon_pid first_generation second_generation watcher_pid i deliveries
+  local dir state fakebin sessions session_file daemon_pid first_generation second_generation watcher_pid i deliveries
   local owner_identity identity_hash home_hash drain_out drain_err ack sequence generation
   dir="$TMP_ROOT/t3"
   state="$dir/state"
   fakebin="$dir/fakebin"
-  mkdir -p "$state" "$fakebin"
+  sessions="$dir/codex-sessions"
+  session_file="$sessions/2026/08/31/rollout-fixture-33333333-3333-4333-8333-333333333333.jsonl"
+  mkdir -p "$state" "$fakebin" "${session_file%/*}"
   mark_pr_check_migration_complete "$state"
   : > "$state/crew.meta"
   cat > "$fakebin/codex" <<'SH'
@@ -264,9 +266,15 @@ SH
   printf 'fm-codex-primary-binding-v1\nthread_uuid=33333333-3333-4333-8333-333333333333\nhome_sha256=%s\nowner_pid=%s\nowner_identity_sha256=%s\nsession_generation=present-t3\nsource=startup\n' \
     "$home_hash" "$$" "$identity_hash" > "$state/.codex-primary-binding"
   chmod 0600 "$state/.lock-generation" "$state/.codex-primary-binding"
+  printf '%s\n' \
+    '{"type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333","originator":"codex-tui"}}' \
+    '{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-ready"}}' \
+    '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-ready"}}' > "$session_file"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_SUPERVISE_PRESENT=1 FM_CODEX_QUEUE_ONLY=1 \
     FM_DAEMON_PRIMARY_HARNESS=codex FM_CODEX_QUEUE_BIN="$fakebin/codex" \
     FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE="$$" \
+    FM_CODEX_SESSIONS_ROOT="$sessions" FM_CODEX_QUEUE_SETTLE_INTERVAL=0.01 \
+    FM_CODEX_QUEUE_SETTLE_SAMPLES=2 FM_CODEX_QUEUE_SETTLE_ATTEMPTS=20 \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
     FM_HEARTBEAT=999999 FM_WATCHER_STALE_GRACE=10 FM_HOUSEKEEPING_TICK=1 \
     FM_FAKE_DELIVERIES="$dir/deliveries" "$DAEMON" >"$dir/daemon.out" 2>"$dir/daemon.err" &

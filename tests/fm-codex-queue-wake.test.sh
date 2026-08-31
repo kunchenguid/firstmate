@@ -39,9 +39,25 @@ make_case() { # <name>
 }
 
 bind_primary() { # <dir> <uuid> <source> [lifecycle-uuid]
-  local dir=$1 uuid=$2 source=${3:-startup} lifecycle=${4:-}
+  local dir=$1 uuid=$2 source=${3:-startup} lifecycle=${4:-} status=0
   CODEX_THREAD_ID="$uuid" FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ \
-    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$PRIMARY" bind "$source" "$lifecycle"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$PRIMARY" bind "$source" "$lifecycle" || status=$?
+  [ "$status" -eq 0 ] || return "$status"
+  write_terminal_session "$dir" "$uuid"
+}
+
+session_file() { # <dir> <uuid>
+  printf '%s/codex-sessions/2026/08/31/rollout-fixture-%s.jsonl\n' "$1" "$2"
+}
+
+write_terminal_session() { # <dir> <uuid>
+  local dir=$1 uuid=$2 file
+  file=$(session_file "$dir" "$uuid")
+  mkdir -p "${file%/*}"
+  printf '%s\n' \
+    "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$uuid\",\"originator\":\"codex-tui\"}}" \
+    '{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-ready"}}' \
+    '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-ready"}}' > "$file"
 }
 
 write_fake_codex() { # <dir> <mode>
@@ -75,6 +91,10 @@ deliver() { # <dir> [mode]
   bin=$(write_fake_codex "$dir" "$mode")
   FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
     FM_CODEX_QUEUE_BIN="$bin" FM_FAKE_MODE="$mode" FM_FAKE_LOG="$dir/queue.log" FM_CODEX_QUEUE_TIMEOUT=1 \
+    FM_CODEX_SESSIONS_ROOT="$dir/codex-sessions" \
+    FM_CODEX_QUEUE_SETTLE_INTERVAL="${FM_TEST_SETTLE_INTERVAL:-0.01}" \
+    FM_CODEX_QUEUE_SETTLE_SAMPLES="${FM_TEST_SETTLE_SAMPLES:-2}" \
+    FM_CODEX_QUEUE_SETTLE_ATTEMPTS="${FM_TEST_SETTLE_ATTEMPTS:-20}" \
     "$QUEUE" deliver
 }
 
@@ -91,6 +111,8 @@ present_with_fake_backend() { # <dir> <queue-mode> <composer-state> <fallback-lo
       FM_FAKE_LOG="$dir/queue.log"
     export FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ \
       FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state"
+    export FM_CODEX_SESSIONS_ROOT="$dir/codex-sessions" FM_CODEX_QUEUE_SETTLE_INTERVAL=0.01 \
+      FM_CODEX_QUEUE_SETTLE_SAMPLES=2 FM_CODEX_QUEUE_SETTLE_ATTEMPTS=20
     export FM_FAKE_COMPOSER_STATE="$composer_state" FM_FAKE_FALLBACK_LOG="$fallback_log"
     fm_backend_target_exists() { return 0; }
     fm_backend_busy_state() { printf 'idle'; }
@@ -210,6 +232,55 @@ test_idle_busy_and_burst_coalescing() {
   assert_not_contains "$prompt" "crew.status" "queue prompt leaked the event payload"
   [ -s "$dir/state/.wake-queue" ] || fail "queue acceptance acknowledged durable wakes"
   pass "idle delivery emits the full handling and conversational contract while busy/burst delivery serializes behind one outstanding doorbell"
+}
+
+test_queue_waits_for_exact_thread_post_completion_quiet() {
+  local dir file deliver_pid
+  dir=$(make_case lifecycle-settlement)
+  bind_primary "$dir" "$UUID_A" startup || fail "lifecycle-settlement binding setup failed"
+  file=$(session_file "$dir" "$UUID_A")
+  printf '%s\n' \
+    "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$UUID_A\",\"originator\":\"codex-tui\"}}" \
+    '{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-one"}}' > "$file"
+  FM_TEST_SETTLE_INTERVAL=0.05 FM_TEST_SETTLE_SAMPLES=5 FM_TEST_SETTLE_ATTEMPTS=80 \
+    deliver "$dir" ok > "$dir/deliver.out" 2> "$dir/deliver.err" &
+  deliver_pid=$!
+  sleep 0.1
+  [ ! -e "$dir/queue.log" ] || fail "active exact-thread turn was pre-queued"
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-one"}}' >> "$file"
+  sleep 0.1
+  [ ! -e "$dir/queue.log" ] || fail "queue submission did not honor the post-completion quiet window"
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-two"}}' >> "$file"
+  sleep 0.3
+  [ ! -e "$dir/queue.log" ] || fail "a successor turn did not reset the post-completion quiet window"
+  printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-two"}}' >> "$file"
+  sleep 0.1
+  [ ! -e "$dir/queue.log" ] || fail "successor completion bypassed the renewed quiet window"
+  wait "$deliver_pid" || fail "settled exact-thread delivery failed: $(cat "$dir/deliver.err")"
+  [ "$(wc -l < "$dir/queue.log" | tr -d ' ')" = 1 ] \
+    || fail "settled exact-thread lifecycle produced the wrong queue-call count"
+  assert_contains "$(cat "$dir/queue.log")" "--thread $UUID_A" \
+    "settled lifecycle delivery targeted a different thread"
+  pass "native queue waits for exact-thread completion and resets its quiet window on successor activity"
+}
+
+test_active_thread_timeout_preserves_durable_wake() {
+  local dir file
+  dir=$(make_case lifecycle-timeout)
+  bind_primary "$dir" "$UUID_A" startup || fail "lifecycle-timeout binding setup failed"
+  file=$(session_file "$dir" "$UUID_A")
+  printf '%s\n' \
+    "{\"type\":\"session_meta\",\"payload\":{\"id\":\"$UUID_A\",\"originator\":\"codex-tui\"}}" \
+    '{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-active"}}' > "$file"
+  if FM_TEST_SETTLE_INTERVAL=0.01 FM_TEST_SETTLE_SAMPLES=2 FM_TEST_SETTLE_ATTEMPTS=4 \
+    deliver "$dir" ok >/dev/null 2>&1; then
+    fail "active exact-thread timeout was reported as delivered"
+  fi
+  [ ! -e "$dir/queue.log" ] || fail "active exact-thread timeout invoked the native queue"
+  [ -s "$dir/state/.wake-queue" ] || fail "active exact-thread timeout consumed the durable wake"
+  [ ! -e "$dir/state/.codex-queue-outstanding" ] \
+    || fail "active exact-thread timeout published a false outstanding delivery"
+  pass "an exact thread that stays active fails closed and preserves its durable wake"
 }
 
 test_failures_preserve_wakes_and_fallback_safely() {
@@ -356,6 +427,8 @@ test_ack_requeues_same_generation_successor() {
   printf '2\t8\tsignal\tcrew2.status\tdone: arrived during handling\n' >> "$dir/state/.wake-queue"
   FM_CODEX_TESTING=1 FM_CODEX_PRIMARY_OWNER_PID_OVERRIDE=$$ \
     FM_CODEX_QUEUE_BIN="$dir/fakebin/codex" FM_FAKE_MODE=ok FM_FAKE_LOG="$dir/queue.log" \
+    FM_CODEX_SESSIONS_ROOT="$dir/codex-sessions" FM_CODEX_QUEUE_SETTLE_INTERVAL=0.01 \
+    FM_CODEX_QUEUE_SETTLE_SAMPLES=2 FM_CODEX_QUEUE_SETTLE_ATTEMPTS=20 \
     FM_CODEX_QUEUE_ONLY=1 FM_DAEMON_PRIMARY_HARNESS=codex \
     FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_SUPERVISION_MODEL=extension \
     "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" --recovery-generation "$generation" \
@@ -374,6 +447,8 @@ test_authoritative_binding_and_stale_rejection
 test_resume_rebind_and_compact_stability
 test_stale_outstanding_thread_does_not_coalesce
 test_idle_busy_and_burst_coalescing
+test_queue_waits_for_exact_thread_post_completion_quiet
+test_active_thread_timeout_preserves_durable_wake
 test_failures_preserve_wakes_and_fallback_safely
 test_ambiguous_submission_is_idempotent_until_ack
 test_interrupted_submission_falls_back_without_native_retry

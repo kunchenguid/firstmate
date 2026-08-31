@@ -4,6 +4,9 @@ Codex does not start a turn when an asynchronous `Stop` hook finishes.
 The present-mode daemon therefore owns the watcher and uses `codex queue` to ring the exact bound primary thread when an actionable wake is already durable.
 The queued message is a fixed `FIRSTMATE_OP` drain instruction and never carries the wake payload.
 `state/.wake-queue` remains the authority, and queue acceptance means only that Codex accepted a doorbell.
+Before native submission, Firstmate resolves the exact UUID-bound append-only TUI transcript and requires unchanged terminal lifecycle evidence across a bounded post-completion quiet window.
+Codex exposes no persisted presentation acknowledgement, so this boundary allows its asynchronous message consolidation and scrollback reflow to settle without claiming that rendered output is observable.
+An active, changing, missing, ambiguous, or timed-out transcript defers native submission while the durable wake remains authoritative.
 
 When this session owns supervision and away mode is not active:
 
@@ -33,7 +36,7 @@ Duplicate turns can therefore observe an empty eligible queue but cannot duplica
 
 Fallback order is exact:
 
-1. Invoke bounded `codex queue --thread <validated UUID> --message <fixed drain prompt>` when the installed command exposes `queue --thread` and `--message`.
+1. Invoke bounded `codex queue --thread <validated UUID> --message <fixed drain prompt>` only after the exact thread's append-only lifecycle remains terminal and unchanged through the post-completion quiet window and when the installed command exposes `queue --thread` and `--message`.
 2. On a missing or stale binding, unsupported command, timeout, rejection, or ambiguous submission, retain every wake and try the existing marked tmux/herdr injection.
    Its composer and target-ownership guards are unchanged: only an affirmatively empty composer receives the marked message.
 3. If no safe injectable pane exists, retain every wake for `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.

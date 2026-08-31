@@ -473,13 +473,16 @@ ok - done signal reaches one queue turn, drain/ack, and a stable live successor
 ok - unacknowledged recovery is announced at most once per generation and the successor stays alive
 ```
 
-Codex's deterministic queue adapter coverage was run on 2026-08-27 with:
+Codex's deterministic queue adapter coverage was refreshed on 2026-08-31 with Codex CLI 0.151.0 installed:
 
 ```sh
 bin/fm-test-run.sh tests/fm-codex-queue-wake.test.sh tests/fm-present-launch.test.sh tests/fm-turnend-guard.test.sh tests/fm-watch-recovery-loop.test.sh
 ```
 
-The suites cover authoritative home/lock/process binding, stale and invalid rejection, idle/busy adapter boundaries, burst and ambiguous-acceptance coalescing, missing/unsupported/rejected/timed-out queue fallbacks, composer safety, resume/rebind and compact identity, Stop-loop suppression, and the real watcher row -> doorbell -> drain/report -> acknowledgement -> successor path with a fake CLI.
+The suites cover authoritative home/lock/process binding, stale and invalid rejection, exact-thread append-only lifecycle settlement, idle/busy adapter boundaries, burst and ambiguous-acceptance coalescing, missing/unsupported/rejected/timed-out queue fallbacks, composer safety, resume/rebind and compact identity, Stop-loop suppression, and the real watcher row -> doorbell -> drain/report -> acknowledgement -> successor path with a fake CLI.
+The settlement regression starts with an active turn, appends its completion, appends a successor start during the quiet window, and proves that native submission occurs only after that successor completes and the exact transcript remains unchanged through the renewed window.
+The observed lifecycle is Codex-specific because the queue ingress, UUID-bound TUI session JSONL, and asynchronous post-completion `ConsolidateAgentMessage` reflow are Codex surfaces; Claude, Cursor, Grok, OpenCode, Pi, pi-signed, Traex, Kimi, and Muse do not call `bin/fm-codex-queue-wake.sh`, while tmux, Herdr, Zellij, Orca, and cmux only host the primary and do not alter this adapter boundary.
+Codex exposes no persisted acknowledgement that the terminal has rendered the consolidated answer, so the regression proves a bounded unchanged lifecycle boundary rather than claiming direct UI observation.
 The deterministic adapter suite also appends wake sequence 8 after presenting sequence 7, acknowledges only through 7 in the same recovery generation, and proves that row 8 remains durable while a successor queue doorbell advances the outstanding high-water mark to 8.
 The manual live guard is separate because it requires Codex credentials and an interactive TUI.
 Its successful 0.150.1 output is:
