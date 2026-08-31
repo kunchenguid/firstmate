@@ -6,7 +6,10 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
+#                                         [--cursor-exemption <attended|envelope:<name>>]
 #                                         (--note <text> | --note-file <path>)
+#   --cursor-exemption is a fresh per-invocation grant for THIS relaunch, the way
+#   to relaunch a cursor task whose recorded grant cannot be inherited.
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -256,7 +259,8 @@ fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    && [ "$CURSOR_EXEMPTION_SET" = 0 ] \
+    || die "--harness, --model, --effort, --note, and --cursor-exemption apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -669,27 +673,30 @@ resolve_relaunch_profile() {
   else
     TARGET_HARNESS=$PRIOR_HARNESS
   fi
-  # The launch owner refuses an adapter that cannot run this task's kind, but it
-  # is only reached after the old agent has been stopped. Asking the same
-  # capability table here keeps that refusal on the pre-stop side of the
-  # transaction, where nothing has changed yet.
-  # A cursor exemption is recorded on the task itself, but the RECORDED grant is
-  # not always the grant the relaunch will run under: this verb forwards no
-  # --cursor-exemption, so fm-spawn.sh --relaunch inherits only what survives an
-  # unattended relaunch. Asking with the raw record would let an `attended` task
-  # pass here, be stopped, and then be refused by the launch owner - the exact
-  # stranding this pre-stop check exists to prevent. Both sides therefore ask the
-  # one inheritance owner in bin/fm-control-lib.sh, so this question is the
-  # question the launch will actually be asked. The refusal text is shared for
-  # the same reason.
+  # The launch owner refuses a profile it cannot run, but it is only reached
+  # after the old agent has been stopped, so the SAME question is asked here
+  # while nothing has changed yet. Two properties make that equivalence hold.
+  #
+  # First the grant: an explicit --cursor-exemption on this verb is a fresh
+  # per-invocation attestation and is forwarded verbatim to the launch, while
+  # without one the launch inherits only what survives an unattended relaunch,
+  # which is what the shared inheritance owner returns. Either way this resolves
+  # the grant that will really be in force rather than the raw recorded value.
+  #
+  # Second the question itself: fm_control_launch_refusal composes EVERY
+  # launch-admissibility rule, so this cannot ask a narrower question than the
+  # launch will. Asking a subset is exactly how a running agent gets stopped for
+  # a launch that is then refused, and adding a rule to the launch path alone
+  # cannot reopen that gap while both sides call this one function.
   if [ "$CURSOR_EXEMPTION_SET" -eq 1 ]; then
     RELAUNCH_EXEMPTION=$NEW_CURSOR_EXEMPTION
   else
     RELAUNCH_EXEMPTION=$(fm_control_cursor_exemption_inherited \
       "$(fm_meta_get "$META" cursor_exemption)" "$TARGET_HARNESS")
   fi
-  fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" "$RELAUNCH_EXEMPTION" \
-    || die "$(fm_control_harness_kind_refusal "$TARGET_HARNESS" "$KIND") Relaunching $ID onto it would stop the running agent for a launch that must be refused."
+  if ! RELAUNCH_REFUSAL=$(fm_control_launch_refusal "$TARGET_HARNESS" "$KIND" "$RELAUNCH_EXEMPTION"); then
+    die "$RELAUNCH_REFUSAL Relaunching $ID onto it would stop the running agent for a launch that must be refused."
+  fi
   # A model or effort chosen for the previous harness does not transfer to a
   # different one, so an explicit harness change resets both axes unless the
   # caller names them too.

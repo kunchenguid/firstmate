@@ -913,6 +913,51 @@ test_relaunch_inherits_a_named_isolation_envelope_grant() {
 # attestation for this relaunch, which is why `attended` is accepted here even
 # though it is never inherited from the record, and the pre-stop check must
 # evaluate the passed grant rather than the recorded one.
+# THE pre-stop invariant, stated once and driven for every way it has been
+# breached: if a relaunch would be refused, the running agent must never be
+# stopped. Both known doors are covered here because each was found only after
+# the other was closed - an `attended` record that the launch drops, and an
+# explicit grant on a harness the launch will not record it on - and each time
+# the cause was the same: the pre-stop check asked a NARROWER question than the
+# launch would. Driving both through the control verb means a future rule added
+# to the launch path alone shows up here as a stranded agent.
+assert_relaunch_refused_without_stopping() {  # <case-dir> <id> <expect> <label> <args...>
+  local dir=$1 id=$2 expect=$3 label=$4; shift 4
+  local out rc
+  out=$(run_control "$dir" "$id" relaunch "$@"); rc=$?
+  # The invariant is checked FIRST so a breach is reported as the stranding it
+  # is, rather than as a downstream message mismatch.
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "$label stopped the running agent for a launch that was then refused"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "$label must send nothing, but the pane received: $(cat "$dir/fake/literal")"
+  expect_code 1 "$rc" "$label should be refused"
+  assert_contains "$out" "$expect" "$label should print the launch owner's own reason"
+  assert_contains "$out" "would stop the running agent for a launch that must be refused" \
+    "$label should name the invariant it is protecting"
+}
+
+test_a_refused_relaunch_never_stops_the_running_agent() {
+  local dir
+  dir=$(new_case prestopinvariant rl46)
+  add_ship_task "$dir" rl46 cursor
+  printf 'cursor_exemption=attended\n' >> "$dir/home/state/rl46.meta"
+  assert_relaunch_refused_without_stopping "$dir" rl46 \
+    "refused for an unattended ship launch" \
+    "an uninheritable attended record" --note "stalled overnight"
+
+  dir=$(new_case prestopinvariant2 rl47)
+  add_ship_task "$dir" rl47 cursor
+  assert_relaunch_refused_without_stopping "$dir" rl47 \
+    "applies only to a cursor launch" \
+    "an explicit grant on a non-cursor target" \
+    --harness codex --cursor-exemption envelope:bench --note n
+  [ "$(meta_field "$dir" rl47 harness)" = cursor ] \
+    || fail "a refused relaunch must leave the durable record on the recorded harness"
+
+  pass "fm-control relaunch: a refusal never stops the running agent, on either known door"
+}
+
 test_relaunch_accepts_a_fresh_attended_grant_on_the_verb() {
   local dir out rc
   dir=$(new_case cursorattendedflag rl44)
@@ -1647,6 +1692,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_relaunch_never_inherits_an_attended_cursor_grant
 test_control_relaunch_refuses_an_attended_cursor_grant_before_stopping
 test_relaunch_onto_another_harness_drops_the_cursor_grant
+test_a_refused_relaunch_never_stops_the_running_agent
 test_relaunch_accepts_a_fresh_attended_grant_on_the_verb
 test_relaunch_refuses_a_malformed_grant_before_stopping
 test_relaunch_inherits_a_named_isolation_envelope_grant

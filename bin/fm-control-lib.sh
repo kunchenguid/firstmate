@@ -230,12 +230,46 @@ fm_control_harness_kind_refusal() {  # <harness> <kind>
       printf 'muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates.'
       ;;
     cursor)
-      printf "cursor is a verified adapter but is refused for an unattended %s launch: its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. The bar applies however cursor was selected, INCLUDING when firstmate inherited it by detecting its own runtime, because silently substituting another tool would change which adapter runs the captain's work without saying so. If this home is running inside cursor and resolved it that way, set config/crew-harness to a verified adapter such as codex or claude, or add a crew-dispatch profile eligible for this kind; firstmate will not choose one for you. If a person is in the pane or a proven outer isolation envelope governs this worker, pass it on the spawn itself with --cursor-exemption attended or --cursor-exemption envelope:<name>." "$kind"
+      printf "cursor is a verified adapter but is refused for an unattended %s launch: its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. The bar applies however cursor was selected, INCLUDING when firstmate inherited it by detecting its own runtime, because silently substituting another tool would change which adapter runs the captain's work without saying so. If this home is running inside cursor and resolved it that way, set config/crew-harness to a verified adapter such as codex or claude, or add a crew-dispatch profile eligible for this kind; firstmate will not choose one for you. If a person is in the pane or a proven outer isolation envelope governs this worker, pass it on the invocation itself with --cursor-exemption attended or --cursor-exemption envelope:<name>, which both bin/fm-spawn.sh and bin/fm-control.sh's relaunch verb accept." "$kind"
       ;;
     *)
       printf "'%s' is not verified to run a %s task" "$canonical" "$kind"
       ;;
   esac
+}
+
+# The ONE composite question "would a launch with this profile be refused, and
+# why". Prints the operator-facing reason and returns 1 when it would be refused;
+# prints nothing and returns 0 when it would proceed.
+#
+# This exists because the control plane and the launch owner must ask the SAME
+# question. bin/fm-spawn.sh asks it immediately before launching, and
+# bin/fm-control.sh's relaunch asks it BEFORE it stops anything. Twice on this
+# branch the pre-stop side asked a narrower question than the launch side - once
+# missing the inheritance rule, once missing the non-cursor grant rule - and both
+# times the result was identical: the pre-stop check passed, the running agent
+# was stopped, and the replacement was then refused, stranding the task with no
+# agent. Composing every launch-admissibility rule here means a rule added for
+# the launch path is automatically enforced pre-stop and the two cannot drift.
+#
+# The order below is the order the refusals are reported in, so the reason the
+# control plane prints pre-stop is the reason the launch would have printed. The
+# harness-family check gates only the KIND rule, preserving the launch owner's
+# escape hatch: an unverified raw launch command has no kind table to consult,
+# while the grant rule applies to it regardless because the family canonicalizer
+# still resolves a raw `cursor-agent` command to cursor.
+fm_control_launch_refusal() {  # <harness> <kind> <effective-grant>
+  local harness=${1-} kind=${2-} grant=${3-}
+  if [ -n "$grant" ] && ! fm_control_cursor_exemption_applies "$harness"; then
+    fm_control_cursor_exemption_harness_refusal "$harness"
+    return 1
+  fi
+  if fm_control_harness_family "$harness" >/dev/null 2>&1 &&
+    ! fm_control_harness_supports_kind "$harness" "$kind" "$grant"; then
+    fm_control_harness_kind_refusal "$harness" "$kind"
+    return 1
+  fi
+  return 0
 }
 
 # The key that cancels a running turn. Escape for every adapter except grok,

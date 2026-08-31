@@ -1527,25 +1527,14 @@ if [ "$CURSOR_EXEMPTION_SET" -eq 0 ] &&
     "$(spawn_recorded_cursor_exemption "$STATE" "$ID")" "$HARNESS")
 fi
 
-# A cursor exemption is meaningful only for a cursor launch. Accepting and
-# RECORDING one on another harness would leave a stale attested grant in that
-# task's meta, which a later relaunch onto cursor would read back as authority
-# nobody granted for cursor, so refuse the combination outright instead.
-#
-# This is keyed on the EFFECTIVE grant rather than on how the grant arrived. An
-# earlier revision asked whether the --cursor-exemption FLAG was passed, which
-# left the relaunch-inheritance path - which assigns a grant without setting that
-# flag - free to record a cursor grant on a non-cursor task. Asking about the
-# value that will actually be written keeps flag, inheritance, and any later
-# source behind this one check.
-if [ -n "$CURSOR_EXEMPTION" ] && ! fm_control_cursor_exemption_applies "$HARNESS"; then
-  echo "error: $(fm_control_cursor_exemption_harness_refusal "$HARNESS")" >&2
-  exit 1
-fi
-
-if fm_control_harness_family "$HARNESS" >/dev/null &&
-  ! fm_control_harness_supports_kind "$HARNESS" "$KIND" "$CURSOR_EXEMPTION"; then
-  echo "error: $(fm_control_harness_kind_refusal "$HARNESS" "$KIND")" >&2
+# Every launch-admissibility rule is composed by fm_control_launch_refusal in
+# bin/fm-control-lib.sh, asked here with the EFFECTIVE grant rather than with how
+# the grant arrived, so flag, inheritance, and any later source go through one
+# check. bin/fm-control.sh's relaunch asks the SAME function before it stops
+# anything, which is what keeps a refusal on the pre-stop side of that
+# transaction instead of stranding a task whose replacement is then refused.
+if ! SPAWN_LAUNCH_REFUSAL=$(fm_control_launch_refusal "$HARNESS" "$KIND" "$CURSOR_EXEMPTION"); then
+  echo "error: $SPAWN_LAUNCH_REFUSAL" >&2
   exit 1
 fi
 
