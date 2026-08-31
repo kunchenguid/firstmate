@@ -863,9 +863,10 @@ test_relaunch_never_inherits_an_attended_cursor_grant() {
 }
 
 # The control plane's PRE-STOP capability check must ask about the grant the
-# relaunch will actually run under, not the raw recorded one. `relaunch` forwards
-# no --cursor-exemption, so an `attended` record leaves the replacement launch
-# with NO grant; if the pre-stop check accepted the record verbatim it would pass,
+# relaunch will actually run under, not the raw recorded one. This invocation
+# passes no --cursor-exemption, so an `attended` record leaves the replacement
+# launch with NO grant; if the pre-stop check accepted the record verbatim it
+# would pass,
 # stop the running agent, and only then hit the launch owner's refusal - leaving
 # the task with no agent at all, which is precisely what the pre-stop check
 # exists to prevent.
@@ -901,26 +902,20 @@ test_relaunch_inherits_a_named_isolation_envelope_grant() {
   pass "fm-spawn --relaunch: a named isolation-envelope grant is inherited so automatic recovery still works"
 }
 
-# An envelope grant is inherited across relaunch, but it exempts a worker from
-# CURSOR's unattended bar and describes nothing about any other adapter, so it
-# must not ride a harness switch into a non-cursor task's record. If it did, a
-# later relaunch back onto cursor would read it out of that record as authority
-# nobody granted for cursor. The switch itself stays legitimate: the grant is
-# dropped, not the relaunch refused.
-# The refusal an attended cursor task hits names --cursor-exemption as the way
-# forward, so that flag has to work on the verb the operator was just using or
-# following the instruction produces a second error. It is a FRESH per-invocation
-# attestation for this relaunch, which is why `attended` is accepted here even
-# though it is never inherited from the record, and the pre-stop check must
-# evaluate the passed grant rather than the recorded one.
-# THE pre-stop invariant, stated once and driven for every way it has been
-# breached: if a relaunch would be refused, the running agent must never be
-# stopped. Both known doors are covered here because each was found only after
-# the other was closed - an `attended` record that the launch drops, and an
-# explicit grant on a harness the launch will not record it on - and each time
-# the cause was the same: the pre-stop check asked a NARROWER question than the
-# launch would. Driving both through the control verb means a future rule added
-# to the launch path alone shows up here as a stranded agent.
+# THE pre-stop invariant for POLICY refusals, stated once and driven for every
+# way it has been breached: if a relaunch would be refused on harness, kind, or
+# grant, the running agent must never be stopped. Both known doors are covered
+# here because each was found only after the other was closed - an `attended`
+# record that the launch drops, and an explicit grant on a harness the launch
+# will not record it on - and each time the cause was the same: the pre-stop
+# check asked a NARROWER question than the launch would. Driving both through the
+# control verb means a policy rule added to the launch path alone shows up here
+# as a stranded agent.
+#
+# Environmental refusals are deliberately out of scope, matching the bound stated
+# on fm_control_launch_refusal: a missing harness executable or an unavailable
+# cursor model is only discoverable at launch, so those still strand a relaunch
+# and no assertion here claims otherwise.
 assert_relaunch_refused_without_stopping() {  # <case-dir> <id> <expect> <label> <args...>
   local dir=$1 id=$2 expect=$3 label=$4; shift 4
   local out rc
@@ -958,6 +953,12 @@ test_a_refused_relaunch_never_stops_the_running_agent() {
   pass "fm-control relaunch: a refusal never stops the running agent, on either known door"
 }
 
+# The refusal an attended cursor task hits names --cursor-exemption as the way
+# forward, so that flag has to work on the verb the operator was just using or
+# following the instruction produces a second error. It is a FRESH per-invocation
+# attestation for this relaunch, which is why `attended` is accepted here even
+# though it is never inherited from the record, and the pre-stop check must
+# evaluate the passed grant rather than the recorded one.
 test_relaunch_accepts_a_fresh_attended_grant_on_the_verb() {
   local dir out rc
   dir=$(new_case cursorattendedflag rl44)
@@ -993,6 +994,12 @@ test_relaunch_refuses_a_malformed_grant_before_stopping() {
   pass "fm-control relaunch: a malformed grant is refused before the agent is stopped"
 }
 
+# An envelope grant is inherited across relaunch, but it exempts a worker from
+# CURSOR's unattended bar and describes nothing about any other adapter, so it
+# must not ride a harness switch into a non-cursor task's record. If it did, a
+# later relaunch back onto cursor would read it out of that record as authority
+# nobody granted for cursor. The switch itself stays legitimate: the grant is
+# dropped, not the relaunch refused.
 test_relaunch_onto_another_harness_drops_the_cursor_grant() {
   local dir out
   dir=$(new_case cursorswitch rl43)

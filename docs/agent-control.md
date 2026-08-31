@@ -92,6 +92,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An unverified harness is refused rather than guessed at.
 - An implicit relaunch from a prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
+  That pre-stop guarantee covers the policy rules the control plane can evaluate from the recorded profile: harness, task kind, and the cursor grant that will be in force.
+  It does not cover environmental refusals, which only the launch can discover: relaunching onto a harness whose executable is missing from this machine, or onto a cursor model absent from its live catalog, stops the agent and is then refused, leaving the task with no agent and its work preserved.
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
   Cursor is the broader case: it is refused for ship, scout, and secondmate alike, because its `--auto-review` classifier can park an unattended pane on a prompt nobody answers while the pane still reads as busy.
   That pre-stop answer is keyed on the grant the relaunch will actually run under, not on the raw `cursor_exemption=` value recorded in the task's own meta.

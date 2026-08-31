@@ -683,11 +683,17 @@ resolve_relaunch_profile() {
   # which is what the shared inheritance owner returns. Either way this resolves
   # the grant that will really be in force rather than the raw recorded value.
   #
-  # Second the question itself: fm_control_launch_refusal composes EVERY
-  # launch-admissibility rule, so this cannot ask a narrower question than the
+  # Second the question itself: fm_control_launch_refusal composes every POLICY
+  # admissibility rule, so this cannot ask a narrower policy question than the
   # launch will. Asking a subset is exactly how a running agent gets stopped for
-  # a launch that is then refused, and adding a rule to the launch path alone
-  # cannot reopen that gap while both sides call this one function.
+  # a launch that is then refused, and adding a policy rule to the launch path
+  # alone cannot reopen that gap while both sides call this one function.
+  #
+  # It is not an absolute guarantee, and the bound is stated where the owner is
+  # defined. Environmental refusals - a missing pi or cursor executable, a model
+  # absent from cursor's live catalog - are only discoverable by probing the
+  # machine at launch, so they still land after do_exit and a relaunch onto a
+  # harness that is not installed here does strand the task.
   if [ "$CURSOR_EXEMPTION_SET" -eq 1 ]; then
     RELAUNCH_EXEMPTION=$NEW_CURSOR_EXEMPTION
   else
