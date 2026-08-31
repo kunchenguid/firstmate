@@ -92,6 +92,13 @@ function runHandoff(
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let child: ReturnType<typeof spawn> | undefined;
+    const testTimeout = Number(process.env.FM_HANDOFF_TEST_ADAPTER_TIMEOUT_MS);
+    const adapterTimeoutMs = process.env.FM_HANDOFF_TESTING === "1" && Number.isFinite(testTimeout) && testTimeout >= 50 && testTimeout <= 5000
+      ? testTimeout
+      : 10_000;
+    const adapterInput = args[0] === "compaction-outcome"
+      ? { ...input, adapter_deadline_epoch_ms: Date.now() + Math.max(25, adapterTimeoutMs - 1_000) }
+      : input;
     const finish = (result: HandoffResult): void => {
       if (settled) return;
       settled = true;
@@ -133,10 +140,6 @@ function runHandoff(
     }
     const childStdout = runningChild.stdout;
     const childStdin = runningChild.stdin;
-    const testTimeout = Number(process.env.FM_HANDOFF_TEST_ADAPTER_TIMEOUT_MS);
-    const adapterTimeoutMs = process.env.FM_HANDOFF_TESTING === "1" && Number.isFinite(testTimeout) && testTimeout >= 50 && testTimeout <= 5000
-      ? testTimeout
-      : 10_000;
     timeout = setTimeout(() => {
       terminateAdapter();
     }, adapterTimeoutMs);
@@ -169,7 +172,7 @@ function runHandoff(
         finish({ status: "adapter-failed" });
       }
     });
-    childStdin.end(JSON.stringify(input));
+    childStdin.end(JSON.stringify(adapterInput));
   });
 }
 

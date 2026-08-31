@@ -195,6 +195,7 @@ Result:
 ok - required evidence prerequisite exit status
 ok - sensitive candidate and Save content rejection
 ok - foreign candidate ownership isolation
+ok - global active-state caps and stale-session recovery
 ok - candidate identity binds its exact source session
 ok - durable receipt for unhealthy seal-time bindings
 ok - durable compaction attempt result replay
@@ -207,17 +208,19 @@ ok - single-note automatic Save boundary
 ok - queue-first orphan recovery
 ok - invalid candidate failures are durably receipted
 ok - locked registration capability snapshot
-ok - bounded compaction backpressure and drain
+ok - bounded retryable and successful active-state backpressure
 ok - deterministic byte-bounded envelope draining
 ok - replacement-monotonic Claude session binding
 ok - fail-closed Claude PreCompact endpoint binding
 ok - immutable lifecycle and serialized authority snapshots
 ok - exit-75 Save authority revocation
-ok - exact bundled MCP tool allowlist
+ok - exact bundled MCP tool and live hook authority
 ok - bounded transports and fail-closed delivery
+ok - descriptor-private atomic publication
 ok - durable private state directory creation
 ok - serialized durable state initialization
 ok - model-free Pi lifecycle and fail-closed adapter validation
+ok - isolated turn-end extension runtime dependencies
 public:compaction_start:threshold:aborted=unset
 extension:session_before_compact:threshold
 persistence:appendCompaction
@@ -229,13 +232,17 @@ ok - completed Save recovery before source validation
 ok - registration lifecycle and multi-record retry recovery
 ok - quarantine, disable, and disposition recovery
 ok - transaction apply replay and rollback recovery
+ok - complete transaction dependency manifest binding
 ok - orphan apply remains behind durable execution authority
 ok - Claude lifecycle and model-free plugin discovery
+ok - probe-independent authenticated Claude terminal outcome
 ```
+
+Exit status: `0`.
 
 The suite uses isolated temporary Firstmate homes, source roots, Vaults, Herdr adapters, Pi extension APIs, Claude hook payloads, MCP requests, and transaction state.
 The self-contained Bash suite executes the public CLI, Claude hook, MCP server, Pi extension, and transaction fixture against isolated synthetic homes and Vaults.
-It covers required-gate prerequisite exit status, non-cancelling empty registers under an unhealthy binding, bounded classification of missing durable records, retirement of invalid compaction attempt journals, case-exact bundled MCP allowlisting, category-sensitive rejection after eligibility authorization, session-bound candidate identity, durable receipts for unhealthy seal-time bindings, crash-durable compaction attempt replay, exact live-generation revalidation at the sealing boundary with a probe budget materially shorter than the PreCompact hook timeout, consumable-only SessionStart announcements, exact one-create-plus-coupled Save authority, queue-before-claim crash recovery, corrupt-candidate receipts, locked and generation-monotonic process capability, deterministic byte-bounded subsets, retry backpressure and draining, fail-closed Claude endpoint binding, atomic terminal compaction recovery, exit-75 approval revocation and fresh inspect, exact MCP and shell guard confinement, bounded MCP and subprocess transport, fail-closed delivery, serialized durable state initialization, complete Pi lifecycle failure handling, completed-Save recovery before mutable-source validation, registration retry recovery, quarantine, disable and re-enable, disposition crash recovery, complete reviewed transaction-path verification, durable orphan-apply execution claims, transaction replay and rollback, and model-free Claude plugin discovery.
+It covers required-gate prerequisite exit status, non-cancelling empty registers under an unhealthy binding, bounded classification of missing durable records, retirement of invalid compaction attempt journals, case-exact bundled MCP allowlisting, category-sensitive rejection after eligibility authorization, session-bound candidate identity, global active-state backpressure and stale-session evidence, durable receipts for unhealthy seal-time bindings, crash-durable compaction attempt replay, exact live-generation revalidation at the sealing boundary with a probe budget materially shorter than the PreCompact hook timeout, consumable-only SessionStart announcements, exact one-create-plus-coupled Save authority, queue-before-claim crash recovery, corrupt-candidate receipts, locked and generation-monotonic process capability, deterministic byte-bounded subsets, fail-closed Claude endpoint binding, per-capability terminal compaction recovery, exit-75 approval revocation and fresh inspect, current source/queue/bundle/approval enforcement at the exact MCP guard, bounded MCP and subprocess transport, deadline-aware fail-closed delivery, private descriptor publication, serialized durable state initialization, isolated Pi runtime dependencies, complete Pi lifecycle failure handling, completed-Save recovery before mutable-source validation, registration retry recovery, quarantine, disable and re-enable, disposition crash recovery, complete reviewed transaction-path verification, complete installed-package dependency manifest binding, orphan transaction-runtime and apply-claim recovery, correlated result-before-journal replay, transaction rollback, and model-free Claude plugin discovery.
 No test reads or mutates the real Vault, a live Claude session, a live Herdr process, credentials, auth state, transcripts, or provider data.
 No test invokes a model.
 
@@ -248,8 +255,10 @@ FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE=1 tests/fm-context-handoff.test.sh
 Its distinguishing final line was:
 
 ```text
-ok - exact-installed-transaction-core core=34f3030da4a0ebc223a5dfba7f7180638d08dffa3d044be33fa72234866900c2 module=e007e3b7d08f72eabc4a95c7031fb596c201562432cf37cc649136b02b223de2
+ok - exact-installed-transaction-core core=34f3030da4a0ebc223a5dfba7f7180638d08dffa3d044be33fa72234866900c2 module=e007e3b7d08f72eabc4a95c7031fb596c201562432cf37cc649136b02b223de2 manifest=7e3bf1bc25a36053978b18916cb8dd751a4327fc6127617dc0d1b98e543062e0
 ```
+
+Exit status: `0`.
 
 ## Fresh-process model-free smokes
 
