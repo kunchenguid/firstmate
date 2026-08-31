@@ -2556,6 +2556,9 @@ def current_boot_identity(platform: str) -> str | None:
     if platform == "test" and os.environ.get("FM_HANDOFF_TESTING") == "1":
         return synthetic_boot_identity()
     if platform == "linux":
+        test_boot = os.environ.get("FM_HANDOFF_TEST_PI_BOOT_ID")
+        if os.environ.get("FM_HANDOFF_TESTING") == "1" and test_boot:
+            return test_boot
         return current_linux_boot_id()
     return None
 
@@ -2724,11 +2727,19 @@ def darwin_pi_process_claim(process_pid: int) -> dict[str, Any]:
         proc_pidinfo.restype = ctypes.c_int
         value = ProcBSDInfo()
         size = ctypes.sizeof(value)
+        ctypes.set_errno(0)
         result = proc_pidinfo(process_pid, 3, 0, ctypes.byref(value), size)
-        process_session = os.getsid(process_pid)
+        probe_errno = ctypes.get_errno()
     except (OSError, AttributeError) as exc:
         raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is unavailable") from exc
-    if result != size or value.pbi_pid != process_pid or value.pbi_uid != os.getuid() or value.pbi_start_tvusec >= 1_000_000:
+    if result != size:
+        exc = OSError(probe_errno or errno.EIO, "proc_pidinfo failed")
+        raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is unavailable") from exc
+    try:
+        process_session = os.getsid(process_pid)
+    except OSError as exc:
+        raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is unavailable") from exc
+    if value.pbi_pid != process_pid or value.pbi_uid != os.getuid() or value.pbi_start_tvusec >= 1_000_000:
         raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is inconsistent")
     start_token = f"{value.pbi_start_tvsec}:{value.pbi_start_tvusec}"
     identity = f"pi-darwin\0{process_pid}\0{value.pbi_pgid}\0{process_session}\0{start_token}\0{value.pbi_uid}"
@@ -2761,10 +2772,13 @@ def pi_process_binding_owner_is_live(value: Mapping[str, Any]) -> bool | None:
     process_pid = value.get("process_pid")
     if not isinstance(platform, str) or not isinstance(process_pid, int) or process_pid < 1:
         return None
-    boot_current = process_binding_boot_is_current(value)
-    if boot_current is False:
-        return False
-    if boot_current is None:
+    if platform in {"linux", "test"}:
+        boot_current = process_binding_boot_is_current(value)
+        if boot_current is False:
+            return False
+        if boot_current is None:
+            return None
+    elif platform != "darwin":
         return None
     if platform == "test" and os.environ.get("FM_HANDOFF_TESTING") == "1":
         forced = os.environ.get("FM_HANDOFF_TEST_PI_LIVENESS")
@@ -2775,13 +2789,37 @@ def pi_process_binding_owner_is_live(value: Mapping[str, Any]) -> bool | None:
         live = os.environ.get("FM_HANDOFF_TEST_LIVE_PROCESS_CAPABILITY")
         boot_id = value.get("process_boot_id")
         return isinstance(boot_id, str) and bool(live) and value.get("process_capability_sha256") == sha256_bytes(f"test\0{boot_id}\0{live}".encode("utf-8"))
+    forced = os.environ.get("FM_HANDOFF_TEST_PI_LIVENESS") if os.environ.get("FM_HANDOFF_TESTING") == "1" else None
     try:
-        claim = linux_pi_process_claim(process_pid) if platform == "linux" else darwin_pi_process_claim(process_pid) if platform == "darwin" else None
-    except HandoffError:
-        return None
-    if claim is None:
-        return None
+        if forced == "linux-missing" and platform == "linux":
+            raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is unavailable") from ProcessLookupError(errno.ESRCH, "process not found")
+        if forced == "linux-transient" and platform == "linux":
+            raise HandoffError("PI_PROCESS_CAPABILITY", "the Pi process capability is unavailable") from PermissionError(errno.EACCES, "process probe unavailable")
+        if forced == "darwin-match" and platform == "darwin":
+            claim = dict(value)
+        elif forced == "darwin-mismatch" and platform == "darwin":
+            claim = {
+                **value,
+                "process_capability_sha256": "0" * 64,
+                "process_generation": int(value.get("process_generation", 0)) + 1,
+                "process_start_token": f"{value.get('process_start_token', '')}:replacement",
+            }
+        else:
+            claim = linux_pi_process_claim(process_pid) if platform == "linux" else darwin_pi_process_claim(process_pid)
+    except HandoffError as exc:
+        return False if pi_process_probe_proves_absent(exc) else None
     return pi_process_claim_matches(value, claim)
+
+
+def pi_process_probe_proves_absent(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno in {errno.ENOENT, errno.ESRCH}:
+            return True
+        current = current.__cause__
+    return False
 
 
 def current_process_identity() -> tuple[str, int]:
