@@ -264,14 +264,20 @@ test_base_freshness_check_is_resolved_and_mode_aware() {
   local_dod=$(sed -n '/^# Definition of done$/,$p' "$local_brief")
   scout_dod=$(sed -n '/^# Definition of done$/,$p' "$scout")
 
-  assert_contains "$ship_setup" "1. **First startup step - check your base before starting work.**" \
-    "ship brief did not make the base check its first startup step"
+  assert_contains "$ship_setup" "1. **Verify isolation before anything else.**" \
+    "ship brief did not number worktree isolation as the first safety step"
+  assert_contains "$ship_setup" "2. **Check your base before starting work.**" \
+    "ship brief did not number the base check as the second safety step"
   assert_contains "$ship_setup" "git rev-list --count \$(git merge-base HEAD origin/release)..origin/release" \
     "PR brief did not check the resolved remote default branch"
-  assert_contains "$ship_setup" "Only \`0\` passes against the fetched default branch \`origin/release\`." \
+  assert_contains "$ship_setup" "Only \`0\` passes against the freshly fetched default branch \`origin/release\`." \
     "PR brief did not state the zero-only pass criterion"
-  assert_contains "$ship_setup" "2. Create your branch: \`git checkout -b fm/base-pr\`" \
-    "ship brief did not put branch creation after its freshness check"
+  assert_contains "$ship_setup" 'git fetch origin --quiet' \
+    "PR brief compared against the tracking ref without refreshing it first"
+  assert_contains "$ship_setup" 'blocked: cannot fetch origin to verify base freshness' \
+    "PR brief did not tell the worker to report blocked when the single fetch fails"
+  assert_contains "$ship_setup" "3. Create your branch: \`git checkout -b fm/base-pr\`" \
+    "ship brief did not number branch creation as the third safety step"
   assert_not_contains "$ship_setup" 'on a clean default branch' \
     "ship brief retained an unchecked clean-base assertion"
   assert_not_contains "$ship_setup" 'origin/main' \
@@ -285,20 +291,88 @@ test_base_freshness_check_is_resolved_and_mode_aware() {
     "local-only brief did not explain its local zero-only criterion"
   assert_not_contains "$local_setup" 'origin/release' \
     "local-only brief used the stale origin tracking ref instead of its local default branch"
+  assert_not_contains "$local_setup" 'git fetch' \
+    "local-only brief refreshed the network even though it lands in the local branch"
   assert_not_contains "$local_dod" 'git rev-list --count' \
     "local-only brief put the freshness check in Definition of done instead of Setup"
 
-  assert_contains "$scout_setup" "1. **First startup step - check your base before starting work.**" \
-    "scout brief did not make the base check its first startup step"
+  assert_contains "$scout_setup" "1. **Check your base before starting work.**" \
+    "scout brief did not make the base check its first numbered startup step"
   assert_contains "$scout_setup" "git rev-list --count \$(git merge-base HEAD origin/release)..origin/release" \
     "scout brief did not check the resolved default branch"
-  assert_contains "$scout_setup" "Only \`0\` passes against the fetched default branch \`origin/release\`." \
+  assert_contains "$scout_setup" "Only \`0\` passes against the freshly fetched default branch \`origin/release\`." \
     "scout brief did not state the zero-only pass criterion"
+  assert_contains "$scout_setup" 'git fetch origin --quiet' \
+    "scout brief compared against the tracking ref without refreshing it first"
   assert_not_contains "$scout_setup" 'on a clean default branch' \
     "scout brief retained an unchecked clean-base assertion"
   assert_not_contains "$scout_dod" 'git rev-list --count' \
     "scout brief put the freshness check in Definition of done instead of Setup"
   pass "fm-brief.sh: startup base freshness is resolved, zero-only, and mode-aware"
+}
+
+# The repo positional is a caller-supplied label, not a path contract: firstmate
+# names repos this scaffold has no local view of, so an unresolvable label must
+# still produce a brief - and that brief must still carry the mandatory check
+# with the base determined by the worker at runtime.
+test_unresolvable_repo_label_still_mandates_the_base_check() {
+  local home ship scout ship_setup scout_setup
+  home="$TMP_ROOT/unresolvable-repo-home"
+  mkdir -p "$home/data"
+
+  [ ! -d "$BRIEF_PROJECTS/no-such-repo" ] || fail "fixture leak: no-such-repo must not resolve"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" label-ship no-such-repo --mode no-mistakes >/dev/null 2>&1 \
+    || fail "an unresolvable repo label must not fail the ship scaffold"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" label-scout no-such-repo --scout >/dev/null 2>&1 \
+    || fail "an unresolvable repo label must not fail the scout scaffold"
+
+  ship="$home/data/label-ship/brief.md"
+  scout="$home/data/label-scout/brief.md"
+  [ -f "$ship" ] || fail "no ship brief was written for an unresolvable repo label"
+  [ -f "$scout" ] || fail "no scout brief was written for an unresolvable repo label"
+  ship_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$ship")
+  scout_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$scout")
+
+  assert_contains "$ship_setup" "2. **Check your base before starting work.**" \
+    "the runtime fallback lost its numbered place in the ship safety contract"
+  assert_contains "$ship_setup" 'git rev-list --count $(git merge-base HEAD origin/<default>)..origin/<default>' \
+    "the runtime fallback omitted the mandatory zero-count command"
+  assert_contains "$ship_setup" 'blocked: cannot determine the default branch to verify base freshness' \
+    "the runtime fallback did not require reporting blocked on an undeterminable base"
+  assert_contains "$ship_setup" 'never skip, soften, or postpone it' \
+    "the runtime fallback softened the mandatory check"
+  assert_contains "$scout_setup" 'git rev-list --count $(git merge-base HEAD origin/<default>)..origin/<default>' \
+    "the scout runtime fallback omitted the mandatory zero-count command"
+  pass "fm-brief.sh: an unresolvable repo label still mandates the base check at runtime"
+}
+
+# A clone with no origin/HEAD that is stranded on a feature branch (the worktree
+# tangle bin/fm-tangle-lib.sh detects) must never have that feature branch
+# rendered as its own base - the brief would then certify a wrong base as fresh.
+test_missing_origin_head_never_relabels_the_current_branch() {
+  local home stranded setup
+  home="$TMP_ROOT/stranded-head-home"
+  stranded="$BRIEF_PROJECTS/stranded"
+  mkdir -p "$home/data"
+
+  fm_git_init_commit "$stranded"
+  git -C "$stranded" branch -M main
+  git -C "$stranded" checkout -q -b fm/old-task
+  [ "$(git -C "$stranded" symbolic-ref --short HEAD)" = "fm/old-task" ] \
+    || fail "stranded fixture is not checked out on its feature branch"
+  git -C "$stranded" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null 2>&1 \
+    && fail "stranded fixture unexpectedly has an origin/HEAD"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" stranded-local stranded --mode local-only >/dev/null 2>&1 \
+    || fail "local-only brief should scaffold against a stranded clone"
+  setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/stranded-local/brief.md")
+
+  assert_not_contains "$setup" 'fm/old-task' \
+    "the checked-out feature branch was rendered as the local default branch"
+  assert_contains "$setup" 'git rev-list --count $(git merge-base HEAD main)..main' \
+    "the stranded clone did not fall back to its local default-branch ref"
+  pass "fm-brief.sh: a missing origin/HEAD never relabels the current feature branch"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -851,6 +925,8 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_base_freshness_check_is_resolved_and_mode_aware
+test_unresolvable_repo_label_still_mandates_the_base_check
+test_missing_origin_head_never_relabels_the_current_branch
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
