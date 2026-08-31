@@ -154,7 +154,7 @@ fm_trace_context_session_lock() {  # <effective-state-file>
   { IFS= read -r lock_pid < "$state_dir/.lock"; } 2>/dev/null || return 1
   fm_session_identity_valid "$lock_pid" || return 1
   case "$lock_pid" in
-    codex:*) ;;
+    *[!0-9]*) ;;
     *) [ "$lock_pid" -gt 1 ] || return 1 ;;
   esac
   printf '%s' "$lock_pid"

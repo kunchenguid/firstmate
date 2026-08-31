@@ -126,7 +126,7 @@ test_missing_state_is_silent() {
 test_owned_lock_is_silent() {
   local root="$TMP_ROOT/already-ran"
   make_primary "$root"
-  printf '%s\n' "$$" > "$root/state/.lock"
+  printf '%s\n' "$PPID" > "$root/state/.lock"
   expect_silent_zero "owned lock nudge" run_nudge "$root"
   pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
 }
