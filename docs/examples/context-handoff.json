@@ -15,6 +15,7 @@
       "kind": "project-fact",
       "confidence": "verified",
       "sphere": "privat",
+      "sensitivity_class": "ordinary-project-context",
       "provider_class": "anthropic-claude-obsidian",
       "supersedes": []
     }

@@ -5,7 +5,7 @@ It records active repeatable evidence rather than an activation or a claim about
 
 ## Version and source evidence
 
-Verified on 2026-08-30 against Pi 0.84.3 and Claude Code 2.1.251.
+Verified on 2026-08-31 against Pi 0.84.3 and Claude Code 2.1.251.
 `pi --version` returned `0.84.3`.
 `claude --version` returned `2.1.251 (Claude Code)`.
 The installed Pi README SHA-256 was `80d08cf6a947f288d62da22d02f73b75636082cd733bd797ab89ae052d2582b1`.
@@ -100,6 +100,24 @@ extension:session_before_compact:threshold
 public:compaction_end:threshold:aborted=true
 extension:session_compact_failed:threshold
 continued=false
+```
+
+The installed Pi success path was then executed with an extension-supplied synthetic compaction, so no summarizer or model was reachable. The probe records the persistence call and observes that state from the public success event:
+
+```sh
+FM_CONTEXT_HANDOFF_PI_SUCCESS_PROBE_ONLY=1 tests/fm-context-handoff.test.sh
+```
+
+Its exact output was:
+
+```text
+public:compaction_start:threshold:aborted=unset
+extension:session_before_compact:threshold
+persistence:appendCompaction
+extension:session_compact:persisted=true
+public:compaction_end:threshold:aborted=false
+continued=false
+ok - installed Pi persistence-before-success order
 ```
 
 The normalized Claude strings output was:
@@ -260,26 +278,6 @@ Validating plugin manifest: <worktree>/integrations/claude-context-handoff/.clau
 ✔ Validation passed
 exit=0
 ```
-
-The Claude lifecycle discovery command was:
-
-```sh
-repo=$PWD
-evidence_root=$(mktemp -d)
-mkdir -p "$evidence_root/home" "$evidence_root/fm-home" "$evidence_root/vault"
-printf '{}\n' >"$evidence_root/settings.json"
-(cd "$evidence_root/vault" && HOME="$evidence_root/home" FM_HOME="$evidence_root/fm-home" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --setting-sources '' --settings "$evidence_root/settings.json" --strict-mcp-config --plugin-dir "$repo/integrations/claude-context-handoff" --init-only >"$evidence_root/claude.stdout" 2>"$evidence_root/claude.stderr")
-printf 'exit=%s\nstdout-bytes=%s\nstderr-bytes=%s\n' "$?" "$(wc -c <"$evidence_root/claude.stdout" | tr -d ' ')" "$(wc -c <"$evidence_root/claude.stderr" | tr -d ' ')"
-```
-
-It produced:
-
-```text
-exit=0
-stdout-bytes=0
-stderr-bytes=0
-```
-It loaded the real plugin lifecycle without a prompt, model, provider call, global configuration write, or real Vault access.
 
 ## Residual limits
 
