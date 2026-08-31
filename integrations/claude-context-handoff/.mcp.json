@@ -3,6 +3,8 @@
     "firstmate-context-handoff": {
       "command": "python3",
       "args": [
+        "-I",
+        "-S",
         "${CLAUDE_PLUGIN_ROOT}/scripts/adapter.py",
         "mcp-server"
       ]
