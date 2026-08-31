@@ -1142,6 +1142,13 @@ housekeeping() {  # <state>
     for f in "$state"/*.status; do
       [ -e "$f" ] || [ -L "$f" ] || continue
       task=$(basename "$f"); task="${task%.status}"
+      # Same orphan guard as bin/fm-watch.sh's scan_signals: a .status
+      # surviving with no matching state/<id>.meta belongs to a torn-down (or
+      # never-recorded) task and has no owner for firstmate to act on, so it
+      # must never wake firstmate via this catch-all either. Skipped here, not
+      # removed - the watcher's own per-poll scan already best-effort removes
+      # the file, so this stays a pure read.
+      [ -e "$state/$task.meta" ] || continue
       record=$(status_span_first_actionable_record "$f" \
         "$(status_seen_offset "$state" "$task")")
       rc=$?

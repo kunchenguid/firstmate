@@ -15,7 +15,12 @@
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
-#                          positive execution evidence, unless afk is active
+#                          positive execution evidence, unless afk is active. A
+#                          .status/.turn-ended with no matching state/<id>.meta is
+#                          an orphan from a torn-down task (or a leaked writer
+#                          still touching its old path) and is always absorbed
+#                          and removed, even under afk - never classified, never
+#                          actionable, no matter how many times it is recreated.
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -70,7 +75,11 @@
 #                          captured generation, never again while that record
 #                          stays queued and never once it is acknowledged
 #   check: rejected unauthenticated state checks: <paths>
-#                          unsafe state checks were refused without execution
+#                          unsafe state checks were refused without execution.
+#                          A check.sh with no matching state/<id>.meta is instead
+#                          an orphan (unless its fixed name is an exempt shim like
+#                          x-watch.check.sh or tool-updates.check.sh) and is
+#                          absorbed and removed here rather than reported
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
@@ -1007,11 +1016,34 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
+#
+# Orphan guard: a live task always has a matching state/<id>.meta (fm-spawn.sh
+# writes it before the agent can produce a first status or turn-end, and
+# teardown removes markers before it removes .meta - see fm-teardown.sh). A
+# .status/.turn-ended surviving with no matching .meta belongs to no task
+# firstmate can act on, most commonly a harness turn-end hook whose command
+# line baked in this absolute path before teardown ran and which keeps firing
+# if its process outlives teardown's best-effort backend kill (Stop hooks,
+# opencode's plugin, pi's extension, grok's global hook). Such a file must
+# never wake firstmate no matter how many times it is recreated: skip it here,
+# before it ever reaches a signature or classification, and best-effort remove
+# it so a leaked writer cannot leave a permanently "fresh" file in state/.
 scan_signals() {
-  local f sig sf
+  local f sig sf base task
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
+    fi
+    base=$(basename "$f")
+    case "$base" in
+      *.status) task=${base%.status} ;;
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *) continue ;;
+    esac
+    if [ ! -e "$STATE/$task.meta" ]; then
+      triage_log "absorbed orphan signal (no state/$task.meta): $f"
+      rm -f "$f" 2>/dev/null || true
+      continue
     fi
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
@@ -1230,6 +1262,12 @@ heartbeat_scan_finds_actionable() {
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
+    # Same orphan guard as scan_signals: a .status surviving with no matching
+    # state/<id>.meta belongs to a torn-down (or never-recorded) task and must
+    # never wake firstmate via this backstop either. Skipped here, not
+    # removed - scan_signals' own per-poll pass already best-effort removes
+    # the file, so this stays a pure read.
+    [ -e "$STATE/$task.meta" ] || continue
     record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
@@ -1545,6 +1583,7 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      id=$(basename "$c" .check.sh)
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -1556,7 +1595,6 @@ while :; do
           continue
         fi
       else
-        id=$(basename "$c" .check.sh)
         if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
@@ -1574,7 +1612,27 @@ while :; do
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup
-          rejected_checks="$rejected_checks $c"
+          # Orphan guard: a per-task custom check is always registered
+          # (state/<id>.check-trust) against a live task with a matching
+          # state/<id>.meta - fm-teardown.sh's remove_pr_poll_artifacts
+          # removes .check.sh and .check-trust together with .meta, so a
+          # registered live task never reaches this branch at all. A survivor
+          # here has failed BOTH pr-poll and custom-check registration, so it
+          # is either a live task whose registration is genuinely broken
+          # (still worth reporting) or a torn-down task's leftover with no
+          # owner (must never wake firstmate, no matter how many
+          # CHECK_INTERVAL sweeps pass). state/<id>.meta is what tells the two
+          # apart. tool-updates is the sole exception: fm-tool-update-check.sh's
+          # fixed-name poll shim, keyed by a constant id rather than a spawned
+          # task id, so it never has a matching .meta by design - a broken
+          # tool-updates registration must keep surfacing, exactly like
+          # x-watch's own name-based carve-out above.
+          if [ "$id" = tool-updates ] || [ -e "$STATE/$id.meta" ]; then
+            rejected_checks="$rejected_checks $c"
+          else
+            triage_log "absorbed orphan check (no matching state/$id.meta): $c"
+            rm -f "$c" "$STATE/$id.check-trust" 2>/dev/null || true
+          fi
           continue
         fi
       fi

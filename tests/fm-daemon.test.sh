@@ -296,6 +296,7 @@ test_status_read_failure_surfaces_without_advancing_seen() {
 test_catchall_advances_routine_then_surfaces_append() {
   local dir state out
   dir=$(make_supercase catchall-routine); state="$dir/state"
+  fm_write_meta "$state/routine-r6.meta" "window=sess:fm-routine-r6"
   printf 'working: routine history\nworking: still routine\n' > "$state/routine-r6.status"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
@@ -349,6 +350,7 @@ test_catchall_buffer_failure_preserves_position() {
   local dir state buffer out
   dir=$(make_supercase catchall-write-failure); state="$dir/state"
   buffer="$state/.subsuper-escalations"
+  fm_write_meta "$state/catch-write-r2.meta" "window=sess:fm-catch-write-r2"
   printf 'failed: release verification broke\nworking: collecting logs\n' > "$state/catch-write-r2.status"
   mkdir "$buffer"
   rm -f "$state/.subsuper-last-scan"
@@ -450,6 +452,7 @@ test_permission_recovery_reclassifies_catchall_status() {
   local dir state status before_ident after_ident out
   dir=$(make_supercase catchall-permission-recovery); state="$dir/state"
   status="$state/permission-r8.status"
+  fm_write_meta "$state/permission-r8.meta" "window=sess:fm-permission-r8"
   printf 'blocked: release approval required\nworking: preserving context\n' > "$status"
   before_ident=$(_fm_open_decisions_file_ident "$status")
   chmod 000 "$status"
@@ -551,6 +554,7 @@ test_catchall_scan_surfaces_a_masked_event() {
   local dir state
   dir=$(make_supercase catchall-masked)
   state="$dir/state"
+  fm_write_meta "$state/catch-m1.meta" "window=sess:fm-catch-m1"
   printf 'working: setup\nneeds-decision [key=release]: pick A or B\nfailed: release build broke\nworking: tidying the branch\n' \
     > "$state/catch-m1.status"
   rm -f "$state/.subsuper-last-scan"
@@ -1407,6 +1411,7 @@ test_heartbeat_scan_dedup() {
   local dir state
   dir=$(make_supercase scan-dedup)
   state="$dir/state"
+  fm_write_meta "$state/dup-t6.meta" "window=sess:fm-dup-t6"
   printf 'done: ready\n' > "$state/dup-t6.status"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
@@ -1416,6 +1421,22 @@ test_heartbeat_scan_dedup() {
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ -s "$state/.subsuper-escalations" ] && fail "catch-all scan re-escalated the same terminal (dedup failed)"
   pass "catch-all scan escalates a missed terminal once, not twice"
+}
+
+# Regression for the orphan-marker guard: a .status surviving with no matching
+# state/<id>.meta belongs to a torn-down (or never-recorded) task and must
+# never be escalated by this catch-all, mirroring bin/fm-watch.sh's own
+# scan_signals orphan guard - even under afk, where this catch-all is the ONLY
+# scanner running.
+test_heartbeat_scan_orphan_status_not_escalated() {
+  local dir state
+  dir=$(make_supercase scan-orphan)
+  state="$dir/state"
+  printf 'done: orphan PR\n' > "$state/ghost.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] && fail "catch-all scan escalated an orphan .status with no matching .meta"
+  pass "catch-all scan never escalates a no-meta orphan .status (housekeeping stays quiet, even under afk)"
 }
 
 test_handle_wake_routes_self_and_escalate() {
@@ -2653,6 +2674,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
+test_heartbeat_scan_orphan_status_not_escalated
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
