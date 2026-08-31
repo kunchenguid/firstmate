@@ -1473,6 +1473,27 @@ def apply_pi_terminal_binding(layout: StateLayout, config: Mapping[str, Any], bi
     return result
 
 
+def recover_pi_attempt_binding(layout: StateLayout, config: Mapping[str, Any], binding: Mapping[str, Any]) -> None:
+    for item in binding["bindings"]:
+        record_id = item["record_id"]
+        envelope, digest = read_envelope(layout, record_id, config, verify_sources=False)
+        if digest != item["envelope_sha256"]:
+            raise HandoffError("PAYLOAD_MISMATCH", "Pi attempt binding no longer matches its envelope")
+        if not queue_path(layout, record_id).exists():
+            update_queue(layout, record_id, envelope_sha256=digest)
+            failpoint("after-recovery-queue-before-claims")
+        for envelope_item in envelope["items"]:
+            candidate_id = envelope_item["item_id"]
+            claim = {
+                "schema": "firstmate.context-handoff.claim.v1",
+                "candidate_id": candidate_id,
+                "record_id": record_id,
+                "envelope_sha256": digest,
+                "claimed_at": envelope["created_at"],
+            }
+            atomic_create(layout.claims / f"{candidate_id}.json", canonical_json(claim))
+
+
 def seal_pi_attempt(home: Path, config: Mapping[str, Any], session_hash: str, trigger: str) -> dict[str, Any]:
     layout = StateLayout(home)
     with state_lock(layout):
@@ -1485,6 +1506,7 @@ def seal_pi_attempt(home: Path, config: Mapping[str, Any], session_hash: str, tr
                 raise HandoffError("PI_ATTEMPT", "Pi compaction binding belongs to another session")
             if existing["terminal_outcome"] is None:
                 if pi_process_claim_matches(existing, claim):
+                    recover_pi_attempt_binding(layout, config, existing)
                     return {
                         **compaction_attempt_result("already-sealed", existing["bindings"]),
                         "attempt_id": existing["attempt_id"],
