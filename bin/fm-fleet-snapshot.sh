@@ -216,13 +216,15 @@ bool_json() {
 # MAX_ARG_STRLEN (128 KiB) independently of the far larger ARG_MAX, so exec
 # fails with E2BIG ("Argument list too long") once one document crosses it,
 # and this home's backlog, task list, and cross-home roll-ups all grow with
-# the fleet. Filters unwrap a slurped document with `doc($x; "x")`, which also
-# refuses an empty document the way --argjson refuses an empty argument, so a
-# producer that returned nothing still fails closed instead of binding null.
+# the fleet. Filters unwrap a slurped document with `doc($x; "x")`, which
+# accepts exactly one document the way --argjson accepts exactly one JSON
+# value: a producer that returned nothing, or that emitted a concatenated
+# multi-value stream, fails closed instead of binding null or silently
+# binding the first value and discarding the rest.
 # Small fixed-size values - counts, booleans, timestamps, single paths, single
 # status lines - stay on argv as ordinary --arg or --argjson.
 # shellcheck disable=SC2016 # jq filter text: $d and $name are jq variables.
-JQ_DOC='def doc($d; $name): if ($d | length) == 0 then error("fm-fleet-snapshot: empty JSON document for $" + $name) else $d[0] end;'
+JQ_DOC='def doc($d; $name): if ($d | length) != 1 then error("fm-fleet-snapshot: expected exactly one JSON document for $" + $name + ", got " + ($d | length | tostring)) else $d[0] end;'
 
 path_present_json() {  # <path>
   local present=0
