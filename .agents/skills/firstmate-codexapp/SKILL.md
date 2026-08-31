@@ -163,12 +163,12 @@ transition, reconcile only what the host actually reported:
 ```sh
 bin/fm-codex-app-task.sh reconcile <id> \
   --thread <observed-thread-id> --host <observed-host-id> \
-  --generation <observed-generation> \
+  --generation <observed-generation> --epoch <observed-observation-epoch> \
   --state <state> --detail '<bounded host evidence>' \
   --event '<valid-prefix>: <event detail>'
 ```
 
-Pass the thread, host, and generation attached to the observed result so a delayed prior-session result cannot mutate the current endpoint.
+Pass the thread, host, generation, and observation epoch attached to the observed result so a delayed result from a stopped or superseded endpoint cannot mutate the current task.
 Omit `--event` for a repeated poll with no new event.
 Never derive the new current state from the status log tail.
 

@@ -130,6 +130,17 @@ fi
 
 pass "Codex Desktop session start holds the thread-bound lease in its tracked PTY"
 
+FIRSTMATE_TOP=$(git -C "$ROOT" rev-parse --show-toplevel) \
+  || fail "could not resolve the active Firstmate worktree"
+ENTRY_OUT=$(cd "$TMP_ROOT" && "$ROOT/bin/fm-desktop-entry.sh" --cwd "$ROOT") \
+  || fail "Desktop entry did not resolve from its active tracked code root"
+assert_contains "$ENTRY_OUT" 'mode=direct' \
+  "Desktop entry did not recognize its active tracked worktree"
+assert_contains "$ENTRY_OUT" "firstmate_code=$FIRSTMATE_TOP" \
+  "Desktop entry did not report its portable active code root"
+
+pass "Codex Desktop entry resolves the active tracked Firstmate root"
+
 TASK_HOME="$TMP_ROOT/task-home"
 TASK_PROJECT="$TMP_ROOT/task-project"
 TASK_WORKTREE="$TMP_ROOT/task-worktree"
@@ -210,6 +221,8 @@ assert_grep $'resolved_profile\tsol-primary' "$ROUTE_RECORD" \
   "quota-aware registration did not retain the selected Desktop profile"
 assert_grep "session_envelope=research" "$META" \
   "metadata did not persist the selected session envelope"
+assert_grep 'observation_epoch=1' "$META" \
+  "metadata did not establish the initial observation epoch"
 assert_grep 'mode=direct-PR' "$META" \
   "metadata did not persist bounded direct-PR delivery"
 assert_grep 'yolo=off' "$META" \
@@ -239,7 +252,7 @@ CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
-    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 \
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
     --state working --detail 'published after shared metadata lock' \
     > "$TMP_ROOT/shared-meta-reconcile.out" 2>&1 &
 META_RECONCILE_PID=$!
@@ -268,37 +281,48 @@ CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
-    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 \
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
     --state working --detail 'recovered stale mutation owner' >/dev/null \
   || fail "a reused task mutation pid was treated as the live owner"
 [ ! -e "$MUTATION_LOCK" ] \
   || fail "stale task mutation ownership was not retired"
 
+MUTATION_RECOVERY_LOCK="$TASK_HOME/state/.$TASK_ID.codex-app-mutation-recovery.lock"
+fm_lock_acquire_wait "$MUTATION_RECOVERY_LOCK" \
+  || fail "could not hold task mutation initialization ownership"
 mkdir "$MUTATION_LOCK"
-status=0
-out=$(CODEX_THREAD_ID="$THREAD_A" \
-  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
-  FM_HOME="$TASK_HOME" \
-  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
-    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 \
-    --state working --detail 'must wait for lock initialization' 2>&1) || status=$?
-expect_code 1 "$status" "a fresh ownerless mutation lock must retain its initialization grace"
-assert_contains "$out" 'mutation lock initialization is incomplete' \
-  "fresh ownerless mutation lock refusal was not diagnostic"
-touch -t 200001010000 "$MUTATION_LOCK"
 CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
-    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 \
-    --state working --detail 'recovered abandoned lock initialization' >/dev/null \
-  || fail "an abandoned ownerless mutation lock was not recoverable"
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
+    --state working --detail 'recovered serialized lock initialization' \
+    > "$TMP_ROOT/mutation-initialization.out" 2>&1 &
+MUTATION_RECONCILE_PID=$!
+sleep 5.2
+kill -0 "$MUTATION_RECONCILE_PID" 2>/dev/null \
+  || fail "a competing mutation reclaimed a live ownerless initialization"
+[ -d "$MUTATION_LOCK" ] \
+  || fail "a competing mutation removed a live ownerless initialization"
+fm_lock_release "$MUTATION_RECOVERY_LOCK"
+wait "$MUTATION_RECONCILE_PID" \
+  || fail "serialized mutation did not continue after initialization ownership was released"
 [ ! -e "$MUTATION_LOCK" ] \
-  || fail "recovered ownerless mutation lock was not retired"
+  || fail "serialized ownerless mutation lock was not retired"
+assert_grep 'detail=recovered serialized lock initialization' "$CURRENT" \
+  "serialized mutation did not publish after initialization ownership was released"
 
 state=$(FM_HOME="$TASK_HOME" "$ROOT/bin/fm-crew-state.sh" "$TASK_ID")
 assert_contains "$state" "state: working · source: codex-app-host" \
   "crew-state did not read the Desktop host's authoritative current-state record"
+
+cp "$CURRENT" "$CURRENT.epoch-matched"
+sed 's/^observation_epoch=.*/observation_epoch=2/' "$CURRENT" > "$CURRENT.epoch-mismatch"
+mv "$CURRENT.epoch-mismatch" "$CURRENT"
+state=$(FM_HOME="$TASK_HOME" "$ROOT/bin/fm-crew-state.sh" "$TASK_ID")
+assert_contains "$state" "state: unknown · source: none · Codex Desktop current state does not match endpoint metadata" \
+  "crew-state accepted current state from a superseded observation epoch"
+mv "$CURRENT.epoch-matched" "$CURRENT"
 
 sed 's/^updated_at=.*/updated_at=2000-01-01T00:00:00Z/' "$CURRENT" > "$CURRENT.stale"
 mv "$CURRENT.stale" "$CURRENT"
@@ -314,7 +338,7 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
-    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 \
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
     --state blocked --detail 'must not publish' 2>&1) || status=$?
 expect_code 1 "$status" "changed route evidence must invalidate the task binding"
 assert_contains "$out" "immutable model route evidence" \
@@ -325,7 +349,7 @@ CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
-    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 \
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
     --state blocked --detail 'needs exact captain decision' \
     --event 'blocked: needs exact captain decision' >/dev/null \
   || fail "Codex Desktop task current-state reconciliation failed"
@@ -341,7 +365,7 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
-    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 \
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
     --state invented 2>&1) || status=$?
 expect_code 2 "$status" "Desktop state reconciliation must reject an unknown state"
 assert_contains "$out" "invalid current state 'invented'" \
@@ -423,7 +447,7 @@ CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
-    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 \
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
     --state 'done' --detail 'report retained outside Desktop worktree' >/dev/null \
   || fail "could not make the Desktop scout terminal for archive preflight"
 
@@ -511,7 +535,7 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
-    --thread "$SHIP_THREAD" --host "$HOST_ID" --generation 1 \
+    --thread "$SHIP_THREAD" --host "$HOST_ID" --generation 1 --epoch 1 \
     --state 'done' --detail 'must wait for registration recovery' 2>&1) || status=$?
 expect_code 1 "$status" "a sibling mutation must not cross interrupted registration"
 assert_contains "$out" 'interrupted register mutation' \
@@ -568,7 +592,7 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
-    --thread "$SHIP_THREAD" --host "$HOST_ID" --generation 1 \
+    --thread "$SHIP_THREAD" --host "$HOST_ID" --generation 1 --epoch 1 \
     --state 'done' --detail 'must wait for hard-stop recovery' 2>&1) || status=$?
 expect_code 1 "$status" "a sibling mutation must not cross interrupted hard stop"
 assert_contains "$out" 'interrupted hard-stop mutation' \
@@ -634,11 +658,17 @@ if git -C "$SHIP_WORKTREE" ls-files --error-unmatch unstaged.txt >/dev/null 2>&1
 fi
 assert_grep 'state=paused' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
   "hard stop did not pause the old Desktop endpoint"
+assert_grep 'observation_epoch=2' "$TASK_HOME/state/$SHIP_ID.meta" \
+  "hard stop did not advance the durable observation epoch"
+assert_grep 'observation_epoch=2' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "hard stop current state did not bind the advanced observation epoch"
 HARD_STOP_RECEIPT="$TASK_HOME/state/$SHIP_ID.codex-app-hard-stop-receipt"
 assert_grep "request_sha256=" "$HARD_STOP_RECEIPT" \
   "hard stop did not retain a request-bound completion receipt"
 assert_grep "checkpoint=$SHIP_CHECKPOINT" "$HARD_STOP_RECEIPT" \
   "hard-stop completion receipt omitted the exact checkpoint"
+assert_grep 'observation_epoch=2' "$HARD_STOP_RECEIPT" \
+  "hard-stop completion receipt omitted the advanced observation epoch"
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
@@ -648,13 +678,19 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
 assert_contains "$out" "checkpoint=$SHIP_CHECKPOINT" \
   "completed hard-stop retry did not recover its exact receipt"
 
-CODEX_THREAD_ID="$THREAD_A" \
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
-    --thread "$SHIP_THREAD" --host "$HOST_ID" --generation 1 \
-    --state working --detail 'old endpoint reported working after hard stop' >/dev/null \
-  || fail "could not stage reused-thread resume behavior"
+    --thread "$SHIP_THREAD" --host "$HOST_ID" --generation 1 --epoch 1 \
+    --state working --detail 'old endpoint reported working after hard stop' 2>&1) \
+  || status=$?
+expect_code 1 "$status" "a stopped endpoint observation must not cross hard stop"
+assert_contains "$out" 'generation, and observation epoch binding' \
+  "stopped endpoint refusal did not name the advanced observation epoch"
+assert_grep 'state=paused' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "a stopped endpoint observation overwrote the hard-stop boundary"
 status=0
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
@@ -666,13 +702,6 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
 expect_code 1 "$status" "old Desktop thread must never satisfy resume idempotence"
 assert_grep 'session_generation=1' "$TASK_HOME/state/$SHIP_ID.meta" \
   "reused old Desktop thread advanced the session generation"
-CODEX_THREAD_ID="$THREAD_A" \
-  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
-  FM_HOME="$TASK_HOME" \
-  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
-    --thread "$SHIP_THREAD" --host "$HOST_ID" --generation 1 \
-    --state paused --detail 'restore hard boundary after stale host report' >/dev/null \
-  || fail "could not restore the hard session boundary after reused-thread refusal"
 
 SHIP_THREAD_2=019ff1ae-966b-7643-ba01-488112346571
 : > "$TRANSITION_FAIL_ONCE"
@@ -699,7 +728,7 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
-    --thread "$SHIP_THREAD_2" --host "$HOST_ID" --generation 2 \
+    --thread "$SHIP_THREAD_2" --host "$HOST_ID" --generation 2 --epoch 3 \
     --state 'done' --detail 'must wait for resume recovery' \
     --event 'done: must wait for resume recovery' 2>&1) || status=$?
 expect_code 1 "$status" "a sibling mutation must not cross interrupted resume"
@@ -720,6 +749,8 @@ assert_grep "codex_app_thread_id=$SHIP_THREAD_2" "$TASK_HOME/state/$SHIP_ID.meta
   "resume did not bind the fresh Desktop task"
 assert_grep 'session_generation=2' "$TASK_HOME/state/$SHIP_ID.meta" \
   "resume did not advance the session generation"
+assert_grep 'observation_epoch=3' "$TASK_HOME/state/$SHIP_ID.meta" \
+  "resume did not advance the observation epoch"
 assert_grep 'state=working' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
   "resume retry did not complete its journaled current state"
 status=0
@@ -727,10 +758,10 @@ out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
-    --thread "$SHIP_THREAD" --host "$HOST_ID" --generation 1 \
+    --thread "$SHIP_THREAD" --host "$HOST_ID" --generation 1 --epoch 1 \
     --state 'done' --detail 'delayed old endpoint result' 2>&1) || status=$?
 expect_code 1 "$status" "a delayed pre-resume endpoint result must be refused"
-assert_contains "$out" 'does not match its current thread, host, and generation binding' \
+assert_contains "$out" 'does not match its current thread, host, generation, and observation epoch binding' \
   "delayed endpoint refusal did not name the exact current binding"
 assert_grep 'state=working' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
   "delayed old endpoint result mutated the resumed task state"
@@ -738,7 +769,7 @@ CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
-    --thread "$SHIP_THREAD_2" --host "$HOST_ID" --generation 2 \
+    --thread "$SHIP_THREAD_2" --host "$HOST_ID" --generation 2 --epoch 3 \
     --state 'done' --detail 'new endpoint completed after resume recovery' \
     --event 'done: new endpoint completed after resume recovery' >/dev/null \
   || fail "could not publish a newer reconciled state after resume recovery"
@@ -757,6 +788,10 @@ assert_grep 'old_generation=1' "$RESUME_RECEIPT" \
   "resume receipt omitted the previous session generation"
 assert_grep 'new_generation=2' "$RESUME_RECEIPT" \
   "resume receipt omitted the fresh session generation"
+assert_grep 'old_observation_epoch=2' "$RESUME_RECEIPT" \
+  "resume receipt omitted the stopped observation epoch"
+assert_grep 'new_observation_epoch=3' "$RESUME_RECEIPT" \
+  "resume receipt omitted the fresh observation epoch"
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
@@ -774,7 +809,7 @@ CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
   "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
-    --thread "$SHIP_THREAD_2" --host "$HOST_ID" --generation 2 \
+    --thread "$SHIP_THREAD_2" --host "$HOST_ID" --generation 2 --epoch 3 \
     --state 'done' --detail 'uncommitted artifact retained' >/dev/null \
   || fail "could not make the Desktop ship terminal for archive preflight"
 

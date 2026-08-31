@@ -285,7 +285,7 @@ A ship brief records its mode as a fixed machine-readable line and the spawn ref
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 Legacy commits under a target project's `.no-mistakes/evidence/` remain preserved for inactive migration compatibility, but active direct-PR tasks neither create nor depend on that evidence.
 The firstmate repo's `.no-mistakes/` directory remains local state, stays gitignored, and is rejected by CI if tracked.
-PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling the forge CLI.
+PR-based task merges go through `bin/fm-pr-merge.sh`, whose shared `bin/fm-pr-check.sh` boundary requires `mode=direct-PR` before recording exact-head proof or calling the forge CLI.
 The helper requires a full canonical URL and rejects malformed URLs or repo override flags before recording merge state.
 A `https://github.com/<owner>/<repo>/pull/<n>` URL invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, and preserves explicit merge-method flags.
 GitLab merge request URLs remain recognizable only as [inactive migration compatibility](gitlab-merge-watch.md); active checking, polling, and merging refuse them without invoking `glab` or publishing new poll state.

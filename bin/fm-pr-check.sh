@@ -16,6 +16,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -35,18 +37,30 @@ HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
 
+# Task-derived paths are constructed only after the canonical ID validation.
+META="$STATE/$ID.meta"
+if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
+  echo "error: task metadata is unavailable" >&2
+  exit 1
+fi
+TASK_MODE=$(fm_backend_meta_exact_value "$META" mode 2>/dev/null || true)
+case "$TASK_MODE" in
+  direct-PR) ;;
+  local-only)
+    echo "error: task $ID is local-only and is not authorized for remote PR delivery; use bin/fm-merge-local.sh $ID" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: task $ID delivery mode is missing, ambiguous, or not direct-PR; remote PR delivery is refused" >&2
+    exit 1
+    ;;
+esac
+
 # Bounded direct-PR currently has one exact-head check source: GitHub.
 # The legacy GitLab poll parser remains inactive migration compatibility, but a
 # provider with no exact head/check proof is ambiguous and cannot be armed.
 if [ "$PROVIDER" != github ]; then
   echo "error: GitLab PR delivery is inactive migration compatibility; exact-head checking supports GitHub only" >&2
-  exit 1
-fi
-
-# Task-derived paths are constructed only after the canonical ID validation.
-META="$STATE/$ID.meta"
-if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
-  echo "error: task metadata is unavailable" >&2
   exit 1
 fi
 

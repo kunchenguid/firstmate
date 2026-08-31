@@ -33,7 +33,7 @@ usage:
       --session-envelope <small|normal|research>
       --mode <direct-PR|local-only> --yolo <on|off>
   fm-codex-app-task.sh reconcile <id> --thread <uuid> --host <host-id>
-      --generation <number> --state <state> [--detail <text>]
+      --generation <number> --epoch <number> --state <state> [--detail <text>]
       [--event <status-line>]
   fm-codex-app-task.sh hard-stop <id> --reason <text> --handoff <external-path>
   fm-codex-app-task.sh resume <id> --thread <uuid> --host <host-id>
@@ -160,30 +160,21 @@ task_mutation_recovery_die() {  # <recovery-lock> <message>
 }
 
 task_mutation_lock_acquire() {  # <task-id>
-  local id=$1 lock owner identity self_record mtime age recovery_lock
+  local id=$1 lock owner identity self_record recovery_lock
   lock="$STATE/.$id.codex-app-mutation-lock"
   recovery_lock="$STATE/.$id.codex-app-mutation-recovery.lock"
   identity=$(fm_process_command_identity "$$" fm-codex-app-task.sh) \
     || die "cannot establish task $id mutation process identity"
   self_record="codex-app-mutation:$$:$identity"
-  while ! mkdir -- "$lock" 2>/dev/null; do
-    fm_lock_acquire_wait "$recovery_lock" \
-      || die "cannot acquire task $id mutation recovery ownership"
+  fm_lock_acquire_wait "$recovery_lock" \
+    || die "cannot acquire task $id mutation recovery ownership"
+  while :; do
     if mkdir -- "$lock" 2>/dev/null; then
-      fm_lock_release "$recovery_lock" || true
       break
     fi
     owner=$(cat "$lock/owner" 2>/dev/null || true)
     if [ -z "$owner" ] && [ -d "$lock" ] && [ ! -L "$lock" ] \
       && [ ! -e "$lock/owner" ]; then
-      mtime=$(fm_path_mtime "$lock") \
-        || task_mutation_recovery_die "$recovery_lock" \
-          "task $id mutation lock is invalid; refusing concurrent mutation"
-      age=$(($(date +%s) - mtime))
-      [ "$age" -ge 0 ] || age=0
-      [ "$age" -ge 5 ] \
-        || task_mutation_recovery_die "$recovery_lock" \
-          "task $id mutation lock initialization is incomplete; retry after five seconds"
       rmdir -- "$lock" 2>/dev/null \
         || task_mutation_recovery_die "$recovery_lock" \
           "task $id mutation ownership changed while recovering an incomplete lock"
@@ -201,24 +192,22 @@ task_mutation_lock_acquire() {  # <task-id>
         || task_mutation_recovery_die "$recovery_lock" \
           "task $id mutation ownership changed while recovering a stale lock"
     fi
-    if mkdir -- "$lock" 2>/dev/null; then
-      fm_lock_release "$recovery_lock" || true
-      break
-    fi
-    fm_lock_release "$recovery_lock" || true
   done
   printf '%s\n' "$self_record" > "$lock/owner" || {
     rm -f -- "$lock/owner" 2>/dev/null || true
     rmdir -- "$lock" 2>/dev/null || true
-    die "cannot record task $id mutation ownership"
+    task_mutation_recovery_die "$recovery_lock" \
+      "cannot record task $id mutation ownership"
   }
   chmod 0600 "$lock/owner" || {
     rm -f -- "$lock/owner" 2>/dev/null || true
     rmdir -- "$lock" 2>/dev/null || true
-    die "cannot protect task $id mutation ownership"
+    task_mutation_recovery_die "$recovery_lock" \
+      "cannot protect task $id mutation ownership"
   }
   TASK_MUTATION_LOCK=$lock
   TASK_MUTATION_OWNER=$self_record
+  fm_lock_release "$recovery_lock" || true
   trap task_mutation_cleanup EXIT
   trap 'task_mutation_cleanup; exit 129' HUP
   trap 'task_mutation_cleanup; exit 130' INT
@@ -274,14 +263,17 @@ registered_route_validate() {  # <metadata>
     && [ "$FM_TASK_ROUTE_RESOLVED_EFFORT" = "$recorded_effort" ]
 }
 
-write_current() {  # <task-id> <thread> <host> <state> <detail>
-  local id=$1 thread=$2 host=$3 current_state=$4 detail=$5 tmp current
+write_current() {  # <task-id> <thread> <host> <generation> <epoch> <state> <detail>
+  local id=$1 thread=$2 host=$3 generation=$4 epoch=$5 current_state=$6 detail=$7
+  local tmp current
   current="$STATE/$id.codex-app-current"
   tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-current.XXXXXX") \
     || die "cannot stage current state for $id"
   {
     printf 'thread_id=%s\n' "$thread"
     printf 'host_id=%s\n' "$host"
+    printf 'session_generation=%s\n' "$generation"
+    printf 'observation_epoch=%s\n' "$epoch"
     printf 'state=%s\n' "$current_state"
     printf 'updated_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf 'detail=%s\n' "$detail"
@@ -390,6 +382,10 @@ desktop_transition_resume_current_supersedes() {  # <staged-current> <current>
   [ -f "$current" ] && [ ! -L "$current" ] || return 1
   [ "$(exact_meta_value "$current" thread_id)" = "$(exact_meta_value "$staged" thread_id)" ] \
     && [ "$(exact_meta_value "$current" host_id)" = "$(exact_meta_value "$staged" host_id)" ] \
+    && [ "$(exact_meta_value "$current" session_generation)" = \
+      "$(exact_meta_value "$staged" session_generation)" ] \
+    && [ "$(exact_meta_value "$current" observation_epoch)" = \
+      "$(exact_meta_value "$staged" observation_epoch)" ] \
     || return 1
   state=$(exact_meta_value "$current" state) || return 1
   valid_state "$state"
@@ -593,10 +589,13 @@ register_task() {
     && [ "$(exact_meta_value "$meta" model_route_sha256)" = "$route_hash" ] \
     && [ "$(exact_meta_value "$meta" session_envelope)" = "$envelope" ] \
     && [ "$(exact_meta_value "$meta" session_generation)" = 1 ] \
+    && [ "$(exact_meta_value "$meta" observation_epoch)" = 1 ] \
     && [ "$(exact_meta_value "$meta" mode)" = "$mode" ] \
     && [ "$(exact_meta_value "$meta" yolo)" = "$yolo" ] \
     && [ "$(exact_meta_value "$current" thread_id)" = "$thread" ] \
     && [ "$(exact_meta_value "$current" host_id)" = "$host" ] \
+    && [ "$(exact_meta_value "$current" session_generation)" = 1 ] \
+    && [ "$(exact_meta_value "$current" observation_epoch)" = 1 ] \
     && [ "$(exact_meta_value "$current" state)" = working ]; then
     printf 'registered: %s -> Codex Desktop task %s (host=%s worktree=%s)\n' \
       "$id" "$thread" "$host" "$worktree_real"
@@ -628,6 +627,7 @@ register_task() {
     printf 'model_route_sha256=%s\n' "$route_hash"
     printf 'session_envelope=%s\n' "$envelope"
     printf 'session_generation=1\n'
+    printf 'observation_epoch=1\n'
     printf 'session_cost_telemetry=unsupported\n'
     printf 'session_context_telemetry=unsupported\n'
     printf 'session_compaction_telemetry=unsupported\n'
@@ -642,6 +642,8 @@ register_task() {
   {
     printf 'thread_id=%s\n' "$thread"
     printf 'host_id=%s\n' "$host"
+    printf 'session_generation=1\n'
+    printf 'observation_epoch=1\n'
     printf 'state=working\n'
     printf 'updated_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf 'detail=registered by the Codex Desktop host\n'
@@ -661,12 +663,13 @@ reconcile_task() {
   local id=$1
   shift
   local current_state='' detail='' event='' observed_thread='' observed_host=''
-  local observed_generation='' meta thread host generation
+  local observed_generation='' observed_epoch='' meta thread host generation epoch
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --thread) [ "$#" -ge 2 ] || usage; observed_thread=$2; shift 2 ;;
       --host) [ "$#" -ge 2 ] || usage; observed_host=$2; shift 2 ;;
       --generation) [ "$#" -ge 2 ] || usage; observed_generation=$2; shift 2 ;;
+      --epoch) [ "$#" -ge 2 ] || usage; observed_epoch=$2; shift 2 ;;
       --state) [ "$#" -ge 2 ] || usage; current_state=$2; shift 2 ;;
       --detail) [ "$#" -ge 2 ] || usage; detail=$2; shift 2 ;;
       --event) [ "$#" -ge 2 ] || usage; event=$2; shift 2 ;;
@@ -681,6 +684,9 @@ reconcile_task() {
     || die_usage "invalid observed Codex Desktop host id '$observed_host'"
   case "$observed_generation" in
     ''|*[!0-9]*|0|0*) die_usage "invalid observed session generation '$observed_generation'" ;;
+  esac
+  case "$observed_epoch" in
+    ''|*[!0-9]*|0|0*) die_usage "invalid observed observation epoch '$observed_epoch'" ;;
   esac
   valid_state "$current_state" \
     || die_usage "invalid current state '$current_state'"
@@ -708,10 +714,13 @@ reconcile_task() {
     || die "task $id has no exact Desktop host binding"
   generation=$(exact_meta_value "$meta" session_generation) \
     || die "task $id has no exact Desktop generation binding"
+  epoch=$(exact_meta_value "$meta" observation_epoch) \
+    || die "task $id has no exact Desktop observation epoch binding"
   [ "$thread" = "$observed_thread" ] && [ "$host" = "$observed_host" ] \
-    && [ "$generation" = "$observed_generation" ] \
-    || die "task $id observed Desktop endpoint does not match its current thread, host, and generation binding"
-  write_current "$id" "$thread" "$host" "$current_state" "$detail"
+    && [ "$generation" = "$observed_generation" ] && [ "$epoch" = "$observed_epoch" ] \
+    || die "task $id observed Desktop endpoint does not match its current thread, host, generation, and observation epoch binding"
+  write_current "$id" "$thread" "$host" "$generation" "$epoch" \
+    "$current_state" "$detail"
   [ -z "$event" ] || printf '%s\n' "$event" >> "$STATE/$id.status" \
     || die "current state changed, but status event could not be appended for $id"
   printf 'reconciled: %s state=%s\n' "$id" "$current_state"
@@ -732,6 +741,7 @@ HARD_STOP_THREAD=
 HARD_STOP_HOST=
 HARD_STOP_ENVELOPE=
 HARD_STOP_GENERATION=
+HARD_STOP_OBSERVATION_EPOCH=
 HARD_STOP_WORKTREE=
 HARD_STOP_REQUEST=
 HARD_STOP_META_PREIMAGE=
@@ -743,10 +753,10 @@ hard_stop_journal_parse() {  # <journal>
   local journal=$1 key lines value
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
   lines=$(wc -l < "$journal" | tr -d ' ')
-  [ "$lines" = 16 ] || return 1
-  [ "$(exact_meta_value "$journal" version)" = 2 ] || return 1
+  [ "$lines" = 17 ] || return 1
+  [ "$(exact_meta_value "$journal" version)" = 3 ] || return 1
   for key in request_sha256 pre_head index_tree reason handoff thread host envelope \
-    generation worktree meta_preimage_sha256 current_preimage_sha256 checkpoint \
+    generation observation_epoch worktree meta_preimage_sha256 current_preimage_sha256 checkpoint \
     meta_sha256 current_sha256; do
     value=$(exact_meta_value "$journal" "$key") || return 1
     valid_scalar "$value" || return 1
@@ -760,6 +770,7 @@ hard_stop_journal_parse() {  # <journal>
   HARD_STOP_HOST=$(exact_meta_value "$journal" host)
   HARD_STOP_ENVELOPE=$(exact_meta_value "$journal" envelope)
   HARD_STOP_GENERATION=$(exact_meta_value "$journal" generation)
+  HARD_STOP_OBSERVATION_EPOCH=$(exact_meta_value "$journal" observation_epoch)
   HARD_STOP_WORKTREE=$(exact_meta_value "$journal" worktree)
   HARD_STOP_META_PREIMAGE=$(exact_meta_value "$journal" meta_preimage_sha256)
   HARD_STOP_CURRENT_PREIMAGE=$(exact_meta_value "$journal" current_preimage_sha256)
@@ -776,6 +787,7 @@ hard_stop_journal_parse() {  # <journal>
   [ -n "$HARD_STOP_REASON" ] && [ -n "$HARD_STOP_HANDOFF" ] \
     && [ -n "$HARD_STOP_WORKTREE" ] || return 1
   case "$HARD_STOP_GENERATION" in ''|*[!0-9]*) return 1 ;; esac
+  case "$HARD_STOP_OBSERVATION_EPOCH" in ''|*[!0-9]*|0|0*) return 1 ;; esac
   if [ "$HARD_STOP_CHECKPOINT" = none ]; then
     [ "$HARD_STOP_META_HASH" = none ] && [ "$HARD_STOP_CURRENT_HASH" = none ] \
       || return 1
@@ -790,7 +802,7 @@ hard_stop_journal_write() {  # <journal>
   local journal=$1 tmp
   tmp=$(umask 077; mktemp "$STATE/.hard-stop-journal.XXXXXX") || return 1
   {
-    printf 'version=2\n'
+    printf 'version=3\n'
     printf 'request_sha256=%s\n' "$HARD_STOP_REQUEST"
     printf 'pre_head=%s\n' "$HARD_STOP_PRE_HEAD"
     printf 'index_tree=%s\n' "$HARD_STOP_INDEX_TREE"
@@ -800,6 +812,7 @@ hard_stop_journal_write() {  # <journal>
     printf 'host=%s\n' "$HARD_STOP_HOST"
     printf 'envelope=%s\n' "$HARD_STOP_ENVELOPE"
     printf 'generation=%s\n' "$HARD_STOP_GENERATION"
+    printf 'observation_epoch=%s\n' "$HARD_STOP_OBSERVATION_EPOCH"
     printf 'worktree=%s\n' "$HARD_STOP_WORKTREE"
     printf 'meta_preimage_sha256=%s\n' "$HARD_STOP_META_PREIMAGE"
     printf 'current_preimage_sha256=%s\n' "$HARD_STOP_CURRENT_PREIMAGE"
@@ -817,14 +830,15 @@ HARD_STOP_RECEIPT_HANDOFF=
 HARD_STOP_RECEIPT_THREAD=
 HARD_STOP_RECEIPT_HOST=
 HARD_STOP_RECEIPT_GENERATION=
+HARD_STOP_RECEIPT_OBSERVATION_EPOCH=
 HARD_STOP_RECEIPT_WORKTREE=
 hard_stop_receipt_parse() {  # <receipt>
   local receipt=$1 lines key value
   [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
   lines=$(wc -l < "$receipt" | tr -d ' ')
-  [ "$lines" = 8 ] || return 1
-  [ "$(exact_meta_value "$receipt" version)" = 1 ] || return 1
-  for key in request_sha256 checkpoint handoff thread host generation worktree; do
+  [ "$lines" = 9 ] || return 1
+  [ "$(exact_meta_value "$receipt" version)" = 2 ] || return 1
+  for key in request_sha256 checkpoint handoff thread host generation observation_epoch worktree; do
     value=$(exact_meta_value "$receipt" "$key") || return 1
     valid_scalar "$value" || return 1
   done
@@ -834,6 +848,7 @@ hard_stop_receipt_parse() {  # <receipt>
   HARD_STOP_RECEIPT_THREAD=$(exact_meta_value "$receipt" thread)
   HARD_STOP_RECEIPT_HOST=$(exact_meta_value "$receipt" host)
   HARD_STOP_RECEIPT_GENERATION=$(exact_meta_value "$receipt" generation)
+  HARD_STOP_RECEIPT_OBSERVATION_EPOCH=$(exact_meta_value "$receipt" observation_epoch)
   HARD_STOP_RECEIPT_WORKTREE=$(exact_meta_value "$receipt" worktree)
   [[ "$HARD_STOP_RECEIPT_REQUEST" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s' "$HARD_STOP_RECEIPT_CHECKPOINT" | grep -Eq '^[0-9a-f]{40,64}$' \
@@ -841,6 +856,7 @@ hard_stop_receipt_parse() {  # <receipt>
   valid_thread "$HARD_STOP_RECEIPT_THREAD" \
     && valid_atom "$HARD_STOP_RECEIPT_HOST" || return 1
   case "$HARD_STOP_RECEIPT_GENERATION" in ''|*[!0-9]*|0|0*) return 1 ;; esac
+  case "$HARD_STOP_RECEIPT_OBSERVATION_EPOCH" in ''|*[!0-9]*|0|0*) return 1 ;; esac
   [ -n "$HARD_STOP_RECEIPT_HANDOFF" ] && [ -n "$HARD_STOP_RECEIPT_WORKTREE" ]
 }
 
@@ -859,31 +875,39 @@ hard_stop_receipt_matches() {  # <receipt> <request> <handoff> <meta> <current> 
       "$HARD_STOP_RECEIPT_HOST" ] \
     && [ "$(exact_meta_value "$meta" session_generation)" = \
       "$HARD_STOP_RECEIPT_GENERATION" ] \
+    && [ "$(exact_meta_value "$meta" observation_epoch)" = \
+      "$HARD_STOP_RECEIPT_OBSERVATION_EPOCH" ] \
     && [ "$(exact_meta_value "$current" thread_id)" = \
       "$HARD_STOP_RECEIPT_THREAD" ] \
     && [ "$(exact_meta_value "$current" host_id)" = \
       "$HARD_STOP_RECEIPT_HOST" ] \
+    && [ "$(exact_meta_value "$current" session_generation)" = \
+      "$HARD_STOP_RECEIPT_GENERATION" ] \
+    && [ "$(exact_meta_value "$current" observation_epoch)" = \
+      "$HARD_STOP_RECEIPT_OBSERVATION_EPOCH" ] \
     && [ "$(exact_meta_value "$current" state)" = paused ] \
     && [ "$(git -C "$HARD_STOP_RECEIPT_WORKTREE" rev-parse HEAD 2>/dev/null)" = \
       "$HARD_STOP_RECEIPT_CHECKPOINT" ] \
     && [ -f "$handoff" ] && [ ! -L "$handoff" ] \
     && grep -qx "checkpoint_sha: $HARD_STOP_RECEIPT_CHECKPOINT" "$handoff" \
+    && grep -qx "observation_epoch: $HARD_STOP_RECEIPT_OBSERVATION_EPOCH" "$handoff" \
     && grep -qx "previous_thread_id: $HARD_STOP_RECEIPT_THREAD" "$handoff" \
     && grep -qx "previous_host_id: $HARD_STOP_RECEIPT_HOST" "$handoff"
 }
 
-hard_stop_receipt_write() {  # <receipt> <request> <checkpoint> <handoff> <thread> <host> <generation> <worktree>
+hard_stop_receipt_write() {  # <receipt> <request> <checkpoint> <handoff> <thread> <host> <generation> <epoch> <worktree>
   local receipt=$1 request_hash=$2 checkpoint=$3 handoff=$4 thread=$5 host=$6
-  local generation=$7 worktree=$8 tmp
+  local generation=$7 epoch=$8 worktree=$9 tmp
   tmp=$(umask 077; mktemp "$STATE/.hard-stop-receipt.XXXXXX") || return 1
   {
-    printf 'version=1\n'
+    printf 'version=2\n'
     printf 'request_sha256=%s\n' "$request_hash"
     printf 'checkpoint=%s\n' "$checkpoint"
     printf 'handoff=%s\n' "$handoff"
     printf 'thread=%s\n' "$thread"
     printf 'host=%s\n' "$host"
     printf 'generation=%s\n' "$generation"
+    printf 'observation_epoch=%s\n' "$epoch"
     printf 'worktree=%s\n' "$worktree"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
@@ -917,7 +941,7 @@ hard_stop_task() {
   local id=$1
   shift
   local reason='' handoff='' meta current worktree_real handoff_parent handoff_real journal receipt
-  local thread host envelope generation checkpoint tmp pre_head index_tree head parent commit_tree subject
+  local thread host envelope generation epoch next_epoch checkpoint tmp pre_head index_tree head parent commit_tree subject
   local request_hash meta_preimage current_preimage hard_meta_stage hard_current_stage
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -968,6 +992,9 @@ hard_stop_task() {
   generation=$(exact_meta_value "$meta" session_generation) \
     || die "task $id has no session generation"
   case "$generation" in ''|*[!0-9]*) die "task $id has invalid session generation" ;; esac
+  epoch=$(exact_meta_value "$meta" observation_epoch) \
+    || die "task $id has no observation epoch"
+  case "$epoch" in ''|*[!0-9]*|0|0*) die "task $id has invalid observation epoch" ;; esac
   journal="$STATE/$id.hard-stop-journal"
   receipt="$STATE/$id.codex-app-hard-stop-receipt"
   hard_meta_stage="$STATE/.$id.hard-stop.meta"
@@ -998,6 +1025,7 @@ hard_stop_task() {
       && [ "$HARD_STOP_GENERATION" = "$generation" ] \
       && [ "$HARD_STOP_WORKTREE" = "$worktree_real" ] \
       || die "task $id hard-stop retry does not match its recovery journal"
+    next_epoch=$HARD_STOP_OBSERVATION_EPOCH
     pre_head=$HARD_STOP_PRE_HEAD
     index_tree=$HARD_STOP_INDEX_TREE
   else
@@ -1027,6 +1055,8 @@ hard_stop_task() {
     HARD_STOP_HOST=$host
     HARD_STOP_ENVELOPE=$envelope
     HARD_STOP_GENERATION=$generation
+    next_epoch=$((epoch + 1))
+    HARD_STOP_OBSERVATION_EPOCH=$next_epoch
     HARD_STOP_WORKTREE=$worktree_real
     HARD_STOP_META_PREIMAGE=$meta_preimage
     HARD_STOP_CURRENT_PREIMAGE=$current_preimage
@@ -1064,6 +1094,7 @@ hard_stop_task() {
     printf 'task_id: %s\n' "$id"
     printf 'session_envelope: %s\n' "$envelope"
     printf 'session_generation: %s\n' "$generation"
+    printf 'observation_epoch: %s\n' "$next_epoch"
     printf 'reason: %s\n' "$reason"
     printf 'checkpoint_sha: %s\n' "$checkpoint"
     printf 'worktree: %s\n' "$worktree_real"
@@ -1095,10 +1126,12 @@ hard_stop_task() {
       || die "cannot reset hard-stop publication stages for $id"
     tmp=$(umask 077; mktemp "$STATE/.$id.meta.XXXXXX") \
       || die "cannot stage checkpoint metadata for $id"
-    grep -v -e '^session_checkpoint=' -e '^session_handoff=' "$meta" > "$tmp" || true
+    grep -v -e '^session_checkpoint=' -e '^session_handoff=' \
+      -e '^observation_epoch=' "$meta" > "$tmp" || true
     {
       printf 'session_checkpoint=%s\n' "$checkpoint"
       printf 'session_handoff=%s\n' "$handoff_real"
+      printf 'observation_epoch=%s\n' "$next_epoch"
     } >> "$tmp"
     mv -f -- "$tmp" "$hard_meta_stage" \
       || { rm -f -- "$tmp"; die "cannot retain staged checkpoint metadata for $id"; }
@@ -1107,6 +1140,8 @@ hard_stop_task() {
     {
       printf 'thread_id=%s\n' "$thread"
       printf 'host_id=%s\n' "$host"
+      printf 'session_generation=%s\n' "$generation"
+      printf 'observation_epoch=%s\n' "$next_epoch"
       printf 'state=paused\n'
       printf 'updated_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
       printf 'detail=hard session boundary; checkpoint %s\n' "$checkpoint"
@@ -1135,7 +1170,7 @@ hard_stop_task() {
     "$HARD_STOP_CURRENT_PREIMAGE" "$HARD_STOP_CURRENT_HASH" \
     || die "task $id current state changed during hard-stop recovery; refusing to overwrite it"
   hard_stop_receipt_write "$receipt" "$request_hash" "$checkpoint" "$handoff_real" \
-    "$thread" "$host" "$generation" "$worktree_real" \
+    "$thread" "$host" "$generation" "$next_epoch" "$worktree_real" \
     || die "cannot publish hard-stop completion receipt for $id"
   rm -f -- "$journal" || die "cannot retire hard-stop recovery journal for $id"
   rm -f -- "$hard_meta_stage" "$hard_current_stage" \
@@ -1151,14 +1186,16 @@ DESKTOP_RESUME_RECEIPT_NEW_THREAD=
 DESKTOP_RESUME_RECEIPT_HOST=
 DESKTOP_RESUME_RECEIPT_OLD_GENERATION=
 DESKTOP_RESUME_RECEIPT_NEW_GENERATION=
+DESKTOP_RESUME_RECEIPT_OLD_EPOCH=
+DESKTOP_RESUME_RECEIPT_NEW_EPOCH=
 desktop_resume_receipt_parse() {  # <receipt>
   local receipt=$1 lines key value
   [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
   lines=$(wc -l < "$receipt" | tr -d ' ')
-  [ "$lines" = 9 ] || return 1
-  [ "$(exact_meta_value "$receipt" version)" = 1 ] || return 1
+  [ "$lines" = 11 ] || return 1
+  [ "$(exact_meta_value "$receipt" version)" = 2 ] || return 1
   for key in request_sha256 checkpoint handoff old_thread_id new_thread_id host_id \
-    old_generation new_generation; do
+    old_generation new_generation old_observation_epoch new_observation_epoch; do
     value=$(exact_meta_value "$receipt" "$key") || return 1
     valid_scalar "$value" || return 1
   done
@@ -1170,6 +1207,8 @@ desktop_resume_receipt_parse() {  # <receipt>
   DESKTOP_RESUME_RECEIPT_HOST=$(exact_meta_value "$receipt" host_id)
   DESKTOP_RESUME_RECEIPT_OLD_GENERATION=$(exact_meta_value "$receipt" old_generation)
   DESKTOP_RESUME_RECEIPT_NEW_GENERATION=$(exact_meta_value "$receipt" new_generation)
+  DESKTOP_RESUME_RECEIPT_OLD_EPOCH=$(exact_meta_value "$receipt" old_observation_epoch)
+  DESKTOP_RESUME_RECEIPT_NEW_EPOCH=$(exact_meta_value "$receipt" new_observation_epoch)
   [[ "$DESKTOP_RESUME_RECEIPT_REQUEST" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s' "$DESKTOP_RESUME_RECEIPT_CHECKPOINT" | grep -Eq '^[0-9a-f]{40,64}$' \
     || return 1
@@ -1179,9 +1218,13 @@ desktop_resume_receipt_parse() {  # <receipt>
     && valid_atom "$DESKTOP_RESUME_RECEIPT_HOST" || return 1
   case "$DESKTOP_RESUME_RECEIPT_OLD_GENERATION" in ''|*[!0-9]*) return 1 ;; esac
   case "$DESKTOP_RESUME_RECEIPT_NEW_GENERATION" in ''|*[!0-9]*) return 1 ;; esac
+  case "$DESKTOP_RESUME_RECEIPT_OLD_EPOCH" in ''|*[!0-9]*|0|0*) return 1 ;; esac
+  case "$DESKTOP_RESUME_RECEIPT_NEW_EPOCH" in ''|*[!0-9]*|0|0*) return 1 ;; esac
   [ "$DESKTOP_RESUME_RECEIPT_OLD_GENERATION" -ge 1 ] || return 1
   [ "$DESKTOP_RESUME_RECEIPT_NEW_GENERATION" -eq \
-    $((DESKTOP_RESUME_RECEIPT_OLD_GENERATION + 1)) ]
+    $((DESKTOP_RESUME_RECEIPT_OLD_GENERATION + 1)) ] \
+    && [ "$DESKTOP_RESUME_RECEIPT_NEW_EPOCH" -eq \
+      $((DESKTOP_RESUME_RECEIPT_OLD_EPOCH + 1)) ]
 }
 
 desktop_resume_receipt_matches() {  # <receipt> <request> <checkpoint> <handoff> <thread> <host> <meta> <current>
@@ -1197,8 +1240,16 @@ desktop_resume_receipt_matches() {  # <receipt> <request> <checkpoint> <handoff>
     && [ "$(exact_meta_value "$meta" codex_app_host_id)" = "$host" ] \
     && [ "$(exact_meta_value "$meta" session_generation)" = \
       "$DESKTOP_RESUME_RECEIPT_NEW_GENERATION" ] \
+    && [ "$(exact_meta_value "$meta" observation_epoch)" = \
+      "$DESKTOP_RESUME_RECEIPT_NEW_EPOCH" ] \
     && [ "$(exact_meta_value "$current" thread_id)" = "$thread" ] \
     && [ "$(exact_meta_value "$current" host_id)" = "$host" ] || return 1
+  [ "$(exact_meta_value "$current" session_generation)" = \
+    "$DESKTOP_RESUME_RECEIPT_NEW_GENERATION" ] \
+    && [ "$(exact_meta_value "$current" observation_epoch)" = \
+      "$DESKTOP_RESUME_RECEIPT_NEW_EPOCH" ] \
+    && grep -qx "observation_epoch: $DESKTOP_RESUME_RECEIPT_OLD_EPOCH" "$handoff" \
+    || return 1
   state=$(exact_meta_value "$current" state) || return 1
   valid_state "$state"
 }
@@ -1207,7 +1258,7 @@ resume_task() {
   local id=$1
   shift
   local thread='' host='' checkpoint='' handoff='' meta current worktree handoff_real
-  local recorded_checkpoint recorded_handoff old_thread generation next_generation tmp
+  local recorded_checkpoint recorded_handoff old_thread generation next_generation epoch next_epoch tmp
   local current_tmp receipt receipt_tmp request_hash journal
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -1273,22 +1324,31 @@ resume_task() {
   generation=$(exact_meta_value "$meta" session_generation) \
     || die "task $id has no session generation"
   case "$generation" in ''|*[!0-9]*) die "task $id has invalid session generation" ;; esac
+  epoch=$(exact_meta_value "$meta" observation_epoch) \
+    || die "task $id has no observation epoch"
+  case "$epoch" in ''|*[!0-9]*|0|0*) die "task $id has invalid observation epoch" ;; esac
+  grep -qx "observation_epoch: $epoch" "$handoff_real" \
+    || die "session handoff does not bind observation epoch $epoch"
   next_generation=$((generation + 1))
+  next_epoch=$((epoch + 1))
   tmp=$(umask 077; mktemp "$STATE/.$id.meta.XXXXXX") \
     || die "cannot stage resumed metadata for $id"
   grep -v -e '^window=' -e '^codex_app_thread_id=' -e '^codex_app_host_id=' \
-    -e '^session_generation=' "$meta" > "$tmp" || true
+    -e '^session_generation=' -e '^observation_epoch=' "$meta" > "$tmp" || true
   {
     printf 'window=%s\n' "$thread"
     printf 'codex_app_thread_id=%s\n' "$thread"
     printf 'codex_app_host_id=%s\n' "$host"
     printf 'session_generation=%s\n' "$next_generation"
+    printf 'observation_epoch=%s\n' "$next_epoch"
   } >> "$tmp"
   current_tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-current.XXXXXX") \
     || { rm -f -- "$tmp"; die "cannot stage resumed current state for $id"; }
   {
     printf 'thread_id=%s\n' "$thread"
     printf 'host_id=%s\n' "$host"
+    printf 'session_generation=%s\n' "$next_generation"
+    printf 'observation_epoch=%s\n' "$next_epoch"
     printf 'state=working\n'
     printf 'updated_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf 'detail=resumed from checkpoint %s\n' "$checkpoint"
@@ -1299,7 +1359,7 @@ resume_task() {
   receipt_tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-resume-receipt.XXXXXX") \
     || { rm -f -- "$tmp" "$current_tmp"; die "cannot stage resume receipt for $id"; }
   {
-    printf 'version=1\n'
+    printf 'version=2\n'
     printf 'request_sha256=%s\n' "$request_hash"
     printf 'checkpoint=%s\n' "$checkpoint"
     printf 'handoff=%s\n' "$handoff_real"
@@ -1308,6 +1368,8 @@ resume_task() {
     printf 'host_id=%s\n' "$host"
     printf 'old_generation=%s\n' "$generation"
     printf 'new_generation=%s\n' "$next_generation"
+    printf 'old_observation_epoch=%s\n' "$epoch"
+    printf 'new_observation_epoch=%s\n' "$next_epoch"
   } > "$receipt_tmp" || {
     rm -f -- "$tmp" "$current_tmp" "$receipt_tmp"
     die "cannot write staged resume receipt for $id"

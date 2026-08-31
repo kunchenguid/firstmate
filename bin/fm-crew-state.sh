@@ -208,6 +208,16 @@ if [ "$TASK_BACKEND" = codex-app-host ]; then
     || emit unknown none "invalid Codex Desktop current-state record"
   CURRENT_HOST=$(current_value host_id) \
     || emit unknown none "invalid Codex Desktop current-state record"
+  CURRENT_GENERATION=$(current_value session_generation) \
+    || emit unknown none "invalid Codex Desktop current-state record"
+  CURRENT_OBSERVATION_EPOCH=$(current_value observation_epoch) \
+    || emit unknown none "invalid Codex Desktop current-state record"
+  case "$CURRENT_GENERATION" in
+    ''|*[!0-9]*|0|0*) emit unknown none "invalid Codex Desktop current-state record" ;;
+  esac
+  case "$CURRENT_OBSERVATION_EPOCH" in
+    ''|*[!0-9]*|0|0*) emit unknown none "invalid Codex Desktop current-state record" ;;
+  esac
   CURRENT_STATE=$(current_value state) \
     || emit unknown none "invalid Codex Desktop current-state record"
   CURRENT_UPDATED=$(current_value updated_at) \
@@ -216,7 +226,13 @@ if [ "$TASK_BACKEND" = codex-app-host ]; then
     || emit unknown none "invalid Codex Desktop current-state record"
   META_THREAD=$(fm_meta_get "$META" codex_app_thread_id)
   META_HOST=$(fm_meta_get "$META" codex_app_host_id)
-  if [ "$CURRENT_THREAD" != "$META_THREAD" ] || [ "$CURRENT_HOST" != "$META_HOST" ]; then
+  META_GENERATION=$(fm_backend_meta_exact_value "$META" session_generation 2>/dev/null) \
+    || emit unknown none "invalid Codex Desktop endpoint metadata"
+  META_OBSERVATION_EPOCH=$(fm_backend_meta_exact_value "$META" observation_epoch 2>/dev/null) \
+    || emit unknown none "invalid Codex Desktop endpoint metadata"
+  if [ "$CURRENT_THREAD" != "$META_THREAD" ] || [ "$CURRENT_HOST" != "$META_HOST" ] \
+    || [ "$CURRENT_GENERATION" != "$META_GENERATION" ] \
+    || [ "$CURRENT_OBSERVATION_EPOCH" != "$META_OBSERVATION_EPOCH" ]; then
     emit unknown none "Codex Desktop current state does not match endpoint metadata"
   fi
   case "$CURRENT_STATE" in

@@ -89,12 +89,12 @@ For each task:
    ```sh
    bin/fm-codex-app-task.sh reconcile <id> \
      --thread <observed-thread-id> --host <observed-host-id> \
-     --generation <observed-generation> \
+     --generation <observed-generation> --epoch <observed-observation-epoch> \
      --state <working-or-terminal-state> --detail '<bounded evidence>' \
      --event '<working|needs-decision|blocked|paused|done|failed>: <detail>'
    ```
 
-   Pass the thread, host, and generation attached to the observed result so a delayed prior-session result cannot mutate the current endpoint.
+   Pass the thread, host, generation, and observation epoch attached to the observed result so a delayed result from a stopped or superseded endpoint cannot mutate the current task.
 7. Use the Desktop send tool for follow-ups. Never imitate a send by editing a
    transcript or local ledger.
 8. Reconcile the final state, then run `bin/fm-codex-app-task.sh archive-preflight <id> --report <absolute-firstmate-home>/data/<id>/report.md`.
@@ -126,6 +126,7 @@ model_route_record=<absolute-routing-record>
 model_route_sha256=<routing-record-digest>
 session_envelope=<small-or-normal-or-research>
 session_generation=<positive-integer>
+observation_epoch=<positive-integer>
 session_cost_telemetry=unsupported
 session_context_telemetry=unsupported
 session_compaction_telemetry=unsupported
@@ -135,19 +136,21 @@ session_output_telemetry=unsupported
 Endpoint validation requires one exact value for every binding and refuses a mismatched task id, thread id, host id, project, worktree, or Git common-directory identity before mutation.
 Registration refuses to overwrite pre-existing task records, accepts only `direct-PR` or `local-only` with an explicit `on` or `off` project `yolo` posture, and refuses a worktree that resolves to the saved project checkout.
 The shared routing parser requires the ordered five factors and their evidence, recomputes the score, floor, override, and deterministic selection, and rejects missing, duplicate, extra, or inconsistent rows.
-Each configured quota profile records its model, effort, eligibility, rejection reason, and candidate-specific evidence, including profiles that the floor or explicit override makes ineligible.
+Each configured quota profile records its model, effort, truthful quota eligibility, rejection reason, and candidate-specific evidence independently of the routing floor or explicit captain override.
+The floor and explicit override constrain only selection of the resolved profile, so an otherwise quota-eligible candidate remains eligible when it is unselected by either constraint.
 The selected eligible profile is separate from both the deterministic result and any explicit captain override.
 Registration binds the exact routing record digest and every later host mutation refuses changed routing evidence.
-Every Desktop task operation passes one process-identity-bound mutation owner that blocks sibling operations while registration, resume, or hard-stop recovery is incomplete.
+Every Desktop task operation passes one process-identity-bound mutation owner whose initialization is serialized before concurrent admission and that blocks sibling operations while registration, resume, or hard-stop recovery is incomplete.
 Registration, resume, and hard stop publish through preimage-bound journals, so an exact retry cannot overwrite newer task state or status events after interruption.
+Registration establishes a durable observation epoch, and hard stop plus resume each advance it before results from the prior endpoint may be reconciled.
 
 ## Session envelope boundary
 
 Codex Desktop does not currently expose reliable exact per-task cost, remaining-context, compaction-count, or output-token metrics to Firstmate.
 The envelope classes therefore provide qualitative soft boundaries and never claim exact enforcement or savings from those signals.
 At an explicit hard boundary, the worker stages intended changes and `fm-codex-app-task.sh hard-stop` creates a staged-only checkpoint commit plus a structured handoff outside the app-owned worktree.
-The hard-stop recovery journal binds the pre-checkpoint commit, staged tree, requested handoff, endpoint generation, task preimages, checkpoint, and staged publication digests, so an interrupted publication retries from that exact checkpoint without overwriting later task records.
-The primary creates a fresh Desktop task for the retained worktree, then `fm-codex-app-task.sh resume` verifies the exact checkpoint and handoff before replacing endpoint identity and advancing `session_generation`.
+The hard-stop recovery journal binds the pre-checkpoint commit, staged tree, requested handoff, endpoint generation and observation epoch, task preimages, checkpoint, and staged publication digests, so an interrupted publication retries from that exact checkpoint without overwriting later task records.
+The primary creates a fresh Desktop task for the retained worktree, then `fm-codex-app-task.sh resume` verifies the exact checkpoint and handoff before replacing endpoint identity and advancing both `session_generation` and `observation_epoch`.
 Each completed resume publishes a durable receipt binding the previous and fresh thread identifiers and generations, and only that exact receipt makes a retry idempotent.
 Unstaged and untracked artifacts remain preserved throughout this transition.
 Reconciled `working` state is authoritative only for a bounded age, after which crew-state reports it as stale instead of suppressing later supervision signals.

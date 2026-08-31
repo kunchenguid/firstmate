@@ -6,10 +6,10 @@ description: >-
 
 # Firstmate Desktop
 
-Treat `/Users/vladisval/Documents/Code/firstmate` as the installed Firstmate
-code project.
-The captain states the outcome; the Desktop primary owns orchestration
-mechanics.
+Resolve `FIRSTMATE_CODE` from the active selected skill before any project operation.
+Use the Git top level containing this `SKILL.md`, or the installation-owned `FM_ROOT_OVERRIDE` only when it resolves to that same tracked Firstmate repository and contains `bin/fm-desktop-entry.sh`.
+Refuse when no tracked Firstmate code root can be proven from those installation-owned inputs.
+The captain states the outcome; the Desktop primary owns orchestration mechanics.
 
 1. Read the full Firstmate `AGENTS.md` and obey it.
 2. Read the full internal skills required by the request, always including:
@@ -18,7 +18,7 @@ mechanics.
 3. Before starting a session, run the installed read-only entry router:
 
    ```sh
-   /Users/vladisval/Documents/Code/firstmate/bin/fm-desktop-entry.sh
+   "$FIRSTMATE_CODE/bin/fm-desktop-entry.sh"
    ```
 
    When it prints `mode=coordinator`, do not run `fm-session-start.sh` in the

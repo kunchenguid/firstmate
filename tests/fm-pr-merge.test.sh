@@ -1193,6 +1193,39 @@ test_missing_meta_refuses_before_merge() {
   pass "fm-pr-merge refuses before merging when task meta is missing"
 }
 
+test_local_only_refuses_before_remote_pr_action() {
+  local case_dir rc
+  case_dir=$(make_case local-only-refusal)
+  mkdir -p "$case_dir/wt"
+  sed 's/^mode=.*/mode=local-only/' "$case_dir/state/task-x1.meta" \
+    > "$case_dir/state/task-x1.meta.tmp"
+  mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+  chmod 0600 "$case_dir/state/task-x1.meta"
+  add_gh_mocks "$case_dir" 3434343434343434343434343434343434343434
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/34 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "local-only: remote PR delivery must be refused"
+  assert_grep 'task task-x1 is local-only and is not authorized for remote PR delivery; use bin/fm-merge-local.sh task-x1' \
+    "$case_dir/stderr" \
+    "local-only: refusal did not route landing through fm-merge-local"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "local-only: remote PR refusal invoked gh-axi"
+  [ ! -s "$case_dir/gh.log" ] \
+    || fail "local-only: remote PR refusal invoked gh"
+  assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+    "local-only: remote PR refusal published PR metadata"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "local-only: remote PR refusal armed a merge poll"
+  pass "fm-pr-merge routes local-only landing away from remote PR delivery"
+}
+
 test_malformed_url_refuses_before_merge() {
   local case_dir rc
   case_dir=$(make_case malformed-url)
@@ -1690,6 +1723,7 @@ test_github_different_head_never_proves_merged_or_queued
 test_github_queue_required_refusal_names_strict_boundary
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
+test_local_only_refuses_before_remote_pr_action
 test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
