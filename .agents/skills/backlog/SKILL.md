@@ -40,11 +40,18 @@ This skill owns the intake PROCEDURE only; `tasks-axi` remains the one backlog e
      An explicit captain priority signal in the pasted text (an explicit "P1", "urgent",
      "whenever", "someday", and the like) overrides the rubric for that item.
 
-3. **Dedupe.**
-   Check the item against the existing backlog (`tasks-axi list`) before filing.
-   When an existing item already covers the same work, merge into it with
-   `tasks-axi update <id> --body-file <path> --archive-body` so the prior body is preserved rather
-   than lost, instead of creating a twin.
+3. **Dedupe, then file.**
+   Filing and merging are routine backlog mutations, so use compatible `tasks-axi` when the configured
+   backend selects it, and the documented manual hand-edit path to `data/backlog.md` otherwise, per
+   `AGENTS.md` section 10 and `docs/configuration.md` "Backlog backend"; that doc owns the exact
+   `config/backlog-backend` mechanics.
+   Check the item against the existing backlog (`tasks-axi list`, or a read of `data/backlog.md` on
+   a manual-backend home) before filing.
+   When an existing item already covers the same work, merge into it (`tasks-axi update <id>
+   --body-file <path> --archive-body`, or the equivalent manual edit that archives rather than
+   drops the prior body) instead of creating a twin.
+   Otherwise file a new item (`tasks-axi add`, or the equivalent manual entry) with its classified
+   kind and priority.
 
 4. **Route.**
    For an item whose project or domain matches a registered secondmate `scope:` in
