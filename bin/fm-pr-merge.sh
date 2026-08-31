@@ -17,13 +17,14 @@
 # and naming both failed reads when gh is present and its own read failed.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, the refusal names the queue's configured merge method and
-# states that this strict exact-head path does not arm auto-merge.
+# states that this strict exact-head path does not retain auto-merge.
 # No method is selected for the caller in any case. A rules response that names
 # no queue rule, one that could not be read, rules that disagree, and a method
 # this script does not recognise are four distinct outcomes and are reported
 # apart, because each one leaves the operator somewhere different.
-# Caller-provided --auto is rejected before any metadata or forge mutation, so
-# a refusal cannot leave auto-merge armed for a later, different head.
+# Caller-provided --auto is rejected before any metadata or forge mutation.
+# An unmerged and unqueued outcome must also prove auto-merge absent, disabling
+# and reading it back when the forge implicitly armed it.
 # Every refusal that follows a merge command which returned success quotes that
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
@@ -132,17 +133,18 @@ FM_PR_GITHUB_STATE=
 FM_PR_GITHUB_MERGED=
 FM_PR_GITHUB_QUEUED=
 FM_PR_GITHUB_BASE=
+FM_PR_GITHUB_AUTO=
 FM_PR_GITHUB_QUEUE_OBSERVED=false
 github_read_outcome_with_gh() {
   local fields line
   local total=0 named=0
-  local state='' merged='' queued='' base=''
+  local state='' merged='' queued='' base='' auto=''
 
   # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
   if ! fields=$(gh api graphql \
-    -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged isInMergeQueue baseRefName}}}' \
+    -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged isInMergeQueue baseRefName autoMergeRequest{enabledAt}}}}' \
     -F "owner=$PR_OWNER" -F "repo=$PR_REPO" -F "number=$PR_NUMBER" \
-    --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring), "queued=" + (.isInMergeQueue | tostring), "base=" + (.baseRefName // "")' \
+    --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring), "queued=" + (.isInMergeQueue | tostring), "base=" + (.baseRefName // ""), "auto=" + (if .autoMergeRequest == null then "false" else "true" end)' \
     2>/dev/null) || [ -z "$fields" ]; then
     return 1
   fi
@@ -153,15 +155,17 @@ github_read_outcome_with_gh() {
       merged=*) merged=${line#merged=} ;;
       queued=*) queued=${line#queued=} ;;
       base=*) base=${line#base=} ;;
+      auto=*) auto=${line#auto=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ] || [ -z "$state" ] \
+  if [ "$named" -ne 5 ] || [ "$total" -ne 5 ] || [ -z "$state" ] \
     || { [ "$merged" != true ] && [ "$merged" != false ]; } \
     || { [ "$queued" != true ] && [ "$queued" != false ]; } \
+    || { [ "$auto" != true ] && [ "$auto" != false ]; } \
     || [ -z "$base" ]; then
     return 1
   fi
@@ -170,6 +174,7 @@ FIELDS
   FM_PR_GITHUB_MERGED=$merged
   FM_PR_GITHUB_QUEUED=$queued
   FM_PR_GITHUB_BASE=$base
+  FM_PR_GITHUB_AUTO=$auto
   FM_PR_GITHUB_QUEUE_OBSERVED=true
 }
 
@@ -189,11 +194,13 @@ github_read_outcome_with_gh_axi() {
       FM_PR_GITHUB_STATE=MERGED
       FM_PR_GITHUB_MERGED=true
       FM_PR_GITHUB_QUEUED=false
+      FM_PR_GITHUB_AUTO=false
       ;;
     *)
       FM_PR_GITHUB_STATE=$state
       FM_PR_GITHUB_MERGED=false
       FM_PR_GITHUB_QUEUED=unknown
+      FM_PR_GITHUB_AUTO=unknown
       ;;
   esac
   FM_PR_GITHUB_BASE=
@@ -354,7 +361,7 @@ github_report_queue_rules() {
         SQUASH) queue_method=squash ;;
         REBASE) queue_method=rebase ;;
       esac
-      printf 'error: base branch %s requires the merge queue method %s; this strict exact-head path does not arm auto-merge, and no landed or queued outcome is proven\n' \
+      printf 'error: base branch %s requires the merge queue method %s; this strict exact-head path does not retain auto-merge, and no landed or queued outcome is proven\n' \
         "$FM_PR_GITHUB_BASE" "$queue_method" >&2
       ;;
     conflicting)
@@ -374,19 +381,52 @@ github_report_queue_rules() {
   esac
 }
 
+github_disable_auto_merge() {
+  local output
+  if [ "$FM_PR_GITHUB_AUTO" = false ]; then
+    echo "verified: GitHub auto-merge is disabled for $URL" >&2
+    return 0
+  fi
+  if ! output=$(gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    --disable-auto 2>&1); then
+    if github_read_outcome_with_gh && [ "$FM_PR_GITHUB_AUTO" = false ]; then
+      echo "verified: GitHub auto-merge is disabled for $URL" >&2
+      return 0
+    fi
+    printf 'error: could not disable GitHub auto-merge after the unmerged, unqueued outcome: %s\n' \
+      "${output:-no forge detail}" >&2
+    return 1
+  fi
+  if ! github_read_outcome_with_gh; then
+    echo "error: GitHub auto-merge disablement could not be verified" >&2
+    return 1
+  fi
+  if [ "$FM_PR_GITHUB_AUTO" != false ]; then
+    printf 'error: GitHub auto-merge remains armed after disablement: autoMergeRequest=%s\n' \
+      "$FM_PR_GITHUB_AUTO" >&2
+    return 1
+  fi
+  echo "verified: GitHub auto-merge is disabled for $URL" >&2
+}
+
 github_report_unmerged_outcome() {
+  local cleanup_status=0
   printf 'error: GitHub merge outcome was not successful: state=%s, merged=%s, isInMergeQueue=%s\n' \
     "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
+  if [ "$FM_PR_GITHUB_MERGED" = false ] && [ "$FM_PR_GITHUB_QUEUED" = false ]; then
+    github_disable_auto_merge || cleanup_status=1
+  fi
   if ! github_state_is_open || [ "$FM_PR_GITHUB_MERGED" != false ] \
     || [ "$FM_PR_GITHUB_QUEUED" = true ]; then
-    return 0
+    return "$cleanup_status"
   fi
   if [ "$FM_PR_GITHUB_QUEUE_OBSERVED" != true ]; then
     printf 'error: the merge queue could not be observed for %s because the queue-aware read was unavailable, so a pull request already in the merge queue cannot be told apart from one that never entered it; re-check the pull request'"'"'s merge queue state before retrying\n' \
       "$URL" >&2
-    return 0
+    return "$cleanup_status"
   fi
   github_report_queue_rules
+  return "$cleanup_status"
 }
 
 # Record before the forge call. This arms the merge poll without claiming a

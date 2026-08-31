@@ -96,6 +96,44 @@ require_owner() {
     || die "this process does not own the live Firstmate session lock; refusing Desktop task mutation"
 }
 
+TASK_MUTATION_LOCK=
+task_mutation_lock_release() {
+  [ -n "$TASK_MUTATION_LOCK" ] || return 0
+  if [ "$(cat "$TASK_MUTATION_LOCK/pid" 2>/dev/null || true)" = "$$" ]; then
+    rm -f -- "$TASK_MUTATION_LOCK/pid"
+    rmdir -- "$TASK_MUTATION_LOCK" 2>/dev/null || true
+  fi
+  TASK_MUTATION_LOCK=
+}
+
+task_mutation_lock_acquire() {  # <task-id>
+  local id=$1 lock owner
+  lock="$STATE/.$id.codex-app-mutation-lock"
+  if ! mkdir -- "$lock" 2>/dev/null; then
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    case "$owner" in
+      ''|*[!0-9]*) die "task $id mutation lock is invalid; refusing concurrent mutation" ;;
+    esac
+    if kill -0 "$owner" 2>/dev/null; then
+      die "task $id is already being mutated by process $owner"
+    fi
+    rm -f -- "$lock/pid" 2>/dev/null || true
+    rmdir -- "$lock" 2>/dev/null || true
+    mkdir -- "$lock" 2>/dev/null \
+      || die "task $id mutation ownership changed while recovering a stale lock"
+  fi
+  printf '%s\n' "$$" > "$lock/pid" || {
+    rm -f -- "$lock/pid" 2>/dev/null || true
+    rmdir -- "$lock" 2>/dev/null || true
+    die "cannot record task $id mutation ownership"
+  }
+  TASK_MUTATION_LOCK=$lock
+  trap task_mutation_lock_release EXIT
+  trap 'task_mutation_lock_release; exit 129' HUP
+  trap 'task_mutation_lock_release; exit 130' INT
+  trap 'task_mutation_lock_release; exit 143' TERM
+}
+
 resolve_git_checkout() {  # <checkout>
   local checkout=$1 checkout_real top top_real
   [ -d "$checkout" ] || return 1
@@ -184,28 +222,46 @@ desktop_transition_request_hash() {
 
 DESKTOP_TRANSITION_OPERATION=
 DESKTOP_TRANSITION_REQUEST=
+DESKTOP_TRANSITION_META_PREIMAGE=
 DESKTOP_TRANSITION_META_HASH=
+DESKTOP_TRANSITION_CURRENT_PREIMAGE=
 DESKTOP_TRANSITION_CURRENT_HASH=
+DESKTOP_TRANSITION_STATUS_PREIMAGE=
 DESKTOP_TRANSITION_STATUS_HASH=
+DESKTOP_TRANSITION_RECEIPT_PREIMAGE=
+DESKTOP_TRANSITION_RECEIPT_HASH=
 desktop_transition_journal_parse() {
   local journal=$1 key lines value
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
   lines=$(wc -l < "$journal" | tr -d ' ')
-  [ "$lines" = 6 ] || return 1
-  [ "$(exact_meta_value "$journal" version)" = 1 ] || return 1
-  for key in operation request_sha256 meta_sha256 current_sha256 status_sha256; do
+  [ "$lines" = 11 ] || return 1
+  [ "$(exact_meta_value "$journal" version)" = 2 ] || return 1
+  for key in operation request_sha256 meta_preimage_sha256 meta_sha256 \
+    current_preimage_sha256 current_sha256 status_preimage_sha256 status_sha256 \
+    receipt_preimage_sha256 receipt_sha256; do
     value=$(exact_meta_value "$journal" "$key") || return 1
     case "$key" in
       operation) case "$value" in register|resume) ;; *) return 1 ;; esac ;;
-      status_sha256) [ "$value" = none ] || [[ "$value" =~ ^[0-9a-f]{64}$ ]] || return 1 ;;
+      *_preimage_sha256)
+        [ "$value" = none ] || [ "$value" = absent ] \
+          || [[ "$value" =~ ^[0-9a-f]{64}$ ]] || return 1
+        ;;
+      status_sha256|receipt_sha256)
+        [ "$value" = none ] || [[ "$value" =~ ^[0-9a-f]{64}$ ]] || return 1
+        ;;
       *) [[ "$value" =~ ^[0-9a-f]{64}$ ]] || return 1 ;;
     esac
   done
   DESKTOP_TRANSITION_OPERATION=$(exact_meta_value "$journal" operation)
   DESKTOP_TRANSITION_REQUEST=$(exact_meta_value "$journal" request_sha256)
+  DESKTOP_TRANSITION_META_PREIMAGE=$(exact_meta_value "$journal" meta_preimage_sha256)
   DESKTOP_TRANSITION_META_HASH=$(exact_meta_value "$journal" meta_sha256)
+  DESKTOP_TRANSITION_CURRENT_PREIMAGE=$(exact_meta_value "$journal" current_preimage_sha256)
   DESKTOP_TRANSITION_CURRENT_HASH=$(exact_meta_value "$journal" current_sha256)
+  DESKTOP_TRANSITION_STATUS_PREIMAGE=$(exact_meta_value "$journal" status_preimage_sha256)
   DESKTOP_TRANSITION_STATUS_HASH=$(exact_meta_value "$journal" status_sha256)
+  DESKTOP_TRANSITION_RECEIPT_PREIMAGE=$(exact_meta_value "$journal" receipt_preimage_sha256)
+  DESKTOP_TRANSITION_RECEIPT_HASH=$(exact_meta_value "$journal" receipt_sha256)
 }
 
 desktop_transition_file_matches() {  # <path> <sha256>
@@ -215,27 +271,51 @@ desktop_transition_file_matches() {  # <path> <sha256>
   [ "$actual" = "$2" ]
 }
 
-desktop_transition_publish_file() {  # <task-id> <staged> <destination> <sha256>
-  local id=$1 staged=$2 destination=$3 expected_hash=$4 tmp
+desktop_transition_snapshot() {  # <path>
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  fm_task_route_sha256 "$1"
+}
+
+desktop_transition_publish_file() {  # <task-id> <staged> <destination> <preimage> <sha256>
+  local id=$1 staged=$2 destination=$3 preimage=$4 expected_hash=$5 tmp
   if desktop_transition_file_matches "$destination" "$expected_hash"; then
     return 0
   fi
+  case "$preimage" in
+    absent) [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 1 ;;
+    *) desktop_transition_file_matches "$destination" "$preimage" || return 1 ;;
+  esac
   tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-publish.XXXXXX") || return 1
   cp -- "$staged" "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return 1; }
 }
 
+desktop_transition_resume_current_supersedes() {  # <staged-current> <current>
+  local staged=$1 current=$2 state
+  [ -f "$current" ] && [ ! -L "$current" ] || return 1
+  [ "$(exact_meta_value "$current" thread_id)" = "$(exact_meta_value "$staged" thread_id)" ] \
+    && [ "$(exact_meta_value "$current" host_id)" = "$(exact_meta_value "$staged" host_id)" ] \
+    || return 1
+  state=$(exact_meta_value "$current" state) || return 1
+  valid_state "$state"
+}
+
 desktop_transition_finish() {  # <task-id> <operation> <request-sha256>
   local id=$1 operation=$2 request_hash=$3 journal meta_stage current_stage status_stage
-  local meta current status
+  local receipt_stage meta current status receipt
   journal="$STATE/$id.codex-app-transition"
   meta_stage="$STATE/.$id.codex-app-transition.meta"
   current_stage="$STATE/.$id.codex-app-transition.current"
   status_stage="$STATE/.$id.codex-app-transition.status"
+  receipt_stage="$STATE/.$id.codex-app-transition.resume-receipt"
   meta="$STATE/$id.meta"
   current="$STATE/$id.codex-app-current"
   status="$STATE/$id.status"
+  receipt="$STATE/$id.codex-app-resume-receipt"
   desktop_transition_journal_parse "$journal" || return 1
   [ "$DESKTOP_TRANSITION_OPERATION" = "$operation" ] \
     && [ "$DESKTOP_TRANSITION_REQUEST" = "$request_hash" ] || return 1
@@ -246,45 +326,84 @@ desktop_transition_finish() {  # <task-id> <operation> <request-sha256>
     desktop_transition_file_matches "$status_stage" "$DESKTOP_TRANSITION_STATUS_HASH" \
       || return 1
   fi
+  if [ "$DESKTOP_TRANSITION_RECEIPT_HASH" != none ]; then
+    desktop_transition_file_matches "$receipt_stage" "$DESKTOP_TRANSITION_RECEIPT_HASH" \
+      || return 1
+  fi
   desktop_transition_publish_file "$id" "$meta_stage" "$meta" \
-    "$DESKTOP_TRANSITION_META_HASH" || return 1
-  desktop_transition_publish_file "$id" "$current_stage" "$current" \
-    "$DESKTOP_TRANSITION_CURRENT_HASH" || return 1
+    "$DESKTOP_TRANSITION_META_PREIMAGE" "$DESKTOP_TRANSITION_META_HASH" || return 1
+  if ! desktop_transition_file_matches "$current" "$DESKTOP_TRANSITION_CURRENT_HASH"; then
+    if [ "$operation" = resume ] \
+      && ! desktop_transition_file_matches "$current" "$DESKTOP_TRANSITION_CURRENT_PREIMAGE" \
+      && desktop_transition_resume_current_supersedes "$current_stage" "$current"; then
+      :
+    else
+      desktop_transition_publish_file "$id" "$current_stage" "$current" \
+        "$DESKTOP_TRANSITION_CURRENT_PREIMAGE" "$DESKTOP_TRANSITION_CURRENT_HASH" || return 1
+    fi
+  fi
   if [ "$DESKTOP_TRANSITION_STATUS_HASH" != none ]; then
     desktop_transition_publish_file "$id" "$status_stage" "$status" \
-      "$DESKTOP_TRANSITION_STATUS_HASH" || return 1
+      "$DESKTOP_TRANSITION_STATUS_PREIMAGE" "$DESKTOP_TRANSITION_STATUS_HASH" || return 1
   fi
-  rm -f -- "$journal" "$meta_stage" "$current_stage" "$status_stage" || return 1
+  if [ "$DESKTOP_TRANSITION_RECEIPT_HASH" != none ]; then
+    desktop_transition_publish_file "$id" "$receipt_stage" "$receipt" \
+      "$DESKTOP_TRANSITION_RECEIPT_PREIMAGE" "$DESKTOP_TRANSITION_RECEIPT_HASH" || return 1
+  fi
+  rm -f -- "$journal" "$meta_stage" "$current_stage" "$status_stage" \
+    "$receipt_stage" || return 1
 }
 
-desktop_transition_begin() {  # <task-id> <operation> <request-sha256> <meta> <current> [status]
+desktop_transition_begin() {  # <task-id> <operation> <request-sha256> <meta> <current> [status] [receipt]
   local id=$1 operation=$2 request_hash=$3 meta_source=$4 current_source=$5
-  local status_source=${6:-} journal meta_stage current_stage status_stage
-  local meta_hash current_hash status_hash=none journal_tmp
+  local status_source=${6:-} receipt_source=${7:-}
+  local journal meta_stage current_stage status_stage receipt_stage
+  local meta_preimage current_preimage status_preimage=none receipt_preimage=none
+  local meta_hash current_hash status_hash=none receipt_hash=none journal_tmp
   journal="$STATE/$id.codex-app-transition"
   meta_stage="$STATE/.$id.codex-app-transition.meta"
   current_stage="$STATE/.$id.codex-app-transition.current"
   status_stage="$STATE/.$id.codex-app-transition.status"
+  receipt_stage="$STATE/.$id.codex-app-transition.resume-receipt"
   [ ! -e "$journal" ] || return 1
-  rm -f -- "$meta_stage" "$current_stage" "$status_stage" || return 1
+  meta_preimage=$(desktop_transition_snapshot "$STATE/$id.meta") || return 1
+  current_preimage=$(desktop_transition_snapshot "$STATE/$id.codex-app-current") || return 1
+  if [ -n "$status_source" ]; then
+    status_preimage=$(desktop_transition_snapshot "$STATE/$id.status") || return 1
+  fi
+  if [ -n "$receipt_source" ]; then
+    receipt_preimage=$(desktop_transition_snapshot "$STATE/$id.codex-app-resume-receipt") || return 1
+  fi
+  rm -f -- "$meta_stage" "$current_stage" "$status_stage" "$receipt_stage" || return 1
   mv -f -- "$meta_source" "$meta_stage" || return 1
   mv -f -- "$current_source" "$current_stage" || return 1
   if [ -n "$status_source" ]; then
     mv -f -- "$status_source" "$status_stage" || return 1
+  fi
+  if [ -n "$receipt_source" ]; then
+    mv -f -- "$receipt_source" "$receipt_stage" || return 1
   fi
   meta_hash=$(fm_task_route_sha256 "$meta_stage") || return 1
   current_hash=$(fm_task_route_sha256 "$current_stage") || return 1
   if [ -n "$status_source" ]; then
     status_hash=$(fm_task_route_sha256 "$status_stage") || return 1
   fi
+  if [ -n "$receipt_source" ]; then
+    receipt_hash=$(fm_task_route_sha256 "$receipt_stage") || return 1
+  fi
   journal_tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-transition.XXXXXX") || return 1
   {
-    printf 'version=1\n'
+    printf 'version=2\n'
     printf 'operation=%s\n' "$operation"
     printf 'request_sha256=%s\n' "$request_hash"
+    printf 'meta_preimage_sha256=%s\n' "$meta_preimage"
     printf 'meta_sha256=%s\n' "$meta_hash"
+    printf 'current_preimage_sha256=%s\n' "$current_preimage"
     printf 'current_sha256=%s\n' "$current_hash"
+    printf 'status_preimage_sha256=%s\n' "$status_preimage"
     printf 'status_sha256=%s\n' "$status_hash"
+    printf 'receipt_preimage_sha256=%s\n' "$receipt_preimage"
+    printf 'receipt_sha256=%s\n' "$receipt_hash"
   } > "$journal_tmp" || { rm -f -- "$journal_tmp"; return 1; }
   mv -f -- "$journal_tmp" "$journal" || { rm -f -- "$journal_tmp"; return 1; }
   desktop_transition_finish "$id" "$operation" "$request_hash"
@@ -349,6 +468,7 @@ register_task() {
     || die_usage "cannot hash model route record: $route_real"
 
   require_owner
+  task_mutation_lock_acquire "$id"
   meta="$STATE/$id.meta"
   status="$STATE/$id.status"
   current="$STATE/$id.codex-app-current"
@@ -467,6 +587,7 @@ reconcile_task() {
     *) die_usage "invalid status event '$event'" ;;
   esac
   require_owner
+  task_mutation_lock_acquire "$id"
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || die "no metadata for Desktop task $id"
   [ "$(fm_backend_of_meta "$meta")" = codex-app-host ] \
@@ -545,6 +666,7 @@ hard_stop_task() {
     die_usage "handoff path must be a non-empty single-line value"
   fi
   require_owner
+  task_mutation_lock_acquire "$id"
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || die "no metadata for Desktop task $id"
   [ "$(fm_backend_of_meta "$meta")" = codex-app-host ] \
@@ -674,12 +796,72 @@ hard_stop_task() {
   printf 'hard-stop: %s checkpoint=%s handoff=%s\n' "$id" "$checkpoint" "$handoff_real"
 }
 
+DESKTOP_RESUME_RECEIPT_REQUEST=
+DESKTOP_RESUME_RECEIPT_CHECKPOINT=
+DESKTOP_RESUME_RECEIPT_HANDOFF=
+DESKTOP_RESUME_RECEIPT_OLD_THREAD=
+DESKTOP_RESUME_RECEIPT_NEW_THREAD=
+DESKTOP_RESUME_RECEIPT_HOST=
+DESKTOP_RESUME_RECEIPT_OLD_GENERATION=
+DESKTOP_RESUME_RECEIPT_NEW_GENERATION=
+desktop_resume_receipt_parse() {  # <receipt>
+  local receipt=$1 lines key value
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  lines=$(wc -l < "$receipt" | tr -d ' ')
+  [ "$lines" = 9 ] || return 1
+  [ "$(exact_meta_value "$receipt" version)" = 1 ] || return 1
+  for key in request_sha256 checkpoint handoff old_thread_id new_thread_id host_id \
+    old_generation new_generation; do
+    value=$(exact_meta_value "$receipt" "$key") || return 1
+    valid_scalar "$value" || return 1
+  done
+  DESKTOP_RESUME_RECEIPT_REQUEST=$(exact_meta_value "$receipt" request_sha256)
+  DESKTOP_RESUME_RECEIPT_CHECKPOINT=$(exact_meta_value "$receipt" checkpoint)
+  DESKTOP_RESUME_RECEIPT_HANDOFF=$(exact_meta_value "$receipt" handoff)
+  DESKTOP_RESUME_RECEIPT_OLD_THREAD=$(exact_meta_value "$receipt" old_thread_id)
+  DESKTOP_RESUME_RECEIPT_NEW_THREAD=$(exact_meta_value "$receipt" new_thread_id)
+  DESKTOP_RESUME_RECEIPT_HOST=$(exact_meta_value "$receipt" host_id)
+  DESKTOP_RESUME_RECEIPT_OLD_GENERATION=$(exact_meta_value "$receipt" old_generation)
+  DESKTOP_RESUME_RECEIPT_NEW_GENERATION=$(exact_meta_value "$receipt" new_generation)
+  [[ "$DESKTOP_RESUME_RECEIPT_REQUEST" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$DESKTOP_RESUME_RECEIPT_CHECKPOINT" | grep -Eq '^[0-9a-f]{40,64}$' \
+    || return 1
+  valid_thread "$DESKTOP_RESUME_RECEIPT_OLD_THREAD" \
+    && valid_thread "$DESKTOP_RESUME_RECEIPT_NEW_THREAD" \
+    && [ "$DESKTOP_RESUME_RECEIPT_OLD_THREAD" != "$DESKTOP_RESUME_RECEIPT_NEW_THREAD" ] \
+    && valid_atom "$DESKTOP_RESUME_RECEIPT_HOST" || return 1
+  case "$DESKTOP_RESUME_RECEIPT_OLD_GENERATION" in ''|*[!0-9]*) return 1 ;; esac
+  case "$DESKTOP_RESUME_RECEIPT_NEW_GENERATION" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$DESKTOP_RESUME_RECEIPT_OLD_GENERATION" -ge 1 ] || return 1
+  [ "$DESKTOP_RESUME_RECEIPT_NEW_GENERATION" -eq \
+    $((DESKTOP_RESUME_RECEIPT_OLD_GENERATION + 1)) ]
+}
+
+desktop_resume_receipt_matches() {  # <receipt> <request> <checkpoint> <handoff> <thread> <host> <meta> <current>
+  local receipt=$1 request_hash=$2 checkpoint=$3 handoff=$4 thread=$5 host=$6
+  local meta=$7 current=$8 state
+  desktop_resume_receipt_parse "$receipt" || return 1
+  [ "$DESKTOP_RESUME_RECEIPT_REQUEST" = "$request_hash" ] \
+    && [ "$DESKTOP_RESUME_RECEIPT_CHECKPOINT" = "$checkpoint" ] \
+    && [ "$DESKTOP_RESUME_RECEIPT_HANDOFF" = "$handoff" ] \
+    && [ "$DESKTOP_RESUME_RECEIPT_NEW_THREAD" = "$thread" ] \
+    && [ "$DESKTOP_RESUME_RECEIPT_HOST" = "$host" ] \
+    && [ "$(exact_meta_value "$meta" codex_app_thread_id)" = "$thread" ] \
+    && [ "$(exact_meta_value "$meta" codex_app_host_id)" = "$host" ] \
+    && [ "$(exact_meta_value "$meta" session_generation)" = \
+      "$DESKTOP_RESUME_RECEIPT_NEW_GENERATION" ] \
+    && [ "$(exact_meta_value "$current" thread_id)" = "$thread" ] \
+    && [ "$(exact_meta_value "$current" host_id)" = "$host" ] || return 1
+  state=$(exact_meta_value "$current" state) || return 1
+  valid_state "$state"
+}
+
 resume_task() {
   local id=$1
   shift
   local thread='' host='' checkpoint='' handoff='' meta current worktree handoff_real
   local recorded_checkpoint recorded_handoff old_thread generation next_generation tmp
-  local current_tmp request_hash journal
+  local current_tmp receipt receipt_tmp request_hash journal
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --thread) [ "$#" -ge 2 ] || usage; thread=$2; shift 2 ;;
@@ -698,8 +880,10 @@ resume_task() {
   handoff_real=$(resolve_existing_file "$handoff") \
     || die_usage "cannot resolve session handoff: $handoff"
   require_owner
+  task_mutation_lock_acquire "$id"
   meta="$STATE/$id.meta"
   current="$STATE/$id.codex-app-current"
+  receipt="$STATE/$id.codex-app-resume-receipt"
   journal="$STATE/$id.codex-app-transition"
   request_hash=$(desktop_transition_request_hash resume "$id" "$thread" "$host" \
     "$checkpoint" "$handoff_real") || die "cannot bind Desktop resume request for $id"
@@ -725,14 +909,9 @@ resume_task() {
     || die "resume checkpoint or handoff does not match recorded hard stop"
   grep -qx "checkpoint_sha: $checkpoint" "$handoff_real" \
     || die "session handoff does not bind checkpoint $checkpoint"
-  if [ "$(exact_meta_value "$meta" codex_app_thread_id)" = "$thread" ] \
-    && [ "$(exact_meta_value "$meta" codex_app_host_id)" = "$host" ] \
-    && [ "$(exact_meta_value "$current" thread_id)" = "$thread" ] \
-    && [ "$(exact_meta_value "$current" host_id)" = "$host" ] \
-    && [ "$(exact_meta_value "$current" state)" = working ]; then
-    generation=$(exact_meta_value "$meta" session_generation) \
-      || die "task $id has no session generation"
-    case "$generation" in ''|*[!0-9]*) die "task $id has invalid session generation" ;; esac
+  if desktop_resume_receipt_matches "$receipt" "$request_hash" "$checkpoint" \
+    "$handoff_real" "$thread" "$host" "$meta" "$current"; then
+    generation=$DESKTOP_RESUME_RECEIPT_NEW_GENERATION
     printf 'resumed: %s generation=%s thread=%s checkpoint=%s\n' \
       "$id" "$generation" "$thread" "$checkpoint"
     return 0
@@ -768,7 +947,24 @@ resume_task() {
     rm -f -- "$tmp" "$current_tmp"
     die "cannot write staged resumed current state for $id"
   }
+  receipt_tmp=$(umask 077; mktemp "$STATE/.$id.codex-app-resume-receipt.XXXXXX") \
+    || { rm -f -- "$tmp" "$current_tmp"; die "cannot stage resume receipt for $id"; }
+  {
+    printf 'version=1\n'
+    printf 'request_sha256=%s\n' "$request_hash"
+    printf 'checkpoint=%s\n' "$checkpoint"
+    printf 'handoff=%s\n' "$handoff_real"
+    printf 'old_thread_id=%s\n' "$old_thread"
+    printf 'new_thread_id=%s\n' "$thread"
+    printf 'host_id=%s\n' "$host"
+    printf 'old_generation=%s\n' "$generation"
+    printf 'new_generation=%s\n' "$next_generation"
+  } > "$receipt_tmp" || {
+    rm -f -- "$tmp" "$current_tmp" "$receipt_tmp"
+    die "cannot write staged resume receipt for $id"
+  }
   desktop_transition_begin "$id" resume "$request_hash" "$tmp" "$current_tmp" \
+    '' "$receipt_tmp" \
     || die "cannot publish journaled Desktop resume for $id; retry the exact resume"
   printf 'resumed: %s generation=%s thread=%s checkpoint=%s\n' \
     "$id" "$next_generation" "$thread" "$checkpoint"
@@ -788,6 +984,7 @@ archive_preflight_task() {
   valid_id "$id" || die_usage "invalid task id '$id'"
   valid_scalar "$report" || die_usage "report path must be a single-line value"
   require_owner
+  task_mutation_lock_acquire "$id"
   meta="$STATE/$id.meta"
   current="$STATE/$id.codex-app-current"
   [ -f "$meta" ] || die "no metadata for Desktop task $id"

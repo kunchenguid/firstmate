@@ -150,7 +150,7 @@ FM_HOME="$TASK_HOME" "$ROOT/bin/fm-task-model-route.sh" "$TASK_ID" \
   --risk 0 --risk-evidence low \
   --diagnosis 0 --diagnosis-evidence none \
   --verification 0 --verification-evidence focused \
-  --quota-candidate sol-primary gpt-5.6-sol high 'primary Sol profile has available quota' \
+  --quota-candidate sol-primary gpt-5.6-sol high eligible none 'primary Sol profile has available quota' \
   --resolved-profile sol-primary \
   --resolved-model gpt-5.6-sol --resolved-effort high >/dev/null \
   || fail "could not create the Desktop task model route"
@@ -478,6 +478,30 @@ fi
 assert_grep 'state=paused' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
   "hard stop did not pause the old Desktop endpoint"
 
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
+    --state working --detail 'old endpoint reported working after hard stop' >/dev/null \
+  || fail "could not stage reused-thread resume behavior"
+status=0
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" resume "$SHIP_ID" \
+    --thread "$SHIP_THREAD" --host "$HOST_ID" \
+    --checkpoint "$SHIP_CHECKPOINT" --handoff "$SHIP_HANDOFF" 2>&1) \
+  || status=$?
+expect_code 1 "$status" "old Desktop thread must never satisfy resume idempotence"
+assert_grep 'session_generation=1' "$TASK_HOME/state/$SHIP_ID.meta" \
+  "reused old Desktop thread advanced the session generation"
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
+    --state paused --detail 'restore hard boundary after stale host report' >/dev/null \
+  || fail "could not restore the hard session boundary after reused-thread refusal"
+
 SHIP_THREAD_2=019ff1ae-966b-7643-ba01-488112346571
 : > "$TRANSITION_FAIL_ONCE"
 status=0
@@ -498,6 +522,13 @@ assert_grep "codex_app_thread_id=$SHIP_THREAD_2" "$TASK_HOME/state/$SHIP_ID.meta
   "resume interruption fixture did not publish its first artifact"
 assert_grep 'state=paused' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
   "resume interruption fixture unexpectedly published current state"
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$SHIP_ID" \
+    --state 'done' --detail 'new endpoint completed during resume recovery' \
+    --event 'done: new endpoint completed during resume recovery' >/dev/null \
+  || fail "could not publish a newer reconciled state during resume recovery"
 out=$(CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
   FM_HOME="$TASK_HOME" \
@@ -513,8 +544,31 @@ assert_grep "codex_app_thread_id=$SHIP_THREAD_2" "$TASK_HOME/state/$SHIP_ID.meta
   "resume did not bind the fresh Desktop task"
 assert_grep 'session_generation=2' "$TASK_HOME/state/$SHIP_ID.meta" \
   "resume did not advance the session generation"
-assert_grep 'state=working' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
-  "resume did not reconcile the fresh Desktop task as working"
+assert_grep 'state=done' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "resume retry overwrote the newer reconciled current state"
+[ "$(grep -cFx 'done: new endpoint completed during resume recovery' \
+  "$TASK_HOME/state/$SHIP_ID.status")" = 1 ] \
+  || fail "resume retry lost or duplicated the newer status event"
+RESUME_RECEIPT="$TASK_HOME/state/$SHIP_ID.codex-app-resume-receipt"
+assert_grep "old_thread_id=$SHIP_THREAD" "$RESUME_RECEIPT" \
+  "resume receipt omitted the previous Desktop thread"
+assert_grep "new_thread_id=$SHIP_THREAD_2" "$RESUME_RECEIPT" \
+  "resume receipt omitted the fresh Desktop thread"
+assert_grep 'old_generation=1' "$RESUME_RECEIPT" \
+  "resume receipt omitted the previous session generation"
+assert_grep 'new_generation=2' "$RESUME_RECEIPT" \
+  "resume receipt omitted the fresh session generation"
+out=$(CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" resume "$SHIP_ID" \
+    --thread "$SHIP_THREAD_2" --host "$HOST_ID" \
+    --checkpoint "$SHIP_CHECKPOINT" --handoff "$SHIP_HANDOFF" 2>&1) \
+  || fail "receipt-bound Desktop resume retry was not idempotent: $out"
+assert_contains "$out" 'generation=2' \
+  "receipt-bound Desktop resume retry did not preserve its generation"
+assert_grep 'state=done' "$TASK_HOME/state/$SHIP_ID.codex-app-current" \
+  "idempotent Desktop resume retry changed newer reconciled state"
 
 printf '%s\n' 'uncommitted ship artifact' > "$SHIP_WORKTREE/result.txt"
 CODEX_THREAD_ID="$THREAD_A" \

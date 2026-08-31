@@ -135,9 +135,10 @@ session_output_telemetry=unsupported
 Endpoint validation requires one exact value for every binding and refuses a mismatched task id, thread id, host id, project, worktree, or Git common-directory identity before mutation.
 Registration refuses to overwrite pre-existing task records, accepts only `direct-PR` or `local-only` with an explicit `on` or `off` project `yolo` posture, and refuses a worktree that resolves to the saved project checkout.
 The shared routing parser requires the ordered five factors and their evidence, recomputes the score, floor, override, and deterministic selection, and rejects missing, duplicate, extra, or inconsistent rows.
-Each concrete quota profile records its own model, effort, and evidence, and the selected profile is separate from both the deterministic result and any explicit captain override.
+Each configured quota profile records its model, effort, eligibility, rejection reason, and candidate-specific evidence, including profiles that the floor or explicit override makes ineligible.
+The selected eligible profile is separate from both the deterministic result and any explicit captain override.
 Registration binds the exact routing record digest and every later host mutation refuses changed routing evidence.
-Registration and resume share one digest-bound transition journal, so an exact retry completes the same metadata, current-state, and status publication after interruption.
+Registration and resume share one preimage-bound transition journal, so an exact retry cannot overwrite newer reconciled state or status events after interruption.
 
 ## Session envelope boundary
 
@@ -146,6 +147,7 @@ The envelope classes therefore provide qualitative soft boundaries and never cla
 At an explicit hard boundary, the worker stages intended changes and `fm-codex-app-task.sh hard-stop` creates a staged-only checkpoint commit plus a structured handoff outside the app-owned worktree.
 The hard-stop recovery journal binds the pre-checkpoint commit, staged tree, requested handoff, and endpoint generation before the commit, so an interrupted publication retries from that exact checkpoint.
 The primary creates a fresh Desktop task for the retained worktree, then `fm-codex-app-task.sh resume` verifies the exact checkpoint and handoff before replacing endpoint identity and advancing `session_generation`.
+Each completed resume publishes a durable receipt binding the previous and fresh thread identifiers and generations, and only that exact receipt makes a retry idempotent.
 Unstaged and untracked artifacts remain preserved throughout this transition.
 Reconciled `working` state is authoritative only for a bounded age, after which crew-state reports it as stale instead of suppressing later supervision signals.
 

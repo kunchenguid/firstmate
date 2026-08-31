@@ -18,7 +18,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-task-model-route-lib.sh"
 
 usage() {
-  echo "usage: fm-task-model-route.sh <task-id> --ambiguity <0-2> --ambiguity-evidence <text> --boundary-clarity <0-2> --boundary-clarity-evidence <text> --risk <0-2> --risk-evidence <text> --diagnosis <0-2> --diagnosis-evidence <text> --verification <0-2> --verification-evidence <text> [--floor <name>] [--override-model <slug> --override-effort <effort>] [--quota-candidate <profile> <model> <effort> <evidence>]... [--resolved-profile <profile> --resolved-model <slug> --resolved-effort <effort>]" >&2
+  echo "usage: fm-task-model-route.sh <task-id> --ambiguity <0-2> --ambiguity-evidence <text> --boundary-clarity <0-2> --boundary-clarity-evidence <text> --risk <0-2> --risk-evidence <text> --diagnosis <0-2> --diagnosis-evidence <text> --verification <0-2> --verification-evidence <text> [--floor <name>] [--override-model <slug> --override-effort <effort>] [--quota-candidate <profile> <model> <effort> <eligible|ineligible> <reason> <evidence>]... [--resolved-profile <profile> --resolved-model <slug> --resolved-effort <effort>]" >&2
   exit 2
 }
 
@@ -36,17 +36,20 @@ FLOOR=none
 OVERRIDE_MODEL='' OVERRIDE_EFFORT=''
 QUOTA_CANDIDATE_COUNT=0
 RESOLVED_PROFILE='' RESOLVED_MODEL='' RESOLVED_EFFORT=''
-declare -a QUOTA_PROFILES=() QUOTA_MODELS=() QUOTA_EFFORTS=() QUOTA_EVIDENCE=()
+declare -a QUOTA_PROFILES=() QUOTA_MODELS=() QUOTA_EFFORTS=()
+declare -a QUOTA_ELIGIBILITY=() QUOTA_REASONS=() QUOTA_EVIDENCE=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --quota-candidate)
-      [ "$#" -ge 5 ] || usage
+      [ "$#" -ge 7 ] || usage
       QUOTA_PROFILES+=("$2")
       QUOTA_MODELS+=("$3")
       QUOTA_EFFORTS+=("$4")
-      QUOTA_EVIDENCE+=("$5")
+      QUOTA_ELIGIBILITY+=("$5")
+      QUOTA_REASONS+=("$6")
+      QUOTA_EVIDENCE+=("$7")
       QUOTA_CANDIDATE_COUNT=$((QUOTA_CANDIDATE_COUNT + 1))
-      shift 5
+      shift 7
       continue
       ;;
     *) [ "$#" -ge 2 ] || usage ;;
@@ -130,6 +133,7 @@ else
   while [ "$index" -lt "$QUOTA_CANDIDATE_COUNT" ]; do
     fm_task_route_quota_candidate_valid "${QUOTA_PROFILES[$index]}" \
       "${QUOTA_MODELS[$index]}" "${QUOTA_EFFORTS[$index]}" \
+      "${QUOTA_ELIGIBILITY[$index]}" "${QUOTA_REASONS[$index]}" \
       "${QUOTA_EVIDENCE[$index]}" "$MINIMUM_TIER" "$OVERRIDE_MODEL" \
       "$OVERRIDE_EFFORT" || usage
     case ",$QUOTA_PROFILE_SET," in
@@ -138,7 +142,11 @@ else
     QUOTA_PROFILE_SET=${QUOTA_PROFILE_SET:+$QUOTA_PROFILE_SET,}${QUOTA_PROFILES[$index]}
     if [ "${QUOTA_PROFILES[$index]}" = "$RESOLVED_PROFILE" ] \
       && [ "${QUOTA_MODELS[$index]}" = "$RESOLVED_MODEL" ] \
-      && [ "${QUOTA_EFFORTS[$index]}" = "$RESOLVED_EFFORT" ]; then
+      && [ "${QUOTA_EFFORTS[$index]}" = "$RESOLVED_EFFORT" ] \
+      && [ "${QUOTA_ELIGIBILITY[$index]}" = eligible ] \
+      && fm_task_route_quota_candidate_selectable "$RESOLVED_MODEL" \
+        "$RESOLVED_EFFORT" "$MINIMUM_TIER" "$OVERRIDE_MODEL" \
+        "$OVERRIDE_EFFORT"; then
       RESOLVED_PROFILE_MATCHES=$((RESOLVED_PROFILE_MATCHES + 1))
     fi
     index=$((index + 1))
@@ -157,7 +165,7 @@ RECORD="$DIR/model-routing.tsv"
 TMP=$(mktemp "$DIR/.model-routing.XXXXXX") || exit 1
 trap 'rm -f -- "$TMP"' EXIT HUP INT TERM
 {
-  printf 'version\t3\n'
+  printf 'version\t4\n'
   printf 'task_id\t%s\n' "$ID"
   printf 'ambiguity\t%s\t%s\n' "$AMBIGUITY" "$AMBIGUITY_EVIDENCE"
   printf 'boundary_clarity\t%s\t%s\n' "$BOUNDARY" "$BOUNDARY_EVIDENCE"
@@ -177,16 +185,17 @@ trap 'rm -f -- "$TMP"' EXIT HUP INT TERM
   printf 'quota_candidate_count\t%s\n' "$QUOTA_CANDIDATE_COUNT"
   index=0
   while [ "$index" -lt "$QUOTA_CANDIDATE_COUNT" ]; do
-    printf 'quota_candidate\t%s\t%s\t%s\t%s\n' \
+    printf 'quota_candidate\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "${QUOTA_PROFILES[$index]}" "${QUOTA_MODELS[$index]}" \
-      "${QUOTA_EFFORTS[$index]}" "${QUOTA_EVIDENCE[$index]}"
+      "${QUOTA_EFFORTS[$index]}" "${QUOTA_ELIGIBILITY[$index]}" \
+      "${QUOTA_REASONS[$index]}" "${QUOTA_EVIDENCE[$index]}"
     index=$((index + 1))
   done
   printf 'resolved_profile\t%s\n' "$RESOLVED_PROFILE"
   printf 'resolved_model\t%s\n' "$RESOLVED_MODEL"
   printf 'resolved_effort\t%s\n' "$RESOLVED_EFFORT"
   printf 'resolution\t%s\n' "$RESOLUTION"
-  printf 'quota_policy\tquota selects one recorded profile with candidate-specific evidence and preserves explicit override exactly or otherwise never lowers minimum_tier\n'
+  printf 'quota_policy\tquota records every configured profile with eligibility, rejection reason, and candidate-specific evidence; selection preserves explicit override exactly or otherwise never lowers minimum_tier\n'
 } > "$TMP" || exit 1
 chmod 0600 "$TMP" || exit 1
 fm_task_route_record_parse "$TMP" || {

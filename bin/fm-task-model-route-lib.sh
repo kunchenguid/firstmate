@@ -37,18 +37,35 @@ fm_task_route_effort_supported() {
   return 1
 }
 
-fm_task_route_quota_candidate_valid() {  # <profile> <model> <effort> <evidence> <minimum-tier> <override-model> <override-effort>
-  local profile=$1 model=$2 effort=$3 evidence=$4 minimum_tier=$5
-  local override_model=$6 override_effort=$7 tier
-  case "$profile" in ''|none|*[!A-Za-z0-9._@%:+-]*) return 1 ;; esac
-  case "$evidence" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+fm_task_route_quota_candidate_selectable() {  # <model> <effort> <minimum-tier> <override-model> <override-effort>
+  local model=$1 effort=$2 minimum_tier=$3 override_model=$4 override_effort=$5 tier
   tier=$(fm_task_route_model_tier "$model") || return 1
-  fm_task_route_effort_supported "$tier" "$effort" || return 1
   if [ "$override_model" = none ]; then
     [ "$(fm_task_route_tier_rank "$tier")" -ge \
       "$(fm_task_route_tier_rank "$minimum_tier")" ]
   else
     [ "$model" = "$override_model" ] && [ "$effort" = "$override_effort" ]
+  fi
+}
+
+fm_task_route_quota_candidate_valid() {  # <profile> <model> <effort> <eligibility> <reason> <evidence> <minimum-tier> <override-model> <override-effort>
+  local profile=$1 model=$2 effort=$3 eligibility=$4 reason=$5 evidence=$6
+  local minimum_tier=$7 override_model=$8 override_effort=$9 tier
+  case "$profile" in ''|none|*[!A-Za-z0-9._@%:+-]*) return 1 ;; esac
+  case "$eligibility" in eligible|ineligible) ;; *) return 1 ;; esac
+  case "$reason" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+  case "$evidence" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+  tier=$(fm_task_route_model_tier "$model") || return 1
+  fm_task_route_effort_supported "$tier" "$effort" || return 1
+  case "$eligibility:$reason" in
+    eligible:none) ;;
+    ineligible:none) return 1 ;;
+    ineligible:*) ;;
+    *) return 1 ;;
+  esac
+  if [ "$eligibility" = eligible ]; then
+    fm_task_route_quota_candidate_selectable "$model" "$effort" "$minimum_tier" \
+      "$override_model" "$override_effort"
   fi
 }
 
@@ -103,23 +120,32 @@ fm_task_route_read_factor() {
 }
 
 fm_task_route_read_quota_candidate() {
-  local line rest profile model effort evidence
+  local line rest profile model effort eligibility reason evidence
   IFS= read -r line <&8 || return 1
-  case "$line" in quota_candidate$'\t'*$'\t'*$'\t'*$'\t'*) ;; *) return 1 ;; esac
+  case "$line" in quota_candidate$'\t'*$'\t'*$'\t'*$'\t'*$'\t'*$'\t'*) ;; *) return 1 ;; esac
   rest=${line#*$'\t'}
   profile=${rest%%$'\t'*}
   rest=${rest#*$'\t'}
   model=${rest%%$'\t'*}
   rest=${rest#*$'\t'}
   effort=${rest%%$'\t'*}
-  evidence=${rest#*$'\t'}
+  rest=${rest#*$'\t'}
+  eligibility=${rest%%$'\t'*}
+  rest=${rest#*$'\t'}
+  reason=${rest%%$'\t'*}
+  rest=${rest#*$'\t'}
+  evidence=$rest
   case "$profile" in ''|none|*[!A-Za-z0-9._@%:+-]*) return 1 ;; esac
   case "$model" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
   case "$effort" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+  case "$eligibility" in eligible|ineligible) ;; *) return 1 ;; esac
+  case "$reason" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
   case "$evidence" in ''|*$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
   FM_TASK_ROUTE_CANDIDATE_PROFILE=$profile
   FM_TASK_ROUTE_CANDIDATE_MODEL=$model
   FM_TASK_ROUTE_CANDIDATE_EFFORT=$effort
+  FM_TASK_ROUTE_CANDIDATE_ELIGIBILITY=$eligibility
+  FM_TASK_ROUTE_CANDIDATE_REASON=$reason
   FM_TASK_ROUTE_CANDIDATE_EVIDENCE=$evidence
 }
 
@@ -128,10 +154,11 @@ fm_task_route_record_parse() {
   local total recorded_total score_tier recorded_score_tier floor floor_tier
   local minimum_tier recorded_minimum_tier override_model override_effort
   local precedence selected_tier model effort quota_candidate_count
-  local candidate_profile candidate_model candidate_effort
+  local candidate_profile candidate_model candidate_effort candidate_eligibility
   local resolved_profile resolved_model resolved_effort resolution quota_policy
   local extra expected_precedence quota_profiles='' selected_matches=0 index
   local -a candidate_profiles=() candidate_models=() candidate_efforts=()
+  local -a candidate_eligibilities=()
   FM_TASK_ROUTE_ID=
   FM_TASK_ROUTE_MODEL=
   FM_TASK_ROUTE_EFFORT=
@@ -145,7 +172,7 @@ fm_task_route_record_parse() {
 
   fm_task_route_read_pair version || { exec 8<&-; return 1; }
   version=$FM_TASK_ROUTE_VALUE
-  [ "$version" = 3 ] || { exec 8<&-; return 1; }
+  [ "$version" = 4 ] || { exec 8<&-; return 1; }
   fm_task_route_read_pair task_id || { exec 8<&-; return 1; }
   task_id=$FM_TASK_ROUTE_VALUE
   case "$task_id" in ''|*[!A-Za-z0-9._-]*) exec 8<&-; return 1 ;; esac
@@ -227,13 +254,16 @@ fm_task_route_record_parse() {
     candidate_profile=$FM_TASK_ROUTE_CANDIDATE_PROFILE
     candidate_model=$FM_TASK_ROUTE_CANDIDATE_MODEL
     candidate_effort=$FM_TASK_ROUTE_CANDIDATE_EFFORT
+    candidate_eligibility=$FM_TASK_ROUTE_CANDIDATE_ELIGIBILITY
     case ",$quota_profiles," in *,"$candidate_profile",*) exec 8<&-; return 1 ;; esac
     fm_task_route_quota_candidate_valid "$candidate_profile" "$candidate_model" \
-      "$candidate_effort" "$FM_TASK_ROUTE_CANDIDATE_EVIDENCE" "$minimum_tier" \
-      "$override_model" "$override_effort" || { exec 8<&-; return 1; }
+      "$candidate_effort" "$candidate_eligibility" "$FM_TASK_ROUTE_CANDIDATE_REASON" \
+      "$FM_TASK_ROUTE_CANDIDATE_EVIDENCE" "$minimum_tier" "$override_model" \
+      "$override_effort" || { exec 8<&-; return 1; }
     candidate_profiles[index]=$candidate_profile
     candidate_models[index]=$candidate_model
     candidate_efforts[index]=$candidate_effort
+    candidate_eligibilities[index]=$candidate_eligibility
     quota_profiles=${quota_profiles:+$quota_profiles,}$candidate_profile
     index=$((index + 1))
   done
@@ -256,7 +286,10 @@ fm_task_route_record_parse() {
     while [ "$index" -lt "$quota_candidate_count" ]; do
       if [ "${candidate_profiles[$index]}" = "$resolved_profile" ] \
         && [ "${candidate_models[$index]}" = "$resolved_model" ] \
-        && [ "${candidate_efforts[$index]}" = "$resolved_effort" ]; then
+        && [ "${candidate_efforts[$index]}" = "$resolved_effort" ] \
+        && [ "${candidate_eligibilities[$index]}" = eligible ] \
+        && fm_task_route_quota_candidate_selectable "$resolved_model" \
+          "$resolved_effort" "$minimum_tier" "$override_model" "$override_effort"; then
         selected_matches=$((selected_matches + 1))
       fi
       index=$((index + 1))
@@ -267,7 +300,7 @@ fm_task_route_record_parse() {
 
   fm_task_route_read_pair quota_policy || { exec 8<&-; return 1; }
   quota_policy=$FM_TASK_ROUTE_VALUE
-  [ "$quota_policy" = 'quota selects one recorded profile with candidate-specific evidence and preserves explicit override exactly or otherwise never lowers minimum_tier' ] \
+  [ "$quota_policy" = 'quota records every configured profile with eligibility, rejection reason, and candidate-specific evidence; selection preserves explicit override exactly or otherwise never lowers minimum_tier' ] \
     || { exec 8<&-; return 1; }
   if IFS= read -r extra <&8 || [ -n "$extra" ]; then
     exec 8<&-

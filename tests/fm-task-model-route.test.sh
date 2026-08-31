@@ -103,8 +103,9 @@ test_floors_and_user_override_precedence() {
     --verification 0 --verification-evidence e \
     --floor architecture \
     --override-model gpt-5.6-terra --override-effort ultra \
-    --quota-candidate terra-primary gpt-5.6-terra ultra 'primary credentials have runway' \
-    --quota-candidate terra-secondary gpt-5.6-terra ultra 'secondary credentials are available' \
+    --quota-candidate terra-primary gpt-5.6-terra ultra eligible none 'primary credentials have runway' \
+    --quota-candidate terra-secondary gpt-5.6-terra ultra eligible none 'secondary credentials are available' \
+    --quota-candidate sol-primary gpt-5.6-sol high ineligible override-mismatch 'Sol credentials do not match the explicit override' \
     --resolved-profile terra-secondary \
     --resolved-model gpt-5.6-terra --resolved-effort ultra) \
     || fail "quota reconciliation after explicit override failed: $out"
@@ -113,6 +114,8 @@ test_floors_and_user_override_precedence() {
     "quota reconciliation mislabeled the explicit override"
   assert_grep $'resolved_profile\tterra-secondary' "$record" \
     "quota reconciliation omitted the profile selected for an explicit override"
+  assert_grep $'quota_candidate\tsol-primary\tgpt-5.6-sol\thigh\tineligible\toverride-mismatch\tSol credentials do not match the explicit override' "$record" \
+    "quota reconciliation omitted an ineligible configured profile under override"
 
   # Luna does not support ultra in the host-supported model catalog.
   set +e
@@ -139,9 +142,9 @@ test_quota_resolution_and_record_immutability() {
     --risk 0 --risk-evidence c \
     --diagnosis 0 --diagnosis-evidence d \
     --verification 0 --verification-evidence e \
-    --quota-candidate terra-primary gpt-5.6-terra high 'primary Terra profile has the best runway' \
-    --quota-candidate terra-secondary gpt-5.6-terra high 'secondary Terra profile remains available' \
-    --quota-candidate sol-primary gpt-5.6-sol high 'Sol profile remains above the floor' \
+    --quota-candidate terra-primary gpt-5.6-terra high eligible none 'primary Terra profile has the best runway' \
+    --quota-candidate terra-secondary gpt-5.6-terra high eligible none 'secondary Terra profile remains available' \
+    --quota-candidate sol-primary gpt-5.6-sol high eligible none 'Sol profile remains above the floor' \
     --resolved-profile terra-secondary \
     --resolved-model gpt-5.6-terra --resolved-effort high) \
     || fail "quota-aware route failed: $out"
@@ -150,9 +153,9 @@ test_quota_resolution_and_record_immutability() {
   record="$HOME_DIR/data/quota-task/model-routing.tsv"
   assert_grep $'model\tgpt-5.6-luna' "$record" \
     "quota resolution replaced the deterministic five-factor result"
-  assert_grep $'quota_candidate\tterra-primary\tgpt-5.6-terra\thigh\tprimary Terra profile has the best runway' "$record" \
+  assert_grep $'quota_candidate\tterra-primary\tgpt-5.6-terra\thigh\teligible\tnone\tprimary Terra profile has the best runway' "$record" \
     "quota resolution omitted primary candidate evidence"
-  assert_grep $'quota_candidate\tterra-secondary\tgpt-5.6-terra\thigh\tsecondary Terra profile remains available' "$record" \
+  assert_grep $'quota_candidate\tterra-secondary\tgpt-5.6-terra\thigh\teligible\tnone\tsecondary Terra profile remains available' "$record" \
     "quota resolution collapsed distinct profiles with the same model and effort"
   assert_grep $'resolved_profile\tterra-secondary' "$record" \
     "quota resolution omitted its final profile"
@@ -161,7 +164,6 @@ test_quota_resolution_and_record_immutability() {
   assert_grep $'resolution\tquota_profile' "$record" \
     "quota resolution was mislabeled as a user override"
 
-  status=0
   out=$(route below-floor \
     --ambiguity 0 --ambiguity-evidence a \
     --boundary-clarity 0 --boundary-clarity-evidence b \
@@ -169,11 +171,32 @@ test_quota_resolution_and_record_immutability() {
     --diagnosis 0 --diagnosis-evidence d \
     --verification 0 --verification-evidence e \
     --floor architecture \
-    --quota-candidate luna-primary gpt-5.6-luna medium 'candidate is below the floor' \
+    --quota-candidate luna-primary gpt-5.6-luna medium ineligible below-floor 'candidate is below the floor' \
+    --quota-candidate sol-primary gpt-5.6-sol high eligible none 'candidate satisfies the floor' \
+    --resolved-profile sol-primary \
+    --resolved-model gpt-5.6-sol --resolved-effort high 2>&1) \
+    || fail "configured below-floor candidate could not be recorded: $out"
+  record="$HOME_DIR/data/below-floor/model-routing.tsv"
+  assert_grep $'quota_candidate\tluna-primary\tgpt-5.6-luna\tmedium\tineligible\tbelow-floor\tcandidate is below the floor' "$record" \
+    "routing record omitted the evaluated ineligible profile"
+  assert_grep $'quota_candidate\tsol-primary\tgpt-5.6-sol\thigh\teligible\tnone\tcandidate satisfies the floor' "$record" \
+    "routing record omitted the eligible selected profile"
+
+  status=0
+  out=$(route ineligible-selection \
+    --ambiguity 0 --ambiguity-evidence a \
+    --boundary-clarity 0 --boundary-clarity-evidence b \
+    --risk 0 --risk-evidence c \
+    --diagnosis 0 --diagnosis-evidence d \
+    --verification 0 --verification-evidence e \
+    --floor architecture \
+    --quota-candidate luna-primary gpt-5.6-luna medium ineligible below-floor 'candidate is below the floor' \
+    --quota-candidate sol-primary gpt-5.6-sol high eligible none 'candidate satisfies the floor' \
     --resolved-profile luna-primary \
     --resolved-model gpt-5.6-luna --resolved-effort medium 2>&1) || status=$?
-  expect_code 2 "$status" "quota resolution must not lower the minimum tier"
+  expect_code 2 "$status" "quota resolution must not select an ineligible candidate"
 
+  record="$HOME_DIR/data/quota-task/model-routing.tsv"
   before=$(shasum -a 256 "$record" | awk '{print $1}')
   status=0
   out=$(route quota-task \

@@ -38,7 +38,8 @@ make_case() {
     'state=MERGED' \
     'merged=true' \
     'queued=false' \
-    'base=main' > "$case_dir/github-outcome"
+    'base=main' \
+    'auto=false' > "$case_dir/github-outcome"
   : > "$case_dir/github-rules"
   : > "$case_dir/gh.log"
   chmod 0600 "$case_dir/state/task-x1.meta"
@@ -61,7 +62,16 @@ case "${1:-} ${2:-}" in
     printf '%s\n' 'checks[1]{name,conclusion}:'
     printf '%s\n' '  Verify exact PR head,pass'
     ;;
-  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
+  "pr merge")
+    case " $* " in
+      *" --disable-auto "*)
+        sed 's/^auto=.*/auto=false/' "$FM_TEST_GH_OUTCOME" > "$FM_TEST_GH_OUTCOME.tmp"
+        mv "$FM_TEST_GH_OUTCOME.tmp" "$FM_TEST_GH_OUTCOME"
+        printf 'auto-merge disabled\n'
+        ;;
+      *) printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
+    esac
+    ;;
   "pr view")
     [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
     printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"
@@ -128,7 +138,16 @@ case "${1:-} ${2:-}" in
     printf '%s\n' '  Verify exact PR head,pass'
     exit 0
     ;;
-  "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
+  "pr merge")
+    case " $* " in
+      *" --disable-auto "*)
+        sed 's/^auto=.*/auto=false/' "$FM_TEST_GH_OUTCOME" > "$FM_TEST_GH_OUTCOME.tmp"
+        mv "$FM_TEST_GH_OUTCOME.tmp" "$FM_TEST_GH_OUTCOME"
+        exit 0
+        ;;
+      *) echo "error: pr merge failed" >&2 ; exit 1 ;;
+    esac
+    ;;
   esac
   exit 0
 SH
@@ -264,12 +283,13 @@ run_pr_merge() {
 }
 
 write_github_outcome() {
-  local case_dir=$1 state=$2 merged=$3 queued=$4 base=$5
+  local case_dir=$1 state=$2 merged=$3 queued=$4 base=$5 auto=${6:-false}
   printf '%s\n' \
     "state=$state" \
     "merged=$merged" \
     "queued=$queued" \
-    "base=$base" > "$case_dir/github-outcome"
+    "base=$base" \
+    "auto=$auto" > "$case_dir/github-outcome"
 }
 
 test_pending_checks_refuse_merge() {
@@ -453,6 +473,33 @@ test_github_open_unqueued_outcome_refuses() {
   pass "fm-pr-merge refuses a GitHub merge call that leaves the PR open and unqueued"
 }
 
+test_github_implicit_auto_merge_is_disabled_before_refusal() {
+  local case_dir rc
+  case_dir=$(make_case github-implicit-auto-disabled)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 2929292929292929292929292929292929292929
+  write_github_outcome "$case_dir" OPEN false false main true
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/68 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-implicit-auto-disabled: an unmerged outcome must fail"
+  assert_grep 'pr merge 68 --repo example/repo --disable-auto' "$case_dir/gh-axi.log" \
+    "github-implicit-auto-disabled: the implicit auto-merge request was not disabled"
+  assert_grep 'verified: GitHub auto-merge is disabled' "$case_dir/stderr" \
+    "github-implicit-auto-disabled: disablement was not verified before refusal"
+  assert_grep 'auto=false' "$case_dir/github-outcome" \
+    "github-implicit-auto-disabled: the mock forge retained its auto-merge request"
+  [ "$(grep -c '^api graphql' "$case_dir/gh.log")" -ge 2 ] \
+    || fail "github-implicit-auto-disabled: auto-merge clear state was not read back"
+  pass "fm-pr-merge clears and verifies implicit auto-merge before refusal"
+}
+
 test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   local case_dir rc
   case_dir=$(make_case github-outcome-read-fails)
@@ -584,7 +631,7 @@ test_github_unrecognised_queue_method_still_names_the_queue() {
   assert_grep 'base branch main requires the merge queue, but its configured merge method (FASTFORWARD) is not one this strict exact-head path recognises' \
     "$case_dir/stderr" \
     "github-unrecognised-queue-method: a readable queue rule produced no queue mention"
-  assert_no_grep 'does not arm auto-merge' "$case_dir/stderr" \
+  assert_no_grep 'does not retain auto-merge' "$case_dir/stderr" \
     "github-unrecognised-queue-method: a queue method was guessed for the caller"
   assert_no_grep '--auto --' "$case_dir/stderr" \
     "github-unrecognised-queue-method: a merge method was guessed for the caller"
@@ -874,7 +921,7 @@ test_github_zero_exit_queue_required_refuses_without_auto_retry() {
     "github-zero-exit-queue-required: refusal did not name the concrete observed state"
   assert_grep 'base branch release/2026 requires the merge queue' "$case_dir/stderr" \
     "github-zero-exit-queue-required: refusal did not name the queue requirement"
-  assert_grep 'strict exact-head path does not arm auto-merge' "$case_dir/stderr" \
+  assert_grep 'strict exact-head path does not retain auto-merge' "$case_dir/stderr" \
     "github-zero-exit-queue-required: refusal did not name the strict auto-merge boundary"
   assert_grep 'api --paginate repos/example/repo/rules/branches/release%2F2026' "$case_dir/gh.log" \
     "github-zero-exit-queue-required: queue rules were not read with pagination and encoded branch path"
@@ -951,7 +998,7 @@ test_github_queue_required_refusal_names_strict_boundary() {
   case_dir=$(make_case github-queue-required)
   mkdir -p "$case_dir/wt"
   add_gh_mocks_merge_fails "$case_dir"
-  write_github_outcome "$case_dir" OPEN false false master
+  write_github_outcome "$case_dir" OPEN false false master true
   printf 'merge_method=MERGE\n' > "$case_dir/github-rules"
   : > "$case_dir/gh-axi.log"
   : > "$case_dir/gh.log"
@@ -967,13 +1014,15 @@ test_github_queue_required_refusal_names_strict_boundary() {
     "github-queue-required: the original forge failure was not preserved"
   assert_grep 'base branch master requires the merge queue' "$case_dir/stderr" \
     "github-queue-required: refusal did not name the queue requirement"
-  assert_grep 'strict exact-head path does not arm auto-merge' "$case_dir/stderr" \
+  assert_grep 'strict exact-head path does not retain auto-merge' "$case_dir/stderr" \
     "github-queue-required: refusal did not name the strict auto-merge boundary"
   grep -qxF 'pr merge 54 --repo example/repo --match-head-commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --squash' "$case_dir/gh-axi.log" \
     || fail "github-queue-required: the wrapper silently changed the attempted merge semantics"
+  assert_grep 'pr merge 54 --repo example/repo --disable-auto' "$case_dir/gh-axi.log" \
+    "github-queue-required: failed direct merge retained implicit auto-merge"
   assert_present "$case_dir/state/task-x1.check.sh" \
     "github-queue-required: the failed forge call did not leave the merge poll armed"
-  pass "fm-pr-merge names the queue method without arming auto-merge"
+  pass "fm-pr-merge names the queue method without retaining auto-merge"
 }
 
 test_github_agreeing_queue_rules_keep_strict_guidance() {
@@ -1548,6 +1597,7 @@ test_pr_metadata_is_recorded_before_the_forge_call
 test_pending_checks_refuse_merge
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses
+test_github_implicit_auto_merge_is_disabled_before_refusal
 test_github_unreadable_outcome_keeps_pr_bookkeeping
 test_github_refusal_quotes_the_forge_output
 test_github_unreadable_outcome_refusal_quotes_the_forge_output
