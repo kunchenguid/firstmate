@@ -1510,6 +1510,7 @@ def seal_pi_attempt(home: Path, config: Mapping[str, Any], session_hash: str, tr
                     return {
                         **compaction_attempt_result("already-sealed", existing["bindings"]),
                         "attempt_id": existing["attempt_id"],
+                        "trigger": existing["trigger"],
                     }
                 if pi_process_binding_owner_is_live(existing):
                     return {"status": "attempt-conflict"}
@@ -1534,7 +1535,27 @@ def seal_pi_attempt(home: Path, config: Mapping[str, Any], session_hash: str, tr
             "terminal_at": None,
         }
         atomic_replace(path, canonical_json(binding))
-        return {**result, "attempt_id": attempt_id}
+        return {**result, "attempt_id": attempt_id, "trigger": trigger}
+
+
+def seal_pi_standalone(home: Path, config: Mapping[str, Any], session_hash: str, trigger: str) -> dict[str, Any]:
+    layout = StateLayout(home)
+    with state_lock(layout):
+        replay_compaction_attempts(layout, config)
+        for path in sorted(layout.bindings.glob("pi-compaction-*.json")):
+            read_pi_compaction_binding(path)
+            return {"status": "attempt-conflict"}
+        result = _seal_candidates_locked(layout, config, "pi", session_hash, trigger)
+        if result.get("status") in {"sealed", "already-sealed"}:
+            _mark_compaction_locked(
+                layout,
+                config,
+                normalize_compaction_bindings(result.get("bindings")),
+                True,
+                trigger,
+                "standalone-manual-seal",
+            )
+        return result
 
 
 def seal_candidates(
@@ -1876,9 +1897,9 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
         return seal_binding_failure_receipt(home, static_config, args.source_harness, session_hash, args.trigger, exc)
     if not config_enabled(config, "sealing_enabled"):
         return {"status": "disabled"}
-    if args.source_harness == "pi" and not args.standalone:
+    if args.source_harness == "pi":
         try:
-            result = seal_pi_attempt(home, config, session_hash, args.trigger)
+            result = seal_pi_standalone(home, config, session_hash, args.trigger) if args.standalone else seal_pi_attempt(home, config, session_hash, args.trigger)
         except (HandoffError, OSError) as raw_exc:
             exc = raw_exc if isinstance(raw_exc, HandoffError) else HandoffError("STATE_DURABILITY", "Pi compaction binding publication was not durable")
             if exc.code in {"TRANSACTION_RUNTIME_BACKPRESSURE", "HERDR_RUNTIME_BACKPRESSURE"}:
@@ -1887,7 +1908,8 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
     else:
         result = seal_with_failure_receipt(home, args.source_harness, session_hash, args.trigger)
     if args.standalone and result.get("status") in {"sealed", "already-sealed"}:
-        mark_compaction(home, normalize_compaction_bindings(result.get("bindings")), True, args.trigger, "standalone-manual-seal")
+        if args.source_harness != "pi":
+            mark_compaction(home, normalize_compaction_bindings(result.get("bindings")), True, args.trigger, "standalone-manual-seal")
         deliver_pending(home)
     return result
 

@@ -102,8 +102,8 @@ extension:session_compact_failed:threshold
 continued=false
 ```
 
-The installed Pi success path was then executed through the public package compaction entry with an extension-supplied synthetic compaction, so no summarizer or model was reachable.
-The separately mapped live guard records the persistence call and observes that state from the public success event:
+The Pi adapter lifecycle remains covered by the portable model-free focused suite.
+The separately mapped live guard invokes the installed `pi` executable in offline RPC mode with an isolated synthetic provider and extension. It supplies the compaction result before any model path, observes the saved JSONL entry from the success handler, scrubs provider credentials, and does not contact a provider:
 
 ```sh
 FM_CONTEXT_HANDOFF_PI_LIVE_E2E=1 tests/fm-context-handoff-pi-live-e2e.test.sh
@@ -112,12 +112,9 @@ FM_CONTEXT_HANDOFF_PI_LIVE_E2E=1 tests/fm-context-handoff-pi-live-e2e.test.sh
 Its exact output was:
 
 ```text
-public:compaction_start:manual:aborted=unset
 extension:session_before_compact:manual
-persistence:appendCompaction
 extension:session_compact:persisted=true
-public:compaction_end:manual:aborted=false
-ok - installed Pi public persistence-before-success order
+ok - installed Pi executable offline persistence-before-success
 ```
 
 The normalized Claude strings output was:
@@ -201,6 +198,7 @@ ok - durable receipt for unhealthy seal-time bindings
 ok - orphan active state blocks Pi and Claude compaction
 ok - foreign candidates never cancel current-session compaction
 ok - durable compaction attempt result replay
+ok - exclusive Pi attempt authority and immutable terminal outcome
 ok - fail-closed Claude generation and probe budget margin
 ok - SessionStart announces only consumable records
 ok - empty register stays a no-op under an unhealthy binding

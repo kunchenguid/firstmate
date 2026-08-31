@@ -17,6 +17,7 @@ type SealBinding = {
 
 type HandoffResult = {
   attempt_id?: string;
+  trigger?: string;
   status?: string;
   had_candidates?: boolean;
   record_id?: string;
@@ -54,16 +55,17 @@ function exactBindings(result: HandoffResult): RecordBinding[] | null {
   return bindings;
 }
 
-function exactSealResult(result: HandoffResult): { attemptId: string; bindings: RecordBinding[] } | null {
+function exactSealResult(result: HandoffResult): { attemptId: string; bindings: RecordBinding[]; trigger: SealBinding["trigger"] } | null {
   const bindings = exactBindings(result);
-  if (!bindings || typeof result.attempt_id !== "string" || !/^pi-attempt-[0-9a-f]{48}$/u.test(result.attempt_id)) return null;
+  if (!bindings || typeof result.attempt_id !== "string" || !/^pi-attempt-[0-9a-f]{48}$/u.test(result.attempt_id)
+    || !["manual", "threshold", "overflow"].includes(result.trigger ?? "")) return null;
   const keys = Object.keys(result).sort();
   const expected = bindings.length === 1
-    ? ["attempt_id", "bindings", "envelope_sha256", "record_id", "status"]
-    : ["attempt_id", "bindings", "status"];
+    ? ["attempt_id", "bindings", "envelope_sha256", "record_id", "status", "trigger"]
+    : ["attempt_id", "bindings", "status", "trigger"];
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null;
   if (bindings.length === 1 && (result.record_id !== bindings[0].record_id || result.envelope_sha256 !== bindings[0].envelope_sha256)) return null;
-  return { attemptId: result.attempt_id, bindings };
+  return { attemptId: result.attempt_id, bindings, trigger: result.trigger as SealBinding["trigger"] };
 }
 
 function exactNoopResult(result: HandoffResult): boolean {
@@ -221,7 +223,7 @@ export function registerContextHandoff(
         attemptId: sealed.attemptId,
         bindings: sealed.bindings,
         sessionId: currentSessionId,
-        trigger: event.reason,
+        trigger: sealed.trigger,
       };
       return;
     }
