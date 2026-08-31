@@ -421,6 +421,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/codex-sandbox.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },
