@@ -55,14 +55,26 @@ fi
 exec "$real_mktemp" "\$@"
 SH
   chmod +x "$fakebin/mktemp"
+  cat > "$fakebin/node-race-hook.cjs" <<'JS'
+const fs = require('node:fs');
+const symlinkSync = fs.symlinkSync;
+
+fs.symlinkSync = function (source, target, type) {
+  const raceTarget = process.env.FM_NODE_MODULES_RACE_TARGET;
+  if (raceTarget && target === `${raceTarget}/node_modules`) {
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(`${target}/owned.txt`, 'worker install\n');
+  }
+  return symlinkSync.call(this, source, target, type);
+};
+JS
   local real_node
   real_node=$(command -v node)
   cat > "$fakebin/node" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = - ] && [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ]; then
-  mkdir -p "\$FM_NODE_MODULES_RACE_TARGET/node_modules"
-  printf 'worker install\n' > "\$FM_NODE_MODULES_RACE_TARGET/node_modules/owned.txt"
+  export NODE_OPTIONS="--require=$fakebin/node-race-hook.cjs"
 fi
 exec "$real_node" "\$@"
 SH
@@ -241,23 +253,23 @@ test_spawn_cleans_staging_after_setup_failure() {
   pass "fm-spawn cleans dependency staging after setup failure"
 }
 
-test_spawn_protects_staging_registration_from_interrupt() {
-  local rec id out status candidate published
+test_spawn_cancels_after_staging_registration_interrupt() {
+  local rec id out status candidate
   id=node-modules-interrupt-z6
   rec=$(make_case setup-interrupt "$id")
   read_case "$rec"
 
   out=$(FM_INTERRUPT_NODE_MODULES_CREATION=1 run_spawn "$id")
   status=$?
-  expect_code 0 "$status" "spawn should protect dependency staging registration from interruption"
-  [ -L "$WORKTREE_DIR/node_modules" ] || fail "protected setup did not publish dependencies"
-  published=$(readlink "$WORKTREE_DIR/node_modules")
-  [ -d "$WORKTREE_DIR/$published" ] || fail "protected setup published a missing dependency tree"
+  expect_code 143 "$status" "spawn should preserve cancellation during dependency staging registration"
+  assert_not_contains "$out" "spawned $id" "cancelled setup launched a worker"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "cancelled setup published dependencies"
   for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ "$(basename "$candidate")" = "$published" ] \
-      || fail "interrupted staging registration leaked an orphaned dependency tree"
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "cancelled staging registration leaked a dependency tree"
   done
-  pass "fm-spawn protects dependency staging registration from interruption"
+  pass "fm-spawn cancels cleanly during dependency staging registration"
 }
 
 test_spawn_shares_dependencies_and_repoints_workspace_links
@@ -265,6 +277,6 @@ test_spawn_leaves_existing_node_modules_untouched
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
 test_spawn_cleans_staging_after_setup_failure
-test_spawn_protects_staging_registration_from_interrupt
+test_spawn_cancels_after_staging_registration_interrupt
 
 echo "# all fm-spawn-node-modules tests passed"

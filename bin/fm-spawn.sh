@@ -1323,7 +1323,7 @@ exclude_path() {
 
 share_beeline_node_modules() {
   local source source_real target staging_root staging entry name entry_real link_target
-  local has_beeline_workspace publish_status
+  local has_beeline_workspace publish_status creation_signal_status
   source="$PROJ_ABS/node_modules"
   target="$WT/node_modules"
 
@@ -1342,9 +1342,15 @@ share_beeline_node_modules() {
   done
   [ "$has_beeline_workspace" = 1 ] || return 0
 
-  trap '' INT TERM
-  if ! staging_root=$(mktemp -d "$WT/.fm-node-modules.XXXXXX"); then
+  creation_signal_status=
+  trap 'creation_signal_status=130' INT
+  trap 'creation_signal_status=143' TERM
+  if ! staging_root=$(
+    trap '' INT TERM
+    exec mktemp -d "$WT/.fm-node-modules.XXXXXX"
+  ); then
     trap - INT TERM
+    [ -z "$creation_signal_status" ] || return "$creation_signal_status"
     return 1
   fi
   staging="$staging_root"
@@ -1352,6 +1358,10 @@ share_beeline_node_modules() {
   NODE_MODULES_ABORT_TARGET=$target
   NODE_MODULES_ABORT_LINK=$(basename "$staging_root")
   trap - INT TERM
+  if [ -n "$creation_signal_status" ]; then
+    cleanup_beeline_node_modules_staging
+    return "$creation_signal_status"
+  fi
   if ! (
     for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
       [ -e "$entry" ] || [ -L "$entry" ] || continue
