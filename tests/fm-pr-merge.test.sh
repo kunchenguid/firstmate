@@ -256,6 +256,11 @@ add_gh_axi_mock_view_fails() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
+  "pr checks")
+    printf '%s\n' 'summary: 1 passed, 0 failed, 1 total'
+    printf '%s\n' 'checks[1]{name,conclusion}:'
+    printf '%s\n' '  Verify exact PR head,pass'
+    ;;
   "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
   "pr view") exit 1 ;;
 esac
@@ -480,6 +485,11 @@ test_pr_metadata_is_recorded_before_the_forge_call() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
+  "pr checks")
+    printf '%s\n' 'summary: 1 passed, 0 failed, 1 total'
+    printf '%s\n' 'checks[1]{name,conclusion}:'
+    printf '%s\n' '  Verify exact PR head,pass'
+    ;;
   "pr merge")
     cat "$FM_STATE_OVERRIDE/task-x1.meta" > "$FM_TEST_META_AT_MERGE"
     printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}"
@@ -551,6 +561,7 @@ test_github_merged_outcome_is_verified() {
 test_github_verified_merge_requires_poll_recording() {
   local case_dir rc
   case_dir=$(make_case github-poll-recording-fails)
+  mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 1111111111111111111111111111111111111111
   add_failing_poll_publish_mv "$case_dir"
   : > "$case_dir/gh-axi.log"
@@ -640,6 +651,11 @@ test_github_refusal_quotes_the_forge_output() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
+  "pr checks")
+    printf '%s\n' 'summary: 1 passed, 0 failed, 1 total'
+    printf '%s\n' 'checks[1]{name,conclusion}:'
+    printf '%s\n' '  Verify exact PR head,pass'
+    ;;
   "pr merge") echo "will be added to the merge queue when all requirements are met" ;;
 esac
 exit 0
@@ -702,7 +718,7 @@ test_github_auto_merge_without_queue_refuses_legibly() {
       "github-auto-no-queue: the refusal left the operator to infer the pending state"
     grep -qxF "pr merge 66 --repo example/repo $spelling --merge" "$case_dir/gh-axi.log" \
       || fail "github-auto-no-queue: the attempted merge was changed unexpectedly"
-    [ "$(wc -l < "$case_dir/gh-axi.log" | tr -d '[:space:]')" = 1 ] \
+    [ "$(grep -c '^pr merge ' "$case_dir/gh-axi.log")" = 1 ] \
       || fail "github-auto-no-queue: the wrapper attempted more than one merge"
     assert_grep 'pr=https://github.com/example/repo/pull/66' "$case_dir/state/task-x1.meta" \
       "github-auto-no-queue: the attempted merge lost its PR reference"
@@ -951,22 +967,14 @@ SH
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "github-fallback-unobservable-queue: an unproved merge must fail"
-  assert_grep 'isInMergeQueue=unknown' "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: refusal did not name the concrete observed state"
-  assert_grep 'the merge queue could not be observed for https://github.com/example/repo/pull/73' \
-    "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the refusal implied an unqueued PR it could not see"
-  assert_grep "re-check the pull request's merge queue state" "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the refusal named no concrete next step"
-  # The lowercase state the fallback view reports must be judged the same way
-  # the queue-aware read's uppercase enum is, or every explanation is skipped.
-  assert_grep 'auto-merge was requested and armed for https://github.com/example/repo/pull/73' \
-    "$case_dir/stderr" \
-    "github-fallback-unobservable-queue: the fallback view's state skipped the auto-merge explanation"
-  assert_no_grep 'verified: ' "$case_dir/stdout" \
-    "github-fallback-unobservable-queue: an unproved merge was reported as verified"
-  pass "fm-pr-merge says the merge queue was unobservable when only the gh-axi view answered"
+  expect_code 1 "$rc" "github-without-head-reader: missing exact-head evidence must fail"
+  assert_grep 'exact-head PR verification requires gh on PATH' "$case_dir/stderr" \
+    "github-without-head-reader: refusal did not name the missing exact-head reader"
+  assert_no_grep '^pr merge ' "$case_dir/gh-axi.log" \
+    "github-without-head-reader: merge ran without exact-head green evidence"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "github-without-head-reader: a poll was armed without exact-head green evidence"
+  pass "fm-pr-merge refuses before the forge call when the exact-head reader is unavailable"
 }
 
 test_github_unreadable_outcome_refusal_quotes_the_forge_output() {
@@ -978,6 +986,11 @@ test_github_unreadable_outcome_refusal_quotes_the_forge_output() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
+  "pr checks")
+    printf '%s\n' 'summary: 1 passed, 0 failed, 1 total'
+    printf '%s\n' 'checks[1]{name,conclusion}:'
+    printf '%s\n' '  Verify exact PR head,pass'
+    ;;
   "pr merge") echo "will be added to the merge queue when all requirements are met" ;;
   "pr view") exit 1 ;;
 esac
@@ -1080,14 +1093,12 @@ test_github_without_gh_still_uses_gh_axi_merge() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "github-without-gh: gh-axi can prove a landed merge without gh"
-  assert_grep 'pr merge 60 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    "github-without-gh: the configured merge abstraction was not invoked"
-  assert_grep 'pr view 60 --repo example/repo' "$case_dir/gh-axi.log" \
-    "github-without-gh: the gh-axi fallback did not verify the landed state"
-  assert_grep 'verified: https://github.com/example/repo/pull/60 is merged' \
-    "$case_dir/stdout" "github-without-gh: the fallback did not report the proven merge"
-  pass "fm-pr-merge reaches and verifies the gh-axi merge path without gh"
+  expect_code 1 "$rc" "github-without-gh: missing exact-head evidence must fail"
+  assert_grep 'exact-head PR verification requires gh on PATH' "$case_dir/stderr" \
+    "github-without-gh: refusal did not name the missing exact-head reader"
+  assert_no_grep '^pr merge ' "$case_dir/gh-axi.log" \
+    "github-without-gh: merge ran without exact-head green evidence"
+  pass "fm-pr-merge does not substitute merge output for exact-head evidence"
 }
 
 test_github_without_gh_failed_read_keeps_bookkeeping() {
@@ -1115,16 +1126,14 @@ SH
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "github-without-gh-read-fails: an unreadable outcome must fail"
-  assert_grep 'pr merge 61 --repo example/repo --squash' "$case_dir/gh-axi.log" \
-    "github-without-gh-read-fails: the merge call did not happen before the failed read"
-  assert_grep 'could not read the GitHub pull request outcome after the merge attempt' \
-    "$case_dir/stderr" "github-without-gh-read-fails: the failed read was not reported"
-  assert_grep 'pr=https://github.com/example/repo/pull/61' "$case_dir/state/task-x1.meta" \
-    "github-without-gh-read-fails: a landed merge lost its PR metadata"
-  assert_present "$case_dir/state/task-x1.check.sh" \
-    "github-without-gh-read-fails: a landed merge lost its merge poll"
-  pass "fm-pr-merge preserves bookkeeping when gh is absent and the fallback read fails"
+  expect_code 1 "$rc" "github-without-gh-read-fails: missing exact-head evidence must fail"
+  assert_grep 'exact-head PR verification requires gh on PATH' "$case_dir/stderr" \
+    "github-without-gh-read-fails: refusal did not name the missing exact-head reader"
+  assert_no_grep '^pr merge ' "$case_dir/gh-axi.log" \
+    "github-without-gh-read-fails: merge ran before exact-head verification"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "github-without-gh-read-fails: a poll was armed without exact-head green evidence"
+  pass "fm-pr-merge refuses gh-less fallback reads before any merge side effect"
 }
 
 test_github_zero_exit_queue_required_refuses_with_exact_retry() {
@@ -1154,7 +1163,7 @@ test_github_zero_exit_queue_required_refuses_with_exact_retry() {
     "github-zero-exit-queue-required: queue rules were not read with pagination and encoded branch path"
   grep -qxF 'pr merge 56 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "github-zero-exit-queue-required: the attempted merge was changed unexpectedly"
-  [ "$(wc -l < "$case_dir/gh-axi.log" | tr -d '[:space:]')" = 1 ] \
+  [ "$(grep -c '^pr merge ' "$case_dir/gh-axi.log")" = 1 ] \
     || fail "github-zero-exit-queue-required: the wrapper attempted more than one merge"
   assert_no_grep --auto "$case_dir/gh-axi.log" \
     "github-zero-exit-queue-required: queue flags were auto-applied to the attempted merge"
@@ -2173,24 +2182,11 @@ test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
 test_github_still_forwards_sha_arg
-test_gitlab_url_resolves_and_merges
-test_gitlab_host_comes_from_the_url
-test_gitlab_imposes_no_merge_method
-test_gitlab_extra_args_forwarded
-test_gitlab_merge_failure_propagates
-test_gitlab_each_condition_refuses_independently
-test_gitlab_reports_every_failing_condition
-test_gitlab_stale_recorded_head_is_reported
-test_gitlab_unreadable_state_refuses
-test_gitlab_invalid_head_refuses
-test_gitlab_missing_tool_refuses_before_recording
-test_gitlab_head_override_args_refuse_before_recording
+# Inactive migration compatibility: GitLab merge behavior remains on disk above,
+# but is not an active delivery path until it can prove exact-head green state.
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
-test_gitlab_merge_reports_upward
-test_queued_gitlab_merge_leaves_the_poll_armed
 test_failed_merge_reports_nothing
-test_gitlab_refusal_reports_nothing
 test_main_home_merge_leaves_a_durable_wake
 test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes

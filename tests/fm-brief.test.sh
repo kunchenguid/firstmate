@@ -486,7 +486,7 @@ test_documented_global_replace_leaves_the_herdr_gate_intact() {
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode direct-PR >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$kind brief was not scaffolded"

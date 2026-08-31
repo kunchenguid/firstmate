@@ -288,11 +288,10 @@ test_promote_refuses_a_symlinked_task_record() {
 }
 
 # The delivery contract only protects a worker that actually receives it. A promoted
-# scout used to get a free-form hint instead of the mode-specific Definition of done,
-# so it never saw the ask-user escalation rule or the --yes ban that every briefed
-# no-mistakes worker gets. This drives the real promotion path, then runs the delivery command it
-# prints against a capturing fm-send.sh, and asserts on the message the worker would
-# actually receive - for every supported mode.
+# scout used to get a free-form hint instead of the mode-specific Definition of done.
+# This drives the real promotion path, then runs the delivery command it prints
+# against a capturing fm-send.sh, and asserts on the message the worker would
+# actually receive for every active mode.
 test_promotion_delivers_the_real_definition_of_done() {
   local home meta out sendroot payload mode id brief_dod delivered_dod
   home="$TMP_ROOT/promote-dod/home"
@@ -305,7 +304,7 @@ printf '%s' "$2" > "$FM_TEST_CAPTURE"
 STUB
   chmod +x "$sendroot/bin/fm-send.sh"
 
-  for mode in no-mistakes direct-PR local-only; do
+  for mode in direct-PR local-only; do
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
@@ -347,21 +346,13 @@ STUB
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
   done
 
-  payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
-  assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
-    "promoted no-mistakes worker did not receive the ask-user escalation rule"
-  assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
-    "promoted no-mistakes worker did not receive the --yes prohibition"
-  assert_grep "It is banned fleet-wide" "$payload" \
-    "promoted no-mistakes worker did not receive the fleet-wide ban wording"
-
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr"
   assert_grep "supersede the scout delivery rules and report-based Definition of done" "$payload" \
     "promoted worker retained the scout delivery contract"
   assert_grep "status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule" "$payload" \
     "promoted worker lost the scout protocols and safety rules that still apply"
 
-  # The faster paths keep their own contracts rather than inheriting the pipeline's.
+  # Each active path keeps its own delivery contract.
   assert_grep "Do NOT run /no-mistakes" "$payload" \
     "promoted direct-PR worker lost its no-pipeline contract"
   assert_grep "Do NOT push, do NOT open a PR, do NOT merge" "$TMP_ROOT/promote-dod/payload-promote-dod-local-only" \
