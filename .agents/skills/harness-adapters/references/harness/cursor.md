@@ -8,15 +8,15 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 | Fact | Value |
 |---|---|
 | Binary | `fm_cursor_resolve_binary` in `../../../bin/fm-cursor-lib.sh` resolves stable launcher `cursor-agent` or legacy `agent`, never `cursor`; both symlink into `~/.local/share/cursor-agent/versions/<version>/cursor-agent`, whose target auto-update replaces. |
-| Launch | Positional instructions with `--trust`, `--yolo`, optional `--model <model>`, and `--workspace <absolute-task-worktree>`, after clearing foreign primary markers. |
+| Launch | Positional instructions with `--trust`, `--auto-review`, `--sandbox enabled`, optional `--model <model>`, and `--workspace <absolute-task-worktree>`, after clearing foreign primary markers. |
 | Models | Use current-account `cursor-agent --list-models` or legacy `agent --list-models`; the drifting observed list had only `cursor-grok-4.5-high` and `cursor-grok-4.5-high-fast` for Grok plus several `xhigh` ids, so choose a returned reasoning id and never assume low or medium Grok. |
 | Busy state | `../../../bin/fm-busy-lib.sh` folds the per-conversation transcript as `cursor-transcript`: `role:user` opens and typed `turn_ended` closes success or abort, covering manual interrupt; nothing is armed or seeded, and this backend-agnostic source was identical on tmux and Herdr. |
 | Exit command | `/exit`. |
 | Interrupt | Single Escape returns the placeholder with no clear key; control makes no cancellation claim because an aborted transcript close appeared within seconds in some runs and not within twenty in others. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Cursor discovers Firstmate's user skills. |
 | Resume | No verified native pane resume; use deterministic relaunch. |
-| Autonomy | `--yolo`, documented alias for `--force`; footer `Run Everything`. |
-| Trust | `--trust` suppresses the dialog; `--yolo` does not, and every task has a fresh path. |
+| Autonomy | `--auto-review --sandbox enabled`, so the worker runs under Cursor's own review and sandbox controls. This replaced `--yolo` (the documented `--force` alias, footer `Run Everything`), which switched both off. |
+| Trust | `--trust` suppresses the dialog; the autonomy flags do not, and every task has a fresh path. |
 | Marker | `CURSOR_INVOKED_AS=cursor-agent` on agent and children, plus `CURSOR_AGENT=1` on child or tool processes; other `CURSOR_*` variables are not identity markers. |
 | Effort | No verified flag; `references/common/model-and-effort.md` owns unsupported-value handling. |
 | Composer | Bare borderless row with `→` (U+2192); de-emphasized placeholders `Plan, search, build anything` when fresh and `Add a follow-up` later. |
