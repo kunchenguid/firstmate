@@ -718,11 +718,11 @@ fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>
 
 # fm_procevent_capture <state> <source-id> <adapter> <output-file> [<registration-generation>]
 #   [<extension-id> <extension-version> <capability-version> <package-digest> <binding-digest>]
-# Atomically store the completed output at 0600 and print its durable path. The
-# rename is the commit point; nothing referencing this result may be published
-# before it returns successfully. Extension captures retain immutable package
-# identity beside the legacy adapter sidecar, so later classification cannot
-# silently move to a replacement binding.
+# Atomically store the completed output at 0600 and print its durable path.
+# Durable sidecars are published first; the result rename is the commit marker,
+# so a visible result always has the identity needed to validate it. Extension
+# captures retain immutable package identity beside the legacy adapter sidecar,
+# so later classification cannot silently move to a replacement binding.
 fm_procevent_capture() {
   local state=$1 id=$2 adapter=$3 src=$4 registration_generation='' extension_id=${5-} extension_version=${6-}
   local capability_version=${7-} package_digest=${8-} binding_digest=${9-}
