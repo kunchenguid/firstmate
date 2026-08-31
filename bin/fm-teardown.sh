@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# harvest the task's fleet usage-ledger row while its state files still exist
+# (best effort: bin/fm-usage-harvest.sh owns that ledger, and a harvest failure
+# only warns on stderr rather than blocking teardown),
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -710,6 +713,12 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
+  # Best-effort fleet usage harvest runs while the task's state files still
+  # exist. It must precede the status retirement below, which deletes
+  # state/<id>.status: without that log the harvest has no task window and no
+  # turn count. A harvest failure must never block teardown.
+  "$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
+    || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
   status_retire_presentation_task "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended"
@@ -2912,6 +2921,12 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# Best-effort fleet usage harvest runs while the task's state files still
+# exist. It must precede the status retirement below, which deletes
+# state/<id>.status: without that log the harvest has no task window and no
+# turn count. A harvest failure must never block teardown.
+"$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
+  || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
