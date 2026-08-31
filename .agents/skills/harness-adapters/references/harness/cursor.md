@@ -66,6 +66,8 @@ The CLI supports repeatable `--add-dir`, but the adapter adds none; positional i
 Example of the ordinary case, which is REFUSED because nobody is watching a scout pane: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high`.
 Pass a grant only when it is true of this launch, because `attended` is an attestation that a person is sitting in the pane and `envelope:<name>` names the outer isolation envelope an audit can go check.
 A captain who will watch the pane themself adds `--cursor-exemption attended`; a worker running inside the approved routing benchmark adds `--cursor-exemption envelope:routing-benchmark` instead.
+An envelope name is bounded to letters, digits, `.`, `_`, and `-` starting on a letter or digit, so a grant cannot be unauditable or carry a line break into the task record.
+The grant is refused on a non-cursor harness rather than recorded, and across a relaunch an `envelope:<name>` grant is inherited while an `attended` one is not, because the person who attested may be gone by the time stuck-worker recovery relaunches.
 Without that flag the spawn is refused, so route ordinary unattended scouting to Codex or Claude instead.
 
 ## Primary integration
