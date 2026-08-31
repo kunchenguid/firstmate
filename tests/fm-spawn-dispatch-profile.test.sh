@@ -494,9 +494,8 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
 
-  out=$(FM_CURSOR_UNATTENDED_EXEMPTION=attended \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
-    --model cursor-grok-4.5-high --effort high)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
+    --cursor-exemption attended --model cursor-grok-4.5-high --effort high)
   status=$?
   expect_code 0 "$status" "an attended cursor scout spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
@@ -532,9 +531,8 @@ test_cursor_refuses_model_absent_from_live_catalog() {
   rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
   read_case_record "$rec"
 
-  out=$(FM_CURSOR_UNATTENDED_EXEMPTION=attended \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
-    --model cursor-grok-4.5)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
+    --cursor-exemption attended --model cursor-grok-4.5)
   status=$?
   expect_code 1 "$status" "cursor spawn should refuse a model absent from a successful catalog"
   assert_contains "$out" "Cursor model 'cursor-grok-4.5' is not available" \
@@ -552,9 +550,8 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   read_case_record "$rec"
 
   FM_TEST_CURSOR_LIST_STATUS=124 \
-    out=$(FM_CURSOR_UNATTENDED_EXEMPTION=attended \
-      run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
-      --model cursor-catalog-unreachable)
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout \
+      --cursor-exemption attended --model cursor-catalog-unreachable)
   status=$?
   expect_code 0 "$status" "cursor spawn should fail open when the bounded catalog query fails"
   launch=$(cat "$LAUNCH_LOG")
@@ -573,18 +570,18 @@ test_cursor_is_refused_for_every_unattended_kind() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "an unattended cursor ship spawn must be refused, not launched into a pane that can park"
-  assert_contains "$out" "cursor is refused for an unattended ship spawn" \
+  assert_contains "$out" "refused for an unattended ship launch" \
     "cursor ship refusal did not name the refused kind"
   assert_contains "$out" "codex" "cursor refusal must name codex as a supported alternative"
   assert_contains "$out" "claude" "cursor refusal must name claude as a supported alternative"
-  assert_contains "$out" "FM_CURSOR_UNATTENDED_EXEMPTION" \
-    "cursor refusal must name the opt-in that covers an attended or enveloped launch"
+  assert_contains "$out" "--cursor-exemption" \
+    "cursor refusal must name the per-spawn opt-in that covers an attended or enveloped launch"
   [ ! -s "$LAUNCH_LOG" ] || fail "cursor ship refusal must happen before any launch is sent"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
   status=$?
   expect_code 1 "$status" "a scout pane is unattended too, so cursor must be refused for it"
-  assert_contains "$out" "cursor is refused for an unattended scout spawn" \
+  assert_contains "$out" "refused for an unattended scout launch" \
     "cursor scout refusal did not name the refused kind"
   [ ! -s "$LAUNCH_LOG" ] || fail "cursor scout refusal must happen before any launch is sent"
   pass "cursor is refused for ship and scout spawns and names codex and claude instead"
@@ -598,10 +595,12 @@ test_cursor_unrecognized_exemption_still_refuses() {
 
   # Fail closed: only the two recognized tokens are an opt-in, so a truthy-looking
   # value must not be mistaken for one.
-  out=$(FM_CURSOR_UNATTENDED_EXEMPTION=1 \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption 1)
   status=$?
   expect_code 1 "$status" "an unrecognized exemption token must not open the cursor bar"
+  assert_contains "$out" "--cursor-exemption must be" \
+    "an unrecognized grant must say which two forms are accepted"
   [ ! -s "$LAUNCH_LOG" ] || fail "an unrecognized exemption must refuse before launch"
   pass "only the recognized cursor exemption tokens open the bar"
 }
@@ -612,14 +611,43 @@ test_cursor_exemption_permits_an_attended_or_enveloped_spawn() {
   rec=$(make_spawn_case profile-cursor-exempt cursor "$id")
   read_case_record "$rec"
 
-  out=$(FM_CURSOR_UNATTENDED_EXEMPTION=isolation-envelope \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --cursor-exemption envelope:routing-benchmark)
   status=$?
   expect_code 0 "$status" "a proven isolation envelope must let a cursor ship spawn through"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "--trust --auto-review --sandbox enabled" \
     "an exempted cursor launch must still keep the sandboxed review posture"
-  pass "a recognized cursor exemption permits the spawn and keeps the sandbox posture"
+  # The grant has to be auditable after the fact, on the task itself and on the
+  # line the spawn printed, or a later reader cannot tell attended from enveloped.
+  assert_grep "cursor_exemption=envelope:routing-benchmark" "$HOME_DIR/state/$id.meta" \
+    "the exemption grant must be recorded in the task meta"
+  assert_contains "$out" "cursor_exemption=envelope:routing-benchmark" \
+    "the spawned line must report the grant the launch used"
+  pass "a recognized cursor exemption permits the spawn, keeps the sandbox posture, and is recorded"
+}
+
+# The regression the per-invocation flag exists for: a grant used on one spawn
+# must not carry into the next spawn in the same shell.
+test_cursor_exemption_does_not_leak_to_a_later_spawn() {
+  local rec first second out status
+  first=profile-cursor-leak-first-z6i
+  second=profile-cursor-leak-second-z6j
+  rec=$(make_spawn_case profile-cursor-leak cursor "$first" "$second")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$first" "$PROJ_DIR" \
+    --cursor-exemption attended)
+  status=$?
+  expect_code 0 "$status" "the first attended cursor spawn should succeed"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$second" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "the grant from the first spawn must not exempt a later unattended spawn"
+  assert_contains "$out" "cursor is a verified adapter but is refused" \
+    "the later unattended spawn must be refused on the cursor rule"
+  [ ! -s "$LAUNCH_LOG" ] || fail "the later unattended spawn must be refused before any launch is sent"
+  pass "a cursor exemption does not leak from one spawn to the next in the same shell"
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
@@ -877,6 +905,7 @@ test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_is_refused_for_every_unattended_kind
 test_cursor_unrecognized_exemption_still_refuses
 test_cursor_exemption_permits_an_attended_or_enveloped_spawn
+test_cursor_exemption_does_not_leak_to_a_later_spawn
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis

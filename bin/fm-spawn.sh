@@ -310,6 +310,11 @@ fm_refuse_if_gate_agent
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
+# The cursor unattended exemption is per invocation and never ambient: it is a
+# flag on THIS spawn, recorded in THIS task's meta, so one deliberate attended
+# launch cannot silently exempt a later unattended spawn in the same shell.
+CURSOR_EXEMPTION=
+CURSOR_EXEMPTION_SET=0
 KIND_SET=0
 HARNESS_ARG=
 MODEL=
@@ -341,6 +346,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      cursor-exemption) CURSOR_EXEMPTION=$a; CURSOR_EXEMPTION_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -364,6 +370,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --cursor-exemption) want_value=cursor-exemption ;;
+    --cursor-exemption=*) CURSOR_EXEMPTION=${a#--cursor-exemption=}; CURSOR_EXEMPTION_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -375,6 +383,13 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$CURSOR_EXEMPTION_SET" -eq 0 ] || [ -n "$CURSOR_EXEMPTION" ] || { echo "error: --cursor-exemption requires a non-empty value" >&2; exit 1; }
+if [ "$CURSOR_EXEMPTION_SET" -eq 1 ]; then
+  case "$CURSOR_EXEMPTION" in
+    attended|envelope:?*) ;;
+    *) echo "error: --cursor-exemption must be 'attended' (a person is in the pane) or 'envelope:<name>' (the named outer isolation envelope that governs this worker); '$CURSOR_EXEMPTION' names neither, and an unnamed grant could not be audited later" >&2; exit 1 ;;
+  esac
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1132,6 +1147,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  if [ "$CURSOR_EXEMPTION_SET" -eq 0 ]; then
+    CURSOR_EXEMPTION=$(fm_meta_get "$RELAUNCH_META" cursor_exemption)
+  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1380,37 +1398,30 @@ case "$ARG3" in
     ;;
 esac
 
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; muse has none, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
-fi
-
-# cursor launches under --auto-review --sandbox enabled, which keeps a REAL
-# filesystem sandbox but accepts that cursor's server classifier prompts for any
-# call it does not deem safe. An unattended pane has no approver, and the
-# cursor-transcript busy fold keeps a parked pane reading as working, so the
-# stall never surfaces as a hold. The non-prompting alternative (--force, and its
-# documented --yolo alias) defeats --sandbox enabled, so it is refused as false
-# hardening rather than shipped. cursor is therefore barred from every ordinary
-# unattended kind: ship, scout, and secondmate alike, the last being the worst
-# case because a whole firstmate instance stalls invisibly.
+# Which kinds a verified adapter may run is owned by
+# fm_control_harness_supports_kind in fm-control-lib.sh, and this asks it for
+# EVERY verified harness rather than repeating any rule here, so a future entry
+# in that table is enforced by the launch owner and the control plane alike. The
+# control plane asks the same question BEFORE it stops a running agent, which is
+# what keeps a refused relaunch from stranding a task with no agent at all.
 #
-# fm_control_harness_supports_kind owns that rule so the control plane can refuse
-# an incompatible relaunch BEFORE it stops the running agent; asking it here
-# rather than repeating the table is what keeps the two owners from drifting.
-# FM_CURSOR_UNATTENDED_EXEMPTION is the single auditable opt-in, and no in-repo
-# caller sets it: there is no attended-launch flag and no isolation-envelope
-# caller in this repo to key on today, so rather than infer either condition the
-# variable must be set deliberately by whoever knows the launch is covered.
-if [ "$HARNESS" = cursor ] &&
-  ! fm_control_harness_supports_kind cursor "$KIND" "${FM_CURSOR_UNATTENDED_EXEMPTION-}"; then
-  echo "error: cursor is refused for an unattended $KIND spawn; its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. Use codex or claude for unattended work. If a person is in the pane or a proven outer isolation envelope governs this worker, set FM_CURSOR_UNATTENDED_EXEMPTION=attended or FM_CURSOR_UNATTENDED_EXEMPTION=isolation-envelope." >&2
+# Two rules live in that table today. muse has no primary supervision protocol,
+# so it cannot run a secondmate. cursor launches under --auto-review --sandbox
+# enabled, which keeps a REAL filesystem sandbox but accepts that cursor's
+# server classifier prompts for any call it does not deem safe; an unattended
+# pane has no approver and the cursor-transcript busy fold keeps a parked pane
+# reading as working, so cursor is refused for ship, scout, and secondmate
+# alike, the last being the worst case because a whole firstmate instance stalls
+# invisibly. The non-prompting alternative (--force, and its documented --yolo
+# alias) defeats --sandbox enabled, so it is refused as false hardening rather
+# than shipped.
+#
+# An unverified harness is skipped, not refused: a raw launch command is the
+# documented escape hatch for an adapter with no template. The canonicalization
+# inside the table still holds a raw `cursor-agent` command to the cursor rule.
+if fm_control_harness_family "$HARNESS" >/dev/null &&
+  ! fm_control_harness_supports_kind "$HARNESS" "$KIND" "$CURSOR_EXEMPTION"; then
+  echo "error: $(fm_control_harness_kind_refusal "$HARNESS" "$KIND")" >&2
   exit 1
 fi
 
@@ -2913,7 +2924,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort cursor_exemption busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2928,6 +2939,7 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ -z "$CURSOR_EXEMPTION" ] || echo "cursor_exemption=$CURSOR_EXEMPTION"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -3217,4 +3229,6 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWN_EXEMPTION_NOTE=
+[ -z "$CURSOR_EXEMPTION" ] || SPAWN_EXEMPTION_NOTE=" cursor_exemption=$CURSOR_EXEMPTION"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY$SPAWN_EXEMPTION_NOTE window=$META_WINDOW worktree=$WT"
