@@ -3022,6 +3022,9 @@ spawn_record_traceparent() {
     acquired=1
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  # Inserted before the first pr= line so the armed poll's identity lines stay
+  # terminal (fm_pr_metadata_identity_parse rejects unknown fields after pr=,
+  # so a carrier appended at the end would break the PR merge poll).
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
      || ! awk -F= -v carrier="$SPAWN_TRACEPARENT" '
           $1 == "traceparent" { next }
