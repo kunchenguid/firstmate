@@ -121,35 +121,76 @@ granted_roots() {  # <launchlog>
 
 count_roots() { granted_roots "$1" | grep -c . || true; }
 
+# The comparison bin/fm-watch.sh scan_signals makes for one signal file, run
+# through the library that owns it rather than reimplemented here.
+signal_reads_as_reported() {  # <state> <signal file>
+  ( . "$ROOT/bin/fm-wake-lib.sh" && fm_wake_signal_seen_current "$1" "$2" )
+}
+
+# Enqueue one steer the way firstmate does. Firstmate is not sandboxed, so this
+# is always the unconfined side; the record format belongs to its own library.
+enqueue_steer() {  # <state> <task id> <text>
+  ( . "$ROOT/bin/fm-task-inbox-lib.sh" && fm_task_inbox_write "$1" "$2" "$3" ) >/dev/null
+}
+
+# The physically-resolved spelling of a path, computed here independently of
+# fm-spawn: codex resolves a writable root through its symlinks, and so does the
+# notify hook's own turn-ended path, so a root spelled through a symlinked home
+# names a path the worker never actually writes.
+canonical_of() {  # <path>
+  local p=$1 parent
+  if [ -d "$p" ]; then ( cd "$p" && pwd -P ); return; fi
+  parent=$(cd "$(dirname "$p")" && pwd -P) || return 1
+  printf '%s/%s\n' "${parent%/}" "$(basename "$p")"
+}
+
 # --- 1. Composition ---------------------------------------------------------
 
 test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir() {
-  local rec out roots gitdir
+  local rec out roots gitdir state_real r
   rec=$(make_case ship); read_case "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off) \
     || fail "codex ship spawn failed: $out"
 
   gitdir=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
   roots=$(granted_roots "$LAUNCH_LOG")
-  # A ship crewmate never runs the completion gate and writes no report, so it
-  # gets only its OWN two per-task state files plus the out-of-tree git dir.
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state/$CASE_ID.status" \
+  # A ship crewmate never runs the completion gate and writes no report, so the
+  # only paths it gets outside its worktree are its OWN two per-task state files,
+  # its OWN steering inbox, and the out-of-tree git dir.
+  printf '%s\n' "$roots" | grep -qxF "$state_real/$CASE_ID.status" \
     || fail "the task's own status file was not granted: $roots"
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state/$CASE_ID.turn-ended" \
+  printf '%s\n' "$roots" | grep -qxF "$state_real/$CASE_ID.turn-ended" \
     || fail "the task's own turn-ended wake marker was not granted: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$state_real/$CASE_ID.inbox" \
+    || fail "the task's own steering inbox was not granted, so the worker cannot acknowledge a steer: $roots"
   printf '%s\n' "$roots" | grep -qxF "$gitdir" \
     || fail "the linked worktree's git common dir was not granted: $roots"
-  [ "$(count_roots "$LAUNCH_LOG")" = 3 ] \
-    || fail "expected exactly 3 granted roots, got: $roots"
+  [ "$(count_roots "$LAUNCH_LOG")" = 4 ] \
+    || fail "expected exactly 4 granted roots, got: $roots"
 
-  # The two granted state files must be pre-created so the single-file roots
-  # resolve, and neither the shared state directory nor any other task's records
-  # come with them.
+  # Every root must be spelled the way the sandbox and the launch's own notify
+  # hook resolve it, or the grant names a path the worker never writes.
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    [ "$r" = "$(canonical_of "$r")" ] \
+      || fail "granted root is not canonicalized, so it names a path the sandbox never resolves to: $r"
+  done <<EOF
+$roots
+EOF
+  grep -qF -- "--add-dir '$state_real/$CASE_ID.turn-ended'" "$LAUNCH_LOG" \
+    || fail "the granted turn-ended root does not match the canonical spelling the notify hook touches"
+
+  # The two granted state files and the inbox (with its handled/ subdirectory)
+  # must be pre-created so the roots resolve, and neither the shared state
+  # directory nor any other task's records come with them.
   [ -f "$HOME_DIR/state/$CASE_ID.status" ] \
     || fail "the granted status file was not pre-created, so its single-file root cannot resolve"
   [ -f "$HOME_DIR/state/$CASE_ID.turn-ended" ] \
     || fail "the granted turn-ended file was not pre-created, so its single-file root cannot resolve"
+  [ -d "$HOME_DIR/state/$CASE_ID.inbox/handled" ] \
+    || fail "the granted inbox and its handled/ were not pre-created, so the acknowledgement move has nowhere to land"
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state" \
     && fail "a ship crewmate must NOT receive the shared state directory; only its own two files: $roots"
   printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data/$CASE_ID" \
@@ -168,36 +209,69 @@ test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir() {
 
   # The grant does not make codex able to drive the pipeline: its sandbox still
   # denies the no-mistakes data directory, so the dispatch says so out loud rather
-  # than leaving it to be rediscovered at the gate. It must NOT assert the network
-  # limit, which is the operator's own codex setting and varies per machine
+  # than leaving it to be rediscovered at the gate. It must NOT assert a network
+  # limit, because the launch itself grants network access unconditionally
   # (docs/verification/codex-sandbox.md).
   printf '%s\n' "$out" | grep -q 'cannot run validation itself' \
     || fail "a codex ship dispatch must name the pipeline limit the grant does not lift: $out"
-  printf '%s\n' "$out" | grep -qE 'denies (ALL )?network|cannot push, open the PR' \
-    && fail "the dispatch must not assert a network limit that depends on the operator's codex config: $out"
-  pass "codex ship: grants only its own status + turn-ended files and the out-of-tree git common dir, never the shared state directory"
+  printf '%s\n' "$out" | grep -qE 'denies (ALL )?network|cannot push, open the PR|depends on this machine' \
+    && fail "the dispatch must not assert a network limit the launch's own network_access grant lifts: $out"
+  grep -qF -- '-c sandbox_workspace_write.network_access=true' "$LAUNCH_LOG" \
+    || fail "the dispatch claims no network limit, so the launch must actually grant network access"
+  pass "codex ship: grants only its own status + turn-ended files, its own steering inbox, and the out-of-tree git common dir, never the shared state directory"
+}
+
+# The turn-ended marker is pre-created so its single-file root resolves, which
+# makes it a brand-new signal file for the watcher's own scan: bin/fm-watch.sh
+# scan_signals reports any turn-end marker whose signature differs from its
+# persisted state/.seen-* one, and codex has no verified semantic busy source that
+# could absorb the resulting wake. So the spawn must seed that marker, and seed it
+# narrowly enough that a REAL turn end still reports.
+test_precreated_turn_ended_marker_is_not_read_as_a_turn_end() {
+  local rec out marker
+  rec=$(make_case turnend-seed); read_case "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off) \
+    || fail "codex ship spawn failed: $out"
+  marker="$HOME_DIR/state/$CASE_ID.turn-ended"
+  [ -f "$marker" ] || fail "the turn-ended marker was not pre-created"
+
+  # A false here is exactly the row the watcher's scan would emit.
+  signal_reads_as_reported "$HOME_DIR/state" "$marker" \
+    || fail "the pre-created turn-ended marker reads as unreported, so the first watcher poll wakes the captain for a turn nobody took"
+
+  # Not vacuous: the seed must record the marker as it was created, not suppress
+  # the file forever. A real turn end changes the signature and must report again.
+  printf 'x' >> "$marker"
+  signal_reads_as_reported "$HOME_DIR/state" "$marker" \
+    && fail "the seeded marker also suppresses a REAL turn end; the seed is too broad"
+  pass "the pre-created turn-ended marker is seeded as already reported, and a real turn end still reports"
 }
 
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir() {
-  local rec out roots
+  local rec out roots data_real state_real
   rec=$(make_case scout); read_case "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --scout) || fail "codex scout spawn failed: $out"
   roots=$(granted_roots "$LAUNCH_LOG")
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data/$CASE_ID" \
+  data_real=$(cd "$HOME_DIR/data" && pwd -P)
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  printf '%s\n' "$roots" | grep -qxF "$data_real/$CASE_ID" \
     || fail "a scout cannot deliver data/<id>/report.md without its own data/<id>/ grant: $roots"
   # A scout runs the captain-hold completion gate, which creates a mktemp-named
   # lock owner directory and a lock symlink directly in state/, so it needs write
   # on the DIRECTORY - a per-file grant cannot serve those unnameable new entries.
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state" \
+  # That same directory root is what covers its steering inbox, so a scout needs
+  # no separate inbox grant.
+  printf '%s\n' "$roots" | grep -qxF "$state_real" \
     || fail "a scout cannot pass the completion gate without the state directory grant: $roots"
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data" \
+  printf '%s\n' "$roots" | grep -qxF "$data_real" \
     && fail "a scout must not receive the shared data/ root, only its own data/<id>/: $roots"
   pass "codex scout: the report, status, and completion-gate paths are all granted, and the shared data/ root is not"
 }
 
 test_secondmate_grants_only_the_parent_status_file() {
-  local base prim sm smlog smfake roots out
+  local base prim sm smlog smfake roots out prim_state_real
   base="$TMP_ROOT/secondmate"
   prim="$base/primary"
   sm="$base/sm"
@@ -221,19 +295,25 @@ test_secondmate_grants_only_the_parent_status_file() {
     || fail "codex secondmate spawn failed: $out"
 
   roots=$(granted_roots "$smlog")
-  # A secondmate's own home IS its workspace, so only the parent status FILE it
-  # reports through is outside the sandbox. Copying the crewmate grant here would
-  # hand it the parent's data/ and git objects for no contract reason, and even
-  # the parent's whole state/ would expose every sibling task's records.
-  [ "$(count_roots "$smlog")" = 1 ] \
-    || fail "a secondmate must get exactly the parent status file, got: $roots"
-  printf '%s\n' "$roots" | grep -qxF "$prim/state/sm-a.status" \
+  prim_state_real=$(cd "$prim/state" && pwd -P)
+  # A secondmate's own home IS its workspace, so the only paths outside the
+  # sandbox are the parent status FILE it reports through and the parent-side
+  # steering inbox it acknowledges in. Copying the crewmate grant here would hand
+  # it the parent's data/ and git objects for no contract reason, and even the
+  # parent's whole state/ would expose every sibling task's records.
+  [ "$(count_roots "$smlog")" = 2 ] \
+    || fail "a secondmate must get exactly the parent status file and its own inbox, got: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$prim_state_real/sm-a.status" \
     || fail "the parent status file was not granted: $roots"
-  printf '%s\n' "$roots" | grep -qxF "$prim/state" \
-    && fail "a secondmate must NOT receive the parent's whole state directory, only its own status file: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$prim_state_real/sm-a.inbox" \
+    || fail "the secondmate's steering inbox was not granted, so it cannot acknowledge a steer: $roots"
+  printf '%s\n' "$roots" | grep -qxF "$prim_state_real" \
+    && fail "a secondmate must NOT receive the parent's whole state directory, only its own status file and inbox: $roots"
   [ -f "$prim/state/sm-a.status" ] \
     || fail "the granted parent status file was not pre-created, so its single-file root cannot resolve"
-  pass "codex secondmate: only the parent status file is granted, not the parent state directory or the crewmate set"
+  [ -d "$prim/state/sm-a.inbox/handled" ] \
+    || fail "the granted inbox and its handled/ were not pre-created, so the acknowledgement move has nowhere to land"
+  pass "codex secondmate: only the parent status file and its own steering inbox are granted, not the parent state directory or the crewmate set"
 }
 
 test_other_adapters_are_untouched() {
@@ -270,6 +350,22 @@ deny_outside_roots() {  # <home> <granted roots...>
   for root in "$@"; do
     [ -w "$root" ] || fail "the confinement denied a GRANTED root ($root); the fixture is wrong, not the grant"
   done
+}
+
+# The same confinement narrowed to state/: deny write on every directory under it
+# that the grant did NOT name, which is how this fixture expresses "outside the
+# sandbox's writable roots" for a kind whose state grant is per-path rather than
+# the whole directory. Driven off the roots fm-spawn emitted, never a retyped list.
+deny_state_dirs_outside_roots() {  # <canonical state dir> <granted roots...>
+  local state=$1 d granted keep
+  shift
+  while IFS= read -r d; do
+    keep=0
+    for granted in "$@"; do
+      case "$d/" in "$granted"/*) keep=1; break ;; esac
+    done
+    [ "$keep" -eq 1 ] || chmod a-w "$d" 2>/dev/null || true
+  done < <(find "$state" -type d | sort -r)
 }
 
 allow_all() { chmod -R u+w "$1" 2>/dev/null || true; }
@@ -417,10 +513,60 @@ test_ship_grant_is_sufficient_and_isolates_siblings() {
   pass "ship grant is sufficient (status, turn-ended, commit) and isolates siblings: the shared state directory stays unwritable"
 }
 
+# The steering-inbox acknowledgement is part of EVERY brief kind (bin/fm-brief.sh
+# builds one INBOX_SECTION for all of them): the worker acknowledges a handled
+# steer by moving the record into state/<id>.inbox/handled/, and firstmate's
+# re-ring ladder escalates a worker that never acknowledges as stuck. That move
+# needs write on the inbox directory, which lives outside the worktree, so a ship
+# crewmate whose grant stopped at its two state FILES would be structurally unable
+# to comply - the same shape as the 2026-08-26 defect this grant exists for.
+test_ship_grant_covers_the_steering_inbox_acknowledgement() {
+  local rec out roots inbox msg state_real
+  rec=$(make_case ship-inbox); read_case "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off) \
+    || fail "codex ship spawn failed: $out"
+  roots=$(granted_roots "$LAUNCH_LOG")
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  inbox="$state_real/$CASE_ID.inbox"
+
+  # Firstmate writes the steer, and firstmate is not sandboxed, so this happens
+  # before the confinement. The record format belongs to its own library.
+  enqueue_steer "$HOME_DIR/state" "$CASE_ID" "steer: read the failing log first" \
+    || fail "could not enqueue a steering message"
+  msg=$(find "$inbox" -maxdepth 1 -name '*.msg' | head -1)
+  [ -n "$msg" ] || fail "the steering message was not enqueued"
+
+  # shellcheck disable=SC2086 # roots is a newline list of paths without spaces here.
+  deny_state_dirs_outside_roots "$state_real" $roots
+  mv "$msg" "$inbox/handled/" \
+    || { allow_all "$HOME_DIR"; fail "a ship crewmate could not acknowledge a steer under its own grant"; }
+  [ -f "$inbox/handled/$(basename "$msg")" ] \
+    || { allow_all "$HOME_DIR"; fail "the acknowledgement move did not land in handled/"; }
+  allow_all "$HOME_DIR"
+
+  if dac_confines; then
+    # Necessity: with the inbox root removed from the grant, the acknowledgement
+    # is exactly the operation that breaks.
+    enqueue_steer "$HOME_DIR/state" "$CASE_ID" "steer: second instruction" \
+      || fail "could not enqueue a second steering message"
+    msg=$(find "$inbox" -maxdepth 1 -name '*.msg' | head -1)
+    chmod a-w "$inbox" "$inbox/handled"
+    if ( exec 2>/dev/null; mv "$msg" "$inbox/handled/" ); then
+      allow_all "$HOME_DIR"
+      fail "the inbox root is not load-bearing in this fixture; the necessity assertion is vacuous"
+    fi
+    allow_all "$HOME_DIR"
+  fi
+  pass "ship grant covers the steering-inbox acknowledgement, and that inbox root is load-bearing"
+}
+
 test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir
+test_precreated_turn_ended_marker_is_not_read_as_a_turn_end
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir
 test_secondmate_grants_only_the_parent_status_file
 test_other_adapters_are_untouched
 test_ship_grant_is_sufficient_and_isolates_siblings
+test_ship_grant_covers_the_steering_inbox_acknowledgement
 test_granted_set_is_sufficient_for_the_whole_contract
 test_each_root_is_load_bearing

@@ -52,13 +52,19 @@ Every Firstmate task worktree is a LINKED worktree, so that confinement denies w
 
 `../../../../../bin/fm-spawn.sh` grants these back with repeatable `--add-dir` roots, scoped PER KIND as narrowly as the sandbox allows so a mistaken worker command cannot reach another task's authoritative records:
 
-- A ship crewmate gets only its OWN two per-task state FILES - `state/<id>.status` and `state/<id>.turn-ended` - plus the out-of-tree git common directory. Both files are pre-created at launch so the single-file roots resolve and neither the append nor the touch needs the directory-create permission a file grant withholds. Granting the files rather than `state/` keeps every OTHER task's status, metadata, and completion locks out of reach.
+- A ship crewmate gets only its OWN two per-task state FILES - `state/<id>.status` and `state/<id>.turn-ended` - plus its OWN steering inbox `state/<id>.inbox/` and the out-of-tree git common directory. Both files are pre-created at launch so the single-file roots resolve and neither the append nor the touch needs the directory-create permission a file grant withholds. Granting the files rather than `state/` keeps every OTHER task's status, metadata, and completion locks out of reach.
 - A scout gets `state/` itself (a whole-directory grant), the task's OWN `data/<id>/` for the report, and the git common directory. `state/` must be the directory because the captain-hold completion gate creates a lock symlink AND a mktemp-named owner directory directly in it, and neither new entry can be named ahead of time.
-- A secondmate gets ONLY the parent's `state/<id>.status` file, because its own home is already its workspace and it runs its own completion gate there.
+- A secondmate gets ONLY the parent's `state/<id>.status` file and its parent-side `state/<id>.inbox/`, because its own home is already its workspace and it runs its own completion gate there.
+
+The steering inbox is a DIRECTORY root for every kind that does not already have `state/`, because firstmate allocates the record names after launch and they cannot be named ahead of time.
+Every brief kind carries the same inbox section, whose acknowledgement is a `mv` of the handled record into `state/<id>.inbox/handled/`; without write on that directory a sandboxed worker would read its steering messages, be unable to acknowledge one, and be escalated as stuck for complying.
+Firstmate creates the inbox and its `handled/` at launch so the root resolves.
+
+Every root is emitted with its symlinks resolved, because codex resolves a granted root that way and the launch's own turn-end path is already canonical.
 
 `$FM_HOME` itself, `.env`, `config/`, `projects/`, and every other home stay denied, and the brief's own rule against writing outside the worktree remains stricter than the sandbox.
 
 One limit no writable root and no operator setting lifts: `~/.no-mistakes` stays denied, so a Codex worker cannot drive `no-mistakes axi` and cannot run validation itself.
-Network is NOT such a fact - `sandbox_workspace_write.network_access` is the operator's own Codex setting, it defaults to denied but is enabled on some machines, and Firstmate never sets it - so measure it per machine rather than assuming a Codex worker can or cannot push.
+Network is NOT such a limit and is a separate axis from the roots: `workspace-write` defaults `sandbox_workspace_write.network_access` to denied, but Firstmate's launch passes `-c sandbox_workspace_write.network_access=true` unconditionally and a CLI `-c` override wins over `~/.codex/config.toml`, so egress is on for every Firstmate Codex crewmate regardless of the machine.
 
 [`../../../../../docs/verification/codex-sandbox.md`](../../../../../docs/verification/codex-sandbox.md) owns the evidence and the refresh command.
