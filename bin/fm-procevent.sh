@@ -144,6 +144,17 @@
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
+# Receipt state is adapter-owned through one more seam of the same kind, and
+# this runner presents nothing anywhere. After a result is durably captured and
+# any keyed-answer feed has returned, the runner hands the adapter the outcome:
+# `bin/fm-procevent-<adapter>.sh receipt <source-id> <sequence> <result-file>
+# <outcome-file>`, where the outcome file states exactly what the intake
+# returned - `not-fed`, or `fed <exit>` plus its bounded output - so an adapter
+# that acknowledges a capture toward its own audience can record what was
+# received and what was saved, never more than that. A missing command, an
+# error, or any other exit changes nothing: publication and handling proceed
+# exactly as before. This runner never reads or presents a receipt.
+#
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
 # only a claim whose whole generation is gone is reclaimed. A runner leads its
@@ -172,6 +183,32 @@ REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 EXTENSION_HOST="$SCRIPT_DIR/fm-extension.mjs"
 EXTENSION_LIFECYCLE_LOCK="$REG/.extension-binding-lifecycle.lock"
+
+# Shared by the two bounded-capture sites: copy stdin to stdout up to $1 bytes,
+# drain the rest, and exit 3 exactly when truncation was needed.
+# shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
+FM_PROCEVENT_BOUNDER='use strict;
+    use warnings;
+    my $limit = shift;
+    my ($written, $truncated) = (0, 0);
+    while (1) {
+      my $count = sysread(STDIN, my $buffer, 65536);
+      exit 2 unless defined $count;
+      last if $count == 0;
+      my $take = $written < $limit ? $limit - $written : 0;
+      $take = $count if $take > $count;
+      if ($take > 0) {
+        my $offset = 0;
+        while ($offset < $take) {
+          my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
+          exit 2 unless defined $count_written;
+          $offset += $count_written;
+        }
+        $written += $take;
+      }
+      $truncated = 1 if $take < $count;
+    }
+    exit($truncated ? 3 : 0);'
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
@@ -329,16 +366,57 @@ adapter_autohandle() {  # <adapter> <source-id> <result-file>
 # source, an adapter with no `answers` command, and a failure on either side all
 # leave the capture untouched and still announced, because this never
 # acknowledges anything (see the keyed-answer note in the header).
-feed_keyed_answers() {  # <adapter> <source-id> <result-file>
-  local adapter=$1 id=$2 result=$3 script origin seq
+#
+# Whatever the intake returned is written to the outcome file for the receipt
+# seam: `not-fed`, or `fed <exit>` plus the bounded stdout of the intake. A
+# truncated or unreadable capture is stated as such rather than silently
+# presented as a complete verdict.
+feed_keyed_answers() {  # <adapter> <source-id> <result-file> <outcome-file>
+  local adapter=$1 id=$2 result=$3 outcome=$4 script origin seq
+  local intake_rc bound_rc body pipe_status
+  body="$outcome.body"
   script=$(adapter_script "$adapter")
-  [ -f "$script" ] && [ ! -L "$script" ] || return 1
-  origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
-  [ -n "$origin" ] || return 1
-  seq=$(fm_procevent_result_sequence "$result") || return 1
+  if [ ! -f "$script" ] || [ -L "$script" ] \
+    || ! origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) \
+    || [ -z "$origin" ] \
+    || ! seq=$(fm_procevent_result_sequence "$result"); then
+    printf 'not-fed\n' > "$outcome"
+    return 1
+  fi
+  # Both staged files can carry task-id rows, so neither may depend on the
+  # caller's umask for its privacy.
+  (umask 077; : > "$body") || return 1
   "$script" answers "$result" 2>/dev/null \
     | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
-        --source "the captured result $id sequence $seq" >/dev/null 2>&1
+        --source "the captured result $id sequence $seq" 2>/dev/null \
+    | perl -e "$FM_PROCEVENT_BOUNDER" "$MAX_OUTPUT_BYTES" > "$body"
+  pipe_status=("${PIPESTATUS[@]}")
+  intake_rc=${pipe_status[1]}
+  bound_rc=${pipe_status[2]}
+  {
+    if [ "$bound_rc" -eq 0 ]; then
+      printf 'fed %s\n' "$intake_rc"
+    elif [ "$bound_rc" -eq 3 ]; then
+      printf 'fed %s\ntruncated\n' "$intake_rc"
+    else
+      printf 'fed %s\nunreadable\n' "$intake_rc"
+    fi
+    cat "$body"
+  } > "$outcome"
+  rm -f -- "$body"
+  return "$intake_rc"
+}
+
+# Let the source's own adapter record receipt state for one captured result and
+# prepare whatever acknowledgement it presents to its own audience (see the
+# receipt-state note in the header). Silenced and best-effort exactly like the
+# seams above: an adapter with no such command, and any failure on its side,
+# leaves the capture untouched and still announced.
+adapter_receipt() {  # <adapter> <source-id> <sequence> <result-file> <outcome-file>
+  local adapter=$1 script
+  script=$(adapter_script "$adapter")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 0
+  "$script" receipt "$2" "$3" "$4" "$5" >/dev/null 2>>"${FM_PROCEVENT_SEAM_DEBUG:-/dev/null}"
 }
 
 read_adapter() {  # <source-id>
@@ -659,9 +737,11 @@ cmd_start() {
   CLAIM_TOKEN=$FM_PROCEVENT_CLAIM_TOKEN
   CLAIM_REG_IDENTITY=$FM_PROCEVENT_CLAIM_REG_IDENTITY
   STAGED_OUTPUT=
+  RECEIPT_OUTCOME=
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
+    [ -z "$RECEIPT_OUTCOME" ] || rm -f -- "$RECEIPT_OUTCOME"
     fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
@@ -736,30 +816,7 @@ EOF
     [ ! -e "$out" ] && [ ! -L "$out" ] || die "cannot safely stage output"
     (umask 077; : > "$out") || die "cannot stage output"
     STAGED_OUTPUT=$out
-    "${ARGV[@]}" 2>/dev/null | perl -e '
-      use strict;
-      use warnings;
-      my $limit = shift;
-      my ($written, $truncated) = (0, 0);
-      while (1) {
-        my $count = sysread(STDIN, my $buffer, 65536);
-        exit 2 unless defined $count;
-        last if $count == 0;
-        my $take = $written < $limit ? $limit - $written : 0;
-        $take = $count if $take > $count;
-        if ($take > 0) {
-          my $offset = 0;
-          while ($offset < $take) {
-            my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
-            exit 2 unless defined $count_written;
-            $offset += $count_written;
-          }
-          $written += $take;
-        }
-        $truncated = 1 if $take < $count;
-      }
-      exit($truncated ? 3 : 0);
-    ' "$MAX_OUTPUT_BYTES" > "$out"
+    "${ARGV[@]}" 2>/dev/null | perl -e "$FM_PROCEVENT_BOUNDER" "$MAX_OUTPUT_BYTES" > "$out"
     local pipe_status=("${PIPESTATUS[@]}")
     rc=${pipe_status[0]}
     bound_rc=${pipe_status[1]}
@@ -769,6 +826,7 @@ EOF
       *) die "cannot bound source output" ;;
     esac
   fi
+
 
   if [ "$capture_state" = no-result ] || { [ "$extension_owner" -eq 0 ] && [ "$rc" -ne 0 ] && [ ! -s "$out" ]; }; then
     # No usable result. Leave the registration armed; the adapter decides
@@ -795,11 +853,26 @@ EOF
   [ "$truncated" -eq 1 ] && printf 'truncated: %s at %s bytes\n' "$id" "$MAX_OUTPUT_BYTES" >&2
 
   # Independent of publication and acknowledgement, so it runs once per capture
-  # for every adapter and cannot change what the handler receives.
+  # for every adapter and cannot change what the handler receives. The receipt
+  # seam runs after the feed so a receipt can state the intake's verdict, and
+  # before publication so recording a receipt can never delay a capture's wake.
+  RECEIPT_OUTCOME=$(staging_file "$id" "$CLAIM_TOKEN.rcpt")
+  (umask 077; : > "$RECEIPT_OUTCOME") || die "cannot stage the receipt outcome"
   if [ "$extension_owner" -eq 0 ] \
-    && feed_keyed_answers "$adapter" "$id" "$durable"; then
+    && feed_keyed_answers "$adapter" "$id" "$durable" "$RECEIPT_OUTCOME"; then
     printf 'answers-fed: %s\n' "$id"
   fi
+  # The per-source boundary is held across the receipt seam: a concurrent
+  # reconcile's publication must never observe the pre-seam instant of a capture
+  # the seam is about to acknowledge, and the seam marks its handled generations
+  # under this same hold instead of taking the boundary itself.
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD=1 \
+    adapter_receipt "$adapter" "$id" "$(fm_procevent_result_sequence "$durable")" \
+      "$durable" "$RECEIPT_OUTCOME" || true
+  fm_procevent_source_lock_release "$id"
+  rm -f -- "$RECEIPT_OUTCOME"
+  RECEIPT_OUTCOME=
 
   # A self-announcing adapter's autohandle announces through its own durable
   # downstream channel, so publication waits until after application and covers
@@ -1186,6 +1259,9 @@ cmd_retire() {
   fi
   rm -f -- "$(source_file "$id")"
   rm -f -- "$(runner_file "$id")"
+  # The receipts record is part of this runner's per-source layout (its bytes
+  # belong to the source's adapter), so it is cleaned with the registration.
+  rm -f -- "$(fm_procevent_receipts_path "$STATE" "$id")"
   fm_procevent_source_lock_release "$id"
   # A retired source produces no further answer, so drop any decision binding it
   # carried. Generic and idempotent: the binding owner is asked to forget this

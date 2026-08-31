@@ -545,29 +545,44 @@ assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
   || fail "retirement recovery reran the terminal source"
 pass "failed terminal retirement is fail-closed and idempotently recoverable"
 
-# --- end-user-aligned regression: one Send & End, one captured result -------
+# --- end-user-aligned regression: one Send & End, receipt before retirement --
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
-# action, and the runner captured four results - the human's real feedback, then
-# recurring empty ended sessions - because it kept restarting a source whose own
-# adapter already knew the session had ended. Driven through the adapter's own
-# arm command against a stand-in for the published poll shape, so registration,
-# the runner, capture, publication, and retirement all run for real.
+# action and Firstmate retired the source immediately, so the page never
+# acknowledged the submission and the captain could not tell capture from loss.
+# Now the final feedback is captured, its receipt is presented through the next
+# poll's --agent-reply, and only that delivery lets the source retire. Driven
+# through the adapter's own arm command against a stand-in for the published
+# poll shape, so registration, the runner, capture, publication, and retirement
+# all run for real.
 HLT="$TMP_ROOT/hlt"; new_home "$HLT"
 LAVISH_BIN=$(fm_fakebin "$TMP_ROOT/lavish-stub")
 LAVISH_POLL_COUNT="$TMP_ROOT/lavish-poll-count"
-export LAVISH_POLL_COUNT
+LAVISH_ARGV_LOG="$TMP_ROOT/lavish-argv.log"
+export LAVISH_POLL_COUNT LAVISH_ARGV_LOG
 cat > "$LAVISH_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 # Stand-in for `lavish-axi poll <file>` around a human `Send & End`: the final
 # feedback is delivered exactly once carrying session_ended, and every later
 # poll returns an empty ended session immediately.
+printf '%s\n' "$*" >> "$LAVISH_ARGV_LOG"
 n=$(cat "$LAVISH_POLL_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$LAVISH_POLL_COUNT"
 if [ "$n" = 1 ]; then
-  printf 'session:\n  file: /review.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n'
+  printf '%s\n' 'session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]{uid,prompt,selector,tag,text}:
+  "7","Ship call: ship it\n\nContext data:\n{\n  \"question\": \"sample-ship-call\", \"answer\": \"ship it\"\n}",section#call > form,choice,"Ship call: ship it"
+feedback[1]{text}:
+  ship it'
 else
-  printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n'
+  printf '%s\n' 'session:
+  file: /review.html
+  status: ended
+  ended_by: user'
 fi
 SH
 chmod +x "$LAVISH_BIN/lavish-axi"
@@ -576,24 +591,36 @@ printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
 PE_TRACKED+=("$HLT|$lavish_id")
 PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
-for _ in $(seq 1 6); do
+for _ in $(seq 1 8); do
   PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
   sleep 0.3
 done
-[ "$(cat "$LAVISH_POLL_COUNT")" = 1 ] \
-  || fail "an ended review kept being polled: $(cat "$LAVISH_POLL_COUNT") polls for one Send & End"
-[ "$(count_results "$HLT" "$lavish_id")" = 1 ] \
+[ "$(cat "$LAVISH_POLL_COUNT")" = 2 ] \
+  || fail "an ended review was not polled exactly twice (feedback, then its receipt): $(cat "$LAVISH_POLL_COUNT") polls"
+[ "$(count_results "$HLT" "$lavish_id")" = 2 ] \
   || fail "one Send & End produced $(count_results "$HLT" "$lavish_id") captured results"
 [ "$(wake_payloads "$HLT" | sort -u | grep -c .)" = 1 ] \
   || fail "one Send & End produced more than one distinct event: $(wake_payloads "$HLT" | sort -u)"
 assert_contains "$(wake_payloads "$HLT")" "procevent lavish $lavish_id 1" "the human's final feedback is announced"
-assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires automatically"
+assert_absent "$(wake_payloads "$HLT" | grep "lavish $lavish_id 2")" "the pure receipt-delivery capture wakes no handler"
+assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires only after its receipt was displayed"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$lavish_id.claim" "the ended review releases its owned claim"
 LAVISH_RESULT=$(first_result "$HLT" "$lavish_id" || true)
 assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's final feedback"
+assert_grep 'sample-ship-call' "$LAVISH_RESULT" "the queued card is retained for the keyed-answer intake"
+assert_grep '--agent-reply' "$LAVISH_ARGV_LOG" "the second poll presented an agent reply"
+receipt_argv=$(grep -- '--agent-reply' "$LAVISH_ARGV_LOG" | tail -1)
+assert_contains "$receipt_argv" "received 1 answer" "the presented receipt states the received answer count"
+assert_grep "UTC" "$LAVISH_ARGV_LOG" "the presented receipt states a timestamp"
+assert_not_contains "$receipt_argv" 'ship it' "the presented receipt exposes no decision payload"
+assert_not_contains "$receipt_argv" 'sample-ship-call' "the presented receipt exposes no decision key"
+journal=$HLT/state/procevent/$lavish_id.receipts
+grep -q "^received" "$journal" || fail "the receipts record journaled the received submission"
+grep -q "^delivered" "$journal" || fail "the receipts record journaled the displayed receipt"
+assert_present "$HLT/state/procevent-inbox/$lavish_id.2.handled" "the pure delivery capture was acknowledged, never announced"
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
-pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
+pass "one Send & End captures the feedback, displays its receipt, then retires without recurring polls"
 
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still

@@ -695,7 +695,7 @@ After capture - and after initial `check` publication for the default ordering -
 A failed terminal removal stays durably terminal and is completed by ordinary reconciliation without restarting its poll, while a concurrently replaced registration survives and becomes independently runnable after the old claim releases.
 Any registration refuses to replace an external registration while its prior runner claim is live, uncertain, orphaned, or terminal-pending; replacement becomes eligible only after that generation is proved gone or its terminal retirement completes.
 A source that has ended therefore captures at most one terminal result, is never restarted, and leaves no recurring poll work, while explicit `retire` stays the supported and idempotent path afterwards.
-For Lavish that verdict covers an ended session, a missing session, and the final feedback of a `Send & End` review, which the published poll marks with `session_ended` before it returns only empty ended sessions.
+For Lavish that verdict covers an ended session, a missing session, and the final feedback of a `Send & End` review, which the published poll marks with `session_ended` before it returns only empty ended sessions, and it is withheld while the newest received submission's receipt still owes its delivery poll, so retirement can never outrun the acknowledgement the captain sees.
 
 Applying a captured result through code is a built-in adapter seam, and some built-in results carry no judgement at all: they must simply be applied idempotently to this home's own durable state.
 Leaving that to a handler means it can silently not happen, so immediately after the terminal check above the runner calls `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>` and lets the built-in adapter apply and acknowledge its own result.
@@ -712,6 +712,13 @@ The built-in adapter reports only what the captain chose; the intake owns every 
 Feeding is independent of handling: it never acknowledges a result and never suppresses a wake, because recording the answer is transcription while acting on it is firstmate's judgement.
 An unbound built-in source, a built-in adapter with no `answers` command, and a failure on either side all leave the capture untouched and still announced.
 External binding responses never enter this authority-bearing intake.
+
+Acknowledgement presentation is adapter-owned through one more seam of the same kind, and the runner still presents nothing anywhere.
+After a result is durably captured and any keyed-answer feed has returned, the runner holds the per-source boundary across one call to `bin/fm-procevent-<adapter>.sh receipt <source-id> <sequence> <result-file> <outcome-file>`, where the outcome file states exactly what the intake returned - `not-fed`, or `fed <exit>` with its bounded output - so an adapter that acknowledges a capture toward its own audience can journal what was received and what was saved, never more than that fact.
+The boundary hold means a concurrent reconcile can never publish a capture the seam is about to acknowledge; an adapter without a `receipt` command, and any failure inside the seam, changes nothing about publication or handling.
+For Lavish this seam feeds a per-source receipts record (`state/procevent/<id>.receipts`, layout owned by the runner, bytes owned by the adapter) that backs the visible answer-receipt lifecycle the adapter presents through the published poll's `--agent-reply` surface: `Received` states only a durable capture, `Saved` only the intake's verdict with rejected rows reported rather than presented as saved, `Applying` and `Complete` only the handler's explicit `applying` and `complete` calls, and an exact replay of an already-captured submission is stated as already received.
+The registered poll presents the newest recorded truth each time it arms, so an ended review is never retired before its final receipt was displayed by a later poll or became impossible to display because the session is gone; a missing session retires with its receipt durably queued and undelivered.
+The receipt states what reached firstmate, never what the source delivered to the browser, and the destructive-poll loss limitation below is unchanged.
 
 Ownership is machine-wide per canonical source, because separate homes can share one underlying source store.
 Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `FM_PROCEVENT_CLAIM_ROOT`).
