@@ -297,7 +297,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod
+  local home meta out sendroot payload mode id brief_dod delivered_dod brief_project delivered_project
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -348,6 +348,17 @@ STUB
     awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
     cmp -s "$brief_dod" "$delivered_dod" \
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
+
+    # A promoted worker edits files, so it must carry the same project-instructions
+    # block a briefed worker gets; both come from the same owner in fm-dod-lib.sh.
+    brief_project="$TMP_ROOT/promote-dod/brief-project-$id"
+    delivered_project="$TMP_ROOT/promote-dod/delivered-project-$id"
+    awk '/^# Project instructions$/ { emit=3 } emit > 0 { print; emit-- }' "$home/data/$id/brief.md" > "$brief_project"
+    awk '/^# Project instructions$/ { emit=3 } emit > 0 { print; emit-- }' "$payload" > "$delivered_project"
+    [ -s "$delivered_project" ] \
+      || fail "$mode: promoted worker was not told to read the project's own agent instructions"
+    cmp -s "$brief_project" "$delivered_project" \
+      || fail "$mode: promotion and ordinary brief generation delivered different project instructions"
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"

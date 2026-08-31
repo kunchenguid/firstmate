@@ -52,9 +52,9 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
-# Ship tasks include a project-instructions-and-memory section: the crewmate reads
-# and follows the project's own AGENTS.md or CLAUDE.md before editing and stops on a
-# conflict with the brief via needs-decision rather than choosing silently, and durable project-intrinsic
+# Ship tasks include a project-instructions section rendered from its single owner
+# (bin/fm-dod-lib.sh, which bin/fm-promote.sh renders too), and a project-memory
+# section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
@@ -396,6 +396,7 @@ case "$MODE" in
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+PROJECT_INSTRUCTIONS=$(fm_project_instructions_block) || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -442,9 +443,9 @@ $RULE1
 
 $INBOX_SECTION
 
-# Project instructions and memory
-If the project carries its own \`AGENTS.md\` or \`CLAUDE.md\`, read it before you edit any file and follow it for this task, including any issue, branch, evidence, and review requirements it states.
-Where it conflicts with this brief, append \`needs-decision: {the conflict}\` and stop as rule 6 requires, rather than choosing between them yourself.
+$PROJECT_INSTRUCTIONS
+
+# Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
