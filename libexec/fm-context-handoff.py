@@ -43,6 +43,7 @@ RECEIPT_SCHEMA = "firstmate.context-handoff.receipt.v1"
 ACK_SCHEMA = "firstmate.context-handoff.ack.v1"
 APPROVAL_SCHEMA = "firstmate.context-handoff.approval.v1"
 BINDING_SCHEMA = "firstmate.context-handoff.consumer-binding.v1"
+STATE_INITIALIZED_BYTES = b"firstmate.context-handoff.state.v1\n"
 COMPACTION_BINDING_SCHEMA = "firstmate.context-handoff.compaction-binding.v1"
 HANDOFF_SCHEMA = "claude-obsidian.handoff.v1"
 TRANSACTION_SCHEMA = "claude-obsidian.transaction.v1"
@@ -109,6 +110,7 @@ SENSITIVE_PATTERNS = [
         r"\b(local-only|strictly private|do not share)\b",
         r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
         r"\b\d{3}-\d{2}-\d{4}\b",
+        r"\b(?:taxpayer|tax)(?:[_ -]?(?:id|identifier|identification|number))\b",
         r"\baccount balance\b",
     )
 ]
@@ -152,23 +154,59 @@ class StateLayout:
         self.approvals = self.root / "approvals"
         self.bundles = self.root / "bundles"
         self.bindings = self.root / "bindings"
+        self.initialized = self.root / ".initialized"
         self.lock = self.root / ".lock"
 
     def initialize(self) -> None:
-        for directory in (
-            self.root,
-            self.candidates,
-            self.records,
-            self.claims,
-            self.queue,
-            self.receipts,
-            self.quarantine,
-            self.acks,
-            self.approvals,
-            self.bundles,
-            self.bindings,
-        ):
-            ensure_private_directory(directory)
+        fd: int | None = None
+        locked = False
+        try:
+            fd = os.open(self.home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+            for directory in (
+                self.root,
+                self.candidates,
+                self.records,
+                self.claims,
+                self.queue,
+                self.receipts,
+                self.quarantine,
+                self.acks,
+                self.approvals,
+                self.bundles,
+                self.bindings,
+            ):
+                ensure_private_directory(directory)
+            if self.initialized.exists():
+                validate_private_file(self.initialized)
+                if self.initialized.read_bytes() != STATE_INITIALIZED_BYTES:
+                    raise HandoffError("STATE_DURABILITY", "the handoff state initialization boundary is invalid")
+            else:
+                for directory in (
+                    self.root,
+                    self.candidates,
+                    self.records,
+                    self.claims,
+                    self.queue,
+                    self.receipts,
+                    self.quarantine,
+                    self.acks,
+                    self.approvals,
+                    self.bundles,
+                    self.bindings,
+                ):
+                    failpoint("before-initialization-boundary-fsync")
+                    fsync_directory(directory)
+                    fsync_directory(directory.parent)
+                atomic_create(self.initialized, STATE_INITIALIZED_BYTES)
+        except OSError as exc:
+            raise HandoffError("STATE_DURABILITY", "the handoff state directory chain could not be initialized durably") from exc
+        finally:
+            if fd is not None:
+                if locked:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
 
 _schema_cache: dict[str, Any] | None = None
@@ -447,7 +485,7 @@ def resolve_home(argument: str | None = None) -> Path:
         raise HandoffError("HOME_INVALID", "the selected Firstmate home is unavailable") from exc
 
 
-def load_config(home: Path) -> dict[str, Any] | None:
+def load_config(home: Path, *, validate_active_bindings: bool = True) -> dict[str, Any] | None:
     override = os.environ.get("FM_HANDOFF_CONFIG")
     path = Path(override).expanduser() if override else home / "config" / "context-handoff.json"
     if not path.exists():
@@ -479,13 +517,13 @@ def load_config(home: Path) -> dict[str, Any] | None:
     value = dict(value)
     value["approved_source_roots"] = canonical_roots
     value["registration_allowlist"] = normalize_registration_allowlist(value)
-    if value["registration_enabled"] or value["sealing_enabled"] or value["delivery_enabled"] or value["consumer_enabled"]:
+    if value["delivery_enabled"] or value["consumer_enabled"]:
+        validate_runtime_config(value)
+    if validate_active_bindings and (value["registration_enabled"] or value["sealing_enabled"] or value["delivery_enabled"] or value["consumer_enabled"]):
         vault = validate_vault_binding(value)
         state_root = (home / "state" / "context-handoff").resolve(strict=False)
         if state_root == vault or vault in state_root.parents or state_root in vault.parents:
             raise HandoffError("STATE_VAULT_OVERLAP", "handoff state root must remain outside the selected Vault")
-    if value["delivery_enabled"] or value["consumer_enabled"]:
-        validate_runtime_config(value)
     return value
 
 
@@ -1112,32 +1150,39 @@ def seal_candidates(home: Path, source_harness: str, session_hash: str, trigger:
                 return compaction_attempt_result("already-sealed", [{"record_id": key, "envelope_sha256": value} for key, value in attempt_bindings.items()])
             write_receipt(layout, "seal", "empty", "no-registered-candidates", source_harness=source_harness, trigger=trigger)
             return {"status": "empty"}
-        if len(matching) > MAX_ITEMS:
-            write_receipt(layout, "seal", "failed", "item-cap-exceeded", source_harness=source_harness, trigger=trigger, candidate_count=len(matching))
-            return {"status": "seal-failed", "had_candidates": True, "reason": "item-cap-exceeded"}
-        items = [matching[key]["item"] for key in sorted(matching)]
-        envelope: dict[str, Any] = {
-            "schema": HANDOFF_SCHEMA,
-            "record_id": "",
-            "source_harness": source_harness,
-            "source_session_hash": session_hash,
-            "trigger": trigger,
-            "created_at": now_utc(),
-            "items": items,
-        }
-        envelope["record_id"] = envelope_identity(envelope)
-        data = canonical_json(envelope)
-        if len(data) > MAX_ENVELOPE_BYTES:
-            write_receipt(layout, "seal", "failed", "byte-cap-exceeded", source_harness=source_harness, trigger=trigger, candidate_count=len(items), envelope_bytes=len(data))
-            return {"status": "seal-failed", "had_candidates": True, "reason": "byte-cap-exceeded"}
         if len(attempt_bindings) >= MAX_COMPACTION_RECORDS:
-            write_receipt(layout, "seal", "failed", "compaction-record-cap-exceeded", source_harness=source_harness, trigger=trigger, retryable_count=len(attempt_bindings))
-            return {"status": "seal-failed", "had_candidates": True, "reason": "compaction-record-cap-exceeded"}
+            return compaction_attempt_result("already-sealed", [{"record_id": key, "envelope_sha256": value} for key, value in attempt_bindings.items()])
+        selected: dict[str, dict[str, Any]] = {}
+        envelope: dict[str, Any] = {}
+        data = b""
+        created_at = now_utc()
+        for candidate_id in sorted(matching):
+            proposed = {**selected, candidate_id: matching[candidate_id]}
+            proposed_envelope: dict[str, Any] = {
+                "schema": HANDOFF_SCHEMA,
+                "record_id": "",
+                "source_harness": source_harness,
+                "source_session_hash": session_hash,
+                "trigger": trigger,
+                "created_at": created_at,
+                "items": [proposed[key]["item"] for key in sorted(proposed)],
+            }
+            proposed_envelope["record_id"] = envelope_identity(proposed_envelope)
+            proposed_data = canonical_json(proposed_envelope)
+            if len(proposed) > MAX_ITEMS or len(proposed_data) > MAX_ENVELOPE_BYTES:
+                break
+            selected = proposed
+            envelope = proposed_envelope
+            data = proposed_data
+        if not selected:
+            write_receipt(layout, "seal", "failed", "byte-cap-exceeded", source_harness=source_harness, trigger=trigger, candidate_count=len(matching))
+            return {"status": "seal-failed", "had_candidates": True, "reason": "byte-cap-exceeded"}
+        items = envelope["items"]
         validate_envelope(envelope, config)
         try:
             digest = atomic_create(record_file(layout, envelope["record_id"]), data)
             update_queue(layout, envelope["record_id"], envelope_sha256=digest)
-            for candidate_id in sorted(matching):
+            for candidate_id in sorted(selected):
                 claim = {
                     "schema": "firstmate.context-handoff.claim.v1",
                     "candidate_id": candidate_id,
@@ -1175,7 +1220,10 @@ def parse_event_stdin(max_bytes: int = MAX_HOOK_BYTES) -> dict[str, Any]:
 
 def matching_candidate_present(layout: StateLayout, source_harness: str, session_hash: str) -> bool:
     layout.initialize()
+    claimed = claimed_candidate_ids(layout)
     for path in sorted(layout.candidates.glob("candidate-*.json")):
+        if path.stem in claimed:
+            continue
         try:
             value = read_json_file(path, max_bytes=16 * 1024)
         except HandoffError:
@@ -1188,6 +1236,15 @@ def matching_candidate_present(layout: StateLayout, source_harness: str, session
         ):
             return True
     return False
+
+
+def block_failed_claude_precompact(home: Path, config: Mapping[str, Any], trigger: str, failure_code: str) -> dict[str, Any] | None:
+    layout = StateLayout(home)
+    if not matching_candidate_present(layout, "claude", config["recipient"]["agent_session_sha256"]):
+        return None
+    with state_lock(layout):
+        write_receipt(layout, "seal", "failed", "claude-precompact-binding-failed", source_harness="claude", trigger=trigger, failure_code=failure_code)
+    return {"decision": "block", "reason": "Already-curated handoff candidates could not be bound to the exact Claude endpoint; compaction was stopped."}
 
 
 def seal_with_failure_receipt(home: Path, source_harness: str, session_hash: str, trigger: str) -> dict[str, Any]:
@@ -1473,12 +1530,13 @@ def command_deliver(args: argparse.Namespace) -> dict[str, Any]:
     return deliver_pending(resolve_home(args.fm_home))
 
 
-def current_process_capability() -> str:
+def current_process_identity() -> tuple[str, int]:
     test_value = os.environ.get("FM_HANDOFF_TEST_PROCESS_CAPABILITY")
     if os.environ.get("FM_HANDOFF_TESTING") == "1" and test_value is not None:
-        if not test_value or len(test_value.encode("utf-8")) > 256:
+        generation_text = os.environ.get("FM_HANDOFF_TEST_PROCESS_GENERATION", "1")
+        if not test_value or len(test_value.encode("utf-8")) > 256 or not generation_text.isdigit() or int(generation_text) < 1:
             raise HandoffError("PROCESS_CAPABILITY", "the synthetic hook process capability is invalid")
-        return sha256_bytes(f"test\0{test_value}".encode("utf-8"))
+        return sha256_bytes(f"test\0{test_value}".encode("utf-8")), int(generation_text)
     process_group = os.getpgrp()
     session = os.getsid(0)
     if sys.platform.startswith("linux"):
@@ -1495,6 +1553,7 @@ def current_process_capability() -> str:
         if recorded_group != process_group or recorded_session != session or owner != os.getuid() or not start_time.isdigit():
             raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is inconsistent")
         identity = f"linux\0{process_group}\0{session}\0{start_time}\0{owner}"
+        generation = int(start_time)
     else:
         try:
             completed = subprocess.run(
@@ -1513,8 +1572,18 @@ def current_process_capability() -> str:
             raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is unavailable") from exc
         if completed.returncode != 0 or not output or len(output.encode("utf-8")) > 4096:
             raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is unavailable")
+        fields = output.split()
+        try:
+            started = datetime.strptime(" ".join(fields[2:7]), "%a %b %d %H:%M:%S %Y")
+        except (ValueError, IndexError) as exc:
+            raise HandoffError("PROCESS_CAPABILITY", "the current Claude process generation is unavailable") from exc
         identity = f"posix\0{process_group}\0{session}\0{output}"
-    return sha256_bytes(identity.encode("utf-8"))
+        generation = int(started.replace(tzinfo=timezone.utc).timestamp())
+    return sha256_bytes(identity.encode("utf-8")), generation
+
+
+def current_process_capability() -> str:
+    return current_process_identity()[0]
 
 
 def endpoint_binding_key(config: Mapping[str, Any]) -> str:
@@ -1527,19 +1596,35 @@ def bind_claude_session(home: Path, config: Mapping[str, Any], payload: Mapping[
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or hash_session("claude", session_id) != config["recipient"]["agent_session_sha256"]:
         return False
-    if not recipient_context_matches(config, require_environment=True):
-        return False
     layout = StateLayout(home)
-    binding = {
-        "schema": BINDING_SCHEMA,
-        "binding_key": endpoint_binding_key(config),
-        "session_hash": config["recipient"]["agent_session_sha256"],
-        "process_capability_sha256": current_process_capability(),
-        "vault_path": str(validate_vault_binding(config)),
-        "bound_at": now_utc(),
-    }
     with state_lock(layout):
-        atomic_replace(layout.bindings / f"{binding['binding_key']}.json", canonical_json(binding))
+        capability, generation = current_process_identity()
+        binding_key = endpoint_binding_key(config)
+        path = layout.bindings / f"{binding_key}.json"
+        if path.exists():
+            existing = read_json_file(path, max_bytes=4096)
+            existing_generation = existing.get("process_generation", -1) if isinstance(existing, dict) else -1
+            existing_capability = existing.get("process_capability_sha256") if isinstance(existing, dict) else None
+            if not isinstance(existing_generation, int):
+                raise HandoffError("CONSUMER_SESSION", "consumer session generation claim is invalid")
+            if existing_generation > generation or (existing_generation == generation and existing_capability != capability):
+                return False
+        claim = {
+            "schema": BINDING_SCHEMA,
+            "binding_key": binding_key,
+            "session_hash": config["recipient"]["agent_session_sha256"],
+            "process_capability_sha256": capability,
+            "process_generation": generation,
+            "state": "claiming",
+            "vault_path": str(config["vault"]["path"]),
+            "bound_at": now_utc(),
+        }
+        atomic_replace(path, canonical_json(claim))
+        if not recipient_context_matches(config, require_environment=True):
+            return False
+        claim["state"] = "active"
+        claim["vault_path"] = str(validate_vault_binding(config))
+        atomic_replace(path, canonical_json(claim))
     return True
 
 
@@ -1554,11 +1639,14 @@ def require_consumer_binding(home: Path, config: Mapping[str, Any]) -> None:
     layout = StateLayout(home)
     path = layout.bindings / f"{endpoint_binding_key(config)}.json"
     value = read_json_file(path, max_bytes=4096)
+    capability, generation = current_process_identity()
     if (
         not isinstance(value, dict)
         or value.get("schema") != BINDING_SCHEMA
         or value.get("session_hash") != config["recipient"]["agent_session_sha256"]
-        or value.get("process_capability_sha256") != current_process_capability()
+        or value.get("process_capability_sha256") != capability
+        or value.get("process_generation") != generation
+        or value.get("state") != "active"
         or value.get("vault_path") != str(validate_vault_binding(config))
     ):
         raise HandoffError("CONSUMER_SESSION", "consumer session generation is not bound")
@@ -1640,11 +1728,22 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
     home = resolve_home(args.fm_home)
     payload = parse_event_stdin()
     event_name = payload.get("hook_event_name")
+    precompact_config: dict[str, Any] | None = None
+    precompact_trigger = "manual" if payload.get("trigger") == "manual" else "threshold"
+    if event_name == "PreCompact":
+        precompact_config = load_config(home, validate_active_bindings=False)
+        if precompact_config is None or not config_enabled(precompact_config, "sealing_enabled"):
+            return None
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or hash_session("claude", session_id) != precompact_config["recipient"]["agent_session_sha256"]:
+            return None
     try:
         config = load_config(home)
-    except HandoffError:
+    except HandoffError as exc:
         if event_name == "PreToolUse":
             return guard_deny("The context handoff safety boundary is unhealthy; mutation was denied.")
+        if precompact_config is not None:
+            return block_failed_claude_precompact(home, precompact_config, precompact_trigger, exc.code)
         raise
     if config is None:
         return None
@@ -1668,11 +1767,17 @@ def command_claude_hook(args: argparse.Namespace) -> dict[str, Any] | None:
             return output
         return None
     if event_name == "PreCompact":
-        if not config_enabled(config, "sealing_enabled") or not bind_claude_session(home, config, payload):
-            return None
-        trigger = "manual" if payload.get("trigger") == "manual" else "threshold"
-        result = seal_with_failure_receipt(home, "claude", config["recipient"]["agent_session_sha256"], trigger)
-        persist_compaction_binding(home, config, result, trigger)
+        try:
+            bound = bind_claude_session(home, config, payload)
+        except HandoffError as exc:
+            bound = False
+            failure_code = exc.code
+        else:
+            failure_code = "CONSUMER_ENDPOINT"
+        if not bound:
+            return block_failed_claude_precompact(home, config, precompact_trigger, failure_code)
+        result = seal_with_failure_receipt(home, "claude", config["recipient"]["agent_session_sha256"], precompact_trigger)
+        persist_compaction_binding(home, config, result, precompact_trigger)
         if result.get("status") == "seal-failed" and result.get("had_candidates"):
             return {"decision": "block", "reason": "Already-curated handoff candidates could not be sealed durably; compaction was stopped."}
         return None
@@ -1815,8 +1920,8 @@ def validate_save_bundle(config: Mapping[str, Any], record_id: str, bundle: Any)
         normalized_writes.append({"path": relative, "mode": mode, "content": content})
     if len(paths) != len(set(paths)) or set(expected_hashes) != set(paths):
         raise HandoffError("BUNDLE_PATH_SET", "Save expected_hashes must bind every unique write path exactly")
-    if not create_paths:
-        raise HandoffError("BUNDLE_DESTRUCTIVE", "automatic Save requires at least one new non-canonical note")
+    if len(create_paths) != 1:
+        raise HandoffError("BUNDLE_DESTRUCTIVE", "automatic Save requires exactly one new non-canonical note")
     if not set(consumer["required_coupled_paths"]).issubset(paths):
         raise HandoffError("BUNDLE_COUPLED", "automatic Save lacks required coupled index, log, or hot updates")
     normalized = {

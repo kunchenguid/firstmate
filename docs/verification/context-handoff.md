@@ -54,21 +54,31 @@ tests/fm-context-handoff.test.sh
 Result:
 
 ```text
+ok - required evidence prerequisite exit status
 ok - sensitive candidate and Save content rejection
+ok - single-note automatic Save boundary
 ok - queue-first orphan recovery
 ok - locked registration capability snapshot
 ok - bounded compaction backpressure and drain
+ok - deterministic byte-bounded envelope draining
+ok - replacement-monotonic Claude session binding
+ok - fail-closed Claude PreCompact endpoint binding
 ok - exit-75 Save authority revocation
 ok - exact bundled MCP tool allowlist
 ok - bounded transports and fail-closed delivery
 ok - durable private state directory creation
-ok - fail-closed Pi adapter result validation
+ok - serialized durable state initialization
+ok - model-free Pi lifecycle and fail-closed adapter validation
 ok - completed Save recovery before source validation
+ok - registration lifecycle and multi-record retry recovery
+ok - quarantine, disable, and disposition recovery
+ok - transaction apply replay and rollback recovery
+ok - Claude lifecycle and model-free plugin discovery
 ```
 
 The suite uses isolated temporary Firstmate homes, source roots, Vaults, Herdr adapters, Pi extension APIs, Claude hook payloads, MCP requests, and transaction state.
 The self-contained Bash suite executes the public CLI, Claude hook, MCP server, Pi extension, and transaction fixture against isolated synthetic homes and Vaults.
-It covers exact sensitive-data rejection after eligibility authorization, queue-before-claim crash recovery, locked process-capability registration, bounded retry backpressure and draining, exit-75 approval revocation and fresh inspect, exact MCP and shell guard confinement, bounded MCP and subprocess transport, fail-closed delivery, durable state-directory creation, fail-closed Pi adapter result validation, and completed-Save recovery before mutable-source validation.
+It covers required-gate prerequisite exit status, exact sensitive-data rejection after eligibility authorization, single-note Save authority, queue-before-claim crash recovery, locked and generation-monotonic process capability, deterministic byte-bounded subsets, retry backpressure and draining, fail-closed Claude endpoint binding, exit-75 approval revocation and fresh inspect, exact MCP and shell guard confinement, bounded MCP and subprocess transport, fail-closed delivery, serialized durable state initialization, complete Pi lifecycle failure handling, completed-Save recovery before mutable-source validation, registration retry recovery, quarantine, disable and re-enable, disposition crash recovery, transaction replay and rollback, and model-free Claude plugin discovery.
 No test reads or mutates the real Vault, a live Claude session, a live Herdr process, credentials, auth state, transcripts, or provider data.
 No test invokes a model.
 
