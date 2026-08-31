@@ -104,6 +104,26 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+  CONFIG=$(resolve_directory_input FM_CONFIG_OVERRIDE "$FM_CONFIG_OVERRIDE") || exit 1
+else
+  CONFIG="$FM_HOME/config"
+fi
+
+BROWSER_RULE='3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.'
+BROWSER_CDP_FILE="$CONFIG/browser-cdp-url"
+if [ -f "$BROWSER_CDP_FILE" ] && [ ! -L "$BROWSER_CDP_FILE" ]; then
+  BROWSER_CDP_URL=$(sed -n '1p' "$BROWSER_CDP_FILE")
+  case "$BROWSER_CDP_URL" in
+    http://127.0.0.1:[0-9]*|http://localhost:[0-9]*)
+      IFS= read -r -d '' BROWSER_RULE <<EOF || true
+3. Use gh-axi for GitHub operations. Before browser automation, check \`$BROWSER_CDP_URL/json/version\` with \`/usr/bin/curl\`. When it responds, connect with \`CHROME_DEVTOOLS_AXI_SESSION=firstmate-browser CHROME_DEVTOOLS_AXI_BROWSER_URL=$BROWSER_CDP_URL chrome-devtools-axi ...\`. Do not launch or install a browser, create a fake browser-app alias, or expose the debugger beyond loopback. If the endpoint is unavailable, append \`blocked: configured browser CDP endpoint unavailable\` and stop.
+EOF
+      BROWSER_RULE=${BROWSER_RULE%$'\n'}
+      ;;
+    *) echo "warning: ignoring invalid local browser CDP URL in $BROWSER_CDP_FILE" >&2 ;;
+  esac
+fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -337,7 +357,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -453,7 +473,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+$BROWSER_RULE
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

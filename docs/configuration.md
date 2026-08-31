@@ -100,6 +100,12 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Browser CDP endpoint (config/browser-cdp-url)
+
+`config/browser-cdp-url` is an optional local, gitignored one-line URL for a captain-owned Chromium browser's Chrome DevTools Protocol endpoint. When it is a loopback URL in the form `http://127.0.0.1:<port>` or `http://localhost:<port>`, `bin/fm-brief.sh` adds the exact connection command to new ship and scout briefs. Workers first check `<url>/json/version` with `/usr/bin/curl`, then use a named `chrome-devtools-axi` session and `CHROME_DEVTOOLS_AXI_BROWSER_URL=<url>` to attach to that browser instead of launching Google Chrome.
+
+The URL must remain loopback-only. A worker must never install a browser, create a fake application alias, or expose remote debugging to the network to satisfy this setting. If the endpoint is unavailable, the brief requires a `blocked:` status rather than a fallback browser launch. A missing or malformed file leaves the standard browser-tool instruction unchanged.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.

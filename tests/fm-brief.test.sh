@@ -751,6 +751,30 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_browser_cdp_rule_is_optional_and_loopback_only() {
+  local home brief
+  home="$TMP_ROOT/browser-cdp-home"
+  mkdir -p "$home/data" "$home/config"
+  printf '%s\n' 'http://127.0.0.1:9222' > "$home/config/browser-cdp-url"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" browser-cdp-ship alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "loopback browser CDP configuration should scaffold a ship brief"
+  brief="$home/data/browser-cdp-ship/brief.md"
+  assert_grep 'http://127.0.0.1:9222/json/version' "$brief" \
+    "configured browser CDP URL was not rendered into the ship brief"
+  assert_grep 'CHROME_DEVTOOLS_AXI_SESSION=firstmate-browser' "$brief" \
+    "configured browser CDP rule omitted its isolated checker session"
+  assert_grep 'Do not launch or install a browser' "$brief" \
+    "configured browser CDP rule omitted its no-launch safety boundary"
+
+  printf '%s\n' 'https://browser.example.test:9222' > "$home/config/browser-cdp-url"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" browser-cdp-scout alpha --scout >/dev/null 2>&1 \
+    || fail "malformed browser CDP configuration should not prevent a scout brief"
+  brief="$home/data/browser-cdp-scout/brief.md"
+  assert_no_grep 'browser.example.test' "$brief" \
+    "non-loopback browser CDP URL must never be rendered into a brief"
+  pass "fm-brief.sh: browser CDP guidance is optional and loopback-only"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -772,3 +796,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_browser_cdp_rule_is_optional_and_loopback_only
