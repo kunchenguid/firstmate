@@ -4,7 +4,8 @@
 # sums with cwd/window matching, pi/pi-signed session parsing over the shared
 # ~/.pi/agent/sessions tree, the durable spawn_gen task start that survives a
 # meta rewritten after the fact, cursor/unavailable null rows, the
-# no-double-append idempotency guard, the ledger report rendering, and the
+# no-double-append idempotency guard, the ledger report rendering including
+# its refusal to present an unparseable ledger as a result, and the
 # teardown integration properties that the harvest sees the status log and
 # that a harvest failure never blocks teardown. Also covers the whole-task row
 # scope a relaunch must not narrow, the per-line corrupt-log tolerance, and
@@ -589,6 +590,35 @@ report_case() {
   pass "usage report: per-model totals, per-task rows, missing-ledger tolerance"
 }
 
+# A ledger line that jq cannot parse must fail the report loudly. Reporting
+# exit 0 with a physical row count above empty sections presents a truncated
+# fleet cost picture as a complete one.
+report_malformed_case() {
+  local home ledger out status
+  home="$TMP_ROOT/home-usagemalformed"
+  mkdir -p "$home/data"
+  ledger="$home/data/usage-ledger.jsonl"
+  printf '{"task":"usagegood1","model":"good-model","source":"claude","input_tokens":7}\n' > "$ledger"
+  printf '{"task": truncated\n' >> "$ledger"
+
+  out=$(FM_DATA_OVERRIDE="$home/data" "$REPORT" 2>&1)
+  status=$?
+  expect_code 1 "$status" "report of an unparseable ledger should fail"$'\n'"$out"
+  assert_contains "$out" "$ledger" "the failure names the offending ledger"
+  assert_not_contains "$out" "per-task rows" \
+    "a failed report must not print sections it could not compute"
+  assert_not_contains "$out" "2 rows" \
+    "a failed report must not present a physical row count as a result"
+
+  # The same ledger without the truncated line still reports normally, so the
+  # failure is the parse error and not the new pre-render step.
+  printf '{"task":"usagegood1","model":"good-model","source":"claude","input_tokens":7}\n' > "$ledger"
+  out=$(FM_DATA_OVERRIDE="$home/data" "$REPORT" 2>&1)
+  expect_code 0 "$?" "report of a parseable ledger should still succeed"$'\n'"$out"
+  assert_contains "$out" "good-model" "the repaired ledger still renders its model row"
+  pass "usage report: an unparseable ledger fails loudly instead of reporting empty sections"
+}
+
 # --- teardown integration: the harvest still sees the task status log -------
 
 # Teardown deletes state/<id>.status when it retires the task's status
@@ -914,5 +944,6 @@ race_case
 lock_bound_case
 report_case
 report_no_harness_case
+report_malformed_case
 teardown_status_case
 teardown_case
