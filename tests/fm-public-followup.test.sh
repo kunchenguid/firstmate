@@ -102,6 +102,18 @@ run_pf() {  # <home> <args...>
     FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" "$PF" "$@"
 }
 
+# Drive the real script through macOS system bash (3.2.x). /usr/bin/env bash
+# often resolves to a newer bash where empty-array "${arr[@]}" under set -u is
+# a no-op, so this path is what actually guards the 3.2 unbound-variable crash.
+run_pf_sysbash() {  # <home> <args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FAKE_CURL_LOG="${FAKE_CURL_LOG:-}" \
+    FAKE_FOLLOWUP_CODE="${FAKE_FOLLOWUP_CODE:-200}" \
+    FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" /bin/bash "$PF" "$@"
+}
+
 tasks_in() {  # <home> <tasks-axi args...>
   local home=$1
   shift
@@ -1642,6 +1654,48 @@ EOF
   pass "failed rechain retirement keeps the source claimed by one resumable destination"
 }
 
+test_first_register_succeeds_with_empty_lock_list_under_bash32() {
+  local home err rc
+  [ -x /bin/bash ] || { pass "first register under /bin/bash skipped without /bin/bash"; return 0; }
+  home=$(make_home first-register-empty-locks)
+  jq -n '{request_id:"req-empty-locks", platform:"discord",
+      context_binding:{version:"ctx1", value:"ctx1_req-empty-locks"},
+      public_safe_summary:"first register with an empty lock list",
+      received_at:"2026-07-30T10:00:00Z",
+      followup_expires_at:"2026-08-06T10:00:00Z",
+      reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+  jq -n '{type:"pr-merged", project:"firstmate",
+          required_deliverables:["pr_url"], completion_policy:"all-required"}' \
+    > "$home/expected.json"
+  jq -n '{relation_id:"rel-code", work_ref:{home_id:"main", task_id:"work-empty-locks"},
+      role:"fulfills", required:true, generation:1}' > "$home/relation.json"
+  tasks_in "$home" public-followup add pf-empty-locks \
+    --request-context-file "$home/request.json" --purpose promised-final \
+    --expected-final-file "$home/expected.json" --expires-at 2026-10-01T00:00:00Z >/dev/null \
+    || fail "could not create the public commitment"
+  tasks_in "$home" public-followup bind-work pf-empty-locks \
+    --relation-file "$home/relation.json" >/dev/null \
+    || fail "could not bind work to the public commitment"
+  FM_HOME="$home" FMX_NOW_OVERRIDE="$PF_TEST_NOW" bash -c \
+    ". '$ROOT/bin/fm-x-lib.sh'; fmx_context_registry_set '$home/state' req-empty-locks discord 1900" \
+    || fail "could not retain the private request context"
+
+  err=$(mktemp "$home/register-err.XXXXXX")
+  set +e
+  run_pf_sysbash "$home" register pf-empty-locks --relation rel-code \
+    --work-home main --work-id work-empty-locks --generation 1 >"$home/register.out" 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first register under /bin/bash with an empty lock list failed (exit $rc): $(cat "$err" "$home/register.out")"
+  grep -q 'unbound variable' "$err" \
+    && fail "first register hit an unbound-variable crash under /bin/bash: $(cat "$err")"
+  assert_grep "registered pf-empty-locks main/work-empty-locks" "$home/register.out" \
+    "first register must print the registered line"
+  assert_present "$home/state/public-followup/registry/pf-empty-locks" \
+    "first register must write the registration record"
+  pass "first register succeeds with an empty lock list under /bin/bash"
+}
+
 test_registration_replay_preserves_delivery_and_retirement() {
   local home log registry snapshot
   home=$(make_home register-replay)
@@ -2218,6 +2272,13 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   pass "secondmate promotion matches teardown parent resolution"
 }
 
+# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
+# register regression. The rest of this file is not a 3.2 snapshot suite.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_outcome_text_is_bounded_without_corrupting_characters
 test_restart_e2e_delivers_exactly_once
 test_duplicate_event_and_replay_are_noops
@@ -2256,6 +2317,7 @@ test_rechain_delivers_second_post_on_same_thread
 test_rechain_resumes_after_partial_add
 test_rechain_claims_delivered_source_once
 test_failed_rechain_retirement_keeps_source_claimed
+test_first_register_succeeds_with_empty_lock_list_under_bash32
 test_registration_replay_preserves_delivery_and_retirement
 test_redelivery_does_not_report_retired_loop_open
 test_retire_after_secondmate_home_removal
