@@ -220,7 +220,7 @@ fm_control_cursor_exemption_harness_refusal() {  # <harness>
 # bin/fm-control.sh - print this, so the diagnostic cannot drift from the table
 # above the way a hand-written message at each site would.
 fm_control_harness_kind_refusal() {  # <harness> <kind>
-  local harness=${1-} kind=${2-} canonical
+  local harness=${1-} kind=${2-} canonical cursor_remedy
   canonical=$(fm_control_harness_family "$harness") || {
     printf "'%s' is not a verified adapter, so it is not verified to run a %s task" "$harness" "$kind"
     return 0
@@ -230,7 +230,18 @@ fm_control_harness_kind_refusal() {  # <harness> <kind>
       printf 'muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates.'
       ;;
     cursor)
-      printf "cursor is a verified adapter but is refused for an unattended %s launch: its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. The bar applies however cursor was selected, INCLUDING when firstmate inherited it by detecting its own runtime, because silently substituting another tool would change which adapter runs the captain's work without saying so. If this home is running inside cursor and resolved it that way, set config/crew-harness to a verified adapter such as codex or claude, or add a crew-dispatch profile eligible for this kind; firstmate will not choose one for you. If a person is in the pane or a proven outer isolation envelope governs this worker, pass it on the invocation itself with --cursor-exemption attended or --cursor-exemption envelope:<name>, which both bin/fm-spawn.sh and bin/fm-control.sh's relaunch verb accept." "$kind"
+      # The remedy is per KIND because the resolution chains differ, and naming a
+      # knob that cannot clear the refusal sends an operator to edit the wrong
+      # file and hit the identical message again. A secondmate resolves through
+      # config/secondmate-harness FIRST (bin/fm-harness.sh's resolve_secondmate),
+      # so crew-harness alone cannot clear it, and crew-dispatch profiles are
+      # never consulted for a secondmate at all. It stays here rather than at the
+      # call sites so the one owner of the refusal owns its remedy too.
+      case "$kind" in
+        secondmate) cursor_remedy='set config/secondmate-harness to a verified adapter such as codex or claude; it resolves ahead of config/crew-harness, so changing crew-harness alone will not clear this, and crew-dispatch profiles are not consulted for a secondmate' ;;
+        *) cursor_remedy='set config/crew-harness to a verified adapter such as codex or claude, or add a crew-dispatch profile eligible for this kind' ;;
+      esac
+      printf "cursor is a verified adapter but is refused for an unattended %s launch: its --auto-review classifier prompts for calls it does not deem safe, the pane has no approver, and the parked pane keeps reading as busy. The bar applies however cursor was selected, INCLUDING when firstmate inherited it by detecting its own runtime, because silently substituting another tool would change which adapter runs the captain's work without saying so. If this home is running inside cursor and resolved it that way, %s; firstmate will not choose one for you. If a person is in the pane or a proven outer isolation envelope governs this worker, pass it on the invocation itself with --cursor-exemption attended or --cursor-exemption envelope:<name>, which both bin/fm-spawn.sh and bin/fm-control.sh's relaunch verb accept." "$kind" "$cursor_remedy"
       ;;
     *)
       printf "'%s' is not verified to run a %s task" "$canonical" "$kind"
@@ -256,9 +267,12 @@ fm_control_harness_kind_refusal() {  # <harness> <kind>
 # know it. What belongs here is every rule answerable from the recorded profile
 # ALONE - harness, kind, and effective grant - because that is what the control
 # plane can evaluate while the old agent is still running. What does not belong
-# here is the ENVIRONMENTAL class: bin/fm-spawn.sh still refuses after this point
-# when the harness executable is absent from PATH (pi, cursor) and when a
-# requested cursor model is missing from the live `--list-models` catalog. Those
+# here is the ENVIRONMENTAL class, defined by its rule rather than by a roster
+# that would go stale as adapters are added: any refusal whose answer depends on
+# the state of THIS MACHINE rather than on the recorded profile. bin/fm-spawn.sh
+# still refuses after this point for several of them - resolving an adapter's
+# executable on PATH and probing a live model catalog are two examples, not the
+# whole set. Those
 # cannot be answered without probing this machine and running the harness binary,
 # which this file must never do - it is sourced as a pure contract with no side
 # effects, no backend command, and no state reads - and their answer can change
