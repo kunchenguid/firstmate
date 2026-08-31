@@ -47,9 +47,10 @@ This skill owns the intake PROCEDURE only; `tasks-axi` remains the one backlog e
    `config/backlog-backend` mechanics.
    Check the item against the existing backlog (`tasks-axi list`, or a read of `data/backlog.md` on
    a manual-backend home) before filing.
-   When an existing item already covers the same work, merge into it (`tasks-axi update <id>
-   --body-file <path> --archive-body`, or the equivalent manual edit that archives rather than
-   drops the prior body) instead of creating a twin.
+   When an existing item already covers the same work, merge into it instead of creating a twin:
+   `tasks-axi update <id> --body-file <path> --archive-body` on the tasks-axi backend, or on a
+   manual-backend home edit the item's body in place, archiving the superseded body rather than
+   appending or dropping it per `AGENTS.md` section 10.
    Otherwise file a new item (`tasks-axi add`, or the equivalent manual entry) with its classified
    kind and priority.
 
