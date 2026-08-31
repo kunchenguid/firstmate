@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Shared session-lock harness identity.
+# Shared session-lock session identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
+# ONE owner of the "which verified harness session holds this home's session
+# lock, and does the current process belong to that same session?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
@@ -24,6 +24,67 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
+
+# Print Codex's state root, or fail when no absolute-enough root is available.
+# CODEX_HOME is Codex's own override; otherwise its state lives below HOME.
+fm_codex_state_root() {
+  if [ -n "${CODEX_HOME:-}" ]; then
+    printf '%s\n' "$CODEX_HOME"
+  elif [ -n "${HOME:-}" ]; then
+    printf '%s/.codex\n' "$HOME"
+  else
+    return 1
+  fi
+}
+
+# Classify Codex's thread-writer lock for $1.
+#   0 = held, so that Codex thread is live
+#   1 = absent or free, so that thread is stale
+#   2 = uncertain, which callers must treat fail-closed
+fm_codex_writer_lock_state() {  # <thread-id>
+  local thread_id=${1:-} root writer_lock rc
+  case "$thread_id" in
+    ''|*[!A-Za-z0-9._-]*) return 2 ;;
+  esac
+  root=$(fm_codex_state_root) || return 2
+  writer_lock="$root/thread-writer-locks/$thread_id.lock"
+  [ -e "$writer_lock" ] || return 1
+  [ -f "$writer_lock" ] && [ ! -L "$writer_lock" ] || return 2
+  command -v flock >/dev/null 2>&1 || return 2
+  (
+    exec 9<"$writer_lock" || exit 2
+    flock -n -E 75 9
+  ) >/dev/null 2>&1
+  rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    75) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+# Print the first safe Codex thread marker available to a tool subprocess.
+fm_codex_thread_id() {
+  local thread_id=${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}
+  case "$thread_id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  printf '%s\n' "$thread_id"
+}
+
+# True for every lock identity shape accepted by the current file format.
+# Numeric identities retain their historic permissive syntax; their ancestry
+# and liveness checks below remain the authority for actual ownership.
+fm_session_identity_valid() {  # <identity>
+  local identity=${1:-}
+  case "$identity" in
+    codex:*)
+      identity=${identity#codex:}
+      case "$identity" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+      ;;
+    ''|*[!0-9]*) return 1 ;;
+  esac
+}
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -152,6 +213,39 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# Print this session's stable lock identity. A verified Codex writer lock takes
+# precedence because Codex's sandbox may hide the harness process ancestry.
+# Every other case falls through to the existing harness-PID ancestry path.
+fm_session_identity() {
+  local thread_id
+  if thread_id=$(fm_codex_thread_id) \
+    && fm_codex_writer_lock_state "$thread_id"; then
+    printf 'codex:%s\n' "$thread_id"
+    return 0
+  fi
+  fm_harness_ancestry_pid
+}
+
+# True while a recorded session identity is live. An uncertain Codex writer
+# state is deliberately live for contention purposes, so ambiguity can never
+# authorize stealing a possibly active session's home lock.
+fm_session_identity_alive() {  # <identity>
+  local identity=${1:-} state
+  case "$identity" in
+    codex:*)
+      fm_session_identity_valid "$identity" || return 1
+      fm_codex_writer_lock_state "${identity#codex:}"
+      state=$?
+      case "$state" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) fm_harness_pid_alive "$identity" ;;
+  esac
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
@@ -161,14 +255,21 @@ fm_harness_pid_alive() {
 # lock, a malformed lock, a lock held by a harness outside this ancestry, or an
 # ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
-  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
+  local state=$1 lock_identity pids pid thread_id
+  lock_identity=$(cat "$state/.lock" 2>/dev/null || true)
+  case "$lock_identity" in
+    codex:*)
+      fm_session_identity_valid "$lock_identity" || return 1
+      thread_id=$(fm_codex_thread_id) || return 1
+      [ "$lock_identity" = "codex:$thread_id" ] || return 1
+      fm_codex_writer_lock_state "$thread_id"
+      return
+      ;;
     ''|*[!0-9]*) return 1 ;;
   esac
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 0
+    [ "$pid" = "$lock_identity" ] && return 0
   done <<EOF
 $pids
 EOF

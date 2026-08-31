@@ -220,6 +220,70 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+test_codex_writer_lock_supplies_identity_when_ancestry_is_hidden() {
+  local dir fakebin codex_home writer_lock writer_fd got out rc
+  dir="$TMP_ROOT/codex-hidden-ancestry"
+  fakebin=$(fm_fakebin "$dir")
+  codex_home="$dir/codex-state"
+  writer_lock="$codex_home/thread-writer-locks/thread-123.lock"
+  mkdir -p "$dir/state" "${writer_lock%/*}"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  exec {writer_fd}>"$writer_lock" || fail "could not open the Codex writer-lock fixture"
+  flock "$writer_fd" || fail "could not hold the Codex writer-lock fixture"
+
+  got=$(CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_session_identity' _ "$LIB") \
+    || fail "a held Codex writer lock did not supply a session identity"
+  [ "$got" = codex:thread-123 ] \
+    || fail "Codex identity was '$got', expected codex:thread-123"
+  got=$(CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-harness.sh") \
+    || fail "the harness detector failed with hidden Codex ancestry"
+  [ "$got" = codex ] || fail "the verified Codex writer marker detected '$got' instead of codex"
+  CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_codex_writer_lock_state thread-123' _ "$LIB" \
+    || fail "a held Codex writer lock was not classified live"
+
+  out=$(CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    FM_HOME="$dir" "$ROOT/bin/fm-lock.sh" 2>&1) || fail "Codex could not acquire the home lock: $out"
+  [ "$out" = 'lock acquired: session codex:thread-123' ] \
+    || fail "Codex lock acquisition reported unexpected output: $out"
+  [ "$(cat "$dir/state/.lock")" = codex:thread-123 ] \
+    || fail "Codex lock acquisition did not publish the stable thread identity"
+  CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_session_lock_owned_by_self "$2"' _ "$LIB" "$dir/state" \
+    || fail "the Codex session did not recognize its own published lock"
+
+  flock -u "$writer_fd" || fail "could not release the Codex writer-lock fixture"
+  if CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_codex_writer_lock_state thread-123' _ "$LIB"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ] || fail "a free Codex writer lock returned $rc instead of stale state 1"
+
+  rm -f "$writer_lock"
+  ln -s /dev/null "$writer_lock"
+  if CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_codex_writer_lock_state thread-123' _ "$LIB"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ] || fail "an unsafe Codex writer lock returned $rc instead of uncertain state 2"
+  CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_session_identity_alive codex:thread-123' _ "$LIB" \
+    || fail "uncertain Codex liveness did not fail closed against lock theft"
+
+  pass "session-lock: a held Codex writer flock supplies identity when process ancestry is hidden"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +424,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_codex_writer_lock_supplies_identity_when_ancestry_is_hidden
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

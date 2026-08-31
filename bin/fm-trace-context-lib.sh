@@ -41,6 +41,9 @@
 #     returns 0: telemetry is omitted safely and never aborts the spawn. The
 #     task's recorded carrier wins so recovery keeps identity; otherwise a
 #     fresh root is minted, never derived from this process's environment.
+
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
 #
 # Enablement (see docs/configuration.md for the schema):
 #   config/trace-context   presence flag under the home's config dir enables it.
@@ -137,7 +140,7 @@ fm_trace_context_enabled() {  # <config-dir>
   [ -f "$config_dir/trace-context" ]
 }
 
-# Echo the lock pid that owns the effective-state file's home, or fail when the
+# Echo the lock identity that owns the effective-state file's home, or fail when the
 # adjacent session lock is absent or malformed. Binding the decision to this
 # token makes a prior session's record inactive even if publication cannot
 # replace or remove that stale file.
@@ -149,10 +152,11 @@ fm_trace_context_session_lock() {  # <effective-state-file>
   # attempted: an absent lock is an ordinary silent "not locked" answer, and a
   # trailing 2>/dev/null on the bare read would still leak the open failure.
   { IFS= read -r lock_pid < "$state_dir/.lock"; } 2>/dev/null || return 1
+  fm_session_identity_valid "$lock_pid" || return 1
   case "$lock_pid" in
-    '' | *[!0-9]*) return 1 ;;
+    codex:*) ;;
+    *) [ "$lock_pid" -gt 1 ] || return 1 ;;
   esac
-  [ "$lock_pid" -gt 1 ] || return 1
   printf '%s' "$lock_pid"
 }
 

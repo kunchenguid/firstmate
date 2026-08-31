@@ -293,9 +293,9 @@ EOF
 # nobody else has claimed, and the sweeps are idempotent, so finishing it is
 # strictly better than abandoning it. A missing, unreadable, or replaced lock all
 # fail closed to the read-only probe.
-lock_unchanged() {  # <expected-pid>
+lock_unchanged() {  # <expected-session-identity>
   local expected=$1 current
-  case "$expected" in ''|*[!0-9]*) return 1 ;; esac
+  fm_session_identity_valid "$expected" || return 1
   [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
   current=$(cat "$STATE/.lock" 2>/dev/null) || return 1
   [ "$current" = "$expected" ]
