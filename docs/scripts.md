@@ -120,6 +120,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
+| `fm-cloud-annahme.sh`    | Accept a new cloud kick by comparing state/cloud-kick.md to cloud-kick.done and queue one check wake |
+| `fm-cloud-holen.sh`      | Poll the ntfy kick topic into state/cloud-kick.md and announce through annahme       |
+| `fm-cloud-lib.sh`        | Shared cloud-kick paths, hashing, and acceptance helpers                             |
+| `fm-cloud-senden.sh`     | Post state/cloud-bericht.md to the ntfy report topic                               |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |

@@ -163,9 +163,11 @@ budget_reset() {
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
+  "$SCRIPT_DIR/fm-cloud-annahme.sh" >/dev/null 2>&1 || true
   exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  "$SCRIPT_DIR/fm-cloud-annahme.sh" >/dev/null 2>&1 || true
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2

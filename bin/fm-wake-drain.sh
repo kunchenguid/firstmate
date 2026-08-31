@@ -513,6 +513,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
+  "$SCRIPT_DIR/fm-cloud-annahme.sh" >/dev/null 2>&1 || true
   assert_watcher_liveness
   exit 0
 fi
@@ -526,6 +527,7 @@ if [ "$ACTOR" = main ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
+    "$SCRIPT_DIR/fm-cloud-annahme.sh" >/dev/null 2>&1 || true
     assert_watcher_liveness
     exit 0
   fi
