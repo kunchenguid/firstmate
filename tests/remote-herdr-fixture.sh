@@ -34,13 +34,16 @@ install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <sock
   local standalone_release="$1/.codex/packages/standalone/releases/0.146.0/bin/codex"
   local standalone_current="$1/.codex/packages/standalone/current"
   local standalone_launcher="$1/.local/bin/codex"
-  local lock_lib="$1/bin/fm-session-lock-lib.sh" quoted_remote_root
+  local lock_lib="$1/bin/fm-session-lock-lib.sh" quoted_remote_root quoted_proc_root perl_bin
   mkdir -p "$remote_root/bin" "$codex_root/bin" "$(dirname "$codex_script")" \
     "$(dirname "$standalone_release")" "$(dirname "$standalone_launcher")"
   command -v node >/dev/null 2>&1 || return 1
+  perl_bin=$(command -v perl) || return 1
   [ -f "$lock_lib" ] || return 1
   printf -v quoted_remote_root '%q' "$remote_root"
-  printf '\nfm_codex_system_home() { printf "%%s\\n" %s; }\n' "$quoted_remote_root" >> "$lock_lib"
+  printf -v quoted_proc_root '%q' "$state.proc"
+  printf '\nFM_PROC_ROOT_OVERRIDE=%s\nfm_codex_system_home() { printf "%%s\\n" %s; }\n' \
+    "$quoted_proc_root" "$quoted_remote_root" >> "$lock_lib"
   cat > "$codex_script" <<'JS'
 #!/usr/bin/env node
 setInterval(() => {}, 1000);
@@ -60,6 +63,7 @@ SEND_FAIL='$send_fail'
 SOCKET='$socket'
 CODEX_BIN='$standalone_launcher'
 NODE_BIN='$(command -v node)'
+PERL_BIN='$perl_bin'
 PROCESS_MODE_FILE='$state.process-mode'
 PROC_ROOT='$state.proc'
 SH
@@ -67,6 +71,39 @@ SH
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
 save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+start_fixture_process() { # <pid-file> <executable> [args...]
+  pid_file=$1
+  executable=$2
+  shift 2
+  ready_file="$pid_file.ready.$$"
+  rm -f -- "$ready_file"
+  CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54 \
+    FM_FIXTURE_READY="$ready_file" \
+    "$PERL_BIN" -MPOSIX=setsid -e '
+      my $sid = setsid();
+      die "setsid failed: $!\n" unless defined $sid;
+      exec @ARGV;
+      die "exec failed: $!\n";
+    ' "$executable" "$@" >/dev/null 2>&1 &
+  fixture_pid=$!
+  ready_attempt=0
+  while [ ! -f "$ready_file" ]; do
+    if ! kill -0 "$fixture_pid" 2>/dev/null; then
+      wait "$fixture_pid" 2>/dev/null || true
+      rm -f -- "$ready_file"
+      return 1
+    fi
+    ready_attempt=$((ready_attempt + 1))
+    if [ "$ready_attempt" -gt 500 ]; then
+      kill "$fixture_pid" 2>/dev/null || true
+      rm -f -- "$ready_file"
+      return 1
+    fi
+    sleep 0.01
+  done
+  printf '%s\n' "$fixture_pid" > "$pid_file"
+  rm -f -- "$ready_file"
+}
 ws=""; label=""; cwd=""; pane=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
@@ -149,10 +186,10 @@ case "${1:-} ${2:-}" in
     agent_pid_file="$STATE.agent-pid"
     agent_pid=$(cat "$agent_pid_file" 2>/dev/null || true)
     if [ "$process_mode" != generic-only ] && ! kill -0 "$agent_pid" 2>/dev/null; then
-      CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54 \
-        "$CODEX_BIN" -e 'setInterval(() => {}, 1000)' >/dev/null 2>&1 &
-      agent_pid=$!
-      printf '%s\n' "$agent_pid" > "$agent_pid_file"
+      start_fixture_process "$agent_pid_file" "$CODEX_BIN" -e \
+        'require("fs").writeFileSync(process.env.FM_FIXTURE_READY, ""); setInterval(() => {}, 1000)' \
+        || exit 1
+      agent_pid=$(cat "$agent_pid_file")
       mkdir -p "$PROC_ROOT/$agent_pid"
       printf 'CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54\0' > "$PROC_ROOT/$agent_pid/environ"
       ln -s "$CODEX_BIN" "$PROC_ROOT/$agent_pid/exe"
@@ -162,10 +199,10 @@ case "${1:-} ${2:-}" in
     case "$process_mode" in
       generic-only|with-helper)
         if ! kill -0 "$helper_pid" 2>/dev/null; then
-          CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54 \
-            "$NODE_BIN" -e 'setInterval(() => {}, 1000)' codex-helper >/dev/null 2>&1 &
-          helper_pid=$!
-          printf '%s\n' "$helper_pid" > "$helper_pid_file"
+          start_fixture_process "$helper_pid_file" "$NODE_BIN" -e \
+            'require("fs").writeFileSync(process.env.FM_FIXTURE_READY, ""); setInterval(() => {}, 1000)' \
+            codex-helper || exit 1
+          helper_pid=$(cat "$helper_pid_file")
           mkdir -p "$PROC_ROOT/$helper_pid"
           printf 'CODEX_SESSION_ID=4d5f9e9a-0e7c-4d32-9f3a-6fd1e2eb4a54\0' > "$PROC_ROOT/$helper_pid/environ"
           ln -s "$NODE_BIN" "$PROC_ROOT/$helper_pid/exe"
@@ -223,4 +260,16 @@ SH
 # tabs, or panes", which is what a test means by "the previous endpoint is gone".
 reset_remote_herdr_fixture() { # <state>
   printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{}}\n' > "$1"
+}
+
+cleanup_remote_herdr_fixture_processes() { # <state>
+  local state=$1 pid_file pid
+  for pid_file in "$state.agent-pid" "$state.helper-pid"; do
+    pid=$(cat "$pid_file" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) ;;
+      *) kill "$pid" 2>/dev/null || true ;;
+    esac
+    rm -f -- "$pid_file" "$pid_file".ready.*
+  done
 }

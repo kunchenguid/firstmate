@@ -62,6 +62,7 @@ cleanup() {
     worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
     kill "$worker_pid" 2>/dev/null || true
   fi
+  cleanup_remote_herdr_fixture_processes "$HERDR_STATE"
   rm -rf -- "$TMP_ROOT"
 }
 trap cleanup EXIT
