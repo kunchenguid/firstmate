@@ -772,6 +772,13 @@ test_browser_cdp_rule_is_optional_and_loopback_only() {
   brief="$home/data/browser-cdp-scout/brief.md"
   assert_no_grep 'browser.example.test' "$brief" \
     "non-loopback browser CDP URL must never be rendered into a brief"
+
+  printf '%s\n' 'http://127.0.0.1:9@evil.example' > "$home/config/browser-cdp-url"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" browser-cdp-userinfo alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "unsafe browser CDP configuration should not prevent a ship brief"
+  brief="$home/data/browser-cdp-userinfo/brief.md"
+  assert_no_grep 'evil.example' "$brief" \
+    "browser CDP URL with userinfo must never be rendered into a brief"
   pass "fm-brief.sh: browser CDP guidance is optional and loopback-only"
 }
 

@@ -114,15 +114,14 @@ BROWSER_RULE='3. Use gh-axi for GitHub operations and chrome-devtools-axi for br
 BROWSER_CDP_FILE="$CONFIG/browser-cdp-url"
 if [ -f "$BROWSER_CDP_FILE" ] && [ ! -L "$BROWSER_CDP_FILE" ]; then
   BROWSER_CDP_URL=$(sed -n '1p' "$BROWSER_CDP_FILE")
-  case "$BROWSER_CDP_URL" in
-    http://127.0.0.1:[0-9]*|http://localhost:[0-9]*)
+  if [[ "$BROWSER_CDP_URL" =~ ^http://(127\.0\.0\.1|localhost):[0-9]+$ ]]; then
       IFS= read -r -d '' BROWSER_RULE <<EOF || true
 3. Use gh-axi for GitHub operations. Before browser automation, check \`$BROWSER_CDP_URL/json/version\` with \`/usr/bin/curl\`. When it responds, connect with \`CHROME_DEVTOOLS_AXI_SESSION=firstmate-browser CHROME_DEVTOOLS_AXI_BROWSER_URL=$BROWSER_CDP_URL chrome-devtools-axi ...\`. Do not launch or install a browser, create a fake browser-app alias, or expose the debugger beyond loopback. If the endpoint is unavailable, append \`blocked: configured browser CDP endpoint unavailable\` and stop.
 EOF
       BROWSER_RULE=${BROWSER_RULE%$'\n'}
-      ;;
-    *) echo "warning: ignoring invalid local browser CDP URL in $BROWSER_CDP_FILE" >&2 ;;
-  esac
+  else
+    echo "warning: ignoring invalid local browser CDP URL in $BROWSER_CDP_FILE" >&2
+  fi
 fi
 KIND=ship
 HERDR_LAB=0
