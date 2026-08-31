@@ -1420,7 +1420,7 @@ def read_pi_compaction_binding(path: Path) -> dict[str, Any]:
         raise HandoffError("PI_ATTEMPT", "durable Pi compaction binding is invalid")
     platform = value["process_platform"]
     boot_id = value.get("process_boot_id")
-    if (platform in {"linux", "test"} and (not isinstance(boot_id, str) or not boot_id):
+    if platform in {"linux", "test"} and (not isinstance(boot_id, str) or not boot_id):
         raise HandoffError("PI_ATTEMPT", "durable Pi process boot identity is invalid")
     if platform == "darwin" and boot_id is not None:
         raise HandoffError("PI_ATTEMPT", "durable Pi process boot identity is invalid")
