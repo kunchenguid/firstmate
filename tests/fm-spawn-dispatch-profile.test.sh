@@ -489,7 +489,7 @@ test_recorded_default_axes_respawn_as_unset() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' NM_HOME='$HOME_DIR/.no-mistakes' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' NM_HOME='$HOME_DIR/.no-mistakes' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "recorded default axes did not launch identically to unset axes"$'\n'"expected: $expected"$'\n'"actual:   $launch"
 
   ledger="$HOME_DIR/data/routing-outcomes.jsonl"
@@ -513,7 +513,7 @@ test_no_profile_keeps_claude_profile_defaults() {
     "the default writer spawn added an access field to legacy metadata"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' NM_HOME='$HOME_DIR/.no-mistakes' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="GIT_CONFIG_COUNT='1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='/tmp/fm-$id/git-hooks' NM_HOME='$HOME_DIR/.no-mistakes' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults, writer metadata omits access, and the claude launch is canonical"
 }
@@ -1055,7 +1055,7 @@ test_cursor_agent_missing_binary_refuses_before_endpoint_or_metadata() {
 }
 
 test_pi_threads_model_and_max_effort() {
-  local rec id out status launch
+  local rec id out status launch pi_bin
   id=profile-pi-z8
   rec=$(make_spawn_case profile-pi pi "$id")
   read_case_record "$rec"
@@ -1066,8 +1066,9 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi launch did not thread the requested model and max thinking level"
+  pi_bin=$(command -v pi)
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$pi_bin' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi launch did not thread its preflighted executable, regular TUI mode, requested model, and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
@@ -1076,7 +1077,7 @@ test_pi_threads_model_and_max_effort() {
 }
 
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
-  local rec id out status launch
+  local rec id out status launch pi_signed_bin
   id=profile-pi-signed-z8b
   rec=$(make_spawn_case profile-pi-signed pi-signed "$id")
   read_case_record "$rec"
@@ -1088,8 +1089,9 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
-    "pi-signed launch did not share Pi's model, thinking, and extension semantics"
+  pi_signed_bin=$FAKEBIN_DIR/pi-signed
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$pi_signed_bin' --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+    "pi-signed launch did not share Pi's preflighted executable, model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
@@ -1132,7 +1134,7 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
 }
 
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
-  local rec id sm out status launch
+  local rec id sm out status launch pi_signed_bin
   id=profile-pi-signed-secondmate-z8d
   rec=$(make_spawn_case profile-pi-signed-secondmate codex "$id")
   read_case_record "$rec"
@@ -1148,8 +1150,9 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
-    "pi-signed secondmate did not share Pi's primary extension launch shape"
+  pi_signed_bin=$FAKEBIN_DIR/pi-signed
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$pi_signed_bin' -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+    "pi-signed secondmate did not share Pi's preflighted primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
@@ -1192,8 +1195,8 @@ test_claude_account_profile_binds_canonical_dir_and_records_alias_only() {
   [ "$(wc -l < "$endpoint_log" | tr -d ' ')" = 1 ] || fail "selected profile did not create exactly one endpoint"
 
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$profile_dir' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
-    "selected account profile did not bind its canonical directory to the claude launch"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$profile_dir' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "selected account profile did not bind its canonical directory to the scrubbed claude launch"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep "account_profile=paid-primary" "$meta" "selected account alias was not recorded in private task metadata"
   assert_no_grep "$profile_dir" "$meta" "task metadata leaked the selected config directory"
@@ -1574,8 +1577,8 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
-    "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the scrubbed crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
 
@@ -1593,8 +1596,8 @@ test_selected_account_profile_wins_over_ambient_config_dir() {
   status=$?
   expect_code 0 "$status" "a selected account profile should spawn while firstmate runs under its own store"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$profile_dir' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
-    "the selected account profile did not bind the crewmate launch"
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$profile_dir' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "the selected account profile did not bind the scrubbed crewmate launch"
   assert_not_contains "$launch" "/opt/test/claude-work" \
     "firstmate's ambient CLAUDE_CONFIG_DIR reached an account-bound claude launch"
   run_log="$CASE_DIR/claude-run.log"
