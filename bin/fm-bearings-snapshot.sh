@@ -259,7 +259,14 @@ EOF
       cnt=$(printf '%s' "$repo_rows" | jq 'length')
       [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
       npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+      # Candidate PR rows grow with the fleet's open PRs, so the accumulator
+      # and the projection below hand jq slurped files instead of argv entries:
+      # a SINGLE argv entry is capped at MAX_ARG_STRLEN (128 KiB) independently
+      # of the far larger ARG_MAX, and exec fails with E2BIG past it. An empty
+      # document is refused rather than folded away, matching --argjson.
+      rows=$(jq -n --slurpfile a <(printf '%s' "$rows") --slurpfile b <(printf '%s' "$repo_rows") \
+        'if (($a | length) == 1) and (($b | length) == 1) then $a[0] + $b[0]
+         else error("fm-bearings-snapshot: empty candidate PR row document") end')
     done
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
@@ -311,7 +318,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
+  --slurpfile candidate_prs <(printf '%s' "$CANDIDATE_PRS") '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def round_robin_landed($n):
@@ -320,7 +327,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | $groups[]
        | select(length > $i)
        | .[$i]][:$n];
-  ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
+  ($candidate_prs | if length == 1 then .[0]
+   else error("fm-bearings-snapshot: empty candidate PR document") end) as $candidate_prs
+  | ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions

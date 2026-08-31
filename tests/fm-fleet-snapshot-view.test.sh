@@ -8,6 +8,7 @@ set -u
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
+BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -799,6 +800,75 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# A backlog large enough that its rendered JSON crosses a single argv entry's
+# MAX_ARG_STRLEN cap (128 KiB on Linux, independent of the far larger ARG_MAX).
+# Every command that reads this home has to keep working: a document that big
+# can only reach jq through a file, never as one command-line argument.
+write_oversized_backlog() {  # <home>
+  local home=$1 pad i
+  pad=""
+  for i in $(seq 1 12); do
+    pad="$pad padding body text that makes each backlog row expensive to render"
+  done
+  {
+    printf '## In flight\n'
+    for i in $(seq 1 40); do
+      printf -- '- [ ] big-ship-%03d - Big Ship %d (repo: alpha) (kind: ship) (since 2026-08-01)\n' "$i" "$i"
+      printf '  %s\n' "$pad"
+    done
+    printf '\n## Queued\n'
+    for i in $(seq 1 40); do
+      printf -- '- [ ] big-queued-%03d - Big Queued %d (repo: alpha) (kind: ship) (since 2026-08-01)\n' "$i" "$i"
+      printf '  %s\n' "$pad"
+    done
+    printf '\n## Done\n'
+    for i in $(seq 1 40); do
+      printf -- '- [x] big-done-%03d - Big Done %d https://github.com/kunchenguid/firstmate/pull/%d (repo: alpha) (kind: ship) (merged 2026-08-02)\n' "$i" "$i" "$i"
+      printf '  %s\n' "$pad"
+    done
+  } > "$home/data/backlog.md"
+}
+
+# Regression: a large backlog used to break every fleet read in the home. The
+# rendered backlog document was handed to jq as a single --argjson argument, so
+# exec failed with E2BIG ("Argument list too long") and the snapshot, the
+# secondmate home summary, and bearings all exited non-zero with no output.
+test_oversized_backlog_still_reads() {
+  local home fakebin out summary bearings backlog_bytes
+  home=$(make_home oversized-backlog)
+  write_oversized_backlog "$home"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a backlog larger than one argv entry"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot output must be valid JSON for an oversized backlog"
+
+  # Prove the fixture actually crosses the cap this test exists for; a smaller
+  # document would make the whole case vacuous.
+  backlog_bytes=$(printf '%s' "$out" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$backlog_bytes" -gt 131072 ] \
+    || fail "fixture backlog renders to only $backlog_bytes bytes; it must exceed the 131072-byte argv cap"
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) == 120
+      and .main_inventory.valid == false
+      and .main_inventory.unstructured_current_count == 0
+      and ((.main_inventory.orphan_in_flight | length) == 40)
+  ' >/dev/null || fail "oversized backlog must still project a complete main inventory: $backlog_bytes bytes"
+
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "secondmate home summary must survive a backlog larger than one argv entry"
+  printf '%s' "$summary" | jq -e '.schema == "fm-secondmate-home-summary.v1"' >/dev/null \
+    || fail "secondmate home summary must stay valid JSON for an oversized backlog"
+
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json) \
+    || fail "bearings must survive a backlog larger than one argv entry"
+  printf '%s' "$bearings" | jq -e '.schema == "fm-bearings.v1"' >/dev/null \
+    || fail "bearings output must stay valid JSON for an oversized backlog"
+
+  pass "a backlog past the single-argument size cap still reads through snapshot, home summary, and bearings"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -810,6 +880,7 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_oversized_backlog_still_reads
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
