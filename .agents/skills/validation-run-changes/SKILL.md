@@ -44,7 +44,4 @@ When that happens, the worker follows this sequence exactly and in order.
 4. **Revalidate once.**
    Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
 
-## Duplicated pipeline ownership
-
-A worker hand-editing, committing, aborting, or restarting during an active validation run outside the sequence above has duplicated pipeline ownership.
-Steer it back to the gate response flow rather than letting a second owner accumulate commits under the run.
+A worker that hand-edits, commits, aborts, or restarts outside this exact sequence while a run still owns the branch has duplicated pipeline ownership; `AGENTS.md` section 7 owns the steer-back-to-gate-flow response.
