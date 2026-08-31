@@ -480,6 +480,7 @@ test_spawn_split_and_inherit() {
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
+  printf 'http://127.0.0.1:9222\n' > "$w/home/config/browser-cdp-url"
   make_seeded_home "$sm" sm
 
   spawn_secondmate "$w" sm "$sm"
@@ -496,8 +497,14 @@ test_spawn_split_and_inherit() {
     || fail "split: home backlog-backend not inherited as manual"
   [ "$(cat "$sm/config/backend" 2>/dev/null)" = zellij ] \
     || fail "split: home backend not inherited as zellij"
+  [ "$(cat "$sm/config/browser-cdp-url" 2>/dev/null)" = http://127.0.0.1:9222 ] \
+    || fail "split: home browser CDP endpoint not inherited (got '$(cat "$sm/config/browser-cdp-url" 2>/dev/null)')"
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
+  FM_HOME="$sm" "$ROOT/bin/fm-brief.sh" secondmate-browser-cdp alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "split: inherited browser CDP endpoint should scaffold a crew brief"
+  assert_contains "$(cat "$sm/data/secondmate-browser-cdp/brief.md")" 'http://127.0.0.1:9222/json/version' \
+    "split: a crew brief in the spawned secondmate home omitted the inherited browser CDP endpoint"
   pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
 }
 
