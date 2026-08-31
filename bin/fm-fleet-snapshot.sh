@@ -1307,17 +1307,20 @@ secondmate_current_json() {  # <parent-tasks-json>
       else
         summary_bytes=$(printf '%s' "$summary" | LC_ALL=C wc -c | tr -d ' ')
         if [ "$summary_bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]; then
+          summary='{}'
           reason="structured home snapshot exceeded byte limit"
-        elif ! printf '%s' "$summary" | jq -e --arg home "$home" --arg generated "$SNAPSHOT_NOW" --argjson remote "$remote" '
-          .schema == "fm-secondmate-home-summary.v1" and .home == $home
+        elif ! printf '%s' "$summary" | jq -e -s --arg home "$home" --arg generated "$SNAPSHOT_NOW" --argjson remote "$remote" '
+          length == 1 and (.[0]
+          | .schema == "fm-secondmate-home-summary.v1" and .home == $home
           and (($remote == true) or .generated == $generated)
           and (.valid | type) == "boolean" and (.state | type) == "string"
           and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
           and (.active_children | type) == "array" and (.decisions_open | type) == "array"
           and (.holds | type) == "array" and (.queued | type) == "array"
           and (.landed | type) == "array" and (.endpoints | type) == "array"
-          and (.counts | type) == "object" and (.omitted | type) == "array"
+          and (.counts | type) == "object" and (.omitted | type) == "array")
         ' >/dev/null 2>&1; then
+          summary='{}'
           reason="structured home snapshot was malformed or stale"
         else
           summary_sampled=true

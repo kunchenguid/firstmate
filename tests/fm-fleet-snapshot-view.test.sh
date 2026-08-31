@@ -869,6 +869,46 @@ test_oversized_backlog_still_reads() {
   pass "a backlog past the single-argument size cap still reads through snapshot, home summary, and bearings"
 }
 
+# Regression: one registered secondmate whose home summary command exits 0 but
+# returns something unusable used to fail the whole snapshot for the entire
+# home. The unusable sample was carried into the record assembly, which could
+# not parse it, and the failure cascaded out through the accumulator to
+# "registered secondmate aggregation failed" with no output at all. An
+# unsamplable route has to degrade to the unknown-state record this function
+# already builds for every other unreachable mate.
+test_unusable_secondmate_summary_degrades_to_unknown_record() {
+  local home stub out rc
+  home=$(make_home unusable-secondmate-summary)
+  cat > "$home/data/secondmates.md" <<'EOF'
+- badjson - remote mate (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote testing; projects: alpha; added 2026-08-02)
+EOF
+  stub=$home/stubbin
+  mkdir -p "$stub"
+  cat > "$stub/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+printf 'Welcome to remote-mac\n'
+exit 0
+SH
+  chmod +x "$stub/fake-ssh"
+
+  out=$(FM_HOME="$home" FM_SSH_BIN="$stub/fake-ssh" "$SNAPSHOT" --json 2>"$home/summary-err"); rc=$?
+  expect_code 0 "$rc" \
+    "one unusable secondmate home summary must not fail the whole snapshot: $(cat "$home/summary-err")"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot must stay valid JSON when a secondmate home summary is unusable"
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records
+    | length == 1
+      and (.[0].id == "badjson")
+      and (.[0].registered == true)
+      and (.[0].remote == true)
+      and (.[0].current.state == "unknown")
+      and (.[0].current.reason == "structured home snapshot was malformed or stale")
+      and (.[0].reconcile_inventory == null)
+  ' >/dev/null || fail "an unusable home summary must degrade to an unknown-state record: $out"
+  pass "an unusable secondmate home summary degrades to an unknown record instead of failing the snapshot"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -881,6 +921,7 @@ test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_oversized_backlog_still_reads
+test_unusable_secondmate_summary_degrades_to_unknown_record
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
