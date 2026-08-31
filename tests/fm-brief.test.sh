@@ -21,6 +21,25 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
+BRIEF_PROJECTS="$TMP_ROOT/projects"
+
+# Brief generation now resolves its named repo from the configured project root.
+# These local-only fixtures carry a non-main default branch and a local origin
+# so the generated command is tested against the actual delivery-path ref.
+init_brief_project() {
+  local name=$1 repo
+  repo="$BRIEF_PROJECTS/$name"
+  fm_git_init_commit "$repo"
+  git -C "$repo" branch -M release
+  fm_git_add_origin "$repo" "$repo.origin.git"
+  git -C "$repo" fetch --quiet origin
+  git -C "$repo" remote set-head origin --auto >/dev/null
+}
+
+for brief_project in some-proj direct-proj local-proj never-registered firstmate foreign sample alpha; do
+  init_brief_project "$brief_project"
+done
+export FM_PROJECTS_OVERRIDE="$BRIEF_PROJECTS"
 
 # The script itself must always parse under the ambient bash. That is Bash 5 in
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
@@ -215,6 +234,71 @@ test_ship_modes_generate_clean_briefs() {
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+test_base_freshness_check_is_resolved_and_mode_aware() {
+  local home ship local_brief scout ship_setup local_setup scout_setup ship_dod local_dod scout_dod local_ahead
+  home="$TMP_ROOT/base-freshness-home"
+  mkdir -p "$home/data"
+
+  printf '%s\n' 'local-only default moves ahead of origin' >> "$BRIEF_PROJECTS/local-proj/README.md"
+  git -C "$BRIEF_PROJECTS/local-proj" add README.md
+  git -C "$BRIEF_PROJECTS/local-proj" commit -qm 'local default advances'
+  local_ahead=$(git -C "$BRIEF_PROJECTS/local-proj" rev-list --count origin/release..release)
+  [ "$local_ahead" -gt 0 ] || fail "local-only fixture did not move its local default branch ahead of origin"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-pr direct-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "PR brief should scaffold with a resolved default branch"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-local local-proj --mode local-only >/dev/null 2>&1 \
+    || fail "local-only brief should scaffold with a resolved local default branch"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" base-scout sample --scout >/dev/null 2>&1 \
+    || fail "scout brief should scaffold with a resolved default branch"
+
+  ship="$home/data/base-pr/brief.md"
+  local_brief="$home/data/base-local/brief.md"
+  scout="$home/data/base-scout/brief.md"
+  ship_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$ship")
+  local_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$local_brief")
+  scout_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$scout")
+  ship_dod=$(sed -n '/^# Definition of done$/,$p' "$ship")
+  local_dod=$(sed -n '/^# Definition of done$/,$p' "$local_brief")
+  scout_dod=$(sed -n '/^# Definition of done$/,$p' "$scout")
+
+  assert_contains "$ship_setup" "1. **First startup step - check your base before starting work.**" \
+    "ship brief did not make the base check its first startup step"
+  assert_contains "$ship_setup" "git rev-list --count \$(git merge-base HEAD origin/release)..origin/release" \
+    "PR brief did not check the resolved remote default branch"
+  assert_contains "$ship_setup" "Only \`0\` passes against the fetched default branch \`origin/release\`." \
+    "PR brief did not state the zero-only pass criterion"
+  assert_contains "$ship_setup" "2. Create your branch: \`git checkout -b fm/base-pr\`" \
+    "ship brief did not put branch creation after its freshness check"
+  assert_not_contains "$ship_setup" 'on a clean default branch' \
+    "ship brief retained an unchecked clean-base assertion"
+  assert_not_contains "$ship_setup" 'origin/main' \
+    "PR brief hard-coded main instead of the resolved default branch"
+  assert_not_contains "$ship_dod" 'git rev-list --count' \
+    "PR brief put the freshness check in Definition of done instead of Setup"
+
+  assert_contains "$local_setup" "git rev-list --count \$(git merge-base HEAD release)..release" \
+    "local-only brief did not check its local default branch"
+  assert_contains "$local_setup" "Only \`0\` passes against your local default branch \`release\`." \
+    "local-only brief did not explain its local zero-only criterion"
+  assert_not_contains "$local_setup" 'origin/release' \
+    "local-only brief used the stale origin tracking ref instead of its local default branch"
+  assert_not_contains "$local_dod" 'git rev-list --count' \
+    "local-only brief put the freshness check in Definition of done instead of Setup"
+
+  assert_contains "$scout_setup" "1. **First startup step - check your base before starting work.**" \
+    "scout brief did not make the base check its first startup step"
+  assert_contains "$scout_setup" "git rev-list --count \$(git merge-base HEAD origin/release)..origin/release" \
+    "scout brief did not check the resolved default branch"
+  assert_contains "$scout_setup" "Only \`0\` passes against the fetched default branch \`origin/release\`." \
+    "scout brief did not state the zero-only pass criterion"
+  assert_not_contains "$scout_setup" 'on a clean default branch' \
+    "scout brief retained an unchecked clean-base assertion"
+  assert_not_contains "$scout_dod" 'git rev-list --count' \
+    "scout brief put the freshness check in Definition of done instead of Setup"
+  pass "fm-brief.sh: startup base freshness is resolved, zero-only, and mode-aware"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -766,6 +850,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_base_freshness_check_is_resolved_and_mode_aware
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

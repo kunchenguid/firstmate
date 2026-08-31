@@ -11,6 +11,8 @@
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   repo-name resolves under FM_PROJECTS_OVERRIDE when set, otherwise under
+#   $FM_HOME/projects; projects/<repo-name> and explicit directory paths work too.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -106,6 +108,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -179,6 +182,58 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+resolve_brief_repo() {  # <repo-name-or-directory>
+  local repo=$1 candidate resolved
+  case "$repo" in
+    projects/*) candidate="$PROJECTS/${repo#projects/}" ;;
+    /*|./*|../*) candidate=$repo ;;
+    *)
+      if [ -d "$PROJECTS/$repo" ]; then
+        candidate="$PROJECTS/$repo"
+      elif [ "$repo" = "$(basename "$FM_ROOT")" ]; then
+        candidate="$FM_ROOT"
+      else
+        candidate=$repo
+      fi
+      ;;
+  esac
+  [ -d "$candidate" ] || {
+    echo "error: repo for brief does not exist or is not a directory: $candidate" >&2
+    return 1
+  }
+  git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+    echo "error: repo for brief is not a git worktree: $candidate" >&2
+    return 1
+  }
+  resolved=$(cd "$candidate" && pwd -P) || return 1
+  printf '%s\n' "$resolved"
+}
+
+resolve_local_default_branch() {  # <repo-dir>
+  local repo=$1 branch
+  # origin/HEAD can identify the name while the comparison must still target
+  # the clone's local branch, which may be ahead of origin.
+  if branch=$(resolve_origin_default_branch "$repo" 2>/dev/null) \
+    && git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null 2>&1; then
+    printf '%s\n' "$branch"
+    return 0
+  fi
+  branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$branch"
+}
+
+resolve_origin_default_branch() {  # <repo-dir>
+  local repo=$1 ref branch
+  ref=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
+  case "$ref" in
+    origin/*) branch=${ref#origin/} ;;
+    *) return 1 ;;
+  esac
+  git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$branch"
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
@@ -288,6 +343,51 @@ exit 0
 fi
 
 REPO=${POS[1]}
+REPO_DIR=$(resolve_brief_repo "$REPO") || exit 1
+
+# A local-only task lands into the clone's local default branch, which can be
+# ahead of its origin tracking ref. PR-based tasks instead need the fetched
+# remote default branch that their PR will merge into. Scouts have no delivery
+# mode, so use the remote path when available and otherwise their local base.
+case "$KIND:$MODE" in
+  ship:local-only)
+    DEFAULT_BRANCH=$(resolve_local_default_branch "$REPO_DIR") || {
+      echo "error: could not determine the checked-out local default branch for local-only brief repo $REPO_DIR" >&2
+      exit 1
+    }
+    BASE_REF=$DEFAULT_BRANCH
+    BASE_DESCRIPTION="your local default branch \`$DEFAULT_BRANCH\`"
+    ;;
+  ship:*)
+    DEFAULT_BRANCH=$(resolve_origin_default_branch "$REPO_DIR") || {
+      echo "error: could not determine origin's default branch for PR-based brief repo $REPO_DIR" >&2
+      exit 1
+    }
+    BASE_REF="origin/$DEFAULT_BRANCH"
+    BASE_DESCRIPTION="the fetched default branch \`$BASE_REF\`"
+    ;;
+  scout:*)
+    if DEFAULT_BRANCH=$(resolve_origin_default_branch "$REPO_DIR"); then
+      BASE_REF="origin/$DEFAULT_BRANCH"
+      BASE_DESCRIPTION="the fetched default branch \`$BASE_REF\`"
+    else
+      DEFAULT_BRANCH=$(resolve_local_default_branch "$REPO_DIR") || {
+        echo "error: could not determine a default branch for scout brief repo $REPO_DIR" >&2
+        exit 1
+      }
+      BASE_REF=$DEFAULT_BRANCH
+      BASE_DESCRIPTION="your local default branch \`$DEFAULT_BRANCH\`"
+    fi
+    ;;
+esac
+
+IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
+1. **First startup step - check your base before starting work.** Run:
+   \`git rev-list --count \$(git merge-base HEAD $BASE_REF)..$BASE_REF\`
+   Only \`0\` passes against $BASE_DESCRIPTION.
+   If the result is not \`0\`, rebase onto \`$BASE_REF\` before reading or writing anything.
+EOF
+BASE_FRESHNESS_SECTION=${BASE_FRESHNESS_SECTION%$'\n'}
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -331,7 +431,9 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD supplied by the worktree pool.
+$BASE_FRESHNESS_SECTION
+
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -389,7 +491,7 @@ case "$MODE" in
     ;;
   *)  # no-mistakes
     SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+3. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
@@ -404,13 +506,15 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD supplied by the worktree pool.
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$BASE_FRESHNESS_SECTION
+
+2. Create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules
 $RULE1
