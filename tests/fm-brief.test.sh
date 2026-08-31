@@ -502,6 +502,46 @@ test_scout_local_fallback_uses_kind_neutral_wording() {
   pass "fm-brief.sh: a scout local fallback explains itself without claiming it lands locally"
 }
 
+# A scout's runtime fallback must mirror the policy the same scaffold applies
+# when the label DOES resolve: prefer a verified origin default, degrade to a
+# verified local default with no network refresh, and block only if neither can
+# be established. An origin-only fallback would strand a scout in a remote-less
+# clone before it does any research.
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
+test_unresolved_scout_fallback_degrades_to_a_local_default() {
+  local home scout_setup ship_setup
+  home="$TMP_ROOT/unresolved-scout-fallback-home"
+  mkdir -p "$home/data"
+
+  [ ! -d "$BRIEF_PROJECTS/comms" ] || fail "fixture leak: comms must not resolve"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fallback-scout comms --scout >/dev/null 2>&1 \
+    || fail "an unresolvable scout label must not fail the scaffold"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" fallback-ship comms --mode direct-PR >/dev/null 2>&1 \
+    || fail "an unresolvable PR-path label must not fail the scaffold"
+  scout_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/fallback-scout/brief.md")
+  ship_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/fallback-ship/brief.md")
+
+  assert_contains "$scout_setup" 'git fetch origin --quiet' \
+    "the scout fallback dropped the single fetch that precedes its origin comparison"
+  assert_contains "$scout_setup" 'git rev-list --count $(git merge-base HEAD origin/<default>)..origin/<default>' \
+    "the scout fallback lost its origin-first zero-count command"
+  assert_contains "$scout_setup" 'git rev-list --count $(git merge-base HEAD <default>)..<default>' \
+    "the scout fallback never degrades to a local default when origin cannot be established"
+  assert_contains "$scout_setup" 'Only when this clone has no origin default at all' \
+    "the scout fallback did not gate its local degradation on origin being unavailable"
+  assert_contains "$scout_setup" 'Do not fetch in that case' \
+    "the scout local degradation did not forbid the network refresh"
+  assert_contains "$scout_setup" 'blocked: cannot determine the default branch to verify base freshness' \
+    "the scout fallback dropped its block-and-stop requirement"
+  assert_not_contains "$scout_setup" 'This task lands locally' \
+    "the scout fallback claimed the task lands locally"
+
+  assert_not_contains "$ship_setup" 'git rev-list --count $(git merge-base HEAD <default>)..<default>' \
+    "a PR-path fallback degraded to a local base instead of requiring origin"
+  pass "fm-brief.sh: an unresolved scout fallback degrades to a local default before blocking"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -1058,6 +1098,7 @@ test_non_root_directory_never_resolves_to_its_enclosing_repo
 test_absent_local_ref_for_origin_default_never_substitutes_another_branch
 test_local_only_rule_names_the_resolved_default_branch
 test_scout_local_fallback_uses_kind_neutral_wording
+test_unresolved_scout_fallback_degrades_to_a_local_default
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

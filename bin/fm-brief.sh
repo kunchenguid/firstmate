@@ -386,8 +386,9 @@ BASE_NEEDS_FETCH=0
 BASE_NO_FETCH_REASON=
 BASE_UNRESOLVED_REASON=
 case "$KIND:$MODE" in
-  ship:local-only) BASE_FALLBACK_KIND=local ;;
-  *) BASE_FALLBACK_KIND=origin ;;
+  ship:local-only) BASE_POLICY=local ;;
+  scout:*) BASE_POLICY='origin-then-local' ;;
+  *) BASE_POLICY=origin ;;
 esac
 
 set_origin_base() {  # <repo-dir>
@@ -407,16 +408,16 @@ set_local_base() {  # <repo-dir> <why-no-fetch>
 }
 
 if REPO_DIR=$(resolve_brief_repo "$REPO"); then
-  case "$KIND:$MODE" in
-    ship:local-only)
+  case "$BASE_POLICY" in
+    local)
       set_local_base "$REPO_DIR" "This task lands locally, so do not fetch" \
         || BASE_UNRESOLVED_REASON="This brief could not determine the local default branch of \`$REPO\`"
       ;;
-    ship:*)
+    origin)
       set_origin_base "$REPO_DIR" \
         || BASE_UNRESOLVED_REASON="This brief could not determine origin's default branch for \`$REPO\`"
       ;;
-    scout:*)
+    origin-then-local)
       set_origin_base "$REPO_DIR" \
         || set_local_base "$REPO_DIR" "Origin's default branch could not be resolved, so do not fetch" \
         || BASE_UNRESOLVED_REASON="This brief could not determine a default branch for \`$REPO\`"
@@ -429,7 +430,21 @@ fi
 # Sets BASE_FRESHNESS_SECTION as the numbered startup step <step-number>.
 build_base_freshness_section() {  # <step-number>
   local step=$1
-  if [ -n "$BASE_UNRESOLVED_REASON" ] && [ "$BASE_FALLBACK_KIND" = origin ]; then
+  if [ -n "$BASE_UNRESOLVED_REASON" ] && [ "$BASE_POLICY" = 'origin-then-local' ]; then
+    IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
+$step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
+   Try origin first: run \`git remote set-head origin --auto\`, then read \`git symbolic-ref --quiet --short refs/remotes/origin/HEAD\` and drop the leading \`origin/\` to get \`<default>\`. If that names a branch, confirm it with \`git rev-parse --verify origin/<default>\`; if the name resolves but the ref does not, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop instead of guessing another branch.
+   With a verified origin default, refresh the remote exactly once and measure:
+   \`git fetch origin --quiet\`
+   \`git rev-list --count \$(git merge-base HEAD origin/<default>)..origin/<default>\`
+   Only \`0\` passes. If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
+   If the count is not \`0\`, rebase onto \`origin/<default>\` before reading or writing anything.
+   Only when this clone has no origin default at all - no \`origin\` remote, or its HEAD cannot be set - use the local default branch, \`main\` or \`master\`, confirmed with \`git rev-parse --verify <default>\`. Do not fetch in that case; measure:
+   \`git rev-list --count \$(git merge-base HEAD <default>)..<default>\`
+   Only \`0\` passes, and if the count is not \`0\`, rebase onto \`<default>\` before reading or writing anything.
+   Never substitute whatever branch happens to be checked out. If neither an origin default nor a local default can be determined and verified, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
+EOF
+  elif [ -n "$BASE_UNRESOLVED_REASON" ] && [ "$BASE_POLICY" = origin ]; then
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
    Determine \`<default>\` with \`git remote set-head origin --auto\` then \`git symbolic-ref --quiet --short refs/remotes/origin/HEAD\`, dropping the leading \`origin/\`. Never substitute whatever branch happens to be checked out.
