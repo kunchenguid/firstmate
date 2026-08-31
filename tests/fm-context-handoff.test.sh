@@ -1890,6 +1890,38 @@ test_claude_terminal_outcome_uses_durable_binding() {
   pass "probe-independent authenticated Claude terminal outcome"
 }
 
+test_sessionstart_contains_invalid_compaction_bindings() {
+  local statement arguments registered record i foreign_key foreign_cap output result
+  new_env sessionstart-invalid-compaction-bindings
+  enable_consumer
+  bind_claude >/dev/null || fail "invalid-binding fixture did not bind Claude"
+  statement='A replacement session must survive unreadable compaction evidence.'
+  authorize "$statement"
+  arguments=$(jq -nc --arg statement "$statement" --arg source "$SOURCE_FILE" --arg sha "$(hash_file "$SOURCE_FILE")" '{kind:"gotcha",statement:$statement,source_record:$source,source_sha256:$sha,confidence:"verified",sphere:"privat",sensitivity_class:"ordinary-project-context",provider_class:"anthropic-claude-obsidian",supersedes:[]}')
+  registered=$(mcp_content register_curated_candidate "$arguments")
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "invalid-binding fixture did not register"
+  jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook >/dev/null || fail "invalid-binding fixture did not seal"
+  record=$(find "$FM_HOME/state/context-handoff/records" -name 'handoff-*.json' -printf '%f\n' | sed 's/\.json$//' | head -1)
+  rm "$FM_HOME/state/context-handoff/records/$record.json"
+  i=1
+  while [ "$i" -le 33 ]; do
+    foreign_key=$(hash_text "foreign-binding-$i" | cut -c1-48)
+    foreign_cap=$(hash_text "foreign-capability-$i")
+    printf '{\n' > "$FM_HOME/state/context-handoff/bindings/compaction-$foreign_key-$foreign_cap.json"
+    chmod 600 "$FM_HOME/state/context-handoff/bindings/compaction-$foreign_key-$foreign_cap.json"
+    i=$((i + 1))
+  done
+  CAPABILITY=claude-process-generation-2
+  PROCESS_GENERATION=2
+  output=$(bind_claude) || fail "replacement SessionStart wedged on invalid compaction evidence"
+  [ -z "$output" ] || fail "replacement SessionStart exposed an unclaimable record"
+  [ "$(find "$FM_HOME/state/context-handoff/bindings" -name 'compaction-*.json' | wc -l)" -eq 33 ] || fail "replacement SessionStart did not preserve foreign binding evidence"
+  jq -se 'any(.[]; .reason=="compaction-binding-record-invalid" and .failure_code=="RECORD_UNREADABLE")' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "unreadable target binding left no quarantine evidence"
+  result=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$result" | jq -r .status)" = empty ] || fail "replacement SessionStart did not restore exact consumer authority"
+  pass "SessionStart contains invalid compaction binding evidence"
+}
+
 test_claude_precompact_retry_binding() {
   local i statement registered output records_before records_after claims_before claims_after binding_before binding_after
   new_env claude-precompact-retry
@@ -2310,6 +2342,7 @@ test_transaction_dependency_manifest
 test_orphan_apply_execution_claim
 test_claude_lifecycle_and_plugin_discovery
 test_claude_terminal_outcome_uses_durable_binding
+test_sessionstart_contains_invalid_compaction_bindings
 test_claude_precompact_retry_binding
 
 if [ "${FM_CONTEXT_HANDOFF_REQUIRE_INSTALLED_CORE:-0}" = 1 ]; then
