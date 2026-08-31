@@ -10,10 +10,10 @@
 #   2. A valid value is one line of letters, digits, and dashes, with or
 #      without a single trailing newline.
 #   3. Anything else - a slash anywhere (including a trailing "ardy/"),
-#      whitespace, a second line, CRLF, an empty file - fails loudly on
-#      stderr rather than silently falling back, because a brief that names
-#      one branch while the landing helper resolves another is worse than a
-#      stopped helper.
+#      whitespace, a second line, CRLF, a NUL byte, an empty file - fails
+#      loudly on stderr rather than silently falling back, because a brief
+#      that names one branch while the landing helper resolves another is
+#      worse than a stopped helper.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -65,7 +65,7 @@ test_invalid_shapes_are_refused_loudly() {
   local bad out err
   for bad in 'ardy/' 'ar/dy' 'ardy//x' '' ' ' ' ' 'ar dy' ' ardy' 'ardy ' 'ard_y' 'ardy.
 ' 'ardy
-more' 'ล̇ardy'; do
+more' 'ล̇ardy' 'Ａrdy'; do
     make_config "$bad"
     out=$(resolve "$CFG" 2> "$TMP_ROOT/err") && \
       fail "invalid prefix $(printf '%q' "$bad") resolved to '$out' instead of being refused"
@@ -77,6 +77,25 @@ more' 'ล̇ardy'; do
       "refusal for $(printf '%q' "$bad") must be an error line"
   done
   pass "every invalid prefix shape is refused loudly on stderr with no fallback"
+}
+
+test_nul_byte_in_config_is_refused() {
+  local out err
+  mkdir -p "$CFG"
+  rm -rf -- "$CFG/branch-prefix"
+  printf 'ard\0dy' > "$CFG/branch-prefix"
+  out=$(resolve "$CFG" 2> "$TMP_ROOT/err") && \
+    fail "a prefix containing an embedded NUL byte must be refused, not truncated to '$out'"
+  err=$(cat "$TMP_ROOT/err")
+  assert_contains "$err" 'branch-prefix' "embedded-NUL refusal must name the config file"
+  assert_contains "$err" 'error:' "embedded-NUL refusal must be an error line"
+  assert_contains "$err" 'NUL' "embedded-NUL refusal must say so"
+  printf 'ardy\0' > "$CFG/branch-prefix"
+  out=$(resolve "$CFG" 2> "$TMP_ROOT/err") && \
+    fail "a prefix ending in a NUL byte must be refused, not truncated to '$out'"
+  err=$(cat "$TMP_ROOT/err")
+  assert_contains "$err" 'NUL' "trailing-NUL refusal must say so"
+  pass "a config containing a NUL byte is refused loudly instead of silently truncated"
 }
 
 test_symlinked_config_file_is_refused() {
@@ -119,6 +138,7 @@ test_refusal_returns_nonzero_and_records_the_error() {
 test_absent_config_is_the_default
 test_valid_prefix_with_and_without_trailing_newline
 test_invalid_shapes_are_refused_loudly
+test_nul_byte_in_config_is_refused
 test_symlinked_config_file_is_refused
 test_directory_in_place_of_file_is_refused
 test_refusal_returns_nonzero_and_records_the_error
