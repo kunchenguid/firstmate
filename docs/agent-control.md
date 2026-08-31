@@ -82,9 +82,12 @@ The note is required for both ship and scout tasks because the replacement reads
 
 Before this operation existed, the ordinary `fm-spawn.sh <task-id> --relaunch` path refused a recorded Herdr endpoint classified as `missing`, because that path is reserved for a positively agent-free endpoint and does not allocate a new one.
 This operation is eligible only when the exact task record in this home is valid, local, `kind=ship` or `kind=scout`, `backend=herdr`, and points at an existing Git worktree root and project.
-A remote route, secondmate, malformed record, missing worktree, missing brief, or non-Herdr backend is refused.
+That recorded copy must also share its Git object store with the recorded project, and no other task record in this home may name the same copy.
+A remote route, secondmate, malformed record, missing worktree, missing brief, non-Herdr backend, a copy belonging to a different repository, or a copy a second task record also claims is refused.
 The recorded endpoint must classify as `missing`, which means Herdr positively says the recorded pane is absent.
 A present pane with no registered agent classifies as `dead` and remains the ordinary `relaunch` case, while a live, ambiguous, or unreadable result refuses this operation.
+
+Those two record-level proofs matter because this operation allocates a NEW endpoint: a foreign checkout would strand the replacement outside the work it must continue, and a copy two records claim would put two tasks in one set of files.
 
 A missing pane is not ownership proof by itself.
 Before creating anything, the control plane scans every running Herdr session, task-labeled tab, and foreground process path for a live registered agent carrying the exact task label or the recorded worktree.

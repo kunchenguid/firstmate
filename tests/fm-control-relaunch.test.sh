@@ -1963,6 +1963,47 @@ test_missing_herdr_recovery_rejects_secondmate_remote_and_missing_copy() {
   pass "missing Herdr recovery: secondmate, remote, and missing-copy boundaries refuse"
 }
 
+test_missing_herdr_recovery_refuses_a_copy_a_second_task_records() {
+  local dir out rc wt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case shared-copy mr20)
+  wt=$(meta_field "$dir" mr20 worktree)
+  # A second durable record claims the very same local copy while no agent is
+  # live in it, so the backend ownership proof reads clear. Only record-level
+  # attribution can keep two tasks off one copy.
+  sed 's/^endpoint_task_id=mr20$/endpoint_task_id=mr20b/; s/^window=lab:w1:p2$/window=lab:w1:p7/' \
+    "$dir/home/state/mr20.meta" > "$dir/home/state/mr20b.meta"
+  out=$(run_herdr_control "$dir" mr20 recover-missing --captain-authorized --note 'must refuse a shared copy'); rc=$?
+  expect_code 1 "$rc" "recovery into a copy a second record claims must refuse"$'\n'"$out"
+  assert_contains "$out" "mr20b" "the refusal should name the other task recording the copy"
+  [ -d "$wt" ] || fail "the recorded copy must survive the refusal"
+  [ ! -e "$dir/home/state/mr20.control-recover-missing" ] \
+    || fail "an early refusal must not open a recovery transaction"
+  pass "missing Herdr recovery: a copy a second task record claims is refused"
+}
+
+test_missing_herdr_recovery_refuses_a_copy_from_another_repository() {
+  local dir out rc foreign_proj foreign_wt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case foreign-copy mr21)
+  foreign_proj="$dir/foreign-proj"; foreign_wt="$dir/foreign-wt"
+  fm_git_worktree "$foreign_proj" "$foreign_wt" task-foreign
+  # A structurally valid isolated worktree root that belongs to a DIFFERENT
+  # repository than the recorded project. Launching the replacement here would
+  # strand it outside the work it is supposed to continue.
+  sed "s|^worktree=.*|worktree=$foreign_wt|" "$dir/home/state/mr21.meta" \
+    > "$dir/home/state/mr21.meta.tmp"
+  mv "$dir/home/state/mr21.meta.tmp" "$dir/home/state/mr21.meta"
+  printf '%s\n' "$foreign_wt" > "$dir/fake/cwd"
+  printf '%s\n' "$foreign_wt" > "$dir/fake/fake-wt"
+  out=$(run_herdr_control "$dir" mr21 recover-missing --captain-authorized --note 'must refuse a foreign copy'); rc=$?
+  expect_code 1 "$rc" "recovery into another repository's copy must refuse"$'\n'"$out"
+  assert_contains "$out" "not a local copy of" "the refusal should name the project mismatch"
+  [ ! -e "$dir/home/state/mr21.control-recover-missing" ] \
+    || fail "an early refusal must not open a recovery transaction"
+  pass "missing Herdr recovery: a copy from another repository is refused"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -2028,3 +2069,5 @@ test_missing_herdr_recovery_distinguishes_missing_from_normal_relaunch
 test_missing_herdr_recovery_does_not_change_normal_dead_endpoint_relaunch
 test_spawn_missing_herdr_recovery_is_not_a_direct_escape_hatch
 test_missing_herdr_recovery_rejects_secondmate_remote_and_missing_copy
+test_missing_herdr_recovery_refuses_a_copy_a_second_task_records
+test_missing_herdr_recovery_refuses_a_copy_from_another_repository

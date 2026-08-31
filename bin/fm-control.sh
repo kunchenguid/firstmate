@@ -60,8 +60,10 @@
 #              recorded Herdr workspace, launches the existing brief in the
 #              exact recorded local copy, and keeps the task identity. It refuses
 #              live, dead, ambiguous, unreadable, remote, secondmate, malformed,
-#              or missing-copy cases. It is not a force, discard, or fresh-task
-#              escape hatch.
+#              and missing-copy cases, a recorded copy belonging to a repository
+#              other than the recorded project, and a copy a second task record
+#              also claims. It is not a force, discard, or fresh-task escape
+#              hatch.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -943,6 +945,49 @@ do_relaunch() {
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
+# git_common_dir_real: the physical object store a checkout belongs to. Two
+# paths that resolve to the same common directory are worktrees of one
+# repository; two that do not are unrelated checkouts however similar they look.
+git_common_dir_real() {  # <git-worktree-or-repo>
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -d "$common" ] || return 1
+  (cd "$common" 2>/dev/null && pwd -P)
+}
+
+# recovery_copy_is_uniquely_attributable: prove the recorded local copy really
+# belongs to the recorded project, and that this task is the only one recording
+# it. The backend ownership proof sees LIVE agents only, so neither a record
+# pointing at a foreign checkout nor a stale sibling record claiming the same
+# copy shows up there. Recovery allocates a NEW endpoint, so getting either
+# wrong is exactly how one task's work ends up split across two copies.
+recovery_copy_is_uniquely_attributable() {
+  local proj wt_real wt_common proj_common other other_id other_wt other_real
+  proj=$(fm_meta_get "$META" project)
+  [ -n "$proj" ] \
+    || die "task $ID records no project, so its recorded copy $WT cannot be attributed; refusing to recreate a missing endpoint"
+  wt_common=$(git_common_dir_real "$WT") \
+    || die "task $ID's recorded copy $WT has no readable git common directory; refusing to recreate a missing endpoint"
+  proj_common=$(git_common_dir_real "$proj") \
+    || die "task $ID's recorded project $proj has no readable git common directory; refusing to recreate a missing endpoint"
+  [ "$wt_common" = "$proj_common" ] \
+    || die "task $ID's recorded copy $WT is not a local copy of its recorded project $proj; refusing to recreate a missing endpoint against a foreign checkout"
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) \
+    || die "task $ID's recorded copy $WT cannot be resolved; refusing to recreate a missing endpoint"
+  for other in "$STATE"/*.meta; do
+    [ -e "$other" ] || [ -L "$other" ] || continue
+    [ "$other" != "$META" ] || continue
+    [ -f "$other" ] && [ ! -L "$other" ] \
+      || die "task $ID's recorded copy cannot be uniquely attributed while $other is not a regular task record"
+    other_wt=$(fm_meta_get "$other" worktree)
+    [ -n "$other_wt" ] || continue
+    other_real=$(cd "$other_wt" 2>/dev/null && pwd -P) || continue
+    [ "$other_real" = "$wt_real" ] || continue
+    other_id=$(basename "$other" .meta)
+    die "task $ID's recorded copy $WT is also recorded for task $other_id; refusing to recreate a missing endpoint and split one copy across two tasks"
+  done
+}
+
 recover_missing_rollback() {
   [ "$RECOVERY_ACTIVE" = 1 ] || return 0
   [ "$RECOVERY_PHASE" != complete ] || return 0
@@ -1008,6 +1053,7 @@ do_recover_missing() {
   state=$(agent_state)
   [ "$state" = missing ] \
     || die "recover-missing requires the recorded Herdr endpoint to read missing, got '$state'"
+  recovery_copy_is_uniquely_attributable
   ownership=$(fm_backend_recovery_ownership_state \
     herdr "$(fm_meta_get "$META" herdr_session)" "$ID" "$WT")
   [ "$ownership" = clear ] \

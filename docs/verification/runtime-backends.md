@@ -312,7 +312,7 @@ Observed guarantee: a restored no-agent tab was replaced create-before-close, wh
 
 ### Explicit missing-endpoint recovery
 
-The guarded recovery contract was verified on 2026-08-27 with the portable Herdr fake and real Git worktree fixtures.
+The guarded recovery contract was verified on 2026-09-01 with the portable Herdr fake and real Git worktree fixtures.
 The exact regression command was:
 
 ```sh
@@ -341,6 +341,8 @@ ok - missing Herdr recovery: ordinary relaunch refuses the distinct missing-endp
 ok - missing Herdr recovery: ordinary dead-endpoint relaunch remains unchanged
 ok - fm-spawn --recover-missing: the launch half cannot be used as a direct escape hatch
 ok - missing Herdr recovery: secondmate, remote, and missing-copy boundaries refuse
+ok - missing Herdr recovery: a copy a second task record claims is refused
+ok - missing Herdr recovery: a copy from another repository is refused
 ```
 
 Before this operation, `bin/fm-spawn.sh <task-id> --relaunch` refused a recorded Herdr endpoint classified as `missing` rather than allocating a replacement.
@@ -348,6 +350,7 @@ The explicit operator command is `bin/fm-control.sh <task-id> recover-missing --
 The authorization flag is mandatory, the task id is exact, and the operation accepts only local ship/scout tasks with a recorded Herdr endpoint whose classifier returns `missing`.
 Herdr `dead` means the pane exists but has no registered agent, so it remains the ordinary same-endpoint `relaunch` case.
 The ownership proof scans running Herdr sessions for a live registered agent with the exact task label or a foreground path inside the recorded worktree, and refuses any live or ambiguous result.
+That live scan cannot see a record-level conflict, so the control plane separately proves the recorded copy shares its Git object store with the recorded project and that no second task record in the home names the same copy, refusing a foreign checkout or a shared copy before any endpoint is allocated.
 A pane with no native registration is considered clear only when Herdr's strict process inventory proves it is one idle bare shell; an unregistered non-shell or unreadable process shape remains ambiguous.
 The dirty-copy regression proved that uncommitted files, branch identity, task identity, instructions, and the existing project copy survive the fresh endpoint allocation.
 The publication regression proved that the prior metadata remains authoritative until the new pane enters the existing worktree and reads alive, after which a same-directory atomic replacement publishes the new endpoint.
