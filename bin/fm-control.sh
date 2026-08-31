@@ -669,7 +669,7 @@ resolve_relaunch_profile() {
   # question the launch will actually be asked. The refusal text is shared for
   # the same reason.
   RELAUNCH_EXEMPTION=$(fm_control_cursor_exemption_inherited \
-    "$(fm_meta_get "$META" cursor_exemption)")
+    "$(fm_meta_get "$META" cursor_exemption)" "$TARGET_HARNESS")
   fm_control_harness_supports_kind "$TARGET_HARNESS" "$KIND" "$RELAUNCH_EXEMPTION" \
     || die "$(fm_control_harness_kind_refusal "$TARGET_HARNESS" "$KIND") Relaunching $ID onto it would stop the running agent for a launch that must be refused."
   # A model or effort chosen for the previous harness does not transfer to a

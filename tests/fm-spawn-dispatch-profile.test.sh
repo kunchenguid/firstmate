@@ -611,6 +611,13 @@ test_cursor_unrecognized_exemption_still_refuses() {
 # `yolo=` line that wins - silently rewriting the task's recorded merge
 # authority. The envelope name is therefore whitelisted to a bounded single-line
 # charset like every other recorded posture field.
+#
+# What this case proves is the refusal itself, and that it lands early enough
+# that no record is created to displace anything in. The displacement it guards
+# against is unreachable BY CONSTRUCTION once the charset holds, so there is no
+# honest assertion to make about a mangled record here; the companion case below
+# carries the other half by proving an ACCEPTED grant leaves a single-valued
+# record.
 test_cursor_exemption_rejects_a_record_injecting_grant() {
   local rec id out status injected
   id=profile-cursor-inject-z6m
@@ -625,12 +632,8 @@ test_cursor_exemption_rejects_a_record_injecting_grant() {
   assert_contains "$out" "--cursor-exemption must be" \
     "the refusal must say which grant forms are accepted"
   [ ! -s "$LAUNCH_LOG" ] || fail "a record-injecting grant must refuse before any launch is sent"
-  [ ! -f "$HOME_DIR/state/$id.meta" ] || {
-    grep -q '^cursor_exemption=' "$HOME_DIR/state/$id.meta" \
-      && fail "a refused grant must not be recorded in the task meta"
-    grep -q '^yolo=on$' "$HOME_DIR/state/$id.meta" \
-      && fail "a refused grant must not have displaced the task's recorded merge authority"
-  }
+  [ ! -f "$HOME_DIR/state/$id.meta" ] \
+    || fail "a grant refused at parse time must not have created a task record at all"
 
   # A grant whose envelope name carries only shell-inert but unauditable
   # characters is refused on the same whitelist, so the bound is the charset and
@@ -640,7 +643,7 @@ test_cursor_exemption_rejects_a_record_injecting_grant() {
   status=$?
   expect_code 1 "$status" "an envelope name outside the whitelisted charset must be refused"
   [ ! -s "$LAUNCH_LOG" ] || fail "an unbounded envelope name must refuse before any launch is sent"
-  pass "a cursor grant that could inject a second record line is refused and alters no recorded field"
+  pass "a cursor grant that could inject a second record line is refused before any record exists"
 }
 
 test_cursor_exemption_permits_an_attended_or_enveloped_spawn() {
@@ -662,7 +665,18 @@ test_cursor_exemption_permits_an_attended_or_enveloped_spawn() {
     "the exemption grant must be recorded in the task meta"
   assert_contains "$out" "cursor_exemption=envelope:routing-benchmark" \
     "the spawned line must report the grant the launch used"
-  pass "a recognized cursor exemption permits the spawn, keeps the sandbox posture, and is recorded"
+  # The task record is a `key=value` contract whose readers resolve a key to its
+  # LAST matching line, so a recorded grant must leave every key single-valued or
+  # that resolution silently changes meaning. This is the reachable half of the
+  # record-integrity claim: the refusal case above can only prove no record was
+  # written, while this one proves a written grant displaces nothing.
+  [ "$(grep -c '^yolo=' "$HOME_DIR/state/$id.meta")" -eq 1 ] \
+    || fail "recording a grant must leave exactly one yolo= line, got $(grep -c '^yolo=' "$HOME_DIR/state/$id.meta")"
+  [ "$(grep -c '^cursor_exemption=' "$HOME_DIR/state/$id.meta")" -eq 1 ] \
+    || fail "recording a grant must leave exactly one cursor_exemption= line"
+  [ "$(grep '^yolo=' "$HOME_DIR/state/$id.meta" | tail -1)" = "yolo=off" ] \
+    || fail "the recorded merge authority must still resolve to the spawn's own --yolo off"
+  pass "a recognized cursor exemption permits the spawn, keeps the sandbox posture, and is recorded single-valued"
 }
 
 # The regression the per-invocation flag exists for: a grant used on one spawn

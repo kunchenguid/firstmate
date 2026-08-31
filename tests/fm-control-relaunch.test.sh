@@ -901,6 +901,27 @@ test_relaunch_inherits_a_named_isolation_envelope_grant() {
   pass "fm-spawn --relaunch: a named isolation-envelope grant is inherited so automatic recovery still works"
 }
 
+# An envelope grant is inherited across relaunch, but it exempts a worker from
+# CURSOR's unattended bar and describes nothing about any other adapter, so it
+# must not ride a harness switch into a non-cursor task's record. If it did, a
+# later relaunch back onto cursor would read it out of that record as authority
+# nobody granted for cursor. The switch itself stays legitimate: the grant is
+# dropped, not the relaunch refused.
+test_relaunch_onto_another_harness_drops_the_cursor_grant() {
+  local dir out
+  dir=$(new_case cursorswitch rl43)
+  add_ship_task "$dir" rl43 cursor
+  printf 'cursor_exemption=envelope:routing-benchmark\n' >> "$dir/home/state/rl43.meta"
+  out=$(run_control "$dir" rl43 relaunch --harness codex --note "moving off cursor")
+  assert_contains "$out" "relaunched rl43 harness=codex" \
+    "a harness switch away from cursor should still succeed"
+  [ "$(meta_field "$dir" rl43 harness)" = codex ] \
+    || fail "the relaunched task should be recorded on codex"
+  ! grep -q '^cursor_exemption=' "$dir/home/state/rl43.meta" \
+    || fail "a cursor grant must not survive into a non-cursor task's record, got '$(meta_field "$dir" rl43 cursor_exemption)'"
+  pass "fm-control relaunch: a cursor grant is dropped when the relaunch resolves to another harness"
+}
+
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   local dir out
   dir=$(new_case spawnharness rl21)
@@ -1584,6 +1605,7 @@ test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_relaunch_never_inherits_an_attended_cursor_grant
 test_control_relaunch_refuses_an_attended_cursor_grant_before_stopping
+test_relaunch_onto_another_harness_drops_the_cursor_grant
 test_relaunch_inherits_a_named_isolation_envelope_grant
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
