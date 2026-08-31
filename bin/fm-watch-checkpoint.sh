@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Run one bounded foreground watcher checkpoint for harnesses that should not
 # rely on background-task completion to wake the model.
+# A Codex managed PID sandbox cannot safely reconcile host-owned process-event
+# runner PIDs, so that surface fails before starting the watcher and must be
+# retried through Codex's host-context approval path.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,7 +16,19 @@ Usage: fm-watch-checkpoint.sh [--seconds <n>]
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
 On an actionable watcher wake, pass through the watcher output and exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
+Inside Codex's managed PID sandbox, refuse before starting the watcher and ask
+the caller to rerun this same command with host-context approval.
 EOF
+}
+
+codex_managed_pid_sandbox() {
+  local pid1
+  [ -n "${CODEX_PERMISSION_PROFILE:-}" ] || return 1
+  pid1=$(ps -o comm= -p 1 2>/dev/null | tr -d '[:space:]') || return 1
+  case "$pid1" in
+    codex|codex-*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -43,6 +58,12 @@ case "$SECONDS_ARG" in
   ''|*[!0-9]*) echo "error: --seconds must be a positive integer" >&2; exit 2 ;;
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
+
+if codex_managed_pid_sandbox; then
+  printf '%s\n' "error: Codex's managed PID sandbox cannot safely own Firstmate watcher supervision." >&2
+  printf '%s\n' 'Rerun this foreground checkpoint with host-context approval.' >&2
+  exit 1
+fi
 
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {

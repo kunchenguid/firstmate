@@ -33,8 +33,9 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
-  # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
+  # Claude, Pi, Grok, Cursor, and current Codex managed surfaces set verified
+  # markers of their own; opencode, Kimi, and Muse are markerless, so a foreign
+  # marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -65,6 +66,11 @@ detect_own() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # Current Codex managed sessions publish both identifiers to hook and tool
+  # subprocesses. Require the pair so a single unrelated CODEX_* variable is not
+  # promoted into harness identity.
+  [ -n "${CODEX_SESSION_ID:-}" ] && [ -n "${CODEX_THREAD_ID:-}" ] \
+    && { echo codex; return; }
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
@@ -107,9 +113,7 @@ detect_own() {
         esac ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
-      break
-    fi
+    case "$pid" in ''|*[!0-9]*|0) break ;; esac
   done
   echo unknown
 }

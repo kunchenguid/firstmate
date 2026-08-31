@@ -457,6 +457,12 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
+Codex managed-shell compatibility was reverified on 2026-08-28 against `codex-cli 0.150.1`.
+The live managed tool surface published paired `CODEX_SESSION_ID` and `CODEX_THREAD_ID` markers, and the patched `bin/fm-harness.sh` returned `codex` despite the isolated PID namespace.
+Inside the managed PID sandbox, `bin/fm-watch-checkpoint.sh --seconds 1` refused before starting watcher state with `error: Codex's managed PID sandbox cannot safely own Firstmate watcher supervision.` and directed a host-context retry.
+A ten-second checkpoint against the live home with Codex host-context approval delivered the registered GitHub issue-label check without the prior process-event reconciliation segmentation fault.
+The portable regression commands were `tests/fm-watch-checkpoint.test.sh`, `tests/fm-supervision-instructions.test.sh`, and `tests/fm-secondmate-harness.test.sh`; all passed, with the harness suite proving both the paired-marker path and Codex-at-PID-1 ancestry.
+
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
 Pi same-process session-transition ownership was verified on 2026-07-27 against the tracked extension with a faithful in-process factory rebind (module cache retained, real arm children):

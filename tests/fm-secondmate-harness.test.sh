@@ -58,6 +58,7 @@ set -u
 # ambient markers so what this suite asserts does not depend on which harness it
 # was launched from; every case states the marker it means to test.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+unset CODEX_PERMISSION_PROFILE CODEX_SESSION_ID CODEX_THREAD_ID
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
@@ -119,6 +120,51 @@ SH
     PATH="$fakebin:$BASE_PATH" CURSOR_INVOKED_AS=cursor "$ROOT/bin/fm-harness.sh")
   [ "$got" != cursor ] || fail "an inexact Cursor marker value was accepted as Cursor Agent CLI"
   pass "fm-harness detects only Cursor Agent CLI's exact invocation marker"
+}
+
+test_codex_managed_marker_and_pid_one_detection() {
+  local dir fakebin got
+  dir="$TMP_ROOT/codex-managed-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "${FM_TEST_PID1_CODEX:-0}:$pid:$field" in
+  1:1:comm=) printf '%s\n' codex ;;
+  1:1:args=) printf '%s\n' 'codex managed shell' ;;
+  1:1:ppid=) printf '%s\n' 0 ;;
+  1:*:ppid=) printf '%s\n' 1 ;;
+  *:*:comm=) printf '%s\n' bash ;;
+  *:*:args=) printf '%s\n' bash ;;
+  *:*:ppid=) printf '%s\n' 0 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    CODEX_SESSION_ID=session CODEX_THREAD_ID=thread FM_TEST_PID1_CODEX=0 \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = codex ] || fail "paired Codex managed markers resolved '$got', expected codex"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CODEX_THREAD_ID \
+    CODEX_SESSION_ID=session FM_TEST_PID1_CODEX=0 \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = unknown ] || fail "a lone Codex session marker resolved '$got', expected unknown"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    -u CODEX_SESSION_ID -u CODEX_THREAD_ID -u CODEX_PERMISSION_PROFILE \
+    FM_TEST_PID1_CODEX=1 PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = codex ] || fail "Codex at PID 1 resolved '$got', expected codex"
+
+  pass "fm-harness detects paired Codex managed markers and inspects PID 1 ancestry"
 }
 
 # ===========================================================================
@@ -2549,6 +2595,7 @@ SH
 
 test_harness_resolution
 test_cursor_marker_detection
+test_codex_managed_marker_and_pid_one_detection
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands

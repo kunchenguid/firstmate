@@ -7,6 +7,7 @@ set -u
 
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-checkpoint)
+unset CODEX_PERMISSION_PROFILE CODEX_SESSION_ID CODEX_THREAD_ID
 
 make_home() {
   local name=$1 home
@@ -81,7 +82,35 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
+test_codex_managed_pid_sandbox_refuses_before_watcher_start() {
+  local home fakebin out err status base_path
+  home=$(make_home codex-pid-sandbox)
+  fakebin=$(fm_fakebin "$home/fakebin")
+  base_path=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = '-o comm= -p 1' ]; then
+  printf '%s\n' codex
+  exit 0
+fi
+exec "$FM_TEST_REAL_PS" "$@"
+SH
+  chmod +x "$fakebin/ps"
+  out="$home/out.txt"
+  err="$home/err.txt"
+  status=0
+  CODEX_PERMISSION_PROFILE=managed FM_TEST_REAL_PS=$(command -v ps) \
+    PATH="$fakebin:$base_path" FM_HOME="$home" "$CHECKPOINT" --seconds 1 \
+    >"$out" 2>"$err" || status=$?
+  expect_code 1 "$status" "Codex managed PID sandbox checkpoint exit"
+  assert_contains "$(cat "$err")" "managed PID sandbox" "checkpoint did not identify the unsafe Codex PID sandbox"
+  assert_contains "$(cat "$err")" "host-context approval" "checkpoint did not direct the safe retry path"
+  assert_absent "$home/state/.watch.lock/pid" "checkpoint started a watcher inside the managed PID sandbox"
+  pass "checkpoint refuses Codex's managed PID sandbox before touching watcher state"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
+test_codex_managed_pid_sandbox_refuses_before_watcher_start
