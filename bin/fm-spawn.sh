@@ -1306,29 +1306,28 @@ launch_template() {
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs. grok's launch was deliberately left unchanged when the other
-    # harnesses moved onto their own approval and sandbox controls: it exposes no
-    # sandbox or classifier equivalent, so full auto-approval remains the only
-    # posture that keeps an unattended grok pane running. grok's turn-end signal does NOT ride the
+    # crewmate needs. grok's launch was deliberately left unchanged by the
+    # hardening that moved claude, codex, and cursor onto their own approval and
+    # sandbox controls: grok exposes no sandbox or classifier equivalent, so full
+    # auto-approval remains the only posture that keeps an unattended grok pane
+    # running. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which the
-    # autonomy flag does NOT cover and which would otherwise block every spawn,
+    # autonomy flags do NOT cover and which would otherwise block every spawn,
     # since each task gets a fresh worktree path cursor has never seen.
-    # --force ("Force allow commands unless explicitly denied", the canonical flag
-    # --yolo aliases) is the ONLY non-prompting posture cursor offers, and it
-    # genuinely defeats the sandbox. This was measured on cursor-agent
-    # 2026.08.25, not assumed: --auto-review runs a server classifier that
-    # "prompts for the rest", which parks an unattended crewmate on a dialog
-    # nobody can answer while the cursor busy-state fold still reads the pane as
-    # working; and --sandbox enabled, which DOES confine writes under
-    # --auto-review, is overridden by --force regardless of flag order (a write
-    # outside the worktree succeeds). So --sandbox enabled is deliberately NOT
-    # passed alongside --force: it would claim a confinement the launch does not
-    # actually have. Unattended operation wins here because a parked pane fails
-    # the delivery contract outright, and the per-task worktree plus firstmate's
-    # own supervision remain the blast-radius control.
+    # --auto-review --sandbox enabled replaces the former --yolo (the --force
+    # alias whose TUI label is "Run Everything"): the worker runs under cursor's
+    # own review and sandbox controls rather than with both switched off. These
+    # were measured on cursor-agent 2026.08.25, not assumed. --sandbox enabled
+    # DOES confine writes under --auto-review (a write outside the worktree is
+    # denied), but --force defeats that confinement at any flag order, so --force
+    # and --yolo are deliberately NOT passed: either would claim a confinement
+    # the launch does not actually have. The accepted cost is that --auto-review
+    # runs a server classifier that "prompts for the rest", so a cursor pane CAN
+    # park on a dialog nobody is watching; the ship refusal below is what keeps
+    # that cost off the unattended implementation path.
     # --workspace pins the
     # exact worktree. -w/--worktree is deliberately never passed: it allocates a
     # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
@@ -1338,7 +1337,7 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --force __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1414,6 +1413,23 @@ esac
 # secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# cursor launches under --auto-review --sandbox enabled, which keeps a REAL
+# filesystem sandbox but accepts that cursor's server classifier prompts for any
+# call it does not deem safe. An unattended pane has no approver, and the
+# cursor-transcript busy fold keeps a parked pane reading as working, so the
+# stall would never surface as a hold. The non-prompting alternative (--force,
+# and its documented --yolo alias) defeats --sandbox enabled, so it is refused
+# as false hardening rather than shipped. cursor is therefore barred from
+# UNATTENDED IMPLEMENTATION, and this bar is deliberately scoped to kind=ship
+# alone: ship is the only kind that carries a delivery contract (--mode/--yolo
+# are required for it), so it is the narrowest kind that matches the reason for
+# the refusal. scout (a report deliverable) and secondmate (a firstmate instance
+# with its own supervision protocol) are NOT barred.
+if [ "$KIND" = ship ] && [ "$HARNESS" = cursor ]; then
+  echo "error: cursor cannot run an unattended ship spawn; its --auto-review classifier prompts for calls it does not deem safe, a crewmate pane has no approver, and the parked pane keeps reading as busy. Use codex or claude for unattended implementation, or spawn cursor with --scout." >&2
   exit 1
 fi
 
