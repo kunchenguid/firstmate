@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Resolve a project's REGISTERED delivery posture from the data/projects.md registry.
 # Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# no-mistakes|direct-PR|direct-push|local-only and yolo is on|off.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode and
@@ -19,6 +19,8 @@
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
 #   direct-PR              push + PR via gh-axi, no pipeline
+#   direct-push            directed tests, then push straight to the default
+#                          branch (no PR; the push is the landing)
 #   local-only             local branch, no remote/PR, guarded local merge
 #   no-mistakes-prod-only  a conditional policy, not a task mode: firstmate
 #                          classifies each task's surface at intake (the
@@ -80,7 +82,7 @@ fi
 mode=${parsed%% *}
 yolo=${parsed##* }
 case "$mode" in
-  no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
+  no-mistakes|direct-PR|direct-push|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac

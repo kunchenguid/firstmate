@@ -5,7 +5,7 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
+# fm_dod_block <no-mistakes|direct-PR|direct-push|local-only> <task-id> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
@@ -24,6 +24,20 @@ This task ships **direct-PR**: you raise the PR yourself, without the no-mistake
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
+      ;;
+    direct-push)
+      cat <<EOF
+# Definition of done
+Delivery contract: mode=direct-push
+This task ships **direct-push**: no PR anywhere - you push your commits straight to the repo's default branch.
+The task is complete only when committed on your branch.
+Implement the change, then write and pass DIRECTED tests - tests aimed at the delivered change (run the full suite too when it is cheap).
+There is no review gate, so the directed tests are the gate: they must actually pass before you push.
+Then push your branch's commits to the repo's default branch from this worktree: \`git push origin HEAD:<default>\` (replace \`<default>\` with the repo's actual default branch, e.g. \`main\`).
+That push is the delivery moment; firstmate's fleet sync reconciles the local copy afterwards.
+Do NOT open a PR and do NOT run /no-mistakes.
+When the push has landed, append \`done: pushed to <default>; directed tests green\` to the status file and stop.
 EOF
       ;;
     local-only)

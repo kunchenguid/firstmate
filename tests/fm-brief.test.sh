@@ -199,7 +199,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
+  for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only" "brief-directpush-a4:direct-push"; do
     id=${id_mode%%:*}
     mode=${id_mode##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
@@ -215,6 +215,42 @@ test_ship_modes_generate_clean_briefs() {
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+# direct-push's contract inverts direct-PR's rule 1: the default-branch push IS the
+# delivery, so the brief must ban PRs and merges, name the exact push mechanic,
+# and keep the directed-tests gate and the machine-readable done line.
+test_direct_push_dod_wording() {
+  local home id brief
+  home="$TMP_ROOT/direct-push-home"
+  mkdir -p "$home/data"
+  id="brief-directpush-wording-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-push >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  grep -qx "Delivery contract: mode=direct-push" "$brief" \
+    || fail "direct-push brief did not record its machine-readable delivery contract"
+  assert_grep "no PR anywhere - you push your commits straight to the repo's default branch" "$brief" \
+    "direct-push DoD lost its no-PR delivery statement"
+  assert_grep "git push origin HEAD:<default>" "$brief" \
+    "direct-push DoD lost the exact default-branch push mechanic"
+  assert_grep "write and pass DIRECTED tests - tests aimed at the delivered change" "$brief" \
+    "direct-push DoD lost the directed-tests gate"
+  assert_grep "the directed tests are the gate: they must actually pass before you push" "$brief" \
+    "direct-push DoD lost the tests-before-push ordering rule"
+  assert_grep "done: pushed to <default>; directed tests green" "$brief" \
+    "direct-push DoD lost its machine-readable done line"
+  assert_grep "Never open a PR and never merge. Deliver by pushing your commits from your \`fm/$id\` branch straight to the default branch" "$brief" \
+    "direct-push rule 1 lost the no-PR/no-merge ban and push mechanic"
+  assert_no_grep "Never push to the default branch" "$brief" \
+    "direct-push brief retained direct-PR's never-push rule 1"
+  assert_no_grep "Do NOT push, do NOT open a PR" "$brief" \
+    "direct-push brief retained local-only's never-push contract"
+  assert_no_grep "no-mistakes axi respond" "$brief" \
+    "direct-push brief received the pipeline gate contract"
+  assert_no_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+    "direct-push brief received the no-mistakes pipeline handoff"
+  pass "fm-brief.sh: direct-push DoD bans PRs, names the push mechanic, and gates on directed tests"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -238,7 +274,7 @@ test_ship_mode_is_required_and_closed_set() {
   done <<'ROWS'
 missing --mode||ship briefs require --mode
 empty --mode value|--mode|requires a value
-unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only
+unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, direct-push, local-only
 conditional policy is not a task mode|--mode no-mistakes-prod-only|classify this task's surface
 ROWS
   pass "fm-brief.sh: ship --mode is required and closed-set validated"
@@ -766,6 +802,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_direct_push_dod_wording
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

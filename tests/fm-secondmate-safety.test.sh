@@ -876,10 +876,37 @@ test_home_seed_refuses_local_only_project() {
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed allowed a local-only project into a secondmate home"
   fi
-  grep -F 'project alpha is local-only; secondmate routes support only no-mistakes and direct-PR projects' "$err" >/dev/null \
+  grep -F 'project alpha is local-only; secondmate routes support only no-mistakes, direct-PR, and direct-push projects' "$err" >/dev/null \
     || fail "seed did not explain local-only project rejection"
   [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
   pass "home seeding refuses local-only projects"
+}
+
+# direct-push is a remote-backed mode, so seeding a secondmate home treats it
+# like direct-PR: origin required, clone seeded, and no no-mistakes init step.
+test_home_seed_accepts_direct_push_project_without_no_mistakes_init() {
+  local home subhome err out seeded_origin
+  home="$TMP_ROOT/direct-push-seed-home"
+  subhome="$TMP_ROOT/direct-push-seed-subhome"
+  err="$TMP_ROOT/direct-push-seed.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/direct-push-alpha.git"
+  printf '%s\n' '- alpha [direct-push +yolo] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for direct-push seed test"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha 2>"$err") || {
+    cat "$err" >&2
+    fail "seed refused a direct-push project"
+  }
+  seeded_origin=$(git -C "$subhome/projects/alpha" remote get-url origin 2>/dev/null) \
+    || fail "direct-push seed did not clone the project into the subhome"
+  [ "$(git -C "$home/projects/alpha" remote get-url origin)" = "$seeded_origin" ] \
+    || fail "direct-push seed did not preserve the source origin"
+  if git -C "$subhome/projects/alpha" remote get-url no-mistakes >/dev/null 2>&1; then
+    fail "direct-push seed ran a no-mistakes init on the seeded clone"
+  fi
+  pass "home seeding treats direct-push as remote-backed without no-mistakes init"
 }
 
 test_home_seed_refuses_registry_delimiter_home() {
@@ -2922,6 +2949,7 @@ test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
+test_home_seed_accepts_direct_push_project_without_no_mistakes_init
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

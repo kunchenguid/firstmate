@@ -82,7 +82,7 @@ EOF
 missing both flags||ship spawns require --mode
 missing --yolo|--mode no-mistakes|ship spawns require --yolo
 missing --mode|--yolo off|ship spawns require --mode
-unknown mode|--mode nope --yolo off|must be one of no-mistakes, direct-PR, local-only
+unknown mode|--mode nope --yolo off|must be one of no-mistakes, direct-PR, direct-push, local-only
 unknown yolo|--mode no-mistakes --yolo maybe|--yolo must be on or off
 conditional policy as a task mode|--mode no-mistakes-prod-only --yolo off|classify this task's surface
 ROWS
@@ -139,6 +139,16 @@ EOF
   out=$(run_spawn "$home" "$fakebin" delivery-agree-b2 "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "delivery mismatch" "an agreeing mode was reported as a mismatch"
 
+  # The direct-push contract agrees and mismatches on the same terms as the
+  # other task modes, since the brief/spawn contract line is mode-agnostic.
+  write_brief "$home" delivery-agree-b4 direct-push
+  out=$(run_spawn "$home" "$fakebin" delivery-agree-b4 "$proj" claude --mode direct-push --yolo on)
+  assert_not_contains "$out" "delivery mismatch" "an agreeing direct-push mode was reported as a mismatch"
+  write_brief "$home" delivery-mismatch-b5 direct-push
+  out=$(run_spawn "$home" "$fakebin" delivery-mismatch-b5 "$proj" claude --mode direct-PR --yolo off)
+  assert_contains "$out" "the brief says mode=direct-push but this spawn passed --mode direct-PR" \
+    "a direct-push brief mismatched against a direct-PR spawn was not shown both sides"
+
   # A brief scaffolded before the contract line existed warns once and continues.
   write_brief "$home" delivery-legacy-b3
   out=$(run_spawn "$home" "$fakebin" delivery-legacy-b3 "$proj" claude --mode local-only --yolo off)
@@ -176,8 +186,13 @@ EOF
   done <<'ROWS'
 no-mistakes project shipped direct-PR|- proj [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
 no-mistakes project shipped local-only|- proj [no-mistakes] - fixture (added 2026-01-01)|local-only|notice|no-mistakes
+no-mistakes project shipped direct-push|- proj [no-mistakes] - fixture (added 2026-01-01)|direct-push|notice|no-mistakes
 no-mistakes project shipped no-mistakes|- proj [no-mistakes] - fixture (added 2026-01-01)|no-mistakes|quiet|no-mistakes
+direct-PR project shipped direct-push|- proj [direct-PR] - fixture (added 2026-01-01)|direct-push|notice|direct-PR
+direct-push project shipped direct-PR|- proj [direct-push] - fixture (added 2026-01-01)|direct-PR|quiet|direct-push
+direct-push project shipped direct-push|- proj [direct-push] - fixture (added 2026-01-01)|direct-push|quiet|direct-push
 local-only project shipped no-mistakes|- proj [local-only] - fixture (added 2026-01-01)|no-mistakes|quiet|local-only
+local-only project shipped direct-push|- proj [local-only] - fixture (added 2026-01-01)|direct-push|notice|local-only
 conditional policy shipped direct-PR|- proj [no-mistakes-prod-only] - fixture (added 2026-01-01)|direct-PR|quiet|no-mistakes-prod-only
 unregistered project resolves to the no-mistakes standing default|- other [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
 ROWS
@@ -259,6 +274,17 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
+
+  # The fourth registered task mode promotes and records on the same terms.
+  meta="$home/state/promote-push-d2.meta"
+  printf 'window=fm-promote-push-d2\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-push-d2 --mode direct-push --yolo on 2>&1)
+  status=$?
+  expect_code 0 "$status" "a direct-push promotion carrying both flags should succeed"
+  assert_grep 'kind=ship' "$meta" "direct-push promotion did not restore ship teardown protection"
+  assert_grep 'mode=direct-push' "$meta" "direct-push promotion did not record the decided delivery mode"
+  assert_grep 'yolo=on' "$meta" "direct-push promotion did not record the decided merge posture"
+  assert_contains "$out" "ship instructions for mode=direct-push" "promotion hint did not carry the direct-push mode"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
@@ -308,7 +334,7 @@ printf '%s' "$2" > "$FM_TEST_CAPTURE"
 STUB
   chmod +x "$sendroot/bin/fm-send.sh"
 
-  for mode in no-mistakes direct-PR local-only; do
+  for mode in no-mistakes direct-PR direct-push local-only; do
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
@@ -371,6 +397,19 @@ STUB
     "promoted local-only worker lost its no-remote contract"
   assert_no_grep "no-mistakes axi respond" "$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr" \
     "promoted direct-PR worker received the pipeline gate contract"
+
+  # direct-push carries the push mechanic and its own done line, never a PR.
+  payload="$TMP_ROOT/promote-dod/payload-promote-dod-direct-push"
+  assert_grep "git push origin HEAD:<default>" "$payload" \
+    "promoted direct-push worker lost the default-branch push mechanic"
+  assert_grep "done: pushed to <default>; directed tests green" "$payload" \
+    "promoted direct-push worker lost its machine-readable done line"
+  assert_grep "Do NOT open a PR" "$payload" \
+    "promoted direct-push worker lost its no-PR contract"
+  assert_no_grep "no-mistakes axi respond" "$payload" \
+    "promoted direct-push worker received the pipeline gate contract"
+  assert_no_grep "open a PR with" "$payload" \
+    "promoted direct-push worker received the direct-PR open-a-PR instruction"
   pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
 }
 
@@ -385,6 +424,9 @@ test_project_mode_maps_the_conditional_policy() {
 - prodproj [no-mistakes-prod-only] - fixture (added 2026-01-01)
 - yoloproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
 - flatproj [direct-PR] - fixture (added 2026-01-01)
+- pushproj [direct-push] - fixture (added 2026-01-01)
+- pushyoloproj [direct-push +yolo] - fixture (added 2026-01-01)
+- pushtypo [direct-pus] - fixture (added 2026-01-01)
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
@@ -400,6 +442,22 @@ EOF
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" pushproj 2>/dev/null)
+  [ "$out" = "direct-push off" ] || fail "direct-push registry mode was not parsed (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" pushproj 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a registered direct-push mode still warned as unknown: $err"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" pushyoloproj 2>/dev/null)
+  [ "$out" = "direct-push on" ] || fail "direct-push dropped its +yolo posture (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw pushproj 2>/dev/null)
+  [ "$out" = "direct-push off" ] || fail "--raw altered the direct-push mode (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" pushtypo 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "a direct-push typo no longer falls back to the most rigorous default"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" pushtypo 2>&1 >/dev/null)
+  assert_contains "$err" "unknown mode" "a direct-push typo stopped warning"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
