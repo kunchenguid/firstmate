@@ -241,6 +241,7 @@ cli() {
       FM_HANDOFF_TEST_PROCESS_BOOT_ID="$PROCESS_BOOT_ID" \
       FM_HANDOFF_TEST_LIVE_PROCESS_CAPABILITY="${LIVE_PROCESS_CAPABILITY:-}" \
       FM_HANDOFF_TEST_PI_LIVENESS="${FM_HANDOFF_TEST_PI_LIVENESS:-}" \
+      FM_HANDOFF_TEST_PI_BOOT_ID="${FM_HANDOFF_TEST_PI_BOOT_ID:-}" \
       FM_HANDOFF_TEST_FAILPOINT="${FM_HANDOFF_TEST_FAILPOINT:-}" \
       FM_HANDOFF_TEST_PAUSEPOINT="${FM_HANDOFF_TEST_PAUSEPOINT:-}" \
       FM_HANDOFF_TEST_PAUSE_MARKER="${FM_HANDOFF_TEST_PAUSE_MARKER:-$EROOT/pause-marker}" \
@@ -2324,6 +2325,79 @@ test_pi_attempt_authority_and_immutable_outcome() {
   pass "exclusive Pi attempt authority and immutable terminal outcome"
 }
 
+test_pi_process_liveness_recovery() {
+  local seal binding old_attempt recovered conflict replacement
+
+  new_env pi-linux-missing-owner
+  CAPABILITY=pi-linux-owner
+  PROCESS_GENERATION=301
+  LIVE_PROCESS_CAPABILITY=pi-linux-owner
+  register_statement 'A missing Linux Pi owner must release its durable attempt.' >/dev/null || fail "Linux missing-owner fixture did not register"
+  seal=$(seal_pi) || fail "Linux missing-owner fixture did not seal"
+  binding=$(find "$FM_HOME/state/context-handoff/bindings" -name 'pi-compaction-*.json' -print -quit)
+  old_attempt=$(printf '%s' "$seal" | jq -r .attempt_id)
+  jq --arg boot linux-test-boot '.process_platform="linux" | .process_boot_id=$boot' "$binding" > "$binding.tmp" || fail "could not create the Linux missing-owner binding"
+  chmod 600 "$binding.tmp"
+  mv "$binding.tmp" "$binding"
+  CAPABILITY=pi-linux-replacement
+  PROCESS_GENERATION=302
+  LIVE_PROCESS_CAPABILITY=
+  FM_HANDOFF_TEST_PI_BOOT_ID=linux-test-boot
+  FM_HANDOFF_TEST_PI_LIVENESS=linux-missing
+  recovered=$(seal_pi) || fail "proven missing Linux Pi owner escaped bounded recovery"
+  [ "$(printf '%s' "$recovered" | jq -r .attempt_id)" != "$old_attempt" ] || fail "proven missing Linux Pi owner retained exclusive authority"
+  [ "$(jq -r .process_platform "$binding")" = test ] || fail "replacement Pi process did not acquire the recovered attempt"
+  jq -se --arg attempt "$old_attempt" 'any(.[]; .reason=="dead-pi-compaction-attempt-retired" and .record_id==$attempt)' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "missing Linux Pi owner left no retirement evidence"
+
+  new_env pi-linux-transient-owner
+  CAPABILITY=pi-linux-owner
+  PROCESS_GENERATION=311
+  LIVE_PROCESS_CAPABILITY=pi-linux-owner
+  register_statement 'A transient Linux probe failure must preserve its owner.' >/dev/null || fail "Linux transient fixture did not register"
+  seal=$(seal_pi) || fail "Linux transient fixture did not seal"
+  binding=$(find "$FM_HOME/state/context-handoff/bindings" -name 'pi-compaction-*.json' -print -quit)
+  old_attempt=$(printf '%s' "$seal" | jq -r .attempt_id)
+  jq --arg boot linux-test-boot '.process_platform="linux" | .process_boot_id=$boot' "$binding" > "$binding.tmp" || fail "could not create the Linux transient binding"
+  chmod 600 "$binding.tmp"
+  mv "$binding.tmp" "$binding"
+  CAPABILITY=pi-linux-contender
+  PROCESS_GENERATION=312
+  LIVE_PROCESS_CAPABILITY=
+  FM_HANDOFF_TEST_PI_BOOT_ID=linux-test-boot
+  FM_HANDOFF_TEST_PI_LIVENESS=linux-transient
+  conflict=$(seal_pi) || fail "transient Linux probe failure escaped bounded transport"
+  [ "$(printf '%s' "$conflict" | jq -r .status)" = attempt-conflict ] || fail "transient Linux probe failure retired the durable owner"
+  [ "$(jq -r .attempt_id "$binding")" = "$old_attempt" ] || fail "transient Linux probe failure replaced the durable attempt"
+  [ -z "$(find "$FM_HOME/state/context-handoff/quarantine" -name '*.json' -print -quit)" ] || fail "transient Linux probe failure wrote false retirement evidence"
+
+  new_env pi-darwin-token-owner
+  CAPABILITY=pi-darwin-owner
+  PROCESS_GENERATION=321
+  LIVE_PROCESS_CAPABILITY=pi-darwin-owner
+  register_statement 'A Darwin Pi start token must own crash recovery.' >/dev/null || fail "Darwin token fixture did not register"
+  seal=$(seal_pi) || fail "Darwin token fixture did not seal"
+  binding=$(find "$FM_HOME/state/context-handoff/bindings" -name 'pi-compaction-*.json' -print -quit)
+  old_attempt=$(printf '%s' "$seal" | jq -r .attempt_id)
+  jq '.process_platform="darwin" | .process_boot_id=null | .process_generation=321000123 | .process_start_token="321:123"' "$binding" > "$binding.tmp" || fail "could not create the Darwin token binding"
+  chmod 600 "$binding.tmp"
+  mv "$binding.tmp" "$binding"
+  CAPABILITY=pi-darwin-contender
+  PROCESS_GENERATION=322
+  LIVE_PROCESS_CAPABILITY=
+  FM_HANDOFF_TEST_PI_BOOT_ID=
+  FM_HANDOFF_TEST_PI_LIVENESS=darwin-match
+  conflict=$(seal_pi) || fail "matching Darwin owner probe escaped bounded transport"
+  [ "$(printf '%s' "$conflict" | jq -r .status)" = attempt-conflict ] || fail "matching Darwin start token did not preserve exclusive authority"
+  [ "$(jq -r .attempt_id "$binding")" = "$old_attempt" ] || fail "matching Darwin start token replaced the durable attempt"
+  FM_HANDOFF_TEST_PI_LIVENESS=darwin-mismatch
+  replacement=$(seal_pi) || fail "mismatched Darwin start token escaped bounded recovery"
+  [ "$(printf '%s' "$replacement" | jq -r .attempt_id)" != "$old_attempt" ] || fail "mismatched Darwin start token retained stale authority"
+  [ "$(jq -r .process_platform "$binding")" = test ] || fail "replacement Pi process did not acquire the Darwin attempt"
+  FM_HANDOFF_TEST_PI_LIVENESS=
+  FM_HANDOFF_TEST_PI_BOOT_ID=
+  pass "precise Pi process liveness recovery"
+}
+
 test_precompact_generation_and_timeout_margin() {
   local statement arguments registered marker release paused_pid paused_status blocked started elapsed budget i
   new_env precompact-generation-at-seal
@@ -2506,6 +2580,7 @@ test_orphan_active_state_blocks_compaction
 test_foreign_candidate_never_blocks_compaction
 test_durable_compaction_attempt
 test_pi_attempt_authority_and_immutable_outcome
+test_pi_process_liveness_recovery
 test_precompact_generation_and_timeout_margin
 test_sessionstart_pending_eligibility
 test_empty_register_binding_noop
