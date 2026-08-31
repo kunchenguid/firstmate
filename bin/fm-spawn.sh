@@ -3044,7 +3044,11 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
-      LAUNCH="env -u TRACEPARENT $LAUNCH"
+      if [ "$RELAUNCH" -eq 1 ]; then
+        LAUNCH="env -u TRACEPARENT $LAUNCH"
+      else
+        LAUNCH="unset TRACEPARENT; $LAUNCH"
+      fi
     fi
   else
     TRACE_SEND_STATUS=$?
@@ -3052,7 +3056,11 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
       echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
       exit 1
     fi
-    LAUNCH="env -u TRACEPARENT $LAUNCH"
+    if [ "$RELAUNCH" -eq 1 ]; then
+      LAUNCH="env -u TRACEPARENT $LAUNCH"
+    else
+      LAUNCH="unset TRACEPARENT; $LAUNCH"
+    fi
   fi
 fi
 sleep 0.3

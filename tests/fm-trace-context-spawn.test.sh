@@ -304,7 +304,8 @@ test_failed_delivery_omits_metadata_and_still_launches() {
     || fail "failed traceparent delivery must not leave a traceparent= claim in meta"
   ! grep -q '^export TRACEPARENT=' "$LAUNCH_LOG" \
     || fail "the failed TRACEPARENT export must not be recorded as delivered"
-  grep -q 'claude' "$LAUNCH_LOG" || fail "the source task must still launch"
+  grep -q '^unset TRACEPARENT; .*claude' "$LAUNCH_LOG" \
+    || fail "failed TRACEPARENT delivery must preserve the fresh-spawn launch cleanup"
   pass "failed TRACEPARENT delivery omits metadata while the source task still launches"
 }
 
@@ -342,8 +343,8 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
 
   ! grep -q '^traceparent=' "$meta" \
     || fail "failed metadata append must not leave a traceparent= claim in meta"
-  grep -q '^env -u TRACEPARENT .*claude' "$LAUNCH_LOG" \
-    || fail "failed metadata append must clear TRACEPARENT in the launched process environment"
+  grep -q '^unset TRACEPARENT; .*claude' "$LAUNCH_LOG" \
+    || fail "failed metadata append must unset TRACEPARENT in the launch command"
   pass "failed traceparent metadata append removes the carrier from the launched task"
 }
 

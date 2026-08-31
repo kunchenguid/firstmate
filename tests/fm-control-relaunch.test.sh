@@ -459,19 +459,21 @@ test_disabled_relaunch_clears_prior_trace_context() {
     || fail "disabled relaunch must clear the pane carrier in the replacement process environment"
   ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
     || fail "disabled relaunch must not export a replacement trace carrier"
-  command -v fish >/dev/null 2>&1 \
-    || fail "Fish is required for the trace-disabled replacement launch regression"
-  cat > "$dir/fakebin/claude" <<'SH'
+  if command -v fish >/dev/null 2>&1; then
+    cat > "$dir/fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${TRACEPARENT-unset}" > "$FM_FAKE_DIR/fish-traceparent"
 SH
-  chmod +x "$dir/fakebin/claude"
-  PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" TRACEPARENT=stale \
-    fish -c "$launch" >/dev/null 2>&1 \
-    || fail "Fish rejected the trace-disabled replacement launch"
-  [ "$(cat "$dir/fake/fish-traceparent")" = unset ] \
-    || fail "the replacement process inherited TRACEPARENT under Fish"
-  pass "fm-control relaunch: disabling tracing clears metadata and starts through Fish without inheriting pane context"
+    chmod +x "$dir/fakebin/claude"
+    PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" TRACEPARENT=stale \
+      fish -c "$launch" >/dev/null 2>&1 \
+      || fail "Fish rejected the trace-disabled replacement launch"
+    [ "$(cat "$dir/fake/fish-traceparent")" = unset ] \
+      || fail "the replacement process inherited TRACEPARENT under Fish"
+  elif [ "${FM_TEST_REQUIRE_FISH:-0}" = 1 ]; then
+    fail "Fish is required for the trace-disabled replacement launch regression"
+  fi
+  pass "fm-control relaunch: disabling tracing clears metadata and replacement process context"
 }
 
 test_herdr_pi_relaunch_rejects_a_surviving_shell() {

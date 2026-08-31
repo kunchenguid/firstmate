@@ -392,7 +392,7 @@ jobs:
             exit 1
           }
 
-          /bin/bash tests/fm-control-relaunch.test.sh
+          FM_TEST_REQUIRE_FISH=1 /bin/bash tests/fm-control-relaunch.test.sh
 
   invariants:
     name: Repo invariants
