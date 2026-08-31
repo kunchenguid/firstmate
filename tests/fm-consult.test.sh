@@ -129,7 +129,7 @@ wait_for_file() {
   return 1
 }
 
-mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+mode_of() { perl -e 'my @s = stat($ARGV[0]) or exit 1; printf "%o", $s[2] & 07777' "$1"; }
 
 consult_home() {
   mkdir -p "$1/state"
@@ -221,6 +221,15 @@ mismatch_status=0
 pa "$H1" handle "$id_one" 1 "$bad_capture" >/dev/null 2>&1 || mismatch_status=$?
 [ "$mismatch_status" -ne 0 ] || fail "mismatched result job id was accepted"
 assert_absent "$record_one/advisory.md" "mismatched job id cannot create an advisory"
+
+detached_capture="$TMP_ROOT/detached-matching-completion.json"
+printf '{"schema":"fm-consult-wait/1","consult_id":"%s","job_id":"job_fixture","wait_exit":0,"wait_timed_out":false,"job_status":"succeeded","error_code":null}\n' "$id_one" > "$detached_capture"
+chmod 0600 "$detached_capture"
+detached_status=0
+pa "$H1" handle "$id_one" 1 "$detached_capture" >/dev/null 2>&1 || detached_status=$?
+[ "$detached_status" -ne 0 ] || fail "a detached matching envelope acknowledged another captured generation"
+assert_absent "$record_one/advisory.md" "a detached envelope cannot create an advisory"
+assert_absent "${capture_one%.result}.handled" "a detached envelope acknowledged the durable capture"
 
 handle_status=0
 handle_out=$(pa "$H1" handle "$id_one" 1 "$capture_one") || handle_status=$?
@@ -355,6 +364,7 @@ before_attempt_only=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
 attempt_only_status=0
 attempt_only_out=$(fc "$H_ATTEMPT_ONLY" submit "$id_after_attempt" 2>&1) || attempt_only_status=$?
 [ "$attempt_only_status" -ne 0 ] || fail "an attempt without a conclusive terminal did not block a different consult"
+assert_contains "$attempt_only_out" "reconciles DELIVERY_AMBIGUOUS" "the unresolved attempt reports the human reconciliation boundary"
 assert_grep '"terminal":"DELIVERY_AMBIGUOUS"' "$attempt_only_record/submission.json" "an unresolved attempt becomes DELIVERY_AMBIGUOUS"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_attempt_only" ] || fail "attempt-only recovery created another job"
 fc "$H_ATTEMPT_ONLY" reconcile-ambiguous "$id_attempt_only" --human-record captain-record-43 >/dev/null \
@@ -449,6 +459,24 @@ assert_present "$H_ARM_IDENTITY/state/procevent/$source_arm_identity.source" "mi
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = $((before_arm_identity + 1)) ] || fail "arm identity recovery submitted another job"
 pass "arm suppresses waiting only for an exact consult and job capture"
 
+H_ARM_REGISTRATION="$TMP_ROOT/home-arm-registration"
+consult_home "$H_ARM_REGISTRATION"
+id_arm_registration=$(prepare_id "$H_ARM_REGISTRATION" "$QUESTION_TWO")
+fc "$H_ARM_REGISTRATION" submit "$id_arm_registration" >/dev/null || fail "registration-identity fixture submit failed"
+source_arm_registration="consult-$id_arm_registration"
+pe "$H_ARM_REGISTRATION" retire "$source_arm_registration" >/dev/null || fail "registration-identity fixture could not retire its waiter"
+pe "$H_ARM_REGISTRATION" register consult "$source_arm_registration" -- \
+  "$ROOT/bin/fm-procevent-consult.sh" wait 11111111-1111-1111-1111-111111111111 >/dev/null \
+  || fail "registration-identity fixture could not install the conflicting registration"
+registration_before=$(raw_sha256 "$H_ARM_REGISTRATION/state/procevent/$source_arm_registration.source")
+arm_registration_status=0
+arm_registration_out=$(pa "$H_ARM_REGISTRATION" arm "$id_arm_registration" 2>&1) || arm_registration_status=$?
+[ "$arm_registration_status" -ne 0 ] || fail "an unrelated existing registration was mistaken for the consult waiter"
+assert_contains "$arm_registration_out" "does not match the requested adapter and argv" "arm rejects a same-name registration with different ownership"
+[ "$(raw_sha256 "$H_ARM_REGISTRATION/state/procevent/$source_arm_registration.source")" = "$registration_before" ] \
+  || fail "failed arm replaced the unrelated existing registration"
+pass "arm accepts only the exact known-job wait registration"
+
 # The first durable request is a pre-delivery checkpoint. Its presence without
 # the intent marker means the external call provably has not begun, so resume it
 # rather than converting a harmless pre-call crash into delivery ambiguity.
@@ -458,8 +486,8 @@ id_resume=$(prepare_id "$H_RESUME" "$QUESTION_TWO")
 record_resume="$H_RESUME/data/consults/$id_resume"
 prepared_model=$(perl -MJSON::PP -e 'my $v = decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }); print $v->{model}' "$record_resume/prepared.json")
 observed_now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-printf '{"schema_version":1,"preflight":{"doctor":{"available":true,"ready":true}},"limits_observed":{"available":true,"account":{"planType":"pro"},"observedLimits":[{"featureName":"%s","remaining":1,"observedAt":"%s"}]}}\n' \
-  "$prepared_model" "$observed_now" > "$record_resume/request.json"
+printf '{"schema_version":1,"consult_id":"%s","model":"%s","preflight":{"doctor":{"available":true,"ready":true}},"limits_observed":{"available":true,"account":{"planType":"pro"},"observedLimits":[{"featureName":"%s","remaining":1,"observedAt":"%s"}]}}\n' \
+  "$id_resume" "$prepared_model" "$prepared_model" "$observed_now" > "$record_resume/request.json"
 chmod 0600 "$record_resume/request.json"
 request_hash_before=$(shasum -a 256 "$record_resume/request.json" | awk '{print $1}')
 before_resume=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
@@ -500,6 +528,24 @@ assert_contains "$submission_unmarked_out" "submission terminal is invalid" "pos
 assert_absent "$H_SUBMISSION_UNMARKED/state/procevent/consult-$id_submission_unmarked.source" "unmarked SUBMITTED state armed a waiter"
 [ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_submission_unmarked" ] || fail "unmarked SUBMITTED state created another job"
 pass "submission recovery rejects malformed and unmarked terminal state"
+
+H_PREFLIGHT_MISMATCH="$TMP_ROOT/home-preflight-mismatch"
+consult_home "$H_PREFLIGHT_MISMATCH"
+id_preflight_mismatch=$(prepare_id "$H_PREFLIGHT_MISMATCH" "$QUESTION_TWO")
+record_preflight_mismatch="$H_PREFLIGHT_MISMATCH/data/consults/$id_preflight_mismatch"
+observed_now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+printf '{"schema_version":1,"consult_id":"%s","model":"gpt-5-6-pro","preflight":{"doctor":{"available":true,"ready":true}},"limits_observed":{"available":true,"account":{"planType":"pro"},"observedLimits":[{"featureName":"gpt-5-6-pro","remaining":1,"observedAt":"%s"}]}}\n' \
+  "$id_preflight_mismatch" "$observed_now" > "$record_preflight_mismatch/request.json"
+printf '{"schema_version":1,"consult_id":"%s","attempted_at":"2026-01-01T00:00:00Z","pro_cli_version":"pro-cli fixture","pro_cli_source_revision":"UNAVAILABLE","job_id":null,"terminal":"AUTH_UNAVAILABLE","error_code":"SESSION_EXPIRED"}\n' \
+  "$id_preflight_mismatch" > "$record_preflight_mismatch/submission.json"
+chmod 0600 "$record_preflight_mismatch/request.json" "$record_preflight_mismatch/submission.json"
+before_preflight_mismatch=$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')
+preflight_mismatch_status=0
+preflight_mismatch_out=$(fc "$H_PREFLIGHT_MISMATCH" submit "$id_preflight_mismatch" 2>&1) || preflight_mismatch_status=$?
+[ "$preflight_mismatch_status" -ne 0 ] || fail "an unmarked failure terminal overrode a ready preflight"
+assert_contains "$preflight_mismatch_out" "submission terminal is invalid" "an unmarked failure terminal must match its preflight evidence"
+[ "$(wc -l < "$FAKE_STATE/create-count" | tr -d ' ')" = "$before_preflight_mismatch" ] || fail "invalid preflight terminal created another job"
+pass "unmarked failure terminals cannot suppress a ready preflight"
 
 H_POST_AUTH="$TMP_ROOT/home-post-auth"
 consult_home "$H_POST_AUTH"
@@ -596,6 +642,33 @@ if rg -F -- "$result_boundary_secret" "$record_result_boundary" >/dev/null; then
   fail "unvalidated advisory bytes entered the immutable consult record"
 fi
 pass "raw job results remain outside the immutable record until validation"
+
+# A matching registration generation alone cannot make a foreign payload
+# terminal. Recovery must bind the envelope to the submitted consult and job
+# before it retires the waiter.
+H_CAPTURE_MISMATCH="$TMP_ROOT/home-capture-mismatch"
+consult_home "$H_CAPTURE_MISMATCH"
+id_capture_mismatch=$(prepare_id "$H_CAPTURE_MISMATCH" "$QUESTION_TWO")
+fc "$H_CAPTURE_MISMATCH" submit "$id_capture_mismatch" >/dev/null || fail "capture-mismatch fixture submit failed"
+source_capture_mismatch="consult-$id_capture_mismatch"
+registration_capture_mismatch="$H_CAPTURE_MISMATCH/state/procevent/$source_capture_mismatch.source"
+generation_capture_mismatch=$(sed -n 's/^registration_generation=//p' "$registration_capture_mismatch")
+mkdir -p "$H_CAPTURE_MISMATCH/state/procevent-inbox"
+printf '{"schema":"fm-consult-wait/1","consult_id":"%s","job_id":"job_other","wait_exit":0,"wait_timed_out":false,"job_status":"succeeded","error_code":null}\n' \
+  "$id_capture_mismatch" > "$H_CAPTURE_MISMATCH/state/procevent-inbox/$source_capture_mismatch.1.result"
+printf 'consult\n' > "$H_CAPTURE_MISMATCH/state/procevent-inbox/$source_capture_mismatch.1.adapter"
+printf 'schema=fm-procevent-capture-generation.v1\nregistration_generation=%s\n' \
+  "$generation_capture_mismatch" > "$H_CAPTURE_MISMATCH/state/procevent-inbox/$source_capture_mismatch.1.generation"
+chmod 0600 "$H_CAPTURE_MISMATCH/state/procevent-inbox/$source_capture_mismatch.1.result" \
+  "$H_CAPTURE_MISMATCH/state/procevent-inbox/$source_capture_mismatch.1.adapter" \
+  "$H_CAPTURE_MISMATCH/state/procevent-inbox/$source_capture_mismatch.1.generation"
+rm -f -- "$WAIT_STARTED" "$WAIT_RELEASE"
+capture_mismatch_out=$(pe "$H_CAPTURE_MISMATCH" reconcile) || fail "capture-mismatch reconcile failed: $capture_mismatch_out"
+assert_contains "$capture_mismatch_out" "terminal-recovered=0" "foreign payload is not recovered as the known job terminal"
+assert_present "$registration_capture_mismatch" "foreign payload retired the matching registration generation"
+wait_for_file "$WAIT_STARTED" || fail "foreign payload prevented the known-job waiter from resuming"
+pe "$H_CAPTURE_MISMATCH" sweep-home >/dev/null 2>&1 || fail "capture-mismatch fixture cleanup failed"
+pass "terminal recovery binds generation and exact consult job identity"
 
 # A captured terminal belongs to its publication generation, not a boot-volatile
 # device/inode. Reconcile must retire that exact source before it can start a

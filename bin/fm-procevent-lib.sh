@@ -814,10 +814,10 @@ fm_procevent_capture() {
     rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
     return 1
   fi
-  fm_procevent_sync_file "$tmp" && fm_procevent_sync_file "$adapter_tmp" || {
+  if ! fm_procevent_sync_file "$tmp" || ! fm_procevent_sync_file "$adapter_tmp"; then
     rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"
     return 1
-  }
+  fi
   if [ -n "$generation_tmp" ] && ! fm_procevent_sync_file "$generation_tmp"; then
     rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp" "$generation_tmp"
     return 1

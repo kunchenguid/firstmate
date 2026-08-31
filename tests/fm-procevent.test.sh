@@ -201,8 +201,19 @@ assert_absent "${RESULT%.result}.handled" "publication alone never marks a resul
 
 HCONSULT="$TMP_ROOT/hconsult"; new_home "$HCONSULT"
 CONSULT_TRIGGER="$TMP_ROOT/consult-trigger"
-CONSULT_SOURCE=consult-shared-runner
-CONSULT_PAYLOAD='{"schema":"fm-consult-wait/1","consult_id":"11111111-1111-1111-1111-111111111111","job_id":"job_shared_runner","wait_exit":75,"wait_timed_out":false,"job_status":"succeeded","error_code":null}'
+CONSULT_ID=11111111-1111-1111-1111-111111111111
+CONSULT_SOURCE="consult-$CONSULT_ID"
+CONSULT_JOB=job_shared_runner
+CONSULT_RECORD="$HCONSULT/data/consults/$CONSULT_ID"
+mkdir -p "$CONSULT_RECORD"
+chmod 0700 "$HCONSULT/data/consults" "$CONSULT_RECORD"
+printf '{"schema_version":1,"consult_id":"%s","attempted_at":"2026-01-01T00:00:00Z","state":"SUBMISSION_ATTEMPTED","retries":0}\n' \
+  "$CONSULT_ID" > "$CONSULT_RECORD/submission-attempt.json"
+printf '{"schema_version":1,"consult_id":"%s","attempted_at":"2026-01-01T00:00:00Z","pro_cli_version":"pro-cli fixture","pro_cli_source_revision":"UNAVAILABLE","job_id":"%s","terminal":"SUBMITTED","error_code":null}\n' \
+  "$CONSULT_ID" "$CONSULT_JOB" > "$CONSULT_RECORD/submission.json"
+chmod 0600 "$CONSULT_RECORD/submission-attempt.json" "$CONSULT_RECORD/submission.json"
+CONSULT_PAYLOAD=$(printf '{"schema":"fm-consult-wait/1","consult_id":"%s","job_id":"%s","wait_exit":75,"wait_timed_out":false,"job_status":"succeeded","error_code":null}' \
+  "$CONSULT_ID" "$CONSULT_JOB")
 pe_register "$HCONSULT" consult "$CONSULT_SOURCE" -- "$BLOCKER" "$CONSULT_TRIGGER" "$CONSULT_PAYLOAD" >/dev/null
 : > "$CONSULT_TRIGGER"
 consult_start=$(pe "$HCONSULT" start "$CONSULT_SOURCE") || fail "consult mapping start failed: $consult_start"

@@ -36,7 +36,7 @@ source_id() { "$SCRIPT_DIR/fm-consult.sh" source-id "$1"; }
 private_mode() {
   local actual
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
-  actual=$(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null) || return 1
+  actual=$(perl -e 'my @s = stat($ARGV[0]) or exit 1; printf "%o", $s[2] & 07777' "$1") || return 1
   [ "$actual" = 600 ]
 }
 
@@ -83,7 +83,7 @@ wait_timeout_ms() {
 }
 
 cmd_arm() {
-  local id=${1-} source job registration wait_rc
+  local id=${1-} source job registration_result wait_rc
   [ "$#" -eq 1 ] || usage
   consult_id_valid "$id" || die "invalid consult id"
   job=$("$SCRIPT_DIR/fm-consult.sh" job-id "$id") || exit 1
@@ -99,17 +99,16 @@ cmd_arm() {
   esac
   case "$job" in job_[A-Za-z0-9_-]*) ;; *) die "consult has an invalid known job id" ;; esac
   source=$(source_id "$id") || exit 1
-  registration="$FM_HOME/state/procevent/$source.source"
-  if [ -e "$registration" ] || [ -L "$registration" ]; then
-    if ! [ -f "$registration" ] || [ -L "$registration" ] || ! private_mode "$registration"; then
-      die "existing consultation wait registration is unsafe"
-    fi
-    printf 'already-armed: %s\n' "$id"
-    return 0
-  fi
-  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-if-absent consult "$source" \
-    -- "$SCRIPT_DIR/fm-procevent-consult.sh" wait "$id" || exit 1
-  printf 'armed: %s\n' "$id"
+  registration_result=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-if-absent consult "$source" \
+    -- "$SCRIPT_DIR/fm-procevent-consult.sh" wait "$id") || exit 1
+  case "$registration_result" in
+    registered:*)
+      printf '%s\n' "$registration_result"
+      printf 'armed: %s\n' "$id"
+      ;;
+    already-registered:*) printf 'already-armed: %s\n' "$id" ;;
+    *) die "consultation wait registration returned an unknown result" ;;
+  esac
 }
 
 cmd_wait() {
@@ -152,6 +151,29 @@ event_valid() {
   ' "$1"
 }
 
+event_matches_record() {  # <captured-result-file>
+  local file=$1 identity id job extra base source known_job
+  identity=$(perl -MJSON::PP -e '
+    my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
+    exit 1 unless ref($v) eq "HASH";
+    print "$v->{consult_id}\n$v->{job_id}\n";
+  ' "$file") || return 1
+  {
+    IFS= read -r id
+    IFS= read -r job
+    ! IFS= read -r extra
+  } <<< "$identity" || return 1
+  [ -z "$extra" ] || return 1
+  base=${file##*/}
+  case "$base" in *.result) ;; *) return 1 ;; esac
+  base=${base%.result}
+  case "$base" in *.*) ;; *) return 1 ;; esac
+  source=${base%.*}
+  [ "$source" = "consult-$id" ] || return 1
+  known_job=$("$SCRIPT_DIR/fm-consult.sh" job-id "$id" 2>/dev/null) || return 1
+  [ "$job" = "$known_job" ]
+}
+
 event_is_terminal() {  # <file>
   perl -MJSON::PP -e '
     my $v = eval { decode_json(do { local $/; open my $fh, "<", $ARGV[0] or die; <$fh> }) };
@@ -165,7 +187,7 @@ event_is_terminal() {  # <file>
 
 cmd_classify() {
   local file=${1-}
-  if [ "$#" -ne 1 ] || ! private_mode "$file" || ! event_valid "$file"; then
+  if [ "$#" -ne 1 ] || ! private_mode "$file" || ! event_valid "$file" || ! event_matches_record "$file"; then
     die "invalid consultation completion envelope"
   fi
   printf 'completed\n'
@@ -173,16 +195,18 @@ cmd_classify() {
 
 cmd_terminal() {
   local file=${1-}
-  [ "$#" -eq 1 ] && private_mode "$file" && event_valid "$file" || return 1
+  [ "$#" -eq 1 ] && private_mode "$file" && event_valid "$file" && event_matches_record "$file" || return 1
   event_is_terminal "$file"
 }
 
 cmd_handle() {
-  local id=${1-} seq=${2-} file=${3-} source
+  local id=${1-} seq=${2-} file=${3-} source expected
   [ "$#" -eq 3 ] || usage
   consult_id_valid "$id" || die "invalid consult id"
   case "$seq" in ''|*[!0-9]*) die "invalid process-event sequence" ;; esac
   source=$(source_id "$id") || exit 1
+  expected="$FM_HOME/state/procevent-inbox/$source.$seq.result"
+  [ "$file" = "$expected" ] || die "captured result path does not match the consult source generation"
   "$SCRIPT_DIR/fm-consult.sh" collect "$id" "$file" || exit 1
   FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq"
 }

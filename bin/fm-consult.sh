@@ -56,7 +56,7 @@ consult_id_valid() {
 private_mode() {  # <path> <expected octal mode>
   local actual
   [ -e "$1" ] && [ ! -L "$1" ] || return 1
-  actual=$(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null) || return 1
+  actual=$(perl -e 'my @s = stat($ARGV[0]) or exit 1; printf "%o", $s[2] & 07777' "$1") || return 1
   [ "$actual" = "$2" ]
 }
 
@@ -280,19 +280,29 @@ limits_observation_terminal() {  # <file> <canonical model>; LIMIT_REACHED|LIMIT
   ' "$1" "$2" "${FM_CONSULT_LIMITS_MAX_AGE_SECONDS:-900}"
 }
 
-request_preflight_terminal() {  # <request.json> <canonical model>
+request_preflight_terminal() {  # <request.json> <canonical model> <consult id>
   perl -MJSON::PP -e '
     use Time::Piece;
-    my ($file, $model, $max_age) = @ARGV;
+    my ($file, $model, $max_age, $id) = @ARGV;
     my $v = eval { decode_json(do { local $/; open my $fh, "<", $file or die; <$fh> }) };
     sub out { print "$_[0]\n"; exit 0 }
-    out("AUTH_UNAVAILABLE") unless ref($v) eq "HASH" && ref($v->{preflight}) eq "HASH";
+    exit 1 unless ref($v) eq "HASH" && ($v->{schema_version} // 0) == 1;
+    exit 1 unless ($v->{consult_id} // "") eq $id && ($v->{model} // "") eq $model;
+    exit 1 unless ref($v->{preflight}) eq "HASH";
     my $doctor = $v->{preflight}{doctor};
-    out("AUTH_UNAVAILABLE") unless ref($doctor) eq "HASH" && ref($doctor->{available}) eq "JSON::PP::Boolean" && $doctor->{available};
-    out("AUTH_UNAVAILABLE") unless ref($doctor->{ready}) eq "JSON::PP::Boolean" && $doctor->{ready};
+    exit 1 unless ref($doctor) eq "HASH" && ref($doctor->{available}) eq "JSON::PP::Boolean";
+    out("AUTH_UNAVAILABLE") unless $doctor->{available};
+    exit 1 unless ref($doctor->{ready}) eq "JSON::PP::Boolean";
+    out("AUTH_UNAVAILABLE") unless $doctor->{ready};
     my $limits = $v->{limits_observed};
-    out("LIMITS_INDETERMINATE") unless ref($limits) eq "HASH" && ref($limits->{available}) eq "JSON::PP::Boolean" && $limits->{available};
-    out("LIMITS_INDETERMINATE") unless ref($limits->{account}) eq "HASH" && ref($limits->{observedLimits}) eq "ARRAY";
+    exit 1 unless ref($limits) eq "HASH" && ref($limits->{available}) eq "JSON::PP::Boolean";
+    if (!$limits->{available}) {
+      my $code = $limits->{error_code};
+      exit 1 if defined($code) && (ref($code) || $code !~ /^[A-Z0-9_]+$/);
+      out("AUTH_UNAVAILABLE") if defined($code) && $code =~ /\A(?:SESSION_|ACCOUNT_|CHATGPT_PAGE_|CDP_|AUTH_)/;
+      out("LIMITS_INDETERMINATE");
+    }
+    exit 1 unless ref($limits->{account}) eq "HASH" && ref($limits->{observedLimits}) eq "ARRAY";
     my @matches = grep { ref($_) eq "HASH" && defined($_->{featureName}) && !ref($_->{featureName}) && $_->{featureName} eq $model } @{$limits->{observedLimits}};
     out("LIMITS_INDETERMINATE") unless @matches == 1;
     my $entry = $matches[0];
@@ -301,7 +311,7 @@ request_preflight_terminal() {  # <request.json> <canonical model>
     my $observed = eval { Time::Piece->strptime($entry->{observedAt}, "%Y-%m-%dT%H:%M:%SZ")->epoch };
     out("LIMITS_INDETERMINATE") unless defined($observed) && time() >= $observed && time() - $observed <= $max_age;
     out($entry->{remaining} == 0 ? "LIMIT_REACHED" : "LIMITS_READY");
-  ' "$1" "$2" "${FM_CONSULT_LIMITS_MAX_AGE_SECONDS:-900}"
+  ' "$1" "$2" "${FM_CONSULT_LIMITS_MAX_AGE_SECONDS:-900}" "$3"
 }
 
 json_create_job_id() {  # <file>
@@ -352,7 +362,7 @@ stage_input() {  # <source>; prints private staged path
 }
 
 submission_terminal() {  # <directory>
-  local dir=$1 file="$1/submission.json" id terminal attempted recorded_attempt
+  local dir=$1 file="$1/submission.json" id terminal attempted recorded_attempt model preflight_terminal
   id=$(basename "$dir")
   [ -f "$file" ] && [ ! -L "$file" ] && private_mode "$file" 600 || return 1
   terminal=$(perl -MJSON::PP -e '
@@ -384,10 +394,19 @@ submission_terminal() {  # <directory>
         attempted=$(submission_attempt_at "$dir") || return 1
         recorded_attempt=$(json_path_string "$file" attempted_at) || return 1
         [ "$attempted" = "$recorded_attempt" ] || return 1
+      else
+        request_exists "$dir" || return 1
+        model=$(json_path_string "$dir/prepared.json" model) || return 1
+        preflight_terminal=$(request_preflight_terminal "$dir/request.json" "$model" "$id") || return 1
+        [ "$preflight_terminal" = "$terminal" ] || return 1
       fi
       ;;
     LIMITS_INDETERMINATE)
       [ ! -e "$dir/submission-attempt.json" ] && [ ! -L "$dir/submission-attempt.json" ] || return 1
+      request_exists "$dir" || return 1
+      model=$(json_path_string "$dir/prepared.json" model) || return 1
+      preflight_terminal=$(request_preflight_terminal "$dir/request.json" "$model" "$id") || return 1
+      [ "$preflight_terminal" = "$terminal" ] || return 1
       ;;
   esac
   printf '%s\n' "$terminal"
@@ -779,7 +798,7 @@ cmd_submit_locked() {
       *) die "limits observation could not be classified" ;;
     esac
   else
-    limit_terminal=$(request_preflight_terminal "$dir/request.json" "$model" 2>/dev/null || true)
+    limit_terminal=$(request_preflight_terminal "$dir/request.json" "$model" "$id" 2>/dev/null || true)
     case "$limit_terminal" in
       LIMITS_READY) ;;
       AUTH_UNAVAILABLE|LIMIT_REACHED|LIMITS_INDETERMINATE)
@@ -931,11 +950,12 @@ cmd_collect() {
         die "result validation failed at private boundary ($rc); leave the wake unhandled"
       }
       if [ -e "$dir/advisory.md" ] || [ -L "$dir/advisory.md" ]; then
-        [ -f "$dir/advisory.md" ] && [ ! -L "$dir/advisory.md" ] && private_mode "$dir/advisory.md" 600 \
-          && cmp -s -- "$answer_capture" "$dir/advisory.md" || {
-            rm -f -- "$result_capture" "$answer_capture"
-            die "existing private advisory does not match the known job result"
-          }
+        if ! [ -f "$dir/advisory.md" ] || [ -L "$dir/advisory.md" ] \
+          || ! private_mode "$dir/advisory.md" 600 \
+          || ! cmp -s -- "$answer_capture" "$dir/advisory.md"; then
+          rm -f -- "$result_capture" "$answer_capture"
+          die "existing private advisory does not match the known job result"
+        fi
       else
         write_once "$dir/advisory.md" < "$answer_capture" || {
           rm -f -- "$result_capture" "$answer_capture"

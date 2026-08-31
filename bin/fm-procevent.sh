@@ -429,6 +429,10 @@ cmd_register_if_absent() {
       fm_procevent_source_lock_release "$id"
       die "existing registration is unsafe: $id"
     }
+    if ! fm_procevent_registration_matches_locked "$STATE" "$adapter" "$id" "$@"; then
+      fm_procevent_source_lock_release "$id"
+      die "existing registration does not match the requested adapter and argv: $id"
+    fi
     fm_procevent_source_lock_release "$id"
     printf 'already-registered: %s (%s)\n' "$id" "$adapter"
     return 0
