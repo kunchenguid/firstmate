@@ -690,10 +690,10 @@ resolve_relaunch_profile() {
   # alone cannot reopen that gap while both sides call this one function.
   #
   # It is not an absolute guarantee, and the bound is stated where the owner is
-  # defined. Environmental refusals - a missing pi or cursor executable, a model
-  # absent from cursor's live catalog - are only discoverable by probing the
-  # machine at launch, so they still land after do_exit and a relaunch onto a
-  # harness that is not installed here does strand the task.
+  # defined: any refusal whose answer depends on the state of this MACHINE rather
+  # than on the recorded profile is only discoverable by probing at launch, so it
+  # still lands after do_exit. A relaunch onto an adapter that is not installed
+  # here does strand the task, whichever adapter that is.
   if [ "$CURSOR_EXEMPTION_SET" -eq 1 ]; then
     RELAUNCH_EXEMPTION=$NEW_CURSOR_EXEMPTION
   else

@@ -913,9 +913,9 @@ test_relaunch_inherits_a_named_isolation_envelope_grant() {
 # as a stranded agent.
 #
 # Environmental refusals are deliberately out of scope, matching the bound stated
-# on fm_control_launch_refusal: a missing harness executable or an unavailable
-# cursor model is only discoverable at launch, so those still strand a relaunch
-# and no assertion here claims otherwise.
+# on fm_control_launch_refusal: any refusal that depends on the state of this
+# machine, such as a missing harness executable, is only discoverable at launch,
+# so those still strand a relaunch and no assertion here claims otherwise.
 assert_relaunch_refused_without_stopping() {  # <case-dir> <id> <expect> <label> <args...>
   local dir=$1 id=$2 expect=$3 label=$4; shift 4
   local out rc

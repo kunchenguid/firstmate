@@ -552,10 +552,15 @@ spawn_remote_secondmate() {
   # route too - the local-versus-remote asymmetry has produced two real defects on
   # this branch already, and a route standing outside the owner is how a third
   # would arrive.
+  # The shared refusal offers both grant forms because both are valid on an
+  # ordinary launch, but only an envelope grant can describe a worker on another
+  # host, so this route qualifies the shared text rather than forking a second
+  # copy of it. Without the qualifier the first message an operator reads sends
+  # half of them into the `attended` refusal below.
   if ! remote_launch_refusal=$(fm_control_launch_refusal "$harness" secondmate "$CURSOR_EXEMPTION"); then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: $remote_launch_refusal" >&2
+    echo "error: $remote_launch_refusal On this REMOTE secondmate route only --cursor-exemption envelope:<name> is accepted, because 'attended' asserts a person at this pane and cannot describe a worker on another host." >&2
     return 1
   fi
   # `attended` asserts that a person is at THIS pane, which says nothing about a
@@ -1530,8 +1535,10 @@ fi
 # anything, which is what keeps a policy refusal on the pre-stop side of that
 # transaction instead of stranding a task whose replacement is then refused.
 #
-# The environmental refusals BELOW this point are deliberately outside it: they
-# resolve an executable on PATH and probe cursor's live model catalog, which the
+# The environmental refusals BELOW this point are deliberately outside it: each
+# one's answer depends on the state of this MACHINE - resolving an adapter's
+# executable on PATH, probing a live model catalog, checking for a
+# worker-reachable credential are examples rather than the whole set - which the
 # control plane cannot ask without running the harness binary. A new rule that is
 # answerable from harness, kind, and grant alone belongs in the composite; one
 # that needs this machine belongs here and can strand a relaunch.
