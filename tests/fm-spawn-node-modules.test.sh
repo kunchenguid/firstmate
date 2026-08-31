@@ -65,7 +65,12 @@ fs.symlinkSync = function (source, target, type) {
     fs.mkdirSync(target, { recursive: true });
     fs.writeFileSync(`${target}/owned.txt`, 'worker install\n');
   }
-  return symlinkSync.call(this, source, target, type);
+  const result = symlinkSync.call(this, source, target, type);
+  if (process.env.FM_INTERRUPT_NODE_MODULES_PUBLICATION === '1') {
+    process.kill(process.ppid, 'SIGTERM');
+    process.kill(process.pid, 'SIGTERM');
+  }
+  return result;
 };
 JS
   local real_node
@@ -73,7 +78,7 @@ JS
   cat > "$fakebin/node" <<SH
 #!/usr/bin/env bash
 set -u
-if [ "\${1:-}" = - ] && [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ]; then
+if [ "\${1:-}" = - ] && { [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ] || [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ]; }; then
   export NODE_OPTIONS="--require=$fakebin/node-race-hook.cjs"
 fi
 exec "$real_node" "\$@"
@@ -129,6 +134,7 @@ run_spawn() {
     FM_FAIL_NODE_MODULES_LINK="${FM_FAIL_NODE_MODULES_LINK:-0}" \
     FM_NODE_MODULES_RACE_TARGET="${FM_NODE_MODULES_RACE_TARGET:-}" \
     FM_INTERRUPT_NODE_MODULES_CREATION="${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" \
+    FM_INTERRUPT_NODE_MODULES_PUBLICATION="${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -272,11 +278,28 @@ test_spawn_cancels_after_staging_registration_interrupt() {
   pass "fm-spawn cancels cleanly during dependency staging registration"
 }
 
+test_spawn_preserves_publication_after_interrupt() {
+  local rec id out status publication
+  id=node-modules-published-interrupt-z7
+  rec=$(make_case published-interrupt "$id")
+  read_case "$rec"
+
+  out=$(FM_INTERRUPT_NODE_MODULES_PUBLICATION=1 run_spawn "$id")
+  status=$?
+  expect_code 143 "$status" "spawn should preserve cancellation after dependency publication"
+  assert_not_contains "$out" "spawned $id" "cancelled publication launched a worker"
+  [ -L "$WORKTREE_DIR/node_modules" ] || fail "cancelled spawn removed published dependencies"
+  publication=$(readlink "$WORKTREE_DIR/node_modules")
+  [ -d "$WORKTREE_DIR/$publication" ] || fail "cancelled spawn removed published dependency backing"
+  pass "fm-spawn never cleans node_modules after publication"
+}
+
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
 test_spawn_cleans_staging_after_setup_failure
 test_spawn_cancels_after_staging_registration_interrupt
+test_spawn_preserves_publication_after_interrupt
 
 echo "# all fm-spawn-node-modules tests passed"

@@ -629,8 +629,6 @@ SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 NODE_MODULES_ABORT_STAGING=
-NODE_MODULES_ABORT_TARGET=
-NODE_MODULES_ABORT_LINK=
 NODE_MODULES_ABORT_CLEANUP=0
 
 parse_orca_worktree_result() {
@@ -651,20 +649,11 @@ parse_orca_worktree_result() {
 }
 
 cleanup_beeline_node_modules_staging() {
-  if [ "$NODE_MODULES_ABORT_CLEANUP" = 1 ]; then
-    if [ -n "$NODE_MODULES_ABORT_TARGET" ] \
-       && [ -L "$NODE_MODULES_ABORT_TARGET" ] \
-       && [ "$(readlink "$NODE_MODULES_ABORT_TARGET" 2>/dev/null || true)" = "$NODE_MODULES_ABORT_LINK" ]; then
-      rm -f -- "$NODE_MODULES_ABORT_TARGET" 2>/dev/null || true
-    fi
-    if [ -n "$NODE_MODULES_ABORT_STAGING" ]; then
-      rm -rf -- "$NODE_MODULES_ABORT_STAGING" 2>/dev/null || true
-    fi
+  if [ "$NODE_MODULES_ABORT_CLEANUP" = 1 ] && [ -n "$NODE_MODULES_ABORT_STAGING" ]; then
+    rm -rf -- "$NODE_MODULES_ABORT_STAGING" 2>/dev/null || true
   fi
   NODE_MODULES_ABORT_CLEANUP=0
   NODE_MODULES_ABORT_STAGING=
-  NODE_MODULES_ABORT_TARGET=
-  NODE_MODULES_ABORT_LINK=
 }
 
 spawn_abort_cleanup() {
@@ -1326,8 +1315,8 @@ exclude_path() {
 }
 
 share_beeline_node_modules() {
-  local source source_real target staging_root staging entry name entry_real link_target
-  local has_beeline_workspace publish_status creation_signal_status
+  local source source_real target staging_root staging entry name entry_real link_target publication_link
+  local has_beeline_workspace publish_status creation_signal_status publication_signal_status
   source="$PROJ_ABS/node_modules"
   target="$WT/node_modules"
 
@@ -1359,8 +1348,6 @@ share_beeline_node_modules() {
   fi
   staging="$staging_root"
   NODE_MODULES_ABORT_STAGING=$staging_root
-  NODE_MODULES_ABORT_TARGET=$target
-  NODE_MODULES_ABORT_LINK=$(basename "$staging_root")
   NODE_MODULES_ABORT_CLEANUP=1
   trap - INT TERM
   if [ -n "$creation_signal_status" ]; then
@@ -1416,9 +1403,17 @@ share_beeline_node_modules() {
     return 1
   fi
 
+  exclude_path '.fm-node-modules.*/'
+  publication_link=$(basename "$staging_root")
+  publication_signal_status=
+  trap 'publication_signal_status=130' INT
+  trap 'publication_signal_status=143' TERM
   publish_status=0
-  node - "$NODE_MODULES_ABORT_LINK" "$target" <<'JS' || publish_status=$?
+  node - "$publication_link" "$target" <<'JS' || publish_status=$?
 const fs = require('node:fs');
+
+process.on('SIGINT', () => {});
+process.on('SIGTERM', () => {});
 
 try {
   fs.symlinkSync(process.argv[2], process.argv[3], 'dir');
@@ -1427,13 +1422,17 @@ try {
   throw error;
 }
 JS
+  if [ "$publish_status" = 0 ]; then
+    NODE_MODULES_ABORT_CLEANUP=0
+  fi
+  trap - INT TERM
+  if [ -n "$publication_signal_status" ]; then
+    cleanup_beeline_node_modules_staging
+    return "$publication_signal_status"
+  fi
   case "$publish_status" in
     0)
-      exclude_path '.fm-node-modules.*/'
-      NODE_MODULES_ABORT_CLEANUP=0
       NODE_MODULES_ABORT_STAGING=
-      NODE_MODULES_ABORT_TARGET=
-      NODE_MODULES_ABORT_LINK=
       ;;
     3)
       cleanup_beeline_node_modules_staging
