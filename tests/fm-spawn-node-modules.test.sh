@@ -56,6 +56,10 @@ if [[ "$base" = .fm-node-modules.* ]]; then
     kill -HUP "$$"
     exit 0
   fi
+  if [ "${FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE:-0}" = 1 ]; then
+    /bin/mkdir "$@" || exit $?
+    exit 1
+  fi
 fi
 exec /bin/mkdir "$@"
 SH
@@ -95,6 +99,10 @@ fs.symlinkSync = function (source, target, type) {
     process.kill(process.ppid, 'SIGTERM');
     process.kill(process.pid, 'SIGTERM');
   }
+  if (process.env.FM_HUP_NODE_MODULES_PUBLICATION === '1') {
+    process.kill(process.ppid, 'SIGHUP');
+    process.kill(process.pid, 'SIGHUP');
+  }
   if (process.env.FM_KILL_NODE_MODULES_PUBLISHER === '1') {
     process.kill(process.pid, 'SIGKILL');
   }
@@ -124,7 +132,7 @@ fi
 if [ "\${1:-}" = - ] && [ "\${FM_INJECT_NODE_PUBLISHER_HOOK:-0}" = 1 ]; then
   exec "$real_node" --require="$fakebin/node-ambient-hook.cjs" "\$@"
 fi
-if [ "\${1:-}" = - ] && { [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ] || [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_KILL_NODE_MODULES_PUBLISHER:-0}" = 1 ]; }; then
+if [ "\${1:-}" = - ] && { [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ] || [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_HUP_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_KILL_NODE_MODULES_PUBLISHER:-0}" = 1 ]; }; then
   exec "$real_node" --require="$fakebin/node-race-hook.cjs" "\$@"
 fi
 exec "$real_node" "\$@"
@@ -182,8 +190,10 @@ run_spawn() {
     FM_NODE_MODULES_RACE_PRIMARY_TARGET="${FM_NODE_MODULES_RACE_PRIMARY_TARGET:-}" \
     FM_INTERRUPT_NODE_MODULES_CREATION="${FM_INTERRUPT_NODE_MODULES_CREATION:-0}" \
     FM_KILL_NODE_MODULES_CREATOR="${FM_KILL_NODE_MODULES_CREATOR:-0}" \
+    FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE="${FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE:-0}" \
     FM_INTERRUPT_NODE_MODULES_CLEANUP="${FM_INTERRUPT_NODE_MODULES_CLEANUP:-0}" \
     FM_INTERRUPT_NODE_MODULES_PUBLICATION="${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" \
+    FM_HUP_NODE_MODULES_PUBLICATION="${FM_HUP_NODE_MODULES_PUBLICATION:-0}" \
     FM_KILL_NODE_MODULES_PUBLISHER="${FM_KILL_NODE_MODULES_PUBLISHER:-0}" \
     FM_FAIL_NODE_PUBLISHER_EXEC="${FM_FAIL_NODE_PUBLISHER_EXEC:-0}" \
     FM_NODE_PUBLISHER_EARLY_STATUS="${FM_NODE_PUBLISHER_EARLY_STATUS:-}" \
@@ -278,6 +288,26 @@ test_spawn_rejects_existing_primary_dependency_link() {
   pass "fm-spawn refuses existing dependency links whose workspaces resolve to primary source"
 }
 
+test_spawn_rejects_target_only_primary_workspace_link() {
+  local rec id out status
+  id=node-modules-target-only-primary-z2c
+  rec=$(make_case target-only-primary "$id")
+  read_case "$rec"
+  mkdir -p "$WORKTREE_DIR/node_modules/@beeline"
+  ln -s ../../packages/lib "$WORKTREE_DIR/node_modules/@beeline/lib"
+  ln -s "$WORKTREE_DIR/packages/absolute-lib" "$WORKTREE_DIR/node_modules/@beeline/absolute-lib"
+  ln -s ../../packages/cli "$WORKTREE_DIR/node_modules/@beeline/cli"
+  ln -s "$PROJECT_DIR/packages/lib" "$WORKTREE_DIR/node_modules/@beeline/legacy"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a target-only workspace link to primary source"
+  assert_not_contains "$out" "spawned $id" "target-only primary workspace link launched a worker"
+  [ "$(readlink "$WORKTREE_DIR/node_modules/@beeline/legacy")" = "$PROJECT_DIR/packages/lib" ] \
+    || fail "spawn mutated the target-only primary workspace link"
+  pass "fm-spawn refuses target-only workspace links to primary source"
+}
+
 test_spawn_ignores_published_beeline_consumers() {
   local rec id out status
   id=node-modules-consumer-z3
@@ -355,6 +385,26 @@ test_spawn_cleans_staging_after_setup_failure() {
   pass "fm-spawn cleans dependency staging after setup failure"
 }
 
+test_spawn_validates_staging_before_publication() {
+  local rec id out status candidate
+  id=node-modules-invalid-staging-z5b
+  rec=$(make_case invalid-staging "$id")
+  read_case "$rec"
+  /bin/rm -rf "$WORKTREE_DIR/packages/absolute-lib"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn published staging with a missing worktree workspace"
+  assert_not_contains "$out" "spawned $id" "invalid dependency staging launched a worker"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "invalid dependency staging published node_modules"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "invalid dependency staging survived validation failure"
+  done
+  pass "fm-spawn validates workspace links before dependency publication"
+}
+
 test_spawn_cancels_after_staging_registration_interrupt() {
   local rec id out status candidate
   id=node-modules-interrupt-z6
@@ -374,6 +424,25 @@ test_spawn_cancels_after_staging_registration_interrupt() {
   pass "fm-spawn cancels cleanly during dependency staging registration"
 }
 
+test_spawn_cleans_staging_after_creator_status_failure() {
+  local rec id out status candidate
+  id=node-modules-creator-status-z6b
+  rec=$(make_case creator-status "$id")
+  read_case "$rec"
+
+  out=$(FM_FAIL_NODE_MODULES_CREATOR_AFTER_CREATE=1 run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted failed dependency staging creation"
+  assert_not_contains "$out" "spawned $id" "failed staging creation launched a worker"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "failed staging creation published node_modules"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "failed staging creation leaked its registered directory"
+  done
+  pass "fm-spawn cleans registered staging after creator status failure"
+}
+
 test_spawn_preserves_publication_after_interrupt() {
   local rec id out status publication
   id=node-modules-published-interrupt-z7
@@ -388,6 +457,22 @@ test_spawn_preserves_publication_after_interrupt() {
   publication=$(readlink "$WORKTREE_DIR/node_modules")
   [ -d "$WORKTREE_DIR/$publication" ] || fail "cancelled spawn removed published dependency backing"
   pass "fm-spawn never cleans node_modules after publication"
+}
+
+test_spawn_preserves_publication_after_hup() {
+  local rec id out status publication
+  id=node-modules-published-hup-z7b
+  rec=$(make_case published-hup "$id")
+  read_case "$rec"
+
+  out=$(FM_HUP_NODE_MODULES_PUBLICATION=1 run_spawn "$id")
+  status=$?
+  expect_code 129 "$status" "spawn should preserve cancellation after publication HUP"
+  assert_not_contains "$out" "spawned $id" "HUP-cancelled publication launched a worker"
+  [ -L "$WORKTREE_DIR/node_modules" ] || fail "publication HUP removed node_modules"
+  publication=$(readlink "$WORKTREE_DIR/node_modules")
+  [ -d "$WORKTREE_DIR/$publication" ] || fail "publication HUP removed dependency backing"
+  pass "fm-spawn defers HUP until dependency publication state is settled"
 }
 
 test_spawn_preserves_backing_after_ambiguous_publisher_exit() {
@@ -536,12 +621,16 @@ test_spawn_rejects_wrapper_status_without_dependency_tree() {
 test_spawn_shares_dependencies_and_repoints_workspace_links
 test_spawn_leaves_existing_node_modules_untouched
 test_spawn_rejects_existing_primary_dependency_link
+test_spawn_rejects_target_only_primary_workspace_link
 test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_tree_created_during_publication
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_cleans_staging_after_setup_failure
+test_spawn_validates_staging_before_publication
 test_spawn_cancels_after_staging_registration_interrupt
+test_spawn_cleans_staging_after_creator_status_failure
 test_spawn_preserves_publication_after_interrupt
+test_spawn_preserves_publication_after_hup
 test_spawn_preserves_backing_after_ambiguous_publisher_exit
 test_spawn_isolates_publisher_from_ambient_node_options
 test_spawn_retains_staging_after_ambiguous_publisher_exec_failure

@@ -1343,6 +1343,16 @@ beeline_workspace_links_match_worktree() {
       [ "$candidate_real" = "$expected_real" ] || return 1
     fi
   done
+  if [ -n "$target" ]; then
+    for candidate in "$target/@beeline"/* "$target/@beeline"/.[!.]* "$target/@beeline"/..?*; do
+      [ -L "$candidate" ] || continue
+      candidate_real=$(real_path_or_raw "$candidate")
+      if [[ "$candidate_real" == "$PROJ_ABS_REAL"/* ]] \
+         && [[ "$candidate_real" != "$source_real"/* ]]; then
+        return 1
+      fi
+    done
+  fi
   [ "$found" = 1 ]
 }
 
@@ -1365,11 +1375,12 @@ share_beeline_node_modules() {
   setup_signal_status=
   trap 'setup_signal_status=130' INT
   trap 'setup_signal_status=143' TERM
+  trap 'setup_signal_status=129' HUP
   while :; do
     staging_root="$WT/.fm-node-modules.$$.$RANDOM.$RANDOM"
     [ ! -e "$staging_root" ] && [ ! -L "$staging_root" ] && break
     if [ -n "$setup_signal_status" ]; then
-      trap - INT TERM
+      trap - INT TERM HUP
       return "$setup_signal_status"
     fi
   done
@@ -1380,16 +1391,8 @@ share_beeline_node_modules() {
   mkdir -- "$staging_root" || mkdir_status=$?
   if [ "$mkdir_status" -ne 0 ]; then
     cleanup_status=0
-    case "$mkdir_status:$setup_signal_status" in
-      1:|126:|127:)
-        NODE_MODULES_ABORT_CLEANUP=0
-        NODE_MODULES_ABORT_STAGING=
-        ;;
-      *)
-        cleanup_beeline_node_modules_staging || cleanup_status=$?
-        ;;
-    esac
-    trap - INT TERM
+    cleanup_beeline_node_modules_staging || cleanup_status=$?
+    trap - INT TERM HUP
     [ -z "$setup_signal_status" ] || return "$setup_signal_status"
     [ "$cleanup_status" -eq 0 ] || return 1
     return 1
@@ -1397,7 +1400,7 @@ share_beeline_node_modules() {
   if [ -n "$setup_signal_status" ]; then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
-    trap - INT TERM
+    trap - INT TERM HUP
     [ "$cleanup_status" -eq 0 ] || return 1
     return "$setup_signal_status"
   fi
@@ -1448,7 +1451,16 @@ share_beeline_node_modules() {
   ); then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
-    trap - INT TERM
+    trap - INT TERM HUP
+    [ -z "$setup_signal_status" ] || return "$setup_signal_status"
+    [ "$cleanup_status" -eq 0 ] || return 1
+    return 1
+  fi
+
+  if ! beeline_workspace_links_match_worktree "$source" "$source_real" "$staging"; then
+    cleanup_status=0
+    cleanup_beeline_node_modules_staging || cleanup_status=$?
+    trap - INT TERM HUP
     [ -z "$setup_signal_status" ] || return "$setup_signal_status"
     [ "$cleanup_status" -eq 0 ] || return 1
     return 1
@@ -1457,13 +1469,20 @@ share_beeline_node_modules() {
   if [ -n "$setup_signal_status" ]; then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
-    trap - INT TERM
+    trap - INT TERM HUP
     [ "$cleanup_status" -eq 0 ] || return 1
     return "$setup_signal_status"
   fi
 
   exclude_path '.fm-node-modules.*/'
   publication_link=$(basename "$staging_root")
+  if [ -n "$setup_signal_status" ]; then
+    cleanup_status=0
+    cleanup_beeline_node_modules_staging || cleanup_status=$?
+    trap - INT TERM HUP
+    [ "$cleanup_status" -eq 0 ] || return 1
+    return "$setup_signal_status"
+  fi
   NODE_MODULES_ABORT_CLEANUP=0
   publish_status=0
   NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" <<'JS' || publish_status=$?
@@ -1483,7 +1502,7 @@ JS
     0)
       if [ -L "$target" ] \
          && [ "$(readlink "$target" 2>/dev/null || true)" = "$publication_link" ] \
-         && beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
+         && [ -d "$target" ]; then
         NODE_MODULES_ABORT_STAGING=
       else
         publish_status=5
@@ -1506,7 +1525,7 @@ JS
     *)
       ;;
   esac
-  trap - INT TERM
+  trap - INT TERM HUP
   [ -z "$setup_signal_status" ] || return "$setup_signal_status"
   case "$publish_status" in
     0|3) ;;
