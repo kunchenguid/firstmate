@@ -338,7 +338,10 @@ def ensure_private_directory(path: Path) -> None:
 def validate_private_file(path: Path) -> None:
     if path.is_symlink():
         raise HandoffError("STATE_SYMLINK", "a handoff state record is a symlink")
-    info = path.stat()
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise HandoffError("RECORD_UNREADABLE", "a durable handoff record is unavailable") from exc
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
         raise HandoffError("STATE_FILE_UNSAFE", "a handoff state record is not a private regular file")
     if stat.S_IMODE(info.st_mode) != 0o600:
@@ -1436,7 +1439,8 @@ def seal_binding_failure_receipt(
         except HandoffError:
             candidate_present = True
         if not candidate_present and not retryable_records(layout, source_harness, session_hash, static_config):
-            raise exc
+            write_receipt(layout, "seal", "empty", "no-registered-candidates-unhealthy-binding", source_harness=source_harness, trigger=trigger, failure_code=exc.code)
+            return {"status": "disabled"}
         write_receipt(layout, "seal", "failed", "seal-binding-failed", source_harness=source_harness, trigger=trigger, failure_code=exc.code)
     return {"status": "seal-failed", "had_candidates": True, "reason": "seal-binding-failed"}
 
@@ -1532,9 +1536,22 @@ def apply_compaction_attempt(layout: StateLayout, config: Mapping[str, Any], jou
     return {"status": f"compaction-{status}", "record_ids": [record_id for record_id, _ in verified]}
 
 
+def retire_invalid_compaction_attempt(layout: StateLayout, path: Path, failure_code: str) -> None:
+    try:
+        observed_sha = sha256_file(path, max_bytes=MAX_ENVELOPE_BYTES)
+    except HandoffError:
+        observed_sha = ""
+    quarantine(layout, path.stem, "compaction-attempt-record-invalid", failure_code=failure_code, observed_sha256=observed_sha)
+    durable_unlink(path)
+
+
 def replay_compaction_attempts(layout: StateLayout, config: Mapping[str, Any]) -> None:
     for path in sorted(layout.bindings.glob("attempt-*.json")):
-        journal = read_compaction_attempt(path)
+        try:
+            journal = read_compaction_attempt(path)
+        except HandoffError as exc:
+            retire_invalid_compaction_attempt(layout, path, exc.code)
+            continue
         try:
             apply_compaction_attempt(layout, config, journal)
         finally:
@@ -2221,7 +2238,7 @@ def guard_decision(home: Path, config: Mapping[str, Any], payload: Mapping[str, 
     lowered = tool_name.lower()
     if MUTATING_TOOL_NAMES.search(tool_name):
         return guard_deny("Delete, move, Git, installation, credential, and other mutation tools are not authorized for this Vault curator.")
-    if lowered.startswith("mcp__") and lowered not in HANDOFF_MCP_TOOLS:
+    if lowered.startswith("mcp__") and tool_name not in HANDOFF_MCP_TOOLS:
         return guard_deny("Unrelated MCP tools are not authorized to mutate this Vault or outside paths.")
     return None
 

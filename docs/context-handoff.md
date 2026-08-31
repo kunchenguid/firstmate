@@ -22,10 +22,11 @@ A Pi `session_before_compact` handler seals only candidates already in the regis
 The handler never reads or serializes Pi branch entries, messages, summaries, reasoning, or tool output and never calls a model.
 A producer response that identifies a non-empty register that could not be sealed durably stops compaction and leaves a failure receipt.
 A Pi adapter launch, nonzero-exit, malformed-output, output-cap, or ten-second timeout failure also terminates the child and stops compaction even when no receipt can be written.
-Empty and disabled registers do not stop compaction when the adapter completes successfully.
+Empty and disabled registers do not stop compaction when the adapter completes successfully, including when the active Vault or endpoint binding is unhealthy and nothing is pending.
 The paired `session_compact` and `session_compact_failed` handlers bind the terminal outcome to the complete bounded set of retryable and newly sealed records in that attempt and never infer success from the success event alone.
 A configuration or active-binding failure at seal time still writes the durable non-empty failure receipt before cancelling compaction.
 Each terminal outcome persists the complete attempt result before any per-record queue transition, so a crash mid-attempt is replayed idempotently instead of leaving records reachable by an opposite outcome.
+An attempt journal that no longer reads back as its own exact record is quarantined with its observed digest and retired, so a corrupt artifact cannot wedge sealing, outcome recording, or delivery.
 
 The seal uses a content-bound stable ID, canonical JSON, a mode-0600 temporary file, file fsync, create-only atomic publication, serialized durable creation and fsync of every new state-directory entry, durable repair of non-private directory modes without repeatedly syncing unchanged directories, directory fsync including recovery of an identical publication, a queue published before claims, a 32-item cap, and a 32-KiB envelope cap.
 A candidate record binds its own stable ID to the registering harness, session generation, and item bytes, so a retargeted candidate cannot be sealed into another session's attempt.

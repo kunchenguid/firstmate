@@ -769,11 +769,13 @@ test_exit75_requires_fresh_inspect() {
 }
 
 test_exact_mcp_guard() {
-  local denied shell_denied
+  local denied shell_denied case_denied
   new_env exact-mcp-guard
   enable_consumer
   denied=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff-evil__execute",tool_input:{}}' | cli claude-hook 2>&1 >/dev/null || true)
   printf '%s' "$denied" | jq -e '.hookSpecificOutput.permissionDecision=="deny"' >/dev/null 2>&1 || fail "substring MCP server bypassed the guard"
+  case_denied=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"MCP__FIRSTMATE-CONTEXT-HANDOFF__commit_handoff_save",tool_input:{}}' | cli claude-hook 2>&1 >/dev/null || true)
+  printf '%s' "$case_denied" | jq -e '.hookSpecificOutput.permissionDecision=="deny"' >/dev/null 2>&1 || fail "case-folded MCP lookalike bypassed the exact allowlist"
   shell_denied=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"Bash",tool_input:{command:"printf unsafe"}}' | cli claude-hook 2>&1 >/dev/null || true)
   printf '%s' "$shell_denied" | jq -e '.hookSpecificOutput.permissionDecision=="deny"' >/dev/null 2>&1 || fail "direct shell mutation bypassed the guard"
   if ! jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreToolUse",session_id:$session,tool_name:"mcp__firstmate-context-handoff__next_curated_handoff",tool_input:{}}' | cli claude-hook > "$EROOT/allowed" 2> "$EROOT/allowed-error"; then
@@ -1518,6 +1520,53 @@ test_sessionstart_pending_eligibility() {
   pass "SessionStart announces only consumable records"
 }
 
+test_empty_register_binding_noop() {
+  local seal
+  new_env empty-register-binding
+  jq '.vault.inode=999999999' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not break the reviewed Vault binding"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
+  seal=$(seal_pi) || fail "an empty register with an unhealthy binding failed the seal transport"
+  printf '%s' "$seal" | jq -e 'keys==["status"] and .status=="disabled"' >/dev/null || fail "an empty register with an unhealthy binding did not stay a bounded no-op"
+  [ -z "$(find "$FM_HOME/state/context-handoff/records" -type f -print -quit)" ] || fail "an empty register sealed a record"
+  jq -se 'any(.[]; .reason=="no-registered-candidates-unhealthy-binding" and .failure_code=="VAULT_IDENTITY")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "an empty register with an unhealthy binding left no durable receipt"
+  pass "empty register stays a no-op under an unhealthy binding"
+}
+
+test_missing_record_is_classified() {
+  local payload status
+  new_env missing-record-classification
+  register_statement 'Bounded classification survives a missing durable record.' >/dev/null || fail "missing record fixture did not register"
+  payload=$(jq -nc '{bindings:[{record_id:"handoff-000000000000000000000000000000000000000000000000",envelope_sha256:"1111111111111111111111111111111111111111111111111111111111111111"}],trigger:"threshold",reason:"synthetic-missing-record"}') || fail "could not build the missing-record outcome"
+  status=0
+  printf '%s\n' "$payload" | cli compaction-outcome success > "$EROOT/missing-out" 2> "$EROOT/missing-error" || status=$?
+  [ "$status" -eq 2 ] || fail "a missing durable record did not fail with a classified handoff status"
+  grep -q '^context handoff: RECORD_UNREADABLE: ' "$EROOT/missing-error" || fail "a missing durable record was not classified as a bounded handoff error"
+  if grep -q 'Traceback' "$EROOT/missing-error"; then
+    fail "a missing durable record produced an unhandled traceback"
+  fi
+  if grep -qF "$FM_HOME" "$EROOT/missing-error"; then
+    fail "a missing durable record leaked an absolute state path"
+  fi
+  [ -z "$(find "$FM_HOME/state/context-handoff/bindings" -name 'attempt-*.json' -print -quit)" ] || fail "a failed attempt left its journal behind"
+  seal_pi >/dev/null || fail "a missing durable record wedged later sealing"
+  pass "missing durable records fail with bounded classification"
+}
+
+test_invalid_attempt_journal_retired() {
+  local journal seal
+  new_env invalid-attempt-journal
+  register_statement 'An invalid attempt journal must not wedge sealing.' >/dev/null || fail "invalid journal fixture did not register"
+  journal="$FM_HOME/state/context-handoff/bindings/attempt-deadbeef.json"
+  printf '{"schema":"bogus"}\n' > "$journal"
+  chmod 600 "$journal"
+  seal=$(seal_pi) || fail "an invalid compaction attempt journal wedged sealing"
+  [ "$(printf '%s' "$seal" | jq -r .status)" = sealed ] || fail "sealing did not recover from an invalid attempt journal"
+  [ ! -e "$journal" ] || fail "an invalid attempt journal was not retired"
+  jq -se 'any(.[]; .reason=="compaction-attempt-record-invalid" and .record_id=="attempt-deadbeef")' "$FM_HOME/state/context-handoff/quarantine"/*.json >/dev/null || fail "a retired attempt journal left no durable quarantine evidence"
+  pass "invalid compaction attempt journals are retired"
+}
+
 if [ "${FM_CONTEXT_HANDOFF_PI_SUCCESS_PROBE_ONLY:-0}" = 1 ]; then
   test_installed_pi_success_order
   exit 0
@@ -1531,6 +1580,9 @@ test_seal_binding_failure_receipt
 test_durable_compaction_attempt
 test_precompact_generation_and_timeout_margin
 test_sessionstart_pending_eligibility
+test_empty_register_binding_noop
+test_missing_record_is_classified
+test_invalid_attempt_journal_retired
 test_single_create_save
 test_queue_first_recovery
 test_invalid_candidate_receipts
