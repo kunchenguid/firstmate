@@ -382,6 +382,132 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# The fleet-wide engineering guidelines in AGENTS.md's "General Guidelines for
+# all crewmates, including firstmate" section reach an ordinary crewmate only
+# through the brief: its worktree belongs to some other project, so it never
+# loads firstmate's own AGENTS.md. Both crewmate scaffolds carry a copy, without
+# any captain-personal material. A secondmate charter must not: that home has its
+# own AGENTS.md, which would make the block a second copy.
+test_briefs_carry_fleet_general_guidelines() {
+  local home ship scout charter brief
+  home="$TMP_ROOT/general-guidelines-home"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-guides-s1 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship="$home/data/brief-guides-s1/brief.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-guides-s2 some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  scout="$home/data/brief-guides-s2/brief.md"
+
+  for brief in "$ship" "$scout"; do
+    assert_present "$brief" "brief was not scaffolded"
+    assert_grep "# General guidelines" "$brief" \
+      "$brief: brief lost the fleet-wide general guidelines section"
+    assert_no_grep "VOICE.md" "$brief" \
+      "$brief: brief leaked the captain-personal voice-profile instruction"
+  done
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" brief-guides-s3 --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  charter="$home/data/brief-guides-s3/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep "# General guidelines" "$charter" \
+    "secondmate charter must inherit the guidelines from its own AGENTS.md, not carry a second copy"
+  pass "fm-brief.sh: crewmate briefs carry the fleet-wide general guidelines"
+}
+
+# Print AGENTS.md's general-guidelines section body, the source the generated
+# briefs mirror.
+agents_general_guidelines_section() {
+  awk '
+    /^## General Guidelines for all crewmates, including firstmate$/ { inside = 1; next }
+    inside && /^## / { exit }
+    inside { print }
+  ' "$ROOT/AGENTS.md"
+}
+
+# Write the mirror map: one row per AGENTS.md sentence, as
+# <AGENTS.md fragment>|<ship brief fragment>|<scout brief fragment>.
+# An empty scout field means the scout brief must NOT carry that guideline,
+# because its deliverable is a report and it makes no commits and no code change.
+write_general_guidelines_map() {
+  cat > "$1" <<'MAP'
+Never use the em dash|Never use the em dash character|Never use the em dash character
+Use plain dash|write a plain dash "-" instead|write a plain dash "-" instead
+NEVER auto-add your agent name as co-author|Never add an agent name as a commit co-author.|
+put each full sentence on its own line|Put each full sentence on its own line in long Markdown or TeX files.|Put each full sentence on its own line in long Markdown or TeX files.
+do not give much weight to development costs|far above development cost|
+prefer quality, simplicity, robustness, scalability, and long term maintainability|Weigh quality, simplicity, robustness, scalability, and long-term maintainability|
+reproducing the bug in an E2E setting|Reproduce a bug end to end the way a user would hit it|Reproduce a bug end to end the way a user would hit it
+find the real problem|so the fix lands on the real cause|so your findings rest on the real cause
+be picky about the UI you see and be obsessed with pixel perfection|Be picky about the UI you see while testing, down to the pixel|
+try to get it fixed along the way|if something looks off, get it fixed along the way|
+lint, test failures, and test flakiness|lint failures, test failures, and flaky tests|
+still get it fixed|even ones your task did not cause|
+MAP
+}
+
+# A crewmate in another project's worktree cannot follow a cross-reference into
+# firstmate's AGENTS.md, so the brief scaffold carries a copy of that section
+# rather than a pointer. Nothing but this test keeps the two in step, and the
+# copies are deliberately different subsets, so each is checked against the
+# AGENTS.md sentence it mirrors instead of against one whole-text match. The map
+# is also checked for completeness in the other direction: a guideline added to
+# AGENTS.md that no brief line claims fails here rather than silently never
+# reaching a worker.
+test_brief_guidelines_track_agents_md_section() {
+  local home ship scout section section_file map fragment ship_line scout_line line claimed
+  home="$TMP_ROOT/guidelines-drift-home"
+  mkdir -p "$home/data"
+  map="$TMP_ROOT/general-guidelines-map.txt"
+  write_general_guidelines_map "$map"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-drift-s1 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  ship="$home/data/brief-drift-s1/brief.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-drift-s2 some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  scout="$home/data/brief-drift-s2/brief.md"
+
+  section_file="$TMP_ROOT/general-guidelines-section.txt"
+  agents_general_guidelines_section > "$section_file"
+  section=$(cat "$section_file")
+  [ -n "$section" ] \
+    || fail "AGENTS.md has no \"General Guidelines for all crewmates, including firstmate\" section, but bin/fm-brief.sh mirrors it into every crewmate brief"
+
+  while IFS='|' read -r fragment ship_line scout_line; do
+    [ -n "$fragment" ] || continue
+    case "$section" in
+      *"$fragment"*) : ;;
+      *) fail "drift: AGENTS.md's general-guidelines section no longer says \"$fragment\", but bin/fm-brief.sh's GENERAL_GUIDELINES_SHIP still mirrors it as \"$ship_line\" - update both together" ;;
+    esac
+    assert_grep "$ship_line" "$ship" \
+      "drift: AGENTS.md's general-guidelines section says \"$fragment\", but the ship brief from bin/fm-brief.sh (GENERAL_GUIDELINES_SHIP) does not carry \"$ship_line\""
+    if [ -n "$scout_line" ]; then
+      assert_grep "$scout_line" "$scout" \
+        "drift: AGENTS.md's general-guidelines section says \"$fragment\", but the scout brief from bin/fm-brief.sh (GENERAL_GUIDELINES_SCOUT) does not carry \"$scout_line\""
+    else
+      assert_no_grep "$ship_line" "$scout" \
+        "scope: the scout brief from bin/fm-brief.sh (GENERAL_GUIDELINES_SCOUT) carries \"$ship_line\", which a report-only scout never acts on - keep that guideline in GENERAL_GUIDELINES_SHIP alone"
+    fi
+  done < "$map"
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    claimed=0
+    while IFS='|' read -r fragment ship_line scout_line; do
+      [ -n "$fragment" ] || continue
+      case "$line" in *"$fragment"*) claimed=1 ;; esac
+    done < "$map"
+    [ "$claimed" -eq 1 ] \
+      || fail "drift: AGENTS.md's general-guidelines section states \"$line\", which no line of bin/fm-brief.sh's brief copy mirrors - add it to GENERAL_GUIDELINES_SHIP (and GENERAL_GUIDELINES_SCOUT if a report-only scout acts on it) and to this test's map"
+  done < "$section_file"
+
+  pass "fm-brief.sh: ship and scout guideline copies track the AGENTS.md section they mirror"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -772,6 +898,8 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_briefs_carry_fleet_general_guidelines
+test_brief_guidelines_track_agents_md_section
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
