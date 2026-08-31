@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -u
+exec "$FM_BEELINE_NODE_RUNTIME" "$@"

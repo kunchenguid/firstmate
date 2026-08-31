@@ -44,7 +44,8 @@ case "${1:-}" in
     if [ "${4:-}" = -l ] && [ -n "${FM_FAKE_LAUNCH_SCRIPT:-}" ]; then
       printf '%s\n' "${5:-}" > "$FM_FAKE_LAUNCH_SCRIPT"
       if [ "${FM_SIGNAL_AFTER_LAUNCH_PAYLOAD:-0}" = 1 ]; then
-        kill -TERM "$PPID"
+        parent=$PPID
+        (sleep 0.05; kill -TERM "$parent") &
       fi
     elif [ "${4:-}" = C-c ] && [ -n "${FM_FAKE_LAUNCH_SCRIPT:-}" ]; then
       : > "$FM_FAKE_LAUNCH_SCRIPT"
@@ -106,11 +107,11 @@ SH
 set -u
 case "\${FM_TEST_NODE_PROBE:-}" in
   cjs)
-    exec "$SYSTEM_NODE" -e "\$FM_TEST_NODE_SCRIPT" \
+    exec node -e "\$FM_TEST_NODE_SCRIPT" \
       "\${FM_TEST_NODE_ARG1:-}" "\${FM_TEST_NODE_ARG2:-}"
     ;;
   esm)
-    exec "$SYSTEM_NODE" --input-type=module -e "\$FM_TEST_NODE_SCRIPT" \
+    exec node --input-type=module -e "\$FM_TEST_NODE_SCRIPT" \
       "\${FM_TEST_NODE_ARG1:-}" "\${FM_TEST_NODE_ARG2:-}"
     ;;
 esac
@@ -147,6 +148,27 @@ add_dependency_volume() {
     "$MKDIR_BIN" "$PROJECT_DIR/node_modules/third-party-$index"
     index=$((index + 1))
   done
+}
+
+start_primary_dependency_mutator() {
+  local stop=$1 source=$2
+  (
+    local candidate attempts=0 value=0
+    while [ "$attempts" -lt 200000 ]; do
+      for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+        [ -d "$candidate" ] || continue
+        while [ ! -e "$stop" ]; do
+          printf '%s\n' "$value" > "$source"
+          value=$((value + 1))
+        done
+        exit 0
+      done
+      attempts=$((attempts + 1))
+      sleep 0.001
+    done
+    exit 124
+  ) >/dev/null 2>&1 &
+  PUBLICATION_CONTENDER_PID=$!
 }
 
 add_workspace_validation_volume() {
@@ -575,7 +597,7 @@ test_spawn_publication_is_independent_of_path_node_wrappers() {
 }
 
 test_spawn_resolves_script_managed_node_runtime() {
-  local rec id out status publication toolbin account_home
+  local rec id out status publication toolbin account_home result
   id=node-modules-script-node-z1c
   rec=$(make_case script-node "$id")
   read_case "$rec"
@@ -595,6 +617,10 @@ test_spawn_resolves_script_managed_node_runtime() {
   [ -L "$WORKTREE_DIR/node_modules" ] || fail "script-managed Node runtime did not publish node_modules"
   publication=$(readlink "$WORKTREE_DIR/node_modules")
   [ -d "$WORKTREE_DIR/$publication" ] || fail "script-managed Node runtime left dependency backing unavailable"
+  result=$(FM_REJECT_PATH_NODE_PUBLISHER=1 \
+    run_beeline_cjs 'process.stdout.write("compatible")')
+  [ "$result" = compatible ] \
+    || fail "pane launch did not pin the compatible Node runtime"
   pass "fm-spawn resolves script-managed Node runtimes before publication"
 }
 
@@ -917,6 +943,34 @@ test_spawn_preserves_tree_created_during_publication() {
   pass "fm-spawn publication does not replace a concurrently created dependency tree"
 }
 
+test_spawn_rejects_dependency_source_changes_during_staging() {
+  local rec id out status candidate stop source
+  id=node-modules-source-change-z4a
+  rec=$(make_case source-change "$id")
+  read_case "$rec"
+  add_dependency_volume
+  stop="$HOME_DIR/state/stop-primary-mutation"
+  source="$PROJECT_DIR/node_modules/third-party/index.js"
+  start_primary_dependency_mutator "$stop" "$source"
+
+  out=$(run_spawn "$id")
+  status=$?
+  : > "$stop"
+  wait_publication_contender \
+    || fail "primary dependency mutator did not overlap staging"
+  [ "$status" -ne 0 ] || fail "spawn published dependencies while the primary tree changed"
+  assert_contains "$out" "failed to stage the primary Beeline dependency tree" \
+    "primary dependency source change was not diagnosed"
+  assert_not_contains "$out" "spawned $id" "mixed dependency snapshot launched a worker"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "mixed dependency snapshot published node_modules"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "mixed dependency snapshot leaked staging"
+  done
+  pass "fm-spawn rejects primary dependency changes during staging"
+}
+
 test_spawn_rejects_primary_dependency_link_created_during_publication() {
   local rec id out status candidate
   id=node-modules-race-primary-z4b
@@ -1100,6 +1154,7 @@ test_spawn_ignores_published_beeline_consumers
 test_spawn_preserves_exclude_path_for_harness_files
 test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication
+test_spawn_rejects_dependency_source_changes_during_staging
 test_spawn_rejects_primary_dependency_link_created_during_publication
 test_spawn_rejects_invalid_candidate_before_competing_publication
 test_spawn_rejects_replacement_after_owned_publication

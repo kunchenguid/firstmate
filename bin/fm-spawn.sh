@@ -1705,6 +1705,33 @@ function workspaceMap(rootPath) {
 const projectReal = fs.realpathSync(project);
 const sourceReal = fs.realpathSync(source);
 
+function sourceSnapshot(rootPath) {
+  const entries = [];
+  function visit(entry, relative) {
+    const stat = fs.lstatSync(entry, { bigint: true });
+    const record = [
+      relative,
+      stat.dev.toString(),
+      stat.ino.toString(),
+      stat.mode.toString(),
+      stat.size.toString(),
+      stat.mtimeNs.toString(),
+      stat.ctimeNs.toString()
+    ];
+    if (stat.isSymbolicLink()) record.push(fs.readlinkSync(entry));
+    entries.push(record);
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(entry).sort()) {
+        visit(path.join(entry, name), path.join(relative, name));
+      }
+    }
+  }
+  visit(rootPath, '');
+  return JSON.stringify(entries);
+}
+
+const initialSourceSnapshot = sourceSnapshot(source);
+
 function materialize(sourcePath, targetPath, root = false) {
   const sourceStat = fs.lstatSync(sourcePath);
   if (sourceStat.isSymbolicLink()) {
@@ -1829,6 +1856,9 @@ try {
   }
 } catch (error) {
   if (error.code !== 'ENOENT') throw error;
+}
+if (sourceSnapshot(source) !== initialSourceSnapshot) {
+  throw new Error('primary dependency tree changed during staging');
 }
 JS
   then
@@ -3008,8 +3038,10 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 if [ "$BEELINE_NODE_MODULES_ACTIVE" = 1 ]; then
   beeline_node_path=$(shell_quote "$WT/node_modules")
   beeline_resolver_path=$(shell_quote "$FM_ROOT/bin")
+  beeline_node_runtime=$(shell_quote "$NODE_MODULES_ABORT_NODE")
+  beeline_node_runtime_path=$(shell_quote "$FM_ROOT/bin/fm-beeline-node-runtime")
   beeline_node_options=$(shell_quote "--require=fm-beeline-workspace-resolver.cjs --experimental-loader=$BEELINE_NODE_RESOLVER_ESM_URL")
-  LAUNCH="FM_BEELINE_NODE_MODULES=$beeline_node_path NODE_PATH=$beeline_resolver_path:$beeline_node_path:\${NODE_PATH:-} NODE_OPTIONS=$beeline_node_options\" \${NODE_OPTIONS:-}\" $LAUNCH"
+  LAUNCH="FM_BEELINE_NODE_MODULES=$beeline_node_path FM_BEELINE_NODE_RUNTIME=$beeline_node_runtime NODE_PATH=$beeline_resolver_path:$beeline_node_path:\${NODE_PATH:-} NODE_OPTIONS=$beeline_node_options\" \${NODE_OPTIONS:-}\" PATH=$beeline_node_runtime_path:\${PATH} $LAUNCH"
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -3043,15 +3075,17 @@ spawn_send_literal "$T" "$LAUNCH" || launch_payload_status=$?
   trap - INT TERM HUP
   exit "$launch_payload_status"
 }
-sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-  HERDR_PROJECTION_ABORT_CLEANUP=0
-  spawn_herdr_presentation_order_lock_release
-fi
+launch_settle_status=0
+sleep 0.3 || launch_settle_status=$?
 if [ -n "$launch_signal_status" ]; then
   spawn_send_key "$T" C-c || true
   trap - INT TERM HUP
   exit "$launch_signal_status"
+fi
+if [ "$launch_settle_status" -ne 0 ]; then
+  spawn_send_key "$T" C-c || true
+  trap - INT TERM HUP
+  exit "$launch_settle_status"
 fi
 launch_validation_status=0
 beeline_node_modules_ready_for_launch || launch_validation_status=$?
@@ -3065,8 +3099,14 @@ if [ "$launch_validation_status" -ne 0 ]; then
   trap - INT TERM HUP
   exit "$launch_validation_status"
 fi
+if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+fi
 launch_submit_status=0
 spawn_send_key "$T" Enter || launch_submit_status=$?
+if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+  spawn_herdr_presentation_order_lock_release
+fi
 trap - INT TERM HUP
 [ -z "$launch_signal_status" ] || exit "$launch_signal_status"
 [ "$launch_submit_status" -eq 0 ] || exit "$launch_submit_status"
