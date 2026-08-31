@@ -64,17 +64,46 @@ fm_forge_host_is_gitlab() {
 fm_forge_safe_ssh_config() {
   local config
   for config in "${HOME:-}/.ssh/config" /etc/ssh/ssh_config; do
-    [ -r "$config" ] || continue
-    awk '
-      /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]/ {
-        in_host=1; in_match=0; print; next
-      }
-      /^[[:space:]]*[Mm][Aa][Tt][Cc][Hh][[:space:]]/ {
-        in_match=1; next
-      }
-      in_host && !in_match && /^[[:space:]]*[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee][[:space:]]/ { print }
-    ' "$config"
+    fm_forge_safe_ssh_config_file "$config" 0
   done
+}
+
+# Expand Include directives ourselves so ssh -G receives only inert Host and
+# HostName directives. Passing the original config to ssh would also evaluate
+# Match exec commands while resolving a remote's provider alias.
+fm_forge_safe_ssh_config_file() {
+  local config=${1:-} depth=${2:-0} dir line key rest pattern candidate included
+
+  [ -r "$config" ] || return 0
+  [ "$depth" -lt 16 ] || return 0
+  dir=$(dirname "$config")
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -n "$line" ] || continue
+    case "$line" in
+      \#*) continue ;;
+    esac
+    read -r key rest <<< "$line"
+    key=$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')
+    case "$key" in
+      host|hostname)
+        printf '%s\n' "$line"
+        ;;
+      include)
+        for pattern in $rest; do
+          case "$pattern" in
+            ~/*) candidate="${HOME:-}/.ssh/${pattern#~/}" ;;
+            /*) candidate=$pattern ;;
+            *) candidate="$dir/$pattern" ;;
+          esac
+          while IFS= read -r included; do
+            [ -n "$included" ] || continue
+            fm_forge_safe_ssh_config_file "$included" $((depth + 1))
+          done < <(compgen -G "$candidate" || true)
+        done
+        ;;
+    esac
+  done < "$config"
 }
 
 fm_forge_checkout_remote() {
