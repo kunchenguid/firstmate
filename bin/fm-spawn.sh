@@ -1468,12 +1468,6 @@ JS
     0)
       NODE_MODULES_ABORT_STAGING=
       ;;
-    3|4|126|127)
-      NODE_MODULES_ABORT_CLEANUP=1
-      cleanup_status=0
-      cleanup_beeline_node_modules_staging || cleanup_status=$?
-      [ "$cleanup_status" -eq 0 ] || publish_status=5
-      ;;
     *)
       ;;
   esac

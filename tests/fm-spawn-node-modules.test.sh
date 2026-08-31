@@ -110,6 +110,9 @@ set -u
 if [ "\${1:-}" = - ] && [ "\${FM_FAIL_NODE_PUBLISHER_EXEC:-0}" = 1 ]; then
   exit 127
 fi
+if [ "\${1:-}" = - ] && [ "\${FM_INJECT_NODE_PUBLISHER_HOOK:-0}" = 1 ]; then
+  exec "$real_node" --require="$fakebin/node-ambient-hook.cjs" "\$@"
+fi
 if [ "\${1:-}" = - ] && { [ -n "\${FM_NODE_MODULES_RACE_TARGET:-}" ] || [ "\${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" = 1 ] || [ "\${FM_KILL_NODE_MODULES_PUBLISHER:-0}" = 1 ]; }; then
   exec "$real_node" --require="$fakebin/node-race-hook.cjs" "\$@"
 fi
@@ -171,6 +174,7 @@ run_spawn() {
     FM_INTERRUPT_NODE_MODULES_PUBLICATION="${FM_INTERRUPT_NODE_MODULES_PUBLICATION:-0}" \
     FM_KILL_NODE_MODULES_PUBLISHER="${FM_KILL_NODE_MODULES_PUBLISHER:-0}" \
     FM_FAIL_NODE_PUBLISHER_EXEC="${FM_FAIL_NODE_PUBLISHER_EXEC:-0}" \
+    FM_INJECT_NODE_PUBLISHER_HOOK="${FM_INJECT_NODE_PUBLISHER_HOOK:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -362,8 +366,8 @@ test_spawn_isolates_publisher_from_ambient_node_options() {
   pass "fm-spawn isolates dependency publication from ambient Node options"
 }
 
-test_spawn_cleans_staging_after_publisher_exec_failure() {
-  local rec id out status candidate
+test_spawn_retains_staging_after_ambiguous_publisher_exec_failure() {
+  local rec id out status candidate retained count
   id=node-modules-exec-failure-z10
   rec=$(make_case publisher-exec-failure "$id")
   read_case "$rec"
@@ -374,11 +378,17 @@ test_spawn_cleans_staging_after_publisher_exec_failure() {
   assert_not_contains "$out" "spawned $id" "publisher execution failure launched a worker"
   [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
     || fail "publisher execution failure created node_modules"
+  retained=
+  count=0
   for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
-      || fail "publisher execution failure leaked dependency staging"
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    retained=$candidate
+    count=$((count + 1))
   done
-  pass "fm-spawn cleans staging after publisher execution failure"
+  [ "$count" -eq 1 ] || fail "ambiguous publisher execution failure did not retain exactly one backing tree"
+  assert_present "$retained/third-party/index.js" \
+    "ambiguous publisher execution failure retained an incomplete backing tree"
+  pass "fm-spawn retains complete staging after ambiguous publisher execution failure"
 }
 
 test_spawn_cleans_staging_after_creator_termination() {
@@ -406,17 +416,34 @@ test_spawn_cleans_known_unpublished_staging_during_interrupt() {
   rec=$(make_case cleanup-interrupt "$id")
   read_case "$rec"
 
-  out=$(FM_NODE_MODULES_RACE_TARGET="$WORKTREE_DIR" FM_INTERRUPT_NODE_MODULES_CLEANUP=1 run_spawn "$id")
+  out=$(FM_FAIL_NODE_MODULES_LINK=1 FM_INTERRUPT_NODE_MODULES_CLEANUP=1 run_spawn "$id")
   status=$?
   expect_code 143 "$status" "spawn should preserve cancellation during dependency staging cleanup"
   assert_not_contains "$out" "spawned $id" "cancelled dependency cleanup launched a worker"
-  assert_present "$WORKTREE_DIR/node_modules/owned.txt" \
-    "cancelled cleanup removed the concurrently created dependency tree"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "cancelled pre-publication cleanup created node_modules"
   for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
     [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
       || fail "cancelled cleanup leaked known-unpublished dependency staging"
   done
   pass "fm-spawn completes staging cleanup before honoring cancellation"
+}
+
+test_spawn_retains_backing_after_wrapper_postpublication_failure() {
+  local rec id out status publication
+  id=node-modules-wrapper-failure-z13
+  rec=$(make_case wrapper-failure "$id")
+  read_case "$rec"
+
+  out=$(FM_INJECT_NODE_PUBLISHER_HOOK=1 run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should fail after a wrapper-controlled publication error"
+  assert_not_contains "$out" "spawned $id" "wrapper-controlled publication failure launched a worker"
+  [ -L "$WORKTREE_DIR/node_modules" ] || fail "wrapper-controlled failure removed published node_modules"
+  publication=$(readlink "$WORKTREE_DIR/node_modules")
+  [ -d "$WORKTREE_DIR/$publication" ] \
+    || fail "wrapper-controlled failure removed published dependency backing"
+  pass "fm-spawn retains backing after wrapper-controlled publication failure"
 }
 
 test_spawn_shares_dependencies_and_repoints_workspace_links
@@ -428,8 +455,9 @@ test_spawn_cancels_after_staging_registration_interrupt
 test_spawn_preserves_publication_after_interrupt
 test_spawn_preserves_backing_after_ambiguous_publisher_exit
 test_spawn_isolates_publisher_from_ambient_node_options
-test_spawn_cleans_staging_after_publisher_exec_failure
+test_spawn_retains_staging_after_ambiguous_publisher_exec_failure
 test_spawn_cleans_staging_after_creator_termination
 test_spawn_cleans_known_unpublished_staging_during_interrupt
+test_spawn_retains_backing_after_wrapper_postpublication_failure
 
 echo "# all fm-spawn-node-modules tests passed"
