@@ -50,7 +50,8 @@ The point of these rules is one trace per task: never merge unrelated tasks, and
 
 Because ambient `TRACEPARENT` is never read, the environment a supervisor happens to run under - a Secondmate's launch-time carrier, or an operator shell with a leftover `TRACEPARENT` - cannot leak into new task identities.
 Disabling propagation is an intentional trace boundary: a disabled home injects no carrier into a newly launched or relaunched agent even when the task meta already contains a valid `traceparent=`.
-An actual disabled relaunch regenerates the task meta without `traceparent=`, so a later enabled relaunch roots a new trace instead of resuming the identity from before the boundary; reusing an already-alive remote endpoint is not a relaunch and preserves the carrier that agent already holds.
+An actual disabled relaunch starts the replacement with shell-neutral `env -u TRACEPARENT`, which clears the carrier from that process without mutating the long-lived pane shell.
+It also regenerates the task meta without `traceparent=`, so a later enabled relaunch roots a new trace instead of resuming the identity from before the boundary; reusing an already-alive remote endpoint is not a relaunch and preserves the carrier that agent already holds.
 
 ### Enablement is home-session-scoped
 
@@ -88,7 +89,8 @@ This is a deliberate, source-owned choice:
 ## Safety
 
 - **Default-off.**
-  With no `config/trace-context` and no `FM_TRACE_CONTEXT`, a fresh spawn or actual relaunch injects nothing and writes no `traceparent=` line, so the generated meta and the launch environment are unchanged.
+  With no `config/trace-context` and no `FM_TRACE_CONTEXT`, a fresh spawn injects nothing and writes no `traceparent=` line, so its generated meta and launch environment are unchanged.
+  An actual relaunch writes no `traceparent=` line and excludes any prior carrier from the replacement process as described above.
   Reusing an already-alive remote endpoint records any carrier that endpoint reports without injecting a new one.
   A locked session start makes the one config-file check, and each spawn sources one extra library and reads the frozen effective-state file, so the process is not literally byte-for-byte identical, but nothing an agent, an observer, or the task meta can see differs.
 - **What is and is not exposed.**
@@ -102,7 +104,7 @@ This is a deliberate, source-owned choice:
   Any entropy or self-validation failure that returns omits the carrier for that spawn without aborting source work; a corrupt recorded carrier is re-minted as a fresh root rather than propagated (it is not an omission).
   If the pre-launch carrier export fails, Firstmate omits the `traceparent=` metadata claim and still launches the task.
   If the backend reports that failed trace input could not be cleared, Firstmate refuses to append the launch command rather than risk launching with an unknown partial carrier.
-  If recording the carrier fails after export, Firstmate unsets `TRACEPARENT` in the launch command and still launches the task, so the child never receives an identity absent from its metadata.
+  If recording the carrier fails after export, Firstmate excludes `TRACEPARENT` from the child launch and still launches the task, so the child never receives an identity absent from its metadata.
 - **Metadata-only.**
   The value lives in the ephemeral pane shell and in `state/<id>.meta`; teardown removes state as before, so there is no new durable surface and no schema migration.
 
