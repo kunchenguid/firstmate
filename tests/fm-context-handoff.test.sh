@@ -149,6 +149,7 @@ new_env() {
   CLAUDE_SESSION=claude-session-generation-1
   CAPABILITY=claude-process-generation-1
   PROCESS_GENERATION=1
+  LIVE_PROCESS_CAPABILITY=
   REGISTRATION_ENABLED=true
   SEALING_ENABLED=true
   DELIVERY_ENABLED=false
@@ -187,15 +188,20 @@ if [ "$1 $2" = "agent get" ]; then
 fi
 if [ "$1 $2" = "agent prompt" ] && [ "${3:-}" = --help ]; then
   [ "$mode" = atomic ] && printf '%s\n' '      --expected-agent-session <SESSION>'
-  [ "$mode" = idempotent ] && printf '%s\n' '      --expected-agent-session <SESSION> --idempotency-key <KEY>'
+  { [ "$mode" = idempotent ] || [ "$mode" = busy-race ]; } && printf '%s\n' '      --expected-agent-session <SESSION> --idempotency-key <KEY> --require-idle'
   exit 0
 fi
 if [ "$1 $2" = "agent prompt" ]; then
-  [ "$mode" = idempotent ] || exit 65
+  { [ "$mode" = idempotent ] || [ "$mode" = busy-race ]; } || exit 65
   [ "${3:-}" = pane-1 ] && [ "${4:-}" = /firstmate-context-handoff:consume ] || exit 66
   [ "${5:-}" = --expected-agent-session ] && [ "${6:-}" = "$FAKE_CLAUDE_SESSION" ] || exit 67
   [ "${7:-}" = --session ] && [ "${8:-}" = lab ] && [ "${9:-}" = --timeout ] && [ "${10:-}" = 2000 ] || exit 68
   [ "${11:-}" = --idempotency-key ] && [ -n "${12:-}" ] || exit 69
+  [ "${13:-}" = --require-idle ] || exit 70
+  if [ "$mode" = busy-race ]; then
+    jq -nc --arg pane pane-1 --arg workspace workspace-1 --arg tab tab-1 --arg value "$FAKE_CLAUDE_SESSION" --arg cwd "$FAKE_VAULT" --arg key "${12}" '{result:{agent:{pane_id:$pane,workspace_id:$workspace,tab_id:$tab,agent:"claude",agent_status:"working",cwd:$cwd,foreground_cwd:$cwd,agent_session:{source:"claude",agent:"claude",kind:"id",value:$value}},delivery:{accepted:false,idempotency_key:$key,duplicate:false}}}'
+    exit 0
+  fi
   duplicate=false
   if grep -Fx "${12}" "$FAKE_HERDR_IDEMPOTENCY_FILE" >/dev/null; then
     duplicate=true
@@ -203,7 +209,7 @@ if [ "$1 $2" = "agent prompt" ]; then
     printf '%s\n' "${12}" >> "$FAKE_HERDR_IDEMPOTENCY_FILE"
     printf '%s\n' "${12}" >> "$FAKE_HERDR_EFFECTS_FILE"
   fi
-  jq -nc --arg pane pane-1 --arg workspace workspace-1 --arg tab tab-1 --arg value "$FAKE_CLAUDE_SESSION" --arg cwd "$FAKE_VAULT" --arg key "${12}" --argjson duplicate "$duplicate" '{result:{agent:{pane_id:$pane,workspace_id:$workspace,tab_id:$tab,agent:"claude",agent_status:"working",cwd:$cwd,foreground_cwd:$cwd,agent_session:{source:"claude",agent:"claude",kind:"id",value:$value}},delivery:{accepted:true,idempotency_key:$key,duplicate:$duplicate}}}'
+  jq -nc --arg pane pane-1 --arg workspace workspace-1 --arg tab tab-1 --arg value "$FAKE_CLAUDE_SESSION" --arg cwd "$FAKE_VAULT" --arg key "${12}" --argjson duplicate "$duplicate" '{result:{agent:{pane_id:$pane,workspace_id:$workspace,tab_id:$tab,agent:"claude",agent_status:"idle",cwd:$cwd,foreground_cwd:$cwd,agent_session:{source:"claude",agent:"claude",kind:"id",value:$value}},delivery:{accepted:true,idempotency_key:$key,duplicate:$duplicate}}}'
   exit 0
 fi
 exit 64
@@ -222,6 +228,7 @@ cli() {
       FM_HANDOFF_TEST_NOW="$FIXED_NOW" \
       FM_HANDOFF_TEST_PROCESS_CAPABILITY="$CAPABILITY" \
       FM_HANDOFF_TEST_PROCESS_GENERATION="$PROCESS_GENERATION" \
+      FM_HANDOFF_TEST_LIVE_PROCESS_CAPABILITY="${LIVE_PROCESS_CAPABILITY:-}" \
       FM_HANDOFF_TEST_FAILPOINT="${FM_HANDOFF_TEST_FAILPOINT:-}" \
       FM_HANDOFF_TEST_PAUSEPOINT="${FM_HANDOFF_TEST_PAUSEPOINT:-}" \
       FM_HANDOFF_TEST_PAUSE_MARKER="${FM_HANDOFF_TEST_PAUSE_MARKER:-$EROOT/pause-marker}" \
@@ -684,6 +691,11 @@ test_monotonic_claude_binding() {
   bind_claude >/dev/null || fail "initial Claude generation did not bind"
   CAPABILITY=claude-process-generation-2
   PROCESS_GENERATION=2
+  LIVE_PROCESS_CAPABILITY=claude-process-generation-1
+  bind_claude >/dev/null || fail "live-owner replacement hook transport failed"
+  current=$(mcp_content next_curated_handoff)
+  [ "$(printf '%s' "$current" | jq -r .code)" = CONSUMER_SESSION ] || fail "live prior process owner was replaced"
+  LIVE_PROCESS_CAPABILITY=
   bind_claude >/dev/null || fail "replacement Claude generation did not bind"
   CAPABILITY=claude-process-generation-1
   PROCESS_GENERATION=1
@@ -699,6 +711,16 @@ test_monotonic_claude_binding() {
 
 test_claude_precompact_binding_failure() {
   local statement arguments registered foreign blocked
+  new_env non-claude-recipient
+  enable_consumer
+  jq '.recipient.agent="codex"' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not create non-Claude recipient configuration"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
+  if cli status > "$EROOT/non-claude-output" 2> "$EROOT/non-claude-error"; then
+    fail "non-Claude recipient retained handoff authority"
+  fi
+  grep -q 'CONFIG_RECIPIENT' "$EROOT/non-claude-error" || fail "non-Claude recipient lacked its bounded configuration refusal"
+
   new_env claude-precompact-binding
   enable_consumer
   bind_claude >/dev/null || fail "Claude binding failed"
@@ -728,6 +750,18 @@ test_claude_precompact_binding_failure() {
   printf 'mismatch\n' > "$HERDR_MODE"
   blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "retry-only Claude binding failure escaped the hook"
   printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "retryable Claude queue failed open after endpoint failure"
+
+  new_env malformed-sealing-binding
+  statement='Malformed sealing bindings must durably block a matching nonempty Claude compaction.'
+  authorize "$statement"
+  registered=$(cli register --source-harness claude --kind gotcha --statement "$statement" --source-record "$SOURCE_FILE" --source-sha256 "$(hash_file "$SOURCE_FILE")" --confidence verified --sphere privat --sensitivity-class ordinary-project-context --provider-class anthropic-claude-obsidian) || fail "malformed sealing fixture did not register"
+  [ "$(printf '%s' "$registered" | jq -r .status)" = registered ] || fail "malformed sealing fixture returned an invalid registration"
+  jq '.consumer_enabled=false | .delivery_enabled=false | del(.recipient)' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not remove the sealing recipient binding"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
+  blocked=$(jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PreCompact",session_id:$session,trigger:"auto"}' | cli claude-hook) || fail "malformed sealing configuration escaped the hook"
+  printf '%s' "$blocked" | jq -e '.decision=="block"' >/dev/null || fail "malformed nonempty sealing configuration failed open"
+  jq -se 'any(.[]; .reason=="claude-precompact-binding-failed" and .failure_code=="CONFIG_RECIPIENT")' "$FM_HOME/state/context-handoff/receipts"/*.json >/dev/null || fail "malformed sealing failure lacked its durable receipt"
   pass "fail-closed Claude PreCompact endpoint binding"
 }
 
@@ -914,7 +948,7 @@ test_bounded_transports_and_delivery() {
   DELIVERY_ENABLED=true
   write_config
   delivery=$(cli deliver) || fail "unsupported atomic delivery did not stay pending"
-  [ "$(printf '%s' "$delivery" | jq -r .reason)" = recipient-idempotent-generation-prompt-unsupported ] || fail "delivery did not fail closed without an idempotent generation precondition"
+  [ "$(printf '%s' "$delivery" | jq -r .reason)" = recipient-atomic-idle-generation-prompt-unsupported ] || fail "delivery did not fail closed without an atomic idle generation precondition"
   ! grep -q '^agent prompt pane-1 /firstmate-context-handoff:consume ' "$HERDR_LOG" || fail "delivery sent a probe-then-prompt notification"
 
   new_env generation-only-delivery
@@ -924,8 +958,20 @@ test_bounded_transports_and_delivery() {
   printf 'atomic\n' > "$HERDR_MODE"
   write_config
   delivery=$(cli deliver) || fail "generation-only delivery did not stay pending"
-  [ "$(printf '%s' "$delivery" | jq -r .reason)" = recipient-idempotent-generation-prompt-unsupported ] || fail "generation-only delivery lacked its explicit idempotency capability reason"
+  [ "$(printf '%s' "$delivery" | jq -r .reason)" = recipient-atomic-idle-generation-prompt-unsupported ] || fail "generation-only delivery lacked its explicit atomic idle capability reason"
   ! grep -q '^agent prompt pane-1 /firstmate-context-handoff:consume ' "$HERDR_LOG" || fail "generation-only delivery risked a duplicate prompt"
+
+  new_env busy-race-delivery
+  enable_consumer
+  seal=$(make_ready 'Keep delivery pending when the exact generation becomes busy before notification.') || fail "busy-race delivery fixture failed"
+  record=$(printf '%s' "$seal" | jq -r .record_id)
+  DELIVERY_ENABLED=true
+  printf 'busy-race\n' > "$HERDR_MODE"
+  write_config
+  delivery=$(cli deliver) || fail "busy-race delivery did not stay pending"
+  [ "$(printf '%s' "$delivery" | jq -r .reason)" = recipient-notification-precondition-failed ] || fail "busy-race delivery lacked its atomic precondition failure"
+  [ "$(jq -r .status "$FM_HOME/state/context-handoff/queue/$record.json")" = pending ] || fail "busy recipient was marked notified"
+  [ ! -s "$HERDR_EFFECTS" ] || fail "busy recipient received a notification effect"
 
   new_env idempotent-delivery
   enable_consumer
@@ -948,7 +994,7 @@ test_bounded_transports_and_delivery() {
   [ "$first_prompt" = "$second_prompt" ] || fail "idempotent delivery retry changed its exact recipient request"
   idempotency_key=$(jq -r .delivery_idempotency_key "$FM_HOME/state/context-handoff/queue/$record.json")
   [ "$idempotency_key" = "$(cat "$HERDR_EFFECTS")" ] || fail "durable delivery state did not bind the recipient idempotency identity"
-  grep -Fx "agent prompt pane-1 /firstmate-context-handoff:consume --expected-agent-session $CLAUDE_SESSION --session lab --timeout 2000 --idempotency-key $idempotency_key" "$HERDR_LOG" >/dev/null || fail "delivery omitted the constant prompt, exact generation, or idempotency identity"
+  grep -Fx "agent prompt pane-1 /firstmate-context-handoff:consume --expected-agent-session $CLAUDE_SESSION --session lab --timeout 2000 --idempotency-key $idempotency_key --require-idle" "$HERDR_LOG" >/dev/null || fail "delivery omitted the constant prompt or atomic idle generation authority"
 
   new_env delivery-deadline
   enable_consumer
@@ -972,7 +1018,7 @@ test_bounded_transports_and_delivery() {
   dd if=/dev/zero bs=1048576 count=1 2>/dev/null | tr '\000' x > "$EROOT/frames"
   printf 'x\n{"jsonrpc":"2.0","id":2,"method":"ping"}\n' >> "$EROOT/frames"
   framed=$(cli mcp-server < "$EROOT/frames") || fail "MCP server failed while draining an oversized frame"
-  [ "$(printf '%s' "$framed" | jq -r .id)" = 2 ] || fail "oversized MCP frame consumed the following ping"
+  printf '%s' "$framed" | jq -se 'length==2 and .[0].id==null and .[0].error.code==-32000 and .[1].id==2' >/dev/null || fail "oversized MCP frame did not terminate its request before the following ping"
 
   new_env bounded-subprocess
   enable_consumer
@@ -1432,7 +1478,7 @@ test_quarantine_disable_and_disposition_recovery() {
 }
 
 test_transaction_replay_and_rollback() {
-  local seal record bundle prepared approval result bundle_path operation transaction_dir saved_core saved_module saved_interpreter saved_dependency_root
+  local seal record bundle prepared approval result bundle_path operation transaction_dir saved_core saved_module saved_interpreter saved_dependency_root ambient ambient_marker pause_marker pause_release apply_pid apply_status i
   new_env transaction-replay
   enable_consumer
   seal=$(make_ready) || fail "transaction replay fixture failed"
@@ -1441,8 +1487,39 @@ test_transaction_replay_and_rollback() {
   bundle=$(make_bundle "$record")
   prepared=$(prepare_save "$record" "$bundle") || fail "transaction inspect failed"
   approval=$(printf '%s' "$prepared" | jq -r .approval_sha256)
-  result=$(commit_save "$record" "$approval")
+  ambient="$EROOT/hostile-python-startup"
+  ambient_marker="$EROOT/ambient-release-gate-executed"
+  pause_marker="$EROOT/release-gate-paused"
+  pause_release="$EROOT/release-gate-release"
+  mkdir -p "$ambient"
+  (
+    export PYTHONPATH="$ambient"
+    export FM_AMBIENT_TRANSACTION_MARKER="$ambient_marker"
+    export FM_HANDOFF_TEST_PAUSEPOINT=before-release-gate-spawn
+    export FM_HANDOFF_TEST_PAUSE_MARKER="$pause_marker"
+    export FM_HANDOFF_TEST_PAUSE_RELEASE="$pause_release"
+    commit_save "$record" "$approval"
+  ) > "$EROOT/isolated-apply-output" 2> "$EROOT/isolated-apply-error" &
+  apply_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -f "$pause_marker" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -f "$pause_marker" ] || fail "Save apply did not reach its isolated release gate"
+  cat > "$ambient/sitecustomize.py" <<'PY'
+import os
+from pathlib import Path
+
+Path(os.environ["FM_AMBIENT_TRANSACTION_MARKER"]).write_text("executed\n", encoding="utf-8")
+PY
+  : > "$pause_release"
+  apply_status=0
+  wait "$apply_pid" || apply_status=$?
+  [ "$apply_status" -eq 0 ] || fail "isolated Save apply failed"
+  result=$(cat "$EROOT/isolated-apply-output")
   [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "transaction did not acknowledge after verified apply"
+  [ ! -e "$ambient_marker" ] || fail "Save apply release gate executed ambient Python startup code"
   result=$(commit_save "$record" "$approval")
   [ "$(printf '%s' "$result" | jq -r .status)" = acknowledged ] || fail "transaction replay was not idempotent"
   [ ! -e "$VAULT/.vault-meta/mutation.lock" ] || fail "transaction replay left its mutation lock"
@@ -1791,6 +1868,9 @@ test_claude_terminal_outcome_uses_durable_binding() {
   SEALING_ENABLED=false
   CONSUMER_ENABLED=false
   write_config
+  jq '.vault.path="/unavailable/replacement-vault" | .recipient.pane_id="replacement-pane" | .transaction.core_path="/unavailable/replacement-core"' "$FM_HOME/config/context-handoff.json" > "$FM_HOME/config/context-handoff.json.tmp" || fail "could not replace mutable post-PreCompact configuration"
+  chmod 600 "$FM_HOME/config/context-handoff.json.tmp"
+  mv "$FM_HOME/config/context-handoff.json.tmp" "$FM_HOME/config/context-handoff.json"
   calls_before=$(wc -l < "$HERDR_LOG")
   printf 'unavailable\n' > "$HERDR_MODE"
   jq -nc --arg session "$CLAUDE_SESSION" '{hook_event_name:"PostCompact",session_id:$session,trigger:"auto"}' | CAPABILITY=claude-process-generation-1 PROCESS_GENERATION=1 cli claude-hook >/dev/null || fail "authenticated PostCompact depended on current liveness or the new-seal switch"
