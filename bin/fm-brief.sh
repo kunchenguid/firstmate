@@ -381,6 +381,7 @@ REPO=${POS[1]}
 # mandate a single `git fetch origin --quiet` first. Scouts have no delivery
 # mode: prefer the remote path, and otherwise use their local base.
 BASE_REF=
+BASE_SHELL_REF=
 BASE_DESCRIPTION=
 BASE_NEEDS_FETCH=0
 BASE_NO_FETCH_REASON=
@@ -395,6 +396,7 @@ set_origin_base() {  # <repo-dir>
   local branch
   branch=$(resolve_origin_default_branch "$1") || return 1
   BASE_REF="origin/$branch"
+  BASE_SHELL_REF=$(shell_quote "$BASE_REF")
   BASE_DESCRIPTION="the freshly fetched default branch \`$BASE_REF\`"
   BASE_NEEDS_FETCH=1
 }
@@ -403,6 +405,7 @@ set_local_base() {  # <repo-dir> <why-no-fetch>
   local branch
   branch=$(resolve_local_default_branch "$1") || return 1
   BASE_REF=$branch
+  BASE_SHELL_REF=$(shell_quote "$BASE_REF")
   BASE_DESCRIPTION="your local default branch \`$branch\`"
   BASE_NO_FETCH_REASON=$2
 }
@@ -477,17 +480,17 @@ EOF
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** Refresh the remote exactly once, then measure:
    \`git fetch origin --quiet\`
-   \`git rev-list --count \$(git merge-base HEAD $BASE_REF)..$BASE_REF\`
+   \`git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF\`
    Only \`0\` passes against $BASE_DESCRIPTION.
    If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
-   If the count is not \`0\`, rebase onto \`$BASE_REF\` before reading or writing anything.
+   If the count is not \`0\`, rebase onto \`$BASE_SHELL_REF\` before reading or writing anything.
 EOF
   else
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_NO_FETCH_REASON; measure against the local branch:
-   \`git rev-list --count \$(git merge-base HEAD $BASE_REF)..$BASE_REF\`
+   \`git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF\`
    Only \`0\` passes against $BASE_DESCRIPTION.
-   If the count is not \`0\`, rebase onto \`$BASE_REF\` before reading or writing anything.
+   If the count is not \`0\`, rebase onto \`$BASE_SHELL_REF\` before reading or writing anything.
 EOF
   fi
   BASE_FRESHNESS_SECTION=${BASE_FRESHNESS_SECTION%$'\n'}

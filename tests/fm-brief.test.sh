@@ -269,7 +269,7 @@ test_base_freshness_check_is_resolved_and_mode_aware() {
     "ship brief did not number worktree isolation as the first safety step"
   assert_contains "$ship_setup" "2. **Check your base before starting work.**" \
     "ship brief did not number the base check as the second safety step"
-  assert_contains "$ship_setup" "git rev-list --count \$(git merge-base HEAD origin/release)..origin/release" \
+  assert_contains "$ship_setup" "git rev-list --count \$(git merge-base HEAD 'origin/release')..'origin/release'" \
     "PR brief did not check the resolved remote default branch"
   assert_contains "$ship_setup" "Only \`0\` passes against the freshly fetched default branch \`origin/release\`." \
     "PR brief did not state the zero-only pass criterion"
@@ -286,7 +286,7 @@ test_base_freshness_check_is_resolved_and_mode_aware() {
   assert_not_contains "$ship_dod" 'git rev-list --count' \
     "PR brief put the freshness check in Definition of done instead of Setup"
 
-  assert_contains "$local_setup" "git rev-list --count \$(git merge-base HEAD release)..release" \
+  assert_contains "$local_setup" "git rev-list --count \$(git merge-base HEAD 'release')..'release'" \
     "local-only brief did not check its local default branch"
   assert_contains "$local_setup" "Only \`0\` passes against your local default branch \`release\`." \
     "local-only brief did not explain its local zero-only criterion"
@@ -299,7 +299,7 @@ test_base_freshness_check_is_resolved_and_mode_aware() {
 
   assert_contains "$scout_setup" "1. **Check your base before starting work.**" \
     "scout brief did not make the base check its first numbered startup step"
-  assert_contains "$scout_setup" "git rev-list --count \$(git merge-base HEAD origin/release)..origin/release" \
+  assert_contains "$scout_setup" "git rev-list --count \$(git merge-base HEAD 'origin/release')..'origin/release'" \
     "scout brief did not check the resolved default branch"
   assert_contains "$scout_setup" "Only \`0\` passes against the freshly fetched default branch \`origin/release\`." \
     "scout brief did not state the zero-only pass criterion"
@@ -310,6 +310,39 @@ test_base_freshness_check_is_resolved_and_mode_aware() {
   assert_not_contains "$scout_dod" 'git rev-list --count' \
     "scout brief put the freshness check in Definition of done instead of Setup"
   pass "fm-brief.sh: startup base freshness is resolved, zero-only, and mode-aware"
+}
+
+# The default branch is data from a repository, but resolved briefs embed it in
+# commands that workers execute. A shell-significant ref must therefore render
+# as one shell word, not become a second command in the worker's shell.
+# shellcheck disable=SC2016 # The fixture branch must contain the literal $IFS expansion attempt.
+test_resolved_default_branch_is_shell_quoted_in_the_freshness_command() {
+  local home unsafe marker marker_name setup freshness_command unsafe_branch
+  home="$TMP_ROOT/shell-quoted-default-home"
+  unsafe="$BRIEF_PROJECTS/shell-quoted-default"
+  marker_name='branch-name-command-ran'
+  marker="$unsafe/$marker_name"
+  mkdir -p "$home/data"
+
+  unsafe_branch="release;touch\$IFS\$9$marker_name"
+  fm_git_init_commit "$unsafe"
+  git -C "$unsafe" branch -M "$unsafe_branch"
+  fm_git_add_origin "$unsafe" "$unsafe.origin.git"
+  git -C "$unsafe" fetch --quiet origin
+  git -C "$unsafe" remote set-head origin --auto >/dev/null
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" shell-quoted shell-quoted-default --mode direct-PR >/dev/null 2>&1 \
+    || fail "a shell-significant default branch should scaffold successfully"
+  setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/shell-quoted/brief.md")
+  freshness_command=$(printf '%s\n' "$setup" | sed -n 's/^   `\(git rev-list --count .*\)`$/\1/p')
+
+  assert_contains "$freshness_command" "git rev-list --count \$(git merge-base HEAD 'origin/$unsafe_branch')..'origin/$unsafe_branch'" \
+    "the resolved default branch was not shell-quoted in the freshness command"
+  [ -n "$freshness_command" ] || fail "the resolved brief did not render a freshness command"
+  (cd "$unsafe" && bash -c "$freshness_command") >/dev/null 2>&1 \
+    || fail "the shell-quoted freshness command did not execute against its default branch"
+  assert_absent "$marker" "the rendered default branch executed a shell command"
+  pass "fm-brief.sh: resolved default branches are shell-quoted in freshness commands"
 }
 
 # The repo positional is a caller-supplied label, not a path contract: firstmate
@@ -373,7 +406,7 @@ test_missing_origin_head_never_relabels_the_current_branch() {
 
   assert_not_contains "$setup" 'fm/old-task' \
     "the checked-out feature branch was rendered as the local default branch"
-  assert_contains "$setup" 'git rev-list --count $(git merge-base HEAD main)..main' \
+  assert_contains "$setup" "git rev-list --count \$(git merge-base HEAD 'main')..'main'" \
     "the stranded clone did not fall back to its local default-branch ref"
   pass "fm-brief.sh: a missing origin/HEAD never relabels the current feature branch"
 }
@@ -466,7 +499,7 @@ test_local_only_rule_names_the_resolved_default_branch() {
   setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/rule-local/brief.md")
   rules=$(sed -n '/^# Rules$/,/^# Firstmate instruction inbox$/p' "$home/data/rule-local/brief.md")
 
-  assert_contains "$setup" 'rebase onto `release`' \
+  assert_contains "$setup" "rebase onto \`'release'\`" \
     "the local-only fixture no longer resolves its non-main default branch"
   assert_contains "$rules" 'firstmate handles the merge into local `release`' \
     "Rule 1 named a branch other than the resolved local default"
@@ -493,7 +526,7 @@ test_scout_local_fallback_uses_kind_neutral_wording() {
     || fail "scout brief should scaffold against a remoteless clone"
   setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/neutral-scout/brief.md")
 
-  assert_contains "$setup" 'git rev-list --count $(git merge-base HEAD main)..main' \
+  assert_contains "$setup" "git rev-list --count \$(git merge-base HEAD 'main')..'main'" \
     "the scout local fallback did not measure against the local default branch"
   assert_not_contains "$setup" 'This task lands locally' \
     "the scout brief claimed its task lands locally"
@@ -574,7 +607,7 @@ test_scout_fallback_fetches_before_verifying_and_degrades_like_the_resolved_path
   resolved_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/pruned-resolved/brief.md")
   unresolved_setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/pruned-unresolved/brief.md")
 
-  assert_contains "$resolved_setup" 'git rev-list --count $(git merge-base HEAD develop)..develop' \
+  assert_contains "$resolved_setup" "git rev-list --count \$(git merge-base HEAD 'develop')..'develop'" \
     "the resolved scout path stopped degrading to the local default branch"
 
   fetch_line=$(printf '%s\n' "$unresolved_setup" | grep -n -F -m1 'git fetch origin --quiet' | cut -d: -f1)
@@ -1143,6 +1176,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_base_freshness_check_is_resolved_and_mode_aware
+test_resolved_default_branch_is_shell_quoted_in_the_freshness_command
 test_unresolvable_repo_label_still_mandates_the_base_check
 test_missing_origin_head_never_relabels_the_current_branch
 test_non_root_directory_never_resolves_to_its_enclosing_repo
