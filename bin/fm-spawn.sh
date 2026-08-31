@@ -1618,7 +1618,7 @@ resolve_project_dir_arg() {
 }
 
 validate_link_local_paths() {  # validates against the primary project checkout
-  local path source path_bytes
+  local path source path_bytes i j
   LINK_LOCAL_SOURCES=()
   for path in "${LINK_LOCAL_PATHS[@]}"; do
     [ -n "$path" ] || {
@@ -1648,6 +1648,23 @@ validate_link_local_paths() {  # validates against the primary project checkout
       return 1
     fi
     LINK_LOCAL_SOURCES+=("$source")
+  done
+  # Caught here, before any symlink is created: a fresh worktree gets no
+  # cleanup on spawn failure, so letting link_local_paths_into_worktree
+  # discover a repeat or an ancestor/descendant pair mid-loop would leave a
+  # partial symlink behind that a retried spawn then refuses to overwrite.
+  for ((i = 0; i < ${#LINK_LOCAL_PATHS[@]}; i++)); do
+    for ((j = i + 1; j < ${#LINK_LOCAL_PATHS[@]}; j++)); do
+      if [ "${LINK_LOCAL_PATHS[$i]}" = "${LINK_LOCAL_PATHS[$j]}" ]; then
+        echo "error: --link-local path repeated: ${LINK_LOCAL_PATHS[$i]}" >&2
+        return 1
+      fi
+      if path_is_ancestor_of "${LINK_LOCAL_PATHS[$i]}" "${LINK_LOCAL_PATHS[$j]}" ||
+         path_is_ancestor_of "${LINK_LOCAL_PATHS[$j]}" "${LINK_LOCAL_PATHS[$i]}"; then
+        echo "error: --link-local paths conflict, one is nested in the other: ${LINK_LOCAL_PATHS[$i]}, ${LINK_LOCAL_PATHS[$j]}" >&2
+        return 1
+      fi
+    done
   done
 }
 

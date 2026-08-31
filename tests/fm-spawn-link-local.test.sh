@@ -143,6 +143,33 @@ ROWS
   pass "fm-spawn: link-local rejects tracked, missing, absolute, and parent-escaping paths"
 }
 
+test_link_local_refuses_conflicting_paths_before_linking() {
+  local rec id out status label args expect n=0
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    id="link-local-conflict-$n"
+    rec=$(make_case "$id" "$id")
+    read_case "$rec"
+    mkdir -p "$PROJECT_DIR/config"
+    printf 'local\n' > "$PROJECT_DIR/config/a.yaml"
+    printf 'config/\n' > "$PROJECT_DIR/.gitignore"
+    # shellcheck disable=SC2086
+    out=$(run_spawn "$id" $args)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected link-local spawn to refuse"
+    assert_contains "$out" "$expect" "$label: refusal did not name the reason"
+    assert_absent "$HOME_DIR/state/$id.meta" "$label: refused spawn published metadata"
+    [ ! -e "$WORKTREE_DIR/config" ] && [ ! -L "$WORKTREE_DIR/config" ] \
+      || fail "$label: refused spawn still left a link-local symlink in the task worktree"
+  done <<'ROWS'
+repeated path|--link-local config/a.yaml --link-local config/a.yaml|repeated
+ancestor before descendant|--link-local config --link-local config/a.yaml|conflict, one is nested in the other
+descendant before ancestor|--link-local config/a.yaml --link-local config|conflict, one is nested in the other
+ROWS
+  pass "fm-spawn: link-local refuses a repeated or nested path before creating any symlink"
+}
+
 test_link_local_does_not_mask_real_uncommitted_work() {
   local rec id out status
   id=link-local-dirty-b2
@@ -174,6 +201,7 @@ test_link_local_does_not_mask_real_uncommitted_work() {
 test_help_documents_the_secret_exposure_warning
 test_linked_ignored_file_is_available_recorded_and_removed_by_teardown
 test_link_local_refuses_unsafe_or_unavailable_paths
+test_link_local_refuses_conflicting_paths_before_linking
 test_link_local_does_not_mask_real_uncommitted_work
 
 echo "# all fm-spawn-link-local tests passed"
