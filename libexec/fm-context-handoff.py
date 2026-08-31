@@ -924,6 +924,17 @@ def candidate_identity(source_harness: str, session_hash: str, item_without_id: 
     return "candidate-" + sha256_bytes(canonical_json(identity))[:48]
 
 
+def stored_candidate_identity(value: Mapping[str, Any]) -> str | None:
+    item = value.get("item")
+    if not isinstance(item, dict) or item.get("item_id") != value.get("candidate_id"):
+        return None
+    return candidate_identity(
+        str(value.get("source_harness")),
+        str(value.get("source_session_hash")),
+        {key: entry for key, entry in item.items() if key != "item_id"},
+    )
+
+
 def envelope_identity(envelope: Mapping[str, Any]) -> str:
     identity = {key: envelope[key] for key in ("schema", "source_harness", "source_session_hash", "trigger", "items")}
     return "handoff-" + sha256_bytes(canonical_json(identity))[:48]
@@ -1037,12 +1048,8 @@ def read_candidate_binding(path: Path) -> dict[str, Any]:
 
 def validate_candidate(value: Mapping[str, Any], path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     item = validate_item(value.get("item"), config)
-    bound = candidate_identity(
-        str(value.get("source_harness")),
-        str(value.get("source_session_hash")),
-        {key: entry for key, entry in item.items() if key != "item_id"},
-    )
-    if item["item_id"] != value.get("candidate_id") or path.stem != value.get("candidate_id") or bound != value.get("candidate_id"):
+    bound = stored_candidate_identity({**value, "item": item})
+    if bound is None or path.stem != value.get("candidate_id") or bound != value.get("candidate_id"):
         raise HandoffError("CANDIDATE_ID", "candidate stable ID is invalid")
     return {**value, "item": item}
 
@@ -1534,7 +1541,7 @@ def matching_nonempty_state(layout: StateLayout, source_harness: str, session_ha
         except HandoffError:
             candidate_owners[path.stem] = None
             continue
-        if candidate_identity(value["source_harness"], value["source_session_hash"], value["item"]) != value["candidate_id"]:
+        if stored_candidate_identity(value) != value["candidate_id"]:
             candidate_owners[path.stem] = None
             continue
         candidate_owners[path.stem] = value["source_harness"] == source_harness and value["source_session_hash"] == session_hash
@@ -1606,6 +1613,7 @@ def matching_nonempty_state(layout: StateLayout, source_harness: str, session_ha
         return True
 
     return any(owner is not False for candidate_id, owner in candidate_owners.items() if candidate_id not in claimed)
+
 
 def block_failed_claude_precompact(
     home: Path,
@@ -2262,10 +2270,30 @@ def command_deliver(args: argparse.Namespace) -> dict[str, Any]:
     return deliver_pending(resolve_home(args.fm_home))
 
 
+def synthetic_boot_identity() -> str:
+    return os.environ.get("FM_HANDOFF_TEST_PROCESS_BOOT_ID", "synthetic-boot-1")
+
+
+def current_linux_boot_id() -> str | None:
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return boot_id if LINUX_BOOT_ID.fullmatch(boot_id) else None
+
+
+def current_boot_identity(platform: str) -> str | None:
+    if platform == "test" and os.environ.get("FM_HANDOFF_TESTING") == "1":
+        return synthetic_boot_identity()
+    if platform == "linux":
+        return current_linux_boot_id()
+    return None
+
+
 def linux_process_claim(process_group: int) -> dict[str, Any]:
+    boot_id = current_linux_boot_id()
     try:
         info = (Path("/proc") / str(process_group) / "stat").read_text(encoding="utf-8")
-        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
         close = info.rfind(")")
         fields = info[close + 1 :].split() if close >= 0 else []
         start_time = fields[19]
@@ -2274,7 +2302,7 @@ def linux_process_claim(process_group: int) -> dict[str, Any]:
         owner = (Path("/proc") / str(process_group)).stat().st_uid
     except (OSError, IndexError, ValueError) as exc:
         raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is unavailable") from exc
-    if recorded_group != process_group or owner != os.getuid() or not start_time.isdigit() or not LINUX_BOOT_ID.fullmatch(boot_id):
+    if recorded_group != process_group or owner != os.getuid() or not start_time.isdigit() or boot_id is None:
         raise HandoffError("PROCESS_CAPABILITY", "the current Claude process capability is inconsistent")
     identity = f"linux\0{boot_id}\0{process_group}\0{recorded_session}\0{start_time}\0{owner}"
     return {
@@ -2345,7 +2373,7 @@ def current_process_claim() -> dict[str, Any]:
     test_value = os.environ.get("FM_HANDOFF_TEST_PROCESS_CAPABILITY")
     if os.environ.get("FM_HANDOFF_TESTING") == "1" and test_value is not None:
         generation_text = os.environ.get("FM_HANDOFF_TEST_PROCESS_GENERATION", "1")
-        boot_id = os.environ.get("FM_HANDOFF_TEST_PROCESS_BOOT_ID", "synthetic-boot-1")
+        boot_id = synthetic_boot_identity()
         if not test_value or len(test_value.encode("utf-8")) > 256 or not boot_id or len(boot_id.encode("utf-8")) > 256 or not generation_text.isdigit() or int(generation_text) < 1:
             raise HandoffError("PROCESS_CAPABILITY", "the synthetic hook process capability is invalid")
         return {
@@ -2370,11 +2398,24 @@ def current_process_identity() -> tuple[str, int]:
     return str(claim["process_capability_sha256"]), int(claim["process_generation"])
 
 
+def process_binding_boot_is_current(value: Mapping[str, Any]) -> bool | None:
+    platform = value.get("process_platform")
+    if not isinstance(platform, str):
+        return None
+    current_boot = current_boot_identity(platform)
+    if current_boot is None:
+        return None
+    recorded = value.get("process_boot_id")
+    return isinstance(recorded, str) and recorded == current_boot
+
+
 def process_binding_owner_is_live(value: Mapping[str, Any]) -> bool:
     platform = value.get("process_platform")
     process_group = value.get("process_group")
     if not isinstance(platform, str) or not isinstance(process_group, int) or process_group < 1:
         return True
+    if process_binding_boot_is_current(value) is False:
+        return False
     if platform == "test" and os.environ.get("FM_HANDOFF_TESTING") == "1":
         live = os.environ.get("FM_HANDOFF_TEST_LIVE_PROCESS_CAPABILITY")
         boot_id = value.get("process_boot_id")
