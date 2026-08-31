@@ -154,9 +154,13 @@ case " $* " in
     ;;
 esac
 SH
-  cat > "$fakebin/gh-axi" <<'SH'
+cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+if [ "${1:-}" = api ]; then
+  printf '%s\n' "${FM_TEST_PR_BASE:-main}"
+  exit "${FM_TEST_GH_AXI_RC:-0}"
+fi
 case "${1:-} ${2:-}" in
   "pr view")
     [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
@@ -180,6 +184,23 @@ SH
   : > "$dir/glab.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
+}
+
+# Build the project clone that bin/fm-pr-base-check.sh inspects at merge time.
+# Each PR head equals the base tip, so the guard finds no foreign content.
+write_project_clone() {
+  local dir=$1 seed remote number head
+  shift
+  seed="$dir/project-seed"
+  remote="$dir/project-origin.git"
+  fm_git_init_commit "$seed"
+  git -C "$seed" branch -M main
+  git clone -q --bare "$seed" "$remote"
+  head=$(git -C "$seed" rev-parse HEAD)
+  for number in "$@"; do
+    git -C "$remote" update-ref "refs/pull/$number/head" "$head"
+  done
+  git clone -q "file://$remote" "$dir/project"
 }
 
 write_task_meta() {
@@ -486,6 +507,7 @@ test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
+  write_project_clone "$dir" 37
   expected=0123456789abcdef0123456789abcdef01234567
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
@@ -552,6 +574,7 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case lifecycle-compatible-id)
   write_task_meta "$dir" Task_A.1
+  write_project_clone "$dir" 3
   run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
     > "$dir/stdout" 2> "$dir/stderr" \
     || fail "safe lifecycle-compatible task ID could not use the PR merge flow"
@@ -579,6 +602,12 @@ SH
       "project=$dir/project" \
       'kind=ship' \
       'mode=local-only'
+    write_project_clone "$dir" 4
+    mkdir -p "$dir/home/state/.pr-check-quarantine"
+    chmod 0700 "$dir/home/state/.pr-check-quarantine"
+    printf 'reserved migration evidence\n' \
+      > "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence"
+    chmod 0600 "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence"
     cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -614,10 +643,15 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+# The bound only stops a wedged watcher from hanging the suite.
+# A healthy watcher exits before this generous limit.
+FM_TEST_WATCH_BOUND=${FM_TEST_WATCH_BOUND:-120}
+
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
   shift 2
-  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+  perl -e 'my $bound = shift; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm $bound; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+    "$FM_TEST_WATCH_BOUND" \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
@@ -1591,6 +1625,7 @@ test_self_merge_and_poll_publish_one_outcome() {
   dir=$(make_case merge-outcome-committed)
   state="$dir/home/state"
   replies="$state/parent-replies.status"
+  write_project_clone "$dir" 1
   seed_secondmate_home "$dir"
   write_task_meta "$dir" task-a
   run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/seed.err" \
@@ -1616,6 +1651,7 @@ test_self_merge_and_poll_publish_one_outcome() {
   # than treating the interrupted attempt as complete and going silent.
   dir=$(make_case merge-outcome-uncommitted)
   state="$dir/home/state"
+  write_project_clone "$dir" 1
   write_task_meta "$dir" task-a
   run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/seed.err" \
     || fail "merge-outcome-uncommitted: could not arm merge poll"
