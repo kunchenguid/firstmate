@@ -7,8 +7,10 @@ It is not transcript capture, a compaction-summary archive, or an alternate memo
 ## Safety boundary
 
 Only `decision`, `preference`, `gotcha`, `project-fact`, `next-step`, and `pointer` items can enter the register.
-Each item carries one bounded plain-text statement, an approved no-symlink source path, the source file's exact SHA-256, confidence, sphere, an exact sensitivity class, destination provider class, explicit supersession IDs, and the SHA-256 of an exact reviewed registration eligibility contract. Only `ordinary-project-context` is eligible; `financial-data`, `customer-record`, and `personal-address` are closed, explicit refusal classes, with deterministic high-confidence content checks as a second boundary.
-The register rejects raw chat, transcripts, generated compact summaries, model reasoning, tool streams, reports copied wholesale, terminal output, credentials, financial data, customer or order records, addresses, email or message bodies, sensitive material, and local-only material. Save preparation independently requires the same exact sensitivity classification for every write path and refuses every class except `ordinary-project-context`.
+Each item carries one bounded plain-text statement, an approved no-symlink source path, the source file's exact SHA-256, confidence, sphere, an exact sensitivity class, destination provider class, explicit supersession IDs, and the SHA-256 of an exact reviewed registration eligibility contract.
+Only `ordinary-project-context` is eligible; `financial-data`, `customer-record`, and `personal-address` are closed, explicit refusal classes, with deterministic high-confidence content checks as a second boundary.
+The register rejects raw chat, transcripts, generated compact summaries, model reasoning, tool streams, reports copied wholesale, terminal output, credentials, financial data, customer or order records, addresses, email or message bodies, sensitive material, and local-only material.
+Save preparation independently requires the same exact sensitivity classification for every write path and refuses every class except `ordinary-project-context`.
 The producer proposes a handoff candidate only after the fact has been written to its ordinary durable owner.
 Claude remains the sole final relevance, duplicate, and Vault-routing authority.
 
@@ -77,11 +79,12 @@ The installed transaction core remains the primary confinement and recovery boun
 
 ## Default-off configuration
 
-Copy [`examples/context-handoff.json`](examples/context-handoff.json) to local `config/context-handoff.json` only after replacing every placeholder with reviewed local metadata.
+The tracked [`examples/context-handoff.json`](examples/context-handoff.json) is an inert configuration shape while every switch remains false.
+Before enabling any switch, replace every placeholder with reviewed local metadata and replace its illustrative transaction dependency entries with the entrypoint plus one hash entry for every current Python file below the installed `claude_obsidian` package.
 The four independent booleans are `registration_enabled`, `sealing_enabled`, `delivery_enabled`, and `consumer_enabled`.
 The example keeps all four false.
 The configuration stores no credential and must identify exact approved source roots, source/statement/classification eligibility contracts, provider classes, Vault path/device/inode, Herdr endpoint and session hash, Python executable, transaction dependency root and complete reviewed file manifest, create prefixes, coupled replacement paths, and required coupled paths.
-Registration is a closed allowlist: every contract binds the canonical source path and hash, statement hash, kind, confidence, sphere, provider class, and supersession set before the CLI can accept the candidate.
+Registration is a closed allowlist: every contract binds the canonical source path and hash, statement hash, kind, confidence, sphere, sensitivity class, provider class, and supersession set before the CLI can accept the candidate.
 
 Do not enable the real Vault as part of installation.
 A later local activation must complete this checklist in order:

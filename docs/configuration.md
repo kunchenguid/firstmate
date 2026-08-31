@@ -32,7 +32,7 @@ Its four independent activation switches are `registration_enabled`, `sealing_en
 The configuration is local, gitignored, secret-free, and not inherited by secondmate homes because its canonical Vault object, exact registration eligibility allowlist, Herdr endpoint, Claude session generation, and executable hashes are home-specific authority.
 The producer keeps candidates, sealed envelopes, receipts, delivery state, quarantine records, reviewed transaction bindings, staged bundles, and acknowledgements under private `state/context-handoff/`, outside the selected Vault.
 [`context-handoff.md`](context-handoff.md) owns supported behavior, activation, disable, rollback, and verification, while [`libexec/fm-context-handoff.py`](../libexec/fm-context-handoff.py) owns exact fields and mutation mechanics behind the supported Bash entrypoint.
-The tracked [`examples/context-handoff.json`](examples/context-handoff.json) keeps every switch off and must have every placeholder replaced before local use.
+The tracked [`examples/context-handoff.json`](examples/context-handoff.json) keeps every switch off; follow the activation contract in [`context-handoff.md`](context-handoff.md#default-off-configuration) before enabling it.
 
 ## Pi Calm preference (config/calm)
 
