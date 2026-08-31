@@ -23,7 +23,7 @@ TMP_ROOT=$(fm_test_tmproot fm-merge-local-tests)
 make_case() {
   local name=$1 case_dir
   case_dir="$TMP_ROOT/$name"
-  mkdir -p "$case_dir/state" "$case_dir/home/state"
+  mkdir -p "$case_dir/home/state"
 
   git init -q --bare "$case_dir/origin.git"
   git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
@@ -37,7 +37,7 @@ make_case() {
   git clone -q "$case_dir/origin.git" "$case_dir/project"
   git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
 
-  touch "$case_dir/state/.last-watcher-beat"
+  touch "$case_dir/home/state/.last-watcher-beat"
   fm_write_meta "$case_dir/home/state/task-x1.meta" \
     "project=$case_dir/project" \
     "mode=local-only" \

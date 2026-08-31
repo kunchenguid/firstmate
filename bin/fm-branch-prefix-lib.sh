@@ -13,7 +13,8 @@
 #
 # An absent file is the unconfigured default. A present file must be a regular
 # non-symlink file holding one line of letters, digits, and dashes with no
-# slash (a single trailing newline is tolerated); any other shape is a
+# slash and no leading dash, since git refuses branch names that begin with
+# a dash (a single trailing newline is tolerated); any other shape is a
 # configuration error that fails loudly rather than silently falling back,
 # because a brief naming one branch while the landing helper resolves another
 # is worse than a stopped helper.
@@ -57,6 +58,10 @@ fm_branch_prefix_resolve() {  # <config-dir>
     fm_branch_prefix_fail "$path is not a regular file"
     return 1
   fi
+  if [ ! -r "$path" ]; then
+    fm_branch_prefix_fail "$path is not readable; expected one line holding the prefix"
+    return 1
+  fi
   # Read the whole file (newline-terminated or not); read succeeds only when
   # a NUL byte stops it, so that is refused here. Strip one trailing newline
   # so both "ardy" and "ardy\n" are accepted; anything else - extra lines,
@@ -74,6 +79,12 @@ fm_branch_prefix_resolve() {  # <config-dir>
   case "$value" in
     *[!A-Za-z0-9-]*)
       fm_branch_prefix_fail "$path must hold one line of letters, digits, and dashes with no slash (got '$value')"
+      return 1
+      ;;
+  esac
+  case "$value" in
+    -*)
+      fm_branch_prefix_fail "$path must not start with a dash (got '$value'); git refuses such branch names"
       return 1
       ;;
   esac
