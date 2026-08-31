@@ -11,7 +11,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-node-modules)
-SYSTEM_NODE=$(command -v node)
+SYSTEM_NODE=$(NODE_OPTIONS= node -p 'process.execPath')
 
 make_fakebin() {
   local dir=$1 fakebin
@@ -268,8 +268,10 @@ test_spawn_resolves_script_managed_node_runtime() {
   read_case "$rec"
   toolbin=$(make_toolbin_without_node "$TMP_ROOT/script-node-tools")
   account_home="$TMP_ROOT/script-node-account"
-  mkdir -p "$account_home/.asdf/installs/nodejs/test/bin"
-  /bin/ln -s "$SYSTEM_NODE" "$account_home/.asdf/installs/nodejs/test/bin/node"
+  mkdir -p "$account_home/.asdf/installs/nodejs/12/bin" \
+    "$account_home/.asdf/installs/nodejs/22/bin"
+  /bin/ln -s /bin/false "$account_home/.asdf/installs/nodejs/12/bin/node"
+  /bin/ln -s "$SYSTEM_NODE" "$account_home/.asdf/installs/nodejs/22/bin/node"
 
   out=$(FM_REJECT_PATH_NODE_PUBLISHER=1 \
     FM_TEST_ACCOUNT_HOME="$account_home" \
@@ -440,6 +442,31 @@ test_spawn_rejects_worktree_workspace_alias() {
   pass "fm-spawn refuses workspace aliases outside the canonical worktree"
 }
 
+test_spawn_rejects_stale_primary_workspace_link() {
+  local rec id out status other_worktree candidate
+  id=node-modules-stale-primary-z2g
+  rec=$(make_case stale-primary-workspace "$id")
+  read_case "$rec"
+  other_worktree="$TMP_ROOT/stale-primary-source"
+  mkdir -p "$other_worktree/packages/lib"
+  rm "$PROJECT_DIR/node_modules/@beeline/lib"
+  ln -s "$other_worktree/packages/lib" "$PROJECT_DIR/node_modules/@beeline/lib"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a stale primary workspace link to another worktree"
+  assert_not_contains "$out" "spawned $id" "stale primary workspace link launched a worker"
+  [ "$(readlink "$PROJECT_DIR/node_modules/@beeline/lib")" = "$other_worktree/packages/lib" ] \
+    || fail "spawn mutated the stale primary workspace link"
+  [ ! -e "$WORKTREE_DIR/node_modules" ] && [ ! -L "$WORKTREE_DIR/node_modules" ] \
+    || fail "stale primary workspace link published node_modules"
+  for candidate in "$WORKTREE_DIR"/.fm-node-modules.*; do
+    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] \
+      || fail "stale primary workspace link leaked dependency staging"
+  done
+  pass "fm-spawn rejects stale primary workspace links independently of their destinations"
+}
+
 test_spawn_ignores_published_beeline_consumers() {
   local rec id out status
   id=node-modules-consumer-z3
@@ -586,6 +613,7 @@ test_spawn_rejects_target_only_primary_workspace_link
 test_spawn_rejects_dangling_existing_workspace_link
 test_spawn_rejects_workspace_link_from_another_worktree
 test_spawn_rejects_worktree_workspace_alias
+test_spawn_rejects_stale_primary_workspace_link
 test_spawn_ignores_published_beeline_consumers
 test_spawn_shares_published_beeline_dependencies_with_workspaces
 test_spawn_preserves_tree_created_during_publication

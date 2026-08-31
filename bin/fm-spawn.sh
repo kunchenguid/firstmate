@@ -1339,6 +1339,12 @@ native_node_candidate() {
   esac
 }
 
+native_node_supports_publication() {
+  NODE_OPTIONS= "$1" -e \
+    'const fs = require("fs"); if (typeof fs.symlinkSync !== "function") process.exit(1);' \
+    </dev/null >/dev/null 2>&1
+}
+
 native_node_executable() {
   local candidate directory old_ifs account_home
   old_ifs=$IFS
@@ -1347,7 +1353,7 @@ native_node_executable() {
     [ -n "$directory" ] || directory=.
     candidate="$directory/node"
     case "$candidate" in /*) ;; *) candidate="$PWD/$candidate" ;; esac
-    if native_node_candidate "$candidate"; then
+    if native_node_candidate "$candidate" && native_node_supports_publication "$candidate"; then
       IFS=$old_ifs
       printf '%s\n' "$candidate"
       return 0
@@ -1362,7 +1368,7 @@ native_node_executable() {
     "$account_home"/.asdf/installs/*/*/bin/node \
     "$account_home"/.local/share/mise/installs/*/*/bin/node \
     "$account_home"/.mise/installs/*/*/bin/node; do
-    if native_node_candidate "$candidate"; then
+    if native_node_candidate "$candidate" && native_node_supports_publication "$candidate"; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -1370,26 +1376,40 @@ native_node_executable() {
   return 1
 }
 
+beeline_primary_workspace_path() {
+  local name=$1 candidate
+  case "$name" in ''|.|..|*/*) return 1 ;; esac
+  for candidate in "$PROJ_ABS/packages/$name" "$PROJ_ABS/apps/$name"; do
+    [ -d "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
 beeline_workspace_links_match_worktree() {
-  local source=$1 source_real=$2 target=${3:-} entry entry_real name expected expected_real candidate candidate_real found wt_real
+  local source=$1 target=${2:-} entry entry_real name expected expected_real candidate candidate_real found wt_real
   [ -z "$target" ] || [ -d "$target" ] || return 1
   wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || return 1
   found=0
   for entry in "$source/@beeline"/* "$source/@beeline"/.[!.]* "$source/@beeline"/..?*; do
-    [ -L "$entry" ] || continue
-    entry_real=$(real_path_or_raw "$entry")
-    if [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] && [[ "$entry_real" != "$source_real"/* ]]; then
-      found=1
-      [ -n "$target" ] || continue
-      name=${entry##*/}
-      candidate="$target/@beeline/$name"
-      [ -e "$candidate" ] || [ -L "$candidate" ] || return 1
-      expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
-      expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
-      [[ "$expected_real" == "$wt_real"/* ]] || return 1
-      candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
-      [ "$candidate_real" = "$expected_real" ] || return 1
-    fi
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name=${entry##*/}
+    expected=$(beeline_primary_workspace_path "$name") || continue
+    found=1
+    [ -L "$entry" ] || return 1
+    expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
+    [[ "$expected_real" == "$PROJ_ABS_REAL"/* ]] || return 1
+    entry_real=$(cd "$entry" 2>/dev/null && pwd -P) || return 1
+    [ "$entry_real" = "$expected_real" ] || return 1
+    [ -n "$target" ] || continue
+    candidate="$target/@beeline/$name"
+    [ -e "$candidate" ] || [ -L "$candidate" ] || return 1
+    expected="$WT${expected#"$PROJ_ABS"}"
+    expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
+    [[ "$expected_real" == "$wt_real"/* ]] || return 1
+    candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
+    [ "$candidate_real" = "$expected_real" ] || return 1
   done
   if [ -n "$target" ]; then
     for candidate in "$target/@beeline"/* "$target/@beeline"/.[!.]* "$target/@beeline"/..?*; do
@@ -1399,10 +1419,12 @@ beeline_workspace_links_match_worktree() {
       [ -e "$entry" ] || [ -L "$entry" ] || return 1
       entry_real=$(cd "$entry" 2>/dev/null && pwd -P) || return 1
       candidate_real=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
-      if [ -L "$entry" ] \
-         && [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] \
-         && [[ "$entry_real" != "$source_real"/* ]]; then
-        expected="$WT${entry_real#"$PROJ_ABS_REAL"}"
+      if expected=$(beeline_primary_workspace_path "$name"); then
+        [ -L "$entry" ] || return 1
+        expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
+        [[ "$expected_real" == "$PROJ_ABS_REAL"/* ]] || return 1
+        [ "$entry_real" = "$expected_real" ] || return 1
+        expected="$WT${expected#"$PROJ_ABS"}"
         expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || return 1
         [[ "$expected_real" == "$wt_real"/* ]] || return 1
         [ "$candidate_real" = "$expected_real" ] || return 1
@@ -1411,20 +1433,25 @@ beeline_workspace_links_match_worktree() {
       fi
     done
   fi
-  [ "$found" = 1 ]
+  [ "$found" = 1 ] || return 2
 }
 
 share_beeline_node_modules() {
-  local source source_real target staging_root staging entry name entry_real link_target publication_link publisher_node
-  local publish_status setup_signal_status mkdir_status cleanup_status
+  local source target staging_root staging entry name entry_real link_target publication_link publisher_node
+  local publish_status setup_signal_status mkdir_status cleanup_status workspace_status expected expected_real
   source="$PROJ_ABS/node_modules"
   target="$WT/node_modules"
 
   [ -d "$source/@beeline" ] || return 0
-  source_real=$(real_path_or_raw "$source")
-  beeline_workspace_links_match_worktree "$source" "$source_real" || return 0
+  workspace_status=0
+  beeline_workspace_links_match_worktree "$source" || workspace_status=$?
+  case "$workspace_status" in
+    0) ;;
+    2) return 0 ;;
+    *) return 1 ;;
+  esac
   if [ -e "$target" ] || [ -L "$target" ]; then
-    beeline_workspace_links_match_worktree "$source" "$source_real" "$target"
+    beeline_workspace_links_match_worktree "$source" "$target"
     return $?
   fi
   publisher_node=$(native_node_executable) || return 1
@@ -1475,12 +1502,14 @@ share_beeline_node_modules() {
       [ -e "$entry" ] || [ -L "$entry" ] || continue
       name=${entry##*/}
       entry_real=$(real_path_or_raw "$entry")
-      if [ -L "$entry" ] \
-         && [[ "$entry_real" == "$PROJ_ABS_REAL"/* ]] \
-         && [[ "$entry_real" != "$source_real"/* ]]; then
+      if expected=$(beeline_primary_workspace_path "$name"); then
+        [ -L "$entry" ] || exit 1
+        expected_real=$(cd "$expected" 2>/dev/null && pwd -P) || exit 1
+        [[ "$expected_real" == "$PROJ_ABS_REAL"/* ]] || exit 1
+        [ "$entry_real" = "$expected_real" ] || exit 1
         link_target=$(/usr/bin/readlink "$entry")
         case "$link_target" in
-          /*) /bin/ln -s "$WT${entry_real#"$PROJ_ABS_REAL"}" "$staging/@beeline/$name" || exit 1 ;;
+          /*) /bin/ln -s "$WT${expected#"$PROJ_ABS"}" "$staging/@beeline/$name" || exit 1 ;;
           *) /bin/ln -s "$link_target" "$staging/@beeline/$name" || exit 1 ;;
         esac
       else
@@ -1515,7 +1544,7 @@ share_beeline_node_modules() {
     return 1
   fi
 
-  if ! beeline_workspace_links_match_worktree "$source" "$source_real" "$staging"; then
+  if ! beeline_workspace_links_match_worktree "$source" "$staging"; then
     cleanup_status=0
     cleanup_beeline_node_modules_staging || cleanup_status=$?
     trap - INT TERM HUP
@@ -1543,8 +1572,8 @@ share_beeline_node_modules() {
   fi
   NODE_MODULES_ABORT_CLEANUP=0
   publish_status=0
-  NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" <<'JS' || publish_status=$?
-const fs = require('node:fs');
+NODE_OPTIONS= "$publisher_node" - "$publication_link" "$target" <<'JS' || publish_status=$?
+const fs = require('fs');
 
 process.on('SIGINT', () => {});
 process.on('SIGTERM', () => {});
@@ -1560,7 +1589,7 @@ JS
     0)
       if [ -L "$target" ] \
          && [ "$(/usr/bin/readlink "$target" 2>/dev/null || true)" = "$publication_link" ] \
-         && beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
+         && beeline_workspace_links_match_worktree "$source" "$target"; then
         NODE_MODULES_ABORT_STAGING=
       else
         publish_status=5
@@ -1569,7 +1598,7 @@ JS
     *)
       if [ -L "$target" ] \
          && [ "$(/usr/bin/readlink "$target" 2>/dev/null || true)" = "$publication_link" ]; then
-        if beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
+        if beeline_workspace_links_match_worktree "$source" "$target"; then
           NODE_MODULES_ABORT_STAGING=
         else
           publish_status=5
@@ -1580,7 +1609,7 @@ JS
         cleanup_beeline_node_modules_staging || cleanup_status=$?
         if [ "$cleanup_status" -eq 0 ] \
            && { [ -e "$target" ] || [ -L "$target" ]; } \
-           && beeline_workspace_links_match_worktree "$source" "$source_real" "$target"; then
+           && beeline_workspace_links_match_worktree "$source" "$target"; then
           publish_status=3
         else
           publish_status=5
