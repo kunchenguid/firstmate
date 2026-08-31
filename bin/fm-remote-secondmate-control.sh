@@ -61,6 +61,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-trace-context-lib.sh
+. "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
@@ -155,12 +157,24 @@ cmd_route() {
 # positional, so a new field cannot be mistaken for an older one. The parent
 # sends `traceparent:<value>` and `exemption:<grant>`; anything else is rejected.
 #
-# Compatibility choice, stated deliberately: an OLDER remote host does not know
-# `exemption:` and would bind it to its positional traceparent slot, which then
-# fails validation there. That is the intended degradation - the launch fails
-# loudly on the remote instead of silently proceeding without the grant, and a
-# cursor secondmate that reaches fm-spawn.sh with no exemption is refused by the
-# unattended bar anyway. Both paths fail closed; neither launches unexempted.
+# Both directions of the mixed-version contract are stated here, because a fleet
+# upgrades one host at a time and either side can be the older one.
+#
+# NEW parent, OLD remote: the older host does not know `exemption:` and binds it
+# to its positional traceparent slot, which then fails validation there. That is
+# the intended degradation - the launch fails loudly on the remote instead of
+# silently proceeding without the grant, and a cursor secondmate that reaches
+# fm-spawn.sh with no exemption is refused by the unattended bar anyway.
+#
+# OLD parent, NEW remote: the older parent sends its carrier as a BARE positional
+# sixth argument, which matches neither prefix. Rejecting it would break every
+# carrier-bearing remote spawn from a not-yet-upgraded parent, including ordinary
+# codex and claude launches that have nothing to do with cursor, so a bare
+# argument that is a well-formed W3C carrier is accepted as the traceparent it
+# has always been. It can never be read as a grant: only the explicit
+# `exemption:` prefix sets one, so an old parent still launches unexempted and
+# the unattended bar still applies. A bare argument that is NOT a carrier is
+# refused, so a typo or a future token cannot ride in through this branch.
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5
   local current meta out herdr_session traceparent='' exemption='' extra
@@ -170,7 +184,13 @@ cmd_launch() {
       traceparent:*) traceparent=${extra#traceparent:} ;;
       exemption:*) exemption=${extra#exemption:} ;;
       "") ;;
-      *) die "unrecognized remote launch argument '$extra'; expected traceparent:<value> or exemption:<grant>" ;;
+      *)
+        if [ -z "$traceparent" ] && fm_trace_context_valid "$extra"; then
+          traceparent=$extra
+        else
+          die "unrecognized remote launch argument '$extra'; expected traceparent:<value> or exemption:<grant>"
+        fi
+        ;;
     esac
   done
 

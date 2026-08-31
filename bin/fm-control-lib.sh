@@ -146,6 +146,13 @@ fm_control_harness_supports_kind() {  # <harness> <kind> [exemption]
 # rewrite the task's recorded merge authority. Both refusal sites ask here.
 fm_control_cursor_exemption_valid() {  # <grant>
   local grant=${1-} name
+  # The bracket ranges below are COLLATION-ordered, so without this the bound
+  # this function advertises would differ per machine: under en_US.UTF-8
+  # `envelope:unicode-with-accents` matches [A-Za-z0-9] and is accepted, while
+  # under C it is refused. fm_task_id_path_safe in bin/fm-pr-lib.sh pins the
+  # locale for exactly this reason, and the one owner of the grant charset must
+  # answer the same question everywhere or the recorded grant is unauditable.
+  local LC_ALL=C
   case "$grant" in
     attended) return 0 ;;
     envelope:*)
