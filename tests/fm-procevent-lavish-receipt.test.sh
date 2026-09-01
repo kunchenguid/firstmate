@@ -1022,4 +1022,64 @@ PATH="$STUB_BIN_DIR:$PATH" run_lavish "$H18" arm "$ART18" >/dev/null \
   || fail "arm stayed refused after the recovered round was handled"
 pass "a retired source still recovers and announces the verdict its runner staged"
 
+# --- the first round of a fresh artifact has no record to prove it by --------
+# Arming unlinks the receipts record and nothing recreates it until a round is
+# journaled, so an absent record is the NORMAL state while the very first
+# submission is in flight. A runner killed then, whose replacement ends and
+# retires the review, still owes that round: what proves the obligation is the
+# verdict it staged, and the recovering seam creates the record it needs.
+H19=$(make_home h19)
+RECEIPT_HOME=$H19
+ART19="$TMP_ROOT/deck19.html"
+printf '<h1>deck</h1>\n' > "$ART19"
+RECEIPT_SID=$(run_lavish "$H19" source-id "$ART19")
+tasks_in "$H19" add deck-alpha "Alpha call" --kind ship --repo sample --body 'Alpha plan.' >/dev/null
+run_captain "$H19" hold deck-alpha --reason "alpha choice pending" >/dev/null
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+stub_ended_empty
+run_captain "$H19" bind "$RECEIPT_SID" >/dev/null
+run_lavish "$H19" arm "$ART19" >/dev/null
+journal="$H19/state/procevent/$RECEIPT_SID.receipts"
+result="$H19/state/procevent-inbox/$RECEIPT_SID.1.result"
+reconcile_once
+wait_i=0
+while [ ! -e "$result" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+wait_claim_free
+[ -e "$result" ] || fail "the first submitted round was never captured"
+# Roll back to the instant before that first seam ran: no record was ever
+# created, no announcement was made, and the dead claim still holds the verdict
+# the runner recorded for the round its intake had already applied.
+rm -f "$journal" "$H19/state/procevent-inbox/$RECEIPT_SID.1.receipted" \
+  "$H19/state/.wake-queue"
+staged="$H19/state/procevent/.$RECEIPT_SID.dead-token.rcpt.output"
+printf 'fed 0\nclosed: deck-alpha\n' > "$staged"
+printf '%s\t%s\n' "$RECEIPT_SID" 1 > "$staged.gen"
+chmod 0600 "$staged" "$staged.gen"
+printf '%s\n%s\ndead-token\ndead-identity\n%s\n' \
+  "$H19" 999999 "$H19/state/procevent" > "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+PATH="$STUB_BIN_DIR:$PATH" pe "$H19" start "$RECEIPT_SID" >/dev/null 2>&1 || true
+assert_absent "$H19/state/procevent/$RECEIPT_SID.source" \
+  "the ended review never retired, so this scenario proves nothing"
+assert_absent "$journal" "the fixture created a record this scenario must run without"
+assert_present "$staged" "the retiring replacement destroyed the first round's verdict"
+reconcile_until grep -qs '^saved' "$journal" \
+  || fail "a first round with no record yet was dropped instead of recovered"
+[ "$(awk -F '\t' '$1 == "received" { print $4 }' "$journal")" = 1 ] \
+  || fail "the recovered first round lost its answer count"
+[ "$(awk -F '\t' '$1 == "saved" && $2 == 1 { print $4 }' "$journal")" = 1 ] \
+  || fail "recovery lost the save the first round's verdict recorded"
+straggler=''
+for leftover in "$H19"/state/procevent/.*.rcpt.output*; do
+  [ -e "$leftover" ] || continue
+  straggler="$straggler $leftover"
+done
+[ -z "$straggler" ] || fail "recovery left its consumed staging behind:$straggler"
+grep -qs "procevent lavish $RECEIPT_SID 1" "$H19/state/.wake-queue" \
+  || fail "the recovered first round was never announced to a handler"
+text=$(run_lavish "$H19" receipt-text "$RECEIPT_SID")
+assert_contains "$text" "saved 1 of 1" "the recovered first round never reached the visible receipt"
+pass "a first round whose record was never created is still recovered after retirement"
+
 printf '\nall Lavish receipt tests passed\n'
