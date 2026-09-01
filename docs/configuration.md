@@ -204,9 +204,9 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 It exists for a consumer that watches a FILE and cannot run a command, which otherwise renders whatever the last on-demand `bin/fm-fleet-snapshot.sh` run happened to leave behind.
 The published artifact is the exact `--json` document, schema `fm-fleet-snapshot.v1` unchanged, so a consumer that pins that schema id keeps rendering and reads the picture's age from the document's own `generated` field.
 
-The file must be one positive whole number of seconds followed by exactly one newline, in a regular, single-linked file beneath a non-symlinked `config/`.
+The file must be one positive whole number of seconds, at most 10 digits, followed by exactly one newline, in a regular, single-linked file beneath a non-symlinked `config/`.
 Absent means disabled: no publisher runs, no artifact is written, and the home pays nothing.
-A file that is present but malformed, symlinked, hardlinked, or below the floor is refused as unusable rather than treated as a default, because a home that believes it is publishing and is not is the exact failure this mechanism removes.
+A file that is present but malformed, symlinked, hardlinked, over 10 digits, or below the floor is refused as unusable rather than treated as a default, because a home that believes it is publishing and is not is the exact failure this mechanism removes.
 `bin/fm-fleet-publish.sh status` always names which of disabled, misconfigured, or enabled applies, whether a publisher is running, and how old the published artifact is.
 
 A snapshot read is real work: it forks per task, reads every task record and status tail, checks each task's endpoint presence, and samples every registered secondmate home.

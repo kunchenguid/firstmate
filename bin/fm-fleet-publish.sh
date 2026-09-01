@@ -36,8 +36,9 @@
 # (serialize, validate, rename), applied to the canonical snapshot.
 #
 # CONFIGURATION. config/fleet-snapshot-cadence, one positive decimal integer of
-# seconds followed by exactly one newline, in a regular single-linked file under
-# a non-symlinked config/. ABSENT MEANS DISABLED: no daemon, no artifact, no
+# seconds (at most 10 digits, so the comparison below can never overflow) followed
+# by exactly one newline, in a regular single-linked file under a non-symlinked
+# config/. ABSENT MEANS DISABLED: no daemon, no artifact, no
 # cost. Malformed is refused as malformed and never silently treated as a
 # default, because a home that believes it is publishing and is not is the
 # failure this whole mechanism exists to remove. `status` always says which of
@@ -129,6 +130,7 @@ ERROR_LOG="$STATE/.fleet-publish.log"
 
 PUBLISH_TIMEOUT=${FM_FLEET_PUBLISH_TIMEOUT:-120}
 MIN_CADENCE=${FM_FLEET_PUBLISH_MIN_CADENCE:-30}
+MAX_CADENCE_DIGITS=10
 TICK_SECS=${FM_FLEET_PUBLISH_TICK_SECS:-5}
 START_WAIT=${FM_FLEET_PUBLISH_START_WAIT:-15}
 LOG_MAX_BYTES=${FM_FLEET_PUBLISH_LOG_MAX_BYTES:-65536}
@@ -229,6 +231,10 @@ read_cadence() {
       return 2
       ;;
   esac
+  if [ "${#value}" -gt "$MAX_CADENCE_DIGITS" ]; then
+    fail "config/fleet-snapshot-cadence is ${#value} digits, more than the ${MAX_CADENCE_DIGITS}-digit maximum a cadence can be"
+    return 2
+  fi
   if ! printf '%s\n' "$value" | cmp -s "$CADENCE_FILE" -; then
     fail "config/fleet-snapshot-cadence must contain exactly one value followed by one newline"
     return 2

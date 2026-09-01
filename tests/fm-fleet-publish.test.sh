@@ -101,6 +101,26 @@ if run_publish "$HOME_DIR" start >/dev/null 2>&1; then
 fi
 pass "a malformed or too-small cadence is refused rather than silently defaulted"
 
+# A cadence value too large for the shell to compare safely must be refused
+# outright, not accepted through an overflowed floor comparison: `[ -lt ]` can
+# fail with a nonzero exit on an oversized operand, which `if` reads as false,
+# so an unbounded check would silently wave an absurd value through instead of
+# refusing it.
+printf '99999999999999999999\n' > "$HOME_DIR/config/fleet-snapshot-cadence"
+out=$(run_publish "$HOME_DIR" status) \
+  || fail "status must still succeed on an oversized cadence"
+case "$out" in
+  *"publisher: misconfigured"*"digit"*) ;;
+  *) fail "an oversized cadence must be reported as misconfigured, got: $out" ;;
+esac
+if run_publish "$HOME_DIR" start >/dev/null 2>&1; then
+  fail "start must refuse an oversized cadence rather than busy-loop with no pacing"
+fi
+if run_publish "$HOME_DIR" run >/dev/null 2>&1; then
+  fail "run must refuse an oversized cadence rather than busy-loop with no pacing"
+fi
+pass "a cadence too large to compare safely is refused rather than accepted"
+
 # --- 2. an enabled publish --------------------------------------------------
 #
 # Through the REAL producer, so the published bytes are proven to be a usable
