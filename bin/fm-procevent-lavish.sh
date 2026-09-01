@@ -275,7 +275,7 @@ acquire_receipts_lock() {  # <source-id>
 }
 
 cmd_arm() {
-  local artifact=${1-} id real
+  local artifact=${1-} id real record
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -289,9 +289,15 @@ cmd_arm() {
   # interruption reach the runner as a captured result.
   # A fresh arm hosts a fresh review, so the receipt lifecycle starts empty and
   # a reused artifact never inherits an earlier session's rounds.
-  if [ -e "$(receipts_path "$id")" ]; then
+  local record
+  record=$(receipts_path "$id")
+  if [ -e "$record" ] || [ -L "$record" ]; then
     acquire_receipts_lock "$id" || die "cannot lock the receipts record"
-    rm -f -- "$(receipts_path "$id")"
+    rm -f -- "$record"
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      fm_lock_release "$(receipts_lock_path "$id")"
+      die "cannot reset the receipts record: $id"
+    fi
     fm_lock_release "$(receipts_lock_path "$id")"
   fi
   # The managed poll wraps the plain blocking form and nothing else: it presents
@@ -617,11 +623,16 @@ poll_retry_delay() {
   printf '%s\n' "$delay"
 }
 
-run_poll() {  # <artifact> [additional lavish-axi poll arguments...]
+# Arguments beyond the artifact are presented ONCE, on the first attempt only.
+# The retried condition interrupts the poll response, after the server already
+# accepted the request, so re-sending a visible argument like --agent-reply
+# would repeat what the captain sees for a single round.
+run_poll() {  # <artifact> [first-attempt-only lavish-axi poll arguments...]
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc
-  local pipeline_status
+  local pipeline_status attempt_args
   [ -n "$artifact" ] || return 1
   shift
+  attempt_args=("$@")
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
@@ -638,7 +649,7 @@ run_poll() {  # <artifact> [additional lavish-axi poll arguments...]
     trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
   done
   while :; do
-    lavish-axi poll "$artifact" "$@" | poll_response_filter "$response"
+    lavish-axi poll "$artifact" ${attempt_args[@]+"${attempt_args[@]}"} | poll_response_filter "$response"
     pipeline_status=("${PIPESTATUS[@]}")
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}
@@ -647,6 +658,7 @@ run_poll() {  # <artifact> [additional lavish-axi poll arguments...]
       10)
         if [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
           attempt=$((attempt + 1))
+          attempt_args=()
           sleep "$delay"
         else
           cat -- "$response"
