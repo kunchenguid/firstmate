@@ -1175,6 +1175,27 @@ fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
   return 1
 }
 
+fm_backend_herdr_response_is_success() {
+  printf '%s' "$1" | jq -e '
+    if type != "object" then false
+    elif (has("error") | not) or .error == null then true
+    else false
+    end
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_response_error_code() {
+  printf '%s' "$1" | jq -r '
+    if type != "object" then empty
+    elif (has("error") | not) or .error == null or has("result") then empty
+    elif (.error | type) != "object" then empty
+    elif (.error.code | type) != "string" then empty
+    elif (.error.code | length) == 0 then empty
+    else .error.code
+    end
+  ' 2>/dev/null
+}
+
 # fm_backend_herdr_pane_idle_shell_pid: print the shell pid of <pane-id> only
 # when the exact pane provably holds one lone idle recognized shell: pane
 # process-info agrees on the pane id, the shell pid is both the foreground
@@ -1209,6 +1230,7 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   local session=$1 pane=$2 info shell_pid foreground_pgid count
   local process_pid name argv0 shell_name rows stat ps_bin
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  fm_backend_herdr_response_is_success "$info" || return 1
   printf '%s' "$info" | jq -e --arg pane "$pane" '
     .result.type == "pane_process_info"
     and .result.process_info.pane_id == $pane
@@ -1830,8 +1852,8 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-
 fm_backend_herdr_pane_presence_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code pid
   out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
-  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
-  if [ -n "$code" ]; then
+  if ! fm_backend_herdr_response_is_success "$out"; then
+    code=$(fm_backend_herdr_response_error_code "$out")
     [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
     return 0
   fi
@@ -1922,8 +1944,8 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     return 0
   fi
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
-  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
-  if [ -n "$code" ]; then
+  if ! fm_backend_herdr_response_is_success "$out"; then
+    code=$(fm_backend_herdr_response_error_code "$out")
     [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
     return 0
   fi
@@ -3037,6 +3059,7 @@ fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
 fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || { printf ''; return 0; }
+  fm_backend_herdr_response_is_success "$out" || { printf ''; return 0; }
   printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 

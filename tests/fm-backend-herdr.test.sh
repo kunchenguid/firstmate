@@ -1655,6 +1655,31 @@ test_agent_state_refuses_fractional_process_identities() {
   pass "fm_backend_herdr_agent_state: fractional process identities do not prove a stale done registration"
 }
 
+test_agent_state_refuses_contradictory_done_envelopes() {
+  local kind dir log resp fb out status pid=4242
+  for kind in agent process; do
+    dir="$TMP_ROOT/done-agent-contradictory-$kind"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+    printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/2.out"
+    if [ "$kind" = agent ]; then
+      death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+      printf '%s\n' '{"error":{"code":"internal_error"},"result":{"agent":{"agent_status":"done"}}}' > "$resp/4.out"
+    else
+      printf '{"error":{"code":"internal_error"},"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' "$pid" "$pid" "$pid" > "$resp/3.out"
+    fi
+    make_death_lab "$dir" "$pid"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] && [ "$out" = unreadable ] \
+      || fail "a contradictory $kind response must remain unreadable, got '$out'"
+  done
+  pass "fm_backend_herdr_agent_state: contradictory done and process responses refuse stale recovery"
+}
+
 test_create_task_refuses_when_stale_done_changes_before_close() {
   local dir log resp fb out status pid=4242
   dir="$TMP_ROOT/stale-done-close-boundary"; mkdir -p "$dir/responses"
@@ -4807,6 +4832,7 @@ test_create_task_refuses_when_agent_state_ambiguous
 test_agent_state_accepts_only_a_stale_done_registration
 test_agent_state_refuses_done_without_a_bare_shell
 test_agent_state_refuses_fractional_process_identities
+test_agent_state_refuses_contradictory_done_envelopes
 test_create_task_refuses_when_stale_done_changes_before_close
 test_spawn_relaunch_refuses_when_stale_done_changes_before_input
 test_agent_state_keeps_active_registered_statuses_live
