@@ -215,7 +215,7 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
-CONTROL_LOCK="$STATE/.control-$ID.lock"
+CONTROL_LOCK=$(fm_control_lock_path "$STATE" "$ID") || exit 1
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
@@ -257,7 +257,7 @@ teardown_release_locks() {
   return "$status"
 }
 trap teardown_release_locks EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" || {
+fm_control_lock_acquire_bounded "$STATE" "$ID" fm-teardown.sh 1 0 || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
 }
@@ -2251,12 +2251,15 @@ preflight_descendant_task_locks() {
     state=${DESCENDANT_TASK_STATES[$i]}
     task_id=${DESCENDANT_TASK_IDS[$i]}
     meta="$state/$task_id.meta"
-    control_lock="$state/.control-$task_id.lock"
+    control_lock=$(fm_control_lock_path "$state" "$task_id") || {
+      echo "REFUSED: descendant task $task_id has an invalid control lock path; forced teardown changed nothing" >&2
+      return 1
+    }
     meta_lock=$(fm_meta_lock_path "$meta") || {
       echo "REFUSED: descendant task $task_id has an invalid metadata lock path; forced teardown changed nothing" >&2
       return 1
     }
-    if ! fm_lock_try_acquire "$control_lock"; then
+    if ! fm_control_lock_acquire_bounded "$state" "$task_id" fm-teardown.sh 1 0; then
       echo "REFUSED: descendant task $task_id has a lifecycle action in flight (control lock is held); forced teardown changed nothing" >&2
       return 1
     fi

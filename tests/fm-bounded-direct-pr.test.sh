@@ -80,6 +80,19 @@ case " $* " in
       printf 'gh: Resource not accessible by integration (HTTP 403)\n' >&2
       exit 1
     fi
+    if [ -n "${FM_TEST_CLASSIC_PAYLOAD:-}" ]; then
+      jq_filter=
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = --jq ] && [ "$#" -ge 2 ]; then
+          jq_filter=$2
+          break
+        fi
+        shift
+      done
+      [ -n "$jq_filter" ] || exit 2
+      "$FM_TEST_REAL_JQ" -r "$jq_filter" "$FM_TEST_CLASSIC_PAYLOAD"
+      exit
+    fi
     cat "$FM_TEST_REQUIREMENTS"
     ;;
   *"/rules/branches/"*) cat "$FM_TEST_RULES" ;;
@@ -100,10 +113,12 @@ SH
 }
 
 run_pr_ci() {
-  local dir=$1 expected=$2
+  local dir=$1 expected=$2 real_jq
+  real_jq=$(command -v jq) || return 1
   FM_TEST_HEAD="$dir/head" FM_TEST_CHECK_RUNS="$dir/check-runs" \
     FM_TEST_STATUSES="$dir/statuses" FM_TEST_REQUIREMENTS="$dir/requirements" \
     FM_TEST_RULES="$dir/rules" \
+    FM_TEST_CLASSIC_PAYLOAD="${FM_TEST_CLASSIC_PAYLOAD:-}" FM_TEST_REAL_JQ="$real_jq" \
     FM_TEST_GH_LOG="$dir/gh.log" \
     PATH="$dir/fakebin:$PATH" \
     "$PR_CI" https://github.com/example/repo/pull/7 "$expected" \
@@ -238,6 +253,19 @@ test_exact_head_green_contract() {
     || fail "ruleset-only required checks rejected terminal success: $out"
   assert_contains "$out" "green: https://github.com/example/repo/pull/7 head=$sha checks=2" \
     "ruleset-only exact-head verification did not report green"
+
+  printf '%s\n' '{"required_status_checks":null}' > "$dir/classic-null.json"
+  out=$(FM_TEST_CLASSIC_PAYLOAD="$dir/classic-null.json" run_pr_ci "$dir" "$sha") \
+    || fail "a valid null classic check set rejected ruleset-only success: $out"
+  assert_contains "$out" "green: https://github.com/example/repo/pull/7 head=$sha checks=2" \
+    "null classic checks did not defer to the effective ruleset requirements"
+
+  printf '%s\n' '{}' > "$dir/classic-malformed.json"
+  status=0
+  out=$(FM_TEST_CLASSIC_PAYLOAD="$dir/classic-malformed.json" run_pr_ci "$dir" "$sha") || status=$?
+  expect_code 1 "$status" "a missing classic-check field must remain malformed"
+  assert_contains "$out" "required checks are unavailable for base branch main" \
+    "malformed classic branch protection was not rejected"
 
   status=0
   out=$(FM_TEST_CLASSIC_FORBIDDEN=1 run_pr_ci "$dir" "$sha") || status=$?

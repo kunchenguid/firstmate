@@ -91,7 +91,7 @@ esac
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
-CONTROL_LOCK="$STATE/.control-$ID.lock"
+CONTROL_LOCK=$(fm_control_lock_path "$STATE" "$ID") || exit 1
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
@@ -110,7 +110,7 @@ promote_cleanup() {
   return "$status"
 }
 trap promote_cleanup EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" || {
+fm_control_lock_acquire_bounded "$STATE" "$ID" fm-promote.sh 1 0 || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
 }

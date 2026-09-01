@@ -70,10 +70,14 @@ read_classic_required_checks() {
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "repos/$OWNER/$REPO/branches/$base_path/protection" \
     --jq '
-      if (.required_status_checks | type) != "object" or
-         (.required_status_checks.checks | type) != "array" or
-         (.required_status_checks.contexts | type) != "array"
+      if type != "object" or
+         (has("required_status_checks") | not) or
+         (.required_status_checks != null and
+          ((.required_status_checks | type) != "object" or
+           (.required_status_checks.checks | type) != "array" or
+           (.required_status_checks.contexts | type) != "array"))
       then error("required status checks are unavailable")
+      elif .required_status_checks == null then empty
       else
         .required_status_checks as $required |
         (($required.checks | map(.context)) // []) as $bound_contexts |

@@ -103,7 +103,8 @@ test_control_lock_contention_refuses_before_mutation() {
   (
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
-    fm_lock_try_acquire "$lock" || exit 1
+    fm_control_lock_acquire_bounded "$dir/home/state" "$id" \
+      fm-teardown-endpoint-safety.test.sh 1 0 || exit 1
     sleep 30
   ) &
   holder=$!

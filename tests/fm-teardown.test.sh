@@ -1743,7 +1743,8 @@ SH
     HOME_STATE="$home/state" OWNER_PID="$$" bash -c '
     export FM_STATE_OVERRIDE="$HOME_STATE"
     . "$ROOT/bin/fm-wake-lib.sh"
-    fm_lock_try_acquire "$LOCK" || exit 1
+    fm_control_lock_acquire_bounded "$HOME_STATE" child-b \
+      fm-teardown.test.sh 1 0 || exit 1
     : > "$READY"
     while [ ! -e "$RELEASE" ] && kill -0 "$OWNER_PID" 2>/dev/null; do sleep 0.1; done
     fm_lock_release "$LOCK"

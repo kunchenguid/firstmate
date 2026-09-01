@@ -533,9 +533,13 @@ test_remote_secondmate_is_refused_by_placement() {
 }
 
 hold_lifecycle_lock() {  # <lock-path>
-  local lifecycle_lock_path=$1
+  local lifecycle_lock_path=$1 lifecycle_state lifecycle_id
   . "$ROOT/bin/fm-wake-lib.sh"
-  fm_lock_try_acquire "$lifecycle_lock_path" || return 1
+  lifecycle_state=${lifecycle_lock_path%/*}
+  lifecycle_id=${lifecycle_lock_path##*/.control-}
+  lifecycle_id=${lifecycle_id%.lock}
+  fm_control_lock_acquire_bounded "$lifecycle_state" "$lifecycle_id" \
+    fm-control.test.sh 1 0 || return 1
   sleep 30
 }
 

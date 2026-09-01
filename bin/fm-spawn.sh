@@ -434,6 +434,7 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home projects harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent meta_present=0 meta_signature current_signature
+  local control_acquired_here=0
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -444,24 +445,42 @@ spawn_remote_secondmate() {
     return 1
   fi
   SPAWN_TASK_LOCK_HELD=1
-  SPAWN_CONTROL_LOCK="$STATE/.control-$id.lock"
-  if ! fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
+  SPAWN_CONTROL_LOCK=$(fm_control_lock_path "$STATE" "$id") || return 1
+  if [ "$SPAWN_CONTROL_PARENT" = 1 ]; then
+    if ! fm_control_lock_owned_by_process "$STATE" "$id" "$PPID" fm-control.sh; then
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: the parent relaunch no longer owns task $id control" >&2
+      return 1
+    fi
+  elif [ "$SPAWN_CONTROL_LOCK_HELD" = 1 ]; then
+    if ! fm_control_lock_owned_by_process "$STATE" "$id" "${BASHPID:-$$}" fm-spawn.sh; then
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: this spawn no longer owns task $id control" >&2
+      return 1
+    fi
+  elif ! fm_control_lock_acquire_bounded "$STATE" "$id" fm-spawn.sh 1 0; then
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: another lifecycle action is already running for task $id" >&2
     return 1
+  else
+    SPAWN_CONTROL_LOCK_HELD=1
+    control_acquired_here=1
   fi
-  SPAWN_CONTROL_LOCK_HELD=1
   meta="$STATE/$id.meta"
   if ! SPAWN_META_LOCK=$(fm_meta_lock_path "$meta"); then
-    SPAWN_CONTROL_LOCK_HELD=0
-    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+    if [ "$control_acquired_here" = 1 ]; then
+      SPAWN_CONTROL_LOCK_HELD=0
+      fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+    fi
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 1
   fi
   if ! fm_meta_lock_acquire_bounded "$meta" fm-spawn.sh; then
-    SPAWN_CONTROL_LOCK_HELD=0
-    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+    if [ "$control_acquired_here" = 1 ]; then
+      SPAWN_CONTROL_LOCK_HELD=0
+      fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+    fi
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 1
@@ -480,8 +499,10 @@ spawn_remote_secondmate() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
-    SPAWN_CONTROL_LOCK_HELD=0
-    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+    if [ "$control_acquired_here" = 1 ]; then
+      SPAWN_CONTROL_LOCK_HELD=0
+      fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+    fi
     return 3
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
@@ -746,8 +767,10 @@ spawn_remote_secondmate() {
   fm_lock_release "$SPAWN_TASK_LOCK" || true
   SPAWN_META_LOCK_HELD=0
   fm_lock_release "$SPAWN_META_LOCK" || true
-  SPAWN_CONTROL_LOCK_HELD=0
-  fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+  if [ "$SPAWN_CONTROL_LOCK_HELD" = 1 ]; then
+    SPAWN_CONTROL_LOCK_HELD=0
+    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+  fi
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
@@ -1046,9 +1069,11 @@ if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)"
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
-  control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
-  if [ "$control_owner" = "$PPID" ] && fm_pid_alive "$control_owner"; then
+  SPAWN_CONTROL_LOCK=$(fm_control_lock_path "$STATE" "$ID") || {
+    echo "error: could not resolve lifecycle control for task $ID" >&2
+    exit 1
+  }
+  if fm_control_lock_owned_by_process "$STATE" "$ID" "$PPID" fm-control.sh; then
     SPAWN_CONTROL_PARENT=1
   elif [ "$(fm_lease_actor)" = branch ]; then
     # Role partition refinement: branch recovery relaunches only through the
@@ -1056,7 +1081,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # this entrypoint directly (contract: bin/fm-lease-lib.sh).
     echo "error: relaunch (fm-spawn) refused - the supervision branch must relaunch through fm-control" >&2
     exit "$FM_LEASE_REFUSE_EXIT"
-  elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
+  elif fm_control_lock_acquire_bounded "$STATE" "$ID" fm-spawn.sh 1 0; then
     SPAWN_CONTROL_LOCK_HELD=1
   else
     echo "error: another lifecycle action is already running for task $ID" >&2

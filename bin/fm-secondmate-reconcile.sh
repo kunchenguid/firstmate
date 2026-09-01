@@ -268,8 +268,13 @@ cmd_notify() {
         continue
       fi
     fi
-    control_lock="$STATE/.control-$id.lock"
-    if ! fm_lock_try_acquire "$control_lock"; then
+    control_lock=$(fm_control_lock_path "$STATE" "$id") || {
+      printf 'failed: %s %s\n' "$id" "$kind"
+      rc=1
+      release_active_locks
+      continue
+    }
+    if ! fm_control_lock_acquire_bounded "$STATE" "$id" fm-secondmate-reconcile.sh 1 0; then
       printf 'skipped: %s lock\n' "$id"
       release_active_locks
       continue
@@ -325,7 +330,7 @@ cmd_notify() {
       continue
     fi
     ACTIVE_RECONCILE_LOCK=$reconcile_lock
-    if ! fm_lock_try_acquire "$control_lock"; then
+    if ! fm_control_lock_acquire_bounded "$STATE" "$id" fm-secondmate-reconcile.sh 1 0; then
       printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
       rc=1
       release_active_locks
