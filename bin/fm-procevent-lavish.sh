@@ -778,7 +778,7 @@ cmd_classify() {
 # session can never display anything again, so its queued receipt stays queued
 # and the source ends. An unreadable receipts record is never read as delivered.
 cmd_terminal() {
-  local file=${1-} classify id latest delivered
+  local file=${1-} classify id latest delivered submission rows seq
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   classify=$(cmd_classify "$file")
@@ -795,6 +795,24 @@ cmd_terminal() {
   id=$(fm_procevent_result_source_id "$file") || return 1
   fm_procevent_source_id_valid "$id" || return 1
   journal_readable "$id" || return 1
+  # The journal's counts describe earlier rounds; they say nothing about what
+  # THIS final result carries. So the result is parsed first, on every path: a
+  # refused parse or a failed journal append must keep the source armed rather
+  # than retire it unacknowledged. Terminal needs positive evidence - a
+  # completely parsed result whose own receipt-worthy rows, if any, are already
+  # journaled under this generation. A refused parse is indeterminate, never
+  # proof of absence, whether or not an earlier round was already received.
+  submission=$(perl_rows submission "$file" 2>/dev/null) || return 1
+  rows=0
+  if [ -n "$submission" ]; then
+    rows=$(printf '%s' "$submission" | cut -f3)
+    case "$rows" in ''|*[!0-9]*) return 1 ;; esac
+  fi
+  if [ "$rows" -gt 0 ]; then
+    seq=$(fm_procevent_result_sequence "$file") || return 1
+    case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+    has_event "$id" received "$seq" || return 1
+  fi
   latest=$(journal_count "$id" received)
   case "$latest" in ''|*[!0-9]*) return 1 ;; esac
   if [ "$latest" -gt 0 ]; then
@@ -803,13 +821,6 @@ cmd_terminal() {
     [ "$delivered" -ge "$latest" ] && return 0
     return 1
   fi
-  # Zero journaled rounds is not, by itself, evidence that this final result
-  # carries nothing: a refused parse or a failed journal append must keep the
-  # source armed rather than retire it unacknowledged. Terminal needs positive
-  # evidence - a completely parsed result with no receipt-worthy submission.
-  # A refused parse is indeterminate, never proof of absence.
-  local submission
-  submission=$(perl_rows submission "$file" 2>/dev/null) || return 1
   [ -n "$submission" ] || return 0
   return 1
 }

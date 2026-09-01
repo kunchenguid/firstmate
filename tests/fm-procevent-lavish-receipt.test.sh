@@ -125,6 +125,29 @@ stub_ended_empty() {
   printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n### \n' >> "$STUB_QUEUE"
 }
 
+# A prompts block that declares more rows than it delivers - what a response
+# truncated in transit looks like on the wire.
+stub_truncated() {  # <session-ended: true|false> <declared-rows> <rows-block>
+  {
+    printf 'session:\n  file: /review.html\n  status: feedback\n'
+    [ "$1" = true ] && printf '  session_ended: true\n  ended_by: user\n'
+    printf 'prompts[%s]{uid,prompt,selector,tag,text}:\n' "$2"
+    printf '%s\n' "$3"
+    printf '### \n'
+  } >> "$STUB_QUEUE"
+}
+
+# One captured result in the published poll's shape, written where the receipt
+# seam can be handed it directly.
+write_result() {  # <path> <session-ended: true|false> <declared-rows> <rows-block>
+  {
+    printf 'session:\n  file: /review.html\n  status: feedback\n'
+    [ "$2" = true ] && printf '  session_ended: true\n  ended_by: user\n'
+    printf 'prompts[%s]{uid,prompt,selector,tag,text}:\n' "$3"
+    printf '%s\n' "$4"
+  } > "$1"
+}
+
 stub_missing() {
   printf 'error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n### \n' >> "$STUB_QUEUE"
 }
@@ -149,6 +172,17 @@ stub_calls() { wc -l < "$STUB_LOG" | tr -d ' '; }
 wait_claim_free() {
   local i=0
   while [ -e "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim" ] && [ "$i" -lt 60 ]; do
+    sleep 0.2
+    i=$((i + 1))
+  done
+}
+
+# A live capture's receipt seam may still be in flight when its result file
+# appears, so anything that reads or extends that round's journal facts waits
+# for the seam marker the runner writes once the seam has had its chance.
+wait_seam() {  # <home> <source-id> <sequence>
+  local i=0
+  while [ ! -e "$1/state/procevent-inbox/$2.$3.receipted" ] && [ "$i" -lt 100 ]; do
     sleep 0.2
     i=$((i + 1))
   done
@@ -340,6 +374,7 @@ reconcile_until [ -e "$H4/state/procevent-inbox/$RECEIPT_SID.1.result" ] \
   || fail "the first round was never captured"
 # The handler acts between rounds; a fresh reconcile process (a restart) must
 # still present everything recorded so far on the next armed poll.
+wait_seam "$H4" "$RECEIPT_SID" 1
 run_lavish "$H4" applying "$RECEIPT_SID" 1 >/dev/null
 run_lavish "$H4" complete "$RECEIPT_SID" 1 >/dev/null
 pe "$H4" handled "$RECEIPT_SID" 1 >/dev/null
@@ -616,5 +651,146 @@ text=$(run_lavish "$H11" receipt-text "$RECEIPT_SID")
 assert_contains "$text" "saved 1 of 2" "the recovered receipt did not state the save it recovered"
 rm -f "$staged" "$staged.gen"
 pass "recovery journals the verdict a dead generation recorded, and only for that generation"
+
+# --- a refused parse keeps the review armed, however many rounds preceded it --
+# A prompts block declaring more rows than it delivers is truncated, so the
+# adapter refuses to summarize it: the round is neither journaled nor fed. That
+# refusal is only trustworthy if it also blocks retirement. An earlier round
+# whose receipt was already delivered must not be read as proof that THIS final
+# submission carried nothing - retiring here drops the captain's last round with
+# no acknowledgement and no chance to apply it.
+H12=$(make_home h12)
+RECEIPT_HOME=$H12
+ART12="$TMP_ROOT/deck12.html"
+printf '<h1>deck</h1>\n' > "$ART12"
+RECEIPT_SID=$(run_lavish "$H12" source-id "$ART12")
+tasks_in "$H12" add deck-alpha "Alpha call" --kind ship --repo sample --body 'Alpha plan.' >/dev/null
+run_captain "$H12" hold deck-alpha --reason "alpha choice pending" >/dev/null
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+# The captain's next submission ends the review, and its block arrives truncated.
+stub_truncated true 2 "$(choice_row 3 deck-beta hold 'Beta')"
+run_captain "$H12" bind "$RECEIPT_SID" >/dev/null
+run_lavish "$H12" arm "$ART12" >/dev/null
+journal="$H12/state/procevent/$RECEIPT_SID.receipts"
+reconcile_until [ -e "$H12/state/procevent-inbox/$RECEIPT_SID.2.result" ] \
+  || fail "the truncated final submission was never captured"
+wait_seam "$H12" "$RECEIPT_SID" 2
+grep -qs '^delivered' "$journal" \
+  || fail "the first round's receipt was never delivered before the truncated round"
+truncated_tries=0
+while [ "$truncated_tries" -lt 4 ]; do
+  reconcile_once
+  truncated_tries=$((truncated_tries + 1))
+done
+assert_present "$H12/state/procevent/$RECEIPT_SID.source" \
+  "a refused parse on a final submission retired the review unacknowledged"
+[ "$(grep -c '^received' "$journal")" = 1 ] \
+  || fail "the refused parse was journaled as a received round"
+text=$(run_lavish "$H12" receipt-text "$RECEIPT_SID")
+assert_not_contains "$text" "Round 2" "the refused parse was presented as an acknowledged round"
+pass "a refused final-submission parse keeps the review armed after earlier rounds"
+
+# --- the seam's outcome contract reaches the visible receipt -----------------
+# The runner hands the seam an outcome file whose bytes are the contract
+# documented in docs/configuration.md: `not-fed`, or `fed <exit>` and an
+# optional quality line. These drive the seam directly with that contract, so
+# each visible state is proven against the verdict that produced it.
+H13=$(make_home h13)
+RECEIPT_HOME=$H13
+ART13="$TMP_ROOT/deck13.html"
+printf '<h1>deck</h1>\n' > "$ART13"
+SID13=$(run_lavish "$H13" source-id "$ART13")
+J13="$H13/state/procevent/$SID13.receipts"
+R13="$TMP_ROOT/r13.result"
+O13="$TMP_ROOT/o13.outcome"
+# An intake whose adapter could not extract its own answers reports an
+# incomplete quality, never a verified save over rows nothing vouches for.
+write_result "$R13" false 1 "$(choice_row 2 deck-alpha go 'Alpha')"
+printf 'fed 0\nincomplete\n' > "$O13"
+run_lavish "$H13" receipt "$SID13" 1 "$R13" "$O13" >/dev/null
+[ "$(awk -F '\t' '$1 == "saved" { print $6 }' "$J13")" = incomplete ] \
+  || fail "an answer-extractor failure was journaled as a verified save"
+text=$(run_lavish "$H13" receipt-text "$SID13")
+assert_contains "$text" "its saving report was incomplete" \
+  "the receipt presented an incomplete verdict as a verified save"
+assert_not_contains "$text" "saved 0 of 1" "the receipt claimed a save count it cannot vouch for"
+# A round carrying neither an answer nor a freeform message claims neither.
+R14="$TMP_ROOT/r14.result"
+O14="$TMP_ROOT/o14.outcome"
+write_result "$R14" false 1 '  "9","","section > p",annotation,"the footer is off"'
+printf 'not-fed\n' > "$O14"
+run_lavish "$H13" receipt "$SID13" 2 "$R14" "$O14" >/dev/null
+text=$(run_lavish "$H13" receipt-text "$SID13")
+assert_contains "$text" "Round 2: received your submission at" \
+  "a zero-answer zero-message round was not acknowledged"
+assert_not_contains "$text" "written comment" \
+  "a round of pure annotations claimed the captain typed a comment"
+assert_not_contains "$text" "0 answers" "the acknowledgement counted answers that were not there"
+# A parse the adapter refused is no verdict at all, so it journals nothing.
+R15="$TMP_ROOT/r15.result"
+write_result "$R15" false 3 "$(choice_row 4 deck-alpha go 'Alpha')"
+run_lavish "$H13" receipt "$SID13" 3 "$R15" "$O14" >/dev/null
+[ "$(grep -c '^received' "$J13")" = 2 ] \
+  || fail "a truncated block was journaled as a received round by the seam"
+pass "the seam's outcome contract drives the incomplete, bare, and refused receipts"
+
+# --- a replay whose own outcome proves a new effect is a new action ----------
+# An answer skipped on its first submission - its task was not held yet - is
+# genuinely applied when the captain resubmits it. The identical digest must not
+# hide that: the captain has to see the action, not an actionless "already
+# received". A resubmission that really changed nothing still says so.
+H14=$(make_home h14)
+RECEIPT_HOME=$H14
+ART14="$TMP_ROOT/deck14.html"
+printf '<h1>deck</h1>\n' > "$ART14"
+SID14=$(run_lavish "$H14" source-id "$ART14")
+R16="$TMP_ROOT/r16.result"
+write_result "$R16" false 1 "$(choice_row 2 deck-alpha go 'Alpha')"
+printf 'fed 0\nskipped: deck-alpha names no held task\n' > "$TMP_ROOT/o16a.outcome"
+printf 'fed 0\nclosed: deck-alpha\n' > "$TMP_ROOT/o16b.outcome"
+printf 'fed 0\n' > "$TMP_ROOT/o16c.outcome"
+run_lavish "$H14" receipt "$SID14" 1 "$R16" "$TMP_ROOT/o16a.outcome" >/dev/null
+run_lavish "$H14" receipt "$SID14" 2 "$R16" "$TMP_ROOT/o16b.outcome" >/dev/null
+text=$(run_lavish "$H14" receipt-text "$SID14")
+assert_contains "$text" "Round 2: received 1 answer" \
+  "a replay that really saved an answer was hidden as an actionless replay"
+assert_contains "$text" "saved 1 of 1" "the newly saved replay did not state its save"
+# The same submission a third time changed nothing, and is reported as such.
+run_lavish "$H14" receipt "$SID14" 3 "$R16" "$TMP_ROOT/o16c.outcome" >/dev/null
+text=$(run_lavish "$H14" receipt-text "$SID14")
+assert_contains "$text" "Round 3: already received" \
+  "a replay with no new effect was presented as a new action"
+assert_contains "$text" "no new action" "the actionless replay did not say so"
+pass "a replay is a new action only when its own outcome proves one"
+
+# --- arm never resets a record whose rounds are still owed to a handler ------
+# Resetting the receipts record while an earlier session's captures are still
+# unhandled would orphan their Applying and Complete from the received rounds
+# they speak for, so arming refuses until those generations are settled.
+H15=$(make_home h15)
+RECEIPT_HOME=$H15
+ART15="$TMP_ROOT/deck15.html"
+printf '<h1>deck</h1>\n' > "$ART15"
+SID15=$(run_lavish "$H15" source-id "$ART15")
+install_stub
+mkdir -p "$H15/state/procevent-inbox"
+printf 'session:\n  file: /review.html\n  status: ended\n  ended_by: user\n' \
+  > "$H15/state/procevent-inbox/$SID15.1.result"
+printf 'lavish\n' > "$H15/state/procevent-inbox/$SID15.1.adapter"
+chmod 0600 "$H15/state/procevent-inbox/$SID15.1.result" \
+  "$H15/state/procevent-inbox/$SID15.1.adapter"
+arm_status=0
+arm_out=$(PATH="$STUB_BIN_DIR:$PATH" run_lavish "$H15" arm "$ART15" 2>&1) || arm_status=$?
+[ "$arm_status" -ne 0 ] || fail "arm reset a record whose captured rounds were still unhandled"
+assert_contains "$arm_out" "unhandled captured result" \
+  "the refusal names the unhandled generations it is protecting"
+assert_absent "$H15/state/procevent/$SID15.source" "a refused arm left the source registered"
+pe "$H15" handled "$SID15" 1 >/dev/null
+PATH="$STUB_BIN_DIR:$PATH" run_lavish "$H15" arm "$ART15" >/dev/null \
+  || fail "arm refused after every captured generation was handled"
+assert_present "$H15/state/procevent/$SID15.source" \
+  "arm did not register the source once its captures were settled"
+pass "arm refuses while unhandled captured generations remain on the artifact"
 
 printf '\nall Lavish receipt tests passed\n'

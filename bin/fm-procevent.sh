@@ -202,6 +202,10 @@ case "${1-}" in ''|-h|--help|help) usage ;; esac
 
 REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
+# Retirement's bounded wait for the adapter's receipts lock, in 0.1s tries. The
+# bound is a property of the seam it waits on - one journal append - not an
+# operator choice, so only a test overrides it.
+RECEIPTS_RETIRE_LOCK_TRIES=${FM_PROCEVENT_RECEIPTS_RETIRE_LOCK_TRIES:-50}
 EXTENSION_HOST="$SCRIPT_DIR/fm-extension.mjs"
 EXTENSION_LIFECYCLE_LOCK="$REG/.extension-binding-lifecycle.lock"
 
@@ -1362,7 +1366,7 @@ cmd_handled() {
 
 cmd_retire() {
   local id=${1-} condition=${2-} adapter='' sep='' expected_owner='' owner='' pid='' token='' identity='' stop_state owner_state
-  local extension_binding_digest=''
+  local extension_binding_digest='' receipts_lock_taken=1 receipts_wait=0
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$condition" in
     '') [ "$#" -eq 1 ] || usage ;;
@@ -1463,14 +1467,24 @@ cmd_retire() {
   # The receipts record is part of this runner's per-source layout (its bytes
   # belong to the source's adapter), so it is cleaned with the registration.
   # The removal takes the adapter's receipts lock so a writer already holding
-  # it cannot append the record back into existence after the unlink - but only
-  # if the lock is free. The adapter's own receipt seam takes the receipts lock
-  # before the source lock, so waiting for it here, under the source lock, would
-  # be a lock-order inversion that can never resolve. A busy record is simply
-  # left in place: the sweep boundary reclaims an unregistered record later.
+  # it cannot append the record back into existence after the unlink. The wait
+  # is BOUNDED: the adapter's own receipt seam takes the receipts lock before
+  # the source lock, so waiting unboundedly here, under the source lock, would
+  # be a lock-order inversion that could never resolve. A seam holds that lock
+  # only for the length of one journal append, so a short retry covers every
+  # ordinary contention while still failing rather than hanging.
   if [ -e "$(fm_procevent_receipts_path "$STATE" "$id")" ] \
     || [ -L "$(fm_procevent_receipts_path "$STATE" "$id")" ]; then
-    if fm_lock_try_acquire "$(fm_procevent_receipts_lock_path "$STATE" "$id")"; then
+    receipts_lock_taken=0
+    while [ "$receipts_wait" -lt "$RECEIPTS_RETIRE_LOCK_TRIES" ]; do
+      if fm_lock_try_acquire "$(fm_procevent_receipts_lock_path "$STATE" "$id")"; then
+        receipts_lock_taken=1
+        break
+      fi
+      receipts_wait=$((receipts_wait + 1))
+      sleep 0.1
+    done
+    if [ "$receipts_lock_taken" -eq 1 ]; then
       rm -f -- "$(fm_procevent_receipts_path "$STATE" "$id")"
       fm_lock_release "$(fm_procevent_receipts_lock_path "$STATE" "$id")"
     fi
@@ -1480,6 +1494,11 @@ cmd_retire() {
   # carried. Generic and idempotent: the binding owner is asked to forget this
   # source id, and an unbound source is unaffected.
   "$SCRIPT_DIR/fm-captain-hold.sh" unbind "$id" >/dev/null 2>&1 || true
+  # The registration and the binding are gone either way, so the source really
+  # is retired; a record this call could not lock is reported rather than
+  # covered by a clean retirement line, and a later sweep reclaims it.
+  [ "$receipts_lock_taken" -ne 0 ] \
+    || die "retired the source but could not lock its receipts record: $id"
   printf 'retired: %s\n' "$id"
 }
 
