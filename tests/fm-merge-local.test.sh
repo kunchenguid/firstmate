@@ -9,6 +9,12 @@
 # default branch fast-forwarded to match, while a real hosted (https/ssh/scp-like)
 # origin is left completely untouched - no push is even attempted, so local-only's
 # no-push, no-PR contract for a real forge holds unchanged.
+#
+# The decision is made on push URLs, never the fetch URL alone, because a
+# separately configured remote.origin.pushurl overrides the fetch URL for
+# `git push`: the local-fetch/hosted-pushurl, hosted-fetch/local-pushurl,
+# no-pushurl-configured, and multiple-pushurls cases below pin that boundary
+# from every direction a mismatched fetch/push URL pair could take it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -184,6 +190,184 @@ SH
   pass "a real hosted (https) origin is never pushed to, preserving local-only's no-push contract"
 }
 
+test_local_fetch_hosted_pushurl_is_never_pushed_to() {
+  local home id built mirror proj fakebin out err push_log
+
+  home=$(new_home)
+  id=hosted-pushurl-1
+  built=$(build_local_mirror_project "$home" charlie)
+  mirror=${built% *}
+  proj=${built#* }
+  git -C "$proj" remote set-url --push origin "https://example.invalid/fake/repo.git"
+
+  task_branch "$proj" "$id"
+  fm_write_meta "$home/state/$id.meta" "project=$proj" "mode=local-only"
+
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  push_log="$home/push.log"
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+for a in "\$@"; do
+  if [ "\$a" = push ]; then
+    printf '%s\n' "push \$*" >> "$push_log"
+    exit 1
+  fi
+done
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+
+  out="$home/out"; err="$home/err"
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-merge-local.sh" "$id" >"$out" 2>"$err"
+  status=$?
+  set -e
+
+  [ "$status" -eq 0 ] || fail "hosted-pushurl: fm-merge-local.sh failed for a local-fetch/hosted-push origin: $(cat "$err")"
+  assert_contains "$(cat "$out")" "merged fm/$id into local main" \
+    "hosted-pushurl: the local fast-forward itself was not reported"
+  assert_no_grep "origin mirror updated" "$out" \
+    "hosted-pushurl: a hosted pushurl was wrongly reported as mirror-updated"
+  [ ! -s "$push_log" ] || fail "hosted-pushurl: git push was attempted against a remote with a hosted pushurl: $(cat "$push_log")"
+
+  mirror_main=$(git -C "$mirror" rev-parse main)
+  proj_prev=$(git -C "$proj" rev-parse "main^")
+  [ "$mirror_main" = "$proj_prev" ] \
+    || fail "hosted-pushurl: the local mirror should have been left untouched at its prior commit"
+
+  pass "a local fetch URL paired with a hosted pushurl is never pushed to (the reported bypass)"
+}
+
+test_hosted_fetch_local_pushurl_still_syncs() {
+  local home id built mirror proj out mirror_main proj_main
+
+  home=$(new_home)
+  id=local-pushurl-1
+  built=$(build_local_mirror_project "$home" delta)
+  mirror=${built% *}
+  proj=${built#* }
+  git -C "$proj" remote set-url origin "https://example.invalid/fake/repo.git"
+  git -C "$proj" remote set-url --push origin "$mirror"
+
+  task_branch "$proj" "$id"
+  fm_write_meta "$home/state/$id.meta" "project=$proj" "mode=local-only"
+
+  out=$(run_merge_local "$home" "$id" 2>&1) \
+    || fail "local-pushurl: fm-merge-local.sh failed against a hosted-fetch/local-push origin: $out"
+
+  assert_contains "$out" "origin mirror updated: main" \
+    "local-pushurl: the mirror-sync outcome was not reported when the actual push destination is local"
+
+  mirror_main=$(git -C "$mirror" rev-parse main)
+  proj_main=$(git -C "$proj" rev-parse main)
+  [ "$mirror_main" = "$proj_main" ] \
+    || fail "local-pushurl: mirror main ($mirror_main) does not match project main ($proj_main) after merge"
+
+  pass "a hosted fetch URL paired with a local pushurl still syncs, since that is the actual push destination"
+}
+
+test_no_pushurl_falls_back_to_fetch_url() {
+  # Regression pin: git itself returns the fetch URL from `get-url --push` when
+  # no pushurl is configured, so the ordinary (no pushurl) local-mirror case must
+  # keep working unchanged - covered already by test_local_mirror_origin_advances_to_match,
+  # this test only pins the no-pushurl-configured hosted-origin side of that
+  # same fallback so the boundary is exercised from both directions.
+  local home id proj out err push_log fakebin
+
+  home=$(new_home)
+  id=no-pushurl-1
+  proj="$home/proj-no-pushurl"
+
+  git init -q "$proj"
+  git -C "$proj" symbolic-ref HEAD refs/heads/main
+  commit_file "$proj" file.txt v0 C0
+  git -C "$proj" remote add origin "https://example.invalid/fake/repo.git"
+
+  task_branch "$proj" "$id"
+  fm_write_meta "$home/state/$id.meta" "project=$proj" "mode=local-only"
+
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  push_log="$home/push.log"
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+for a in "\$@"; do
+  if [ "\$a" = push ]; then
+    printf '%s\n' "push \$*" >> "$push_log"
+    exit 1
+  fi
+done
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+
+  out="$home/out"; err="$home/err"
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-merge-local.sh" "$id" >"$out" 2>"$err"
+  status=$?
+  set -e
+
+  [ "$status" -eq 0 ] || fail "no-pushurl: fm-merge-local.sh failed for an unconfigured-pushurl hosted origin: $(cat "$err")"
+  [ ! -s "$push_log" ] || fail "no-pushurl: git push was attempted against a hosted origin with no pushurl configured: $(cat "$push_log")"
+
+  pass "an unconfigured pushurl correctly falls back to the (hosted) fetch URL and is never pushed to"
+}
+
+test_multiple_pushurls_one_hosted_is_never_pushed_to() {
+  local home id built mirror proj out err push_log fakebin
+
+  home=$(new_home)
+  id=multi-pushurl-1
+  built=$(build_local_mirror_project "$home" echo)
+  mirror=${built% *}
+  proj=${built#* }
+  git -C "$proj" remote set-url --push origin "$mirror"
+  git -C "$proj" remote set-url --add --push origin "https://example.invalid/fake/repo.git"
+
+  task_branch "$proj" "$id"
+  fm_write_meta "$home/state/$id.meta" "project=$proj" "mode=local-only"
+
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  push_log="$home/push.log"
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+for a in "\$@"; do
+  if [ "\$a" = push ]; then
+    printf '%s\n' "push \$*" >> "$push_log"
+    exit 1
+  fi
+done
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+
+  out="$home/out"; err="$home/err"
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-merge-local.sh" "$id" >"$out" 2>"$err"
+  status=$?
+  set -e
+
+  [ "$status" -eq 0 ] || fail "multi-pushurl: fm-merge-local.sh failed for a mixed local/hosted multi-pushurl origin: $(cat "$err")"
+  [ ! -s "$push_log" ] || fail "multi-pushurl: git push was attempted against a remote with one hosted pushurl among several: $(cat "$push_log")"
+
+  pass "one hosted URL among several configured pushurls disqualifies the whole remote from the sync"
+}
+
 test_local_mirror_origin_advances_to_match
 test_local_mirror_origin_already_current_is_quiet
 test_hosted_origin_is_never_pushed_to
+test_local_fetch_hosted_pushurl_is_never_pushed_to
+test_hosted_fetch_local_pushurl_still_syncs
+test_no_pushurl_falls_back_to_fetch_url
+test_multiple_pushurls_one_hosted_is_never_pushed_to
