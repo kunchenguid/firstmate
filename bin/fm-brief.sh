@@ -58,10 +58,10 @@
 # brief against it before acting, names project prose the brief intentionally
 # supersedes, and escalates a genuine conflict instead of arbitrating it.
 # A secondmate charter is not a task brief and does not carry it.
-# Ship briefs also carry a batched-findings rule: enumerate the complete finding
-# set and check the surfaces sharing each defect's mechanism before repairing or
-# resubmitting, rather than looping one defect at a time. It is appended as rule 8
-# because bin/fm-dod-lib.sh cross-references the ask-user rule by its number.
+# Every ship path renders bin/fm-dod-lib.sh's batched-findings rule: enumerate the
+# complete finding set and check the surfaces sharing each defect's mechanism
+# before repairing or resubmitting, rather than looping one defect at a time. It
+# remains rule 8 because the delivery contract cross-references rule 6.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -461,10 +461,9 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
-8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find.
-   Enumerate the COMPLETE finding set first, then check the surfaces that can share each defect's mechanism -
-   same pattern, same generator, same template, sibling files - and report or repair the whole batch at once
-   so one re-review covers all of it. One-at-a-time stop-fix-rereview loops are forbidden.
+EOF
+fm_ship_batch_rule_block >> "$BRIEF"
+cat >> "$BRIEF" <<EOF
 
 $INBOX_SECTION
 

@@ -215,6 +215,16 @@ test_ship_modes_generate_clean_briefs() {
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
     assert_grep "no unresolved \`FINALIZE-AFTER(\` sentinel" "$brief" \
       "$id: every delivery mode must gate on zero unresolved FINALIZE-AFTER sentinels"
+    assert_grep 'git -C "$(git rev-parse --show-toplevel)" status --porcelain=v1 --untracked-files=all' "$brief" \
+      "$id: delivery preflight must require a clean repository-root worktree"
+    assert_grep "git -C \"\$(git rev-parse --show-toplevel)\" grep -n -F 'FINALIZE-AFTER(' HEAD -- ." "$brief" \
+      "$id: delivery preflight must scan committed HEAD from the repository root"
+    assert_grep "Exit 1 with no output means no sentinel occurrence" "$brief" \
+      "$id: delivery preflight must distinguish no matches from a scan error"
+    assert_grep "any other exit means the scan failed and blocks delivery" "$brief" \
+      "$id: delivery preflight must never treat a failed scan as green"
+    assert_no_grep "grep -rn 'FINALIZE-AFTER(' ." "$brief" \
+      "$id: delivery preflight must not inspect the mutable current directory"
     assert_no_grep "bin/fm-dod-lib.sh" "$brief" \
       "$id: brief leaked scaffold source paths (a backtick ran as command substitution in an unquoted heredoc)"
   done
@@ -811,6 +821,8 @@ test_ship_briefs_batch_findings_before_resubmitting() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "ship brief was not scaffolded"
+  grep -Fqx "8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find." "$brief" \
+    || fail "ship brief must keep the batched-findings contract as rule 8"
   assert_grep "never fix and resubmit the first defect you find" "$brief" \
     "ship brief must forbid fixing and resubmitting the first defect alone"
   assert_grep "Enumerate the COMPLETE finding set first" "$brief" \
@@ -820,6 +832,8 @@ test_ship_briefs_batch_findings_before_resubmitting() {
   assert_grep "One-at-a-time stop-fix-rereview loops are forbidden." "$brief" \
     "ship brief must forbid one-at-a-time stop-fix-rereview loops"
   # Renumbering the rules would break fm-dod-lib.sh's "(rule 6)" cross-reference.
+  grep -Fqx "6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings)," "$brief" \
+    || fail "numbered rule 6 must remain the ask-user escalation rule"
   assert_grep "escalate to firstmate (rule 6) and stop" "$brief" \
     "the ask-user escalation must still point at rule 6"
   pass "fm-brief.sh: ship briefs require batching findings before repair or resubmission"

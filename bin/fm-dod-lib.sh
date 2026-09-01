@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Single owner of a ship task's mode-specific "Definition of done" block.
+# Single owner of a ship task's shared rule-8 review contract and mode-specific
+# "Definition of done" block.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract: a promoted
@@ -8,12 +9,32 @@
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
-# Every mode's block gates delivery on zero unresolved FINALIZE-AFTER( sentinels,
-# the pre-staging placeholder convention owned by the wayfinding skill.
+# Every mode's block requires a clean worktree and gates delivery by scanning the
+# repository-root committed HEAD for unresolved FINALIZE-AFTER( sentinels, the
+# pre-staging placeholder convention owned by the wayfinding skill. A scan error
+# is a delivery failure, never the same result as no matches.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+
+fm_ship_batch_rule_block() {
+  cat <<'EOF'
+8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find.
+   Enumerate the COMPLETE finding set first, then check the surfaces that can share each defect's mechanism -
+   same pattern, same generator, same template, sibling files - and report or repair the whole batch at once
+   so one re-review covers all of it. One-at-a-time stop-fix-rereview loops are forbidden.
+EOF
+}
+
+fm_dod_delivery_preflight_block() {
+  cat <<'EOF'
+Require a clean worktree and no unresolved `FINALIZE-AFTER(` sentinel in the committed branch before delivery.
+Run `git -C "$(git rev-parse --show-toplevel)" status --porcelain=v1 --untracked-files=all`; it must succeed and print nothing, and any output or command error blocks delivery.
+Then inspect the repository-root committed tree with `git -C "$(git rev-parse --show-toplevel)" grep -n -F 'FINALIZE-AFTER(' HEAD -- .`, never a mutable working-directory scan.
+Exit 1 with no output means no sentinel occurrence; exit 0 means inspect every match and resolve every open placeholder before delivery; any other exit means the scan failed and blocks delivery rather than counting as no matches.
+EOF
+}
 
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
@@ -24,7 +45,10 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-Before you push, confirm the branch contains no unresolved \`FINALIZE-AFTER(\` sentinel: \`grep -rn 'FINALIZE-AFTER(' .\` must return nothing you have not resolved.
+Before you push, pass this delivery preflight:
+EOF
+      fm_dod_delivery_preflight_block
+      cat <<EOF
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -36,7 +60,10 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-Before you report it ready, confirm the branch contains no unresolved \`FINALIZE-AFTER(\` sentinel: \`grep -rn 'FINALIZE-AFTER(' .\` must return nothing you have not resolved.
+Before you report it ready, pass this delivery preflight:
+EOF
+      fm_dod_delivery_preflight_block
+      cat <<EOF
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
@@ -46,7 +73,10 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-Before you hand the branch to validation, confirm it contains no unresolved \`FINALIZE-AFTER(\` sentinel: \`grep -rn 'FINALIZE-AFTER(' .\` must return nothing you have not resolved.
+Before you hand the branch to validation, pass this delivery preflight:
+EOF
+      fm_dod_delivery_preflight_block
+      cat <<EOF
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 

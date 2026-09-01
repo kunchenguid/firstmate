@@ -336,6 +336,14 @@ STUB
       "$mode: promoted worker was not told to stop for any wrong worktree"
     assert_grep "git checkout -b fm/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
+    grep -Fqx "8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find." "$payload" \
+      || fail "$mode: promoted worker did not receive the batched-findings contract as rule 8"
+    assert_grep "Enumerate the COMPLETE finding set first" "$payload" \
+      "$mode: promoted worker was not told to enumerate the complete finding set"
+    assert_grep "surfaces that can share each defect's mechanism" "$payload" \
+      "$mode: promoted worker was not told to inspect shared-mechanism surfaces"
+    assert_grep "One-at-a-time stop-fix-rereview loops are forbidden." "$payload" \
+      "$mode: promoted worker was not forbidden from one-at-a-time review loops"
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
