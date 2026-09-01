@@ -369,8 +369,13 @@ cmd_receipt() {  # <source-id> <sequence> <result-file> <outcome-file>
   [ -f "$outcome" ] && [ ! -L "$outcome" ] || die "intake outcome file does not exist: $outcome"
 
   local classify submission armed_upto delivered_upto epoch submission_line=''
+  local submission_rc=0
   classify=$(cmd_classify "$result")
-  submission=$(perl_rows submission "$result" 2>/dev/null) || submission=''
+  # A parse that did not complete is indeterminate, never proof that the
+  # captain submitted nothing: it yields no verdict here, so this seam neither
+  # acknowledges the capture as a pure delivery nor journals a round for it.
+  submission=$(perl_rows submission "$result" 2>/dev/null) || submission_rc=$?
+  [ "$submission_rc" -eq 0 ] || submission=''
 
   acquire_receipts_lock "$id" || die "cannot lock the receipts record"
   trap 'fm_lock_release "$(receipts_lock_path "$id")"' EXIT
@@ -385,7 +390,7 @@ cmd_receipt() {  # <source-id> <sequence> <result-file> <outcome-file>
       # This poll completed after arming an uncovered receipt: it displayed it,
       # unless the session was already gone - a missing session proves nothing.
       journal_append "$id" "$(printf 'delivered\t%s\t%s' "$epoch" "$armed_upto")" || true
-      if [ "$classify" = ended ] && [ -z "$submission" ]; then
+      if [ "$classify" = ended ] && [ "$submission_rc" -eq 0 ] && [ -z "$submission" ]; then
         # A pure delivery capture has served its only purpose. Acknowledge it so
         # its wake never publishes: the handled marker is written under the same
         # per-source boundary the runner's publication checks - held across this
@@ -433,12 +438,15 @@ cmd_receipt() {  # <source-id> <sequence> <result-file> <outcome-file>
     fi
     if [ "${submission_line:-}" = received ] && [ "${head_line#fed }" != "$head_line" ]; then
       skipped=$(grep -c '^skipped: ' "$outcome" || true)
+      # Every quality the intake can state is carried through verbatim; only a
+      # verdict the runner vouches for in full is `ok`, and anything else makes
+      # the receipt report an incomplete save rather than a verified one.
+      local outcome_quality
+      outcome_quality=$(sed -n '2p' "$outcome")
       quality=ok
-      if [ "$(sed -n '2p' "$outcome")" = truncated ]; then
-        quality=truncated
-      elif [ "$(sed -n '2p' "$outcome")" = unreadable ]; then
-        quality=unreadable
-      fi
+      case "$outcome_quality" in
+        truncated|unreadable|incomplete) quality=$outcome_quality ;;
+      esac
       if ! has_event "$id" saved "$seq"; then
         journal_append "$id" \
           "$(printf 'saved\t%s\t%s\t%s\t%s\t%s' "$seq" "$(date +%s)" "${closed:-0}" "${skipped:-0}" "$quality")" || true
@@ -537,10 +545,12 @@ receipt_build_text() {  # <source-id>
       continue
     fi
     if [ "$choices" = 0 ] && [ "$messages" = 0 ]; then
-      # A round journaled with no answers and no message is a comment-only
-      # submission: the acknowledgement is the point, and it must not claim
-      # answers that were not there.
-      out+="Round $n: received your written comment at $(fmt_utc "$epoch")"$'\n'
+      # A round journaled with no answers and no message carries no content
+      # this record can describe - a comment-only board, or one holding only
+      # pure annotations the captain never typed into. The acknowledgement is
+      # the point, and the wording must claim neither answers nor prose that
+      # were not there.
+      out+="Round $n: received your submission at $(fmt_utc "$epoch")"$'\n'
       continue
     fi
     answers_word="$choices answer"
@@ -867,11 +877,12 @@ cmd_silent() {
 #               fits, including the long legacy `<origin>-decision-<key>`
 #               identities pre-collapse decks still carry; the security property
 #               is the slug SHAPE, which is unchanged.
-#   submission  print `choices<TAB>messages<TAB>sha256` summarizing every queued
-#               row (no output when the result carries no prompts section): the
-#               per-tag counts and a content digest over each row's tag, prompt,
-#               and text - the exact-submission identity a replay is detected
-#               by, stable across DOM uids and selectors.
+#   submission  print `choices<TAB>messages<TAB>rows<TAB>sha256` summarizing every
+#               queued row (no output when the result carries no prompts
+#               section): the per-tag counts, the total row count, and a content
+#               digest over each row's tag, prompt, and text - the
+#               exact-submission identity a replay is detected by, stable across
+#               DOM uids and selectors.
 perl_rows() {  # <answers|submission> <result-file>
   local mode=${1-} file=${2-}
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"

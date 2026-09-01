@@ -822,7 +822,8 @@ cmd_start() {
     extension_lifecycle_lock_release 2>/dev/null || true
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
     [ -z "$RECEIPT_OUTCOME" ] \
-      || rm -f -- "$RECEIPT_OUTCOME" "$RECEIPT_OUTCOME.gen" "$RECEIPT_OUTCOME.body"
+      || rm -f -- "$RECEIPT_OUTCOME" "$RECEIPT_OUTCOME.gen" "$RECEIPT_OUTCOME.body" \
+        "$RECEIPT_OUTCOME.tmp"
     fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
@@ -1461,15 +1462,18 @@ cmd_retire() {
   rm -f -- "$(runner_file "$id")"
   # The receipts record is part of this runner's per-source layout (its bytes
   # belong to the source's adapter), so it is cleaned with the registration.
-  # The removal takes the adapter's receipts lock first, in the established
-  # order (source lock, then receipts lock), so a writer already holding that
-  # lock cannot append the record back into existence after the unlink.
+  # The removal takes the adapter's receipts lock so a writer already holding
+  # it cannot append the record back into existence after the unlink - but only
+  # if the lock is free. The adapter's own receipt seam takes the receipts lock
+  # before the source lock, so waiting for it here, under the source lock, would
+  # be a lock-order inversion that can never resolve. A busy record is simply
+  # left in place: the sweep boundary reclaims an unregistered record later.
   if [ -e "$(fm_procevent_receipts_path "$STATE" "$id")" ] \
     || [ -L "$(fm_procevent_receipts_path "$STATE" "$id")" ]; then
-    fm_lock_acquire_wait "$(fm_procevent_receipts_lock_path "$STATE" "$id")" \
-      || die "cannot lock the receipts record for retirement: $id"
-    rm -f -- "$(fm_procevent_receipts_path "$STATE" "$id")"
-    fm_lock_release "$(fm_procevent_receipts_lock_path "$STATE" "$id")"
+    if fm_lock_try_acquire "$(fm_procevent_receipts_lock_path "$STATE" "$id")"; then
+      rm -f -- "$(fm_procevent_receipts_path "$STATE" "$id")"
+      fm_lock_release "$(fm_procevent_receipts_lock_path "$STATE" "$id")"
+    fi
   fi
   fm_procevent_source_lock_release "$id"
   # A retired source produces no further answer, so drop any decision binding it
