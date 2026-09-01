@@ -614,16 +614,16 @@ test_create_task_refuses_duplicate_label() {
 
 # --- historical label duplicate guard ---------------------------------------
 
-test_create_task_refuses_historical_task_labels_when_live() {
+test_create_task_refuses_exact_task_labels_when_live() {
   local dir case_dir log resp fb out status kind duplicate_label current_label
-  dir="$TMP_ROOT/dup-historical-live"; current_label='NeoMD I/F/A instant (fm-css)'
-  for kind in legacy human; do
+  dir="$TMP_ROOT/dup-exact-live"; current_label='NeoMD I/F/A instant (fm-css)'
+  for kind in legacy current; do
     case_dir="$dir/$kind"; log="$case_dir/log"; resp="$case_dir/responses"
     mkdir -p "$resp"; : > "$log"
     if [ "$kind" = legacy ]; then
       duplicate_label='fm-fm-css'
     else
-      duplicate_label='Old title (fm-css)'
+      duplicate_label="$current_label"
     fi
     printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"%s","workspace_id":"w1"}]}}\n' \
       "$duplicate_label" > "$resp/1.out"
@@ -635,39 +635,55 @@ test_create_task_refuses_historical_task_labels_when_live() {
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css' \
       "$ROOT" "$current_label" 2>&1 )
     status=$?
-    [ "$status" -ne 0 ] || fail "$kind historical task label with a live agent must refuse a duplicate launch"
-    assert_contains "$out" "already exists" "$kind historical task label live duplicate refusal was not reported"
+    [ "$status" -ne 0 ] || fail "$kind exact task label with a live agent must refuse a duplicate launch"
+    assert_contains "$out" "already exists" "$kind exact task label live duplicate refusal was not reported"
     assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
-      "$kind historical task label live duplicate triggered a second tab"
+      "$kind exact task label live duplicate triggered a second tab"
   done
-  pass "fm_backend_herdr_create_task: refuses live legacy and prior human-readable labels for the same task id"
+  pass "fm_backend_herdr_create_task: refuses live current and legacy task labels"
 }
 
-test_create_task_replaces_historical_task_label_husks() {
+test_create_task_replaces_legacy_task_label_husk() {
   local dir log resp fb out current_label
-  dir="$TMP_ROOT/dup-historical-husks"; log="$dir/log"; resp="$dir/responses"
+  dir="$TMP_ROOT/dup-legacy-husk"; log="$dir/log"; resp="$dir/responses"
   current_label='NeoMD I/F/A instant (fm-css)'
   mkdir -p "$resp"; : > "$log"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-fm-css","workspace_id":"w1"},{"tab_id":"w1:t3","label":"Old title (fm-css)","workspace_id":"w1"}]}}\n' > "$resp/1.out"
-  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-fm-css","workspace_id":"w1"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/2.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/3.out"
-  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' > "$resp/4.out"
-  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3"}}}' > "$resp/5.out"
-  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/6.out"
-  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t4"},"root_pane":{"pane_id":"w1:p4"}}}' > "$resp/7.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"%s","workspace_id":"w1"}]}}\n' \
-    "$current_label" > "$resp/10.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}' > "$resp/4.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"%s","workspace_id":"w1"}]}}\n' \
+    "$current_label" > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css' \
     "$ROOT" "$current_label" ) \
-    || fail "agent-free historical task labels should be replaced by the current human-readable label"
-  [ "$out" = 'w1:t4 w1:p4' ] || fail "historical task-label husks returned the wrong replacement ids: $out"
+    || fail "an agent-free legacy task label should be replaced by the current human-readable label"
+  [ "$out" = 'w1:t3 w1:p3' ] || fail "the legacy task-label husk returned the wrong replacement ids: $out"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' \
     "the legacy task-label husk was not closed"
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' \
-    "the prior human-readable task-label husk was not closed"
-  pass "fm_backend_herdr_create_task: replaces only proven husks across legacy and human-readable labels"
+  pass "fm_backend_herdr_create_task: replaces only a proven legacy task-label husk"
+}
+
+test_create_task_ignores_unrelated_human_label_with_same_id() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/dup-unrelated-human"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$resp"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","label":"Meeting (draft)","workspace_id":"w1"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" draft' \
+    "$ROOT" 'Neo (draft)' ) \
+    || fail "an unrelated human label with the same id should not block task creation"
+  [ "$out" = 'w1:t2 w1:p2' ] || fail "unrelated human label caused the wrong task ids: $out"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''Neo (draft)' \
+    "the current human-readable task tab was not created"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' \
+    "an unrelated human label was treated as a husk and closed"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane' \
+    "an unrelated human label was inspected as a duplicate"
+  pass "fm_backend_herdr_create_task: ignores an unrelated human label sharing the task id"
 }
 
 test_create_task_refuses_when_historical_husk_remains() {
@@ -2973,20 +2989,20 @@ test_list_live_scoped_to_this_homes_workspace_only() {
   pass "fm_backend_herdr_list_live: scoped to this home's own workspace, never a sibling home's"
 }
 
-test_list_live_discovers_new_human_readable_task_labels() {
+test_list_live_ignores_unowned_human_readable_task_labels() {
   local dir log resp fb out
   dir="$TMP_ROOT/list-live-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"NeoMD I/F/A instant (fm-css)","workspace_id":"w1"},{"tab_id":"w1:t2","label":"Captain notes","workspace_id":"w1"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"NeoMD I/F/A instant (fm-css)","workspace_id":"w1"},{"tab_id":"w1:t2","label":"Meeting (draft)","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-legacy","workspace_id":"w1"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
-  assert_contains "$out" $'fmtest:w1:p1\tNeoMD I/F/A instant (fm-css)' \
-    "list_live did not discover a new human-readable task label"
-  assert_not_contains "$out" "Captain notes" \
-    "list_live treated an unrelated tab as a task"
-  pass "fm_backend_herdr_list_live: discovers new human-readable task labels and ignores unrelated tabs"
+  [ "$out" = $'fmtest:w1:p3\tfm-legacy' ] \
+    || fail "list_live should report only legacy task labels, got '$out'"
+  assert_not_contains "$out" "Meeting (draft)" \
+    "list_live treated an unrelated human label as a task"
+  pass "fm_backend_herdr_list_live: ignores unowned human-readable labels and keeps legacy discovery"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -4623,8 +4639,9 @@ test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
-test_create_task_refuses_historical_task_labels_when_live
-test_create_task_replaces_historical_task_label_husks
+test_create_task_refuses_exact_task_labels_when_live
+test_create_task_replaces_legacy_task_label_husk
+test_create_task_ignores_unrelated_human_label_with_same_id
 test_create_task_refuses_when_historical_husk_remains
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
@@ -4697,7 +4714,7 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_task_label_is_human_readable_and_id_bound
 test_list_live_scoped_to_this_homes_workspace_only
-test_list_live_discovers_new_human_readable_task_labels
+test_list_live_ignores_unowned_human_readable_task_labels
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read

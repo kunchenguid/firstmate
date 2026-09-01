@@ -52,9 +52,8 @@
 #
 # Authoritative task recovery/orphan discovery (ids may not deterministically match live state
 # after a server restart in a differently-configured session; see the
-# verification doc) uses LABEL matching (legacy fm-<id> or new
-# <short-title> (<id>) tab labels), never trusts a stored pane id blindly:
-# fm_backend_herdr_list_live. The presentation journal
+# verification doc) uses LABEL matching for legacy fm-<id> tab labels, never
+# trusts a stored pane id blindly: fm_backend_herdr_list_live. The presentation journal
 # is deliberately excluded from that path.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
@@ -2047,14 +2046,13 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
   dup_tabs=$(printf '%s' "$list" | jq -r \
     --arg want "$label" --arg task_id "$task_id" \
-    --arg legacy "fm-$task_id" --arg suffix " ($task_id)" '
+    --arg legacy "fm-$task_id" '
       if (.result.tabs | type) == "array" then
         .result.tabs[]
         | select((.label | type) == "string")
         | select(
             .label == $want
             or ($task_id != "" and .label == $legacy)
-            or ($task_id != "" and .label != $suffix and (.label | endswith($suffix)))
           )
         | .tab_id
       else error("missing result.tabs") end
@@ -2101,14 +2099,13 @@ EOF
     fi
     remaining_dup_tabs=$(printf '%s' "$list" | jq -r \
       --arg want "$label" --arg task_id "$task_id" \
-      --arg legacy "fm-$task_id" --arg suffix " ($task_id)" \
+      --arg legacy "fm-$task_id" \
       --arg replacement "$tab_id" '
         .result.tabs[]?
         | select((.label | type) == "string")
         | select(
             .label == $want
             or ($task_id != "" and .label == $legacy)
-            or ($task_id != "" and .label != $suffix and (.label | endswith($suffix)))
           )
         | select(.tab_id != $replacement)
         | .tab_id
@@ -3181,8 +3178,7 @@ EOF
 }
 
 # fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label looks like a firstmate task window (legacy fm-<id>, or the new
-# human-readable `<short title> (<id>)` form) in <session>'s, THIS
+# label is a legacy fm-<id> firstmate task window in <session>'s, THIS
 # HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
 # home's), by LABEL - never by trusting a stored pane id, since ids are not
 # guaranteed stable across every server lifecycle (see herdr-verification-p2.md
@@ -3205,7 +3201,7 @@ fm_backend_herdr_list_live() {  # <session>
   done < <(printf '%s' "$tabs" | jq -r '
     .result.tabs[]?
     | select((.label | type) == "string")
-    | select((.label | startswith("fm-")) or (.label | test("\\([A-Za-z0-9._-]+\\)$")))
+    | select(.label | startswith("fm-"))
     | "\(.tab_id)\t\(.label)"
   ' 2>/dev/null)
 }
