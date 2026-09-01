@@ -111,6 +111,7 @@ init_changed_fixture_repo() {
     fm-pr-merge.test.sh \
     fm-procevent-quota.test.sh \
     fm-quota-choose.test.sh \
+    fm-pavel-ops.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
@@ -233,6 +234,16 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  for pavel_helper in bin/fm-pavel-status.py bin/fm-procevent-pavel-telegram.sh; do
+    mkdir -p "$repo/bin"
+    printf 'changed\n' >"$repo/$pavel_helper"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+    assert_contains "$listed" "tests/fm-pavel-ops.test.sh" "$pavel_helper selects Pavel behavior coverage"
+    assert_contains "$listed" "tests/fm-session-start.test.sh" "$pavel_helper selects session wake coverage"
+    git -C "$repo" add "$pavel_helper"
+    git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm "pavel-helper-${pavel_helper##*/}"
+  done
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

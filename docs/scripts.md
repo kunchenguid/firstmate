@@ -29,6 +29,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-backlog-handoff.sh`  | Move queued backlog items into a secondmate home and durably wake its recorded receiver |
 | `fm-backlog-receive.sh`  | Idempotently ingest one confined remote handoff outbox through tasks-axi             |
 | `fm-captain-hold.sh`     | Hold tasks for the captain, record the captain's answers, gate investigation completion, and report record divergence between the status log and the backlog |
+| `fm-pavel-ops.sh`        | Persist and recover the opt-in Pavel Telegram intake, delegated authority, delivery lifecycle, and live-completion receipts |
 | `fm-decision-hold.sh`    | One-release compatibility shim mapping the retired decision commands onto fm-captain-hold.sh |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, and Herdr-lab briefs   |
 | `fm-dod-lib.sh`          | One owner of the ship task's mode-specific definition of done, rendered by both the brief scaffold and a scout promotion |

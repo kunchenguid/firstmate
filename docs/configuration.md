@@ -107,6 +107,81 @@ A `manual` home owns its backlog file outright: the lifecycle transitions above 
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Pavel operations loop (config/pavel-ops.json)
+
+`config/pavel-ops.json` opts one home into the autonomous Pavel business-operations loop owned by the internal `pavel-ops` skill and `bin/fm-pavel-ops.sh`.
+The file is local, gitignored, and not inherited into secondmate homes.
+An absent file keeps the feature inert.
+A present file must be a single-linked regular JSON file with this schema:
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "principal": "Pavel",
+  "project": "aln",
+  "project_path": "projects/aln",
+  "sender_ids": ["2087379565"],
+  "chat_ids": ["-5550358141"],
+  "worker": {
+    "harness": "pi",
+    "mode": "no-mistakes",
+    "yolo": "on"
+  },
+  "budget": {
+    "per_action_rub": 0,
+    "per_day_rub": 0
+  },
+  "delivery": {
+    "live_url": "https://aln.example/product",
+    "deploy_command": "/absolute/path/to/deploy-wrapper",
+    "live_check_command": "/absolute/path/to/live-check-wrapper",
+    "completion_text": "Готово: изменение уже на сайте."
+  },
+  "telegram": {
+    "env_file": "/absolute/private/path/to/telegram.env",
+    "token_key": "TERENTYEV_BOT_TOKEN",
+    "outbound_chat_id": "-5550358141"
+  }
+}
+```
+
+`sender_ids` and `chat_ids` are non-empty string arrays and form the intake allowlist.
+When present, `telegram.outbound_chat_id` must name one of those allowed chats.
+The worker tuple is intentionally fixed to the verified Pi adapter, no-mistakes delivery, and standing autonomous merge authority for this delegated scope.
+Any other tuple is rejected instead of falling back to Claude or returning routine Pavel PRs to per-PR captain approval.
+When `project_path` is absent, the driver resolves `project` as `projects/<project>` under the Firstmate home; an explicit `project_path` may be absolute or home-relative, but it must resolve to a dedicated git checkout.
+The optional `budget` object records non-negative bounded spending authority in operator-chosen fields such as `per_action_rub` and `per_day_rub`.
+An absent or zero bound grants no spending authority, and spending outside every applicable positive bound remains a captain-only decision.
+The optional `delivery` object records the concrete post-merge deploy and customer-surface verification contract.
+When present, `deploy_command` is run with the task id after a confirmed merge, and `live_check_command` is run with a path to a bounded JSON payload containing the Pavel event id, task id, accepted intent, original source digest, durable Pavel clarification/resolution evidence, PR URL/head, and candidate live URL.
+The live-check owner must return a JSON `fm-pavel-ops-live-proof.v1` object with `verified: true` and the same event id, task id, live URL, and intent digest.
+Without a live-check command, the event must carry its own `live_probe.expected` text contract; global expected or absent text alone is not delivery authority.
+The driver never accepts a precomputed `state=live` claim as proof.
+The Telegram credential file must be an absolute, single-linked regular file containing the configured token key in `KEY=value` form.
+The production API endpoint is fixed to `https://api.telegram.org`; `telegram.api_base` is accepted only when `FM_PAVEL_OPS_TESTING=1` so tests can use a local fake without allowing a production config to redirect the token.
+
+`bin/fm-pavel-ops.sh collect` is the post-cutover Telegram `getUpdates` owner.
+For each Pavel message, including replies, acknowledgements, edited-message events, captions, and attachment metadata, it converts the update into the same immutable `ingest` JSON contract and advances its Telegram update offset only after that update is durably handled.
+The immutable identity is the Telegram chat plus `update_id`, so a collector retry is harmless and an edit remains a distinct auditable event.
+The collector no longer invokes a separate Claude autoresponder or writes a second task store.
+Outbound acknowledgement, clarification, answer, and live-completion messages use the configured Telegram Bot API through `bin/fm-pavel-ops.sh send`, which keeps their delivery receipts beside the event lifecycle.
+
+Session start runs `bin/fm-pavel-ops.sh arm-collector` and `recover --startup` before wake presentation when this config exists and the session owns the home.
+Arming registers one home-identity-bound process-event source; watcher reconciliation starts or recovers the long-polling collector child later, keeping Telegram network I/O off the blocking session-start path and preserving one `getUpdates` owner.
+That local recovery republishes captured, orphaned active-delivery, landed, and live-but-unnotified work and surfaces retryable or delivery-unknown Telegram sends without network access.
+The Pi primary and its tracked supervision extensions then handle each `pavel-ops-...` check wake under the `pavel-ops` skill by calling `bin/fm-pavel-ops.sh drive <event-id>`.
+The driver composes the existing Firstmate brief, Pi spawn, worker-state, task metadata PR record, PR registration, guarded merge, confirmed merge-outcome marker, deploy command, and live-verification owner before recording delivery progress.
+The default structured readiness helper authorizes delivery only from `run-step` status whose task metadata still names `harness=pi`, `mode=no-mistakes`, `yolo=on`, `kind=ship`, the configured project, the matching endpoint task id, and a live isolated git worktree whose current `HEAD` equals the canonical PR head.
+Immediately before merge it requires fresh structured delivery-ready or done status for the same canonical PR/head, and `landed` is recorded only after the merge marker and a fresh forge read both confirm the frozen PR URL/head.
+Live-completion receipts are scoped by the frozen PR URL/head, so an older receipt cannot satisfy or block a notification for a later head.
+
+Before replacing a legacy Pavel watcher or stale tgsync route, run `bin/fm-pavel-ops.sh migration-audit` with the legacy pending queue and project clone paths.
+Use `adopt-task` to link existing paused Pavel backlog rows at their already-proved lifecycle fact without recreating or closing them.
+A clone ahead of its remote default branch must have its head preserved on a dedicated branch and shipped independently before guarded fleet sync.
+The migration commands never reset, clean, force-push, merge, or remove the clone, and they never treat a local commit as deployed.
+After the new intake path has been exercised with replayed test events, stop the old Claude autoresponder and stale-path tgsync timer so one Telegram event has one task-lifecycle owner.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.

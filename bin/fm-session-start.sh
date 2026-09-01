@@ -36,9 +36,10 @@
 #                       handoff retry, X-mode artifact writes, fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
-#   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
-#                       reconciliation before presenting durable wakes and advancing
-#                       recovery handling state, so both only run when locked.
+#   3. local recovery + wake-drain - runs the bounded inactive-outcome
+#                       reconciliation and any configured Pavel-operations recovery
+#                       before presenting durable wakes and advancing recovery handling
+#                       state, so all run only when locked.
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -695,10 +696,12 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. inactive outcomes + wake-drain -----------------------------------
+# --- 3. local recovery + wake-drain --------------------------------------
 # The existing locked session-start path runs the same local inactive-outcome
 # reconciliation as the watcher poll before it presents the resulting durable
-# wake, without adding a daemon or external-network call.
+# wake, without adding a daemon or external-network call. An opted-in Pavel
+# operations home also repairs missing local intake wakes and surfaces uncertain
+# outbound receipts through that feature's own owner before the same drain.
 # Presented records are this turn's first work queue and remain durable until
 # post-handling acknowledgement. The drain's separate OPEN DECISIONS section
 # remains actionable even when that queue is empty (AGENTS.md sections 3 and 8).
@@ -721,6 +724,18 @@ else
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan --startup 2>&1) || INACTIVE_OUT=
   if [ -n "$INACTIVE_OUT" ]; then
     printf 'inactive outcome reconciliation: %s\n' "$INACTIVE_OUT"
+  fi
+  if [ -f "$CONFIG/pavel-ops.json" ]; then
+    PAVEL_ARM_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-pavel-ops.sh" arm-collector 2>&1) || true
+    if [ -n "$PAVEL_ARM_OUT" ]; then
+      printf '%s\n' "$PAVEL_ARM_OUT"
+    fi
+    PAVEL_RECOVERY_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-pavel-ops.sh" recover --startup 2>&1) || true
+    if [ -n "$PAVEL_RECOVERY_OUT" ]; then
+      printf '%s\n' "$PAVEL_RECOVERY_OUT"
+    fi
   fi
   # Pi supervision-branch recovery, locked path only: clear leases whose
   # supervising session died, and surface outcomes the branch stored durably

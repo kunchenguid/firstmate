@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
+  pull_request_target:
     branches: [main]
 
 permissions:
@@ -15,6 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -39,6 +42,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: Prove complete regression partition
         run: bin/fm-test-run.sh --check-coverage
 
@@ -53,6 +59,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - name: Install pinned ShellCheck
         run: |
@@ -90,6 +98,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - name: Install pinned ShellCheck
         run: |
@@ -141,6 +151,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - name: Install pinned ShellCheck
         run: |
@@ -200,6 +212,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - name: Require tools for real Herdr
         run: |
@@ -320,6 +334,9 @@ jobs:
     if: always()
     steps:
       - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: Download lane timing artifacts
         uses: actions/download-artifact@v4
         with:
@@ -353,6 +370,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: Run snapshot consumers with stock Bash
         shell: /bin/bash {0}
         env:
@@ -412,6 +432,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
       - name: Compatibility pointers must stay intact
         run: |
           set -eu

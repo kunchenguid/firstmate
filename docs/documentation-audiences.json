@@ -213,6 +213,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/pavel-ops/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },
