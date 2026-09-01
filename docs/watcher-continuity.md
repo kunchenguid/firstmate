@@ -36,9 +36,12 @@ This is deliberate Option B ordering: the fleet is protected before the model ha
 
 Pi's fixed follow-up dock gained one queued row per ordinary watcher notification, so a burst of actionable closes during one long handling turn could bury the conversation under rows even though every event was already durable in the wake queue.
 The Pi adapter therefore separates presentation from delivery: while one ordinary work-waiting row is pending, later ordinary wakes add no row, because the pending row already directs the model to run `bin/fm-wake-drain.sh` over the durable queue.
-Coalescing never costs a wake: the run that consumes or discards the pending row re-arms presentation, so a genuinely later wake still presents one new row, and a replacement session presents fresh.
+The run that consumes or discards the pending row re-arms presentation, so a genuinely later wake still presents one new row, and a replacement session presents fresh.
+Suppression is bounded by the run that consumed or discarded the row: the latch never outlives it, so no wake is suppressed indefinitely and no generation is left blind.
+A wake arriving after an inline follow-up drain but before that run settles is suppressed for the remainder of that one run.
+Every suppressed event stays durable in the wake queue regardless, and the drain presents it.
 Urgent supervision failures bypass the latch and always surface as their own row, including a typed continuity-restoration failure that rides the ordinary delivery branch.
-Only presentation coalesces: the durable wake queue still receives every event, and nothing is acknowledged, truncated, or delayed by the latch.
+Only presentation coalesces: the durable wake queue still receives every event, and the latch acknowledges and truncates nothing; holding a row back from the dock is the whole of what it does.
 Pi gives an extension no way to see that a wake failed to deliver, so a failed send can leave presentation held until the next run starts or settles, in practice the next captain turn; the durable queue still holds the event throughout.
 The pending-row latch lifecycle, the run boundaries that re-arm it, and the `watcher: FAILED` urgency marker every failure text must carry follow the presentation-coalescing contract in `.pi/extensions/fm-primary-pi-watch.ts`.
 Coalescing is Pi-specific because the accumulating dock is; the other primaries deliver a wake as a single turn-boundary message or as the return of the one blocking command the session is already waiting on.
