@@ -322,6 +322,27 @@ Write the brief per section 11.
 
 ### Wardroom: a brief must be vetted before it spawns
 
+**The structural half runs first, and it needs no model.** Before the council
+and before any pane, worktree or meta exists, `bin/fm-spawn.sh` preflights the
+brief through `bin/fm-preflight-lib.sh` and refuses one that names work the
+crewmate physically cannot do: a **gitignored** path (not in its worktree, and
+no commit can move or delete it), an unsanctioned path under the firstmate
+**primary checkout** (denied to crewmates by the permission profile), an
+**invocation** of `fm-home-seed.sh` or `fm-spawn.sh` (both lease from the live
+treehouse pool whatever `FM_HOME` says, so a "test" run leaks a durable lease
+into the captain's pool), or the retired `>>` **status redirect** (silently
+discarded, so the pane just looks idle). The refusal names the offending path or
+command and says why - a refusal that only said "invalid brief" would cost
+another cycle to diagnose, which is half of what this saves. Scouts are covered;
+secondmates are exempt, because a secondmate home is a firstmate home where
+`data/` and `state/` are its own to operate. A path that merely *resembles* one
+of these is not a match, and a MENTION of a pool-leasing script is not an
+invocation of it - a brief that asks a crewmate to change one of those scripts
+is ordinary work. Ask the same question yourself with
+`bash bin/fm-preflight-lib.sh <brief> <project-dir> <id>`. Captain bypass, loud
+and logged: `FM_PREFLIGHT_OVERRIDE=1`. Spec:
+`docs/specs/2026-08-31-brief-preflight.md`.
+
 A filled ship brief goes to the intake council, not straight to a crewmate. Run
 `bin/fm-intake.sh <id> <project-dir>`: a foreign deep lens (Fugu ultra ->
 codex -> none, degrading loudly) reads the brief, then two thinker lenses

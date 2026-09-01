@@ -14,6 +14,9 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch after treehouse get unless the resolved pane
 #   path is a real git worktree root distinct from the primary project checkout.
+#   Ship/scout spawns are also refused BEFORE anything is created when the brief
+#   names work the crewmate cannot do - see the preflight below and
+#   bin/fm-preflight-lib.sh.
 #   --name <work> supplies the WORK half of the pane name; the project is
 #   prefixed automatically, giving <project>-<work> under 28 chars
 #   (afs-resource-registry, mac-config-cutover-guard). Absent, the work half is
@@ -362,6 +365,23 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+# Preflight: the STRUCTURAL half of the Wardroom, and the cheapest gate in the
+# lifecycle. It refuses a brief that names work the crewmate physically cannot
+# do - a gitignored path that is not in its worktree, a primary-checkout path
+# the permission profile denies it, a pool-leasing command that would leak a
+# durable lease into the captain's pool, or the retired `>>` status redirect
+# whose reports are silently discarded - and it names the offending path or
+# command. It runs BEFORE the intake council because it needs no model at all,
+# and it covers scouts, which the council exempts. Secondmates are exempt: their
+# brief is a charter and their home is a firstmate home, where data/ and state/
+# are theirs to operate. FM_PREFLIGHT_OVERRIDE=1 is the captain's loud, logged
+# bypass. Spec: docs/specs/2026-08-31-brief-preflight.md.
+if [ "$KIND" != secondmate ]; then
+  # shellcheck source=bin/fm-preflight-lib.sh
+  . "$SCRIPT_DIR/fm-preflight-lib.sh"
+  fm_brief_preflight_require "$BRIEF" "$PROJ_ABS" "$ID" fm-spawn
+fi
 
 # Wardroom: a ship task may not spawn until the intake council has proceeded -
 # the last decision line of state/<id>.intake must be `proceed:` (bin/fm-intake.sh

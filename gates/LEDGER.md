@@ -50,3 +50,5 @@
 | gate-t1-proceed-rate-nonzero | green | The council reports its own proceed rate: a structurally zero rate over a meaningful sample is a fault, not strictness |
 | gate-q8-gate-classifier | frozen | Gate classifier: red AND declared is acceptable, frozen is acceptable, absence cases explicit, pure and fail-closed |
 | gate-q9-verify-honours-declared-red | frozen | Quarterdeck honours gates/accepted-red.md, ahead of both models |
+| gate-t1-brief-preflight-rules | green | Brief preflight rules: each rule refuses with the offender named, and the clean brief still passes |
+| gate-t1-brief-preflight-spawn-gate | green | Brief preflight spawn gate: an impossible brief is refused before anything is created |

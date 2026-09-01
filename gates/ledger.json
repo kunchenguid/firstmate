@@ -727,6 +727,40 @@
       "regression": false,
       "created": "2026-08-29T00:00:00Z",
       "last_verified": "2026-08-29T21:29:27.508Z"
+    },
+    {
+      "id": "gate-t1-brief-preflight-rules",
+      "title": "Brief preflight rules: each rule refuses with the offender named, and the clean brief still passes",
+      "observable": "fm_brief_preflight refuses one committed fixture brief per rule - a gitignored project path, an unsanctioned path under the firstmate primary checkout, a pool-lease (an invocation of fm-home-seed.sh or fm-spawn.sh written as code, and an FM_HOME=$(mktemp -d) assignment claiming an isolation FM_HOME cannot provide), and the retired >> status redirect or a .status path named without bin/fm-status.sh - naming the offending path or command and the reason in every case; passes the clean fixture; passes the lookalike fixture holding every near-miss - a sibling dir whose name merely prefixes the primary checkout, a .bak and a differently-named script, a code span naming a pool-leasing script with no arguments, and three PROSE citations that a naive check reads as invocations (an interpreter word, a ./ path, and an interpreter that belongs to the sentence rather than to the code span); sanctions this task's own material under a glob (state/<id>.* and bin/*.sh) while refusing a glob that widens past it (data/*/brief.md, another task's state file, and the whole checkout); passes the real ship and scout scaffolds bin/fm-brief.sh writes, including from a home under the system temp dir; treats a non-git project as inapplicable for the gitignored rule while still running the other rules; and refuses an unreadable brief",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-08-31-brief-preflight.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-wardroom-t1-preflight-rules.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-09-01T02:52:26.202Z",
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-08-31T00:00:00Z",
+      "last_verified": "2026-09-01T02:54:03.625Z",
+      "mutation_verified": null
+    },
+    {
+      "id": "gate-t1-brief-preflight-spawn-gate",
+      "title": "Brief preflight spawn gate: an impossible brief is refused before anything is created",
+      "observable": "fm-spawn refuses a ship or scout task whose brief names work the crewmate cannot do, printing the PREFLIGHT banner with the offender named, ahead of the wardroom gate and before any pane, worktree or meta exists; a clean ship brief and a lookalike scout brief pass the preflight; FM_PREFLIGHT_OVERRIDE=1 bypasses with its own loud banner and no refusal; a secondmate charter is exempt",
+      "origin_mode": "build",
+      "spec_ref": "docs/specs/2026-08-31-brief-preflight.md",
+      "blocked_by": [],
+      "test_ref": "bash tests/fm-wardroom-t1-preflight-spawn.test.sh",
+      "baseline_ref": null,
+      "first_observed_red": "2026-09-01T02:52:26.202Z",
+      "status": "green",
+      "vacuous": false,
+      "regression": false,
+      "created": "2026-08-31T00:00:00Z",
+      "last_verified": "2026-09-01T02:54:03.625Z",
+      "mutation_verified": null
     }
   ]
 }
