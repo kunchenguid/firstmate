@@ -549,4 +549,66 @@ assert_contains "$(sed -n '2p' "$STUB_LOG")" "received 1 answer" \
   "the presented receipt lost the recovered round"
 pass "reconcile recovers the receipt seam a runner died before reaching"
 
+# --- a runner that died after its intake returned keeps that round's verdict --
+# The dead runner of the case above may have got one step further: far enough
+# for the keyed-answer intake to return and be written down, and not far enough
+# to journal it. That verdict is then a durable fact of the crashed generation,
+# so recovery must present it rather than silently drop the round's Saved state
+# forever - and it must only ever read it as the round it actually belongs to.
+H11=$(make_home h11)
+RECEIPT_HOME=$H11
+ART11="$TMP_ROOT/deck11.html"
+printf '<h1>deck</h1>\n' > "$ART11"
+RECEIPT_SID=$(run_lavish "$H11" source-id "$ART11")
+tasks_in "$H11" add deck-alpha "Alpha call" --kind ship --repo sample --body 'Alpha plan.' >/dev/null
+run_captain "$H11" hold deck-alpha --reason "alpha choice pending" >/dev/null
+install_stub
+# One round only: every later poll finds nothing, so the source stays armed and
+# reconcile can be run as often as the recovery needs without capturing again.
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')
+$(choice_row 3 deck-beta hold 'Beta')"
+run_captain "$H11" bind "$RECEIPT_SID" >/dev/null
+run_lavish "$H11" arm "$ART11" >/dev/null
+journal="$H11/state/procevent/$RECEIPT_SID.receipts"
+result="$H11/state/procevent-inbox/$RECEIPT_SID.1.result"
+reconcile_once
+wait_i=0
+while [ ! -e "$result" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+wait_claim_free
+[ -e "$result" ] || fail "the submitted round was never captured"
+live_saved=$(awk -F '\t' '$1 == "saved" && $2 == 1 { printf "%s/%s/%s", $4, $5, $6 }' "$journal")
+[ "$live_saved" = "1/1/ok" ] || fail "the live capture did not journal its own verdict: $live_saved"
+# Roll the durable state back to the instant after that runner's intake returned
+# and before its seam ran: the capture and the applied answers stand, the
+# receipt facts and the seam's own note are gone, and the generation's staged
+# intake outcome is still where the killed runner left it.
+staged="$H11/state/procevent/.$RECEIPT_SID.dead-token.rcpt.output"
+crash_state() {  # <generation-the-staged-outcome-claims>
+  rm -f "$journal" "$H11/state/procevent-inbox/$RECEIPT_SID.1.receipted"
+  printf 'fed 0\nclosed: deck-alpha\nskipped: deck-beta names no task\n' > "$staged"
+  printf '%s\t%s\n' "$RECEIPT_SID" "$1" > "$staged.gen"
+  chmod 0600 "$staged" "$staged.gen"
+}
+# An outcome that names a different generation proves nothing about this one.
+crash_state 2
+reconcile_until grep -qs '^received' "$journal" \
+  || fail "reconcile never recovered the receipt seam the dead runner owed"
+[ "$(grep -c '^saved' "$journal")" = 0 ] \
+  || fail "recovery presented a save from an outcome belonging to another round"
+# The same outcome, named for the round it really covers, is recovered in full.
+crash_state 1
+reconcile_until grep -qs '^saved' "$journal" \
+  || fail "recovery dropped the verdict the dead runner had already recorded"
+recovered_saved=$(awk -F '\t' '$1 == "saved" && $2 == 1 { printf "%s/%s/%s", $4, $5, $6 }' "$journal")
+[ "$recovered_saved" = "$live_saved" ] \
+  || fail "the recovered verdict differs from the live one: $recovered_saved vs $live_saved"
+[ "$(awk -F '\t' '$1 == "received" { print $4 }' "$journal")" = 2 ] \
+  || fail "the recovered receipt lost the round's answer count"
+answer_lines=$(tasks_in "$H11" show deck-alpha --full | grep -c 'Answer: go' || true)
+[ "$answer_lines" = 1 ] || fail "recovery applied the answer again: recorded $answer_lines times"
+text=$(run_lavish "$H11" receipt-text "$RECEIPT_SID")
+assert_contains "$text" "saved 1 of 2" "the recovered receipt did not state the save it recovered"
+rm -f "$staged" "$staged.gen"
+pass "recovery journals the verdict a dead generation recorded, and only for that generation"
+
 printf '\nall Lavish receipt tests passed\n'
