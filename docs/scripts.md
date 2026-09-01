@@ -120,6 +120,8 @@ The inactive no-mistakes migration gate refusal for fleet lifecycle entrypoints 
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
+| `fm-pr-lifecycle-lock-lib.sh` | Own bounded typed serialization across PR checking, poll publication, watcher retirement, and merging |
+| `fm-pr-ci.sh`            | Require terminal exact-SHA results for the combined classic and effective-ruleset status-check policy |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated GitHub PR-poll sidecars        |
 | `fm-pr-check.sh`         | Authorize a `direct-PR` task, record exact GitHub `pr=`, `pr_head=`, and `pr_green_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Merge a task's canonical GitHub URL, and refuse GitLab as inactive migration compatibility or any GitHub outcome it cannot prove landed or queued |

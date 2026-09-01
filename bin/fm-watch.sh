@@ -117,6 +117,8 @@ mkdir -p "$STATE"
 # worker while adding no uncovered file.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
+# shellcheck source=bin/fm-pr-lifecycle-lock-lib.sh
+. "$SCRIPT_DIR/fm-pr-lifecycle-lock-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
@@ -1400,8 +1402,40 @@ home_summary_refresh_detached() {
   HOME_SUMMARY_PID=$!
 }
 
+PR_WATCH_LIFECYCLE_ID=
+PR_WATCH_META_LOCK=
+PR_WATCH_META_LOCK_HELD=0
+pr_watch_lifecycle_release() {
+  if [ "$PR_WATCH_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$PR_WATCH_META_LOCK" || true
+    PR_WATCH_META_LOCK_HELD=0
+  fi
+  PR_WATCH_META_LOCK=
+  [ -n "$PR_WATCH_LIFECYCLE_ID" ] || return 0
+  fm_pr_lifecycle_lock_release "$STATE" "$PR_WATCH_LIFECYCLE_ID" watch || true
+  PR_WATCH_LIFECYCLE_ID=
+}
+
+pr_watch_lifecycle_acquire() {
+  local id=$1 meta
+  [ -z "$PR_WATCH_LIFECYCLE_ID" ] && [ "$PR_WATCH_META_LOCK_HELD" = 0 ] || return 1
+  fm_pr_lifecycle_lock_acquire "$STATE" "$id" watch || return 1
+  PR_WATCH_LIFECYCLE_ID=$id
+  meta="$STATE/$id.meta"
+  PR_WATCH_META_LOCK=$(fm_meta_lock_path "$meta") || {
+    pr_watch_lifecycle_release
+    return 1
+  }
+  if ! fm_pr_lifecycle_metadata_lock_acquire "$meta"; then
+    pr_watch_lifecycle_release
+    return 1
+  fi
+  PR_WATCH_META_LOCK_HELD=1
+}
+
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
+  pr_watch_lifecycle_release
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
@@ -1437,7 +1471,28 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
-if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+recover_pr_poll_retirements_locked() {
+  local receipt id
+  FM_PR_POLL_RETIREMENT_REJECTED=
+  for receipt in "$STATE"/*.pr-poll-retirement; do
+    [ -e "$receipt" ] || [ -L "$receipt" ] || continue
+    id=$(basename "$receipt" .pr-poll-retirement)
+    if ! fm_pr_task_id_valid "$id" \
+      || ! pr_watch_lifecycle_acquire "$id"; then
+      FM_PR_POLL_RETIREMENT_REJECTED="$FM_PR_POLL_RETIREMENT_REJECTED $receipt"
+      continue
+    fi
+    if fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+      :
+    else
+      FM_PR_POLL_RETIREMENT_REJECTED="$FM_PR_POLL_RETIREMENT_REJECTED $receipt"
+    fi
+    pr_watch_lifecycle_release
+  done
+  [ -z "$FM_PR_POLL_RETIREMENT_REJECTED" ]
+}
+
+if ! recover_pr_poll_retirements_locked; then
   reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
@@ -1581,7 +1636,21 @@ while :; do
       fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
-        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+        if [ "$is_pr_poll" -eq 1 ]; then
+          if ! pr_watch_lifecycle_acquire "$id"; then
+            triage_log "PR lifecycle ownership remained unavailable for watcher result $id"
+            exit 1
+          fi
+          if ! fm_pr_poll_snapshot_matches "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+            triage_log "discarded stale PR poll result after replacement for $id"
+            pr_watch_lifecycle_release
+            continue
+          fi
+          if [ "$out" != merged ]; then
+            rejected_checks="$rejected_checks $c"
+            pr_watch_lifecycle_release
+            continue
+          fi
           merge_outcome_rc=0
           fm_merge_outcome_report "$FM_HOME" "$STATE" "$id" "$url" poll \
             || merge_outcome_rc=$?
@@ -1593,6 +1662,7 @@ while :; do
           touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
+            pr_watch_lifecycle_release
             continue
           fi
           wake "$reason"

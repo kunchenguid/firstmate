@@ -79,6 +79,7 @@ case " $* " in
   *"/branches/"*"/protection"*)
     printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n'
     ;;
+  *"/rules/branches/"*) ;;
   *"/check-runs?"*)
     [ -z "${FM_TEST_GH_CHECK_STARTED:-}" ] || : > "$FM_TEST_GH_CHECK_STARTED"
     [ "${FM_TEST_GH_CHECK_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_CHECK_SLEEP"
@@ -88,6 +89,11 @@ case " $* " in
   *"/status?"*) ;;
   *" baseRefName "*) printf '%s\n' main ;;
   *" state,headRefOid "*)
+    [ -z "${FM_TEST_GH_POLL_STARTED:-}" ] || : > "$FM_TEST_GH_POLL_STARTED"
+    if [ -n "${FM_TEST_GH_POLL_RELEASE:-}" ]; then
+      while [ ! -e "$FM_TEST_GH_POLL_RELEASE" ]; do sleep 0.01; done
+    fi
+    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
     printf '%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     ;;
   *" headRefOid "*)
@@ -96,6 +102,7 @@ case " $* " in
     ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ -z "${FM_TEST_GH_POLL_STARTED:-}" ] || : > "$FM_TEST_GH_POLL_STARTED"
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
     printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
     ;;
@@ -310,6 +317,7 @@ case " $* " in
   *"/branches/"*"/protection"*)
     printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n'
     ;;
+  *"/rules/branches/"*) ;;
   *"/check-runs?"*)
     [ -z "${FM_TEST_GH_CHECK_STARTED:-}" ] || : > "$FM_TEST_GH_CHECK_STARTED"
     [ "${FM_TEST_GH_CHECK_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_CHECK_SLEEP"
@@ -319,6 +327,11 @@ case " $* " in
   *"/status?"*) ;;
   *" baseRefName "*) printf '%s\n' main ;;
   *" state,headRefOid "*)
+    [ -z "${FM_TEST_GH_POLL_STARTED:-}" ] || : > "$FM_TEST_GH_POLL_STARTED"
+    if [ -n "${FM_TEST_GH_POLL_RELEASE:-}" ]; then
+      while [ ! -e "$FM_TEST_GH_POLL_RELEASE" ]; do sleep 0.01; done
+    fi
+    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
     printf '%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     ;;
   *" headRefOid "*)
@@ -400,6 +413,8 @@ run_check_entry() {
   FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     FM_PR_CI_ATTEMPTS=1 FM_PR_CI_INTERVAL=0 \
+    FM_PR_LIFECYCLE_LOCK_ATTEMPTS="${FM_PR_LIFECYCLE_LOCK_ATTEMPTS:-50}" \
+    FM_PR_LIFECYCLE_LOCK_INTERVAL="${FM_PR_LIFECYCLE_LOCK_INTERVAL:-0.1}" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -410,6 +425,8 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_PR_LIFECYCLE_LOCK_ATTEMPTS="${FM_PR_LIFECYCLE_LOCK_ATTEMPTS:-50}" \
+    FM_PR_LIFECYCLE_LOCK_INTERVAL="${FM_PR_LIFECYCLE_LOCK_INTERVAL:-0.1}" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -822,6 +839,11 @@ run_watcher_bounded() {
   shift 2
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+      FM_TEST_GH_HEAD="${FM_TEST_GH_HEAD:-}" FM_TEST_GH_STATE="${FM_TEST_GH_STATE:-}" \
+      FM_TEST_GH_SLEEP="${FM_TEST_GH_SLEEP:-0}" FM_TEST_GH_POLL_STARTED="${FM_TEST_GH_POLL_STARTED:-}" \
+      FM_TEST_GH_POLL_RELEASE="${FM_TEST_GH_POLL_RELEASE:-}" \
+      FM_PR_LIFECYCLE_LOCK_ATTEMPTS="${FM_PR_LIFECYCLE_LOCK_ATTEMPTS:-50}" \
+      FM_PR_LIFECYCLE_LOCK_INTERVAL="${FM_PR_LIFECYCLE_LOCK_INTERVAL:-0.1}" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -1155,6 +1177,146 @@ test_merge_holds_pr_lifecycle_against_concurrent_check() {
   [ -e "$dir/concurrent-check-read" ] \
     || fail "concurrent checker did not proceed after merge lifecycle release"
   pass "merge owns the PR lifecycle through its final forge outcome"
+}
+
+test_stale_watcher_cannot_report_republished_poll() {
+  local dir state head_a head_b watcher_pid i rc
+  dir=$(make_case stale-watcher-republished-poll)
+  state="$dir/home/state"
+  head_a=1111111111111111111111111111111111111111
+  head_b=2222222222222222222222222222222222222222
+  write_task_meta "$dir"
+  FM_TEST_GH_HEAD="$head_a" FM_TEST_GH_CHECK_HEAD="$head_a" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2> "$dir/a.err" \
+    || fail "could not seed the watcher A poll: $(cat "$dir/a.err")"
+  rm -f "$state/.last-check"
+  touch "$state/.inactive-outcome-reconcile"
+
+  FM_TEST_GH_STATE=MERGED FM_TEST_GH_HEAD="$head_a" \
+    FM_TEST_GH_POLL_STARTED="$dir/poll-started" \
+    FM_TEST_GH_POLL_RELEASE="$dir/poll-release" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/poll-started" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ "$i" -lt 200 ] || fail "watcher did not capture poll A"
+
+  FM_TEST_GH_HEAD="$head_b" FM_TEST_GH_CHECK_HEAD="$head_b" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2> "$dir/b.err" \
+    || fail "could not republish watcher poll B: $(cat "$dir/b.err")"
+  add_stop_custom_check "$dir"
+  : > "$dir/poll-release"
+  rc=0
+  wait "$watcher_pid" || rc=$?
+  expect_code 0 "$rc" "stale watcher should continue after poll replacement"
+  assert_no_grep '^check: .*task-a.check.sh: merged$' "$dir/watch.out" \
+    "stale watcher reported the replaced poll A"
+  assert_absent "$state/task-a.pr-poll-merge-notified" \
+    "stale watcher recorded a merge outcome for replaced poll A"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "stale watcher damaged republished poll B"
+  fm_pr_poll_data_parse "$state/task-a.pr-poll" \
+    || fail "republished poll B was unreadable"
+  [ "$FM_PR_DATA_HEAD" = "$head_b" ] || fail "stale watcher replaced poll B with poll A"
+  pass "stale watcher results cannot cross a republished PR poll"
+}
+
+test_watcher_waits_for_inflight_forge_lifecycle() {
+  local dir state head merge_pid watcher_pid i merge_rc watch_rc blocked
+  dir=$(make_case watcher-forge-lifecycle-owner)
+  state="$dir/home/state"
+  head=3333333333333333333333333333333333333333
+  write_task_meta "$dir"
+
+  FM_TEST_GH_HEAD="$head" FM_TEST_GH_CHECK_HEAD="$head" \
+    FM_TEST_GH_MERGE_STARTED="$dir/merge-started" \
+    FM_TEST_GH_MERGE_RELEASE="$dir/merge-release" \
+    run_merge_entry "$dir" task-a https://github.com/o/r/pull/1 \
+      > "$dir/merge.out" 2> "$dir/merge.err" &
+  merge_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/merge-started" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ "$i" -lt 200 ] || fail "merge did not reach its forge lifecycle"
+  add_stop_custom_check "$dir"
+  rm -f "$state/.last-check"
+  touch "$state/.inactive-outcome-reconcile"
+
+  FM_TEST_GH_STATE=MERGED FM_TEST_GH_HEAD="$head" FM_TEST_GH_POLL_STARTED="$dir/poll-started" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/poll-started" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ "$i" -lt 200 ] \
+    || fail "watcher did not read the in-flight merge poll: $(cat "$dir/watch.err")"
+  sleep 0.2
+  blocked=0
+  kill -0 "$watcher_pid" 2>/dev/null && [ -e "$state/task-a.check.sh" ] && blocked=1
+
+  : > "$dir/merge-release"
+  merge_rc=0
+  wait "$merge_pid" || merge_rc=$?
+  watch_rc=0
+  wait "$watcher_pid" || watch_rc=$?
+  expect_code 0 "$merge_rc" "forge merge should complete under lifecycle ownership"
+  expect_code 0 "$watch_rc" "watcher should complete after forge lifecycle release"
+  [ "$blocked" -eq 1 ] || fail "watcher retired the poll during the in-flight forge merge"
+  assert_poll_absent "$state" task-a
+  pass "watcher retirement waits for the in-flight forge lifecycle"
+}
+
+test_pr_lifecycle_recovers_reused_pid_owner() {
+  local dir state lock owner holder_pid check_pid i rc timed_out
+  dir=$(make_case pr-lifecycle-pid-reuse)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  sleep 30 &
+  holder_pid=$!
+  lock="$state/.pr-check-task-a.lock"
+  owner="$lock.owner.reused"
+  mkdir "$owner"
+  printf '%s\n' "$holder_pid" > "$owner/pid"
+  printf '%s\n%s\n%s\n%s\n' \
+    fm-pr-lifecycle-v1 check "$holder_pid" \
+    0000000000000000000000000000000000000000000000000000000000000000 \
+    > "$owner/record"
+  chmod 0600 "$owner/pid" "$owner/record"
+  ln -s "$owner" "$lock"
+
+  FM_PR_LIFECYCLE_LOCK_ATTEMPTS=5 FM_PR_LIFECYCLE_LOCK_INTERVAL=0.01 \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+      > "$dir/check.out" 2> "$dir/check.err" &
+  check_pid=$!
+  timed_out=0
+  i=0
+  while kill -0 "$check_pid" 2>/dev/null && [ "$i" -lt 200 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if kill -0 "$check_pid" 2>/dev/null; then
+    timed_out=1
+    kill -TERM "$check_pid" 2>/dev/null || true
+  fi
+  rc=0
+  wait "$check_pid" || rc=$?
+  [ "$timed_out" -eq 0 ] || rc=124
+  kill -0 "$holder_pid" 2>/dev/null || fail "PID-reuse fixture process exited unexpectedly"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "PR lifecycle should recover an unrelated reused PID owner"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "PID-reuse recovery did not publish a valid PR poll"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "PID-reuse recovery left the lifecycle lock held"
+  pass "PR lifecycle ownership rejects PID reuse without wedging delivery"
 }
 
 test_poll_publication_refuses_unsafe_destinations() {
@@ -1690,8 +1852,8 @@ add_stop_custom_check() {
   state="$dir/home/state"
   printf '#!/usr/bin/env bash\nprintf "stop-cycle\\n"\n' > "$state/z-stop.check.sh"
   chmod 0700 "$state/z-stop.check.sh"
-  FM_HOME="$dir/home" "$REGISTER" z-stop >/dev/null \
-    || fail "could not register stop-cycle custom check"
+  FM_HOME="$dir/home" "$REGISTER" z-stop >/dev/null 2> "$dir/stop-register.err" \
+    || fail "could not register stop-cycle custom check: $(cat "$dir/stop-register.err")"
 }
 
 assert_poll_absent() {
@@ -2386,6 +2548,19 @@ test_retirement_queue_failure_and_receipt_tampering() {
   pass "queue failure and untrusted receipts preserve canonical poll evidence"
 }
 
+case "${FM_TEST_FOCUS:-}" in
+  pr-lifecycle-review)
+    test_stale_watcher_cannot_report_republished_poll
+    test_watcher_waits_for_inflight_forge_lifecycle
+    test_pr_lifecycle_recovers_reused_pid_owner
+    echo "# focused PR lifecycle review tests passed"
+    exit 0
+    ;;
+  pr-lifecycle-stale) test_stale_watcher_cannot_report_republished_poll; exit 0 ;;
+  pr-lifecycle-forge) test_watcher_waits_for_inflight_forge_lifecycle; exit 0 ;;
+  pr-lifecycle-pid) test_pr_lifecycle_recovers_reused_pid_owner; exit 0 ;;
+esac
+
 test_parser_matrix
 test_gitlab_delivery_is_inactive
 test_merged_poll_retires_once
@@ -2408,6 +2583,9 @@ test_concurrent_watcher_sees_only_complete_publication
 test_concurrent_pr_checks_preserve_newer_poll
 test_pr_check_refuses_replaced_task_incarnation
 test_merge_holds_pr_lifecycle_against_concurrent_check
+test_stale_watcher_cannot_report_republished_poll
+test_watcher_waits_for_inflight_forge_lifecycle
+test_pr_lifecycle_recovers_reused_pid_owner
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_postrename_poll_validation_revokes_and_retries

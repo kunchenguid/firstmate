@@ -81,6 +81,8 @@ FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
 FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY=
 FM_PR_POLL_SNAPSHOT_REG_HASH=
 FM_PR_POLL_SNAPSHOT_REG_IDENTITY=
+FM_PR_POLL_SNAPSHOT_META_HASH=
+FM_PR_POLL_SNAPSHOT_META_IDENTITY=
 FM_PR_RETIRE_ID=
 FM_PR_RETIRE_PROVIDER=
 FM_PR_RETIRE_URL=
@@ -666,11 +668,14 @@ fm_pr_poll_artifacts_valid() {
 }
 
 fm_pr_poll_snapshot_capture() {
-  local state=$1 id=$2 template=$3 registration
+  local state=$1 id=$2 template=$3 registration meta
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
   registration="$state/$id.pr-poll-registration"
+  meta="$state/$id.meta"
   FM_PR_POLL_SNAPSHOT_REG_HASH=$(fm_pr_sha256 "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_REG_IDENTITY=$(fm_pr_file_identity "$registration") || return 1
+  FM_PR_POLL_SNAPSHOT_META_HASH=$(fm_pr_sha256 "$meta") || return 1
+  FM_PR_POLL_SNAPSHOT_META_IDENTITY=$(fm_pr_file_identity "$meta") || return 1
   FM_PR_POLL_SNAPSHOT_ID=$id
   FM_PR_POLL_SNAPSHOT_PROVIDER=$FM_PR_DATA_PROVIDER
   FM_PR_POLL_SNAPSHOT_URL=$FM_PR_DATA_URL
@@ -685,12 +690,15 @@ fm_pr_poll_snapshot_capture() {
 }
 
 fm_pr_poll_snapshot_matches() {
-  local state=$1 id=$2 template=$3 registration reg_hash reg_identity
+  local state=$1 id=$2 template=$3 registration meta reg_hash reg_identity meta_hash meta_identity
   [ -n "$FM_PR_POLL_SNAPSHOT_ID" ] && [ "$id" = "$FM_PR_POLL_SNAPSHOT_ID" ] || return 1
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
   registration="$state/$id.pr-poll-registration"
+  meta="$state/$id.meta"
   reg_hash=$(fm_pr_sha256 "$registration") || return 1
   reg_identity=$(fm_pr_file_identity "$registration") || return 1
+  meta_hash=$(fm_pr_sha256 "$meta") || return 1
+  meta_identity=$(fm_pr_file_identity "$meta") || return 1
   [ "$FM_PR_DATA_PROVIDER" = "$FM_PR_POLL_SNAPSHOT_PROVIDER" ] || return 1
   [ "$FM_PR_DATA_URL" = "$FM_PR_POLL_SNAPSHOT_URL" ] || return 1
   [ "$FM_PR_DATA_HOST" = "$FM_PR_POLL_SNAPSHOT_HOST" ] || return 1
@@ -702,7 +710,9 @@ fm_pr_poll_snapshot_matches() {
   [ "$FM_PR_REG_DATA_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_DATA_IDENTITY" ] || return 1
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY" ] || return 1
   [ "$reg_hash" = "$FM_PR_POLL_SNAPSHOT_REG_HASH" ] || return 1
-  [ "$reg_identity" = "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" ]
+  [ "$reg_identity" = "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" ] || return 1
+  [ "$meta_hash" = "$FM_PR_POLL_SNAPSHOT_META_HASH" ] || return 1
+  [ "$meta_identity" = "$FM_PR_POLL_SNAPSHOT_META_IDENTITY" ]
 }
 
 fm_pr_poll_retirement_parse() {

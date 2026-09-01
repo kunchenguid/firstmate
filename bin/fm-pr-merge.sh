@@ -45,6 +45,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pr-lifecycle-lock-lib.sh
+. "$SCRIPT_DIR/fm-pr-lifecycle-lock-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # Role partition: merging is MAIN-owned; the Pi supervision branch reports the
@@ -125,7 +127,6 @@ if [ ! -d "$STATE" ] || [ -L "$STATE" ] || [ ! -f "$META" ] || [ -L "$META" ] \
   exit 1
 fi
 
-PR_LIFECYCLE_LOCK="$STATE/.pr-check-$ID.lock"
 PR_LIFECYCLE_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
@@ -135,16 +136,18 @@ pr_merge_cleanup() {
     META_LOCK_HELD=0
   fi
   if [ "$PR_LIFECYCLE_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$PR_LIFECYCLE_LOCK" || true
+    fm_pr_lifecycle_lock_release "$STATE" "$ID" merge || true
     PR_LIFECYCLE_LOCK_HELD=0
   fi
 }
 trap pr_merge_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-fm_lock_acquire_wait "$PR_LIFECYCLE_LOCK"
+fm_pr_lifecycle_lock_acquire "$STATE" "$ID" merge \
+  || { echo "error: PR lifecycle ownership is unavailable" >&2; exit 1; }
 PR_LIFECYCLE_LOCK_HELD=1
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
-fm_lock_acquire_wait "$META_LOCK"
+fm_pr_lifecycle_metadata_lock_acquire "$META" \
+  || { echo "error: task metadata ownership is unavailable" >&2; exit 1; }
 META_LOCK_HELD=1
 
 # Read one live GitHub pull request view after gh-axi returns. The selected

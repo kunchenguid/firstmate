@@ -20,6 +20,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pr-lifecycle-lock-lib.sh
+. "$SCRIPT_DIR/fm-pr-lifecycle-lock-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -54,9 +56,8 @@ fi
 META_TMP=
 META_LOCK=
 META_LOCK_HELD=0
-PR_CHECK_LOCK="$STATE/.pr-check-$ID.lock"
 PR_CHECK_LOCK_HELD=0
-pr_check_parent_owns_lock() {
+pr_check_parent_owns_metadata_lock() {
   local lock=$1 owner pid
   [ -L "$lock" ] || return 1
   owner=$(fm_lock_link_owner "$lock") || return 1
@@ -72,7 +73,7 @@ pr_check_cleanup() {
     META_LOCK_HELD=0
   fi
   if [ "$PR_CHECK_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$PR_CHECK_LOCK" || true
+    fm_pr_lifecycle_lock_release "$STATE" "$ID" check || true
     PR_CHECK_LOCK_HELD=0
   fi
 }
@@ -82,11 +83,12 @@ trap 'exit 1' HUP INT TERM
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
 case "${FM_PR_LIFECYCLE_PARENT_LOCK:-0}" in
   0)
-    fm_lock_acquire_wait "$PR_CHECK_LOCK"
+    fm_pr_lifecycle_lock_acquire "$STATE" "$ID" check \
+      || { echo "error: PR lifecycle ownership is unavailable" >&2; exit 1; }
     PR_CHECK_LOCK_HELD=1
     ;;
   1)
-    pr_check_parent_owns_lock "$PR_CHECK_LOCK" \
+    fm_pr_lifecycle_parent_owns "$STATE" "$ID" merge \
       || { echo "error: parent PR lifecycle ownership is unavailable" >&2; exit 1; }
     ;;
   *)
@@ -144,11 +146,12 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 case "${FM_PR_METADATA_PARENT_LOCK:-0}" in
   0)
-    fm_lock_acquire_wait "$META_LOCK"
+    fm_pr_lifecycle_metadata_lock_acquire "$META" \
+      || { echo "error: task metadata ownership is unavailable" >&2; exit 1; }
     META_LOCK_HELD=1
     ;;
   1)
-    pr_check_parent_owns_lock "$META_LOCK" \
+    pr_check_parent_owns_metadata_lock "$META_LOCK" \
       || { echo "error: parent task metadata ownership is unavailable" >&2; exit 1; }
     ;;
   *)

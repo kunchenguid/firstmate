@@ -65,12 +65,14 @@ make_pr_fixture() {
   printf '%s\n' "$check_runs" > "$dir/check-runs"
   printf '%s\n' "$statuses" > "$dir/statuses"
   : > "$dir/requirements"
+  : > "$dir/rules"
   : > "$dir/gh.log"
   cat > "$dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
   *"/branches/"*"/protection"*) cat "$FM_TEST_REQUIREMENTS" ;;
+  *"/rules/branches/"*) cat "$FM_TEST_RULES" ;;
   *"/check-runs?"*)
     [ -z "${FM_TEST_ABA_MID_HEAD:-}" ] || printf '%s\n' "$FM_TEST_ABA_MID_HEAD" > "$FM_TEST_HEAD"
     cat "$FM_TEST_CHECK_RUNS"
@@ -91,6 +93,7 @@ run_pr_ci() {
   local dir=$1 expected=$2
   FM_TEST_HEAD="$dir/head" FM_TEST_CHECK_RUNS="$dir/check-runs" \
     FM_TEST_STATUSES="$dir/statuses" FM_TEST_REQUIREMENTS="$dir/requirements" \
+    FM_TEST_RULES="$dir/rules" \
     FM_TEST_GH_LOG="$dir/gh.log" \
     PATH="$dir/fakebin:$PATH" \
     "$PR_CI" https://github.com/example/repo/pull/7 "$expected" \
@@ -115,6 +118,8 @@ test_exact_head_green_contract() {
     "exact-head wait did not query commit statuses by commit SHA"
   assert_grep 'repos/example/repo/branches/main/protection' "$dir/gh.log" \
     "exact-head wait did not query base-branch protection"
+  assert_grep 'repos/example/repo/rules/branches/main' "$dir/gh.log" \
+    "exact-head wait did not query effective base-branch rules"
 
   printf '%s\n' \
     $'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone' \
@@ -195,6 +200,23 @@ test_exact_head_green_contract() {
   expect_code 1 "$status" "an A-to-B-to-A PR race must not attach B checks to A"
   assert_contains "$out" "different-head check evidence" \
     "A-to-B-to-A refusal did not identify the different check head"
+
+  printf 'require\trequired\tnone\tsecurity\tnone\tnone\t42\tnone\n' > "$dir/rules"
+  printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\n' "$sha" > "$dir/check-runs"
+  : > "$dir/statuses"
+  status=0
+  out=$(run_pr_ci "$dir" "$sha") || status=$?
+  expect_code 1 "$status" "a ruleset-only missing context must not be green"
+  assert_contains "$out" "required check is missing: security" \
+    "ruleset-only missing-context refusal was not diagnostic"
+
+  printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\nresult\tcheck\t%s\tsecurity\tcompleted\tsuccess\t99\tsecurity-app\n' \
+    "$sha" "$sha" > "$dir/check-runs"
+  status=0
+  out=$(run_pr_ci "$dir" "$sha") || status=$?
+  expect_code 1 "$status" "a ruleset provider mismatch must not be green"
+  assert_contains "$out" "required check provider mismatch: security" \
+    "ruleset provider mismatch refusal was not diagnostic"
   pass "fm-pr-ci accepts only terminal success for the exact PR head"
 }
 

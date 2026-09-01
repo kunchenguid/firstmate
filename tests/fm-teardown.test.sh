@@ -256,6 +256,7 @@ case " \$* " in
     printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n'
     exit 0
     ;;
+  *"/rules/branches/"*) exit 0 ;;
   *"/check-runs?"*)
     printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\n' '$head'
     exit 0

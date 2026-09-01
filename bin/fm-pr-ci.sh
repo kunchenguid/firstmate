@@ -2,9 +2,10 @@
 # Wait a bounded number of times for terminal successful GitHub checks on one
 # exact pull-request head SHA.
 #
-# Required contexts and provider identities come from the PR base branch,
-# while check runs and commit statuses are read directly for the expected SHA.
-# The PR head, base, and requirement set are confirmed around each snapshot.
+# Required contexts and provider identities combine classic branch protection
+# with every effective repository or organization ruleset for the PR base.
+# Check runs and commit statuses are read directly for the expected SHA, while
+# the PR head, base, and combined requirement set are confirmed around each snapshot.
 # Missing, pending, skipped, failed, ambiguous, stale, or different-head
 # results are never green, regardless of a CLI's exit status.
 # Usage: fm-pr-ci.sh <full-pr-url> <exact-head-sha> [--attempts <1-60>] [--interval <0-60>]
@@ -61,11 +62,12 @@ base_valid() {
   case "$base" in *$'\n'*|*$'\r'*) return 1 ;; esac
 }
 
-read_required_checks() {
+read_classic_required_checks() {
   local base_path
   base_path=$(fm_pr_urlencode_path_segment "$1") || return 1
   # shellcheck disable=SC2016
   gh api -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
     "repos/$OWNER/$REPO/branches/$base_path/protection" \
     --jq '
       if (.required_status_checks | type) != "object" or
@@ -84,6 +86,83 @@ read_required_checks() {
         @tsv
       end
     ' 2>/dev/null
+}
+
+read_ruleset_required_checks() {
+  local base_path
+  base_path=$(fm_pr_urlencode_path_segment "$1") || return 1
+  # shellcheck disable=SC2016
+  gh api --paginate -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "repos/$OWNER/$REPO/rules/branches/$base_path?per_page=100" \
+    --jq '
+      if type != "array" then error("effective branch rules are unavailable")
+      else
+        .[] |
+        if (.type | type) != "string" then error("effective branch rule type is unavailable")
+        elif .type != "required_status_checks" then empty
+        elif (.parameters | type) != "object" or
+             (.parameters.required_status_checks | type) != "array"
+        then error("required ruleset status checks are unavailable")
+        else
+          .parameters.required_status_checks[] |
+          if (.context | type) != "string" or .context == "" then
+            error("ruleset status check context is unavailable")
+          elif .integration_id == null then
+            {context: .context, provider: "any"}
+          elif (.integration_id | type) == "number" and
+               .integration_id > 0 and .integration_id == (.integration_id | floor) then
+            {context: .context, provider: (.integration_id | tostring)}
+          else
+            error("ruleset status check provider is unavailable")
+          end |
+          ["require", "required", "none", .context, "none", "none", .provider, "none"] |
+          @tsv
+        end
+      end
+    ' 2>/dev/null
+}
+
+combine_required_checks() {
+  awk -F '\t' '
+    NF == 0 { next }
+    NF != 8 {
+      print
+      next
+    }
+    {
+      name = $4
+      provider = $7
+      if (!(name in seen)) {
+        seen[name] = 1
+        selected[name] = provider
+        next
+      }
+      if (selected[name] == provider) next
+      if (selected[name] == "any") {
+        selected[name] = provider
+        next
+      }
+      if (provider == "any") next
+      conflicts[name SUBSEP provider] = 1
+    }
+    END {
+      for (name in seen) {
+        printf "require\trequired\tnone\t%s\tnone\tnone\t%s\tnone\n", name, selected[name]
+      }
+      for (item in conflicts) {
+        split(item, parts, SUBSEP)
+        printf "require\trequired\tnone\t%s\tnone\tnone\t%s\tnone\n", parts[1], parts[2]
+      }
+    }
+  '
+}
+
+read_required_checks() {
+  local classic rules
+  classic=$(read_classic_required_checks "$1") || return 1
+  rules=$(read_ruleset_required_checks "$1") || return 1
+  printf '%s\n%s\n' "$classic" "$rules" | combine_required_checks | LC_ALL=C sort
 }
 
 read_check_runs() {

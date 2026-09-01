@@ -105,6 +105,7 @@ case "\${1:-} \${2:-}" in
     exit 0
     ;;
   api\ *)
+    case " \$* " in *required_status_checks*) exit 0 ;; esac
     cat "\$FM_TEST_GH_RULES"
     exit 0
     ;;
@@ -192,6 +193,7 @@ case "${1:-} ${2:-}" in
     exit 0
     ;;
   api\ *)
+    case " $* " in *required_status_checks*) exit 0 ;; esac
     cat "$FM_TEST_GH_RULES"
     exit 0
     ;;
@@ -725,7 +727,10 @@ case "${1:-} ${2:-}" in
     cat "$FM_TEST_GH_OUTCOME"
     exit 0
     ;;
-  api\ *) exit 1 ;;
+  api\ *)
+    case " $* " in *required_status_checks*) exit 0 ;; esac
+    exit 1
+    ;;
 esac
 exit 0
 SH

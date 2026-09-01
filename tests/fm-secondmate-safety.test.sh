@@ -83,6 +83,7 @@ test_fm_home_parameterization() {
 head=0000000000000000000000000000000000000001
 case " $* " in
   *"/branches/"*"/protection"*) printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n' ;;
+  *"/rules/branches/"*) ;;
   *"/check-runs?"*) printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\n' "$head" ;;
   *"/status?"*) ;;
   *" baseRefName "*) printf '%s\n' main ;;
