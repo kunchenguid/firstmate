@@ -1705,6 +1705,12 @@ test_create_task_refuses_when_stale_done_changes_before_close() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/8.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/9.out"
   printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/10.out"
+  # The unpublished replacement is still its exact, agent-free pane, so the
+  # refusal must retire it rather than leave a duplicate unrecorded tab.
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' > "$resp/11.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3"}}}' > "$resp/12.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}' > "$resp/13.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-boundary","workspace_id":"w1"}]}}' > "$resp/15.out"
   make_death_lab "$dir" "$pid"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -1716,7 +1722,9 @@ test_create_task_refuses_when_stale_done_changes_before_close() {
     "create_task did not report the changed stale registration"
   assert_not_contains "$(cat "$log")" $'tab\x1fclose\x1fw1:t2' \
     "create_task closed a pane that became working after stale-done proof"
-  pass "fm_backend_herdr_create_task: rechecks stale done immediately before closing its old tab"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw1:t3' \
+    "create_task left its unpublished replacement tab behind after stale-done proof changed"
+  pass "fm_backend_herdr_create_task: rechecks stale done before closing its old tab and retires its unpublished replacement"
 }
 
 test_spawn_relaunch_refuses_when_stale_done_changes_before_input() {

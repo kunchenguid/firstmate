@@ -2014,6 +2014,26 @@ fm_backend_herdr_agent_alive() {  # <target>
   esac
 }
 
+# fm_backend_herdr_unpublished_replacement_rollback: remove an exact replacement
+# tab that create_task made but cannot publish after its stale-husk boundary
+# recheck. It may only close the exact response-derived tab after it still owns
+# its exact response-derived pane and that pane is positively unregistered.
+# A live, stale-done, dead, or unreadable pane leaves the tab untouched for an
+# operator rather than risking another process.
+fm_backend_herdr_unpublished_replacement_rollback() {  # <session> <workspace> <tab> <pane>
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 state list
+  [ "$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id")" = "$pane_id" ] || return 1
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+  [ "$state" = no-agent ] || return 1
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || return 1
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  fm_backend_herdr_response_is_success "$list" || return 1
+  printf '%s' "$list" | jq -e --arg tab "$tab_id" '
+    (.result.tabs | type) == "array"
+    and ([.result.tabs[]? | select(.tab_id == $tab)] | length) == 0
+  ' >/dev/null 2>&1
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate
@@ -2097,6 +2117,10 @@ EOF
       [ -n "$dup" ] || continue
       dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
       if [ -z "$dup_pane" ] || [ "$(fm_backend_herdr_pane_agent_state "$session" "$dup_pane")" != "$dup_state" ]; then
+        if ! fm_backend_herdr_unpublished_replacement_rollback "$session" "$wsid" "$tab_id" "$pane_id"; then
+          echo "error: herdr tab '$label' changed before its stale pane could be replaced and its unpublished replacement could not be removed in workspace $wsid (session $session)" >&2
+          return 1
+        fi
         echo "error: herdr tab '$label' changed before its stale pane could be replaced in workspace $wsid (session $session)" >&2
         return 1
       fi
