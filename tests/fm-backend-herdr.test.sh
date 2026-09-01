@@ -615,15 +615,22 @@ test_create_task_refuses_duplicate_label() {
 # --- task label duplicate guard ----------------------------------------------
 
 test_create_task_refuses_exact_task_labels_when_live() {
-  local dir case_dir log resp fb out status kind duplicate_label current_label
+  local dir case_dir log resp fb out status kind duplicate_label current_label history_file
   dir="$TMP_ROOT/dup-exact-live"; current_label='NeoMD I/F/A instant (fm-css)'
-  for kind in legacy current; do
+  for kind in legacy current history; do
     case_dir="$dir/$kind"; log="$case_dir/log"; resp="$case_dir/responses"
     mkdir -p "$resp"; : > "$log"
     if [ "$kind" = legacy ]; then
       duplicate_label='fm-fm-css'
+    elif [ "$kind" = history ]; then
+      duplicate_label='Old title (fm-css)'
     else
       duplicate_label="$current_label"
+    fi
+    history_file=
+    if [ "$kind" = history ]; then
+      history_file="$case_dir/labels"
+      printf '%s\n' "$duplicate_label" > "$history_file"
     fi
     printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"%s","workspace_id":"w1"}]}}\n' \
       "$duplicate_label" > "$resp/1.out"
@@ -632,8 +639,8 @@ test_create_task_refuses_exact_task_labels_when_live() {
     printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/4.out"
     fb=$(make_herdr_fakebin "$case_dir")
     out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css' \
-      "$ROOT" "$current_label" 2>&1 )
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css "$2"' \
+      "$ROOT" "$current_label" "$history_file" 2>&1 )
     status=$?
     [ "$status" -ne 0 ] || fail "$kind exact task label with a live agent must refuse a duplicate launch"
     assert_contains "$out" "already exists" "$kind exact task label live duplicate refusal was not reported"

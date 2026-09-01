@@ -1992,6 +1992,67 @@ fm_backend_herdr_task_label() {  # <short-title> <task-id>
   printf '%s (%s)' "$title" "$id"
 }
 
+# Flat Herdr creation can be retried after the worker exists but before task
+# metadata is published. Keep the exact labels attempted by that task so a
+# title edit cannot make a live prior attempt invisible to duplicate checks.
+fm_backend_herdr_task_label_history_append() {  # <path> <label>
+  local path=$1 label=$2 tmp
+  [ -n "$path" ] || return 0
+  if [ -e "$path" ] && [ ! -f "$path" ]; then
+    echo "error: herdr task-label history is not a regular file: $path" >&2
+    return 1
+  fi
+  tmp=$(mktemp "$path.tmp.XXXXXX") || {
+    echo "error: could not prepare herdr task-label history: $path" >&2
+    return 1
+  }
+  if [ -f "$path" ] && ! cat "$path" > "$tmp"; then
+    rm -f "$tmp"
+    echo "error: could not read herdr task-label history: $path" >&2
+    return 1
+  fi
+  if [ ! -f "$path" ] || ! grep -Fqx -- "$label" "$path" 2>/dev/null; then
+    printf '%s\n' "$label" >> "$tmp" || {
+      rm -f "$tmp"
+      echo "error: could not append herdr task label to history: $path" >&2
+      return 1
+    }
+  fi
+  mv -f "$tmp" "$path" || {
+    rm -f "$tmp"
+    echo "error: could not publish herdr task-label history: $path" >&2
+    return 1
+  }
+}
+
+fm_backend_herdr_task_label_history_json() {  # <path>
+  local path=$1
+  if [ -z "$path" ] || [ ! -f "$path" ]; then
+    printf '[]'
+    return 0
+  fi
+  jq -Rsc 'split("\n") | map(select(length > 0))' "$path" 2>/dev/null || {
+    echo "error: could not parse herdr task-label history: $path" >&2
+    return 1
+  }
+}
+
+# Once the replacement is verified, retaining only its exact label keeps the
+# recovery record bounded while preserving the label needed by a later retry.
+fm_backend_herdr_task_label_history_compact() {  # <path> <label>
+  local path=$1 label=$2 tmp
+  [ -n "$path" ] || return 0
+  tmp=$(mktemp "$path.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$label" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate
@@ -2036,24 +2097,27 @@ fm_backend_herdr_task_label() {  # <short-title> <task-id>
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [<task-id>]
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} task_id=${5:-}
-  local session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [<task-id>] [<label-history>]
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} task_id=${5:-} label_history=${6:-}
+  local session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs attempted_labels
   session=${container%%:*}
   wsid=${container#*:}
   if [ -z "$task_id" ]; then
     task_id=$(fm_backend_herdr_task_id_from_label "$label" 2>/dev/null || true)
   fi
+  attempted_labels=$(fm_backend_herdr_task_label_history_json "$label_history") || return 1
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
   dup_tabs=$(printf '%s' "$list" | jq -r \
-    --arg want "$label" --arg task_id "$task_id" \
+    --arg want "$label" --arg task_id "$task_id" --argjson attempted "$attempted_labels" \
     --arg legacy "fm-$task_id" '
       if (.result.tabs | type) == "array" then
         .result.tabs[]
         | select((.label | type) == "string")
+        | .label as $candidate
         | select(
-            .label == $want
+            $candidate == $want
             or ($task_id != "" and .label == $legacy)
+            or any($attempted[]; . == $candidate)
           )
         | .tab_id
       else error("missing result.tabs") end
@@ -2099,14 +2163,16 @@ EOF
       return 1
     fi
     remaining_dup_tabs=$(printf '%s' "$list" | jq -r \
-      --arg want "$label" --arg task_id "$task_id" \
+      --arg want "$label" --arg task_id "$task_id" --argjson attempted "$attempted_labels" \
       --arg legacy "fm-$task_id" \
       --arg replacement "$tab_id" '
         .result.tabs[]?
         | select((.label | type) == "string")
+        | .label as $candidate
         | select(
-            .label == $want
+            $candidate == $want
             or ($task_id != "" and .label == $legacy)
+            or any($attempted[]; . == $candidate)
           )
         | select(.tab_id != $replacement)
         | .tab_id
@@ -2116,6 +2182,10 @@ EOF
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     fi
+  fi
+  if [ -n "$label_history" ] \
+     && ! fm_backend_herdr_task_label_history_compact "$label_history" "$label"; then
+    echo "warning: could not compact herdr task-label history: $label_history" >&2
   fi
   printf '%s %s' "$tab_id" "$pane_id"
 }
