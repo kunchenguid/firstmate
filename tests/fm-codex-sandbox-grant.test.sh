@@ -207,7 +207,9 @@ EOF
     "$data_real:the shared data/ root must never be granted" \
     "$home_real:the firstmate home itself must never be granted" \
     "$home_real/config:config/ must never be granted" \
-    "$home_real/projects:projects/ must never be granted"
+    "$home_real/projects:projects/ must never be granted" \
+    "$state_real/sibling-task.status:a ship root reaches a SIBLING task's status file" \
+    "$state_real/sibling-task.inbox:a ship root reaches a SIBLING task's steering inbox"
   do
     printf '%s\n' "$roots" | grep -qxF "${forbidden%%:*}" \
       && fail "${forbidden#*:}: $roots"
@@ -227,6 +229,34 @@ EOF
   grep -qF -- '-c sandbox_workspace_write.network_access=true' "$LAUNCH_LOG" \
     || fail "the dispatch claims no network limit, so the launch must actually grant network access"
   pass "codex ship: grants only its own status + turn-ended files, its own steering inbox, and the out-of-tree git common dir, never the shared state directory"
+}
+
+# The dispatch notice names the ONE thing no writable root gives back: the
+# no-mistakes data directory. Only a no-mistakes brief needs it. A direct-PR brief
+# says "Do NOT run /no-mistakes" and completes by pushing and opening the PR
+# itself (bin/fm-dod-lib.sh), which the git and network grants already cover, so
+# firing the notice there would tell the captain to expect a landing problem for a
+# task codex can finish end to end.
+test_pipeline_notice_fires_only_for_the_mode_that_needs_the_pipeline() {
+  local rec out mode
+  for mode in no-mistakes direct-PR local-only; do
+    rec=$(make_case "notice-$mode"); read_case "$rec"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$CASE_ID" "$PROJ_DIR" codex --mode "$mode" --yolo off) \
+      || fail "codex ship spawn failed for mode=$mode: $out"
+    if [ "$mode" = no-mistakes ]; then
+      printf '%s\n' "$out" | grep -q 'cannot run validation itself' \
+        || fail "a codex no-mistakes dispatch must name the pipeline limit the grant does not lift: $out"
+    else
+      printf '%s\n' "$out" | grep -q 'cannot run validation itself' \
+        && fail "mode=$mode does not run the pipeline, so the dispatch must not claim it cannot: $out"
+    fi
+    # The grant itself is mode-independent: narrowing the notice must not have
+    # narrowed what the worker can write.
+    [ "$(count_roots "$LAUNCH_LOG")" = 4 ] \
+      || fail "mode=$mode did not get the same four ship roots: $(granted_roots "$LAUNCH_LOG")"
+  done
+  pass "the no-mistakes pipeline notice fires for no-mistakes alone, and every mode gets the same ship grant"
 }
 
 # EVERY file the grant pre-creates so a single-file root can resolve becomes a
@@ -577,6 +607,7 @@ test_ship_grant_covers_the_steering_inbox_acknowledgement() {
 }
 
 test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir
+test_pipeline_notice_fires_only_for_the_mode_that_needs_the_pipeline
 test_precreated_state_files_are_not_read_as_new_activity
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir
 test_secondmate_grants_only_the_parent_status_file

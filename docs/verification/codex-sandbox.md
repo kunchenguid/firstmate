@@ -123,7 +123,7 @@ touch: /Users/.../.no-mistakes/.fm-probe: Operation not permitted
 ```
 
 `~/.no-mistakes` holds `state.sqlite`, `socket`, `daemon.lock`, and `daemon.pid`, so a sandboxed codex worker cannot drive `no-mistakes axi`.
-Re-measured 2026-08-31 on 0.150.1 on the same machine whose config enables network: still `Operation not permitted`, confirming this denial is independent of the network setting and is the reliable pipeline blocker.
+Re-measured 2026-08-31 on 0.150.1 with network access enabled: still `Operation not permitted`, confirming this denial is independent of the network setting and is the ONLY blocker standing between a codex worker and the pipeline.
 Widening the grant to a third-party tool home, its control socket, and the homes of every review agent the pipeline spawns is a different decision from firstmate's own supervision paths, and is deliberately not taken here.
 
 ## Other adapters
@@ -149,6 +149,7 @@ Cursor's sandbox therefore does not confine writes to the workspace the way code
 | No other adapter's launch acquired a grant | `tests/fm-codex-sandbox-grant.test.sh` |
 | The scout set is sufficient for a real status append, report, captain-hold completion gate, and commit, and each root is load-bearing; the ship set is sufficient for a status append, turn-ended touch, and commit while the shared `state/` stays unwritable so a sibling task's records cannot be reached | `tests/fm-codex-sandbox-grant.test.sh`, by making everything outside the emitted roots unwritable |
 | Neither pre-created state file reads to the watcher as new activity, while a later real append still does | `tests/fm-codex-sandbox-grant.test.sh` |
+| The dispatch notice about the denied pipeline directory fires for `no-mistakes` alone, and every ship mode still gets the same four roots | `tests/fm-codex-sandbox-grant.test.sh` |
 | codex still denies the SCOUT's paths without the grant and allows exactly them with it | `tests/fm-codex-sandbox-grant-live-e2e.test.sh` (opt-in, real binary), scout halves |
 | firstmate's own `--add-dir` flags reach that policy through a real model turn | `tests/fm-codex-sandbox-grant-live-e2e.test.sh`, `codex exec` halves |
 | codex accepts and enforces the FILE form of `--add-dir` that is the whole ship and secondmate grant: the ship's own two state files become writable and a sibling task's status file in the same `state/` stays denied | `tests/fm-codex-sandbox-grant-live-e2e.test.sh`, ship half |
@@ -157,6 +158,6 @@ Not proven, stated plainly:
 
 - The **interactive TUI** path was not driven end to end. What is proven is that the interactive parser accepts the exact repeated flag, and that the same flag reaches the sandbox policy in `codex exec`. Both surfaces share one top-level flag parser, but no test drives a real interactive pane through the three writes.
 - The live guard composes a **scout** launch and a **ship** launch. The secondmate's grant is not composed against the real binary; it is the same single-file `state/<id>.status` form the ship half proves, plus its own inbox directory, so what the guard leaves unexercised is the secondmate spawn path rather than the mechanism its roots rely on.
-- A codex worker **completing a no-mistakes ship** is not covered, and by the measurements above cannot work: the pipeline needs network and `~/.no-mistakes`.
+- A codex worker **completing a no-mistakes ship** is not covered, and by the measurements above cannot work: the pipeline needs `~/.no-mistakes`, which stays denied. That is the sole blocker, and it is why `bin/fm-spawn.sh` fires its dispatch notice for `no-mistakes` alone. A `direct-PR` ship needs nothing denied: it commits through the granted git common dir, pushes and opens the PR over the granted network, and reports through its granted status file.
 - `bin/fm-captain-hold.sh` **registering** a new captain hold from a crewmate would take `data/backlog.md.lock` and so is not served by the task-scoped `data/<id>/` grant; this is deliberate, because registering a hold is the parent firstmate's job and no crewmate or scout contract does it. The portable suite exercises `complete` and `verify`, which need only `state/`.
 - The recursion `fm_lock_try_acquire` performs when `fm_lock_try_create` fails for a **permanent** reason (the observed `.lock.steal.steal...` until `File name too long`) is not fixed here. Removing the denial removes the trigger seen on 2026-08-26, but any other permanent write failure - a full or read-only filesystem - would still recurse.

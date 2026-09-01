@@ -36,6 +36,12 @@ CODEX_VERSION=$(codex --version)
 # assertion below silently vacuous.
 LAB="$ROOT/.codex-sandbox-grant-live.$$"
 mkdir -p "$LAB"
+# Canonicalize the lab ONCE, here, because every path in this guard derives from
+# it and every writable root fm-spawn emits is canonical. $ROOT above comes from a
+# logical `pwd`, so without this a repo reached through a symlink would give the
+# guard logically-spelled paths that can never equal a canonically-spelled root,
+# and each isolation comparison below would silently stop proving anything.
+LAB=$(cd "$LAB" && pwd -P)
 # FM_CODEX_KEEP_LAB=1 preserves the lab (and the real model transcript inside it)
 # when this guard is run to produce evidence rather than as a pass/fail check.
 cleanup() {
@@ -287,10 +293,19 @@ SHIP_TURNEND="$HOME_DIR/state/$SHIP_ID.turn-ended"
 # directory grant, this is what would become writable.
 SIBLING_STATUS="$STATUS_FILE"
 
-printf '%s\n' "$SHIP_ROOTS" | grep -qxF "$(cd "$(dirname "$SHIP_STATUS")" && pwd -P)/$(basename "$SHIP_STATUS")" \
+# The comparisons below are only evidence if both sides are spelled the same way.
+# $LAB is canonical, so every path derived from it already is; this fails loudly
+# if that ever stops being true rather than letting the guards go quiet.
+[ "$SHIP_STATUS" = "$(cd "$(dirname "$SHIP_STATUS")" && pwd -P)/$(basename "$SHIP_STATUS")" ] \
+  || fail "the guard's own paths are not canonical, so the root comparisons below cannot fire"
+
+printf '%s\n' "$SHIP_ROOTS" | grep -qxF "$SHIP_STATUS" \
   || fail "the ship launch did not grant its own status FILE, so this half would prove nothing: $SHIP_ROOTS"
 for r in $SHIP_ROOTS; do
-  case "$r" in "$SIBLING_STATUS"|"$(cd "$HOME_DIR/state" && pwd -P)") fail "a ship root reaches the sibling status file or the shared state dir: $SHIP_ROOTS" ;; esac
+  case "$r" in
+    "$SIBLING_STATUS") fail "a ship root reaches the SIBLING task's status file: $SHIP_ROOTS" ;;
+    "$HOME_DIR/state") fail "a ship root reaches the shared state directory: $SHIP_ROOTS" ;;
+  esac
 done
 
 SHIP_ROOTS_TOML=$(printf '%s\n' "$SHIP_ROOTS" | sed 's/.*/"&"/' | paste -sd, -)
