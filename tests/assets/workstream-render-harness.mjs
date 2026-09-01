@@ -135,6 +135,11 @@ const streams = streamsCol.children.map((card) => {
           .filter((c) => c.tagName === "rect")
           .map((r) => r.children.find((c) => c.tagName === "title")?.textContent ?? "")
           .sort(),
+        mutedNodes: svg[0].children
+          .filter((c) => c.tagName === "rect" && c.attributes.opacity)
+          .map((r) => r.children.find((c) => c.tagName === "title")?.textContent ?? "")
+          .sort(),
+        ariaLabel: svg[0].attributes["aria-label"] ?? "",
       }
     : null;
   return {
@@ -147,6 +152,7 @@ const streams = streamsCol.children.map((card) => {
           p.children.map((s) => ({ cls: s.className, width: s.style.width })))
       : [],
     key: head ? deep(head, "ws-key").flatMap((k) => k.children.map((i) => i.textContent)) : [],
+    crossKey: deep(card, "ws-key--cross").flatMap((k) => k.children.map((i) => i.textContent)),
     rows,
     more: deep(card, "wb-morechip").map((c) => c.textContent),
     graph,

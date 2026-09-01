@@ -200,6 +200,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          agent_state: ($l.current_state.state // ""),
          pr_url: ($l.pr.url // $r.pr_url // null)};
     def state_rank: {decision:0, held:1, active:2, review:3, queued:4, done:5}[.] // 6;
+    def state_counts: {done: (map(select(.state == "done")) | length),
+                       review: (map(select(.state == "review")) | length),
+                       active: (map(select(.state == "active")) | length),
+                       held: (map(select(.state == "held")) | length),
+                       decision: (map(select(.state == "decision")) | length),
+                       queued: (map(select(.state == "queued")) | length)};
   ($umbrellas
    | map(. as $u
      | [ $recs[] | select($assign[.id] == $u.id) ] as $members
@@ -209,23 +215,13 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         name: (($u.title // $u.id) | trunc(90)),
         outcome: (($u.body_excerpt // $u.title // "") | trunc(240)),
         actionable: ($u.captain_actionable == true),
-        counts: ($rows | {done: (map(select(.state == "done")) | length),
-                          review: (map(select(.state == "review")) | length),
-                          active: (map(select(.state == "active")) | length),
-                          held: (map(select(.state == "held")) | length),
-                          decision: (map(select(.state == "decision")) | length),
-                          queued: (map(select(.state == "queued")) | length)}),
+        counts: ($rows | state_counts),
         rows: (if $all_tasks == 1 then $sorted else $sorted[:$tasks_n] end),
         more: (if $all_tasks == 1 then 0 else (($rows | length) - ($sorted[:$tasks_n] | length)) end)})) as $streams_all
   | ([ $recs[]
        | select(.kind != "program" and ($uidx[.id] == null) and ($assign[.id] // null) == null and .state != "done") ]) as $unassigned_recs
   | ($unassigned_recs | map(task_row(.; "unassigned")) | sort_by([(.state | state_rank)])) as $unassigned_rows_all
-  | ($unassigned_rows_all | {done: (map(select(.state == "done")) | length),
-                             review: (map(select(.state == "review")) | length),
-                             active: (map(select(.state == "active")) | length),
-                             held: (map(select(.state == "held")) | length),
-                             decision: (map(select(.state == "decision")) | length),
-                             queued: (map(select(.state == "queued")) | length)}) as $un_counts
+  | ($unassigned_rows_all | state_counts) as $un_counts
   | ([ $recs[] | select(.kind != "program" and ($uidx[.id] == null) and ($assign[.id] // null) == null and .state == "done") ] | length) as $dropped_done
   | (if $all_tasks == 1 then $unassigned_rows_all else $unassigned_rows_all[:$unassigned_n] end) as $unassigned_rows
   | (if ($streams_all | length) > $streams_n then $streams_all[:$streams_n] else $streams_all end) as $streams

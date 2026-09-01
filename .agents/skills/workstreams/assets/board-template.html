@@ -164,6 +164,8 @@ a { color: inherit; text-decoration: none; }
 .ws-key { display: flex; gap: 14px; flex-wrap: wrap; font-size: var(--fs-2xs); color: var(--text-muted); margin-top: 6px; font-weight: 600; }
 .ws-key i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--ink-900); margin-right: 5px; vertical-align: -1px; }
 .ws-key i.ws-seg--queued { background: var(--paper-200); }
+.ws-key i.ws-seg--cross { background: var(--paper-200); opacity: 0.5; }
+.ws-key--cross { margin-top: 8px; }
 .ws-body { padding: 16px 20px 20px; }
 .ws-body h3 { font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: var(--ls-caps); color: var(--text-faint); margin: 18px 0 8px; }
 .ws-body h3:first-child { margin-top: 0; }
@@ -471,8 +473,14 @@ __FM_WORKSTREAM_BOARD_DATA__
     });
     var width = PAD * 2 + (maxLayer + 1) * W + maxLayer * GX;
     var height = PAD * 2 + maxRows * H + (maxRows - 1) * GY;
+    var foreign = Object.keys(pos)
+      .filter(function (id) { return !ids[id]; })
+      .map(function (id) { return { id: id, wsName: index[id].wsName }; });
     var svg = svgEl("svg", { viewBox: "0 0 " + width + " " + height, role: "img" });
-    svg.setAttribute("aria-label", "Dependency graph");
+    svg.setAttribute("aria-label", foreign.length
+      ? "Dependency graph, including " + foreign.length + " task" + (foreign.length === 1 ? "" : "s")
+        + " from other workstreams: " + foreign.map(function (f) { return f.id + " in " + f.wsName; }).join(", ")
+      : "Dependency graph");
     var defs = svgEl("defs", {});
     var marker = svgEl("marker", { id: markerId, viewBox: "0 0 8 8", refX: "7", refY: "4", markerWidth: "7", markerHeight: "7", orient: "auto" });
     marker.appendChild(svgEl("path", { d: "M0,0 L8,4 L0,8 z", fill: "#9c8a6c" }));
@@ -491,6 +499,7 @@ __FM_WORKSTREAM_BOARD_DATA__
       var style = NODE_FILL[node.task.state] || NODE_FILL.queued;
       var attrs = { x: p.x, y: p.y, width: W, height: H, rx: 7, fill: style.fill, stroke: style.stroke, "stroke-width": "1.5" };
       if (style.dash) attrs["stroke-dasharray"] = style.dash;
+      if (!ids[id]) attrs.opacity = "0.5";
       var rect = svgEl("rect", attrs);
       var rectTitle = svgEl("title", {});
       rectTitle.textContent = ids[id]
@@ -499,14 +508,16 @@ __FM_WORKSTREAM_BOARD_DATA__
       rect.appendChild(rectTitle);
       svg.appendChild(rect);
       var label = id.length > 22 ? id.slice(0, 21) + "…" : id;
-      var text = svgEl("text", {
+      var textAttrs = {
         x: p.x + W / 2, y: p.y + H / 2 + 4, "text-anchor": "middle",
         "font-family": "JetBrains Mono,monospace", "font-size": "11", fill: style.text
-      });
+      };
+      if (!ids[id]) textAttrs.opacity = "0.5";
+      var text = svgEl("text", textAttrs);
       text.textContent = label;
       svg.appendChild(text);
     });
-    return svg;
+    return { svg: svg, foreign: foreign };
   }
 
   /* ---- workstream cards ---- */
@@ -578,8 +589,18 @@ __FM_WORKSTREAM_BOARD_DATA__
     if (graph) {
       body.appendChild(el("h3", null, "Dependency graph"));
       var fig = el("div", "ws-fig");
-      fig.appendChild(graph);
+      fig.appendChild(graph.svg);
       body.appendChild(fig);
+      if (graph.foreign.length) {
+        var crossKey = el("div", "ws-key ws-key--cross");
+        graph.foreign.forEach(function (f) {
+          var item = el("span");
+          item.appendChild(el("i", "ws-seg--cross"));
+          item.appendChild(document.createTextNode(f.id + " - in " + f.wsName));
+          crossKey.appendChild(item);
+        });
+        body.appendChild(crossKey);
+      }
     }
 
     var moving = ws.tasks.filter(function (t) { return t.state !== "queued" && t.state !== "done"; });

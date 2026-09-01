@@ -77,6 +77,7 @@ write_valid_payload() {  # <path>
         { "id": "build-g6", "title": "Build the G6 fix", "state": "queued",
           "pr_url": "https://github.com/example/repo/pull/1" }
       ],
+      "counts": { "done": 1, "review": 0, "active": 0, "held": 1, "decision": 0, "queued": 3 },
       "more_tasks": 2
     }
   ],
@@ -111,6 +112,18 @@ test_path_is_stable_home_scoped_and_mockup_safe() {
     */workstream-board.html) fail "the board path collides with the mockup artifact name" ;;
   esac
   pass "path prints the stable home-scoped board location clear of the mockup"
+}
+
+test_an_uncapped_lane_may_omit_its_counts() {
+  local home data
+  home=$(make_home uncapped)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq 'del(.workstreams[0].counts, .workstreams[0].more_tasks)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null 2>&1 \
+    || fail "an uncapped lane without lane counts was refused"
+  [ -f "$home/.lavish/workstreams.html" ] || fail "the accepted payload produced no board"
+  pass "a lane that ships all of its rows may omit its lane counts"
 }
 
 test_build_refuses_malformed_payloads_before_touching_the_board() {
@@ -155,15 +168,37 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   [ "$rc" -ne 0 ] || fail "a negative omitted-task count was accepted"
 
   write_valid_payload "$data"
-  jq '.workstreams[0].counts = { done: 1, review: 0, active: -2, held: 0, decision: 0, queued: 0 }' \
-    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  jq '.workstreams[0].counts.active = -2' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a negative lane count was accepted"
 
   write_valid_payload "$data"
-  jq '.workstreams[0].counts = { done: 1, sailing: 2 }' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  jq '.workstreams[0].counts.sailing = 2' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a lane count keyed by an unknown state was accepted"
+
+  # The progress bar reads counts, so a capped lane cannot ship without them,
+  # and the object it does ship cannot be partial or smaller than its own rows.
+  write_valid_payload "$data"
+  jq 'del(.workstreams[0].counts)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a capped lane without lane counts was accepted"
+
+  write_valid_payload "$data"
+  jq '.workstreams[0].counts = {}' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an empty lane-counts object was accepted"
+
+  write_valid_payload "$data"
+  jq 'del(.workstreams[0].counts.held)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a partial lane-counts object was accepted"
+
+  write_valid_payload "$data"
+  jq '.workstreams[0].counts = { done: 1, review: 0, active: 0, held: 1, decision: 0, queued: 0 }' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "lane counts totalling fewer than the lane's own rows were accepted"
 
   write_valid_payload "$data"
   jq '.waiting[0].key = (reduce range(129) as $i (""; . + "x"))' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
@@ -302,6 +337,7 @@ test_build_refuses_a_template_without_exactly_one_slot() {
 
 test_path_is_stable_home_scoped_and_mockup_safe
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_an_uncapped_lane_may_omit_its_counts
 test_build_injects_binds_then_arms
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm

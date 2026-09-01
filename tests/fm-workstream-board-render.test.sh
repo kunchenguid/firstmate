@@ -56,6 +56,7 @@ base_payload() {
         { "id": "build-g6", "title": "Build G6", "state": "queued" },
         { "id": "island", "title": "No edges touch this row", "state": "queued" }
       ],
+      "counts": { "done": 3, "review": 0, "active": 0, "held": 1, "decision": 1, "queued": 3 },
       "more_tasks": 3 }
   ],
   "edges": [
@@ -98,6 +99,7 @@ test_the_full_board_renders_every_section() {
       and (.streams[0].title == "Quote Flow")
       and (.streams[0].badges | any(test("1 needs your decision")))
       and (.streams[0].badges | any(test("1 held")))
+      and (.streams[0].key | any(test("^3 done$")))
   ' >/dev/null || fail "the workstream card head is not rendered: $out"
   printf '%s' "$out" | jq -e '
     (.streams[0].rows | length) == 5
@@ -145,25 +147,47 @@ test_a_cross_workstream_edge_is_drawn_on_both_cards() {
       and (.streams[0].graph.nodeTitles | any(test("ontology-rows.*Chat Ontology")))
       and (.streams[1].graph.nodeTitles | any(test("g6-define.*Quote Flow")))
   ' >/dev/null || fail "the cross-workstream edge was not drawn: $out"
+  # The foreign node is muted and named in plain text under the drawing and in
+  # the graph's accessible label, so it never reads as a task of this lane.
+  printf '%s' "$out" | jq -e '
+    (.streams[0].graph.mutedNodes | length) == 1
+      and (.streams[0].graph.mutedNodes[0] | test("ontology-rows"))
+      and (.streams[0].crossKey == ["ontology-rows - in Chat Ontology"])
+      and (.streams[0].graph.ariaLabel | test("ontology-rows in Chat Ontology"))
+      and (.streams[1].crossKey == ["g6-define - in Quote Flow"])
+  ' >/dev/null || fail "the foreign graph node is indistinguishable from a local one: $out"
   pass "a cross-workstream dependency edge is drawn on both workstream cards"
+}
+
+test_a_same_lane_graph_marks_no_foreign_node() {
+  local home out
+  home=$(make_home localgraph)
+  out=$(render "$home" "$(base_payload)")
+  printf '%s' "$out" | jq -e '
+    (.streams[0].graph.mutedNodes == []) and (.streams[0].crossKey == [])
+      and (.streams[0].graph.ariaLabel == "Dependency graph")
+  ' >/dev/null || fail "an all-local graph claimed a foreign node: $out"
+  pass "an all-local dependency graph marks nothing as foreign"
 }
 
 test_the_progress_bar_reports_the_whole_lane() {
   local home out payload
   home=$(make_home progress)
-  # 30 rows visible out of 60; the tail the cap dropped is all done work.
+  # 5 rows visible out of 60; the tail the cap dropped is all done work.
   payload=$(base_payload | jq '
-    .workstreams[0].more_tasks = 30
+    .workstreams[0].more_tasks = 55
     | .workstreams[0].counts = { done: 55, review: 0, active: 5, held: 0, decision: 0, queued: 0 }')
   out=$(render "$home" "$payload")
   printf '%s' "$out" | jq -e '
     (.streams[0].segments | map(select(.cls == "ws-seg--done")) | first | .width)
       == ((55 * 100 / 60 | tostring) + "%")
       and (.streams[0].key | any(test("^55 done$")))
+      and (.streams[0].rows | length) == 5
   ' >/dev/null || fail "the progress bar did not report the lane totals: $out"
 
-  # Without declared counts the bar stays consistent with the rows it drew.
-  out=$(render "$home" "$(base_payload)")
+  # An uncapped lane may omit counts; the bar then matches the rows it drew.
+  payload=$(base_payload | jq 'del(.workstreams[0].counts, .workstreams[0].more_tasks)')
+  out=$(render "$home" "$payload")
   printf '%s' "$out" | jq -e '
     (.streams[0].segments | map(select(.cls == "ws-seg--done")) | first | .width)
       == ((1 * 100 / 5 | tostring) + "%")
@@ -224,6 +248,7 @@ test_unreadable_data_fails_closed() {
 test_the_full_board_renders_every_section
 test_the_dependency_graph_draws_only_edge_touched_local_nodes
 test_a_cross_workstream_edge_is_drawn_on_both_cards
+test_a_same_lane_graph_marks_no_foreign_node
 test_the_progress_bar_reports_the_whole_lane
 test_every_task_row_exposes_its_full_title
 test_a_board_without_edges_or_divergence_stays_quiet
