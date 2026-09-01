@@ -845,6 +845,32 @@ test_create_task_refuses_when_agent_state_ambiguous() {
   pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than guessing when the duplicate's agent state cannot be classified confidently"
 }
 
+test_create_task_refuses_an_ambiguous_duplicate_pane_list() {
+  # A recovered task tab has one root pane. If Herdr returns two candidates for
+  # the same tab, do not select whichever happens to sort first and create a
+  # replacement alongside a potentially live endpoint.
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-ambiguous-pane-list"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-ambig-pane","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p9","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  # These responses would authorize a replacement if the adapter selected the
+  # first candidate rather than refusing the ambiguous public CLI result.
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-ambig-pane /tmp/proj' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse an ambiguous pane list"
+  assert_contains "$out" "already exists" "create_task did not report the ambiguous duplicate tab"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
+    "create_task created a replacement after an ambiguous pane list"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' \
+    "create_task closed a tab after an ambiguous pane list"
+  pass "fm_backend_herdr_create_task: refuses an ambiguous pane list without creating or closing tabs"
+}
+
 test_create_task_husk_replacement_creates_before_closing() {
   # Safety-critical ordering: the replacement tab must be created BEFORE the
   # husk tab is closed, never the reverse - closing a workspace's LAST
@@ -4848,6 +4874,7 @@ test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
+test_create_task_refuses_an_ambiguous_duplicate_pane_list
 test_agent_state_accepts_only_a_stale_done_registration
 test_agent_state_refuses_done_without_a_bare_shell
 test_agent_state_refuses_fractional_process_identities

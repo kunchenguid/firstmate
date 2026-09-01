@@ -3176,14 +3176,23 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
   fi
 }
 
-# fm_backend_herdr_pane_for_tab: the root pane id for <tab_id> in <workspace_id>
-# of <session>, via one pane list call filtered by tab_id (never assumes a
-# tab-number/pane-number correspondence - herdr numbers them independently).
+# fm_backend_herdr_pane_for_tab: the sole pane id for <tab_id> in
+# <workspace_id> of <session>. A task tab is created with exactly one root
+# pane, so an error, malformed envelope, or multiple candidate panes is
+# ambiguous and must not license a close or replacement.
 fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
   local session=$1 wsid=$2 tab_id=$3 panes
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
-  printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
-    '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1
+  fm_backend_herdr_response_is_success "$panes" || return 1
+  printf '%s' "$panes" | jq -er --arg tab "$tab_id" '
+    (.result.panes | select(type == "array")) as $panes
+    | [$panes[]
+       | select(.tab_id == $tab)
+       | .pane_id
+       | select(type == "string" and length > 0)] as $matches
+    | select($matches | length == 1)
+    | $matches[0]
+  ' 2>/dev/null
 }
 
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an
