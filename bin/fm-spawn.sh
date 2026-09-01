@@ -140,11 +140,11 @@
 #   claim is not proof of a live worker: a teardown that aborted after
 #   returning the lease leaves a record whose worktree is genuinely free, and
 #   only removing that record clears the slot.
-#   That refusal retires the endpoint it just created. For every backend but
-#   orca - whose terminal and worktree are retired by the orca abort path
+#   That refusal attempts to retire the endpoint it just created. For every
+#   backend but orca - whose terminal and worktree use the orca abort path
 #   instead - it then reads back the NAME its next spawn would collide on
 #   (fm_backend_endpoint_blocks_respawn), because a backend close is only
-#   best-effort, and names a survivor so the operator can retire the one thing
+#   best-effort. A survivor is named so the operator can retire the one thing
 #   that would refuse the retry.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.

@@ -193,9 +193,9 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout and unclaimed by another durable task metadata record.
-Its canonical-path claim check lets a task relaunch into its own recorded worktree, while a fresh collision retires its newly created endpoint.
-For every backend but Orca — whose terminal and worktree are retired by the Orca abort path, with no read-back — the collision then verifies the removal so the allocation can be retried, naming an endpoint that survived the best-effort close instead of silently reporting it as retired.
-A claim is a record, not a liveness proof, so the refusal names the record file too: a teardown that aborted after returning its treehouse lease leaves a stale claim on a genuinely free worktree, and removing that record is what clears the slot.
+Its canonical-path claim check lets a task relaunch into its own recorded worktree, while a fresh collision attempts to retire its newly created endpoint.
+For every backend but Orca - whose terminal and worktree use the Orca abort path with no name read-back - the collision verifies that the name no longer blocks a retry, naming an endpoint that survived the best-effort close instead of silently reporting it as retired.
+A claim is a record, not a liveness proof, so the refusal names the record file too: incomplete cleanup can leave a stale claim on a genuinely free worktree, and removing that record is what clears the slot.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-tangle-guard.test.sh` and `tests/fm-spawn-pool-base-freshen.test.sh` own the portable regression coverage.
 
