@@ -196,9 +196,9 @@ JSON
   assert_contains "$row" '"model":"glm-5.3"' "codex row captures the turn_context model"
   assert_contains "$row" '"effort":"high"' "codex row carries meta effort"
   assert_contains "$row" '"source":"codex-sessions"' "codex row names its source"
-  # Codex counts its cached tokens inside its own input_tokens, so each event
-  # contributes only the fresh remainder: (100-15) + (50-0) + max(2-9, 0).
-  assert_contains "$row" '"input_tokens":135' \
+  # Codex counts cached_input_tokens inside its own input_tokens, so each event
+  # contributes only the fresh remainder: (100-10) + (50-0) + max(2-9, 0).
+  assert_contains "$row" '"input_tokens":140' \
     "codex input reports fresh input, never the cached tokens it already contains"
   assert_contains "$row" '"cached_input_tokens":24' \
     "codex cached folds cached+cache_write (10+5+0+9)"
@@ -307,7 +307,7 @@ JSON
   cat > "$d1/rollout-conv.jsonl" <<JSON
 {"type":"session_meta","payload":{"cwd":"$wt"}}
 {"type":"turn_context","payload":{"model":"conv-model"}}
-{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"cache_write_input_tokens":10,"output_tokens":7,"reasoning_output_tokens":2}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":60,"cache_write_input_tokens":0,"output_tokens":7,"reasoning_output_tokens":2}}}}
 JSON
   touch -m -r "$d1/rollout-conv.jsonl" "$home/state/$id.status"
   out=$("$HARVEST" "$id" 2>&1)
@@ -334,6 +334,38 @@ JSON
   assert_contains "$row" '"input_tokens":40,"cached_input_tokens":60,"output_tokens":7,"reasoning_tokens":2' \
     "pi reports the same fresh input and folded cache as the other parsers"
   pass "usage harvest: every parser normalizes onto one token convention"
+}
+
+# Codex's input_tokens is known to contain cached_input_tokens, and that is
+# the only field the ledger subtracts from it. Whether cache_write_input_tokens
+# is inside input_tokens too is untestable from real logs, which report it as
+# zero everywhere, so it is folded into the cached column and left in the fresh
+# input rather than being subtracted on a hunch: subtracting an uncontained
+# field would under-count fresh input and the clamp would hide it.
+codex_cache_write_case() {
+  local id=usagecodexwrite wt="$TMP_ROOT/wt-usagecodexwrite"
+  local data home row out d1
+  data=$(harvest_case "$id" codex "$wt" default high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  d1="$FM_USAGE_CODEX_DIR/2026/08/31"
+  mkdir -p "$d1"
+  cat > "$d1/rollout-write.jsonl" <<JSON
+{"type":"session_meta","payload":{"cwd":"$wt"}}
+{"type":"turn_context","payload":{"model":"glm-5.3"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":80,"cached_input_tokens":30,"cache_write_input_tokens":25,"output_tokens":6,"reasoning_output_tokens":2}}}}
+JSON
+  touch -m -r "$d1/rollout-write.jsonl" "$home/state/$id.status"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "codex cache-write harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"input_tokens":50' \
+    "only the cached tokens codex counts inside input are subtracted (80-30)"
+  assert_contains "$row" '"cached_input_tokens":55' \
+    "cache_write is still counted in the cached column (30+25)"
+  assert_contains "$row" '"output_tokens":6' "cache_write never touches the output column"
+  pass "codex harvest: cache_write is folded into cached, never subtracted from input"
 }
 
 # --- candidate scanning is bound before the full parse ----------------------
@@ -1149,6 +1181,7 @@ codex_case
 pi_case usagepi1 pi
 pi_case usagepisigned1 pi-signed
 token_convention_case
+codex_cache_write_case
 prefilter_case
 spawn_gen_case
 spawn_gen_malformed_case

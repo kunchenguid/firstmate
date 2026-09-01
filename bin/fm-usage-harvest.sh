@@ -86,13 +86,19 @@
 #     (input_tokens, cached_input_tokens, cache_write_input_tokens,
 #     output_tokens, reasoning_output_tokens); summing those deltas equals the
 #     final cumulative total. Codex is the one source whose own input_tokens
-#     COUNTS the cached portion inside itself, which real logs establish
+#     COUNTS cached_input_tokens inside itself, which real logs establish
 #     because total_tokens equals input_tokens + output_tokens on every event
-#     they record. The ledger therefore folds cached + cache_write into
-#     cached_input_tokens and subtracts that same sum from the event's
-#     input_tokens, clamped at zero, so a codex row reports fresh input like
-#     every other source instead of counting its cached tokens twice. The
-#     model comes from the turn_context.
+#     carrying usage. The ledger therefore subtracts cached_input_tokens from
+#     the event's input_tokens, clamped at zero, so a codex row reports fresh
+#     input like every other source instead of counting its cached tokens
+#     twice. Whether cache_write_input_tokens is inside input_tokens too is
+#     UNKNOWN, assumed neither way, because that field is zero in every
+#     observed session: it is folded into cached_input_tokens but NOT
+#     subtracted, since subtracting an uncontained field would silently
+#     under-count fresh input. If it ever turns up non-zero, re-check whether
+#     total_tokens still equals input_tokens + output_tokens on such an event,
+#     which is the arithmetic that settles containment. The model comes from
+#     the turn_context.
 #   harness=pi, harness=pi-signed: <pi-sessions>/**/*.jsonl in the task window
 #     whose "session" record's cwd equals the meta worktree. Both adapters run
 #     the same Pi application and share one ~/.pi/agent state tree, so one
@@ -388,14 +394,16 @@ case "$HARNESS" in
             elif $l.type == "event_msg" and $l.payload.type == "token_count"
                  and ($l.payload.info.last_token_usage // null) != null then
               ($l.payload.info.last_token_usage) as $u
-              | (($u.cached_input_tokens // 0)
-                 + ($u.cache_write_input_tokens // 0)) as $cached
               | .n += 1
-              # Codex counts the cached tokens inside its own input_tokens, so
+              # Codex counts cached_input_tokens inside its own input_tokens, so
               # the fresh input the ledger reports is the remainder, clamped at
               # zero rather than going negative on a log that breaks that.
-              | .it += ([(($u.input_tokens // 0) - $cached), 0] | max)
-              | .ct += $cached
+              # cache_write_input_tokens is NOT subtracted: no observed log
+              # establishes whether it is inside input_tokens.
+              | .it += ([(($u.input_tokens // 0)
+                          - ($u.cached_input_tokens // 0)), 0] | max)
+              | .ct += (($u.cached_input_tokens // 0)
+                        + ($u.cache_write_input_tokens // 0))
               | .ot += ($u.output_tokens // 0)
               | .rt += ($u.reasoning_output_tokens // 0)
             else . end)
