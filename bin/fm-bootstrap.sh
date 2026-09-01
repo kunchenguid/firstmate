@@ -93,10 +93,10 @@
 #          snapshot's classifier and
 #          bin/fm-secondmate-reconcile.sh's nudge stay as backstops. Replayed
 #          closes and restored In-flight rows print BOOTSTRAP_INFO facts.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          fleet_sync) while still
+#          fleet_publish_arm, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -104,7 +104,7 @@
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          Unset/0 (the default) runs all seven sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -1497,6 +1497,33 @@ detect_home_summary_publication() {
   fi
 }
 
+# Keep this home's cadence snapshot publisher running.
+#
+# The publisher is the only recurring background work here that must survive the
+# session: a surface that watches state/fleet-snapshot.json has no way to run a
+# command, so the artifact has to keep advancing after every agent is gone
+# (bin/fm-fleet-publish.sh owns why no watcher-armed mechanism can do that). A
+# locked session boundary is where a home reliably notices a publisher that a
+# reboot or a crash took down, so re-arming it here is what makes an opted-in
+# home converge back to publishing on its own.
+#
+# It is idempotent and cheap: a home with no config/fleet-snapshot-cadence pays
+# one absent-file read, and a home whose publisher is already running is left
+# alone. Only a home that asked for a cadence and has no publisher gets one
+# started, and only a failure to start one prints.
+fleet_publish_arm() {
+  local out rc
+  [ -e "$CONFIG/fleet-snapshot-cadence" ] || [ -L "$CONFIG/fleet-snapshot-cadence" ] || return 0
+  out=$("$SCRIPT_DIR/fm-fleet-publish.sh" start 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  # The publisher prefixes its own diagnostics with its command name; strip that
+  # so the bootstrap line carries one prefix rather than two.
+  printf 'FLEET_PUBLISH: %s\n' \
+    "$(printf '%s' "$out" | tr '\t\r\n' '   ' | sed 's/^fm-fleet-publish: //' | cut -c1-300)"
+  return 0
+}
+
 # The order below is the order the diagnostics have always printed in, so a
 # `skip` run is the same output with the network lines removed rather than a
 # reshuffle. `gh auth status` sits between the two local blocks because that is
@@ -1558,6 +1585,8 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # fleet_publish_arm starts a local detached publisher and makes no network call.
+  local_phase && fleet_publish_arm
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"

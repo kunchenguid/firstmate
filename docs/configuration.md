@@ -198,6 +198,34 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Fleet snapshot cadence (config/fleet-snapshot-cadence)
+
+`config/fleet-snapshot-cadence` is an optional local, gitignored opt-in that makes this home republish its own fleet snapshot to `state/fleet-snapshot.json` on a fixed cadence.
+It exists for a consumer that watches a FILE and cannot run a command, which otherwise renders whatever the last on-demand `bin/fm-fleet-snapshot.sh` run happened to leave behind.
+The published artifact is the exact `--json` document, schema `fm-fleet-snapshot.v1` unchanged, so a consumer that pins that schema id keeps rendering and reads the picture's age from the document's own `generated` field.
+
+The file must be one positive whole number of seconds followed by exactly one newline, in a regular, single-linked file beneath a non-symlinked `config/`.
+Absent means disabled: no publisher runs, no artifact is written, and the home pays nothing.
+A file that is present but malformed, symlinked, hardlinked, or below the floor is refused as unusable rather than treated as a default, because a home that believes it is publishing and is not is the exact failure this mechanism removes.
+`bin/fm-fleet-publish.sh status` always names which of disabled, misconfigured, or enabled applies, whether a publisher is running, and how old the published artifact is.
+
+A snapshot read is real work: it forks per task, reads every task record and status tail, checks each task's endpoint presence, and samples every registered secondmate home.
+It makes no network call, so the cost scales with tasks plus secondmate homes rather than with fleet activity.
+Measured 2026-09-01 on a primary home with 6 task records and no secondmates, one read took 2.9 seconds of wall clock and produced 49KB of JSON.
+`300` is the recommended cadence and spends roughly one percent of a core on that home; a 60-second cadence would spend five percent continuously to shave four minutes off a staleness badge, which is why the short value is not the default.
+`FM_FLEET_PUBLISH_MIN_CADENCE` (default 30) is the floor, below which the duty cycle stops being background work on any fleet large enough to want this.
+
+A publish is atomic.
+The producer writes a dot-prefixed temporary file in the state directory, validates it, then renames it over the artifact, so a consumer watching that directory never observes a partial document and never sees the temporary name.
+A snapshot read that fails, times out, or returns a document that is not a usable `fm-fleet-snapshot.v1` for this home leaves the previous artifact byte-identical and records the reason in the bounded `state/.fleet-publish.log`.
+Degrading to stale is correct because the consumer can still say how old the picture is; degrading to absent or truncated would take that away.
+
+The publisher runs detached, in its own process group, and outlives the session that armed it, so the artifact keeps advancing with no agent alive.
+A locked session start arms it when this file is present, and `bin/fm-fleet-publish.sh start` arms it by hand; both are idempotent and leave an already-running publisher alone.
+It re-reads this file on every tick, so a changed cadence takes effect without a restart and removing the file stops the publisher within one tick while leaving the last published snapshot in place.
+This file is not inherited by secondmate homes, because a home opts in for the surface it actually hosts.
+`bin/fm-fleet-publish.sh`'s header owns the publication mechanics, the detachment contract, and why no watcher-armed or away-mode mechanism can carry this work.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
