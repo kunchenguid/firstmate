@@ -779,7 +779,10 @@ fm_backend_endpoint_blocks_respawn() {  # <backend> <target> <label>
       fm_backend_tmux_window_exists "${target%%:*}" "${target#*:}"
       check_status=$?
       ;;
-    herdr) ! fm_backend_herdr_endpoint_confirmed_gone "$target" ;;
+    herdr)
+      ! fm_backend_herdr_endpoint_confirmed_gone "$target"
+      check_status=$?
+      ;;
     zellij)
       fm_backend_zellij_tab_exists "${target%%:*}" "$label"
       check_status=$?
@@ -788,14 +791,13 @@ fm_backend_endpoint_blocks_respawn() {  # <backend> <target> <label>
       fm_backend_cmux_workspace_exists "$label"
       check_status=$?
       ;;
-    *) fm_backend_target_exists "$backend" "$target" ;;
-  esac
-  case "$backend" in
-    tmux|zellij|cmux)
-      [ "$check_status" -eq 1 ] && return 1
-      return 0
+    *)
+      fm_backend_target_exists "$backend" "$target"
+      check_status=$?
       ;;
   esac
+  [ "$check_status" -eq 1 ] && return 1
+  return 0
 }
 
 fm_backend_remove_worktree() {  # <backend> <worktree-id>

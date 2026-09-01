@@ -359,7 +359,10 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   title=$(fm_backend_zellij_scoped_title "$label")
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
   list_status=$?
-  if [ "$list_status" -ne 0 ]; then
+  # Zellij actions can return status 0 while printing a non-JSON missing-session
+  # response. An unreadable inventory cannot prove no tab already holds $title,
+  # so it refuses exactly as fm_backend_zellij_tab_exists does.
+  if [ "$list_status" -ne 0 ] || ! printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1; then
     echo "error: could not inspect zellij tabs in session '$session'; refusing to create '$title'" >&2
     return 1
   fi

@@ -51,7 +51,7 @@ fm-auth-fix
 ```
 
 Every `display-message` form answered for a window whose name was never asked for and still exited 0: an absent window name resolves by fnmatch and then by prefix, a name matching nothing at all falls back to the client's current window, and anchoring the target (`=session:=window`) suppresses neither fallback.
-Only the session inventory answers window identity exactly, so `fm_backend_tmux_window_exists` is the one definition shared by the create-task duplicate refusal, the agent-liveness probe's window-membership check, and `fm-spawn.sh`'s read-back of an endpoint it retired after refusing a claimed worktree.
+Only the session inventory answers window identity exactly, so `fm_backend_tmux_window_exists` is the one definition shared by the create-task duplicate refusal and `fm-spawn.sh`'s read-back of an endpoint it retired after refusing a claimed worktree. The agent-liveness probe applies the same session-inventory rule through its own `list-windows` read, because it needs that command's stderr to separate a missing window from an unreadable one.
 
 ### Agent liveness name sources
 

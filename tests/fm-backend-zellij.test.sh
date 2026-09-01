@@ -463,6 +463,27 @@ test_create_task_refuses_duplicate_label() {
   pass "fm_backend_zellij_create_task: refuses a duplicate home-scoped tab title (zellij's own new-tab has no uniqueness check)"
 }
 
+# A `list-tabs --json` that exits 0 while printing a non-JSON missing-session
+# response cannot prove no tab already holds this title, so create_task must
+# refuse rather than call new-tab on an inventory it never read.
+test_create_task_refuses_when_tab_inventory_is_not_json() {
+  local dir fb out status
+  dir="$TMP_ROOT/dup-task-not-json"; mkdir -p "$dir/responses"
+  printf 'Session firstmate not found\n' > "$dir/responses/1.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_create_task firstmate fm-nonjson1 /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should refuse a successful non-JSON tab inventory"
+  assert_contains "$out" "could not inspect zellij tabs" \
+    "create_task did not report the unreadable tab inventory"
+  if grep -q 'new-tab' "$dir/log" 2>/dev/null; then
+    fail "create_task created a tab despite never reading the tab inventory"
+  fi
+  pass "fm_backend_zellij_create_task: refuses when list-tabs exits 0 with non-JSON output"
+}
+
 test_create_task_creates_and_parses_ids() {
   local dir fb out title
   dir="$TMP_ROOT/create-task"; mkdir -p "$dir/responses"
@@ -1318,6 +1339,7 @@ test_server_ensure_skips_attach_when_already_exists
 test_dispatch_routes_zellij_backend
 test_dispatch_busy_state_unknown_for_zellij
 test_create_task_refuses_duplicate_label
+test_create_task_refuses_when_tab_inventory_is_not_json
 test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active

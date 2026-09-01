@@ -2227,6 +2227,29 @@ test_endpoint_confirmed_gone_gates_on_structured_presence() {
   pass "endpoint confirmed-gone: only structured not-found permits record removal and ambiguous identity refuses"
 }
 
+# fm_backend_endpoint_blocks_respawn must PROPAGATE the herdr verdict, not
+# hardcode "still there": a pane herdr reports structurally gone leaves the
+# slot retryable, and fm-spawn.sh's post-refusal cleanup warning depends on it.
+test_endpoint_blocks_respawn_propagates_the_herdr_verdict() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/fm-backend.sh"
+    . "$0/bin/backends/herdr.sh"
+    _FM_BACKEND_HERDR_SOURCED=1
+    fm_backend_herdr_cli() { printf "%s\n" "$FM_FAKE_PRESENCE_RESPONSE"; return "${FM_FAKE_PRESENCE_STATUS:-0}"; }
+    check() {  # <label> <response> <status> <expected>
+      FM_FAKE_PRESENCE_RESPONSE=$2 FM_FAKE_PRESENCE_STATUS=$3
+      if fm_backend_endpoint_blocks_respawn herdr fmtest:w2:p2 fm-horph; then verdict=yes; else verdict=no; fi
+      [ "$verdict" = "$4" ] || printf "MISMATCH %s: blocks=%s expected=%s\n" "$1" "$verdict" "$4"
+    }
+    check gone "{\"error\":{\"code\":\"pane_not_found\"}}" 1 no
+    check present "{\"result\":{\"pane\":{\"pane_id\":\"w2:p2\"}}}" 0 yes
+    check unknown "" 1 yes
+  ' "$ROOT" 2>&1)
+  [ -z "$out" ] || fail "herdr endpoint-blocks-respawn verdict mismatch: $out"
+  pass "fm_backend_endpoint_blocks_respawn: a confirmed-gone herdr pane leaves the slot retryable"
+}
+
 test_projection_seeded_prune_refuses_active_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-seeded-focus-active-refusal"; mkdir -p "$dir/responses"
@@ -4558,6 +4581,7 @@ test_projection_close_failed_removal_rolls_back_the_reposition
 test_kill_emptying_non_focused_uses_pane_death
 test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
+test_endpoint_blocks_respawn_propagates_the_herdr_verdict
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
