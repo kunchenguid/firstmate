@@ -1863,8 +1863,9 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
-# dead|no-agent|live|unknown, purely from the JSON body of two read-only
-# calls - never from process exit status, since a business-logic "not found"
+# dead|no-agent|live|unknown from read-only backend state plus the shared
+# strict process proof for a stale `done` entry - never from process exit status,
+# since a business-logic "not found"
 # response is a normal, expected outcome here, not a call failure (real herdr
 # 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
 # the JSON keeps this function correct against either).
@@ -1883,16 +1884,33 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              stability across a server restart"), and what a future
 #              `resume_agents_on_restore = false` restore would produce too
 #              (a plain shell, never an agent).
-#   live     - `agent get` succeeds and reports a real agent_status (working,
-#              idle, done, or blocked - any registered value). An idle or
-#              blocked agent is still a genuine, still-registered agent, not
-#              a restored husk, so it is never a close-and-replace candidate.
+#              A `done` registration also resolves to no-agent, but only
+#              after a strict bare-idle-shell proof and a second `agent get`
+#              both agree; a done registration alone remains unknown because
+#              it can still describe an agent that owns the pane.
+#   live     - `agent get` succeeds and reports working, idle, or blocked.
+#              Every one remains a genuine registered agent and is never a
+#              close-and-replace candidate.
 #   unknown  - anything else: an unparseable/unexpected response from either
-#              call, or a `pane get` success whose own echoed pane_id does not
-#              round-trip (guards against misreading a herdr response shape
-#              change as "the pane exists"). The caller must fail safe toward
-#              refusal here, never toward closing - this is the conservative
-#              backstop the husk check depends on.
+#              call, a changed `done` registration, or a `pane get` success
+#              whose own echoed pane_id does not round-trip (guards against
+#              misreading a herdr response shape change as "the pane exists").
+#              The caller must fail safe toward refusal here, never toward
+#              closing - this is the conservative backstop the husk check
+#              depends on.
+#
+# fm_backend_herdr_done_registration_is_stale: a `done` registry entry is
+# agent-free only when the pane independently proves it has returned to its
+# one bare, idle shell and a second registry read is still `done`. The shared
+# idle-shell proof rejects foreground commands, children, active jobs, unknown
+# process identities, and unreadable process data. This helper only observes;
+# it never signals or closes the pane.
+fm_backend_herdr_done_registration_is_stale() {  # <session> <pane_id>
+  local session=$1 pane_id=$2
+  fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id" >/dev/null || return 1
+  [ "$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")" = "done" ]
+}
+
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -1911,7 +1929,14 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
-    working|idle|done|blocked) printf 'live' ;;
+    working|idle|blocked) printf 'live' ;;
+    done)
+      if fm_backend_herdr_done_registration_is_stale "$session" "$pane_id"; then
+        printf 'no-agent'
+      else
+        printf 'unknown'
+      fi
+      ;;
     *) printf 'unknown' ;;
   esac
 }

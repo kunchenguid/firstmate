@@ -133,12 +133,13 @@ jq_state() { jq "$@" "$STATE"; }
 save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 
 cmd=${1:-}; sub=${2:-}
-ws=""; label=""
+ws=""; label=""; cwd=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     --workspace) ws=${args[$((i+1))]:-} ;;
     --label) label=${args[$((i+1))]:-} ;;
+    --cwd) cwd=${args[$((i+1))]:-} ;;
   esac
 done
 
@@ -164,14 +165,41 @@ case "$cmd $sub" in
     ;;
   "tab create")
     n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
-    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
-      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid}]
+    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" --arg cwd "$cwd" \
+      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid, foreground_cwd:$cwd}]
        | .next = (.next + 1)' | save
     printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
     ;;
   "pane list")
     jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
     ;;
+  "pane get")
+    pane=${3:-}
+    jq_state --arg p "$pane" '
+      [.tabs[] | select(.pane_id == $p)] as $matches
+      | if ($matches | length) == 1 then
+          {result:{pane:($matches[0] | {pane_id,tab_id,workspace_id,foreground_cwd:(.foreground_cwd // "")})}}
+        else
+          {error:{code:"pane_not_found",message:"pane not found"}}
+        end'
+    ;;
+  "pane process-info")
+    pane=${4:-}
+    jq_state --arg p "$pane" '
+      [.tabs[] | select(.pane_id == $p)] as $matches
+      | if ($matches | length) == 1 then
+          {result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:4242,foreground_process_group_id:4242,foreground_processes:[{pid:4242,name:"zsh",argv0:"zsh"}]}}}
+        else
+          {error:{code:"pane_not_found",message:"pane not found"}}
+        end'
+    ;;
+  "pane send-keys")
+    pane=${3:-}; key=${4:-}
+    if [ "$key" = enter ] && [ "$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')" = done ]; then
+      jq_state --arg p "$pane" '.agent_status[$p] = "idle"' | save
+    fi
+    ;;
+  "pane send-text"|"pane run") : ;;
   "pane close")
     pane=${3:-}
     jq_state --arg p "$pane" '.tabs |= [.[]|select(.pane_id != $p)]' | save
@@ -1532,6 +1560,124 @@ SH
 
 death_process_info_fixture() {  # <pane> <pid>
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' "$1" "$2" "$2" "$2"
+}
+
+# A done registration alone is not enough to replace a worker: it has to stay
+# done across a strict proof that the pane has only its idle shell. This models
+# the stale registry left after a Pi process exits back to its shell.
+test_agent_state_accepts_only_a_stale_done_registration() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/stale-done-agent-state"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/2.out"
+  death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/4.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = dead ] \
+    || fail "a stale done registration over a proved bare shell should classify dead, got '$out'"
+  [ "$(grep -c $'agent\x1fget\x1fw2:p2' "$log")" -eq 2 ] \
+    || fail "stale done recovery did not re-read the agent registration after proving the shell"
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info\x1f--pane\x1fw2:p2' \
+    "stale done recovery did not prove the pane had returned to its bare shell"
+  pass "fm_backend_herdr_agent_state: a stale done registration over a proved bare shell is agent-free"
+}
+
+test_agent_state_refuses_done_without_a_bare_shell() {
+  local dir log resp fb out status pid=4242
+  dir="$TMP_ROOT/done-agent-active-process"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/2.out"
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"},{"pid":4243,"name":"pi","argv0":"pi"}]}}}\n' "$pid" "$pid" "$pid" > "$resp/3.out"
+  make_death_lab "$dir" "$pid"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] && [ "$out" = unreadable ] \
+    || fail "a done registration with a foreground Pi process must refuse recovery, got '$out'"
+  [ "$(grep -c $'agent\x1fget\x1fw2:p2' "$log")" -eq 1 ] \
+    || fail "an unsafe done registration should not be reclassified after its shell proof failed"
+  pass "fm_backend_herdr_agent_state: done with an active foreground process remains unverified"
+}
+
+test_agent_state_keeps_active_registered_statuses_live() {
+  local candidate dir log resp fb out status
+  for candidate in working idle blocked; do
+    dir="$TMP_ROOT/agent-state-$candidate"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
+    printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$candidate" > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] && [ "$out" = alive ] \
+      || fail "registered agent_status=$candidate must remain live, got '$out'"
+    assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' \
+      "registered agent_status=$candidate should not enter stale-done recovery"
+  done
+  pass "fm_backend_herdr_agent_state: working, idle, and blocked registrations remain live"
+}
+
+# Drive fm-control's complete relaunch transaction against the stale-done
+# classifier. The stateful Herdr double accepts a replacement only when its
+# launch Enter lands, so the test proves the transaction did not type an exit
+# command into the returned shell before it launched the replacement.
+test_control_relaunch_replaces_a_stale_done_registration() {
+  local dir home proj wt log state fb out status
+  dir="$TMP_ROOT/control-stale-done"; home="$dir/home"; proj="$dir/proj"; wt="$dir/wt"
+  mkdir -p "$home/state" "$home/data/hdone" "$home/config"
+  printf '# replacement brief\n' > "$home/data/hdone/brief.md"
+  fm_git_worktree "$proj" "$wt" "task-hdone"
+  log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  state="$dir/state.json"
+  jq -n --arg cwd "$wt" '{
+    next:2,
+    workspaces:[{workspace_id:"w1",label:"firstmate"}],
+    tabs:[{tab_id:"w1:t1",label:"fm-hdone",workspace_id:"w1",pane_id:"w1:p1",foreground_cwd:$cwd}],
+    agent_status:{"w1:p1":"done"}
+  }' > "$state"
+  make_death_lab "$dir" 4242
+  {
+    echo 'window=fmtest:w1:p1'
+    echo 'endpoint_task_id=hdone'
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo 'harness=claude'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'model=default'
+    echo 'effort=default'
+    echo 'backend=herdr'
+    echo 'herdr_session=fmtest'
+    echo 'herdr_workspace_id=w1'
+    echo 'herdr_tab_id=w1:t1'
+    echo 'herdr_pane_id=w1:p1'
+  } > "$home/state/hdone.meta"
+  out=$(PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+    HERDR_SESSION=fmtest FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    FM_SPAWN_NO_GUARD=1 FM_CONTROL_POLL=0.01 FM_CONTROL_LAUNCH_WAIT=0.2 \
+    "$ROOT/bin/fm-control.sh" hdone relaunch --note 'continue from the preserved local copy' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] \
+    || fail "stale done recovery should complete the relaunch transaction: $out"
+  assert_contains "$out" 'relaunched hdone harness=claude' \
+    "stale done recovery did not report a replacement agent"
+  [ "$(jq -r '.agent_status["w1:p1"]' "$state")" = idle ] \
+    || fail "replacement launch did not replace the stale done registration with a live agent"
+  assert_not_contains "$(cat "$log")" $'\x1f/exit' \
+    "stale done recovery typed an exit command into the proved returned shell"
+  pass "fm-control relaunch: a proved stale done registration is replaced without sending a lifecycle command to the shell"
 }
 
 test_projection_close_emptying_after_focus_uses_pane_death_without_move() {
@@ -4516,6 +4662,10 @@ test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
+test_agent_state_accepts_only_a_stale_done_registration
+test_agent_state_refuses_done_without_a_bare_shell
+test_agent_state_keeps_active_registered_statuses_live
+test_control_relaunch_replaces_a_stale_done_registration
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
