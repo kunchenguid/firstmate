@@ -5,7 +5,7 @@
 # PID of any one tool call, which is dead moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
-#        fm-lock.sh --help    print usage; exit 0 without touching the lock
+#        fm-lock.sh -h|--help print usage; exit 0 without touching the lock
 # Any other argument is refused with exit 2 and the lock left untouched, so a
 # probe like `--help` can never claim the home's session lock as a side effect.
 set -u
@@ -14,7 +14,7 @@ usage() {
   cat <<'USAGE'
 Usage: fm-lock.sh           acquire the session lock; exit 1 unless ownership is verified
        fm-lock.sh status    print holder and liveness; always exits 0
-       fm-lock.sh --help    print this usage; exit 0 without touching the lock
+       fm-lock.sh -h|--help print this usage; exit 0 without touching the lock
 USAGE
 }
 
