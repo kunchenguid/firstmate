@@ -90,6 +90,23 @@ esac
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
+# The enveloped cases below drive a real cursor launch on the remote host, whose
+# fm-spawn resolves the vendor CLI through fm_cursor_resolve_binary - an
+# environmental check that lives past the shared policy composite. Without this
+# stub the launch would pass or fail on whether the machine running the suite
+# happens to have Cursor installed, which is why CI (no Cursor) failed while a
+# developer machine (Cursor installed) passed. Cursor's resolver accepts a
+# `cursor-agent` by name, and the remote child PATH puts this bin/ first, so the
+# same stub tests/fm-control-relaunch.test.sh and
+# tests/fm-spawn-dispatch-profile.test.sh use serves here too.
+cat > "$REMOTE_ROOT/bin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  printf '%b\n' "Available models\ncursor-grok-4.5-high - Grok 4.5 High"
+fi
+exit 0
+SH
+chmod +x "$REMOTE_ROOT/bin/cursor-agent"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
 git -C "$REMOTE_ROOT" init -q -b main
