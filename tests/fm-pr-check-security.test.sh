@@ -47,6 +47,16 @@ file_mode() {
   fi
 }
 
+process_is_live_non_zombie() {
+  local pid=$1 stat
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  case "$stat" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
 LINK_KIND=
 LINK_TARGET=
 LINK_CONTENT=
@@ -1133,11 +1143,11 @@ SH
     child_pid=$(cat "$child_pid_file")
     kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop $backend watcher"
     i=0
-    while kill -0 "$watcher_pid" 2>/dev/null && [ "$i" -lt 150 ]; do
+    while process_is_live_non_zombie "$watcher_pid" && [ "$i" -lt 150 ]; do
       sleep 0.02
       i=$((i + 1))
     done
-    if kill -0 "$watcher_pid" 2>/dev/null; then
+    if process_is_live_non_zombie "$watcher_pid"; then
       kill -KILL "$watcher_pid" 2>/dev/null || true
       wait "$watcher_pid" 2>/dev/null || true
       kill -KILL "$child_pid" 2>/dev/null || true
@@ -1147,7 +1157,7 @@ SH
     wait "$watcher_pid" || rc=$?
     [ "$rc" -ne 0 ] || fail "$backend signaled watcher exited successfully"
     alive=0
-    kill -0 "$child_pid" 2>/dev/null && alive=1
+    process_is_live_non_zombie "$child_pid" && alive=1
     [ "$alive" -eq 0 ] || kill -KILL "$child_pid" 2>/dev/null || true
     wait "$child_pid" 2>/dev/null || true
     [ "$alive" -eq 0 ] || fail "$backend watcher left a returned check descendant alive"
