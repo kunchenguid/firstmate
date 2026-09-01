@@ -1176,22 +1176,28 @@ fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
 }
 
 fm_backend_herdr_response_is_success() {
-  printf '%s' "$1" | jq -e '
-    if type != "object" then false
-    elif (has("error") | not) or .error == null then true
-    else false
+  printf '%s' "$1" | jq -se '
+    if length != 1 then false
+    else .[0] as $response
+    | if ($response | type) != "object" then false
+      elif (($response | has("error")) | not) or $response.error == null then true
+      else false
+      end
     end
   ' >/dev/null 2>&1
 }
 
 fm_backend_herdr_response_error_code() {
-  printf '%s' "$1" | jq -r '
-    if type != "object" then empty
-    elif (has("error") | not) or .error == null or has("result") then empty
-    elif (.error | type) != "object" then empty
-    elif (.error.code | type) != "string" then empty
-    elif (.error.code | length) == 0 then empty
-    else .error.code
+  printf '%s' "$1" | jq -sr '
+    if length != 1 then empty
+    else .[0] as $response
+    | if ($response | type) != "object" then empty
+      elif (($response | has("error")) | not) or $response.error == null or ($response | has("result")) then empty
+      elif ($response.error | type) != "object" then empty
+      elif ($response.error.code | type) != "string" then empty
+      elif ($response.error.code | length) == 0 then empty
+      else $response.error.code
+      end
     end
   ' 2>/dev/null
 }

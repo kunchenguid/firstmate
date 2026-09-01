@@ -1657,17 +1657,28 @@ test_agent_state_refuses_fractional_process_identities() {
 
 test_agent_state_refuses_contradictory_done_envelopes() {
   local kind dir log resp fb out status pid=4242
-  for kind in agent process; do
+  for kind in agent process agent-stream process-stream; do
     dir="$TMP_ROOT/done-agent-contradictory-$kind"; mkdir -p "$dir/responses"
     log="$dir/log"; resp="$dir/responses"; : > "$log"
     printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/1.out"
     printf '%s\n' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/2.out"
-    if [ "$kind" = agent ]; then
-      death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
-      printf '%s\n' '{"error":{"code":"internal_error"},"result":{"agent":{"agent_status":"done"}}}' > "$resp/4.out"
-    else
-      printf '{"error":{"code":"internal_error"},"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' "$pid" "$pid" "$pid" > "$resp/3.out"
-    fi
+    case "$kind" in
+      agent)
+        death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+        printf '%s\n' '{"error":{"code":"internal_error"},"result":{"agent":{"agent_status":"done"}}}' > "$resp/4.out"
+        ;;
+      process)
+        printf '{"error":{"code":"internal_error"},"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' "$pid" "$pid" "$pid" > "$resp/3.out"
+        ;;
+      agent-stream)
+        death_process_info_fixture w2:p2 "$pid" > "$resp/3.out"
+        printf '%s\n' '{"error":{"code":"temporary"}}' '{"result":{"agent":{"agent_status":"done"}}}' > "$resp/4.out"
+        ;;
+      process-stream)
+        printf '%s\n' '{"error":{"code":"temporary"}}' > "$resp/3.out"
+        death_process_info_fixture w2:p2 "$pid" >> "$resp/3.out"
+        ;;
+    esac
     make_death_lab "$dir" "$pid"
     fb=$(make_herdr_fakebin "$dir")
     out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -1677,7 +1688,7 @@ test_agent_state_refuses_contradictory_done_envelopes() {
     [ "$status" -eq 0 ] && [ "$out" = unreadable ] \
       || fail "a contradictory $kind response must remain unreadable, got '$out'"
   done
-  pass "fm_backend_herdr_agent_state: contradictory done and process responses refuse stale recovery"
+  pass "fm_backend_herdr_agent_state: contradictory done and process response streams refuse stale recovery"
 }
 
 test_create_task_refuses_when_stale_done_changes_before_close() {
