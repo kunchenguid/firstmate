@@ -1274,7 +1274,7 @@ test_watcher_waits_for_inflight_forge_lifecycle() {
 }
 
 test_pr_lifecycle_recovers_reused_pid_owner() {
-  local dir state lock owner holder_pid check_pid i rc timed_out
+  local dir state lock owner recovery recovery_owner holder_pid check_pid i rc timed_out
   dir=$(make_case pr-lifecycle-pid-reuse)
   state="$dir/home/state"
   write_task_meta "$dir"
@@ -1290,6 +1290,15 @@ test_pr_lifecycle_recovers_reused_pid_owner() {
     > "$owner/record"
   chmod 0600 "$owner/pid" "$owner/record"
   ln -s "$owner" "$lock"
+  recovery="$lock.recovery"
+  recovery_owner="$recovery.owner.reused"
+  mkdir "$recovery_owner"
+  printf '%s\n' "$holder_pid" > "$recovery_owner/pid"
+  printf '%s\n' fm-pr-check.sh > "$recovery_owner/expected-command"
+  printf '%064d\n' 0 > "$recovery_owner/pid-identity"
+  chmod 0600 "$recovery_owner/pid" "$recovery_owner/expected-command" \
+    "$recovery_owner/pid-identity"
+  ln -s "$recovery_owner" "$recovery"
 
   FM_PR_LIFECYCLE_LOCK_ATTEMPTS=5 FM_PR_LIFECYCLE_LOCK_INTERVAL=0.01 \
     run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
@@ -1316,6 +1325,8 @@ test_pr_lifecycle_recovers_reused_pid_owner() {
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
     || fail "PID-reuse recovery did not publish a valid PR poll"
   [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "PID-reuse recovery left the lifecycle lock held"
+  [ ! -e "$recovery" ] && [ ! -L "$recovery" ] \
+    || fail "PID-reuse recovery left the lifecycle recovery claim held"
   pass "PR lifecycle ownership rejects PID reuse without wedging delivery"
 }
 

@@ -288,6 +288,38 @@ CODEX_THREAD_ID="$THREAD_A" \
   || fail "stale task mutation ownership was not retired"
 
 MUTATION_RECOVERY_LOCK="$TASK_HOME/state/.$TASK_ID.codex-app-mutation-recovery.lock"
+MUTATION_RECOVERY_OWNER="$MUTATION_RECOVERY_LOCK.owner.reused"
+mkdir "$MUTATION_RECOVERY_OWNER"
+printf '%s\n' "$TASK_LEASE" > "$MUTATION_RECOVERY_OWNER/pid"
+printf '%s\n' fm-codex-app-task.sh > "$MUTATION_RECOVERY_OWNER/expected-command"
+printf '%064d\n' 0 > "$MUTATION_RECOVERY_OWNER/pid-identity"
+chmod 0600 "$MUTATION_RECOVERY_OWNER/pid" \
+  "$MUTATION_RECOVERY_OWNER/expected-command" \
+  "$MUTATION_RECOVERY_OWNER/pid-identity"
+ln -s "$MUTATION_RECOVERY_OWNER" "$MUTATION_RECOVERY_LOCK"
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
+    --state working --detail 'recovered stale mutation recovery owner' \
+    > "$TMP_ROOT/mutation-recovery-pid.out" 2>&1 &
+MUTATION_RECOVERY_PID=$!
+index=0
+while kill -0 "$MUTATION_RECOVERY_PID" 2>/dev/null && [ "$index" -lt 200 ]; do
+  sleep 0.01
+  index=$((index + 1))
+done
+if kill -0 "$MUTATION_RECOVERY_PID" 2>/dev/null; then
+  kill -TERM "$MUTATION_RECOVERY_PID" 2>/dev/null || true
+  wait "$MUTATION_RECOVERY_PID" 2>/dev/null || true
+  fail "a reused mutation recovery pid wedged Desktop task mutation"
+fi
+wait "$MUTATION_RECOVERY_PID" \
+  || fail "Desktop mutation did not recover a reused recovery pid: $(cat "$TMP_ROOT/mutation-recovery-pid.out")"
+[ ! -e "$MUTATION_RECOVERY_LOCK" ] && [ ! -L "$MUTATION_RECOVERY_LOCK" ] \
+  || fail "stale mutation recovery ownership was not retired"
+
 fm_lock_acquire_wait "$MUTATION_RECOVERY_LOCK" \
   || fail "could not hold task mutation initialization ownership"
 mkdir "$MUTATION_LOCK"
@@ -299,7 +331,7 @@ CODEX_THREAD_ID="$THREAD_A" \
     --state working --detail 'recovered serialized lock initialization' \
     > "$TMP_ROOT/mutation-initialization.out" 2>&1 &
 MUTATION_RECONCILE_PID=$!
-sleep 5.2
+sleep 0.2
 kill -0 "$MUTATION_RECONCILE_PID" 2>/dev/null \
   || fail "a competing mutation reclaimed a live ownerless initialization"
 [ -d "$MUTATION_LOCK" ] \

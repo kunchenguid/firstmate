@@ -71,7 +71,17 @@ make_pr_fixture() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *"/branches/"*"/protection"*) cat "$FM_TEST_REQUIREMENTS" ;;
+  *"/branches/"*"/protection"*)
+    if [ "${FM_TEST_CLASSIC_UNPROTECTED:-0}" = 1 ]; then
+      printf 'gh: Branch not protected (HTTP 404)\n' >&2
+      exit 1
+    fi
+    if [ "${FM_TEST_CLASSIC_FORBIDDEN:-0}" = 1 ]; then
+      printf 'gh: Resource not accessible by integration (HTTP 403)\n' >&2
+      exit 1
+    fi
+    cat "$FM_TEST_REQUIREMENTS"
+    ;;
   *"/rules/branches/"*) cat "$FM_TEST_RULES" ;;
   *"/check-runs?"*)
     [ -z "${FM_TEST_ABA_MID_HEAD:-}" ] || printf '%s\n' "$FM_TEST_ABA_MID_HEAD" > "$FM_TEST_HEAD"
@@ -217,6 +227,23 @@ test_exact_head_green_contract() {
   expect_code 1 "$status" "a ruleset provider mismatch must not be green"
   assert_contains "$out" "required check provider mismatch: security" \
     "ruleset provider mismatch refusal was not diagnostic"
+
+  : > "$dir/requirements"
+  printf '%s\n' \
+    $'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone' \
+    $'require\trequired\tnone\tsecurity\tnone\tnone\t42\tnone' > "$dir/rules"
+  printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\nresult\tcheck\t%s\tsecurity\tcompleted\tsuccess\t42\tsecurity-app\n' \
+    "$sha" "$sha" > "$dir/check-runs"
+  out=$(FM_TEST_CLASSIC_UNPROTECTED=1 run_pr_ci "$dir" "$sha") \
+    || fail "ruleset-only required checks rejected terminal success: $out"
+  assert_contains "$out" "green: https://github.com/example/repo/pull/7 head=$sha checks=2" \
+    "ruleset-only exact-head verification did not report green"
+
+  status=0
+  out=$(FM_TEST_CLASSIC_FORBIDDEN=1 run_pr_ci "$dir" "$sha") || status=$?
+  expect_code 1 "$status" "classic branch-protection permission errors must remain unavailable"
+  assert_contains "$out" "required checks are unavailable for base branch main" \
+    "classic branch-protection permission refusal was not diagnostic"
   pass "fm-pr-ci accepts only terminal success for the exact PR head"
 }
 

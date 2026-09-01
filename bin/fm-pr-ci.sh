@@ -63,10 +63,10 @@ base_valid() {
 }
 
 read_classic_required_checks() {
-  local base_path
+  local base_path response status=0
   base_path=$(fm_pr_urlencode_path_segment "$1") || return 1
   # shellcheck disable=SC2016
-  gh api -H 'Accept: application/vnd.github+json' \
+  response=$(gh api -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "repos/$OWNER/$REPO/branches/$base_path/protection" \
     --jq '
@@ -85,7 +85,12 @@ read_classic_required_checks() {
          (if .app_id == -1 then "any" else (.app_id | tostring) end), "none"] |
         @tsv
       end
-    ' 2>/dev/null
+    ' 2>&1) || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf '%s\n' "$response"
+    return 0
+  fi
+  [ "$response" = 'gh: Branch not protected (HTTP 404)' ]
 }
 
 read_ruleset_required_checks() {

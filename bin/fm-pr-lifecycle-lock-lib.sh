@@ -12,6 +12,7 @@ FM_PR_LIFECYCLE_RECORD_PID=
 FM_PR_LIFECYCLE_RECORD_IDENTITY=
 FM_PR_LIFECYCLE_OBSERVED_OWNER=
 FM_PR_LIFECYCLE_OBSERVED_STATUS=
+FM_PR_LIFECYCLE_RECOVERY_HELD_PID=
 FM_PR_LIFECYCLE_WAIT_ATTEMPTS=
 FM_PR_LIFECYCLE_WAIT_INTERVAL=
 
@@ -151,12 +152,17 @@ fm_pr_lifecycle_owner_observe() {
 }
 
 fm_pr_lifecycle_try_recover() {
-  local lock=$1 recovery expected_owner
+  local lock=$1 role=$2 recovery expected expected_owner
+  FM_PR_LIFECYCLE_RECOVERY_HELD_PID=
   fm_pr_lifecycle_owner_observe "$lock" || return 1
   [ "$FM_PR_LIFECYCLE_OBSERVED_STATUS" = stale ] || return 1
   expected_owner=$FM_PR_LIFECYCLE_OBSERVED_OWNER
   recovery="$lock.recovery"
-  fm_lock_try_acquire "$recovery" || return 1
+  expected=$(fm_pr_lifecycle_role_command "$role") || return 1
+  if ! fm_lock_try_acquire "$recovery" "$expected"; then
+    FM_PR_LIFECYCLE_RECOVERY_HELD_PID=${FM_LOCK_HELD_PID:-unknown}
+    return 1
+  fi
   if ! fm_pr_lifecycle_owner_observe "$lock" \
     || [ "$FM_PR_LIFECYCLE_OBSERVED_OWNER" != "$expected_owner" ] \
     || [ "$FM_PR_LIFECYCLE_OBSERVED_STATUS" != stale ] \
@@ -185,7 +191,7 @@ fm_pr_lifecycle_lock_acquire() {
     if fm_pr_lifecycle_try_create "$lock" "$role"; then
       return 0
     fi
-    if fm_pr_lifecycle_try_recover "$lock" \
+    if fm_pr_lifecycle_try_recover "$lock" "$role" \
       && fm_pr_lifecycle_try_create "$lock" "$role"; then
       return 0
     fi
@@ -196,8 +202,13 @@ fm_pr_lifecycle_lock_acquire() {
     owner_role=${FM_PR_LIFECYCLE_RECORD_ROLE:-unknown}
     owner_pid=${FM_PR_LIFECYCLE_RECORD_PID:-unknown}
   fi
-  printf 'error: PR lifecycle for task %s remained owned by %s process %s after %s bounded attempt(s)\n' \
-    "$id" "$owner_role" "$owner_pid" "$attempts" >&2
+  if [ -n "$FM_PR_LIFECYCLE_RECOVERY_HELD_PID" ]; then
+    printf 'error: PR lifecycle recovery for task %s remained owned by process %s after %s bounded attempt(s)\n' \
+      "$id" "$FM_PR_LIFECYCLE_RECOVERY_HELD_PID" "$attempts" >&2
+  else
+    printf 'error: PR lifecycle for task %s remained owned by %s process %s after %s bounded attempt(s)\n' \
+      "$id" "$owner_role" "$owner_pid" "$attempts" >&2
+  fi
   return 1
 }
 

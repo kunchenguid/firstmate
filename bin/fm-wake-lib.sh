@@ -300,6 +300,7 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/expected-command" \
     "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
@@ -337,12 +338,25 @@ fm_lock_owner_dir() {
   mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
 }
 
+fm_lock_expected_command_valid() {
+  case "$1" in ''|*[!A-Za-z0-9._+-]*) return 1 ;; esac
+}
+
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back
+  local ownerdir=$1 expected=${2:-} mypid back identity
   mypid=${BASHPID:-$$}
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  [ "$back" = "$mypid" ] || return 1
+  [ -n "$expected" ] || return 0
+  fm_lock_expected_command_valid "$expected" || return 1
+  declare -F fm_process_command_identity >/dev/null 2>&1 || return 1
+  identity=$(fm_process_command_identity "$mypid" "$expected") || return 1
+  [[ "$identity" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$expected" > "$ownerdir/expected-command" 2>/dev/null || return 1
+  printf '%s\n' "$identity" > "$ownerdir/pid-identity" 2>/dev/null || return 1
+  chmod 0600 "$ownerdir/pid" "$ownerdir/expected-command" \
+    "$ownerdir/pid-identity" 2>/dev/null
 }
 
 fm_lock_link_owner() {
@@ -413,14 +427,14 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} expected=${3:-} ownerdir
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ! fm_lock_prepare_owner "$ownerdir"; then
+  if ! fm_lock_prepare_owner "$ownerdir" "$expected"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -437,6 +451,42 @@ fm_lock_try_create() {
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
+}
+
+fm_lock_typed_owner_proven_stale() {
+  local lockdir=$1 pid=$2 expected recorded observed args lines
+  fm_pid_alive "$pid" || return 0
+  if [ ! -e "$lockdir/expected-command" ] \
+    && [ ! -e "$lockdir/pid-identity" ]; then
+    return 1
+  fi
+  [ -f "$lockdir/expected-command" ] && [ ! -L "$lockdir/expected-command" ] \
+    && [ -f "$lockdir/pid-identity" ] && [ ! -L "$lockdir/pid-identity" ] \
+    || return 1
+  lines=$(wc -l < "$lockdir/expected-command" 2>/dev/null | tr -d '[:space:]') \
+    || return 1
+  [ "$lines" = 1 ] || return 1
+  lines=$(wc -l < "$lockdir/pid-identity" 2>/dev/null | tr -d '[:space:]') \
+    || return 1
+  [ "$lines" = 1 ] || return 1
+  expected=$(cat "$lockdir/expected-command" 2>/dev/null) || return 1
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null) || return 1
+  fm_lock_expected_command_valid "$expected" || return 1
+  [[ "$recorded" =~ ^[0-9a-f]{64}$ ]] || return 1
+  if declare -F fm_process_command_identity >/dev/null 2>&1; then
+    observed=$(fm_process_command_identity "$pid" "$expected" 2>/dev/null || true)
+    if [ -n "$observed" ]; then
+      [ "$observed" != "$recorded" ]
+      return
+    fi
+  fi
+  args=$(ps -ww -o args= -p "$pid" 2>/dev/null || true)
+  if ! fm_pid_alive "$pid"; then
+    return 0
+  fi
+  [ -n "$args" ] || return 1
+  case "$args" in *"$expected"*) return 1 ;; esac
+  return 0
 }
 
 fm_lock_remove_path() {
@@ -473,7 +523,8 @@ fm_lock_recheck_stale_owner() {
   fi
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
-  if fm_pid_alive "$actual_pid"; then
+  if fm_pid_alive "$actual_pid" \
+    && ! fm_lock_typed_owner_proven_stale "$lockdir" "$actual_pid"; then
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
@@ -792,12 +843,13 @@ fm_recovery_marker_reopen_announced() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 expected=${2:-} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+  [ -z "$expected" ] || fm_lock_expected_command_valid "$expected" || return 1
 
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_try_create "$lockdir" "" "$expected"; then
     return 0
   fi
 
@@ -814,13 +866,14 @@ fm_lock_try_acquire() {
     # - the hang reproduced by the self-held reclaim regression in
     # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
     fm_lock_remove_path "$lockdir" || true
-    if fm_lock_try_create "$lockdir"; then
+    if fm_lock_try_create "$lockdir" "" "$expected"; then
       return 0
     fi
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
-  if fm_pid_alive "$pid"; then
+  if fm_pid_alive "$pid" \
+    && ! fm_lock_typed_owner_proven_stale "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
@@ -830,7 +883,7 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire "$steal" "$expected"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
@@ -838,7 +891,8 @@ fm_lock_try_acquire() {
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if fm_pid_alive "$cur"; then
+  if fm_pid_alive "$cur" \
+    && ! fm_lock_typed_owner_proven_stale "$lockdir" "$cur"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
@@ -878,7 +932,7 @@ fm_lock_try_acquire() {
   fi
   fm_lock_remove_path "$lockdir" || true
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
+  if fm_lock_try_create "$lockdir" "$steal_owner" "$expected"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
@@ -893,8 +947,8 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 expected=${2:-}
+  while ! fm_lock_try_acquire "$lockdir" "$expected"; do
     sleep 0.1
   done
 }

@@ -159,6 +159,25 @@ task_mutation_recovery_die() {  # <recovery-lock> <message>
   die "$message"
 }
 
+task_mutation_recovery_lock_acquire() {
+  local id=$1 recovery_lock=$2 attempts interval attempt=1 held=unknown
+  attempts=${FM_CODEX_APP_MUTATION_RECOVERY_ATTEMPTS:-50}
+  interval=${FM_CODEX_APP_MUTATION_RECOVERY_INTERVAL:-0.1}
+  case "$attempts" in ''|*[!0-9]*|0) die "invalid Desktop mutation recovery attempt limit" ;; esac
+  [ "$attempts" -le 600 ] || die "invalid Desktop mutation recovery attempt limit"
+  [[ "$interval" =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]] \
+    || die "invalid Desktop mutation recovery interval"
+  while [ "$attempt" -le "$attempts" ]; do
+    if fm_lock_try_acquire "$recovery_lock" fm-codex-app-task.sh; then
+      return 0
+    fi
+    held=${FM_LOCK_HELD_PID:-unknown}
+    [ "$attempt" -ge "$attempts" ] || [ "$interval" = 0 ] || sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+  die "task $id mutation recovery remained owned by process $held after $attempts bounded attempt(s)"
+}
+
 task_mutation_lock_acquire() {  # <task-id>
   local id=$1 lock owner identity self_record recovery_lock
   lock="$STATE/.$id.codex-app-mutation-lock"
@@ -166,8 +185,7 @@ task_mutation_lock_acquire() {  # <task-id>
   identity=$(fm_process_command_identity "$$" fm-codex-app-task.sh) \
     || die "cannot establish task $id mutation process identity"
   self_record="codex-app-mutation:$$:$identity"
-  fm_lock_acquire_wait "$recovery_lock" \
-    || die "cannot acquire task $id mutation recovery ownership"
+  task_mutation_recovery_lock_acquire "$id" "$recovery_lock"
   while :; do
     if mkdir -- "$lock" 2>/dev/null; then
       break
