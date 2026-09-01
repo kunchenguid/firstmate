@@ -724,6 +724,7 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
+TASK_TMP_ABORT_CLEANUP=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -869,6 +870,14 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  # Last, so the orca recovery record above is written first: that record names
+  # the root, and a root already removed here is a silent no-op at teardown. Only
+  # this task's own root is touched, through the same validation teardown uses,
+  # and a refusal or failure only reports - it never changes the abort's status.
+  if [ "$TASK_TMP_ABORT_CLEANUP" = 1 ]; then
+    TASK_TMP_ABORT_CLEANUP=0
+    fm_task_tmp_remove "$ID" "${TASK_TMP:-}" || true
   fi
   return "$status"
 }
@@ -2489,7 +2498,17 @@ fi
 # process TMPDIR, which the launch command below pins to this root, so it is
 # torn down with the task instead of accumulating under /tmp until reboot.
 TASK_TMP=$(fm_task_tmp_root "$ID") || { echo "error: cannot derive a temp root for task '$ID'" >&2; exit 1; }
-mkdir -p "$TASK_TMP/gotmp"
+# Creation is validated by the same library that owns the path: the root name is
+# predictable and /tmp is world-writable, so a foreign symlink or directory
+# planted at that name would receive the agent's whole scratch tree through the
+# TMPDIR pin below. Refuse the spawn rather than write through it.
+fm_task_tmp_create "$TASK_TMP" || exit 1
+# A fresh spawn owns this root before anything records it. If the spawn aborts
+# between here and the meta publish below, no record would name the path and no
+# later teardown could find it, so the abort trap removes it - the same leak this
+# root exists to close. A relaunch is deliberately not armed: the root is already
+# the recorded root of the task being relaunched, whose record outlives the abort.
+[ "$RELAUNCH" -eq 1 ] || TASK_TMP_ABORT_CLEANUP=1
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -2920,6 +2939,9 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  # The published record now carries tasktmp=, so teardown can find the root; a
+  # later abort must leave it for teardown rather than remove it here.
+  TASK_TMP_ABORT_CLEANUP=0
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created

@@ -935,6 +935,11 @@ What is left behind is small and bounded - those roots hold only Go build temp, 
 An operator who wants the space back can remove such a directory by hand after confirming no live task is using it.
 [`bin/fm-task-tmp-lib.sh`](../bin/fm-task-tmp-lib.sh)'s header owns the full rationale for that refusal.
 
+`fm-spawn.sh` also refuses to start a task when the path it would use as that task's temp root already exists as a symlink, as a non-directory, or as a directory belonging to another user, printing `error: temp root ... refusing to use it`.
+The root's name is deterministic and its default parent `/tmp` is world-writable, and the launch pins the agent's `TMPDIR` to that root, so writing through such a path would hand the agent's whole scratch tree to a directory this user neither controls nor tears down.
+Remove or rename the offending path after establishing where it came from, then spawn again.
+A fresh spawn that aborts before its task record is published removes the root it just created, because nothing would name that path afterwards.
+
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
 `FM_TREEHOUSE_RETURN_LOCK_RETRIES` accepts a nonnegative integer, and an unset, blank, or invalid value uses the default of 3.
 `FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS` accepts nonnegative whole or fractional seconds between attempts.

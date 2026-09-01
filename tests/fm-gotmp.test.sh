@@ -15,8 +15,14 @@
 # ambiguous between homes and so is deliberately left to leak - and that a refusal
 # or failure never fails an otherwise-complete teardown.
 #
+# Creation is guarded too. The root's name is deterministic and its real parent
+# /tmp is world-writable, so the cases below also pin that fm_task_tmp_create
+# refuses a path this user does not own instead of letting the pinned TMPDIR
+# write the agent's whole scratch tree through it.
+#
 # These tests exercise fm-teardown directly as a subprocess against a fake FM_HOME/FM_ROOT
-# built so the real script resolves into it, with stub helper scripts.
+# built so the real script resolves into it, with stub helper scripts, and call the
+# creation guard through the library the same way fm-spawn does.
 # The isolated fm-spawn subprocess in fm-kimi-harness.test.sh covers temp-root creation,
 # metadata publication, and the pane environment export.
 set -u
@@ -395,6 +401,78 @@ test_teardown_survives_an_unremovable_tasktmp() {
   pass "fm-teardown reports an unremovable temp root and still completes"
 }
 
+# --- creation guard (bin/fm-task-tmp-lib.sh, as fm-spawn calls it) ---
+
+# Create a canonical root the way fm-spawn does: same library, same
+# FM_HOME/FM_ROOT, same sandbox base, in a subshell so the fake home does not
+# leak into the rest of the suite.
+create_task_tmp() {  # <fake-home> <root>
+  local fake=$1 root=$2
+  (
+    FM_HOME=$fake
+    FM_ROOT=$fake
+    # shellcheck source=bin/fm-task-tmp-lib.sh
+    . "$ROOT/bin/fm-task-tmp-lib.sh"
+    fm_task_tmp_create "$root"
+  )
+}
+
+# Portable directory mode, GNU and BSD stat disagreeing on the flag.
+task_tmp_mode() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
+test_create_makes_a_private_root_and_accepts_its_own() {
+  local id=create-z9 fake task_tmp mode
+  fake="$TMP_ROOT/$id"
+  task_tmp=$(canonical_task_tmp "$fake" "$id")
+  create_task_tmp "$fake" "$task_tmp" || fail "creating a fresh temp root failed"
+  [ -d "$task_tmp/gotmp" ] || fail "creation did not make the Go temp directory"
+  mode=$(task_tmp_mode "$task_tmp")
+  [ "$mode" = 700 ] || fail "temp root is not private to its owner (mode $mode)"
+  # A relaunch reuses its task's own root, so an already-owned root is accepted
+  # with everything already in it.
+  printf 'scratch\n' > "$task_tmp/scratch"
+  create_task_tmp "$fake" "$task_tmp" || fail "re-creating this task's own temp root failed"
+  [ -f "$task_tmp/scratch" ] || fail "re-creating the temp root discarded its contents"
+  pass "fm-task-tmp-lib creates a private per-task root and accepts its own on reuse"
+}
+
+test_create_refuses_a_planted_symlink() {
+  # The attack the guard exists for: another local user plants a symlink at the
+  # predictable root name, and the launch would then pin TMPDIR through it and
+  # hand the agent's whole scratch tree to a directory this user does not own.
+  local id=create-symlink-z10 fake task_tmp target err
+  fake="$TMP_ROOT/$id"
+  target="$TMP_ROOT/planted-target-z10"
+  err="$TMP_ROOT/$id.err"
+  task_tmp=$(canonical_task_tmp "$fake" "$id")
+  mkdir -p "$target"
+  ln -s "$target" "$task_tmp"
+  create_task_tmp "$fake" "$task_tmp" 2> "$err" \
+    && fail "creation wrote through a symlink planted at the temp root"
+  [ -z "$(ls -A "$target")" ] || fail "creation created directories through the planted symlink"
+  [ -L "$task_tmp" ] || fail "creation removed the planted symlink instead of refusing"
+  grep -q "refusing to use it" "$err" || fail "creation did not report the refused temp root"
+  pass "fm-task-tmp-lib refuses a symlink planted at the temp root instead of writing through it"
+}
+
+test_create_refuses_a_non_directory() {
+  local id=create-file-z11 fake task_tmp err
+  fake="$TMP_ROOT/$id"
+  err="$TMP_ROOT/$id.err"
+  task_tmp=$(canonical_task_tmp "$fake" "$id")
+  printf 'not a directory\n' > "$task_tmp"
+  create_task_tmp "$fake" "$task_tmp" 2> "$err" \
+    && fail "creation accepted a non-directory at the temp root"
+  grep -q "refusing to use it" "$err" || fail "creation did not report the refused temp root"
+  pass "fm-task-tmp-lib refuses a non-directory at the temp root"
+}
+
 test_teardown_removes_tasktmp_dir
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing
@@ -403,3 +481,6 @@ test_teardown_refuses_a_foreign_tasktmp
 test_teardown_refuses_a_legacy_undiscriminated_tasktmp
 test_teardown_refuses_a_symlinked_tasktmp
 test_teardown_survives_an_unremovable_tasktmp
+test_create_makes_a_private_root_and_accepts_its_own
+test_create_refuses_a_planted_symlink
+test_create_refuses_a_non_directory

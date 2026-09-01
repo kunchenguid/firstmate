@@ -40,6 +40,11 @@
 # sibling directories; teardown removes only the one path this task's own record
 # names, and only when it is exactly the path this library derives for that task.
 #
+# Creation is guarded here too, not only removal: the root's name is predictable
+# and /tmp is world-writable, so fm_task_tmp_create refuses a path another local
+# user already owns instead of letting the pinned TMPDIR write the agent's whole
+# scratch tree through it.
+#
 # FM_TASK_TMP_BASE overrides the /tmp parent (tests and non-default temp roots).
 # Creation and removal must agree on it: a mismatch is reported and removal is
 # refused rather than guessed at.
@@ -109,5 +114,33 @@ fm_task_tmp_remove() {
     echo "warning: temp root $root could not be removed; cleanup is otherwise complete" >&2
     return 1
   fi
+  return 0
+}
+
+# fm_task_tmp_create <root>
+# Creates the per-task temp root and Go's build temp nested at gotmp/, and
+# refuses rather than writing through a path this user does not own.
+# The root name is deterministic and its default parent /tmp is world-writable,
+# so any other local user can plant a symlink or their own directory at that
+# name before a spawn reaches it. Since the launch pins the agent's TMPDIR here,
+# writing through such a path would put the whole scratch tree - search indexes,
+# database copies - somewhere this user neither controls nor tears down, and the
+# symlink refusal in fm_task_tmp_remove above comes too late to prevent it: it
+# runs at teardown, after the agent has written. So the root itself is created
+# with a plain mkdir, which fails on an existing path instead of following it,
+# and an already-present root - a relaunch reuses its task's root - is accepted
+# only when it is a real directory owned by this user. Mode 0700 keeps the
+# scratch out of other users' reach once the directory is ours.
+fm_task_tmp_create() {
+  local root=${1:-}
+  case "$root" in /*) ;; *) return 1 ;; esac
+  mkdir -p -- "${root%/*}" || return 1
+  if ! mkdir -m 700 -- "$root" 2>/dev/null; then
+    if [ -L "$root" ] || [ ! -d "$root" ] || [ ! -O "$root" ]; then
+      echo "error: temp root $root could not be created as a directory owned by this user; refusing to use it" >&2
+      return 1
+    fi
+  fi
+  mkdir -p -- "$root/gotmp" || return 1
   return 0
 }

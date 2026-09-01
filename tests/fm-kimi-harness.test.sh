@@ -224,6 +224,50 @@ test_kimi_launch_then_send_is_verified() {
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
 }
 
+test_spawn_refuses_a_planted_temp_root_symlink() {
+  # The temp root's name is deterministic and its real parent /tmp is
+  # world-writable, so another local user can plant a symlink at it. The launch
+  # pins TMPDIR to that root, so writing through the link would hand the agent's
+  # whole scratch tree to a directory this user does not own. Refuse instead.
+  local id rec out rc task_tmp target
+  id=kimi-tmp-symlink-z9
+  rec=$(make_spawn_case tmp-symlink "$id")
+  read_spawn_record "$rec"
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
+  target="$TMP_ROOT/planted-target-z9"
+  mkdir -p "$target"
+  ln -s "$target" "$task_tmp"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted a symlink planted at its temp root"
+  assert_contains "$out" "refusing to use it" "spawn omitted the concrete temp-root refusal"
+  [ -z "$(ls -A "$target")" ] || fail "spawn created directories through the planted symlink"
+  [ -L "$task_tmp" ] || fail "spawn removed the planted symlink instead of refusing"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "spawn launched an agent through the planted symlink"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn recorded a task whose temp root it refused"
+  pass "fm-spawn: a symlink planted at the task temp root refuses the spawn before launch"
+}
+
+test_spawn_removes_its_temp_root_when_it_aborts_unrecorded() {
+  # A fresh spawn creates its temp root before any record names it. If it aborts
+  # in between, no later teardown could find the path, so the abort must remove
+  # it - otherwise the failed-spawn path keeps the very leak this root closes.
+  # A directory where the task record goes makes the atomic publish fail, which
+  # is exactly an abort after creation and before the record exists.
+  local id rec out rc task_tmp
+  id=kimi-tmp-abort-z10
+  rec=$(make_spawn_case tmp-abort "$id")
+  read_spawn_record "$rec"
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
+  mkdir -p "$HOME_DIR/state/$id.meta"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn succeeded although its task record could not be published"
+  assert_contains "$out" "could not be published" "spawn omitted the record-publication failure"
+  [ ! -e "$task_tmp" ] || fail "aborted spawn left its unrecorded temp root behind: $task_tmp"
+  pass "fm-spawn: a spawn that aborts before recording its temp root removes that root"
+}
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
   local home config original once stripped count
   home="$TMP_ROOT/config-surgery"
@@ -678,6 +722,8 @@ test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
+test_spawn_refuses_a_planted_temp_root_symlink
+test_spawn_removes_its_temp_root_when_it_aborts_unrecorded
 test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
