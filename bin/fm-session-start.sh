@@ -209,7 +209,7 @@
 #             session identity. No resume, clear, reset, compact, or other rebuild
 #             creates or replaces it. Pi and pi-signed compaction are the only
 #             supported stale-cache rebuild pair: a missing baseline, a baseline
-#             for another harness pid, or a changed hash causes the complete
+#             for another session identity, or a changed hash causes the complete
 #             current AGENTS.md to print before the bulky digest. The baseline
 #             remains immutable so every later drifted compaction refreshes
 #             again, while an equal baseline emits no instruction refresh.
