@@ -218,6 +218,34 @@ case "$out" in
 esac
 pass "starting an already-running publisher does not start a second one"
 
+# A crash leaves the singleton lock, the record, and the beacon behind. Coming
+# back from exactly that is what the session-start arming exists for, so it is
+# proven rather than assumed.
+kill -KILL "$daemon_pid" 2>/dev/null || true
+attempts=0
+while [ "$attempts" -lt 100 ]; do
+  kill -0 "$daemon_pid" 2>/dev/null || break
+  sleep 0.1
+  attempts=$(( attempts + 1 ))
+done
+[ -e "$STUB_HOME/state/.fleet-publish-daemon.lock" ] \
+  || fail "a crashed publisher must leave its singleton lock behind for this case to mean anything"
+out=$(run_stub status)
+case "$out" in
+  *"daemon=stopped"*) ;;
+  *) fail "a crashed publisher must not still read as running, got: $out" ;;
+esac
+run_stub start >/dev/null || fail "start must recover from a crashed publisher's leftovers"
+daemon_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
+  "$STUB_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
+[ -n "$daemon_pid" ] || fail "the recovered publisher recorded no pid"
+DAEMON_PIDS+=("$daemon_pid")
+kill -0 "$daemon_pid" 2>/dev/null || fail "the recovered publisher is not running"
+recovered=$(artifact_marker "$STUB_HOME")
+wait_for_marker_beyond "$STUB_HOME" "$recovered" \
+  || fail "the recovered publisher did not resume its cadence"
+pass "a crashed publisher is recovered by the next start rather than blocking it"
+
 # Stopping acts on the same evidence status reports on, so a recorded pid a
 # reboot handed to something else is never the thing that gets signalled.
 DECOY_PID=

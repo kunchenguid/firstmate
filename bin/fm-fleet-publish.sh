@@ -80,6 +80,10 @@
 #          valid cadence is configured. An already-running daemon is left alone.
 #          Verifies before reporting: it prints started/attached only after the
 #          daemon holds this home's singleton lock with a fresh beacon.
+#          A publisher killed outright leaves its singleton lock, record, and
+#          beacon behind; the next start steals that dead holder's lock and
+#          takes over, which is what makes a reboot or a crash recoverable by an
+#          ordinary session start rather than by hand.
 #   fm-fleet-publish.sh stop
 #          Stop exactly this home's daemon, by the pid recorded in this home's
 #          own record. It never matches on a command name, so it can never touch
