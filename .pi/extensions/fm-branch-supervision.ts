@@ -121,6 +121,9 @@ const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
 const modelPinFile = join(config, "supervision-branch-model");
 const effortPinFile = join(config, "supervision-branch-effort");
+const processEnvWithoutActor = { ...process.env };
+delete processEnvWithoutActor.FM_SUPERVISION_ACTOR;
+delete processEnvWithoutActor.FM_LEASE_HOLDER_PID;
 
 // Same tool set in the same order on every request (part of the cached
 // prefix). "bash" resolves to the customTools override below, which injects
@@ -156,7 +159,7 @@ type Verdict = "routine" | "captain";
 type LockOwnership = "owned" | "other" | "missing";
 
 const scriptEnv = {
-  ...process.env,
+  ...processEnvWithoutActor,
   FM_HOME: fmHome,
   FM_ROOT_OVERRIDE: fmRoot,
   FM_STATE_OVERRIDE: state,

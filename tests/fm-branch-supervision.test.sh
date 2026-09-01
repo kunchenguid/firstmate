@@ -12,6 +12,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-branch-supervision)
+unset FM_HOME FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_ROOT_OVERRIDE FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID
 
 # --- byte-stable branch prompt ------------------------------------------------
 

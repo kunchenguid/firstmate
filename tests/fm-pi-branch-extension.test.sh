@@ -1448,7 +1448,7 @@ if (existsSync(`${home}/state/.branch-eligible-rows`)) {
 }
 const drain = spawnSync("bash", [`${realRoot}/bin/fm-wake-drain.sh`], {
   encoding: "utf8",
-  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_ROOT_OVERRIDE: realRoot },
+  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_ROOT_OVERRIDE: realRoot, FM_SUPERVISION_ACTOR: "main" },
 });
 if (drain.status !== 0) throw new Error(`main drain failed after grant release: ${drain.stderr}`);
 if (!drain.stdout.includes("\tsignal\tbranch-driver.status\t")) {
