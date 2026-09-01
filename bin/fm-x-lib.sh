@@ -995,19 +995,19 @@ fmx_meta_link_clear() {
   fi
   [ ! -L "$meta" ] || return 1
   [ -f "$meta" ] || return 0
-  if [ "$expected_set" -eq 1 ]; then
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  if [ "$expected_set" -eq 1 ] && [ ! -w "$parent" ]; then
+    # A link cannot be published without writing this directory or acquiring
+    # this same lock. Preserve idempotent clears in read-only state, but never
+    # make an unlocked absence decision where a publisher can race it.
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
         x_request=*) link_present=1; rid=${line#*=} ;;
       esac
     done < "$meta" || return 1
-    [ "$link_present" -eq 0 ] || {
-      [ -n "$expected" ] && [ -n "$rid" ] && [ "$rid" = "$expected" ] || return 1
-    }
-    [ "$link_present" -eq 1 ] || return 0
-    [ -w "$parent" ] || return 1
+    [ "$link_present" -eq 0 ] || return 1
+    return 0
   fi
-  lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock"
   [ ! -L "$meta" ] || { fm_lock_release "$lock"; return 1; }
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }
