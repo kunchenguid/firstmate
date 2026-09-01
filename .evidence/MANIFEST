@@ -1,17 +1,22 @@
 # Candidate A evidence: durable Lavish answer-receipt lifecycle
 
-Branch: `fm/fm-lavish-receipt-state-a`
+Capture branch: `fm/fm-lavish-receipt-state-a`
 Code head producing this evidence: `ebdb2fa274e267246d7f0bb0db47077ec1792767`
 This directory (screenshots, demo artifact, this manifest) is delivery evidence
 committed on top of that head; it contains no code.
 
-Note on the follow-up commit: after the screenshots were captured, one internal
-race was closed on this branch (a concurrent reconcile could rarely duplicate a
-capture's internal announcement before the receipt seam acknowledged it; the
-per-source boundary now spans capture through the seam). The change is not
-visible in the page or in any receipt text, so the screenshots below match the
-branch tip's behavior exactly, and the reproduction steps below are valid at
-the tip.
+Note on the commits after capture: one internal race was closed first (a
+concurrent reconcile could rarely duplicate a capture's internal announcement
+before the receipt seam acknowledged it; the per-source boundary now spans
+capture through the seam). Rebuilding this work on moved upstream then added
+two compatibility fixes - macOS ancestor symlinks (`/tmp` and `/var` through
+`/private`) no longer fail procevent private-directory validation, and the
+managed delivery poll now runs through the adapter's shared quiet-retry loop -
+and two review fixes hardening the receipts record and staging cleanup and
+presenting a round's receipt once instead of re-sending it on a quiet retry.
+None of them changes visible receipt text or page layout, so the screenshots
+below match the delivered behavior and the reproduction steps below remain
+valid.
 
 ## What is committed
 
