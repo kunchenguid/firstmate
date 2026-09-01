@@ -89,6 +89,8 @@ FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_POLL_RETIREMENT_REJECTED=
+FM_PR_MODE_DEVICE=
+FM_PR_MODE_CAN_LOCK=1
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -263,10 +265,61 @@ fm_pr_sha256() {
   fi
 }
 
+fm_pr_mode_bits_enforced() {
+  # Probe whether chmod actually persists POSIX mode bits on the filesystem
+  # holding $1 (a file or directory). WSL's drvfs/9p bridge to a Windows drive
+  # ignores chmod entirely, so every file reports 0777 and the "no group/other
+  # access" property is really enforced by the Windows ACL, not Unix mode bits.
+  # Probed once per device and memoized; a probe that cannot complete defaults
+  # to "enforced" so a broken stat/mktemp can never loosen a real filesystem.
+  local target=$1 dir device probe mode
+  if [ -d "$target" ]; then
+    dir=$target
+  else
+    dir=$(dirname "$target")
+  fi
+  device=$(fm_pr_file_device "$dir") || return 0
+  if [ "$FM_PR_MODE_DEVICE" = "$device" ]; then
+    [ "$FM_PR_MODE_CAN_LOCK" = 1 ]
+    return
+  fi
+  FM_PR_MODE_DEVICE=$device
+  FM_PR_MODE_CAN_LOCK=1
+  probe=$(mktemp "$dir/.fm-mode-probe.XXXXXX") 2>/dev/null || return 0
+  chmod 0600 "$probe" 2>/dev/null
+  mode=$(fm_pr_file_mode "$probe") 2>/dev/null
+  rm -f "$probe" 2>/dev/null
+  if [ -n "$mode" ]; then
+    case "$mode" in
+      600|700) FM_PR_MODE_CAN_LOCK=1 ;;
+      *) FM_PR_MODE_CAN_LOCK=0 ;;
+    esac
+  fi
+  [ "$FM_PR_MODE_CAN_LOCK" = 1 ]
+}
+
+fm_pr_mode_matches() {
+  # True when $1 reports exactly mode $2, or when the platform cannot express
+  # or observe that exact mode. Git Bash/MSYS cannot clear the owner-execute
+  # bit (chmod 0600 reports 0700), and filesystems such as WSL drvfs/9p ignore
+  # chmod entirely (everything reports 0777). On those filesystems access
+  # control is ACL-based, not Unix-mode-based, so a mode that cannot be
+  # achieved or read carries no actual privacy loss: the property guarded here
+  # is no group/other access, and that never widens.
+  local path=$1 expected=$2 actual
+  actual=$(fm_pr_file_mode "$path") || return 1
+  [ "$actual" = "$expected" ] && return 0
+  case "$(uname)" in
+    MINGW*|MSYS*|CYGWIN*) [ "$expected" = 600 ] && [ "$actual" = 700 ] && return 0 ;;
+  esac
+  fm_pr_mode_bits_enforced "$path" && return 1
+  return 0
+}
+
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  fm_pr_mode_matches "$path" "$mode" || return 1
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }

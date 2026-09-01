@@ -2546,6 +2546,43 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
+# fm_backend_herdr_treehouse_get: acquire a treehouse worktree and land the
+# pane's shell in it, WITHOUT typing plain `treehouse get` into the pane.
+#
+# Verified live (2026-08-20, herdr 0.8.2-preview, Windows): plain `treehouse
+# get` opens a NEW cmd.exe subshell for the worktree. That child process is
+# invisible to herdr's Windows foreground-process tracking on this build - the
+# terminal visibly shows the worktree prompt, but fm_backend_herdr_current_path
+# keeps reporting the ORIGINAL shell's own pid and cwd forever, so
+# fm-spawn.sh's worktree-discovery poll times out at 60s even though the
+# acquisition genuinely succeeded. `treehouse get --lease` sidesteps the whole
+# problem: it prints the leased worktree's absolute path to stdout (banners go
+# to stderr per its own --help) and returns control to the SAME shell instead
+# of opening a child console, so a plain `cd` into that path is an ordinary
+# same-process cwd change - exactly what process-info tracks correctly.
+#
+# Verified live (2026-08-29, herdr 0.8.2-preview, Windows): the path read must
+# come from an UNWRAPPED snapshot. A spawn pane can be narrower than the leased
+# path (44 columns observed), and the default `recent` source returns the
+# rendered grid, so the path arrives split across two physical rows. The
+# drive-letter match then captured only the first row and produced a truncated
+# directory whose trailing characters were missing, so its `cd` failed and
+# fm-spawn.sh's worktree-discovery poll timed out at 60s - the same visible
+# symptom as the two subshell-tracking variants above, from a different cause.
+# fm_backend_herdr_capture_unwrapped reads logical lines instead.
+fm_backend_herdr_treehouse_get() {  # <target>
+  local target=$1 holder out path
+  holder="fm-${FM_BACKEND_HERDR_PANE}-$$"
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" \
+    "treehouse get --lease --lease-holder $holder" >/dev/null 2>&1 || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane wait-output "$FM_BACKEND_HERDR_PANE" \
+    --match 'Leased worktree at' --timeout 60000 >/dev/null 2>&1 || return 1
+  out=$(fm_backend_herdr_capture_unwrapped "$target" 200) || return 1
+  path=$(printf '%s\n' "$out" | grep -E '^[A-Za-z]:[\\/]' | tail -1)
+  [ -n "$path" ] || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "cd '$path'" >/dev/null 2>&1
+}
+
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
@@ -2601,6 +2638,22 @@ fm_backend_herdr_capture() {  # <target> <lines>
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
   out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines"
+}
+
+# fm_backend_herdr_capture_unwrapped: same bounded capture, but from herdr's
+# `recent-unwrapped` source, which returns LOGICAL lines rather than the
+# rendered grid. Use this whenever the caller parses a single long token - a
+# path, a URL, a commit sha - that a narrow pane would otherwise split across
+# physical rows. Ordinary human-readable peeks keep using
+# fm_backend_herdr_capture so what firstmate reads matches what the pane shows.
+fm_backend_herdr_capture_unwrapped() {  # <target> <lines>
+  fm_backend_herdr_target_ready "$1" || return 1
+  local lines=${2:-200} fetch out
+  case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
+  fetch=$lines
+  case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent-unwrapped --lines "$fetch" 2>/dev/null) || return 1
   printf '%s' "$out" | tail -n "$lines"
 }
 

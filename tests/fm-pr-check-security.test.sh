@@ -810,8 +810,118 @@ SH
   pass "concurrent watchers observe only complete private poll publications"
 }
 
-test_poll_publication_refuses_unsafe_destinations() {
-  local artifact kind dir state destination
+test_migration_excludes_older_watcher_before_scan() {
+  local dir state gate sentinel older_pid rc
+  dir=$(make_case migration-pause-before-scan)
+  state="$dir/home/state"
+  gate="$dir/scan-started"
+  sentinel="$dir/legacy-ran"
+  fm_write_meta "$state/task-a.meta" \
+    'window=fm-task-a' \
+    'pr=https://github.com/o/r/pull/9'
+  cat > "$state/task-a.check.sh" <<SH
+#!/usr/bin/env bash
+printf 'seen\n' > '$sentinel'
+SH
+  (
+    while [ ! -e "$gate" ]; do sleep 0.01; done
+    bash "$state/task-a.check.sh"
+    while :; do sleep 1; done
+  ) &
+  older_pid=$!
+  write_watcher_lock "$state" "$dir/home" "$older_pid"
+  cat > "$dir/fakebin/basename" <<SH
+#!/usr/bin/env bash
+: > '$gate'
+sleep 0.3
+exec '$REAL_BASENAME' "\$@"
+SH
+  chmod +x "$dir/fakebin/basename"
+
+  set +e
+  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  wait "$older_pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "pause-before-scan migration failed"
+  [ ! -e "$sentinel" ] || fail "older watcher ran a legacy check during migration startup"
+  [ -e "$gate" ] || fail "migration never reached its under-lock check scan"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  cmp -s "$POLL" "$state/task-a.check.sh" || fail "pause-before-scan migration did not rebuild the poll"
+
+  dir=$(make_case migration-pause-no-check)
+  state="$dir/home/state"
+  ( while :; do sleep 1; done ) &
+  older_pid=$!
+  write_watcher_lock "$state" "$dir/home" "$older_pid"
+  set +e
+  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  wait "$older_pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "no-check older-watcher migration failed"
+  ! kill -0 "$older_pid" 2>/dev/null || fail "no-check migration left the older watcher running"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  pass "migration pauses older watchers and acquires exclusion before its first scan or marker"
+}
+
+test_migration_initializes_fresh_state() {
+  local dir state rc
+  dir="$TMP_ROOT/migration-fresh-state"
+  state="$dir/home/state"
+  mkdir -p "$dir"
+
+  set +e
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "fresh-state migration failed: $(cat "$dir/migrate.err")"
+  [ -d "$state" ] && [ ! -L "$state" ] || fail "fresh-state migration did not create an ordinary state directory"
+  [ "$(file_mode "$state")" = 700 ] || fail "fresh-state migration did not create state with mode 0700"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  pass "migration creates and validates private state before watcher exclusion"
+}
+
+test_private_mode_check_tolerates_noop_chmod_filesystem() {
+  local dir state loose
+  dir=$(make_case mode-noop-chmod)
+  state="$dir/home/state"
+  loose="$state/loose"
+  printf 'x\n' > "$loose"
+  chmod 0644 "$loose"
+
+  # On a mode-enforcing filesystem, a group/other-readable file is not private.
+  if fm_pr_mode_matches "$loose" 600; then
+    fail "mode-enforcing filesystem accepted a 0644 file as private"
+  fi
+
+  # Simulate a filesystem where chmod is a no-op (WSL drvfs/9p): a no-op chmod
+  # and a stat that reports 0777 for every mode. The mode check must accept
+  # there, because access control is the host ACL, not Unix mode bits.
+  cat > "$dir/fakebin/chmod" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" %a "*) printf '777\n'; exit 0 ;;
+esac
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+  chmod +x "$dir/fakebin/chmod" "$dir/fakebin/stat"
+
+  FM_TEST_REAL_STAT="$REAL_STAT" PATH="$dir/fakebin:$BASE_PATH" bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    fm_pr_mode_matches "$2" 600
+  ' _ "$ROOT" "$loose" \
+    || fail "no-op chmod filesystem refused a file whose mode cannot be set"
+  pass "private mode checks enforce on POSIX filesystems and tolerate no-op chmod filesystems"
+}
+
+test_private_artifact_paths_refuse_symlinks_and_directories() {
+  local artifact kind dir state destination rc
   for artifact in task-a.pr-poll task-a.pr-poll-registration task-a.check.sh; do
     for kind in regular dangling directory; do
       dir=$(make_case "poll-path-${artifact//./-}-$kind")
@@ -2145,6 +2255,24 @@ test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
+test_migration_initializes_fresh_state
+test_private_mode_check_tolerates_noop_chmod_filesystem
+test_migration_excludes_older_watcher_before_scan
+test_private_artifact_paths_refuse_symlinks_and_directories
+test_marker_and_diagnostic_rename_fail_closed
+test_postrename_marker_and_diagnostic_validation_retries
+test_quarantine_validation_and_retry_contract
+test_failed_outcomes_block_every_retry_until_repaired
+test_ambiguous_failure_accepts_validated_replacement
+test_replacement_provenance_negative_matrix
+test_complete_single_link_validation
+test_canonical_publication_failure_recovers_only_on_retry
+test_obligation_namespace_compatibility
+test_nonexecuting_migration
+test_historical_x_shim_transition_matrix
+test_direct_registration_refreshes_v1_x_shim
+test_bootstrap_migrates_before_other_mutations
+test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts

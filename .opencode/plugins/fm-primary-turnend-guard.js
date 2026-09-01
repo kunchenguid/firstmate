@@ -9,9 +9,18 @@ let skipNextIdle = false;
 
 function runProcess(command, args, input = "") {
   return new Promise((resolve) => {
-    const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    let child;
+    try {
+      // Same Windows fail-open guard as fm-primary-pretool-check.js: a
+      // synchronous spawn throw (EFTYPE/BAD_EXE_FORMAT for .sh targets) must
+      // never reject this hook.
+      child = spawn(command, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch {
+      resolve({ code: 0, stdout: "", stderr: "" });
+      return;
+    }
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {

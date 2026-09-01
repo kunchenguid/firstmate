@@ -49,10 +49,19 @@ function waitForArmReady(armChild) {
 
 function runProcess(command, args, options = {}) {
   return new Promise((resolve) => {
-    const proc = spawn(command, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      ...options,
-    });
+    let proc;
+    try {
+      // Windows fail-open guard matching fm-primary-pretool-check.js: a
+      // synchronous spawn throw resolves exactly like the asynchronous
+      // "error" event below instead of rejecting the caller.
+      proc = spawn(command, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        ...options,
+      });
+    } catch (error) {
+      resolve({ code: 127, stdout: "", stderr: String(error?.message ?? error) });
+      return;
+    }
     let stdout = "";
     let stderr = "";
     proc.stdout.on("data", (chunk) => {
@@ -342,12 +351,6 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     FM_CONFIG_OVERRIDE: paths.config,
     FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
   };
-  const armChild = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
-    cwd: paths.root,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  child = armChild;
   let stdout = "";
   let stderr = "";
   let settled = false;
@@ -357,7 +360,6 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
   const readiness = new Promise((resolve) => {
     resolveReadiness = resolve;
   });
-  armReadiness.set(armChild, readiness);
   const settleReadiness = (status) => {
     if (readinessSettled) return;
     readinessSettled = true;
@@ -366,10 +368,39 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
   const closed = new Promise((resolveClosedChild) => {
     resolveClosed = resolveClosedChild;
   });
-  armClose.set(armChild, closed);
-  const releaseChild = () => {
-    if (child === armChild) child = null;
+  const releaseChild = (finishedChild) => {
+    if (child === finishedChild) child = null;
   };
+  let armChild = null;
+  try {
+    // Windows fail-open guard matching fm-primary-pretool-check.js: a
+    // synchronous spawn throw routes through the same failure path as the
+    // asynchronous "error" handler below.
+    armChild = spawn("bash", ["-lc", 'config_dir="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; exec "$FM_ROOT_OVERRIDE/bin/fm-watch-arm.sh" --restart'], {
+      cwd: paths.root,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    settled = true;
+    resolveClosed();
+    settleReadiness("failed");
+    if (restorationInFlight) {
+      setArmStatus("failed");
+      return null;
+    }
+    void scheduleRetry(
+      paths,
+      sessionID,
+      client,
+      `watcher: FAILED - OpenCode arm child failed to launch: ${String(error?.message ?? error)}`,
+      "",
+    );
+    return null;
+  }
+  child = armChild;
+  armReadiness.set(armChild, readiness);
+  armClose.set(armChild, closed);
   const observeRecovery = () => {
     const recovery = `${stdout}\n${stderr}`.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
     if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
@@ -388,7 +419,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     if (settled) return;
     settled = true;
     resolveClosed();
-    releaseChild();
+    releaseChild(armChild);
     const classification = classifyArmClose(stdout, stderr, code, signal);
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
@@ -426,7 +457,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     if (settled) return;
     settled = true;
     resolveClosed();
-    releaseChild();
+    releaseChild(armChild);
     settleReadiness("failed");
     if (restorationInFlight) {
       setArmStatus("failed");

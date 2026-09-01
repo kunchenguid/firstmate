@@ -13,7 +13,18 @@ import { spawn } from "node:child_process";
 
 function runProcess(command, args) {
   return new Promise((resolvePromise) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let child;
+    try {
+      // On Windows, spawning a .sh file directly fails at spawn time. Bun
+      // surfaces that failure as a synchronous throw (EFTYPE/BAD_EXE_FORMAT)
+      // instead of an "error" event, which would otherwise reject this hook
+      // and abort every agent bash call. Fail open exactly like the
+      // asynchronous path below.
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    } catch {
+      resolvePromise({ code: 0, stdout: "", stderr: "" });
+      return;
+    }
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {

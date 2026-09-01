@@ -6,7 +6,16 @@ const handledSessions = new Set();
 
 function runProcess(command, args) {
   return new Promise((resolveResult) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"] });
+    let child;
+    try {
+      // Same Windows fail-open guard as fm-primary-pretool-check.js: a
+      // synchronous spawn throw (EFTYPE/BAD_EXE_FORMAT for .sh targets) must
+      // never reject this hook.
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+      resolveResult({ code: 0, stdout: "" });
+      return;
+    }
     let stdout = "";
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();

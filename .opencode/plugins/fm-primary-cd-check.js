@@ -13,7 +13,16 @@ import { spawn } from "node:child_process";
 
 function runProcess(command, args) {
   return new Promise((resolvePromise) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let child;
+    try {
+      // Same Windows fail-open guard as fm-primary-pretool-check.js: a
+      // synchronous spawn throw (EFTYPE/BAD_EXE_FORMAT for .sh targets) must
+      // never abort the agent's bash tool call.
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    } catch {
+      resolvePromise({ code: 0, stdout: "", stderr: "" });
+      return;
+    }
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {
