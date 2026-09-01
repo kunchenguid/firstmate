@@ -1142,3 +1142,4 @@ Only Claude Code is verified here; it is the harness whose scratch was observed 
 No live guard is registered for this fact, because nothing in Firstmate reads harness output to reach a verdict from it.
 A harness that stopped honoring `TMPDIR` would simply keep its scratch outside the task root: teardown still removes exactly the one recorded temp root, still refuses anything else, and still succeeds.
 The portable regressions for the removal itself are in `tests/fm-gotmp.test.sh`, including a live sibling task in a reused worktree slot that must survive; the launch pin is asserted in `tests/fm-kimi-harness.test.sh` and `tests/fm-spawn-dispatch-profile.test.sh`.
+Forced secondmate retirement removes each retired child's own root the same way, and `tests/fm-teardown.test.sh` holds that path against a live sibling home whose task carries the same id.
