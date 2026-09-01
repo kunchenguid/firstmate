@@ -2278,11 +2278,14 @@ case "$BACKEND" in
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+          fm_backend_herdr_projection_journal_snapshot \
+            "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+          HERDR_RECOVERY_TASK_LABEL=$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$HERDR_TASK_LABEL" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$HERDR_RECOVERY_TASK_LABEL" "$PROJ_ABS"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in

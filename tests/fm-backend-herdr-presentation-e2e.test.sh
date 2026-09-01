@@ -164,12 +164,13 @@ if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
 fi
 if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
   case "$label" in
-    fm-active-seeded)
+    *" (active-seeded)")
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/task-pane"
       printf '%s\n' task-created > "$ACTIVE_SEEDED_CONTROL/stage"
       ;;
-    fm-abort-a|fm-abort-b)
-      task=${label#fm-}
+    *" (abort-a)"|*" (abort-b)")
+      task=${label##*' ('}
+      task=${task%')'}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
       ;;
@@ -647,8 +648,8 @@ PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
 [ "$(printf '%s' "$PROJECTED_PANES" | jq -r '.result.panes | length')" = 1 ] \
   || fail "projected workspace did not contain exactly one task pane"
 printf '%s' "$PROJECTED_TABS" | jq -e --arg tab "$PROJECTED_TAB" \
-  '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == "fm-shape"' >/dev/null 2>&1 \
-  || fail "projected workspace's only tab was not the normal fm-shape task tab"
+  '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == "Projection E2E fixture. (shape)"' >/dev/null 2>&1 \
+  || fail "projected workspace's only tab was not the human-readable shape task tab"
 printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
   '.result.panes[0].pane_id == $pane' >/dev/null 2>&1 \
   || fail "projected workspace's only pane was not the exact recorded task pane"
@@ -1182,10 +1183,20 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   RESTART_META="$HOME_DIR/state/$RESTART_ID.meta"
   OLD_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   OLD_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
+  OLD_RESTART_TAB=$(grep '^herdr_tab_id=' "$RESTART_META" | cut -d= -f2-)
   OLD_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
   OLD_RESTART_LABEL=$(lab workspace get "$OLD_RESTART_WSID" | jq -r '.result.workspace.label')
   [ "$(grep '^version=' "$HOME_DIR/state/$RESTART_ID.herdr-presentation")" = version=2 ] \
     || fail "$RESTART_ID fresh projection did not publish an exact restart binding"
+  if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
+    LEGACY_RESTART_LABEL="fm-$RESTART_ID"
+    lab tab rename "$OLD_RESTART_TAB" "$LEGACY_RESTART_LABEL" >/dev/null \
+      || fail "$RESTART_ID legacy-label fixture could not rename its task tab"
+    sed -i.bak "s/^task_label=.*/task_label=$LEGACY_RESTART_LABEL/" \
+      "$HOME_DIR/state/$RESTART_ID.herdr-presentation" \
+      && rm -f "$HOME_DIR/state/$RESTART_ID.herdr-presentation.bak" \
+      || fail "$RESTART_ID legacy-label fixture could not update its journal"
+  fi
   EXPECTED_CONCISE=${RESTART_ID#fm-}
   case "$OLD_RESTART_LABEL" in
     "└ $EXPECTED_CONCISE · p:"*) ;;
