@@ -168,7 +168,7 @@ family_for_basename() {
     fm-capture-visual-evidence-mechanism.test.sh|\
     fm-pr-body.test.sh|fm-pr-body-template-mechanism.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
-    fm-ci-load-guard.test.sh|\
+    fm-ci-load-guard.test.sh|fm-canonical-guard-benchmark.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|fm-daily.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|fm-decision-hold-lifecycle.test.sh|\
@@ -1299,6 +1299,9 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     bin/fm-model-telemetry.sh|bin/fm-model-usage.mjs)
+      printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-canonical-guard-benchmark.sh|scripts/canonical-guard-benchmark/*)
       printf '%s\n' pure-contract-unit
       ;;
     bin/fm-lint.sh|bin/fm-lint-workflows.sh|bin/fm-install-shellcheck.sh|\
