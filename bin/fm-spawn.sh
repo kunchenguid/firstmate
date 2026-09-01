@@ -76,7 +76,7 @@
 #   workspace containing only the ordinary task pane. A successful clean create
 #   upgrades its attempt journal with exact home, session, workspace, tab, pane,
 #   parent, and label bindings. On a same-identity restart, that complete binding
-#   plus authoritative metadata may replace one exact agent-free husk in place.
+#   plus authoritative metadata may replace one exact unregistered husk in place.
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
@@ -1960,7 +1960,7 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 
 # A stale presentation journal never grants launch authority.
 # Under the session lock, authoritative metadata must identify one positively
-# dead or agent-free endpoint before token inspection may allow flat fallback.
+# dead or unregistered endpoint before token inspection may allow flat fallback.
 # A stale done registration remains reserved for a dedicated replacement flow
 # that revalidates it immediately before the first launch input.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.

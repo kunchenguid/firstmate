@@ -138,7 +138,7 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # Version 1 records only the attempted projection's random correlator.
 # Version 2 additionally binds the successful projection's exact home,
 # session, workspace, tab, pane, parent, and presentation labels so a resumed
-# spawn can replace one verified agent-free husk under the session lock.
+# spawn can replace one verified unregistered husk under the session lock.
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 
@@ -1175,6 +1175,9 @@ fm_backend_herdr_pid_is_bare_shell() {  # <ps-bin> <pid>
   return 1
 }
 
+# fm_backend_herdr_response_is_success: accept exactly one object envelope with no
+# non-null error member, so a contradictory or multi-document response cannot
+# authorize a stale-registration replacement.
 fm_backend_herdr_response_is_success() {
   printf '%s' "$1" | jq -se '
     if length != 1 then false
@@ -1187,6 +1190,8 @@ fm_backend_herdr_response_is_success() {
   ' >/dev/null 2>&1
 }
 
+# fm_backend_herdr_response_error_code: return a code only from exactly one
+# error-only object envelope, never a response that also presents a result.
 fm_backend_herdr_response_error_code() {
   printf '%s' "$1" | jq -sr '
     if length != 1 then empty
@@ -2338,7 +2343,7 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")" = dead ]
 }
 
-# fm_backend_herdr_projection_reclaim_task: replace one exact agent-free
+# fm_backend_herdr_projection_reclaim_task: replace one exact unregistered
 # restored projection husk inside its original workspace.
 # The caller holds the session presentation lock and has already established
 # that flat fallback is safe across every token match.
@@ -2497,7 +2502,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
 # or deleting anything.
 # Missing matches safely degrade to the normal flat workspace.
 # One or more matches allow flat fallback only when every pane is positively
-# dead or agent-free; a live or unknown pane refuses a duplicate launch.
+# dead or unregistered; `stale-done`, live, or unknown panes refuse a duplicate launch.
 fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id>
   local session=$1 journal=$2 id=$3 token list wsids count wsid panes pane_ids pane state
   token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || {
