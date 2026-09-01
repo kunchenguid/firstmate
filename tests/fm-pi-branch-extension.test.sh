@@ -739,6 +739,38 @@ if (rows[0].wake !== "signal: working") throw new Error("store lost the wake rea
 if (rows[3].silent !== true || rows[3].wake !== terminalWake) throw new Error(`terminal receipt was not stored silently: ${JSON.stringify(rows[3])}`);
 if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes and store-only receipts were not marked read");
 
+// Crash replay safety: a later store-only terminal receipt must not advance
+// the cursor past an earlier visible outcome that has not reached main yet.
+const crashVisibleSeq = outcomeScript(["append", "--task", "task-visible", "--verdict", "captain", "--summary", "visible outcome preserved after crash"]);
+if (crashVisibleSeq !== "5") throw new Error(`unexpected crash-visible seq ${crashVisibleSeq}`);
+writeFileSync(`${home}/state/task-10.meta`, `project=${home}/projects/approved\nwindow=fm-task-10\nspawn_gen=spawn-ten\n`);
+const terminalWakeAfterCrash = `signal: ${home}/state/task-10.status ${home}/state/task-10.turn-ended`;
+const crashReceipt = await report.execute(
+  "call-crash-receipt",
+  { task: "task-10", verdict: "routine", summary: "completed worker needs no action", wake: terminalWakeAfterCrash, receipt: "terminal-noop" },
+  undefined,
+  undefined,
+  {},
+);
+if (crashReceipt.isError) throw new Error(`terminal receipt after visible crash failed: ${JSON.stringify(crashReceipt)}`);
+if (sentToMain.length !== 3) throw new Error("terminal receipt after visible crash rendered a merge note");
+let crashUnread = outcomeScript(["unread"]).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+if (crashUnread.length !== 2 || crashUnread[0].seq !== 5 || crashUnread[0].silent === true || crashUnread[1].seq !== 6 || crashUnread[1].silent !== true) {
+  throw new Error(`store-only receipt advanced past visible unread outcome: ${JSON.stringify(crashUnread)}`);
+}
+const crashDuplicate = await report.execute(
+  "call-crash-duplicate",
+  { task: "task-10", verdict: "routine", summary: "completed worker still needs no action", wake: terminalWakeAfterCrash, receipt: "terminal-noop" },
+  undefined,
+  undefined,
+  {},
+);
+if (crashDuplicate.isError) throw new Error(`duplicate terminal receipt after visible crash failed: ${JSON.stringify(crashDuplicate)}`);
+crashUnread = outcomeScript(["unread"]).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+if (crashUnread.length !== 2 || crashUnread[0].seq !== 5 || crashUnread[1].seq !== 6) {
+  throw new Error(`duplicate terminal receipt disturbed visible crash replay state: ${JSON.stringify(crashUnread)}`);
+}
+
 // 5. Main-side surfaces: the on-demand store reader tool and the merge-note
 // renderer.
 const outcomesTool = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
@@ -801,9 +833,9 @@ try {
 if (!exportCallFellBack || !exportResultFellBack) {
   throw new Error("fm_branch_outcomes replaced Pi stock export rendering");
 }
-const listed = await outcomesTool.execute("call-4", { recent: 2 }, undefined, undefined, {});
+const listed = await outcomesTool.execute("call-4", { recent: 6 }, undefined, undefined, {});
 const listedText = listed.content[0].text;
-if (listedText.split("\n").length !== 2 || !listedText.includes("checks green")) {
+if (listedText.split("\n").length !== 6 || !listedText.includes("checks green") || !listedText.includes("visible outcome preserved after crash")) {
   throw new Error(`fm_branch_outcomes did not read the store: ${listedText}`);
 }
 if (!renderers.has("fm-branch-merge")) throw new Error("merge-note renderer missing");

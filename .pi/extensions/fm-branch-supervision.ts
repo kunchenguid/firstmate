@@ -717,6 +717,21 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function hasVisibleUnreadThrough(seq: string): boolean {
+    const unread = runOutcomeScript(["unread"]);
+    if (!unread.ok) return true;
+    for (const line of unread.stdout.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const row = JSON.parse(line) as { seq?: unknown; silent?: unknown };
+        if (typeof row.seq === "number" && row.seq <= Number(seq) && row.silent !== true) return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function mergeIntoMain(
     expectedGeneration: number,
     seq: string,
@@ -743,6 +758,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (/^[0-9]+$/.test(seq)) {
       if (!actingAsOwner(expectedGeneration)) return false;
+      if (silent && hasVisibleUnreadThrough(seq)) return true;
       return runOutcomeScript(["mark-read", "--through", seq]).ok;
     }
     return true;
@@ -811,6 +827,12 @@ export default function (pi: ExtensionAPI) {
               content: [{ type: "text", text: "terminal-noop receipt marker is unreadable; refusing to guess whether to merge" }],
               details: undefined,
               isError: true,
+            };
+          }
+          if (hasVisibleUnreadThrough(existingSeq)) {
+            return {
+              content: [{ type: "text", text: `terminal-noop receipt already recorded seq ${existingSeq}; visible unread outcomes remain preserved for replay; no merge needed` }],
+              details: undefined,
             };
           }
           const marked = runOutcomeScript(["mark-read", "--through", existingSeq]);
