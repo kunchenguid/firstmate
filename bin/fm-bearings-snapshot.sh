@@ -103,11 +103,8 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 # without limit reaches jq through a file rather than an argv entry: a SINGLE
 # argv entry is capped at MAX_ARG_STRLEN (128 KiB) independently of the far
 # larger ARG_MAX, and exec fails with E2BIG past it.
-# Filters unwrap a slurped document with `doc($x; "x")`, which accepts exactly
-# one document the way --argjson accepts exactly one JSON value: a producer that
-# returned nothing, or that emitted a concatenated multi-value stream, fails
-# closed instead of binding null or silently binding the first value and
-# discarding the rest.
+# bin/fm-fleet-snapshot.sh's JQ_DOC comment owns the boundedness rule and the
+# fail-closed single-document contract that `doc($x; "x")` enforces here too.
 # shellcheck disable=SC2016 # jq filter text: $d and $name are jq variables.
 JQ_DOC='def doc($d; $name): if ($d | length) != 1 then error("fm-bearings-snapshot: expected exactly one JSON document for $" + $name + ", got " + ($d | length | tostring)) else $d[0] end;'
 
