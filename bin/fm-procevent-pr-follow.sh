@@ -120,7 +120,9 @@
 # Bounded polling: one no-change poll costs one core fetch plus one page per
 #   collection that still has entries above the cursor, each page capped at 100
 #   rows and FM_PR_FOLLOW_MAX_PAGES pages per collection; state maps keep the
-#   FM_PR_FOLLOW_MAP_LIMIT highest ids; one document carries at most
+#   FM_PR_FOLLOW_MAP_LIMIT highest ids, and the durable per-collection maximum
+#   keeps an id the bound evicted from reading back as one nobody announced;
+#   one document carries at most
 #   FM_PR_FOLLOW_MAX_EVENTS events plus the head and pr-state lines, which are
 #   exempt because their cursor advance is not re-announced, and per-collection
 #   maxima advance only to what was announced, so an overflowed poll
@@ -497,6 +499,19 @@ max_map_entries() {
       }'
 }
 
+# max_check_id <check rows> <floor>: the highest validated id in the rows,
+# never below the floor. The check map is bounded, so this watermark is what
+# keeps an evicted id from reading back as a check nobody has announced yet.
+max_check_id() {
+  local rows=$1 highest=$2 id rest
+  while IFS=$'\t' read -r id rest; do
+    [ -n "$id" ] || continue
+    nonnegative_int "$id" || continue
+    [ "$id" -gt "$highest" ] && highest=$id
+  done <<< "$rows"
+  printf '%s' "$highest"
+}
+
 # reverse_rows <rows-var-name>: print the rows oldest first. Descending API
 # pages arrive newest first; thread reconstruction wants parents before
 # replies.
@@ -800,6 +815,7 @@ NEW_STATE=''
 NEW_MAX_ISSUE_COMMENT=''
 NEW_MAX_REVIEW=''
 NEW_MAX_REVIEW_COMMENT=''
+NEW_MAX_CHECK=''
 NEW_REVIEWS=''
 NEW_CHECKS=''
 NEW_THREADS=''
@@ -879,6 +895,7 @@ delta_common_start() {
   NEW_MAX_ISSUE_COMMENT=$CUR_MAX_ISSUE_COMMENT
   NEW_MAX_REVIEW=$CUR_MAX_REVIEW
   NEW_MAX_REVIEW_COMMENT=$CUR_MAX_REVIEW_COMMENT
+  NEW_MAX_CHECK=$CUR_MAX_CHECK
   NEW_REVIEWS=$CUR_REVIEWS
   NEW_CHECKS=$CUR_CHECKS
   NEW_THREADS=$CUR_THREADS
@@ -911,6 +928,7 @@ delta_head_and_state() {
     NEW_CHECKS=$(map_put "$NEW_CHECKS" "$check_id" "$check_sc")
   done <<< "$SN_CHECK_ROWS"
   NEW_CHECKS=$(max_map_entries "$NEW_CHECKS" "$MAP_LIMIT")
+  NEW_MAX_CHECK=$(max_check_id "$SN_CHECK_ROWS" "$NEW_MAX_CHECK")
   CHECKS_REBASELINED=1
   return 0
 }
@@ -951,6 +969,7 @@ advance_from_surviving() {
   NEW_MAX_REVIEW_COMMENT=$CUR_MAX_REVIEW_COMMENT
   if [ "$CHECKS_REBASELINED" -eq 0 ]; then
     NEW_CHECKS=$CUR_CHECKS
+    NEW_MAX_CHECK=$CUR_MAX_CHECK
   fi
   NEW_REVIEWS=$CUR_REVIEWS
   NEW_THREADS=$CUR_THREADS
@@ -1004,6 +1023,7 @@ advance_from_surviving() {
         nonnegative_int "$ev_id" || continue
         [ -n "$ev_status" ] || continue
         NEW_CHECKS=$(map_put "$NEW_CHECKS" "$ev_id" "$ev_status")
+        [ "$ev_id" -gt "$NEW_MAX_CHECK" ] && NEW_MAX_CHECK=$ev_id
         ;;
       'event: thread '*)
         ev_id=${line#event: thread id=}
@@ -1031,7 +1051,9 @@ compute_delta_github() {
       key_v=$(check_key "$check_sc")
       old=$(map_get "$CUR_CHECKS" "$check_id")
       if [ -z "$old" ]; then
-        ev_add "$check_id	event: check id=$check_id name=$(printf '%s' "$check_name" | prf_sanitize 80) change=none->$key_v status=$check_sc"
+        if [ "$check_id" -gt "$CUR_MAX_CHECK" ]; then
+          ev_add "$check_id	event: check id=$check_id name=$(printf '%s' "$check_name" | prf_sanitize 80) change=none->$key_v status=$check_sc"
+        fi
       else
         oldkey=$(check_key "$old")
         if [ "$oldkey" != "$key_v" ]; then
@@ -1044,7 +1066,7 @@ compute_delta_github() {
   # Reviews: new submissions and state changes. The projection normalizes
   # unrecognized states to "unknown", which round-trips through the map and
   # announces instead of silently dropping the event (vocabulary contract).
-  local review_id review_state review_author old
+  local review_id review_state review_author old review_seeds=''
   while IFS=$'\t' read -r review_id review_state review_author; do
     [ -n "$review_id" ] || continue
     nonnegative_int "$review_id" || continue
@@ -1057,6 +1079,8 @@ compute_delta_github() {
     if [ -z "$old" ]; then
       if [ "$review_id" -gt "$CUR_MAX_REVIEW" ]; then
         ev_add "$review_id	event: review id=$review_id state=$review_state author=$review_author"
+      else
+        review_seeds+="$review_id"$'\t'"$review_state"$'\n'
       fi
     elif [ "$old" != "$review_state" ]; then
       ev_add "$review_id	event: review-state id=$review_id state=$review_state author=$review_author"
@@ -1096,6 +1120,12 @@ compute_delta_github() {
 
   ev_sort_and_cap
   advance_from_surviving
+  while IFS=$'\t' read -r review_id review_state; do
+    [ -n "$review_id" ] || continue
+    [ -z "$(map_get "$NEW_REVIEWS" "$review_id")" ] || continue
+    NEW_REVIEWS=$(map_put "$NEW_REVIEWS" "$review_id" "$review_state")
+  done <<< "$review_seeds"
+  NEW_REVIEWS=$(max_map_entries "$NEW_REVIEWS" "$MAP_LIMIT")
   return 0
 }
 
@@ -1168,7 +1198,7 @@ compute_delta_gitlab() {
       key_v=$(check_key "$check_status")
       old=$(map_get "$CUR_CHECKS" "$check_id")
       if [ -z "$old" ]; then
-        if [ -n "$CUR_HEAD" ]; then
+        if [ -n "$CUR_HEAD" ] && [ "$check_id" -gt "$CUR_MAX_CHECK" ]; then
           ev_add "$check_id	event: check id=$check_id change=none->$key_v status=$check_status"
         fi
       else
@@ -1342,6 +1372,7 @@ emit_doc() {  # <status> <head> <state>
   printf 'max_issue_comment=%s\n' "$NEW_MAX_ISSUE_COMMENT"
   printf 'max_review=%s\n' "$NEW_MAX_REVIEW"
   printf 'max_review_comment=%s\n' "$NEW_MAX_REVIEW_COMMENT"
+  printf 'max_check=%s\n' "$NEW_MAX_CHECK"
   printf 'reviews=%s\n' "$NEW_REVIEWS"
   printf 'checks=%s\n' "$NEW_CHECKS"
   printf 'threads=%s\n' "$NEW_THREADS"
@@ -1380,7 +1411,7 @@ cursor_load() {
   CUR_NUMBER=''
   CUR_HEAD=''
   CUR_STATE=unknown
-  CUR_MAX_ISSUE_COMMENT=0 CUR_MAX_REVIEW=0 CUR_MAX_REVIEW_COMMENT=0
+  CUR_MAX_ISSUE_COMMENT=0 CUR_MAX_REVIEW=0 CUR_MAX_REVIEW_COMMENT=0 CUR_MAX_CHECK=0
   CUR_REVIEWS=''
   CUR_CHECKS=''
   CUR_THREADS=''
@@ -1410,6 +1441,7 @@ cursor_load() {
       max_issue_comment)   CUR_MAX_ISSUE_COMMENT=$value ;;
       max_review)          CUR_MAX_REVIEW=$value ;;
       max_review_comment)  CUR_MAX_REVIEW_COMMENT=$value ;;
+      max_check)           CUR_MAX_CHECK=$value ;;
       reviews)     CUR_REVIEWS=$value ;;
       checks)      CUR_CHECKS=$value ;;
       threads)     CUR_THREADS=$value ;;
@@ -1446,7 +1478,8 @@ cursor_load() {
 prf_bigint_valid_cursor() {
   nonnegative_int "$CUR_MAX_ISSUE_COMMENT" || return 1
   nonnegative_int "$CUR_MAX_REVIEW" || return 1
-  nonnegative_int "$CUR_MAX_REVIEW_COMMENT"
+  nonnegative_int "$CUR_MAX_REVIEW_COMMENT" || return 1
+  nonnegative_int "$CUR_MAX_CHECK"
 }
 
 # cursor_store: atomically rewrite the cursor from CUR_*. The caller holds the
@@ -1467,6 +1500,7 @@ cursor_store() {
     printf 'max_issue_comment=%s\n' "$CUR_MAX_ISSUE_COMMENT"
     printf 'max_review=%s\n' "$CUR_MAX_REVIEW"
     printf 'max_review_comment=%s\n' "$CUR_MAX_REVIEW_COMMENT"
+    printf 'max_check=%s\n' "$CUR_MAX_CHECK"
     printf 'reviews=%s\n' "$CUR_REVIEWS"
     printf 'checks=%s\n' "$CUR_CHECKS"
     printf 'threads=%s\n' "$CUR_THREADS"
@@ -1660,6 +1694,7 @@ baseline_write() {
   CUR_MAX_ISSUE_COMMENT=0
   CUR_MAX_REVIEW=0
   CUR_MAX_REVIEW_COMMENT=0
+  CUR_MAX_CHECK=0
   CUR_REVIEWS=
   CUR_CHECKS=
   CUR_THREADS=
@@ -1675,11 +1710,15 @@ baseline_write() {
     nonnegative_int "$id" || continue
     CUR_MAX_REVIEW_COMMENT=$(( id > CUR_MAX_REVIEW_COMMENT ? id : CUR_MAX_REVIEW_COMMENT ))
   done <<< "$SN_RC_ROWS"
-  while IFS=$'\t' read -r id rest; do
+  local review_state
+  while IFS=$'\t' read -r id review_state rest; do
     [ -n "$id" ] || continue
     nonnegative_int "$id" || continue
     CUR_MAX_REVIEW=$(( id > CUR_MAX_REVIEW ? id : CUR_MAX_REVIEW ))
+    prf_review_state_word_valid "$review_state" || review_state=unknown
+    CUR_REVIEWS=$(map_put "$CUR_REVIEWS" "$id" "$review_state")
   done <<< "$SN_REVIEW_ROWS"
+  CUR_REVIEWS=$(max_map_entries "$CUR_REVIEWS" "$MAP_LIMIT")
   local check_id check_sc check_name
   while IFS=$'\t' read -r check_id check_sc check_name; do
     [ -n "$check_id" ] || continue
@@ -1687,6 +1726,7 @@ baseline_write() {
     CUR_CHECKS=$(map_put "$CUR_CHECKS" "$check_id" "$check_sc")
   done <<< "$SN_CHECK_ROWS"
   CUR_CHECKS=$(max_map_entries "$CUR_CHECKS" "$MAP_LIMIT")
+  CUR_MAX_CHECK=$(max_check_id "$SN_CHECK_ROWS" 0)
   if [ "$CUR_PROVIDER" = gitlab ]; then
     local thread_id thread_state n_id
     while IFS=$'\t' read -r thread_id thread_state; do
@@ -1809,6 +1849,7 @@ cmd_run() {
         NEW_MAX_ISSUE_COMMENT=$CUR_MAX_ISSUE_COMMENT
         NEW_MAX_REVIEW=$CUR_MAX_REVIEW
         NEW_MAX_REVIEW_COMMENT=$CUR_MAX_REVIEW_COMMENT
+        NEW_MAX_CHECK=$CUR_MAX_CHECK
         NEW_REVIEWS=$CUR_REVIEWS
         NEW_CHECKS=$CUR_CHECKS
         NEW_THREADS=$CUR_THREADS
@@ -1853,6 +1894,7 @@ parse_apply_doc() {
   DOC_C_MAXI=''
   DOC_C_MAXR=''
   DOC_C_MAXRC=''
+  DOC_C_MAXCHK=0
   DOC_C_REVIEWS=''
   DOC_C_CHECKS=''
   DOC_C_THREADS=''
@@ -1891,6 +1933,7 @@ parse_apply_doc() {
       max_issue_comment)  nonnegative_int "$value" || return 1; DOC_C_MAXI=$value ;;
       max_review)         nonnegative_int "$value" || return 1; DOC_C_MAXR=$value ;;
       max_review_comment) nonnegative_int "$value" || return 1; DOC_C_MAXRC=$value ;;
+      max_check)          nonnegative_int "$value" || return 1; DOC_C_MAXCHK=$value ;;
       reviews)            prf_review_map_valid "$value" || return 1; DOC_C_REVIEWS=$value ;;
       checks)             prf_map_valid "$value" || return 1; DOC_C_CHECKS=$value ;;
       threads)            prf_thread_map_valid "$value" || return 1; DOC_C_THREADS=$value ;;
@@ -1954,6 +1997,7 @@ apply_doc_cursor() {
   [ "$DOC_C_MAXI" -gt "$CUR_MAX_ISSUE_COMMENT" ] && CUR_MAX_ISSUE_COMMENT=$DOC_C_MAXI
   [ "$DOC_C_MAXR" -gt "$CUR_MAX_REVIEW" ] && CUR_MAX_REVIEW=$DOC_C_MAXR
   [ "$DOC_C_MAXRC" -gt "$CUR_MAX_REVIEW_COMMENT" ] && CUR_MAX_REVIEW_COMMENT=$DOC_C_MAXRC
+  [ "$DOC_C_MAXCHK" -gt "$CUR_MAX_CHECK" ] && CUR_MAX_CHECK=$DOC_C_MAXCHK
   if [ "$DOC_STATUS" = backfill ] || [ "$DOC_C_BACKFILL" = "done" ]; then
     CUR_BACKFILL="done"
   fi
@@ -2127,6 +2171,7 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
   CUR_MAX_ISSUE_COMMENT=0
   CUR_MAX_REVIEW=0
   CUR_MAX_REVIEW_COMMENT=0
+  CUR_MAX_CHECK=0
   CUR_REVIEWS=
   CUR_CHECKS=
   CUR_THREADS=

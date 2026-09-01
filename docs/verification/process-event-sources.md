@@ -209,7 +209,7 @@ While `state/.afk` exists the watcher stays one-shot as before, because this del
 
 ## PR lifecycle follow-through adapter
 
-Verified 2026-08-31 on macOS (Darwin 27.0.0, bash 3.2.57) with ShellCheck 0.11.0, jq 1.x, and no forge credentials, entirely through `tests/fm-procevent-pr-follow.test.sh` (26 scenarios, two consecutive green runs against this head), whose stub `gh` and `glab` executables serve representative REST and GraphQL payloads as raw JSON while the adapter's own production projections (its real `--jq`/`-q` filters and its real `JSON::PP` programs) produce every asserted row, so no fixture can drift from what the forge path emits.
+Verified 2026-08-31 on macOS (Darwin 27.0.0, bash 3.2.57) with ShellCheck 0.11.0, jq 1.x, and no forge credentials, entirely through `tests/fm-procevent-pr-follow.test.sh` (28 scenarios, two consecutive green runs against this head), whose stub `gh` and `glab` executables serve representative REST and GraphQL payloads as raw JSON while the adapter's own production projections (its real `--jq`/`-q` filters and its real `JSON::PP` programs) produce every asserted row, so no fixture can drift from what the forge path emits.
 
 The suite proves the load-bearing guarantees end to end through the adapter's public commands plus the generic runner:
 
@@ -222,13 +222,15 @@ The suite proves the load-bearing guarantees end to end through the adapter's pu
 - restart and byte-identical replay safety (`handle` reports `already-applied` for a replayed generation and refuses a conflicting generation bound to the same sequence);
 - the bounded failure contract (three failed fetches produce one diagnostic document that invents no forge event, then recovery resumes from the durable cursor);
 - hostile remote payloads (`$(touch ...)` in author, path, and check names) stay sanitized data, the hostile login collapses to the `invalid` sentinel, nothing executes, and a doctored cursor section claiming the adapter's identity is refused whole without an applied receipt;
+- the bounded state maps never turn their own eviction into a notification: with a two-entry map against three check runs on one head, the baseline records the highest check id it saw, the evicted id is never announced as new, and a later regression on a retained check is announced exactly once with no further document on any later poll;
+- a review that already existed when the source was armed - the migration case the backfill sweep exists for - enters the durable review map at the baseline, so its later dismissal is announced as a state change instead of being silently dropped;
 - the approval set is only ever compared against an approval list the poll actually read: an approvals endpoint that stops answering announces no revocation and leaves the durable set intact, and its recovery re-announces nothing, so an intermittent endpoint cannot produce a repeating DISMISSED/APPROVED cycle;
 - task cleanup does not erase tracking, explicit `retire` is the only off switch and refuses while unhandled captures exist without `--force` - leaving the registration and the durable cursor in place, so a refused retirement is a true no-op - the backfill sweep is idempotent, GitLab comments, pipelines, approvals, thread resolution, and merge flow through the real JSON parser, and `fm-pr-check.sh` keeps its exact single-line success output (asserted in `tests/fm-pr-check-security.test.sh`).
 
 Exact commands (the follow-through suite was re-run against this exact head; the others were last green on the head that introduced the code they cover):
 
 ```sh
-bin/fm-test-run.sh tests/fm-procevent-pr-follow.test.sh          # 26 scenarios, two consecutive green runs (~200 s each)
+bin/fm-test-run.sh tests/fm-procevent-pr-follow.test.sh          # 28 scenarios, two consecutive green runs (~215 s each)
 bin/fm-test-run.sh tests/fm-procevent.test.sh tests/fm-procevent-when.test.sh
 bin/fm-test-run.sh tests/fm-pr-check-security.test.sh
 bin/fm-test-run.sh tests/fm-bootstrap.test.sh tests/fm-watch-triage.test.sh tests/fm-wake-queue.test.sh

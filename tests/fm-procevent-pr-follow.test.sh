@@ -311,8 +311,7 @@ gh_fix_default
 arm_gh "$H" >/dev/null
 out=$(FM_HOME="$H" perl -e 'alarm 1; exec @ARGV' \
   "$ROOT/bin/fm-procevent-pr-follow.sh" run "$sid" 2>/dev/null || true)
-assert_contains "$(printf '%s' "$out" | wc -c | tr -d ' ')" 0 \
-  "the first registration baseline announces nothing"
+[ -z "$out" ] || fail "the first registration baseline announced: $out"
 assert_contains "$(cursor_field "$H" "$sid" baseline)" "done" "the baseline is stored"
 assert_contains "$(cursor_field "$H" "$sid" max_issue_comment)" 5 "the baseline stores the current comment maximum"
 assert_contains "$(cursor_field "$H" "$sid" head)" "$GH_SHA1" "the baseline stores the head"
@@ -644,8 +643,7 @@ assert_contains "$after" "$before" "a recomputed poll after an unapplied capture
 FM_HOME="$H" "$ROOT/bin/fm-procevent-pr-follow.sh" autohandle "$sid" 1 "$first" >/dev/null
 out=$(FM_HOME="$H" perl -e 'alarm 1; exec @ARGV' \
   "$ROOT/bin/fm-procevent-pr-follow.sh" run "$sid" 2>/dev/null || true)
-assert_contains "$(printf '%s' "$out" | wc -c | tr -d ' ')" 0 \
-  "after the applied cursor advance the same remote state is silent"
+[ -z "$out" ] || fail "the applied cursor advance left the same remote state noisy: $out"
 # Byte-identical replay of one generation acknowledges exactly once.
 out=$(FM_HOME="$H" "$ROOT/bin/fm-procevent-pr-follow.sh" handle "$sid" 1 "$first")
 assert_contains "$out" "already-applied: $sid 1" "a byte-identical replay reports already-applied"
@@ -815,8 +813,7 @@ assert_contains "$out" "applied: $sid 2" "the monitoring-loss document applies"
 assert_grep 'surfaced=1' "$H/state/pr-follow/$sid.quarantine" "applying it latches the surface"
 out=$(FM_HOME="$H" perl -e 'alarm 1; exec @ARGV' \
   "$ROOT/bin/fm-procevent-pr-follow.sh" run "$sid" 2>/dev/null || true)
-assert_contains "$(printf '%s' "$out" | wc -c | tr -d ' ')" 0 \
-  "a surfaced quarantine emits nothing further"
+[ -z "$out" ] || fail "a surfaced quarantine emitted more: $out"
 before=$(result_count "$H" "$sid")
 pe "$H" reconcile >/dev/null
 sleep 1
@@ -1095,6 +1092,56 @@ assert_not_contains "$out" "environment bounds are invalid" \
   "the largest bound the apply step accepts was refused"
 unset FM_PR_FOLLOW_MAX_EVENTS
 pass "the event bound truncates review noise and never the lifecycle line"
+
+# --- a bounded check map never re-announces what the bound evicted -----------
+new_section checkbound
+gh_fix_default
+# Two map entries against three check runs on one head: the lowest id is
+# evicted by the bound on every store, so only the durable maximum keeps it
+# from reading back as a check nobody has announced yet.
+export FM_PR_FOLLOW_MAP_LIMIT=2
+gh_checks '[{"id":11,"status":"completed","conclusion":"success","name":"a"},{"id":12,"status":"completed","conclusion":"success","name":"b"},{"id":13,"status":"completed","conclusion":"success","name":"c"}]'
+arm_gh "$H" task-cb >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_baseline "$H" "$sid" || fail "the bounded-map baseline never completed"
+stored=$(cursor_field "$H" "$sid" checks)
+assert_not_contains "$stored" "11:" "the bound kept more entries than it was given"
+assert_contains "$(cursor_field "$H" "$sid" max_check)" 13 \
+  "the baseline did not record the highest check id it saw"
+gh_checks '[{"id":11,"status":"completed","conclusion":"success","name":"a"},{"id":12,"status":"completed","conclusion":"success","name":"b"},{"id":13,"status":"completed","conclusion":"failure","name":"c"}]'
+wait_for_result "$H" "$sid" || fail "the check regression produced no result"
+RESULT=$(first_result "$H" "$sid")
+assert_grep 'event: check id=13 name=c change=green->red status=completed:failure' "$RESULT" \
+  "the tracked check regression is announced"
+assert_no_grep 'change=none->' "$RESULT" \
+  "a check the map bound evicted was re-announced as new"
+ack "$H" "$sid" 1 "$RESULT"
+# The evicted id must stay silent on every later poll, not just the first.
+restart_runner "$H"
+sleep 2
+assert_contains "$(result_count "$H" "$sid")" 1 \
+  "the evicted check keeps producing a fresh document on every poll"
+unset FM_PR_FOLLOW_MAP_LIMIT
+pass "a bounded check map never re-announces what the bound evicted"
+
+# --- reviews that predate the baseline stay tracked --------------------------
+new_section prereview
+gh_fix_default
+# The migration case the backfill sweep exists for: a PR already carrying a
+# review when monitoring is armed.
+printf '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"databaseId":100,"state":"APPROVED","author":{"login":"carol"}}]}}}}}\n' > "$GH_FIX/reviews.json"
+arm_gh "$H" task-pre >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_baseline "$H" "$sid" || fail "the pre-existing-review baseline never completed"
+assert_contains "$(cursor_field "$H" "$sid" reviews)" "100:APPROVED" \
+  "a review that predates the baseline never entered the durable map"
+printf '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"databaseId":100,"state":"DISMISSED","author":{"login":"carol"}}]}}}}}\n' > "$GH_FIX/reviews.json"
+wait_for_result "$H" "$sid" || fail "the dismissal of a pre-existing review produced no result"
+RESULT=$(first_result "$H" "$sid")
+assert_grep 'event: review-state id=100 state=DISMISSED' "$RESULT" \
+  "the dismissal of a review that predates the baseline is announced"
+ack "$H" "$sid" 1 "$RESULT"
+pass "reviews that predate the baseline keep their state tracked"
 
 # --- deterministic rotation bounds aggregate load without starvation ----------
 new_section rotation
