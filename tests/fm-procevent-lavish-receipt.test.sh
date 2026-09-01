@@ -941,4 +941,85 @@ assert_contains "$text" "saved 1 of 1" "the preserved verdict never reached the 
 rm -f "$staged" "$staged.gen"
 pass "a gone-claim reclaim keeps the staged verdict its seam still owes"
 
+# --- a retired source still owes the verdict its dead runner recorded -------
+# Retirement drops the registration but deliberately leaves the receipts record
+# standing. A generation whose runner died with its verdict staged, and whose
+# replacement then ended the review, is therefore still owed its Received and
+# Saved: without recovery after retirement nothing can ever resolve it - the
+# capture is declined by publication for as long as the unconsumed verdict
+# sits there, the captain's applied answers never appear on any receipt, the
+# private verdict stays in the registry, and re-arming that artifact is refused
+# forever because the round stays unhandled.
+H18=$(make_home h18)
+RECEIPT_HOME=$H18
+ART18="$TMP_ROOT/deck18.html"
+printf '<h1>deck</h1>\n' > "$ART18"
+RECEIPT_SID=$(run_lavish "$H18" source-id "$ART18")
+tasks_in "$H18" add deck-alpha "Alpha call" --kind ship --repo sample --body 'Alpha plan.' >/dev/null
+run_captain "$H18" hold deck-alpha --reason "alpha choice pending" >/dev/null
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+stub_ended_empty
+run_captain "$H18" bind "$RECEIPT_SID" >/dev/null
+run_lavish "$H18" arm "$ART18" >/dev/null
+journal="$H18/state/procevent/$RECEIPT_SID.receipts"
+result="$H18/state/procevent-inbox/$RECEIPT_SID.1.result"
+reconcile_once
+wait_i=0
+while [ ! -e "$result" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+wait_claim_free
+[ -e "$result" ] || fail "the submitted round was never captured"
+# Roll that generation back to the instant after its intake returned and before
+# its seam ran: the round's own journal facts and the seam's note are gone, the
+# record itself stands as retirement will leave it, and the dead claim still
+# holds the verdict the runner recorded.
+awk -F '\t' '$1 != "received" && $1 != "saved"' "$journal" > "$journal.rolled"
+mv "$journal.rolled" "$journal"
+chmod 0600 "$journal"
+rm -f "$H18/state/procevent-inbox/$RECEIPT_SID.1.receipted"
+# The announcement the live capture made is part of what is being rolled back:
+# a runner killed before its seam never got that far.
+rm -f "$H18/state/.wake-queue"
+staged="$H18/state/procevent/.$RECEIPT_SID.dead-token.rcpt.output"
+printf 'fed 0\nclosed: deck-alpha\n' > "$staged"
+printf '%s\t%s\n' "$RECEIPT_SID" 1 > "$staged.gen"
+chmod 0600 "$staged" "$staged.gen"
+printf '%s\n%s\ndead-token\ndead-identity\n%s\n' \
+  "$H18" 999999 "$H18/state/procevent" > "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+# The replacement runner reclaims that dead claim, polls an ended review, and
+# retires the source - all without ever consuming the verdict it preserved.
+PATH="$STUB_BIN_DIR:$PATH" pe "$H18" start "$RECEIPT_SID" >/dev/null 2>&1 || true
+assert_absent "$H18/state/procevent/$RECEIPT_SID.source" \
+  "the ended review never retired, so this scenario proves nothing"
+assert_present "$journal" "retirement removed the receipts record it must outlive"
+assert_present "$staged" "the retiring replacement destroyed the dead runner's verdict"
+grep -qs "procevent lavish $RECEIPT_SID 1" "$H18/state/.wake-queue" \
+  && fail "the unacknowledged round was announced before its seam ever ran"
+arm_status=0
+PATH="$STUB_BIN_DIR:$PATH" run_lavish "$H18" arm "$ART18" >/dev/null 2>&1 || arm_status=$?
+[ "$arm_status" -ne 0 ] || fail "arm reset a record whose captured round was still unhandled"
+# Recovery after retirement journals that round from the verdict, drops the
+# staging it consumed, and lets the capture finally reach the handler.
+reconcile_until grep -qs '^saved' "$journal" \
+  || fail "a retired source stranded the verdict its dead runner recorded"
+[ "$(awk -F '\t' '$1 == "received" { print $4 }' "$journal")" = 1 ] \
+  || fail "the recovered round lost its answer count"
+[ "$(awk -F '\t' '$1 == "saved" && $2 == 1 { print $4 }' "$journal")" = 1 ] \
+  || fail "recovery lost the save the stranded verdict recorded"
+straggler=''
+for leftover in "$H18"/state/procevent/.*.rcpt.output*; do
+  [ -e "$leftover" ] || continue
+  straggler="$straggler $leftover"
+done
+[ -z "$straggler" ] || fail "recovery left its consumed staging behind:$straggler"
+grep -qs "procevent lavish $RECEIPT_SID 1" "$H18/state/.wake-queue" \
+  || fail "the recovered round was never announced to a handler"
+text=$(run_lavish "$H18" receipt-text "$RECEIPT_SID")
+assert_contains "$text" "saved 1 of 1" "the recovered round never reached the visible receipt"
+pe "$H18" handled "$RECEIPT_SID" 1 >/dev/null
+PATH="$STUB_BIN_DIR:$PATH" run_lavish "$H18" arm "$ART18" >/dev/null \
+  || fail "arm stayed refused after the recovered round was handled"
+pass "a retired source still recovers and announces the verdict its runner staged"
+
 printf '\nall Lavish receipt tests passed\n'

@@ -1129,12 +1129,14 @@ staged_receipt_outcome() {  # <source-id> <sequence>
 # can always prove and a verdict nobody recorded is not. The intake is never
 # re-fed here, so nothing can be applied twice. A generation whose seam already
 # ran is left alone, re-checked under the hold so a live runner mid-seam is
-# never doubled, and a source whose registration is gone has no record left to
-# acknowledge into. It runs before this cycle publishes anything or starts any
-# replacement runner, so the seam still speaks for the poll that produced the
-# capture, never for one a replacement has since armed.
+# never doubled. A retired source is still recovered from what its dead runner
+# actually recorded: retirement drops the registration but deliberately leaves
+# the receipts record standing, and a verdict already staged is an obligation
+# that outlived the poll. It runs before this cycle publishes anything or
+# starts any replacement runner, so the seam still speaks for the poll that
+# produced the capture, never for one a replacement has since armed.
 recover_receipt_seams() {
-  local result id adapter seq outcome staged claim_state live_token
+  local result id adapter seq outcome staged claim_state live_token registered record
   while IFS= read -r result; do
     [ -n "$result" ] || continue
     id=$(fm_procevent_result_source_id "$result")
@@ -1142,7 +1144,10 @@ recover_receipt_seams() {
     seq=$(fm_procevent_result_sequence "$result")
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     fm_procevent_receipt_seam_ran "$STATE" "$id" "$seq" && continue
-    [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ] || continue
+    registered=0
+    if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
+      registered=1
+    fi
     adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
     [ -n "$adapter" ] || continue
     fm_procevent_source_lock_acquire "$id" || continue
@@ -1172,7 +1177,24 @@ recover_receipt_seams() {
       # itself rather than leaking a private verdict nothing will ever clean.
       outcome=$(staged_receipt_outcome "$id" "$seq") || outcome=
       staged=
-      if [ -z "$outcome" ]; then
+      if [ "$registered" -eq 0 ]; then
+        # A retired source has no poll left to prove anything new, so only the
+        # verdict its dead runner already staged is recoverable here - and only
+        # into the record retirement deliberately left standing. When that
+        # record is gone too the acknowledgement obligation went with it, and
+        # the staged verdict is dropped rather than left to hold its own
+        # generation back from every publication forever.
+        if [ -z "$outcome" ]; then
+          fm_procevent_source_lock_release "$id"
+          continue
+        fi
+        record=$(fm_procevent_receipts_path "$STATE" "$id")
+        if [ ! -f "$record" ] || [ -L "$record" ]; then
+          rm -f -- "$outcome" "$outcome.gen" "$outcome.body" "$outcome.tmp"
+          fm_procevent_source_lock_release "$id"
+          continue
+        fi
+      elif [ -z "$outcome" ]; then
         staged=$(staging_file "$id" "reconcile.$$.rcpt")
         if [ ! -e "$staged" ] && [ ! -L "$staged" ] && (umask 077; : > "$staged"); then
           outcome=$staged
