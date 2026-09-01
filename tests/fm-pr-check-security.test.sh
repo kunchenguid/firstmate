@@ -2605,14 +2605,14 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
-  # The merge path still addresses GitHub only, so it refuses rather than
-  # sending a merge request to the wrong forge.
+  # The merge path supports GitLab directly and must not route the request
+  # through gh-axi.
   write_task_meta "$dir" task-c
   set +e
   run_merge_entry "$dir" task-c "$url" >/dev/null 2>&1
   rc=$?
   set -e
-  [ "$rc" -eq 2 ] || fail "merge wrapper did not refuse a GitLab merge request URL"
+  [ "$rc" -eq 1 ] || fail "merge wrapper did not stop before an unmergeable GitLab merge request"
   [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached the GitHub CLI for a GitLab URL"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
@@ -3091,21 +3091,6 @@ test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries
-test_migration_initializes_fresh_state
-test_migration_excludes_older_watcher_before_scan
-test_private_artifact_paths_refuse_symlinks_and_directories
-test_marker_and_diagnostic_rename_fail_closed
-test_postrename_marker_and_diagnostic_validation_retries
-test_quarantine_validation_and_retry_contract
-test_failed_outcomes_block_every_retry_until_repaired
-test_ambiguous_failure_accepts_validated_replacement
-test_replacement_provenance_negative_matrix
-test_complete_single_link_validation
-test_canonical_publication_failure_recovers_only_on_retry
-test_obligation_namespace_compatibility
-test_nonexecuting_migration
-test_bootstrap_migrates_before_other_mutations
-test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts

@@ -11,7 +11,6 @@
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
-#                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -49,12 +48,10 @@
 #          landed in the primary instead of its own worktree; restore it per the line.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
-#          no-mistakes is also MISSING when its installed version is older than
-#          1.31.2.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
-#          build below its floor reports MISSING like no-mistakes, so the operator
-#          is asked to upgrade rather than silently running an older tool.
+#          build below its floor reports MISSING, so the operator is asked to
+#          upgrade rather than silently running an older tool.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). A compatible tasks-axi default backend is silent.
@@ -75,16 +72,16 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, fleet_sync) while still
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the four MUTATING sweeps
+#          (secondmate_sync, secondmate_liveness_sweep, secondmate_handoff_resume,
+#          fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          PR-check artifacts, secondmate homes, pending handoff outboxes,
-#          project clones, or repair instructions.
+#          secondmate homes, pending handoff outboxes, project clones, or repair
+#          instructions.
 #          Unset/0 (the default) runs every sweep exactly as before - this flag
 #          is purely additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
@@ -97,7 +94,7 @@
 #                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
-#                 no version floors, no tangle check, and no PR-check migration:
+#                 no version floors and no tangle check:
 #                 those already ran on the local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
 #          detect-only is the read-only `gh auth status` probe on its own.
@@ -778,7 +775,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+COMMON_TOOLS="node git gh gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -786,7 +783,6 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN=1.31.2
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
 # newest axi tools. It is NOT the minimum feature-introduced version. These floors
@@ -948,13 +944,7 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
-# This is the first mutating sweep at a locked session boundary. It pauses an
-# identity-matched watcher, holds its lock, and neutralizes legacy PR checks
-# before any tool detection or later bootstrap mutation can leave old artifacts
-# runnable. Detect-only sessions never touch state, and the deferred network pass
-# never repeats it: the local pass that ran first already closed that window.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
-  "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   startup_memory_budget_setup
 fi
 
@@ -977,9 +967,6 @@ detect_local_tools() {
   if fm_backend_list_contains "$TOOLS" treehouse \
     && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
-  fi
-  if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
-    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"

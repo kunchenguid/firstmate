@@ -969,7 +969,6 @@ test_bootstrap_ignores_legacy_relay_env() {
 }
 
 test_bootstrap_reporting
-test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
 test_tasks_axi_min_version
