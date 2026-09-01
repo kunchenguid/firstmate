@@ -925,15 +925,22 @@ test_registration_over_an_ambiguous_inventory_stays_alive() {
 }
 
 test_registration_over_a_shell_with_a_child_stays_alive() {
-  local dir bgpid out
+  local dir bgpid out attempt=0 child=
   dir="$TMP_ROOT/reg-child"
   # A real shell that is genuinely running something: the trailing `true` keeps
   # bash from exec-ing away, so the child row is real.
   bash -c 'sleep 300; true' & bgpid=$!
   # Give the real child a moment to exist before the proof reads the table.
-  while [ -z "$(ps -axo ppid= -o pid= 2>/dev/null | awk -v p="$bgpid" '$1 == p {print $2}')" ]; do
+  while [ "$attempt" -lt 200 ]; do
+    child=$(ps -axo ppid= -o pid= 2>/dev/null | awk -v p="$bgpid" '$1 == p {print $2}')
+    [ -n "$child" ] && break
     sleep 0.05
+    attempt=$((attempt + 1))
   done
+  if [ -z "$child" ]; then
+    kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+    fail "ps never reported a child of the backgrounded shell $bgpid, so this case cannot exercise a shell that is running something"
+  fi
   out=$(agent_state_case "$dir" w1:p2 \
     '{"result":{"agent":{"agent_status":"idle"}}}' \
     "$(bare_shell_inventory w1:p2 "$bgpid")")

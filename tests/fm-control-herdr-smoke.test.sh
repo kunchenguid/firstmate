@@ -109,8 +109,13 @@ register_agent() {  # <state>
     --agent fm-control-smoke-agent --state "$1" --session "$SESSION" >/dev/null 2>&1
 }
 
+# The same read the backend's own capture performs
+# (fm_backend_herdr_capture in bin/backends/herdr.sh): --source recent with a
+# generous --lines, because a small bound returns nothing at all. The exit
+# status is propagated so callers can refuse to treat a failed read as evidence
+# that nothing was typed into the pane.
 pane_text() {
-  herdr pane read "$PANE_ID" --session "$SESSION" 2>/dev/null || true
+  herdr pane read "$PANE_ID" --session "$SESSION" --source recent --lines 200
 }
 
 registered_status() {
@@ -157,7 +162,9 @@ case "$OUT" in
   "already-stopped hsmoke"*) : ;;
   *) fail "an agent-free pane should report already-stopped, got: $OUT" ;;
 esac
-case "$(pane_text)" in
+PANE_TEXT=$(pane_text) \
+  || fail "could not read the task pane, so an absent /quit proves nothing about what exit typed into it"
+case "$PANE_TEXT" in
   *"/quit"*) fail "exit typed the harness's exit command into a pane that hosts a plain shell" ;;
 esac
 pass "real herdr: an exited worker's pane is positively eligible for its replacement instead of being typed into"
