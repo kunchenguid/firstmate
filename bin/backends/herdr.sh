@@ -1937,6 +1937,203 @@ fm_backend_herdr_agent_state() {  # <target>
   esac
 }
 
+# fm_backend_herdr_recovery_path_state: classify one live foreground cwd as
+# match, outside, or unreadable relative to the recorded worktree.
+fm_backend_herdr_recovery_path_state() {  # <worktree> <foreground-cwd>
+  local worktree=$1 foreground=$2 worktree_real foreground_real
+  [ -n "$worktree" ] && [ -n "$foreground" ] || { printf 'unreadable'; return 0; }
+  worktree_real=$(cd "$worktree" 2>/dev/null && pwd -P) || { printf 'unreadable'; return 0; }
+  foreground_real=$(cd "$foreground" 2>/dev/null && pwd -P) || { printf 'unreadable'; return 0; }
+  [ "$foreground_real" = "$worktree_real" ] && { printf 'match'; return 0; }
+  case "$foreground_real" in
+    "$worktree_real"/*) printf 'match'; return 0 ;;
+  esac
+  printf 'outside'
+}
+
+# fm_backend_herdr_recovery_ownership_state: scan every running Herdr session,
+# tab, and pane for a live registered agent in the exact task-labeled tab or a
+# foreground cwd inside the recorded worktree. A missing recorded pane is only
+# an eligibility signal; this independent scan is the ownership proof. Any
+# incomplete or contradictory read returns ambiguous, so callers never launch
+# through an uncertain inventory.
+fm_backend_herdr_recovery_ownership_state() {  # <recorded-session> <task-id> <worktree>
+  local recorded_session=$1 task_id=$2 worktree=$3 sessions session_names session
+  local workspaces workspace_id tabs tab_id tab_label panes pane_id pane_info pane_code
+  local pane_tab_id pane_workspace_id foreground path_state candidate agent_info agent_code
+  local agent_status recorded_seen=0
+  local tab_row
+  [ -n "$recorded_session" ] && [ -n "$task_id" ] && [ -n "$worktree" ] || {
+    printf 'unreadable'
+    return 0
+  }
+  sessions=$(fm_backend_herdr_cli "$recorded_session" session list --json 2>/dev/null) || {
+    printf 'unreadable'
+    return 0
+  }
+  if ! printf '%s' "$sessions" | jq -e '
+    (.sessions | type) == "array"
+    and all(.sessions[];
+      ((.name | type) == "string")
+      and ((.name | length) > 0)
+      and ((.running | type) == "boolean"))
+  ' >/dev/null 2>&1; then
+    printf 'unreadable'
+    return 0
+  fi
+  session_names=$(printf '%s' "$sessions" | jq -r '
+    .sessions[]
+    | select(.running == true)
+    | (if (.name | type) == "string" then .name else "" end)
+  ' 2>/dev/null) || {
+    printf 'unreadable'
+    return 0
+  }
+  while IFS= read -r session; do
+    [ -n "$session" ] || {
+      printf 'ambiguous'
+      return 0
+    }
+    [ "$session" = "$recorded_session" ] && recorded_seen=1
+    workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
+      printf 'unreadable'
+      return 0
+    }
+    if ! printf '%s' "$workspaces" | jq -e '
+      (.result.workspaces | type) == "array"
+      and all(.result.workspaces[];
+        ((.workspace_id | type) == "string") and ((.workspace_id | length) > 0))
+    ' >/dev/null 2>&1; then
+      printf 'unreadable'
+      return 0
+    fi
+    while IFS= read -r workspace_id; do
+      [ -n "$workspace_id" ] || {
+        printf 'unreadable'
+        return 0
+      }
+      tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace_id" 2>/dev/null) || {
+        printf 'unreadable'
+        return 0
+      }
+      if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+        printf 'unreadable'
+        return 0
+      fi
+      while IFS=$'\t' read -r tab_row; do
+        [ -n "$tab_row" ] || continue
+        tab_id=${tab_row%%$'\t'*}
+        tab_label=${tab_row#*$'\t'}
+        [ -n "$tab_id" ] && [ -n "$tab_label" ] || {
+          printf 'ambiguous'
+          return 0
+        }
+        panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace_id" 2>/dev/null) || {
+          printf 'unreadable'
+          return 0
+        }
+        if ! printf '%s' "$panes" | jq -e \
+          --arg tab "$tab_id" --argjson tabs "$tabs" '
+          (.result.panes | type) == "array"
+          and ([.result.panes[] | select(.tab_id == $tab)] | length) > 0
+          and all(.result.panes[]; . as $pane |
+            (($pane.pane_id | type) == "string")
+            and (($pane.pane_id | length) > 0)
+            and (($pane.tab_id | type) == "string")
+            and (($pane.tab_id | length) > 0)
+            and ([
+              $tabs.result.tabs[]
+              | select(.tab_id == $pane.tab_id)
+            ] | length) == 1)
+        ' >/dev/null 2>&1; then
+          printf 'unreadable'
+          return 0
+        fi
+        while IFS=$'\t' read -r pane_id pane_tab_id; do
+          [ -n "$pane_id" ] && [ -n "$pane_tab_id" ] || {
+            printf 'unreadable'
+            return 0
+          }
+          [ "$pane_tab_id" = "$tab_id" ] || continue
+          pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
+            printf 'ambiguous'
+            return 0
+          }
+          pane_code=$(printf '%s' "$pane_info" | jq -r '.error.code // empty' 2>/dev/null)
+          [ -z "$pane_code" ] || {
+            printf 'ambiguous'
+            return 0
+          }
+          if ! printf '%s' "$pane_info" | jq -e --arg pane "$pane_id" --arg workspace "$workspace_id" '
+            .result.pane.pane_id == $pane
+            and ((.result.pane.tab_id | type) == "string")
+            and ((.result.pane.workspace_id | type) == "string")
+            and .result.pane.workspace_id == $workspace
+            and ((.result.pane.foreground_cwd | type) == "string")
+            and ((.result.pane.foreground_cwd | length) > 0)
+          ' >/dev/null 2>&1; then
+            printf 'unreadable'
+            return 0
+          fi
+          pane_tab_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.tab_id' 2>/dev/null)
+          pane_workspace_id=$(printf '%s' "$pane_info" | jq -r '.result.pane.workspace_id' 2>/dev/null)
+          foreground=$(printf '%s' "$pane_info" | jq -r '.result.pane.foreground_cwd' 2>/dev/null)
+          [ "$pane_workspace_id" = "$workspace_id" ] && [ "$pane_tab_id" = "$tab_id" ] || {
+            printf 'ambiguous'
+            return 0
+          }
+          candidate=0
+          [ "$tab_label" = "fm-$task_id" ] && candidate=1
+          path_state=$(fm_backend_herdr_recovery_path_state "$worktree" "$foreground")
+          case "$path_state" in
+            match) candidate=1 ;;
+            outside) ;;
+            *) printf 'unreadable'; return 0 ;;
+          esac
+          [ "$candidate" = 1 ] || continue
+          agent_info=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
+          agent_code=$(printf '%s' "$agent_info" | jq -r '.error.code // empty' 2>/dev/null)
+          if [ "$agent_code" = agent_not_found ]; then
+            # A missing native registration is not enough to call a pane clear:
+            # a manually started agent can still be running in a Herdr pane that
+            # Firstmate did not register. Only the adapter's strict process
+            # inventory may downgrade this to an idle bare shell; every other
+            # shape remains ambiguous and refuses recovery.
+            fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id" >/dev/null 2>&1 || {
+              printf 'ambiguous'
+              return 0
+            }
+            continue
+          fi
+          [ -z "$agent_code" ] || {
+            printf 'ambiguous'
+            return 0
+          }
+          agent_status=$(printf '%s' "$agent_info" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+          case "$agent_status" in
+            working|idle|done|blocked)
+              printf 'live'
+              return 0
+              ;;
+            *)
+              printf 'ambiguous'
+              return 0
+              ;;
+          esac
+        done < <(printf '%s' "$panes" | jq -r '.result.panes[] | [.pane_id, .tab_id] | @tsv' 2>/dev/null)
+      done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | [
+        (if (.tab_id | type) == "string" then .tab_id else "" end),
+        (if (.label | type) == "string" then .label else "" end)
+      ] | @tsv' 2>/dev/null)
+    done < <(printf '%s' "$workspaces" | jq -r '.result.workspaces[]? | (if (.workspace_id | type) == "string" then .workspace_id else "" end)' 2>/dev/null)
+  done <<< "$session_names"
+  [ "$recorded_seen" = 1 ] || {
+    printf 'unreadable'
+    return 0
+  }
+  printf 'clear'
+}
+
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
 fm_backend_herdr_agent_alive() {  # <target>
@@ -1989,12 +2186,32 @@ fm_backend_herdr_agent_alive() {  # <target>
 # fm_backend_herdr_workspace_prune_seeded_default_tab for the incident and
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
-# case. Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+# case. An optional 5th-argument callback first receives raw unverified create
+# evidence, then receives the verified exact IDs after inventory reconciliation.
+# Echoes "<tab_id> <pane_id>" on success.
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [created_callback]
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} created_callback=${5:-}
+  local session wsid list before_tab_ids dup_tabs dup dup_pane dup_tab_ids out raw_tab_id raw_pane_id tab_id pane_id
+  local callback_status=0 reconcile_list reconcile_tabs reconcile_tab reconcile_panes reconcile_pane_info remaining_dup_tabs
+  FM_BACKEND_HERDR_CREATED_TAB_ID=
+  FM_BACKEND_HERDR_CREATED_PANE_ID=
+  FM_BACKEND_HERDR_CREATED_RAW_RESPONSE=
+  FM_BACKEND_HERDR_CREATED_RAW_TAB_ID=
+  FM_BACKEND_HERDR_CREATED_RAW_PANE_ID=
+  FM_BACKEND_HERDR_CREATED_VERIFIED=0
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  if ! printf '%s' "$list" | jq -e '
+    (.result.tabs | type) == "array"
+    and all(.result.tabs[];
+      ((.tab_id | type) == "string")
+      and ((.tab_id | length) > 0))
+  ' >/dev/null 2>&1; then
+    echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
+    return 1
+  fi
+  before_tab_ids=$(printf '%s' "$list" | jq -r '.result.tabs[].tab_id' 2>/dev/null) || return 1
   dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
@@ -2014,12 +2231,99 @@ $dup_tabs
 EOF
   fi
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
-  tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
-  pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
-    echo "error: could not parse tab/pane id from herdr tab create output" >&2
-    return 1
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_CREATED_RAW_RESPONSE=$out
+  raw_tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null) || raw_tab_id=
+  raw_pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null) || raw_pane_id=
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_CREATED_RAW_TAB_ID=$raw_tab_id
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_CREATED_RAW_PANE_ID=$raw_pane_id
+  if [ -n "$created_callback" ] && ! "$created_callback"; then
+    callback_status=1
   fi
+  if [ -n "$created_callback" ] || [ -z "$raw_tab_id" ] || [ -z "$raw_pane_id" ]; then
+    reconcile_list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+      echo "error: could not reconcile tab identity after herdr tab create" >&2
+      return 1
+    }
+    if ! printf '%s' "$reconcile_list" | jq -e '
+      (.result.tabs | type) == "array"
+      and all(.result.tabs[];
+        ((.tab_id | type) == "string")
+        and ((.tab_id | length) > 0)
+        and ((.label | type) == "string")
+        and ((.workspace_id | type) == "string")
+        and ((.workspace_id | length) > 0))
+    ' >/dev/null 2>&1; then
+      echo "error: could not reconcile tab identity after herdr tab create" >&2
+      return 1
+    fi
+    reconcile_tabs=
+    while IFS=$'\t' read -r reconcile_tab dup workspace_id; do
+      [ "$dup" = "$label" ] && [ "$workspace_id" = "$wsid" ] || continue
+      printf '%s\n' "$before_tab_ids" | grep -Fqx "$reconcile_tab" && continue
+      reconcile_tabs="${reconcile_tabs}${reconcile_tab}"$'\n'
+    done < <(printf '%s' "$reconcile_list" | jq -r '.result.tabs[] | [.tab_id, .label, .workspace_id] | @tsv' 2>/dev/null)
+    reconcile_tabs=${reconcile_tabs%$'\n'}
+    [ -n "$reconcile_tabs" ] && [ "${reconcile_tabs#*$'\n'}" = "$reconcile_tabs" ] || {
+      echo "error: could not reconcile one exact tab identity after herdr tab create" >&2
+      return 1
+    }
+    tab_id=$reconcile_tabs
+    reconcile_panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
+      echo "error: could not reconcile pane identity after herdr tab create" >&2
+      return 1
+    }
+    if ! printf '%s' "$reconcile_panes" | jq -e '
+      (.result.panes | type) == "array"
+      and all(.result.panes[];
+        ((.pane_id | type) == "string")
+        and ((.pane_id | length) > 0)
+        and ((.tab_id | type) == "string")
+        and ((.tab_id | length) > 0))
+    ' >/dev/null 2>&1; then
+      echo "error: could not reconcile pane identity after herdr tab create" >&2
+      return 1
+    fi
+    pane_id=$(printf '%s' "$reconcile_panes" | jq -r --arg tab "$tab_id" \
+      '.result.panes[] | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || pane_id=
+    [ -n "$pane_id" ] && [ "${pane_id#*$'\n'}" = "$pane_id" ] || {
+      echo "error: could not reconcile one exact pane identity after herdr tab create" >&2
+      return 1
+    }
+    if { [ -n "$raw_tab_id" ] && [ "$raw_tab_id" != "$tab_id" ]; } \
+       || { [ -n "$raw_pane_id" ] && [ "$raw_pane_id" != "$pane_id" ]; }; then
+      echo "error: herdr tab create response identity contradicts post-create inventory" >&2
+      return 1
+    fi
+    reconcile_pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
+      echo "error: could not verify reconciled pane identity after herdr tab create" >&2
+      return 1
+    }
+    if ! printf '%s' "$reconcile_pane_info" | jq -e \
+      --arg pane "$pane_id" --arg tab "$tab_id" --arg workspace "$wsid" '
+        .result.pane.pane_id == $pane
+        and .result.pane.tab_id == $tab
+        and .result.pane.workspace_id == $workspace
+      ' >/dev/null 2>&1; then
+      echo "error: reconciled pane identity does not belong to the created tab and workspace" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2034
+    FM_BACKEND_HERDR_CREATED_VERIFIED=1
+  else
+    tab_id=$raw_tab_id
+    pane_id=$raw_pane_id
+  fi
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_CREATED_TAB_ID=$tab_id
+  # shellcheck disable=SC2034
+  FM_BACKEND_HERDR_CREATED_PANE_ID=$pane_id
+  if [ -n "$created_callback" ] && ! "$created_callback"; then
+    callback_status=1
+  fi
+  [ "$callback_status" = 0 ] || return 1
   [ -z "$seeded_tab_id" ] || fm_backend_herdr_workspace_prune_seeded_default_tab "$session" "$wsid" "$seeded_tab_id"
   if [ -n "$dup_tab_ids" ]; then
     while IFS= read -r dup; do

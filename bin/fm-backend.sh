@@ -906,6 +906,20 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_recovery_ownership_state: backend-specific proof that no live
+# agent still owns a task or its recorded local copy before an explicit
+# existing-copy recovery.  The result is clear|live|ambiguous|unreadable;
+# callers must refuse every result except clear.
+fm_backend_recovery_ownership_state() {  # <backend> <session> <task-id> <worktree>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unreadable'; return 0; }
+  case "$backend" in
+    herdr) fm_backend_herdr_recovery_ownership_state "$@" ;;
+    *) printf 'unverified' ;;
+  esac
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks

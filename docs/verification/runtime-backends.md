@@ -341,6 +341,73 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: a restored no-agent tab was replaced create-before-close, while a registered live agent caused refusal.
 
+### Explicit missing-endpoint recovery
+
+The guarded recovery contract was verified on 2026-09-01 with the portable Herdr fake and real Git worktree fixtures.
+The exact regression command was:
+
+```sh
+LC_ALL=C tests/fm-control-relaunch.test.sh
+```
+
+Observed recovery output:
+
+```text
+ok - missing Herdr recovery: explicit captain authorization is mandatory
+ok - missing Herdr recovery: dirty existing copy is preserved and a fresh endpoint is published atomically
+ok - missing Herdr recovery: completed evidence permits a later authorized recovery
+ok - ordinary relaunch preserves completed recovery authority for a later missing endpoint
+ok - missing Herdr recovery: Claude worktree settings are merged, not overwritten
+ok - missing Herdr recovery: incomplete create responses reconcile durably
+ok - missing Herdr recovery: contradictory create identity cannot authorize cleanup
+ok - missing Herdr recovery: publication is the irreversible cleanup boundary
+ok - missing Herdr recovery: OpenCode project plugins are preserved
+ok - missing Herdr recovery: an unrelated live agent in the recorded copy is refused
+ok - missing Herdr recovery: endpoint allocation failure retains recoverable evidence
+ok - missing Herdr recovery: live endpoint ownership is refused
+ok - missing Herdr recovery: ambiguous endpoint evidence is refused
+ok - missing Herdr recovery: launch failure rolls back without changing the recorded task identity or instructions
+ok - missing Herdr recovery: early rollback reports a failed brief restoration truthfully
+ok - missing Herdr recovery: ordinary relaunch refuses the distinct missing-endpoint state
+ok - missing Herdr recovery: ordinary dead-endpoint relaunch remains unchanged
+ok - fm-spawn --recover-missing: the launch half cannot be used as a direct escape hatch
+ok - missing Herdr recovery: secondmate, remote, and missing-copy boundaries refuse
+ok - missing Herdr recovery: a copy a second task record claims is refused
+ok - missing Herdr recovery: a copy from another repository is refused
+```
+
+Before this operation, `bin/fm-spawn.sh <task-id> --relaunch` refused a recorded Herdr endpoint classified as `missing` rather than allocating a replacement.
+The explicit operator command is `bin/fm-control.sh <task-id> recover-missing --captain-authorized --note "<continuation>"`.
+The authorization flag is mandatory, the task id is exact, and the operation accepts only local ship/scout tasks with a recorded Herdr endpoint whose classifier returns `missing`.
+Herdr `dead` means the pane exists but has no registered agent, so it remains the ordinary same-endpoint `relaunch` case.
+The ownership proof scans running Herdr sessions for a live registered agent with the exact task label or a foreground path inside the recorded worktree, and refuses any live or ambiguous result.
+That live scan cannot see a record-level conflict, so the control plane separately proves the recorded copy shares its Git object store with the recorded project and that no second task record in the home names the same copy, refusing a foreign checkout or a shared copy before any endpoint is allocated.
+A pane with no native registration is considered clear only when Herdr's strict process inventory proves it is one idle bare shell; an unregistered non-shell or unreadable process shape remains ambiguous.
+The dirty-copy regression proved that uncommitted files, branch identity, task identity, instructions, and the existing project copy survive the fresh endpoint allocation.
+The publication regression proved that the prior metadata remains authoritative until the new pane enters the existing worktree and reads alive, after which a same-directory atomic replacement publishes the new endpoint.
+The allocation- and launch-failure regressions proved that partial recovery evidence remains available, the prior metadata remains in place when no replacement was published, and an exact replacement endpoint is cleaned when its state is unambiguous.
+When a launch failure retires the fresh harness wiring before publication, the rollback also restores the saved brief from its preserved copy and records in the transaction journal whether that restoration succeeded (`rollback=prior-record-kept-instructions-restored` or `-instructions-restore-failed`), so a prior record is never left pointing at a brief still carrying the failed replacement's appended recovery instructions.
+The operation refuses remote and secondmate records and does not change normal relaunch, automatic recovery, watcher, or discard behavior; `bin/fm-teardown.sh` was extended to retire this operation's own artifact family (`tests/fm-teardown.test.sh`, `teardown retires the complete missing-endpoint recovery artifact family`), and ordinary `relaunch` was extended to keep the completed-transaction binding so a later missing-endpoint recovery can still reconcile it (`ordinary relaunch preserves completed recovery authority for a later missing endpoint`).
+
+The real lifecycle opt-in for this path must use the named non-default Herdr lab helper and its default-session tripwire:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name pi-missing-endpoint-recovery-r1)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+```
+
+Every task-specific Herdr command in that opt-in uses `"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" ...`, and cleanup uses only the helper's `teardown` operation.
+
+Observed 2026-08-26 output from the named lab lifecycle probe was:
+
+```text
+live-herdr-lab: session=<generated non-default> workspace=w1 pane=w1:p2
+```
+
+The helper teardown exited successfully and its default-session fleet-state tripwire remained identical.
+
 ### Launcher workspace placement
 
 Herdr exports its pane identity into every process it manages, checked on 2026-07-30 against Herdr 0.7.5 protocol 17 inside a guarded lab pane:

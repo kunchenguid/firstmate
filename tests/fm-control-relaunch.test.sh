@@ -169,6 +169,9 @@ run_control() {  # <case-dir> <args...>
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
+    FM_FAKE_JOURNAL_PHASE_MV_FAIL="${FM_FAKE_JOURNAL_PHASE_MV_FAIL:-}" \
+    FM_REAL_CP="${FM_REAL_CP:-}" FM_FAKE_CP_RESTORE_FAIL_PATH="${FM_FAKE_CP_RESTORE_FAIL_PATH:-}" \
+    FM_FAKE_POST_PUBLISH_SIGNAL="${FM_FAKE_POST_PUBLISH_SIGNAL:-}" \
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
@@ -218,6 +221,13 @@ if [ -n "${FM_FAKE_META_PUBLISH_MV_FAIL:-}" ]; then
     [ "$path" != "$FM_FAKE_META_PUBLISH_MV_FAIL" ] || exit 1
   done
 fi
+if [ -n "${FM_FAKE_JOURNAL_PHASE_MV_FAIL:-}" ]; then
+  for path in "$@"; do
+    if [ -f "$path" ] && grep -Fqx "phase=$FM_FAKE_JOURNAL_PHASE_MV_FAIL" "$path"; then
+      exit 1
+    fi
+  done
+fi
 source_path=
 target_path=
 for path in "$@"; do
@@ -230,9 +240,43 @@ if [ -n "${FM_FAKE_META_WRITER_TARGET:-}" ] \
   : > "$FM_FAKE_META_WRITER_READY"
   while [ ! -e "$FM_FAKE_META_WRITER_RELEASE" ]; do /bin/sleep 0.01; done
 fi
-exec "$FM_REAL_MV" "$@"
+"$FM_REAL_MV" "$@"
+rc=$?
+if [ "$rc" = 0 ] && [ -n "${FM_FAKE_POST_PUBLISH_SIGNAL:-}" ]; then
+  for path in "$@"; do
+    if [ "$path" = "$FM_FAKE_POST_PUBLISH_SIGNAL" ]; then
+      kill -TERM "$PPID"
+      break
+    fi
+  done
+fi
+exit "$rc"
 SH
   chmod +x "$1/fakebin/mv"
+}
+
+make_cp_failure_stub() {  # <case-dir>
+  cat > "$1/fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_CP_RESTORE_FAIL_PATH:-}" ]; then
+  src=
+  dest=
+  for arg in "$@"; do
+    case "$arg" in
+      -*) ;;
+      *) src=$dest; dest=$arg ;;
+    esac
+  done
+  case "$src" in
+    *control-recover-missing.brief-prior)
+      [ "$dest" != "$FM_FAKE_CP_RESTORE_FAIL_PATH" ] || exit 1
+      ;;
+  esac
+fi
+exec "$FM_REAL_CP" "$@"
+SH
+  chmod +x "$1/fakebin/cp"
 }
 
 make_rm_failure_stub() {  # <case-dir>
@@ -246,6 +290,176 @@ done
 exec "$FM_REAL_RM" "$@"
 SH
   chmod +x "$1/fakebin/rm"
+}
+
+# --- Herdr missing-endpoint recovery fixture -------------------------------
+
+make_herdr_missing_stub() {  # <case-dir>
+  cat > "$1/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+printf '%s\n' "$*" >> "$D/herdr.log"
+created=0
+[ -f "$D/created" ] && created=1
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '%s\n' '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}'
+    ;;
+  "session list")
+    printf '%s\n' '{"sessions":[{"name":"lab","running":true,"socket_path":"/tmp/fm-lab.sock"}]}'
+    ;;
+  "workspace list")
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}'
+    ;;
+  "tab list")
+    if [ "$created" = 1 ]; then
+      if [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+        printf '{"result":{"tabs":[{"tab_id":"w1:t9","label":"other-task","workspace_id":"w1"},{"tab_id":"%s","label":"fm-%s","workspace_id":"w1"}]}}\n' w1:t3 "$FM_FAKE_TASK"
+      else
+        printf '{"result":{"tabs":[{"tab_id":"%s","label":"fm-%s","workspace_id":"w1"}]}}\n' w1:t3 "$FM_FAKE_TASK"
+      fi
+    elif [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t9","label":"other-task","workspace_id":"w1"}]}}'
+    elif [ "${FM_FAKE_SEPARATE_LIVE:-}" = 1 ]; then
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t9","label":"other-task","workspace_id":"w1"}]}}'
+    elif [ "${FM_FAKE_OLD_LIVE:-}" = 1 ] || [ "${FM_FAKE_OLD_DEAD:-}" = 1 ] || [ "${FM_FAKE_OLD_AMBIG:-}" = 1 ]; then
+      printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-%s","workspace_id":"w1"}]}}\n' "$FM_FAKE_TASK"
+    else
+      printf '%s\n' '{"result":{"tabs":[]}}'
+    fi
+    ;;
+  "pane list")
+    if [ "$created" = 1 ]; then
+      if [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+        printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t9"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}'
+      else
+        printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}'
+      fi
+    elif [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t9"}]}}'
+    elif [ "${FM_FAKE_SEPARATE_LIVE:-}" = 1 ]; then
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t9"}]}}'
+    else
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}'
+    fi
+    ;;
+  "pane get")
+    pane=${3:-}
+    if [ "$pane" = w1:p2 ] && [ "${FM_FAKE_OLD_AMBIG:-}" = 1 ]; then
+      printf '%s\n' '{"result":{"wrong_shape":true}}'
+      exit 0
+    fi
+    if [ "$pane" = w1:p2 ] && [ "${FM_FAKE_OLD_LIVE:-}" != 1 ] && [ "${FM_FAKE_OLD_DEAD:-}" != 1 ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane missing"}}'
+      exit 1
+    fi
+    if [ "$pane" = w1:p2 ] || { [ "$pane" = w1:p3 ] && [ "$created" = 1 ]; }; then
+      cwd=$(cat "$D/cwd")
+      tab=w1:t2
+      [ "$pane" = w1:p3 ] && tab=w1:t3
+      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"w1","foreground_cwd":"%s"}}}\n' "$pane" "$tab" "$cwd"
+    elif [ "$pane" = w1:p9 ] && [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+      printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":"w1","foreground_cwd":"/"}}}'
+    elif [ "$pane" = w1:p9 ] && [ "${FM_FAKE_SEPARATE_LIVE:-}" = 1 ]; then
+      cwd=$(cat "$D/cwd")
+      printf '{"result":{"pane":{"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":"w1","foreground_cwd":"%s"}}}\n' "$cwd"
+    else
+      printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane missing"}}'
+      exit 1
+    fi
+    ;;
+  "agent get")
+    pane=${3:-}
+    if [ "$pane" = w1:p2 ] \
+       && { [ "${FM_FAKE_OLD_LIVE:-}" = 1 ] || [ -f "$D/agent" ]; }; then
+      printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}'
+    elif [ "$pane" = w1:p9 ] && [ "${FM_FAKE_SEPARATE_LIVE:-}" = 1 ]; then
+      printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}'
+    elif [ "$pane" = w1:p3 ] && [ -f "$D/agent" ]; then
+      printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}'
+    else
+      printf '%s\n' '{"error":{"code":"agent_not_found","message":"no agent"}}'
+    fi
+    ;;
+  "tab create")
+    [ -z "${FM_FAKE_CREATE_FAIL:-}" ] || exit 1
+    : > "$D/created"
+    if [ -n "${FM_FAKE_CREATE_INCOMPLETE:-}" ]; then
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"}}}'
+    elif [ -n "${FM_FAKE_CREATE_CONTRADICTORY:-}" ]; then
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}'
+    else
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}'
+    fi
+    ;;
+  "pane run")
+    text=${4:-}
+    case "$text" in
+      cd\ --\ *) cat "$FM_FAKE_WT" > "$D/cwd" ;;
+    esac
+    ;;
+  "pane send-text")
+    text=${4:-}
+    case "$text" in
+      *'encode launch-brief'*)
+        if [ -z "${FM_FAKE_LAUNCH_FAIL:-}" ]; then : > "$D/agent"; fi
+        ;;
+    esac
+    ;;
+  "pane send-key") : ;;
+  "pane close") rm -f "$D/created" "$D/agent" ;;
+  *) : ;;
+esac
+SH
+  chmod +x "$1/fakebin/herdr"
+}
+
+new_herdr_case() {  # <name> <id>
+  local dir="$TMP_ROOT/herdr-$1-$RANDOM" id=$2 home wt proj
+  home="$dir/home"; wt="$dir/wt"; proj="$dir/proj"
+  mkdir -p "$home/state" "$home/data/$id" "$dir/fakebin" "$dir/fake"
+  fm_git_worktree "$proj" "$wt" "task-$id"
+  printf '# herdr recovery brief\n' > "$home/data/$id/brief.md"
+  printf '%s\n' "$wt" > "$dir/fake/cwd"
+  printf '%s\n' "$wt" > "$dir/fake/fake-wt"
+  printf '%s\n' "$wt" > "$dir/fake/cwd"
+  printf '%s\n' "$id" > "$dir/fake/task"
+  {
+    echo 'window=lab:w1:p2'
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo 'harness=claude'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'model=default'
+    echo 'effort=default'
+    echo 'backend=herdr'
+    echo 'herdr_session=lab'
+    echo 'herdr_workspace_id=w1'
+    echo 'herdr_tab_id=w1:t2'
+    echo 'herdr_pane_id=w1:p2'
+  } > "$home/state/$id.meta"
+  make_herdr_missing_stub "$dir"
+  printf '%s\n' "$dir"
+}
+
+run_herdr_control() {  # <case-dir> <args...>
+  local dir=$1; shift
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_FAKE_TASK="$(cat "$dir/fake/task")" FM_FAKE_WT="$dir/fake/fake-wt" \
+    FM_FAKE_OLD_LIVE="${FM_FAKE_OLD_LIVE:-}" FM_FAKE_OLD_DEAD="${FM_FAKE_OLD_DEAD:-}" \
+    FM_FAKE_OLD_AMBIG="${FM_FAKE_OLD_AMBIG:-}" FM_FAKE_SEPARATE_LIVE="${FM_FAKE_SEPARATE_LIVE:-}" \
+    FM_FAKE_CREATE_FAIL="${FM_FAKE_CREATE_FAIL:-}" FM_FAKE_LAUNCH_FAIL="${FM_FAKE_LAUNCH_FAIL:-}" \
+    FM_FAKE_CREATE_INCOMPLETE="${FM_FAKE_CREATE_INCOMPLETE:-}" FM_FAKE_CREATE_CONTRADICTORY="${FM_FAKE_CREATE_CONTRADICTORY:-}" \
+    FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_JOURNAL_PHASE_MV_FAIL="${FM_FAKE_JOURNAL_PHASE_MV_FAIL:-}" \
+    FM_REAL_CP="${FM_REAL_CP:-}" FM_FAKE_CP_RESTORE_FAIL_PATH="${FM_FAKE_CP_RESTORE_FAIL_PATH:-}" \
+    FM_FAKE_POST_PUBLISH_SIGNAL="${FM_FAKE_POST_PUBLISH_SIGNAL:-}" \
+    FM_SPAWN_NO_GUARD=1 FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
+    FM_CONTROL_LAUNCH_WAIT=0.05 FM_CONTROL_RECOVER_MISSING_LAUNCH_WAIT=0.05 \
+    "$CONTROL" "$@" 2>&1
 }
 
 # Give a case home a real backlog carrying <id>, so the relaunch path's paired
@@ -1442,6 +1656,484 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+test_missing_herdr_recovery_requires_captain_authorization() {
+  local dir out rc
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_SEPARATE_LIVE FM_FAKE_CREATE_FAIL FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case no-auth mr0)
+  out=$(run_herdr_control "$dir" mr0 recover-missing --note 'authorization is required'); rc=$?
+  expect_code 1 "$rc" "missing-endpoint recovery without captain authorization must refuse"
+  assert_contains "$out" "requires the explicit --captain-authorized" "the refusal should name the authorization requirement"
+  [ ! -e "$dir/home/state/mr0.control-recover-missing" ] || fail "unauthorized recovery must not start a transaction"
+  [ ! -e "$dir/fake/created" ] || fail "unauthorized recovery must not allocate an endpoint"
+  pass "missing Herdr recovery: explicit captain authorization is mandatory"
+}
+
+test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint() {
+  local dir out rc before wt proj branch_before head_before worktrees_before
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case publish mr1)
+  wt=$(meta_field "$dir" mr1 worktree)
+  proj=$(meta_field "$dir" mr1 project)
+  worktrees_before=$(git -C "$proj" worktree list --porcelain | grep -c '^worktree ')
+  branch_before=$(git -C "$wt" branch --show-current)
+  head_before=$(git -C "$wt" rev-parse HEAD)
+  printf 'uncommitted audit fix\n' > "$wt/audit-fix.txt"
+  sed 's/^model=default$/model=opus/; s/^effort=default$/effort=high/' \
+    "$dir/home/state/mr1.meta" > "$dir/home/state/mr1.meta.tmp"
+  mv "$dir/home/state/mr1.meta.tmp" "$dir/home/state/mr1.meta"
+  before=$(cat "$dir/home/state/mr1.meta")
+  out=$(run_herdr_control "$dir" mr1 recover-missing --captain-authorized --note 'resume validation from the existing copy'); rc=$?
+  expect_code 0 "$rc" "authorized missing-endpoint recovery should succeed"$'\n'"$out"
+  assert_contains "$out" "recovered mr1" "the outcome should name the recovered task"
+  [ "$(meta_field "$dir" mr1 window)" = 'lab:w1:p3' ] || fail "recovery must publish the fresh Herdr endpoint"
+  [ "$(meta_field "$dir" mr1 endpoint_task_id)" = mr1 ] || fail "recovery must preserve task identity"
+  [ "$(meta_field "$dir" mr1 worktree)" = "$wt" ] || fail "recovery must reuse the exact recorded copy"
+  assert_grep "tab create --workspace w1 --cwd $proj --label fm-mr1 --no-focus" "$dir/fake/herdr.log" \
+    "recovery must allocate from the recorded project path"
+  [ "$(git -C "$proj" worktree list --porcelain | grep -c '^worktree ')" = "$worktrees_before" ] \
+    || fail "recovery must not create a second project worktree"
+  [ -f "$wt/audit-fix.txt" ] || fail "recovery must preserve uncommitted files"
+  [ "$(git -C "$wt" branch --show-current)" = "$branch_before" ] \
+    || fail "recovery must preserve the existing local branch"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$head_before" ] \
+    || fail "recovery must preserve the existing committed head"
+  [ "$(meta_field "$dir" mr1 control_recover_missing_tx)" != "" ] || fail "published metadata must carry the recovery transaction binding"
+  [ "$(meta_field "$dir" mr1 model)" = opus ] || fail "recovery must preserve the recorded model"
+  [ "$(meta_field "$dir" mr1 effort)" = high ] || fail "recovery must preserve the recorded effort"
+  assert_grep "--model 'opus' --effort 'high'" "$dir/fake/herdr.log" \
+    "recovery must launch with the recorded non-default profile"
+  [ "$(grep -h '^phase=published$' "$dir/home/state/mr1.recover-missing."*.attempt)" = phase=published ] || fail "the attempt evidence must record publication"
+  assert_grep "resume validation" "$dir/home/data/mr1/brief.md" "the replacement note must reach the existing brief"
+  [ "$(cat "$dir/home/state/mr1.meta")" != "$before" ] || fail "successful recovery must publish a replacement record"
+  pass "missing Herdr recovery: dirty existing copy is preserved and a fresh endpoint is published atomically"
+}
+
+test_missing_herdr_recovery_retires_a_completed_prior_transaction() {
+  local dir out rc state attempt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case completed-prior mr17)
+  state="$dir/home/state"
+  attempt="$state/mr17.recover-missing.previous.1.attempt"
+  printf '%s\n' \
+    'v1' \
+    'task=mr17' \
+    'tx=previous.1' \
+    'phase=published' \
+    'new_endpoint=lab:w1:p2' > "$attempt"
+  printf '%s\n' \
+    'v1' \
+    'task=mr17' \
+    'phase=complete' \
+    'new_endpoint=lab:w1:p2' \
+    "attempt=$attempt" > "$state/mr17.control-recover-missing"
+  printf '%s\n' prior > "$state/mr17.control-recover-missing.meta-prior"
+  printf '%s\n' prior > "$state/mr17.control-recover-missing.brief-prior"
+  printf '%s\n' prior > "$state/mr17.control-recover-missing.note"
+  printf '%s\n' raw > "$attempt.create-response"
+  mkdir "$attempt.wiring"
+  printf 'control_recover_missing_tx=previous.1\n' >> "$state/mr17.meta"
+
+  out=$(run_herdr_control "$dir" mr17 recover-missing --captain-authorized --note 'recover the replacement endpoint again'); rc=$?
+  expect_code 0 "$rc" "a conclusively completed prior recovery must permit a later recovery"$'\n'"$out"
+  assert_contains "$out" "recovered mr17" "the later recovery should publish a replacement"
+  [ ! -e "$attempt" ] || fail "the completed prior attempt should be retired before the new transaction"
+  [ ! -e "$attempt.create-response" ] || fail "the completed prior raw response should be retired"
+  [ ! -e "$attempt.wiring" ] || fail "the completed prior wiring backup should be retired"
+  [ "$(meta_field "$dir" mr17 control_recover_missing_tx)" != previous.1 ] \
+    || fail "the replacement metadata should carry the new recovery transaction"
+  assert_grep 'phase=complete' "$state/mr17.control-recover-missing" \
+    "the later recovery should leave its own completed journal"
+  pass "missing Herdr recovery: completed evidence permits a later authorized recovery"
+}
+
+test_ordinary_relaunch_preserves_completed_recovery_for_later_missing_recovery() {
+  local dir out rc state attempt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case relaunch-after-recovery mr18)
+  state="$dir/home/state"
+  attempt="$state/mr18.recover-missing.previous.2.attempt"
+  printf '%s\n' \
+    'v1' \
+    'task=mr18' \
+    'tx=previous.2' \
+    'phase=published' \
+    'new_endpoint=lab:w1:p2' > "$attempt"
+  printf '%s\n' \
+    'v1' \
+    'task=mr18' \
+    'phase=complete' \
+    'new_endpoint=lab:w1:p2' \
+    "attempt=$attempt" > "$state/mr18.control-recover-missing"
+  printf 'control_recover_missing_tx=previous.2\n' >> "$state/mr18.meta"
+
+  FM_FAKE_OLD_DEAD=1 \
+    out=$(run_herdr_control "$dir" mr18 relaunch --note 'ordinary relaunch after recovery'); rc=$?
+  expect_code 0 "$rc" "ordinary relaunch after completed recovery should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" mr18 control_recover_missing_tx)" = previous.2 ] \
+    || fail "ordinary relaunch must preserve the completed recovery binding"
+
+  unset FM_FAKE_OLD_DEAD
+  rm -f "$dir/fake/agent"
+  out=$(run_herdr_control "$dir" mr18 recover-missing --captain-authorized --note 'recover after the relaunched endpoint disappeared'); rc=$?
+  expect_code 0 "$rc" "a later missing endpoint should remain recoverable after ordinary relaunch"$'\n'"$out"
+  assert_contains "$out" "recovered mr18" "the later recovery should publish a fresh endpoint"
+  [ ! -e "$attempt" ] || fail "the later recovery should retire the completed prior attempt"
+  [ "$(meta_field "$dir" mr18 control_recover_missing_tx)" != previous.2 ] \
+    || fail "the later recovery must publish its own transaction binding"
+  pass "ordinary relaunch preserves completed recovery authority for a later missing endpoint"
+}
+
+test_missing_herdr_recovery_preserves_claude_worktree_settings() {
+  local dir out rc settings state
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case preserve-settings mr12)
+  settings="$dir/wt/.claude/settings.local.json"
+  state="$dir/home/state"
+  mkdir -p "${settings%/*}"
+  jq -n --arg old "'$ROOT/bin/fm-busy-event.sh' apply '$state' 'mr12' idle --gen old --source claude-hook --event stop" '
+    {
+      permissions: {allow: ["Read"]},
+      hooks: {
+        Stop: [{hooks: [
+          {type: "command", command: $old},
+          {type: "command", command: "touch user-stop"}
+        ]}]
+      }
+    }
+  ' > "$settings"
+  jq --arg sibling "'$ROOT/bin/fm-busy-event.sh' apply '$state' 'mr123' idle --gen sibling --source claude-hook --event stop" '
+    .hooks.Stop[0].hooks += [{type: "command", command: $sibling}]
+  ' "$settings" > "$settings.tmp"
+  mv "$settings.tmp" "$settings"
+
+  out=$(run_herdr_control "$dir" mr12 recover-missing --captain-authorized --note 'preserve local Claude configuration'); rc=$?
+  expect_code 0 "$rc" "recovery with project Claude settings should succeed"$'\n'"$out"
+  jq -e '.permissions.allow == ["Read"]' "$settings" >/dev/null \
+    || fail "recovery must preserve project-owned Claude settings"
+  jq -e '[.hooks.Stop[].hooks[].command] | any(. == "touch user-stop")' "$settings" >/dev/null \
+    || fail "recovery must preserve project-owned Claude hooks"
+  [ "$(jq '[.hooks.Stop[].hooks[].command | select(. == "touch user-stop")] | length' "$settings")" = 1 ] \
+    || fail "recovery must retain a user hook sharing a matcher with retired Firstmate wiring"
+  jq -e '[.hooks.Stop[].hooks[].command] | any(contains("fm-busy-event.sh"))' "$settings" >/dev/null \
+    || fail "recovery must add replacement lifecycle wiring without overwriting project hooks"
+  [ "$(jq --arg task " 'mr12' " '[.hooks.Stop[].hooks[].command | select(contains($task))] | length' "$settings")" = 1 ] \
+    || fail "recovery must replace only the exact task's retired Firstmate command"
+  jq -e --arg sibling " 'mr123' " '[.hooks.Stop[].hooks[].command] | any(contains($sibling))' "$settings" >/dev/null \
+    || fail "recovery must preserve a Firstmate hook owned by a different task"
+  pass "missing Herdr recovery: Claude worktree settings are merged, not overwritten"
+}
+
+test_missing_herdr_recovery_reconciles_incomplete_create_response() {
+  local dir out rc response
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case incomplete-create mr15)
+  FM_FAKE_CREATE_INCOMPLETE=1 \
+    out=$(run_herdr_control "$dir" mr15 recover-missing --captain-authorized --note 'reconcile incomplete create response'); rc=$?
+  expect_code 0 "$rc" "recovery should reconcile an incomplete successful create response"$'\n'"$out"
+  [ "$(meta_field "$dir" mr15 window)" = 'lab:w1:p3' ] \
+    || fail "recovery must publish the reconciled endpoint identity"
+  response=$(find "$dir/home/state" -maxdepth 1 -type f -name 'mr15.recover-missing.*.attempt.create-response' -print -quit)
+  [ -n "$response" ] || fail "recovery must retain the raw create response"
+  [ "$(cat "$response")" = '{"result":{"tab":{"tab_id":"w1:t3"}}}' ] \
+    || fail "recovery must persist the incomplete raw response byte-for-byte"
+  unset FM_FAKE_CREATE_INCOMPLETE
+  pass "missing Herdr recovery: incomplete create responses reconcile durably"
+}
+
+test_missing_herdr_recovery_refuses_contradictory_create_identity_without_cleanup() {
+  local dir out rc attempt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case contradictory-create mr16)
+  FM_FAKE_CREATE_CONTRADICTORY=1 \
+    out=$(run_herdr_control "$dir" mr16 recover-missing --captain-authorized --note 'refuse contradictory create identity'); rc=$?
+  expect_code 1 "$rc" "recovery must refuse a create response naming an unrelated endpoint"$'\n'"$out"
+  assert_contains "$out" "recovery evidence was retained" "contradictory create identity should retain recovery evidence"
+  attempt=$(find "$dir/home/state" -maxdepth 1 -type f -name 'mr16.recover-missing.*.attempt' -print -quit)
+  [ -n "$attempt" ] || fail "contradictory create identity must retain attempt evidence"
+  assert_grep "phase=allocation-failed" "$attempt" "contradictory create identity should record allocation failure"
+  assert_grep "raw_tab=w1:t9" "$attempt" "attempt evidence should retain the unverified raw tab id"
+  assert_grep "raw_pane=w1:p9" "$attempt" "attempt evidence should retain the unverified raw pane id"
+  assert_no_grep 'pane close w1:p9' "$dir/fake/herdr.log" \
+    "an unverified response-derived pane must never receive cleanup authority"
+  unset FM_FAKE_CREATE_CONTRADICTORY
+  pass "missing Herdr recovery: contradictory create identity cannot authorize cleanup"
+}
+
+test_missing_herdr_recovery_keeps_published_replacement_on_interrupt() {
+  local dir out rc meta settings
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case publish-interrupt mr14)
+  meta="$dir/home/state/mr14.meta"
+  settings="$dir/wt/.claude/settings.local.json"
+  mkdir -p "${settings%/*}"
+  printf '%s\n' '{"permissions":{"allow":["Read"]}}' > "$settings"
+  make_mv_failure_stub "$dir"
+
+  FM_REAL_MV=$(command -v mv) FM_FAKE_POST_PUBLISH_SIGNAL="$meta" \
+    out=$(run_herdr_control "$dir" mr14 recover-missing --captain-authorized --note 'interrupt after publication'); rc=$?
+  expect_code 1 "$rc" "an interruption at the publication boundary should stop the control command"$'\n'"$out"
+  [ "$(meta_field "$dir" mr14 window)" = 'lab:w1:p3' ] \
+    || fail "published metadata must keep the replacement endpoint"
+  [ "$(meta_field "$dir" mr14 control_recover_missing_tx)" != "" ] \
+    || fail "published metadata must retain the recovery transaction"
+  [ -f "$dir/fake/agent" ] || fail "post-publication cleanup must not kill the replacement agent"
+  assert_no_grep 'pane close lab:w1:p3' "$dir/fake/herdr.log" \
+    "post-publication cleanup must not close the replacement pane"
+  jq -e '.permissions.allow == ["Read"]' "$settings" >/dev/null \
+    || fail "post-publication cleanup must keep merged project settings"
+  jq -e '[.hooks.Stop[].hooks[].command] | any(contains("fm-busy-event.sh"))' "$settings" >/dev/null \
+    || fail "post-publication cleanup must keep replacement lifecycle wiring"
+  pass "missing Herdr recovery: publication is the irreversible cleanup boundary"
+}
+
+test_missing_herdr_recovery_preserves_opencode_worktree_plugin() {
+  local dir out rc plugin before
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case preserve-opencode mr13)
+  sed 's/^harness=claude$/harness=opencode/' \
+    "$dir/home/state/mr13.meta" > "$dir/home/state/mr13.meta.tmp"
+  mv "$dir/home/state/mr13.meta.tmp" "$dir/home/state/mr13.meta"
+  plugin="$dir/wt/.opencode/plugins/fm-busy-state.js"
+  mkdir -p "${plugin%/*}"
+  printf '%s\n' 'export const ProjectPlugin = async () => ({ event: async () => {} });' > "$plugin"
+  before=$(cat "$plugin")
+
+  out=$(run_herdr_control "$dir" mr13 recover-missing --captain-authorized --note 'preserve local OpenCode configuration'); rc=$?
+  expect_code 0 "$rc" "recovery with a project OpenCode plugin should succeed"$'\n'"$out"
+  [ "$(cat "$plugin")" = "$before" ] \
+    || fail "recovery must preserve the project-owned OpenCode plugin byte-for-byte"
+  assert_grep 'export const FmBusyState' "$dir/wt/.opencode/plugins/fm-busy-state-mr13.js" \
+    "recovery must isolate replacement lifecycle wiring from the project plugin"
+  pass "missing Herdr recovery: OpenCode project plugins are preserved"
+}
+
+test_missing_herdr_recovery_refuses_unrelated_live_copy_ownership() {
+  local dir out rc before
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case separate-live mr10)
+  before=$(cat "$dir/home/state/mr10.meta")
+  FM_FAKE_SEPARATE_LIVE=1 out=$(run_herdr_control "$dir" mr10 recover-missing --captain-authorized --note 'must not reuse an owned copy'); rc=$?
+  expect_code 1 "$rc" "an unrelated live agent in the recorded copy must refuse recovery"
+  assert_contains "$out" "ownership proof reads 'live'" "the ownership refusal should name the live copy owner"
+  [ "$(cat "$dir/home/state/mr10.meta")" = "$before" ] || fail "copy-ownership refusal must preserve metadata"
+  [ ! -e "$dir/fake/created" ] || fail "copy-ownership refusal must not allocate an endpoint"
+  unset FM_FAKE_SEPARATE_LIVE
+  pass "missing Herdr recovery: an unrelated live agent in the recorded copy is refused"
+}
+
+test_missing_herdr_recovery_retains_evidence_when_endpoint_allocation_fails() {
+  local dir out rc attempt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_SEPARATE_LIVE FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case allocation-failure mr12)
+  FM_FAKE_CREATE_FAIL=1 out=$(run_herdr_control "$dir" mr12 recover-missing --captain-authorized --note 'retain allocation failure evidence'); rc=$?
+  expect_code 1 "$rc" "endpoint allocation failure must refuse recovery"
+  assert_contains "$out" "recovery evidence was retained" "allocation failure should identify retained evidence"
+  attempt=$(find "$dir/home/state" -maxdepth 1 -type f -name 'mr12.recover-missing.*.attempt' -print -quit)
+  [ -n "$attempt" ] || fail "allocation failure must retain the attempt evidence"
+  assert_grep "phase=allocation-failed" "$attempt" "allocation failure evidence should record the failed phase"
+  [ ! -e "$dir/fake/created" ] || fail "allocation failure must not leave a created endpoint"
+  unset FM_FAKE_CREATE_FAIL
+  pass "missing Herdr recovery: endpoint allocation failure retains recoverable evidence"
+}
+
+test_missing_herdr_recovery_refuses_live_process_ownership() {
+  local dir out rc before
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case live mr2)
+  before=$(cat "$dir/home/state/mr2.meta")
+  FM_FAKE_OLD_LIVE=1 out=$(run_herdr_control "$dir" mr2 recover-missing --captain-authorized --note 'must not duplicate'); rc=$?
+  expect_code 1 "$rc" "live Herdr ownership must refuse recovery"
+  assert_contains "$out" "got 'alive'" "the live endpoint refusal should name the state"
+  [ "$(cat "$dir/home/state/mr2.meta")" = "$before" ] || fail "live-process refusal must not change metadata"
+  [ ! -e "$dir/home/state/mr2.control-recover-missing" ] || fail "live-process refusal must not start a transaction"
+  pass "missing Herdr recovery: live endpoint ownership is refused"
+}
+
+test_missing_herdr_recovery_refuses_ambiguous_state() {
+  local dir out rc before
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case ambiguous mr3)
+  before=$(cat "$dir/home/state/mr3.meta")
+  FM_FAKE_OLD_AMBIG=1 out=$(run_herdr_control "$dir" mr3 recover-missing --captain-authorized --note 'must remain conservative'); rc=$?
+  expect_code 1 "$rc" "ambiguous Herdr state must refuse recovery"
+  assert_contains "$out" "got 'unreadable'" "the ambiguous endpoint refusal should name the classifier result"
+  [ "$(cat "$dir/home/state/mr3.meta")" = "$before" ] || fail "ambiguous refusal must preserve metadata"
+  [ ! -e "$dir/home/state/mr3.control-recover-missing" ] || fail "ambiguous refusal must not start a transaction"
+  pass "missing Herdr recovery: ambiguous endpoint evidence is refused"
+}
+
+test_missing_herdr_recovery_rolls_back_after_launch_failure() {
+  local dir out rc before brief_before attempt settings settings_before
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case rollback mr4)
+  before=$(cat "$dir/home/state/mr4.meta")
+  brief_before=$(cat "$dir/home/data/mr4/brief.md")
+  settings="$dir/wt/.claude/settings.local.json"
+  mkdir -p "${settings%/*}"
+  printf '%s\n' '{"permissions":{"allow":["Read"]}}' > "$settings"
+  settings_before=$(cat "$settings")
+  FM_FAKE_LAUNCH_FAIL=1 out=$(run_herdr_control "$dir" mr4 recover-missing --captain-authorized --note 'retain this recovery evidence'); rc=$?
+  expect_code 1 "$rc" "a failed replacement launch must fail closed"$'\n'"$out"
+  assert_contains "$out" "could not be launched" "the launch failure should be reported without claiming recovery"
+  [ "$(cat "$dir/home/state/mr4.meta")" = "$before" ] || fail "launch failure must retain the prior durable record"
+  [ "$(cat "$dir/home/data/mr4/brief.md")" = "$brief_before" ] \
+    || fail "launch failure must restore the saved brief after retiring replacement wiring"
+  [ "$(cat "$settings")" = "$settings_before" ] \
+    || fail "launch failure must restore the preserved Claude settings"
+  attempt=$(find "$dir/home/state" -maxdepth 1 -type f -name 'mr4.recover-missing.*.attempt' -print -quit)
+  [ -n "$attempt" ] || fail "launch failure must retain exact replacement evidence"
+  assert_grep "phase=cleanup-complete" "$attempt" "the exact fresh endpoint should be cleaned after an unambiguous launch failure"
+  assert_grep "rollback=prior-record-kept-instructions-restored" "$dir/home/state/mr4.control-recover-missing" \
+    "the transaction should record that the saved instructions were restored"
+  assert_grep "phase=failed:launching" "$dir/home/state/mr4.control-recover-missing" "the transaction should retain its failed phase"
+  unset FM_FAKE_LAUNCH_FAIL
+  out=$(run_herdr_control "$dir" mr4 recover-missing --captain-authorized --note 'do not discard unresolved evidence'); rc=$?
+  expect_code 1 "$rc" "an unresolved failed recovery must still refuse a later attempt"
+  assert_contains "$out" "unresolved or malformed missing-endpoint recovery evidence" \
+    "the refusal should preserve unresolved recovery evidence"
+  pass "missing Herdr recovery: launch failure rolls back without changing the recorded task identity or instructions"
+}
+
+test_missing_herdr_recovery_reports_failed_early_brief_restore() {
+  local dir out rc before brief brief_before real_cp real_mv
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case early-restore mr19)
+  before=$(cat "$dir/home/state/mr19.meta")
+  brief="$dir/home/data/mr19/brief.md"
+  brief_before=$(cat "$brief")
+  real_cp=$(command -v cp)
+  real_mv=$(command -v mv)
+  make_cp_failure_stub "$dir"
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_CP="$real_cp" FM_REAL_MV="$real_mv" \
+    FM_FAKE_CP_RESTORE_FAIL_PATH="$brief" FM_FAKE_JOURNAL_PHASE_MV_FAIL=noted \
+    run_herdr_control "$dir" mr19 recover-missing --captain-authorized --note 'recorded note must not be hidden'); rc=$?
+  expect_code 1 "$rc" "an early journal failure with failed brief restore must fail closed"$'\n'"$out"
+  assert_contains "$out" "prior instructions could not be restored" \
+    "the rollback message must not claim the brief was restored"
+  assert_grep "rollback=prior-record-kept-instructions-restore-failed" \
+    "$dir/home/state/mr19.control-recover-missing" \
+    "the transaction should record the failed brief restoration"
+  [ "$(cat "$dir/home/state/mr19.meta")" = "$before" ] \
+    || fail "early recovery rollback must retain the prior durable record"
+  [ "$(cat "$brief")" != "$brief_before" ] \
+    || fail "the fixture must prove the appended recovery instructions survived the failed restore"
+  assert_grep "recorded note must not be hidden" "$brief" \
+    "failed restoration should leave evidence in the brief rather than reporting preservation"
+  [ ! -e "$dir/fake/created" ] || fail "early rollback must not allocate a replacement endpoint"
+  pass "missing Herdr recovery: early rollback reports a failed brief restoration truthfully"
+}
+
+test_missing_herdr_recovery_distinguishes_missing_from_normal_relaunch() {
+  local dir out rc before
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case missing-relaunch mr11)
+  before=$(cat "$dir/home/state/mr11.meta")
+  out=$(run_spawn "$dir" mr11 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "ordinary relaunch must not treat a missing endpoint as dead"
+  assert_contains "$out" "reads 'missing'" "ordinary relaunch should name the missing endpoint state"
+  [ "$(cat "$dir/home/state/mr11.meta")" = "$before" ] || fail "missing ordinary relaunch must preserve metadata"
+  [ ! -e "$dir/fake/created" ] || fail "missing ordinary relaunch must not allocate an endpoint"
+  pass "missing Herdr recovery: ordinary relaunch refuses the distinct missing-endpoint state"
+}
+
+test_missing_herdr_recovery_does_not_change_normal_dead_endpoint_relaunch() {
+  local dir out rc
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case dead mr5)
+  FM_FAKE_OLD_DEAD=1 out=$(run_herdr_control "$dir" mr5 recover-missing --captain-authorized --note 'wrong operation'); rc=$?
+  expect_code 1 "$rc" "dead endpoint must not use missing-endpoint recovery"
+  assert_contains "$out" "got 'dead'" "dead-endpoint refusal should name the distinct state"
+  FM_FAKE_OLD_DEAD=1 out=$(run_herdr_control "$dir" mr5 relaunch --note 'ordinary dead endpoint relaunch'); rc=$?
+  expect_code 0 "$rc" "ordinary dead-endpoint relaunch should remain available"$'\n'"$out"
+  assert_contains "$out" "relaunched mr5" "normal relaunch should keep its existing behavior"
+  [ "$(meta_field "$dir" mr5 window)" = 'lab:w1:p2' ] || fail "normal dead-endpoint relaunch must reuse the recorded endpoint"
+  pass "missing Herdr recovery: ordinary dead-endpoint relaunch remains unchanged"
+}
+
+test_spawn_missing_herdr_recovery_is_not_a_direct_escape_hatch() {
+  local dir out rc before
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case direct mr9)
+  before=$(cat "$dir/home/state/mr9.meta")
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_FAKE_TASK=mr9 FM_FAKE_WT="$dir/fake/fake-wt" FM_SPAWN_NO_GUARD=1 \
+    FM_CONTROL_RECOVER_MISSING_TX=forged \
+    FM_CONTROL_RECOVER_MISSING_ATTEMPT="$dir/home/state/mr9.forged.attempt" \
+    "$SPAWN" mr9 --recover-missing --harness claude 2>&1); rc=$?
+  expect_code 1 "$rc" "the internal recovery launch half must refuse direct invocation"
+  assert_contains "$out" "must be invoked by fm-control" "direct recovery should name its authorized owner"
+  [ "$(cat "$dir/home/state/mr9.meta")" = "$before" ] \
+    || fail "direct recovery must not alter the task record"
+  [ ! -e "$dir/fake/created" ] || fail "direct recovery must not allocate an endpoint"
+  pass "fm-spawn --recover-missing: the launch half cannot be used as a direct escape hatch"
+}
+
+test_missing_herdr_recovery_rejects_secondmate_remote_and_missing_copy() {
+  local dir out rc
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case secondmate mr6)
+  sed 's/^kind=ship$/kind=secondmate/' "$dir/home/state/mr6.meta" > "$dir/home/state/mr6.meta.tmp"
+  mv "$dir/home/state/mr6.meta.tmp" "$dir/home/state/mr6.meta"
+  out=$(run_herdr_control "$dir" mr6 recover-missing --captain-authorized --note 'must refuse secondmate'); rc=$?
+  expect_code 1 "$rc" "secondmate recovery must refuse"$'\n'"$out"
+  assert_contains "$out" "refuses secondmate" "secondmate refusal should name its owner"
+
+  dir=$(new_herdr_case remote mr7)
+  printf 'remote_host=example\n' >> "$dir/home/state/mr7.meta"
+  out=$(run_herdr_control "$dir" mr7 recover-missing --captain-authorized --note 'must refuse remote'); rc=$?
+  expect_code 1 "$rc" "remote recovery must refuse"$'\n'"$out"
+  assert_contains "$out" "remotely placed secondmate" "remote refusal should name the remote route"
+
+  dir=$(new_herdr_case missing-copy mr8)
+  rm -rf "$(meta_field "$dir" mr8 worktree)"
+  out=$(run_herdr_control "$dir" mr8 recover-missing --captain-authorized --note 'must preserve the missing copy refusal'); rc=$?
+  expect_code 1 "$rc" "missing-copy recovery must refuse"$'\n'"$out"
+  assert_contains "$out" "recorded worktree" "missing-copy refusal should name the preservation boundary"
+  pass "missing Herdr recovery: secondmate, remote, and missing-copy boundaries refuse"
+}
+
+test_missing_herdr_recovery_refuses_a_copy_a_second_task_records() {
+  local dir out rc wt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case shared-copy mr20)
+  wt=$(meta_field "$dir" mr20 worktree)
+  # A second durable record claims the very same local copy while no agent is
+  # live in it, so the backend ownership proof reads clear. Only record-level
+  # attribution can keep two tasks off one copy.
+  sed 's/^endpoint_task_id=mr20$/endpoint_task_id=mr20b/; s/^window=lab:w1:p2$/window=lab:w1:p7/' \
+    "$dir/home/state/mr20.meta" > "$dir/home/state/mr20b.meta"
+  out=$(run_herdr_control "$dir" mr20 recover-missing --captain-authorized --note 'must refuse a shared copy'); rc=$?
+  expect_code 1 "$rc" "recovery into a copy a second record claims must refuse"$'\n'"$out"
+  assert_contains "$out" "mr20b" "the refusal should name the other task recording the copy"
+  [ -d "$wt" ] || fail "the recorded copy must survive the refusal"
+  [ ! -e "$dir/home/state/mr20.control-recover-missing" ] \
+    || fail "an early refusal must not open a recovery transaction"
+  pass "missing Herdr recovery: a copy a second task record claims is refused"
+}
+
+test_missing_herdr_recovery_refuses_a_copy_from_another_repository() {
+  local dir out rc foreign_proj foreign_wt
+  unset FM_FAKE_OLD_LIVE FM_FAKE_OLD_DEAD FM_FAKE_OLD_AMBIG FM_FAKE_LAUNCH_FAIL
+  dir=$(new_herdr_case foreign-copy mr21)
+  foreign_proj="$dir/foreign-proj"; foreign_wt="$dir/foreign-wt"
+  fm_git_worktree "$foreign_proj" "$foreign_wt" task-foreign
+  # A structurally valid isolated worktree root that belongs to a DIFFERENT
+  # repository than the recorded project. Launching the replacement here would
+  # strand it outside the work it is supposed to continue.
+  sed "s|^worktree=.*|worktree=$foreign_wt|" "$dir/home/state/mr21.meta" \
+    > "$dir/home/state/mr21.meta.tmp"
+  mv "$dir/home/state/mr21.meta.tmp" "$dir/home/state/mr21.meta"
+  printf '%s\n' "$foreign_wt" > "$dir/fake/cwd"
+  printf '%s\n' "$foreign_wt" > "$dir/fake/fake-wt"
+  out=$(run_herdr_control "$dir" mr21 recover-missing --captain-authorized --note 'must refuse a foreign copy'); rc=$?
+  expect_code 1 "$rc" "recovery into another repository's copy must refuse"$'\n'"$out"
+  assert_contains "$out" "not a local copy of" "the refusal should name the project mismatch"
+  [ ! -e "$dir/home/state/mr21.control-recover-missing" ] \
+    || fail "an early refusal must not open a recovery transaction"
+  pass "missing Herdr recovery: a copy from another repository is refused"
+}
+
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
@@ -1526,5 +2218,26 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_missing_herdr_recovery_requires_captain_authorization
+test_missing_herdr_recovery_reuses_dirty_copy_and_publishes_a_fresh_endpoint
+test_missing_herdr_recovery_retires_a_completed_prior_transaction
+test_ordinary_relaunch_preserves_completed_recovery_for_later_missing_recovery
+test_missing_herdr_recovery_preserves_claude_worktree_settings
+test_missing_herdr_recovery_reconciles_incomplete_create_response
+test_missing_herdr_recovery_refuses_contradictory_create_identity_without_cleanup
+test_missing_herdr_recovery_keeps_published_replacement_on_interrupt
+test_missing_herdr_recovery_preserves_opencode_worktree_plugin
+test_missing_herdr_recovery_refuses_unrelated_live_copy_ownership
+test_missing_herdr_recovery_retains_evidence_when_endpoint_allocation_fails
+test_missing_herdr_recovery_refuses_live_process_ownership
+test_missing_herdr_recovery_refuses_ambiguous_state
+test_missing_herdr_recovery_rolls_back_after_launch_failure
+test_missing_herdr_recovery_reports_failed_early_brief_restore
+test_missing_herdr_recovery_distinguishes_missing_from_normal_relaunch
+test_missing_herdr_recovery_does_not_change_normal_dead_endpoint_relaunch
+test_spawn_missing_herdr_recovery_is_not_a_direct_escape_hatch
+test_missing_herdr_recovery_rejects_secondmate_remote_and_missing_copy
+test_missing_herdr_recovery_refuses_a_copy_a_second_task_records
+test_missing_herdr_recovery_refuses_a_copy_from_another_repository
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight

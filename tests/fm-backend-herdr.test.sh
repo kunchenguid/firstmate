@@ -771,6 +771,7 @@ test_create_task_creates_and_parses_ids() {
   dir="$TMP_ROOT/create-task"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
   printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$resp/2.out"
+  printf '1\n' > "$resp/3.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-newtask /tmp/proj' "$ROOT" )
@@ -779,7 +780,9 @@ test_create_task_creates_and_parses_ids() {
     "create_task did not call tab create with workspace/cwd/label"
   assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' \
     "create_task must never prune when called with no seeded default tab id (the 4th arg defaults to empty)"
-  pass "fm_backend_herdr_create_task: creates a tab and parses tab_id/pane_id from the JSON response, prunes nothing when no seeded tab id is given"
+  [ "$(wc -l < "$log" | tr -d ' ')" = 2 ] \
+    || fail "ordinary create_task should not perform recovery reconciliation after an exact response"
+  pass "fm_backend_herdr_create_task: exact ordinary create succeeds without recovery reconciliation"
 }
 
 # --- container_ensure / create_task: --no-focus and per-home label ----------
@@ -4420,6 +4423,341 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+test_recovery_ownership_accepts_verified_multitab_inventory() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-multitab"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other-1","workspace_id":"w1"},{"tab_id":"w1:t2","label":"other-2","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}'\'' ;;
+        "pane get")
+          case "$4" in
+            w1:p1) printf "%s\n" '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"/"}}}'\'' ;;
+            w1:p2) printf "%s\n" '\''{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1","foreground_cwd":"/"}}}'\'' ;;
+          esac
+          ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = clear ] || fail "a verified two-tab workspace should be clear, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: joins workspace panes to their owning tabs"
+}
+
+test_recovery_ownership_scans_every_inventoried_workspace() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-multiworkspace"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    worktree=$1
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"},{"workspace_id":"w2"}]}}'\'' ;;
+        "tab list")
+          case "$5" in
+            w1) printf "%s\n" '\''{"result":{"tabs":[]}}'\'' ;;
+            w2) printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w2:t1","label":"fm-task","workspace_id":"w2"}]}}'\'' ;;
+          esac
+          ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w2:p1","tab_id":"w2:t1"}]}}'\'' ;;
+        "pane get") printf '\''{"result":{"pane":{"pane_id":"w2:p1","tab_id":"w2:t1","workspace_id":"w2","foreground_cwd":"%s"}}}\n'\'' "$worktree" ;;
+        "agent get") printf "%s\n" '\''{"result":{"agent":{"agent_status":"working"}}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = live ] || fail "a live agent in a second inventoried workspace must be found, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: scans every workspace list entry, not just those seen in one tab list call"
+}
+
+test_recovery_ownership_refuses_malformed_pane_inventory() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-malformed"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"tab_id":"w1:t1"}]}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = unreadable ] || fail "a malformed pane row should be unreadable, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: malformed pane rows fail closed"
+}
+
+test_recovery_ownership_refuses_orphan_pane_inventory() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-orphan-pane"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p-orphan","tab_id":"w1:t-missing"}]}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = unreadable ] || fail "a pane outside the tab inventory should be unreadable, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: orphan pane rows fail closed"
+}
+
+test_recovery_ownership_refuses_missing_tab_pane_inventory() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-missing-tab-pane"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-task","label":"fm-task","workspace_id":"w1"},{"tab_id":"w1:t-other","label":"other","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p-other","tab_id":"w1:t-other"}]}}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = unreadable ] || fail "a tab omitted from pane inventory should be unreadable, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: missing tab pane membership fails closed"
+}
+
+test_recovery_ownership_refuses_malformed_session_inventory() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-malformed-session"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true},{"name":"other","running":"true"}]}'\'' ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = unreadable ] || fail "a malformed session row should be unreadable, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: malformed session rows fail closed"
+}
+
+test_recovery_ownership_refuses_unreadable_foreground_cwd() {
+  local worktree missing out
+  worktree="$TMP_ROOT/ownership-unreadable-cwd"
+  missing="$worktree/deleted"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    missing=$2
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"other","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}'\'' ;;
+        "pane get") printf '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"%s"}}}\n'\'' "$missing" ;;
+      esac
+    }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree" "$missing")
+  [ "$out" = unreadable ] || fail "an unreadable foreground cwd should be unreadable, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: unreadable foreground cwd fails closed"
+}
+
+test_recovery_ownership_parses_agent_not_found_body_after_nonzero_exit() {
+  local worktree out
+  worktree="$TMP_ROOT/ownership-agent-not-found"
+  mkdir -p "$worktree"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    worktree=$1
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "session list") printf "%s\n" '\''{"sessions":[{"name":"lab","running":true}]}'\'' ;;
+        "workspace list") printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w1"}]}}'\'' ;;
+        "tab list") printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-task","workspace_id":"w1"}]}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}'\'' ;;
+        "pane get") printf '\''{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","foreground_cwd":"%s"}}}\n'\'' "$worktree" ;;
+        "agent get") printf "%s\n" '\''{"error":{"code":"agent_not_found","message":"no agent"}}'\''; return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_idle_shell_pid() { return 0; }
+    fm_backend_herdr_recovery_ownership_state lab task "$1"
+  ' "$ROOT" "$worktree")
+  [ "$out" = clear ] || fail "agent_not_found with a verified idle shell should be clear, got '$out'"
+  pass "fm_backend_herdr_recovery_ownership_state: expected nonzero agent lookup remains classifiable"
+}
+
+test_create_task_reports_identity_before_post_create_failure() {
+  local evidence out rc
+  evidence="$TMP_ROOT/create-task-identity"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    evidence=$1
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab list")
+          if [ -e "$evidence.evidence" ]; then
+            printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-old","label":"fm-task","workspace_id":"w1"},{"tab_id":"w1:t-new","label":"fm-task","workspace_id":"w1"}]}}'\''
+          else
+            printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-old","label":"fm-task","workspace_id":"w1"}]}}'\''
+          fi
+          ;;
+        "tab create") printf "%s\n" '\''{"result":{"tab":{"tab_id":"w1:t-new"},"root_pane":{"pane_id":"w1:p-new"}}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p-old","tab_id":"w1:t-old"},{"pane_id":"w1:p-new","tab_id":"w1:t-new"}]}}'\'' ;;
+        "pane get") printf "%s\n" '\''{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t-new","workspace_id":"w1"}}}'\'' ;;
+        "tab close") return 0 ;;
+      esac
+    }
+    fm_backend_herdr_pane_for_tab() { printf "%s" w1:p-old; }
+    fm_backend_herdr_tab_is_husk() { return 0; }
+    record_created() {
+      printf "%s %s" "$FM_BACKEND_HERDR_CREATED_TAB_ID" "$FM_BACKEND_HERDR_CREATED_PANE_ID" > "$evidence.evidence"
+    }
+    fm_backend_herdr_create_task lab:w1 fm-task /tmp "" record_created
+  ' "$ROOT" "$evidence" 2>&1); rc=$?
+  [ "$rc" = 1 ] || fail "post-create duplicate verification should fail, got rc=$rc output=$out"
+  [ "$(cat "$evidence.evidence")" = "w1:t-new w1:p-new" ] \
+    || fail "the created identity was not reported before post-create failure"
+  pass "fm_backend_herdr_create_task: publishes exact identity before post-create validation"
+}
+
+test_create_task_reconciles_identity_after_incomplete_response() {
+  local evidence out rc
+  evidence="$TMP_ROOT/create-task-reconcile"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    evidence=$1
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab list")
+          if [ -e "$evidence.created" ]; then
+            printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-new","label":"fm-task","workspace_id":"w1"}]}}'\''
+          else
+            printf "%s\n" '\''{"result":{"tabs":[]}}'\''
+          fi
+          ;;
+        "tab create") : > "$evidence.created"; printf "%s\n" '\''{"result":{"tab":{"tab_id":"w1:t-new"}}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p-new","tab_id":"w1:t-new"}]}}'\'' ;;
+        "pane get") printf "%s\n" '\''{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t-new","workspace_id":"w1"}}}'\'' ;;
+      esac
+    }
+    record_created() {
+      printf "%s" "$FM_BACKEND_HERDR_CREATED_RAW_RESPONSE" > "$evidence.raw"
+      printf "%s %s" "$FM_BACKEND_HERDR_CREATED_TAB_ID" "$FM_BACKEND_HERDR_CREATED_PANE_ID" > "$evidence.ids"
+      printf "%s|%s|%s|%s|%s\n" \
+        "$FM_BACKEND_HERDR_CREATED_VERIFIED" \
+        "$FM_BACKEND_HERDR_CREATED_TAB_ID" \
+        "$FM_BACKEND_HERDR_CREATED_PANE_ID" \
+        "$FM_BACKEND_HERDR_CREATED_RAW_TAB_ID" \
+        "$FM_BACKEND_HERDR_CREATED_RAW_PANE_ID" >> "$evidence.calls"
+    }
+    fm_backend_herdr_create_task lab:w1 fm-task /tmp "" record_created
+  ' "$ROOT" "$evidence" 2>&1); rc=$?
+  [ "$rc" = 0 ] || fail "incomplete create response should reconcile, got rc=$rc output=$out"
+  [ "$out" = "w1:t-new w1:p-new" ] || fail "reconciled create should return exact ids, got '$out'"
+  [ "$(cat "$evidence.raw")" = '{"result":{"tab":{"tab_id":"w1:t-new"}}}' ] \
+    || fail "the raw create response was not persisted before reconciliation"
+  [ "$(cat "$evidence.ids")" = "w1:t-new w1:p-new" ] \
+    || fail "the reconciled identity was not published to the callback"
+  [ "$(sed -n '1p' "$evidence.calls")" = '0|||w1:t-new|' ] \
+    || fail "the callback did not keep partial response identity unverified before reconciliation"
+  [ "$(sed -n '2p' "$evidence.calls")" = '1|w1:t-new|w1:p-new|w1:t-new|' ] \
+    || fail "the callback did not receive exact reconciled identity"
+  pass "fm_backend_herdr_create_task: reconciles exact identity after incomplete create output"
+}
+
+test_create_task_refuses_contradictory_response_identity_without_cleanup_authority() {
+  local evidence out rc
+  evidence="$TMP_ROOT/create-task-contradictory"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    evidence=$1
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab list")
+          if [ -e "$evidence.created" ]; then
+            printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-old","label":"other","workspace_id":"w1"},{"tab_id":"w1:t-new","label":"fm-task","workspace_id":"w1"}]}}'\''
+          else
+            printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-old","label":"other","workspace_id":"w1"}]}}'\''
+          fi
+          ;;
+        "tab create") : > "$evidence.created"; printf "%s\n" '\''{"result":{"tab":{"tab_id":"w1:t-old"},"root_pane":{"pane_id":"w1:p-old"}}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p-old","tab_id":"w1:t-old"},{"pane_id":"w1:p-new","tab_id":"w1:t-new"}]}}'\'' ;;
+      esac
+    }
+    record_created() {
+      printf "%s|%s|%s|%s|%s\n" \
+        "$FM_BACKEND_HERDR_CREATED_VERIFIED" \
+        "$FM_BACKEND_HERDR_CREATED_TAB_ID" \
+        "$FM_BACKEND_HERDR_CREATED_PANE_ID" \
+        "$FM_BACKEND_HERDR_CREATED_RAW_TAB_ID" \
+        "$FM_BACKEND_HERDR_CREATED_RAW_PANE_ID" >> "$evidence.calls"
+      [ "$FM_BACKEND_HERDR_CREATED_VERIFIED" = 1 ] && : > "$evidence.cleanup-authority"
+    }
+    fm_backend_herdr_create_task lab:w1 fm-task /tmp "" record_created
+  ' "$ROOT" "$evidence" 2>&1); rc=$?
+  [ "$rc" = 1 ] || fail "contradictory create identity should fail, got rc=$rc output=$out"
+  assert_contains "$out" "contradicts post-create inventory" "create_task did not report contradictory identity"
+  [ "$(cat "$evidence.calls")" = '0|||w1:t-old|w1:p-old' ] \
+    || fail "contradictory raw identity was not retained strictly as unverified evidence"
+  [ ! -e "$evidence.cleanup-authority" ] \
+    || fail "contradictory response identity must not grant cleanup authority"
+  pass "fm_backend_herdr_create_task: contradictory response identity remains unverified and cannot authorize cleanup"
+}
+
+test_create_task_refuses_reconciled_pane_outside_workspace() {
+  local evidence out rc
+  evidence="$TMP_ROOT/create-task-wrong-workspace"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    evidence=$1
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "tab list")
+          if [ -e "$evidence.created" ]; then
+            printf "%s\n" '\''{"result":{"tabs":[{"tab_id":"w1:t-new","label":"fm-task","workspace_id":"w1"}]}}'\''
+          else
+            printf "%s\n" '\''{"result":{"tabs":[]}}'\''
+          fi
+          ;;
+        "tab create") : > "$evidence.created"; printf "%s\n" '\''{"result":{"tab":{"tab_id":"w1:t-new"},"root_pane":{"pane_id":"w1:p-new"}}}'\'' ;;
+        "pane list") printf "%s\n" '\''{"result":{"panes":[{"pane_id":"w1:p-new","tab_id":"w1:t-new"}]}}'\'' ;;
+        "pane get") printf "%s\n" '\''{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t-new","workspace_id":"w2"}}}'\'' ;;
+      esac
+    }
+    record_created() {
+      printf "%s|%s|%s\n" \
+        "$FM_BACKEND_HERDR_CREATED_VERIFIED" \
+        "$FM_BACKEND_HERDR_CREATED_TAB_ID" \
+        "$FM_BACKEND_HERDR_CREATED_PANE_ID" >> "$evidence.calls"
+      [ "$FM_BACKEND_HERDR_CREATED_VERIFIED" = 1 ] && : > "$evidence.cleanup-authority"
+    }
+    fm_backend_herdr_create_task lab:w1 fm-task /tmp "" record_created
+  ' "$ROOT" "$evidence" 2>&1); rc=$?
+  [ "$rc" = 1 ] || fail "a reconciled pane outside the workspace should fail, got rc=$rc output=$out"
+  assert_contains "$out" "does not belong to the created tab and workspace" \
+    "create_task did not report the mismatched reconciled pane"
+  [ "$(cat "$evidence.calls")" = '0||' ] \
+    || fail "the mismatched pane should remain unverified evidence"
+  [ ! -e "$evidence.cleanup-authority" ] \
+    || fail "a pane outside the workspace must not grant cleanup authority"
+  pass "fm_backend_herdr_create_task: reconciled panes require exact workspace membership"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4604,3 +4942,15 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_recovery_ownership_accepts_verified_multitab_inventory
+test_recovery_ownership_scans_every_inventoried_workspace
+test_recovery_ownership_refuses_malformed_pane_inventory
+test_recovery_ownership_refuses_orphan_pane_inventory
+test_recovery_ownership_refuses_missing_tab_pane_inventory
+test_recovery_ownership_refuses_malformed_session_inventory
+test_recovery_ownership_refuses_unreadable_foreground_cwd
+test_recovery_ownership_parses_agent_not_found_body_after_nonzero_exit
+test_create_task_reports_identity_before_post_create_failure
+test_create_task_reconciles_identity_after_incomplete_response
+test_create_task_refuses_contradictory_response_identity_without_cleanup_authority
+test_create_task_refuses_reconciled_pane_outside_workspace

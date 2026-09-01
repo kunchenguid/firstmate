@@ -1340,6 +1340,37 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+test_teardown_removes_missing_endpoint_recovery_artifacts() {
+  local case_dir artifact rc
+  case_dir=$(make_case recovery-artifacts)
+  write_meta "$case_dir" local-only ship
+  for artifact in \
+    task-x1.control-recover-missing \
+    task-x1.control-recover-missing.meta-prior \
+    task-x1.control-recover-missing.brief-prior \
+    task-x1.control-recover-missing.note \
+    task-x1.recover-missing.tx1.attempt \
+    task-x1.recover-missing.tx1.attempt.create-response \
+    task-x1.recover-missing.tx2.attempt; do
+    printf '%s\n' evidence > "$case_dir/state/$artifact"
+  done
+  mkdir "$case_dir/state/task-x1.recover-missing.tx1.attempt.wiring"
+  printf '%s\n' preserved > "$case_dir/state/task-x1.recover-missing.tx1.attempt.wiring/original"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "recovery-artifacts: teardown should complete"
+  for artifact in "$case_dir/state/task-x1.control-recover-missing"* \
+    "$case_dir/state/task-x1.recover-missing."*; do
+    [ ! -e "$artifact" ] && [ ! -L "$artifact" ] \
+      || fail "recovery-artifacts: teardown left $artifact"
+  done
+  pass "teardown retires the complete missing-endpoint recovery artifact family"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2614,6 +2645,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_removes_missing_endpoint_recovery_artifacts
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

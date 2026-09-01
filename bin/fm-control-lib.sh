@@ -48,12 +48,13 @@ fm_control_verbs() {
 interrupt
 exit
 relaunch
+recover-missing
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|relaunch|recover-missing) return 0 ;;
   esac
   return 1
 }
@@ -205,7 +206,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
-    opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
+    opencode)
+      printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js"
+      printf '%s\n' "$wt/.opencode/plugins/fm-busy-state-$id.js"
+      ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)
       printf '%s\n' "$wt/.fm-grok-turnend"
