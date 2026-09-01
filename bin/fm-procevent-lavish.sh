@@ -288,7 +288,20 @@ cmd_arm() {
   # transient interruption. Registering raw poll output is what let that
   # interruption reach the runner as a captured result.
   # A fresh arm hosts a fresh review, so the receipt lifecycle starts empty and
-  # a reused artifact never inherits an earlier session's rounds.
+  # a reused artifact never inherits an earlier session's rounds. It never
+  # starts while captured results of an earlier session are still unhandled:
+  # resetting the record would orphan their Applying and Complete from the
+  # received rounds they speak for.
+  local unhandled=0 genf genseq
+  for genf in "$STATE/procevent-inbox/$id."*.result; do
+    [ -f "$genf" ] && [ ! -L "$genf" ] || continue
+    genseq=${genf##*/}; genseq=${genseq%.result}; genseq=${genseq##*.}
+    case "$genseq" in ''|*[!0-9]*) continue ;; esac
+    fm_procevent_is_handled "$STATE" "$id" "$genseq" && continue
+    unhandled=$((unhandled + 1))
+  done
+  [ "$unhandled" -eq 0 ] \
+    || die "cannot arm: $unhandled unhandled captured result(s) for this artifact remain; reconcile or handle them first"
   local record
   record=$(receipts_path "$id")
   if [ -e "$record" ] || [ -L "$record" ]; then
@@ -322,14 +335,21 @@ cmd_managed_poll() {  # <artifact.html>
   real=$(resolve_real "$artifact") \
     || die "cannot resolve the artifact path: $artifact"
   journal_readable "$id" || die "receipts record is unreadable: $id"
-  text=$(receipt_build_text "$id") || die "cannot build the receipt text: $id"
+  # The snapshot and its armed record are built under one receipts lock: a
+  # handler appending applying or complete between building the text and
+  # journaling its armed count would present stale text while marking the new
+  # count delivered, hiding the newly recorded transition.
+  acquire_receipts_lock "$id" || die "cannot lock the receipts record"
+  text=$(receipt_build_text "$id") \
+    || { fm_lock_release "$(receipts_lock_path "$id")"; die "cannot build the receipt text: $id"; }
   if [ -n "$text" ]; then
     digest=$(sha16_text "$text")
-    acquire_receipts_lock "$id" || die "cannot lock the receipts record"
     upto=$(journal_count "$id" received)
     journal_append "$id" "$(printf 'armed\t%s\t%s\t%s' "$(date +%s)" "$upto" "$digest")" \
       || { fm_lock_release "$(receipts_lock_path "$id")"; die "cannot journal the armed receipt"; }
-    fm_lock_release "$(receipts_lock_path "$id")"
+  fi
+  fm_lock_release "$(receipts_lock_path "$id")"
+  if [ -n "$text" ]; then
     run_poll "$real" --agent-reply "$text"
     return  # the poll's exit status is the delivery attempt's outcome
   fi
@@ -384,25 +404,34 @@ cmd_receipt() {  # <source-id> <sequence> <result-file> <outcome-file>
   fi
 
   if [ -n "$submission" ]; then
-    local choices messages digest replay='-' closed='' skipped='' quality=''
+    local choices messages rows digest replay='-' closed='' skipped='' quality='' head_line
     choices=$(printf '%s' "$submission" | cut -f1)
     messages=$(printf '%s' "$submission" | cut -f2)
-    digest=$(printf '%s' "$submission" | cut -f3 | cut -c1-16)
-    if [ "$((choices + messages))" -gt 0 ] && ! has_event "$id" received "$seq"; then
-      if [ -n "$digest" ]; then
-        replay=$(journal_events "$id" received | awk -F '\t' -v d="$digest" '$6 == d { print NR; exit }')
-        [ -n "$replay" ] || replay='-'
-      fi
+    rows=$(printf '%s' "$submission" | cut -f3)
+    digest=$(printf '%s' "$submission" | cut -f4 | cut -c1-16)
+    head_line=$(sed -n '1p' "$outcome")
+    closed=$(grep -c '^closed: ' "$outcome" || true)
+    # A digest that matches an earlier round is a replay - unless this
+    # submission's own outcome proves a new effect: an answer skipped on its
+    # first submission, because its task was not held yet, can be genuinely
+    # applied when the captain resubmits it, and the captain must see that
+    # action rather than an actionless "already received".
+    if [ -n "$digest" ]; then
+      replay=$(journal_events "$id" received | awk -F '\t' -v d="$digest" '$6 == d { print NR; exit }')
+      [ -n "$replay" ] || replay='-'
+    fi
+    if [ "$replay" != '-' ] && [ "${head_line#fed }" != "$head_line" ]; then
+      [ "${closed:-0}" -gt 0 ] && replay='-'
+    fi
+    case "$rows" in ''|*[!0-9]*) rows=0 ;; esac
+    if [ "$rows" -gt 0 ] && ! has_event "$id" received "$seq"; then
       journal_append "$id" \
         "$(printf 'received\t%s\t%s\t%s\t%s\t%s\t%s' "$seq" "$epoch" "$choices" "$messages" "$digest" "$replay")" || true
       submission_line=received
     elif has_event "$id" received "$seq"; then
       submission_line=received
     fi
-    local head_line
-    head_line=$(sed -n '1p' "$outcome")
     if [ "${submission_line:-}" = received ] && [ "${head_line#fed }" != "$head_line" ]; then
-      closed=$(grep -c '^closed: ' "$outcome" || true)
       skipped=$(grep -c '^skipped: ' "$outcome" || true)
       quality=ok
       if [ "$(sed -n '2p' "$outcome")" = truncated ]; then
@@ -505,6 +534,13 @@ receipt_build_text() {  # <source-id>
     IFS=$'\t' read -r _ seq epoch choices messages digest replay <<< "$ev"
     if [ "$replay" != "-" ]; then
       out+="Round $n: already received at $(fmt_utc "$epoch") (identical to round $replay); no new action."$'\n'
+      continue
+    fi
+    if [ "$choices" = 0 ] && [ "$messages" = 0 ]; then
+      # A round journaled with no answers and no message is a comment-only
+      # submission: the acknowledgement is the point, and it must not claim
+      # answers that were not there.
+      out+="Round $n: received your written comment at $(fmt_utc "$epoch")"$'\n'
       continue
     fi
     answers_word="$choices answer"
@@ -751,10 +787,20 @@ cmd_terminal() {
   journal_readable "$id" || return 1
   latest=$(journal_count "$id" received)
   case "$latest" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$latest" -gt 0 ] || return 0
-  delivered=$(journal_last_field "$id" delivered 3); delivered=${delivered:-0}
-  case "$delivered" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$delivered" -ge "$latest" ] && return 0
+  if [ "$latest" -gt 0 ]; then
+    delivered=$(journal_last_field "$id" delivered 3); delivered=${delivered:-0}
+    case "$delivered" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$delivered" -ge "$latest" ] && return 0
+    return 1
+  fi
+  # Zero journaled rounds is not, by itself, evidence that this final result
+  # carries nothing: a refused parse or a failed journal append must keep the
+  # source armed rather than retire it unacknowledged. Terminal needs positive
+  # evidence - a completely parsed result with no receipt-worthy submission.
+  # A refused parse is indeterminate, never proof of absence.
+  local submission
+  submission=$(perl_rows submission "$file" 2>/dev/null) || return 1
+  [ -n "$submission" ] || return 0
   return 1
 }
 
@@ -846,6 +892,15 @@ perl_rows() {  # <answers|submission> <result-file>
       push @rows, $line;
     }
     close $fh;
+    # A block that declares N rows must deliver N rows: a truncated or partial
+    # block is refused rather than summarized, because a summary over a prefix
+    # would acknowledge answers that were never captured or applied. Exit 3
+    # marks the parse indeterminate; callers must treat that as no verdict
+    # rather than as an empty submission. A present-but-malformed row is still
+    # tolerated row-wise, exactly as the read path tolerates it: its fields
+    # land loosely, so it counts as nothing rather than forging a shape it
+    # does not have.
+    exit 3 if @fields && @rows < $want;
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
@@ -876,7 +931,7 @@ perl_rows() {  # <answers|submission> <result-file>
         my $text = defined $f->{text} ? $f->{text} : "";
         $material .= join("\x1f", $tag, $prompt, $text) . "\x1e";
       }
-      printf "%d\t%d\t%s\n", $choices, $messages, sha256_hex($material);
+      printf "%d\t%d\t%d\t%s\n", $choices, $messages, scalar(@parsed), sha256_hex($material);
       exit 0;
     }
     my %seen;

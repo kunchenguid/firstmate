@@ -413,6 +413,12 @@ out=$(pe "$H7" handled "$RECEIPT_SID" 1)
 assert_contains "$out" "handled: $RECEIPT_SID 1" "the first acknowledgement was not the authorized one"
 out=$(pe "$H7" handled "$RECEIPT_SID" 1)
 assert_contains "$out" "already-handled: $RECEIPT_SID 1" "a repeated acknowledgement authorized the effect again"
+# The live capture's own seam may still be in flight when the result file
+# appears; its journal facts must exist before the convergence count reads.
+wait_i=0
+while [ ! -e "$H7/state/procevent-inbox/$RECEIPT_SID.1.receipted" ] && [ "$wait_i" -lt 100 ]; do
+  sleep 0.2; wait_i=$((wait_i + 1))
+done
 journal="$H7/state/procevent/$RECEIPT_SID.receipts"
 for ev in received saved applying complete; do
   count=$(grep -c "^$ev" "$journal")
