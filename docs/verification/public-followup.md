@@ -8,15 +8,17 @@ This record supports four active guarantees for promised public replies made thr
 2. A home that never opted into the relay pays nothing for any of it.
 3. Delivering a final does not close the public loop: the registration is retained as `state=delivered` until `retire --reason`, session start surfaces an `open-loop` line, and `rechain` can bind follow-on work to the same thread.
 4. A first registration with no registry lock already held succeeds under stock macOS Bash 3.2 with `set -u`.
+5. A public loop whose work lives in a REMOTE secondmate home delivers and retires: the bound legacy Relay link is cleared over that route's SSH transport, `--force` still covers only the unresolved obligation, and a remote that never confirms the clear is unknown completion that retains the loop.
 
 [`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
 
 ## Environment
 
-Recorded 2026-08-21 on Darwin 25.5.0 (arm64) with GNU bash 5.3.9, tasks-axi 0.2.5, jq 1.8.1, and ShellCheck 0.11.0 (the version `bin/fm-lint.sh` pins).
+Recorded 2026-09-01 on Darwin 25.5.0 (arm64) with GNU bash 5.3.9, tasks-axi 0.2.5, jq 1.8.1, and ShellCheck 0.11.0 (the version `bin/fm-lint.sh` pins).
 The stock macOS compatibility lane additionally runs the focused first-registration regression with `/bin/bash` 3.2.57 and a real `tasks-axi` installation.
 The relay is a fakebin `curl` in every case, so no public post is ever made; `tasks-axi` and `jq` are the real tools, because stubbing the obligation state machine would verify nothing.
+The remote-route cases fake only the SSH binary at the `FM_SSH_BIN` process seam and then run the real tracked `fm-remote-entrypoint.sh` against a local checkout standing in for the remote one, so the clear that has to reach the remote home actually runs there; no host and no network are involved.
 
 ## Restart end-to-end and regressions
 
@@ -78,6 +80,9 @@ ok - brief fails explicitly when typed deliverable keys are unavailable
 ok - pre-change registrations are open loops and un-rechainable, never a crash
 ok - teardown reports an unreconciled legacy Relay link
 ok - secondmate promotion matches teardown parent resolution
+ok - a public loop bound to a remote secondmate home delivers and retires
+ok - --force still covers only the unresolved obligation, not the link clear
+ok - an unconfirmed remote clear is unknown completion, never a silent close
 ```
 
 The restart case is the end-to-end proof of guarantee 1.
@@ -90,6 +95,12 @@ It delivers a `report-ready` promised-final, asserts the registration is retaine
 The concurrency and interrupted-bind cases verify that one delivered source cannot fork and that retry converges on the same destination obligation.
 A pre-change on-disk record (no `state=`, no `request_context_b64`) is an open loop and un-rechainable rather than a crash.
 The stock macOS Bash lane in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) sets `FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32` and runs `tests/fm-public-followup.test.sh` through real `/bin/bash` 3.2, proving the first `register` path is safe when its registry lock list starts empty.
+
+The three remote-route cases are the proof of guarantee 5.
+A remote secondmate home exists only on its own machine, so its registration records no local path, and every close that must first clear the bound legacy Relay link had nothing local to act on.
+The first case pins that empty recorded path so it cannot go vacuous, then drives `deliver` and `retire` end to end and asserts the link inside the remote home is actually gone and the retirement receipt is written.
+The second case shows `--force` still governs only the unresolved-obligation refusal: a plain `retire` of an unresolved remote loop is still refused with the remote link untouched, while a forced one closes and clears it.
+The third case makes the transport unreachable and asserts the close is refused with the registration retained, the remote link untouched, and unknown completion named rather than reported as a definite failure.
 
 The existing Relay mention suite (`tests/fm-x-mode.test.sh`) is unchanged by this work.
 

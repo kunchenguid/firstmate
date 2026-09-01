@@ -25,6 +25,21 @@ SESSION_START="$ROOT/bin/fm-session-start.sh"
 TMP_ROOT=$(fm_test_tmproot fm-public-followup)
 PF_TEST_NOW=1787539200
 
+# The remote-route cases drive the real remote job worker, which outlives the
+# command that staged its job. Stop it before the shared fixture cleanup runs,
+# and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
+pf_test_cleanup() {
+  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
+  if [ -f "$pid_file" ]; then
+    pid=$(cat "$pid_file" 2>/dev/null) || pid=
+    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  fi
+  fm_test_cleanup
+}
+trap pf_test_cleanup EXIT
+trap 'pf_test_cleanup; exit 130' INT
+trap 'pf_test_cleanup; exit 143' TERM
+
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
 
@@ -2272,6 +2287,207 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   pass "secondmate promotion matches teardown parent resolution"
 }
 
+# --- remote secondmate work homes ---------------------------------------------
+#
+# A REMOTE secondmate route records no local path for its home, because the home
+# only exists on the other machine. Registration therefore stores an empty
+# work_home_path, and every close that must first clear the bound legacy X link
+# has to reach that home over the route's SSH transport instead.
+#
+# The transport is faked at the FM_SSH_BIN process seam and then runs the REAL
+# tracked remote entrypoint against a local "remote" checkout, so the clear that
+# has to happen actually happens: no live host, no network, and no assumption
+# baked into a stub about what the far side would have done.
+
+REMOTE_FIXTURE_ROOT=
+REMOTE_FIXTURE_SSH=
+REMOTE_FIXTURE_JOBS=
+
+# remote_fixture_prepare: build the shared remote checkout and fake ssh once.
+# The remote root is a real git repo holding the real bin/, because both fm-on.sh
+# and the entrypoint refuse anything that is not a genuine tracked executable.
+remote_fixture_prepare() {
+  local fakebin
+  [ -z "$REMOTE_FIXTURE_ROOT" ] || return 0
+  # TMPDIR on macOS carries a trailing slash, and the route validation rejects an
+  # empty path component, so physicalize both fixture paths before registering.
+  REMOTE_FIXTURE_ROOT="$TMP_ROOT/remote-root"
+  mkdir -p "$REMOTE_FIXTURE_ROOT/bin/backends"
+  REMOTE_FIXTURE_ROOT=$(cd "$REMOTE_FIXTURE_ROOT" && pwd -P)
+  mkdir -p "$TMP_ROOT/remote-jobs"
+  REMOTE_FIXTURE_JOBS=$(cd "$TMP_ROOT/remote-jobs" && pwd -P)
+  cp "$ROOT"/bin/fm-*.sh "$REMOTE_FIXTURE_ROOT/bin/"
+  cp "$ROOT"/bin/backends/*.sh "$REMOTE_FIXTURE_ROOT/bin/backends/"
+  chmod +x "$REMOTE_FIXTURE_ROOT/bin"/*.sh
+  printf 'fixture\n' > "$REMOTE_FIXTURE_ROOT/AGENTS.md"
+  git -C "$REMOTE_FIXTURE_ROOT" init -q -b main
+  git -C "$REMOTE_FIXTURE_ROOT" config user.email test@example.com
+  git -C "$REMOTE_FIXTURE_ROOT" config user.name Test
+  git -C "$REMOTE_FIXTURE_ROOT" add AGENTS.md bin
+  git -C "$REMOTE_FIXTURE_ROOT" commit -qm 'tracked remote fixture'
+
+  fakebin=$(fm_fakebin "$TMP_ROOT/remote-transport")
+  cat > "$fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    --) shift; break ;;
+    *) exit 90 ;;
+  esac
+done
+host=$1
+entry=$2
+shift 2
+[ "$host" = remote-mac ] || exit 91
+[ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+case "${FM_FAKE_SSH_MODE:-normal}" in
+  unreachable) exit 255 ;;
+  *) exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
+esac
+SH
+  chmod +x "$fakebin/fake-ssh"
+  REMOTE_FIXTURE_SSH="$fakebin/fake-ssh"
+}
+
+# make_remote_route <home> <secondmate-id>: register a REMOTE secondmate route in
+# <home> and echo the path standing in for that secondmate's home on the far
+# machine. The parent-side task record carries the same route fm-spawn writes.
+# Callers run remote_fixture_prepare first, because this one is used in command
+# substitution and a subshell cannot publish the shared fixture globals.
+make_remote_route() {  # <home> <secondmate-id>
+  local home=$1 id=$2 remote_home
+  remote_home="$TMP_ROOT/$(basename "$home")-remote-$id"
+  mkdir -p "$remote_home/state" "$remote_home/data"
+  remote_home=$(cd "$remote_home" && pwd -P)
+  cat > "$home/data/secondmates.md" <<EOF
+- $id - remote lane (host: remote-mac; root: $REMOTE_FIXTURE_ROOT; home: $remote_home; scope: relay work; projects: firstmate; added 2026-08-02)
+EOF
+  fm_write_meta "$home/state/$id.meta" "kind=secondmate" "home=$remote_home" \
+    "remote_host=remote-mac" "remote_root=$REMOTE_FIXTURE_ROOT"
+  printf '%s\n' "$remote_home"
+}
+
+run_pf_remote() {  # <home> <args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FAKE_CURL_LOG="${FAKE_CURL_LOG:-}" \
+    FAKE_FOLLOWUP_CODE="${FAKE_FOLLOWUP_CODE:-200}" \
+    FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" \
+    FM_SSH_BIN="$REMOTE_FIXTURE_SSH" \
+    FM_FAKE_SSH_MODE="${FM_FAKE_SSH_MODE:-normal}" \
+    FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_FIXTURE_ROOT/bin/fm-remote-entrypoint.sh" \
+    FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    FM_REMOTE_JOB_STATE_ROOT="$REMOTE_FIXTURE_JOBS" \
+    "$PF" "$@"
+}
+
+# The reported failure: a public loop whose work lived in a REMOTE secondmate
+# home could never be closed. Its registration carries no local path, so the
+# legacy-link clear that every close runs first had nothing to act on and refused
+# forever - leaving the promise permanently open and, on the delivery path,
+# leaving a loop stuck at posted after the public reply had already landed.
+test_remote_secondmate_loop_delivers_and_retires() {
+  local home remote log
+  remote_fixture_prepare
+  home=$(make_home remote-retire)
+  remote=$(make_remote_route "$home" mini-default)
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" pf-remote-close req-remote-close secondmate:mini-default work-remote
+  fm_write_meta "$remote/state/work-remote.meta" \
+    "x_request=req-remote-close" "x_request_ts=1700000000" "x_followups=1"
+
+  # The trap condition, pinned so this case can never go vacuous: a remote route
+  # has no local home path to record, which is exactly what used to dead-end.
+  [ -z "$(sed -n 's/^work_home_path=//p' "$home/state/public-followup/registry/pf-remote-close")" ] \
+    || fail "a remote work home must register with no local path"
+
+  "$EMIT" --home "$home" --obligation pf-remote-close --relation rel-code \
+    --source-home secondmate:mini-default --work-id work-remote --generation 1 \
+    --outcome report-ready --deliverable report_path=data/work-remote/report.md \
+    --outcome-text 'The remote lane finished its investigation.' >/dev/null \
+    || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+
+  FAKE_CURL_LOG="$log" run_pf_remote "$home" deliver pf-remote-close >/dev/null \
+    || fail "delivery must not strand a remote-home loop after the public reply lands"
+  assert_no_grep 'x_request=' "$remote/state/work-remote.meta" \
+    "delivery must clear the legacy X link inside the remote home"
+  [ "$(delivery_state "$home" pf-remote-close)" = posted ] \
+    || fail "a delivered remote-home loop must reach posted"
+
+  run_pf_remote "$home" retire pf-remote-close --reason "handed on by hand" >/dev/null \
+    || fail "retire must be able to close a delivered remote-home loop"
+  assert_present "$home/state/public-followup/retired/pf-remote-close" \
+    "retiring a remote-home loop must record its receipt"
+  assert_absent "$home/state/public-followup/registry/pf-remote-close" \
+    "retiring a remote-home loop must drop its registration"
+  pass "a public loop bound to a remote secondmate home delivers and retires"
+}
+
+# --force governs the unresolved-obligation refusal and nothing else. It never
+# covered the legacy-link clear before this fix and must not start to now: a link
+# still verifiably in place keeps the loop open on either setting.
+test_remote_retire_force_semantics_unchanged() {
+  local home remote
+  remote_fixture_prepare
+  home=$(make_home remote-force)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-remote-open req-remote-open secondmate:mini-default work-open
+  seed_repro_commitment "$home" pf-remote-forced req-remote-forced secondmate:mini-default work-forced
+  fm_write_meta "$remote/state/work-open.meta" \
+    "x_request=req-remote-open" "x_request_ts=1700000000" "x_followups=1"
+  fm_write_meta "$remote/state/work-forced.meta" \
+    "x_request=req-remote-forced" "x_request_ts=1700000000" "x_followups=1"
+
+  expect_failure "an unresolved remote loop must still refuse a plain retire" \
+    run_pf_remote "$home" retire pf-remote-open --reason "not done yet"
+  assert_contains "$EXPECT_OUT" "hide an open public promise" \
+    "the refusal must still be the unresolved-obligation one"
+  assert_present "$home/state/public-followup/registry/pf-remote-open" \
+    "a refused retire must keep the registration"
+  assert_grep 'x_request=req-remote-open' "$remote/state/work-open.meta" \
+    "a refused retire must not touch the remote home's link"
+
+  run_pf_remote "$home" retire pf-remote-forced --reason "discarded" --force >/dev/null \
+    || fail "--force must still discard an unresolved remote-home loop"
+  assert_present "$home/state/public-followup/retired/pf-remote-forced" \
+    "a forced retire must record its receipt"
+  assert_no_grep 'x_request=' "$remote/state/work-forced.meta" \
+    "a forced retire must still clear the remote home's link"
+  pass "--force still covers only the unresolved obligation, not the link clear"
+}
+
+# fm-on.sh passes ssh's status through, so 255 is unknown remote completion, not
+# proof the clear failed. The close must refuse and retain rather than either
+# claiming the link is gone or reporting a definite failure, so reconciliation
+# lands on the host that actually owns the answer.
+test_remote_unconfirmed_clear_is_unknown_completion() {
+  local home remote
+  remote_fixture_prepare
+  home=$(make_home remote-unknown)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-remote-unknown req-remote-unknown secondmate:mini-default work-unknown
+  fm_write_meta "$remote/state/work-unknown.meta" \
+    "x_request=req-remote-unknown" "x_request_ts=1700000000" "x_followups=1"
+
+  FM_FAKE_SSH_MODE=unreachable \
+    expect_failure "an unconfirmed remote clear must not close the loop" \
+    run_pf_remote "$home" retire pf-remote-unknown --reason "closing" --force
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "an unconfirmed remote clear must still report the link as unresolved"
+  assert_contains "$EXPECT_OUT" "never confirmed the clear" \
+    "unknown remote completion must be named, not reported as a definite failure"
+  assert_present "$home/state/public-followup/registry/pf-remote-unknown" \
+    "unknown remote completion must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-unknown" \
+    "unknown remote completion must not record a retirement receipt"
+  assert_grep 'x_request=req-remote-unknown' "$remote/state/work-unknown.meta" \
+    "an unreachable host must leave the remote link exactly as it was"
+  pass "an unconfirmed remote clear is unknown completion, never a silent close"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
 # register regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -2332,3 +2548,6 @@ test_brief_fails_without_typed_deliverable_keys
 test_prechange_registration_is_open_and_unrechainable
 test_x_request_teardown_warns_when_final_unposted
 test_secondmate_promotion_uses_teardown_parent_resolution
+test_remote_secondmate_loop_delivers_and_retires
+test_remote_retire_force_semantics_unchanged
+test_remote_unconfirmed_clear_is_unknown_completion
