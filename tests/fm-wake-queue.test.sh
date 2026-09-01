@@ -1144,6 +1144,79 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+# A bounded waiter acquires in a helper process, but the caller must own the
+# lock once contention clears so it can safely hold and release the critical
+# section itself.
+test_bounded_lock_handoff_after_contention() {
+  local dir state lock holder_pid waiter_pid i recorded_pid real_sleep sleep_log
+  dir=$(make_case bounded-lock-handoff)
+  state="$dir/state"
+  lock="$state/.fixture.lock"
+  sleep_log="$dir/waiter-sleeps"
+  real_sleep=$(command -v sleep) || fail "sleep is unavailable for the handoff fixture"
+  cat > "$dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_HANDOFF_SLEEP_LOG"
+exec "$FM_HANDOFF_REAL_SLEEP" "$@"
+SH
+  chmod +x "$dir/fakebin/sleep"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/holder.ready" "$dir/release-holder" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "handoff fixture holder never acquired its lock"; }
+
+  PATH="$dir/fakebin:$PATH" FM_HANDOFF_SLEEP_LOG="$sleep_log" FM_HANDOFF_REAL_SLEEP="$real_sleep" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait_bounded "$2" 5 || exit 11
+    current=${BASHPID:-$$}
+    printf "%s\n" "$current" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    [ "$(cat "$2/pid" 2>/dev/null || true)" = "$current" ] || exit 12
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/waiter.ready" "$dir/release-waiter" &
+  waiter_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && ! grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1 \
+    || { kill "$holder_pid" "$waiter_pid" 2>/dev/null || true; fail "bounded helper never entered its contended wait"; }
+  [ ! -e "$dir/waiter.ready" ] \
+    || { kill "$holder_pid" "$waiter_pid" 2>/dev/null || true; fail "bounded waiter bypassed a live holder"; }
+
+  : > "$dir/release-holder"
+  wait "$holder_pid" || { kill "$waiter_pid" 2>/dev/null || true; fail "fixture holder did not release cleanly"; }
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/waiter.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/waiter.ready" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded waiter did not acquire after contention cleared"; }
+  recorded_pid=$(cat "$dir/waiter.ready")
+  [ "$recorded_pid" = "$waiter_pid" ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$waiter_pid" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock ownership to its caller"; }
+
+  : > "$dir/release-waiter"
+  wait "$waiter_pid" || fail "caller could not release its handed-off lock"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "handed-off lock remained after caller release"
+  pass "bounded acquire hands ownership to the waiting caller after contention"
+}
+
 # A live-but-stuck presentation lock must not strand the executable drain. The
 # presentation remains retriable on the next pass, while the separate queue
 # mutation lock keeps its blocking all-or-nothing acknowledgement contract.
@@ -1365,6 +1438,7 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
