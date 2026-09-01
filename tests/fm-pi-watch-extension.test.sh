@@ -1269,19 +1269,23 @@ EOF
   pass "Pi late unretired closes resume classified supervision"
 }
 
-# Production-timing Pi follow-up fake used by every coalescing test below.
-# Pi 0.84.4: sendUserMessage(deliverAs followUp) calls prompt(). On an idle
-# agent prompt() runs the whole agent loop inside the call - agent_start is
-# emitted at run start, long before the returned promise resolves at run end.
-# That timing is what makes a latch set after the await strand itself.
-# On a busy agent the row docks and the call resolves at once, and the run
-# already in flight drains that row inline (agent-loop runLoop sets
-# pendingMessages from the follow-up queue and continues), so the docked row is
-# consumed with no second agent_start. A row can also be discarded without ever
-# being consumed, which is what Escape while streaming does. agent_settled is
-# the only boundary both paths share: Pi emits it once a run has fully settled,
-# including an aborted one. The fakes below drive those transitions from the
-# test driver rather than treating a docked row as a no-op.
+# Pi follow-up fake used by every coalescing test below, matching the real
+# ExtensionAPI surface of Pi 0.84.4 rather than the AgentSession one.
+# ExtensionAPI.sendUserMessage is declared void: the loader discards the runtime
+# promise and the runtime binding routes every rejection to runner.emitError, so
+# the extension can neither await delivery nor observe a failure. The call only
+# queues the row, and every runtime effect happens afterwards, off that call
+# stack - which is why the latch has to be set before the call rather than after
+# the await, and why a delivery failure is invisible to the extension.
+# The effects the fakes model: an idle send makes the runtime start a run that
+# takes the queued row and emits agent_start; a row queued while a run is in
+# flight is drained inline by that same run (agent-loop runLoop sets
+# pendingMessages from the follow-up queue and continues) with no second
+# agent_start; a queued row can instead be discarded without ever being
+# consumed, which is what Escape while streaming does; and agent_settled is
+# emitted once a run has fully settled, an aborted one included.
+# The test driver performs those transitions explicitly rather than letting a
+# queued row be a no-op.
 
 test_pi_ordinary_burst_coalesces_to_one_dock_row() {
   local repo home plugin out status
@@ -1320,12 +1324,26 @@ let tool = null;
 const handlers = new Map();
 const sent = [];
 let running = false;
-let finishRun = () => {};
-const docked = [];
-async function startCaptainRun() {
+let runScheduled = false;
+let agentStarts = 0;
+const queued = [];
+const consumed = [];
+// An idle send makes the runtime start a run on its own asynchronous chain,
+// after the void call has already returned. The run takes the queued rows at
+// start and announces that with agent_start.
+async function startRun() {
   running = true;
+  agentStarts += 1;
+  while (queued.length > 0) consumed.push(queued.shift());
   await handlers.get("agent_start")?.({ type: "agent_start" }, {});
 }
+// A captain turn already in flight, started by something other than a wake.
+async function startCaptainRun() {
+  running = true;
+  agentStarts += 1;
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
+// Pi emits agent_settled once a run has fully settled, an aborted one included.
 async function settleRun() {
   running = false;
   await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
@@ -1338,21 +1356,19 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
+  // ExtensionAPI.sendUserMessage returns void: it only queues the row, and the
+  // runtime effects happen afterwards, off this call stack.
+  sendUserMessage: (message) => {
     sent.push(String(message));
-    // Busy agent: the follow-up docks on the run already in flight and the
-    // call resolves at once. No agent_start is ever emitted for that row.
-    if (running) {
-      docked.push(String(message));
-      return;
+    queued.push(String(message));
+    if (!running && !runScheduled) {
+      runScheduled = true;
+      queueMicrotask(() => {
+        runScheduled = false;
+        void startRun();
+      });
     }
-    running = true;
-    const runEnded = new Promise((resolve) => {
-      finishRun = resolve;
-    });
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await runEnded;
-    await settleRun();
+    return undefined;
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -1380,7 +1396,8 @@ for (const count of [2, 3, 4]) {
 await waitFor(() => lines(process.env.FM_ARM_LOG).length >= 5, "final successor start");
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (sent.length !== 1) throw new Error(`burst produced ${sent.length} dock rows: ${sent.join(" || ")}`);
-if (docked.length !== 1) throw new Error(`expected exactly one row docked on the running turn, saw ${docked.length}`);
+if (queued.length !== 1) throw new Error(`expected exactly one row queued on the running turn, saw ${queued.length}`);
+if (agentStarts !== 1) throw new Error(`no wake row may start a run while the captain turn is in flight, saw ${agentStarts}`);
 const row = sent[0];
 if (!row.includes("FIRSTMATE WATCHER WAKE")) throw new Error(`row lost the typed wake header: ${row}`);
 if (!row.includes("signal: burst event 1")) throw new Error(`row lost its own triggering event: ${row}`);
@@ -1400,7 +1417,6 @@ const armRows = lines(process.env.FM_ARM_LOG).length;
 if (armRows !== 5) throw new Error(`expected 4 closes plus one final successor, saw ${armRows} arm rows`);
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 await settleRun();
-finishRun();
 process.exit(0);
 EOF
 )
@@ -1444,10 +1460,20 @@ let tool = null;
 const handlers = new Map();
 const sent = [];
 let running = false;
-let settledSends = 0;
+let runScheduled = false;
 let agentStarts = 0;
-let endRun = () => {};
-const docked = [];
+const queued = [];
+const consumed = [];
+// An idle send makes the runtime start a run on its own asynchronous chain,
+// after the void call has already returned. The run takes the queued rows at
+// start and announces that with agent_start.
+async function startRun() {
+  running = true;
+  agentStarts += 1;
+  while (queued.length > 0) consumed.push(queued.shift());
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
+// Pi emits agent_settled once a run has fully settled, an aborted one included.
 async function settleRun() {
   running = false;
   await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
@@ -1460,23 +1486,19 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  // Idle agent: this call runs the whole handling turn. agent_start fires
-  // inside it and the promise resolves only when the driver ends that run.
-  sendUserMessage: async (message) => {
+  // ExtensionAPI.sendUserMessage returns void: it only queues the row, and the
+  // runtime effects happen afterwards, off this call stack.
+  sendUserMessage: (message) => {
     sent.push(String(message));
-    if (running) {
-      docked.push(String(message));
-      return;
+    queued.push(String(message));
+    if (!running && !runScheduled) {
+      runScheduled = true;
+      queueMicrotask(() => {
+        runScheduled = false;
+        void startRun();
+      });
     }
-    running = true;
-    const runEnded = new Promise((resolve) => {
-      endRun = resolve;
-    });
-    agentStarts += 1;
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await runEnded;
-    await settleRun();
-    settledSends += 1;
+    return undefined;
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -1491,28 +1513,26 @@ async function waitFor(predicate, label) {
   }
   throw new Error(`timeout waiting for ${label}`);
 }
-await waitFor(() => sent.length === 1 && agentStarts === 1, "first row presented and consumed");
-if (settledSends !== 0) throw new Error("fake lost production timing: the idle send resolved before its run ended");
-// End the handling run. Only now does the idle send resolve, which is the
-// point where a latch set after the await would strand itself.
-endRun();
-await waitFor(() => settledSends === 1, "first handling run to end");
-await new Promise((resolve) => setTimeout(resolve, 50));
-// A genuinely later wake, with the agent idle again.
+await waitFor(() => sent.length === 1 && agentStarts === 1, "first row presented and consumed at run start");
+if (consumed.length !== 1) throw new Error(`expected the idle row to be taken by the run it started, saw ${consumed.length}`);
+if (queued.length !== 0) throw new Error("an idle send must have its row taken by the run it starts");
+// That handling run is still in flight, and its row was already consumed at
+// run start. A genuinely later wake must therefore still present one new row.
+// A latch set after the void call, or cleared only at settle, suppresses it.
 writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
-await waitFor(() => sent.length === 2, "genuinely later idle wake row");
+await waitFor(() => sent.length === 2, "genuinely later wake row");
 if (!sent[1].includes("signal: later event 2")) throw new Error(`later wake row lost its event: ${sent.join(" || ")}`);
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (sent.length !== 2) throw new Error(`later idle wake presented ${sent.length - 1} rows instead of one`);
-if (agentStarts !== 2) throw new Error(`expected one consumption edge per presented row, saw ${agentStarts}`);
-if (docked.length !== 0) throw new Error("an idle send must run its row, not dock it");
+if (sent.length !== 2) throw new Error(`later wake presented ${sent.length - 1} rows instead of one`);
+if (agentStarts !== 1) throw new Error(`a row queued on the run in flight must not start a second run, saw ${agentStarts}`);
+if (queued.length !== 1) throw new Error(`expected the later row to queue on the run in flight, saw ${queued.length}`);
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
-endRun();
+await settleRun();
 process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "an idle-consumed wake must leave presentation re-armed so a genuinely later wake presents exactly one new row"
+  expect_code 0 "$status" "a wake consumed at run start must leave presentation re-armed so a genuinely later wake presents exactly one new row"
   [ -z "$out" ] || fail "Pi consumed-row re-arm test printed output: $out"
   pass "Pi idle-consumed row re-arms presentation so a genuinely later wake presents one new row"
 }
@@ -1550,28 +1570,37 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 const handlers = new Map();
 const sent = [];
-const docked = [];
+const queued = [];
 const consumed = [];
 const discarded = [];
 let running = false;
+let runScheduled = false;
 let agentStarts = 0;
-let finishRun = () => {};
 // The captain is already mid-turn: a run this extension did not start is in
-// flight, so every watcher follow-up docks on it.
+// flight, so every watcher follow-up queues on it.
 async function startCaptainRun() {
   running = true;
+  agentStarts += 1;
   await handlers.get("agent_start")?.({ type: "agent_start" }, {});
 }
-// Pi 0.84.4 drains rows docked during a run inline inside that same run, so a
-// docked row is consumed with no second agent_start.
-function drainDockedInline() {
-  while (docked.length > 0) consumed.push(docked.shift());
+// An idle send makes the runtime start a run on its own asynchronous chain,
+// after the void call has already returned.
+async function startRun() {
+  running = true;
+  agentStarts += 1;
+  while (queued.length > 0) consumed.push(queued.shift());
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
 }
-// Escape while streaming restores the docked rows to the editor and aborts the
+// Pi 0.84.4 drains rows queued during a run inline inside that same run, so a
+// queued row is consumed with no second agent_start.
+function drainQueuedInline() {
+  while (queued.length > 0) consumed.push(queued.shift());
+}
+// Escape while streaming restores the queued rows to the editor and aborts the
 // run, so the row is dropped without ever being consumed and without any
 // agent_start. The dequeue keybinding drops it the same way.
-function clearDockedQueue() {
-  while (docked.length > 0) discarded.push(docked.shift());
+function clearQueuedRows() {
+  while (queued.length > 0) discarded.push(queued.shift());
 }
 // agent_settled is the boundary both paths share: Pi emits it once a run has
 // fully settled, an aborted run included.
@@ -1587,22 +1616,19 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
+  // ExtensionAPI.sendUserMessage returns void: it only queues the row, and the
+  // runtime effects happen afterwards, off this call stack.
+  sendUserMessage: (message) => {
     sent.push(String(message));
-    if (running) {
-      docked.push(String(message));
-      return;
+    queued.push(String(message));
+    if (!running && !runScheduled) {
+      runScheduled = true;
+      queueMicrotask(() => {
+        runScheduled = false;
+        void startRun();
+      });
     }
-    // Idle agent: this call runs the whole handling turn, emitting agent_start
-    // inside it and resolving only when the driver ends that run.
-    running = true;
-    const runEnded = new Promise((resolve) => {
-      finishRun = resolve;
-    });
-    agentStarts += 1;
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await runEnded;
-    await settleRun();
+    return undefined;
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -1618,13 +1644,13 @@ async function waitFor(predicate, label) {
   }
   throw new Error(`timeout waiting for ${label}`);
 }
-await waitFor(() => sent.length === 1 && docked.length === 1, "first ordinary wake docked on the busy run");
-if (agentStarts !== 0) throw new Error("a docked row must not start its own run");
-// Pi consumes the docked row inline, inside the run already in flight. No
+await waitFor(() => sent.length === 1 && queued.length === 1, "first ordinary wake queued on the busy run");
+if (agentStarts !== 1) throw new Error(`a queued row must not start its own run, saw ${agentStarts} runs`);
+// Pi consumes the queued row inline, inside the run already in flight. No
 // second agent_start is emitted, which is the whole point of this case.
-drainDockedInline();
-if (consumed.length !== 1) throw new Error(`expected the docked row to be consumed inline, saw ${consumed.length}`);
-if (agentStarts !== 0) throw new Error("an inline drain must not emit a second agent_start");
+drainQueuedInline();
+if (consumed.length !== 1) throw new Error(`expected the queued row to be consumed inline, saw ${consumed.length}`);
+if (agentStarts !== 1) throw new Error("an inline drain must not emit a second agent_start");
 await settleRun();
 await new Promise((resolve) => setTimeout(resolve, 50));
 // A genuinely later actionable close, with the agent idle again.
@@ -1633,11 +1659,12 @@ await waitFor(() => sent.length === 2, "genuinely later wake row");
 if (!sent[1].includes("signal: later event 2")) throw new Error(`later wake row lost its event: ${sent.join(" || ")}`);
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (sent.length !== 2) throw new Error(`later wake presented ${sent.length - 1} rows instead of one`);
-if (agentStarts !== 1) throw new Error(`expected the later idle wake to start exactly one run, saw ${agentStarts}`);
-if (consumed.length !== 1) throw new Error(`expected exactly one inline-consumed row, saw ${consumed.length}`);
+if (agentStarts !== 2) throw new Error(`expected the later idle wake to start exactly one new run, saw ${agentStarts - 1}`);
+if (consumed.length !== 2) throw new Error(`expected the inline-drained row plus the later row, saw ${consumed.length}`);
+if (!consumed[0].includes("signal: first event")) throw new Error(`inline drain took the wrong row: ${consumed[0]}`);
+if (!consumed[1].includes("signal: later event 2")) throw new Error(`later run took the wrong row: ${consumed[1]}`);
 if (discarded.length !== 0) throw new Error("no row was discarded in this case");
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
-finishRun();
 process.exit(0);
 EOF
 )
@@ -1680,28 +1707,37 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 const handlers = new Map();
 const sent = [];
-const docked = [];
+const queued = [];
 const consumed = [];
 const discarded = [];
 let running = false;
+let runScheduled = false;
 let agentStarts = 0;
-let finishRun = () => {};
 // The captain is already mid-turn: a run this extension did not start is in
-// flight, so every watcher follow-up docks on it.
+// flight, so every watcher follow-up queues on it.
 async function startCaptainRun() {
   running = true;
+  agentStarts += 1;
   await handlers.get("agent_start")?.({ type: "agent_start" }, {});
 }
-// Pi 0.84.4 drains rows docked during a run inline inside that same run, so a
-// docked row is consumed with no second agent_start.
-function drainDockedInline() {
-  while (docked.length > 0) consumed.push(docked.shift());
+// An idle send makes the runtime start a run on its own asynchronous chain,
+// after the void call has already returned.
+async function startRun() {
+  running = true;
+  agentStarts += 1;
+  while (queued.length > 0) consumed.push(queued.shift());
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
 }
-// Escape while streaming restores the docked rows to the editor and aborts the
+// Pi 0.84.4 drains rows queued during a run inline inside that same run, so a
+// queued row is consumed with no second agent_start.
+function drainQueuedInline() {
+  while (queued.length > 0) consumed.push(queued.shift());
+}
+// Escape while streaming restores the queued rows to the editor and aborts the
 // run, so the row is dropped without ever being consumed and without any
 // agent_start. The dequeue keybinding drops it the same way.
-function clearDockedQueue() {
-  while (docked.length > 0) discarded.push(docked.shift());
+function clearQueuedRows() {
+  while (queued.length > 0) discarded.push(queued.shift());
 }
 // agent_settled is the boundary both paths share: Pi emits it once a run has
 // fully settled, an aborted run included.
@@ -1717,22 +1753,19 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
+  // ExtensionAPI.sendUserMessage returns void: it only queues the row, and the
+  // runtime effects happen afterwards, off this call stack.
+  sendUserMessage: (message) => {
     sent.push(String(message));
-    if (running) {
-      docked.push(String(message));
-      return;
+    queued.push(String(message));
+    if (!running && !runScheduled) {
+      runScheduled = true;
+      queueMicrotask(() => {
+        runScheduled = false;
+        void startRun();
+      });
     }
-    // Idle agent: this call runs the whole handling turn, emitting agent_start
-    // inside it and resolving only when the driver ends that run.
-    running = true;
-    const runEnded = new Promise((resolve) => {
-      finishRun = resolve;
-    });
-    agentStarts += 1;
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await runEnded;
-    await settleRun();
+    return undefined;
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -1748,13 +1781,13 @@ async function waitFor(predicate, label) {
   }
   throw new Error(`timeout waiting for ${label}`);
 }
-await waitFor(() => sent.length === 1 && docked.length === 1, "first ordinary wake docked on the busy run");
-if (agentStarts !== 0) throw new Error("a docked row must not start its own run");
-// Escape while streaming: the docked row is dropped back into the editor and
+await waitFor(() => sent.length === 1 && queued.length === 1, "first ordinary wake queued on the busy run");
+if (agentStarts !== 1) throw new Error(`a queued row must not start its own run, saw ${agentStarts} runs`);
+// Escape while streaming: the queued row is dropped back into the editor and
 // the run aborts, so the row is never consumed and no agent_start ever fires.
-clearDockedQueue();
-if (discarded.length !== 1) throw new Error(`expected the docked row to be discarded, saw ${discarded.length}`);
-if (agentStarts !== 0) throw new Error("a discarded row must not emit agent_start");
+clearQueuedRows();
+if (discarded.length !== 1) throw new Error(`expected the queued row to be discarded, saw ${discarded.length}`);
+if (agentStarts !== 1) throw new Error("a discarded row must not emit agent_start");
 await settleRun();
 await new Promise((resolve) => setTimeout(resolve, 50));
 // A genuinely later actionable close, with the agent idle again.
@@ -1763,11 +1796,12 @@ await waitFor(() => sent.length === 2, "genuinely later wake row");
 if (!sent[1].includes("signal: later event 2")) throw new Error(`later wake row lost its event: ${sent.join(" || ")}`);
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (sent.length !== 2) throw new Error(`later wake presented ${sent.length - 1} rows instead of one`);
-if (agentStarts !== 1) throw new Error(`expected the later idle wake to start exactly one run, saw ${agentStarts}`);
-if (consumed.length !== 0) throw new Error("the discarded row must never be reported as consumed");
+if (agentStarts !== 2) throw new Error(`expected the later idle wake to start exactly one new run, saw ${agentStarts - 1}`);
 if (discarded.length !== 1) throw new Error(`expected exactly one discarded row, saw ${discarded.length}`);
+if (!discarded[0].includes("signal: first event")) throw new Error(`the wrong row was discarded: ${discarded[0]}`);
+if (consumed.length !== 1) throw new Error(`only the later row may be consumed, saw ${consumed.length}`);
+if (!consumed[0].includes("signal: later event 2")) throw new Error(`a discarded row must never be consumed: ${consumed[0]}`);
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
-finishRun();
 process.exit(0);
 EOF
 )
@@ -1818,7 +1852,11 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 const handlers = new Map();
 const sent = [];
-let running = false;
+// A captain turn is in flight for the whole of this test, so every watcher row
+// queues on it and none of them starts a run of its own.
+async function startCaptainRun() {
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -1827,20 +1865,19 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
+  // ExtensionAPI.sendUserMessage returns void in Pi 0.84.4: the runtime
+  // discards the promise and routes every rejection to runner.emitError, so
+  // the extension can neither await delivery nor observe a failure.
+  sendUserMessage: (message) => {
     sent.push(String(message));
-    if (running) return;
-    running = true;
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await new Promise(() => {});
+    return undefined;
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 // A long captain turn is under way, so every watcher row docks unconsumed.
-running = true;
-await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await startCaptainRun();
 await tool.execute("tool-call-exhaust", {}, undefined, undefined, {});
 mkdirSync(process.env.FM_BURST_GO, { recursive: true });
 const confirms = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
@@ -1905,7 +1942,11 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 const handlers = new Map();
 const sent = [];
-let running = false;
+// A captain turn is in flight for the whole of this test, so every watcher row
+// queues on it and none of them starts a run of its own.
+async function startCaptainRun() {
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -1914,20 +1955,19 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
+  // ExtensionAPI.sendUserMessage returns void in Pi 0.84.4: the runtime
+  // discards the promise and routes every rejection to runner.emitError, so
+  // the extension can neither await delivery nor observe a failure.
+  sendUserMessage: (message) => {
     sent.push(String(message));
-    if (running) return;
-    running = true;
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await new Promise(() => {});
+    return undefined;
   },
 };
 const lock = `${process.env.FM_HOME}/state/.lock`;
 writeFileSync(lock, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-running = true;
-await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await startCaptainRun();
 await tool.execute("tool-call-restore-lock", {}, undefined, undefined, {});
 mkdirSync(process.env.FM_BURST_GO, { recursive: true });
 const confirms = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
@@ -1999,7 +2039,11 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 const handlers = new Map();
 const sent = [];
-let running = false;
+// A captain turn is in flight for the whole of this test, so every watcher row
+// queues on it and none of them starts a run of its own.
+async function startCaptainRun() {
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -2008,20 +2052,19 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
+  // ExtensionAPI.sendUserMessage returns void in Pi 0.84.4: the runtime
+  // discards the promise and routes every rejection to runner.emitError, so
+  // the extension can neither await delivery nor observe a failure.
+  sendUserMessage: (message) => {
     sent.push(String(message));
-    if (running) return;
-    running = true;
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await new Promise(() => {});
+    return undefined;
   },
 };
 const lock = `${process.env.FM_HOME}/state/.lock`;
 writeFileSync(lock, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-running = true;
-await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await startCaptainRun();
 await tool.execute("tool-call-lockloss", {}, undefined, undefined, {});
 mkdirSync(process.env.FM_BURST_GO, { recursive: true });
 const confirms = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
@@ -2089,7 +2132,11 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 const handlers = new Map();
 const sent = [];
-let running = false;
+// A captain turn is in flight for the whole of this test, so every watcher row
+// queues on it and none of them starts a run of its own.
+async function startCaptainRun() {
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -2098,19 +2145,18 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
+  // ExtensionAPI.sendUserMessage returns void in Pi 0.84.4: the runtime
+  // discards the promise and routes every rejection to runner.emitError, so
+  // the extension can neither await delivery nor observe a failure.
+  sendUserMessage: (message) => {
     sent.push(String(message));
-    if (running) return;
-    running = true;
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await new Promise(() => {});
+    return undefined;
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
-running = true;
-await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await startCaptainRun();
 await tool.execute("tool-call-refuse", {}, undefined, undefined, {});
 mkdirSync(process.env.FM_BURST_GO, { recursive: true });
 const handshakes = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
@@ -2139,91 +2185,6 @@ EOF
   expect_code 0 "$status" "a refused handling handshake must surface as its own row even while another row is pending"
   [ -z "$out" ] || fail "Pi refused-handshake bypass test printed output: $out"
   pass "Pi refused handshake surfaces separately from a pending ordinary row"
-}
-
-test_pi_rejected_delivery_rolls_back_ordinary_latch() {
-  local repo home plugin out status
-  repo="$TMP_ROOT/pi-reject-root"
-  home="$TMP_ROOT/pi-reject-home"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
-  install_pi_watch_extension_fixture "$repo"
-  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --handling-delivered ]; then
-  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
-  exit 0
-fi
-printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-count=$(grep -c '^arm=' "$FM_ARM_LOG")
-if [ "$count" -eq 1 ]; then
-  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  printf 'signal: ordinary event 1\n'
-  exit 0
-fi
-printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
-while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
-[ -e "${FM_STOP_FILE:?}" ] && exit 0
-printf 'signal: ordinary event %s\n' "$count"
-SH
-  chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-reject-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-reject-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-reject-go" FM_STOP_FILE="$TMP_ROOT/pi-reject.stop" node --input-type=module 2>&1 <<'EOF'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-
-let tool = null;
-const handlers = new Map();
-const attempts = [];
-const sent = [];
-let running = false;
-const pi = {
-  on(event, handler) {
-    handlers.set(event, handler);
-  },
-  registerCommand() {},
-  registerTool(candidate) {
-    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
-  },
-  sendUserMessage: async (message) => {
-    attempts.push(String(message));
-    // Only the first delivery is rejected, and it establishes no row.
-    if (attempts.length === 1) throw new Error("synthetic follow-up delivery rejection");
-    sent.push(String(message));
-    if (running) return;
-    running = true;
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await new Promise(() => {});
-  },
-};
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-mod.default(pi);
-running = true;
-await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-await tool.execute("tool-call-reject", {}, undefined, undefined, {});
-mkdirSync(process.env.FM_BURST_GO, { recursive: true });
-async function waitFor(predicate, label) {
-  for (let i = 0; i < 500; i += 1) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`timeout waiting for ${label}`);
-}
-// The rejected ordinary delivery is reported through the failure path.
-await waitFor(() => attempts.length === 2 && sent.length === 1, "rejected delivery reported as a failure");
-if (!sent[0].includes("could not deliver an actionable wake")) throw new Error(`delivery rejection was not surfaced: ${sent.join(" || ")}`);
-// A rejected send established no row, so the next ordinary wake must present.
-writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
-await waitFor(() => sent.length === 2, "ordinary wake after a rejected delivery");
-if (!sent[1].includes("signal: ordinary event 2")) throw new Error(`ordinary wake after rejection lost its event: ${sent.join(" || ")}`);
-writeFileSync(process.env.FM_STOP_FILE, "stop\n");
-process.exit(0);
-EOF
-)
-  status=$?
-  expect_code 0 "$status" "a rejected ordinary delivery must roll the presentation latch back instead of stranding it"
-  [ -z "$out" ] || fail "Pi rejected-delivery rollback test printed output: $out"
-  pass "Pi rejected ordinary delivery rolls the presentation latch back"
 }
 
 test_pi_session_replacement_discards_ordinary_latch() {
@@ -2262,7 +2223,11 @@ import { pathToFileURL } from "node:url";
 let tool = null;
 const handlers = new Map();
 const sent = [];
-let running = false;
+// A captain turn is in flight for the whole of this test, so every watcher row
+// queues on it and none of them starts a run of its own.
+async function startCaptainRun() {
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -2271,12 +2236,12 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async (message) => {
+  // ExtensionAPI.sendUserMessage returns void in Pi 0.84.4: the runtime
+  // discards the promise and routes every rejection to runner.emitError, so
+  // the extension can neither await delivery nor observe a failure.
+  sendUserMessage: (message) => {
     sent.push(String(message));
-    if (running) return;
-    running = true;
-    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-    await new Promise(() => {});
+    return undefined;
   },
 };
 function pidAlive(pid) {
@@ -2291,8 +2256,7 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
-running = true;
-await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await startCaptainRun();
 await tool.execute("tool-call-latchgen", {}, undefined, undefined, {});
 mkdirSync(process.env.FM_BURST_GO, { recursive: true });
 const confirms = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
@@ -4695,7 +4659,6 @@ test_pi_restoration_exhaustion_bypasses_ordinary_latch
 test_pi_restoration_lock_loss_bypasses_ordinary_latch
 test_pi_retry_lock_loss_bypasses_ordinary_latch
 test_pi_refused_handshake_bypasses_ordinary_latch
-test_pi_rejected_delivery_rolls_back_ordinary_latch
 test_pi_session_replacement_discards_ordinary_latch
 test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit

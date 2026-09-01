@@ -27,16 +27,22 @@
 // extension only decides whether Pi's fixed follow-up dock gains another row.
 // While one ordinary work-waiting row is pending, later ordinary wakes add no
 // row; the pending row already directs the model to drain the durable queue.
-// The latch lives on the session generation, is set before the delivery await
-// because an idle agent consumes the row and emits agent_start inside that
-// call, clears on both agent_start and agent_settled, and rolls back when
-// delivery rejects before a row exists. A replacement session activates a
-// fresh generation with a clear latch, so no stale latch leaks across
-// generations and a genuinely later burst creates one new row.
+// The latch lives on the session generation and clears on both agent_start and
+// agent_settled. A replacement session activates a fresh generation with a
+// clear latch, so no stale latch leaks across generations and a genuinely
+// later burst creates one new row.
+// The latch is set BEFORE calling pi.sendUserMessage because in Pi 0.84.4 that
+// ExtensionAPI method returns void (dist/core/extensions/types.d.ts declares it
+// void; dist/core/extensions/loader.js discards the runtime promise), so the
+// await resumes on the very next microtask while the run it triggers starts
+// from the runtime's own asynchronous chain and emits agent_start later.
+// Setting the latch before the call is therefore the only ordering with no
+// race; setting it after the await would race the consumption edge and could
+// strand the latch true behind a row that was already consumed.
 // Both clearing edges are needed because Pi 0.84.4 consumes a docked row
-// without a second agent_start. An idle send starts its run inside
-// sendUserMessage and emits agent_start there; a row docked on a busy agent is
-// drained inline by the run already in flight, which emits turn_start only.
+// without a second agent_start. An idle send makes the runtime start a run that
+// emits agent_start; a row docked on a busy agent is drained inline by the run
+// already in flight, which emits turn_start only.
 // agent_start therefore stays the idle-path edge, re-arming presentation the
 // moment that row is consumed rather than at the end of the run it started,
 // while agent_settled is the settle boundary that implies no docked row
@@ -57,6 +63,13 @@
 // that run can dock a second row. That transient is bounded at two rows, both
 // consumed in order, and is the accepted cost of using run boundaries as the
 // only consumption evidence Pi offers.
+// Second residual, a limitation of the current Pi extension API surface rather
+// than a chosen design: the extension cannot observe a failed send at all.
+// ExtensionAPI.sendUserMessage returns void and the runtime binding routes
+// every rejection to runner.emitError, so a delivery that fails leaves the
+// latch set with no row docked and no run started. It clears at the next run's
+// agent_start or agent_settled, in practice the next captain turn, and the
+// durable queue still holds the event meanwhile.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
