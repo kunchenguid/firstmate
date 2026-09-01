@@ -1203,8 +1203,13 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
 }
 
 # fm_backend_herdr_pane_idle_shell_sample: one strict instantaneous
-# observation for fm_backend_herdr_pane_idle_shell_pid, which owns the proof
-# contract and the settle retry.
+# observation of the idle-shell shape.
+# fm_backend_herdr_pane_idle_shell_pid wraps it with the settle retry and owns
+# the proof contract for the destructive close paths.
+# fm_backend_herdr_pane_agent_state instead takes a single sample directly, on
+# purpose: that read runs in poll loops, the retry budget would slow every
+# healthy `live` answer, and its corroboration is positive-only, so a sample
+# lost to a transient prompt helper simply keeps `live` until the next poll.
 fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   local session=$1 pane=$2 info shell_pid foreground_pgid count
   local process_pid name argv0 shell_name rows stat ps_bin
