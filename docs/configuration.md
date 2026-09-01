@@ -685,6 +685,10 @@ The first poll after registration stores the PR's current state silently, so a b
 A failed fetch advances a persisted error streak, and past its budget the child publishes a diagnostic document carrying fixed text only - never a forged forge result - then waits one cadence before continuing, so recovery resumes from the durable cursor.
 Every remote title, author, path, name, and identifier is data: queries are fixed argv built from the validated identity re-derived from the cursor, output is consumed as structural field rows with bounded sanitized values, the wake line names only the source id and sequence, and the tracker has no capability to approve, merge, close, reopen, comment, push, or otherwise modify a PR.
 One captured document announces at most `FM_PR_FOLLOW_MAX_EVENTS` events, and per-collection maxima and state maps advance only to what was announced, so an overflowed poll re-announces its remainder next poll instead of losing it; state maps keep the `FM_PR_FOLLOW_MAP_LIMIT` highest ids.
+One shared word-list vocabulary owns each side of every mapped field: the poll projections normalize unknown check, review, pipeline, and lifecycle words to explicit catch-alls (`unknown` status or review state, `none` absent conclusion) before composing a stored token, and the cursor and document validators accept exactly what those same lists plus the catch-alls can compose, so an ordinary forge vocabulary change can never brick tracking, silently drop an event, or leave a stored token the reader refuses.
+A captured document that claims the adapter's own schema and source but fails validation is an adapter defect rather than tampering: after `FM_PR_FOLLOW_APPLY_BOUND` such refusals the source is quarantined - the failing capture is acknowledged so re-announcement stops, polling pauses, and exactly one bounded monitoring-loss document (fixed text, no forge bytes) surfaces the pause until it is applied - while a document that does not claim this schema and source is tampered or foreign input refused loudly on every attempt without a latch; re-arming with `arm` clears a quarantine and resumes tracking once the adapter is repaired.
+Aggregate polling is bounded by a deterministic modular rotation over `FM_PR_FOLLOW_ROTATION_SLOT`-second slots: the sorted roster of registered sources assigns each slot to exactly one source, so at most one poll burst starts per slot regardless of how many PRs are tracked, no source can be starved (each owns one slot per roster cycle), and merged or closed sources poll only every `FM_PR_FOLLOW_SETTLED_EVERY`-th visit of theirs.
+Worst case at the defaults (a full 13-fetch burst per 300-second slot) is 156 forge requests per hour for the whole home independent of the tracked count, with a per-PR poll interval of at most roster-size x slot while open and roster-size x slot x `FM_PR_FOLLOW_SETTLED_EVERY` once settled; the first poll after a child starts is immediate, and registration is never capped because retirement stays explicit.
 The handling procedure for `procevent pr-follow` wakes lives in `.agents/skills/process-event-sources/SKILL.md`.
 
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
@@ -839,12 +843,15 @@ FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sw
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
-FM_PR_FOLLOW_INTERVAL=300             # seconds between PR lifecycle follow-through polls
+FM_PR_FOLLOW_INTERVAL=300             # minimum seconds between follow-through diagnostic documents and quarantine re-checks
 FM_PR_FOLLOW_FETCH_TIMEOUT=60         # seconds allowed per forge fetch inside one follow-through poll
 FM_PR_FOLLOW_ERROR_BUDGET=3           # consecutive failed fetches before a follow-through diagnostic document
 FM_PR_FOLLOW_MAX_PAGES=5              # per-collection page bound inside one follow-through poll
 FM_PR_FOLLOW_MAX_EVENTS=60            # per-document event bound for follow-through results
 FM_PR_FOLLOW_MAP_LIMIT=40             # bounded review/check/thread map size per follow-through cursor
+FM_PR_FOLLOW_ROTATION_SLOT=300        # seconds per follow-through rotation slot bounding the aggregate poll rate
+FM_PR_FOLLOW_SETTLED_EVERY=3          # settled sources poll every Nth duty visit
+FM_PR_FOLLOW_APPLY_BOUND=2            # adapter-validation failures before a source is quarantined
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
