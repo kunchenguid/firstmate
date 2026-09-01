@@ -240,6 +240,14 @@ test_spawn_durable_worktree_claims() {
   assert_not_contains "$out" "survived the refusal" \
     "a retired endpoint must not be reported as a survivor, even beside a prefix-sharing sibling window"
 
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_TMUX_KILL_FAIL=1 \
+    run_spawn "$home" kill-failed-ii9 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "spawn into another live task's worktree should refuse"
+  assert_not_contains "$out" "survived the refusal" \
+    "a failed close must still read back an already-gone endpoint before warning"
+
   # A close that reports success while the window survives is not a retirement:
   # the leftover endpoint is exactly what refuses the next attempt, so it has to
   # be named rather than swallowed behind the best-effort kill's exit status.
@@ -367,6 +375,7 @@ case "${1:-}" in
       grep -vx "$name" "$FM_FAKE_TMUX_LIVE" > "$FM_FAKE_TMUX_LIVE.next" || true
       mv "$FM_FAKE_TMUX_LIVE.next" "$FM_FAKE_TMUX_LIVE"
     fi
+    [ "${FM_FAKE_TMUX_KILL_FAIL:-0}" != 1 ] || exit 1
     exit 0 ;;
   list-windows) live_names; exit 0 ;;
   has-session|new-session|send-keys|set-window-option) exit 0 ;;

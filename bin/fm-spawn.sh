@@ -862,8 +862,8 @@ spawn_abort_cleanup() {
     # what this cleanup owes the caller, and only a read-back of the name that
     # gates the next spawn can establish it; a survivor is named so it can be
     # retired by hand.
-    if ! fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" \
-       || fm_backend_endpoint_blocks_respawn "$BACKEND" "$T" "$W" 2>/dev/null; then
+    fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" || true
+    if fm_backend_endpoint_blocks_respawn "$BACKEND" "$T" "$W" 2>/dev/null; then
       echo "warning: the new $BACKEND endpoint $T named $W survived the refusal of claimed worktree '$WT'; retire it before retrying task $ID, or the next spawn will refuse the leftover $W" >&2
     fi
   fi
