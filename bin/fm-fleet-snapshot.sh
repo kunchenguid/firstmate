@@ -610,10 +610,10 @@ task_json_lines() {
       --arg target "$target" \
       --arg remote_host "$remote_host" \
       --arg remote_root "$remote_root" \
-      --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
+      --rawfile pr <(printf '%s' "$pr") \
       --rawfile last_event_raw <(printf '%s' "$last_event_raw") \
       --slurpfile current_state <(printf '%s' "$current_json") \
       --argjson meta_path "$meta_json" \

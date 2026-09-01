@@ -940,6 +940,74 @@ EOF
   pass "a status line past the single-argument size cap keeps its task instead of dropping it"
 }
 
+# A status log carrying one PR-URL-shaped token long enough to cross
+# MAX_ARG_STRLEN on its own. first_pr_url_in_file greps
+# 'https?://[^[:space:])"]+/pull/[0-9]+', and POSIX ERE takes the longest
+# leftmost match, so an unbroken run of non-space, non-')', non-'"' bytes
+# between the scheme and /pull/N is returned whole however long it is.
+write_oversized_status_pr_url() {  # <status-file>
+  {
+    printf 'shipped: opened https://example.invalid/'
+    awk 'BEGIN { while (i++ < 4000) printf "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }'
+    printf '/pull/1\n'
+  } > "$1"
+}
+
+# Regression, the same E2BIG drop as the oversized status line above reached
+# through a sibling field: the PR URL is the one task-level value the script
+# derives from status-log text, which nothing bounds, so handing it to jq as a
+# single argv entry killed the per-task jq, dropped the task from .tasks while
+# the snapshot still exited 0, and made main_inventory report the live backlog
+# row as an orphan.
+test_oversized_status_pr_url_keeps_the_task() {
+  local home fakebin out url_bytes pr_len
+  home=$(make_home oversized-status-pr-url)
+  mkdir -p "$home/projects/big-pr-worktree"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] big-pr-task - Big Pr Task (repo: alpha) (kind: ship) (since 2026-08-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/big-pr-task.meta" \
+    "window=firstmate:fm-big-pr-task" \
+    "worktree=$home/projects/big-pr-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  write_oversized_status_pr_url "$home/state/big-pr-task.status"
+  fakebin=$(make_fakebin "$home")
+
+  # Prove the URL token itself - not merely the line - crosses the cap, since
+  # the line's other fields already reach jq through files.
+  url_bytes=$(grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$home/state/big-pr-task.status" \
+    | head -1 | LC_ALL=C wc -c | tr -d ' ')
+  [ "$url_bytes" -gt 131072 ] \
+    || fail "fixture PR URL is only $url_bytes bytes; it must exceed the 131072-byte argv cap"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a PR URL larger than one argv entry"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot output must be valid JSON for an oversized status PR URL"
+
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 1
+      and .tasks[0].id == "big-pr-task"
+      and .main_inventory.valid == true
+      and (.main_inventory.orphan_in_flight | length) == 0
+  ' >/dev/null || fail "an oversized status PR URL must not drop the task or invent an orphan"
+
+  pr_len=$(printf '%s' "$out" | jq -r '.tasks[0].pr.url | length')
+  [ "$pr_len" -eq $((url_bytes - 1)) ] \
+    || fail "the recorded PR URL must survive whole, got $pr_len of $((url_bytes - 1)) characters"
+  printf '%s' "$out" | jq -e '.tasks[0].pr.source == "status_event"' >/dev/null \
+    || fail "a PR URL recovered from the status log must be attributed to the status event"
+  pass "a status-log PR URL past the single-argument size cap keeps its task instead of dropping it"
+}
+
 # Regression: one registered secondmate whose home summary command exits 0 but
 # returns something unusable used to fail the whole snapshot for the entire
 # home. The unusable sample was carried into the record assembly, which could
@@ -993,6 +1061,7 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_oversized_backlog_still_reads
 test_oversized_status_line_keeps_the_task
+test_oversized_status_pr_url_keeps_the_task
 test_unusable_secondmate_summary_degrades_to_unknown_record
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides

@@ -99,6 +99,18 @@ validate_bound FM_BEARINGS_UNHEALTHY "$FM_BEARINGS_UNHEALTHY"
 validate_bound FM_BEARINGS_PR_REPOS "$FM_BEARINGS_PR_REPOS"
 validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 
+# Candidate PR rows grow with the fleet's open PRs, so every value that can grow
+# without limit reaches jq through a file rather than an argv entry: a SINGLE
+# argv entry is capped at MAX_ARG_STRLEN (128 KiB) independently of the far
+# larger ARG_MAX, and exec fails with E2BIG past it.
+# Filters unwrap a slurped document with `doc($x; "x")`, which accepts exactly
+# one document the way --argjson accepts exactly one JSON value: a producer that
+# returned nothing, or that emitted a concatenated multi-value stream, fails
+# closed instead of binding null or silently binding the first value and
+# discarding the rest.
+# shellcheck disable=SC2016 # jq filter text: $d and $name are jq variables.
+JQ_DOC='def doc($d; $name): if ($d | length) != 1 then error("fm-bearings-snapshot: expected exactly one JSON document for $" + $name + ", got " + ($d | length | tostring)) else $d[0] end;'
+
 usage() {
   cat <<'EOF'
 usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
@@ -259,16 +271,8 @@ EOF
       cnt=$(printf '%s' "$repo_rows" | jq 'length')
       [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
       npr=$((npr + cnt))
-      # Candidate PR rows grow with the fleet's open PRs, so the accumulator
-      # and the projection below hand jq slurped files instead of argv entries:
-      # a SINGLE argv entry is capped at MAX_ARG_STRLEN (128 KiB) independently
-      # of the far larger ARG_MAX, and exec fails with E2BIG past it. Exactly
-      # one document is required, so an empty or multi-value stream is refused
-      # rather than folded away, matching --argjson.
       rows=$(jq -n --slurpfile a <(printf '%s' "$rows") --slurpfile b <(printf '%s' "$repo_rows") \
-        'if (($a | length) == 1) and (($b | length) == 1) then $a[0] + $b[0]
-         else error("fm-bearings-snapshot: expected exactly one JSON document for each candidate PR row set, got "
-                    + ($a | length | tostring) + " and " + ($b | length | tostring)) end')
+        "$JQ_DOC"'doc($a; "a") + doc($b; "b")')
     done
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
@@ -320,7 +324,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --slurpfile candidate_prs <(printf '%s' "$CANDIDATE_PRS") '
+  --slurpfile candidate_prs <(printf '%s' "$CANDIDATE_PRS") \
+  "$JQ_DOC"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def round_robin_landed($n):
@@ -329,9 +334,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | $groups[]
        | select(length > $i)
        | .[$i]][:$n];
-  ($candidate_prs | if length == 1 then .[0]
-   else error("fm-bearings-snapshot: expected exactly one JSON document for $candidate_prs, got "
-              + (length | tostring)) end) as $candidate_prs
+  doc($candidate_prs; "candidate_prs") as $candidate_prs
   | ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
