@@ -15,7 +15,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, re-verified on codex-cli 0.150.1 whose installed schema contains `model_reasoning_effort` and whose active config uses it. The bundled catalog advertises these four on every model, and `max` (plus `ultra` on two) on SOME models only, so Firstmate omits `max` as per-model rather than universal - passing it would be a known-bad value on gpt-5.4/5.5. |
 | Model discovery | Open the current interactive session's `/model` picker. |
 | Autonomy | `-s workspace-write -a never` with `-c sandbox_workspace_write.network_access=true`, so the worker runs under codex's own sandbox and never prompts, rather than with both switched off as `--dangerously-bypass-approvals-and-sandbox` did. Verified on codex-cli 0.150.1. |
-| Sandbox | `workspace-write` confines the worker's writes to the task worktree plus `/tmp` and `$TMPDIR`. The explicit `network_access` grant is a separate axis, because that sandbox otherwise denies network egress by default and a crewmate could not push, use `gh`, or install dependencies. |
+| Sandbox | `workspace-write` confines the worker's writes to the task worktree plus `/tmp` and `$TMPDIR`, which is why the launch also grants back the per-kind `--add-dir` roots each brief needs outside it. The explicit `network_access` grant is a separate axis, because that sandbox otherwise denies network egress by default and a crewmate could not push, use `gh`, or install dependencies. "Sandbox and writable roots" below owns both. |
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
@@ -61,6 +61,7 @@ Every brief kind carries the same inbox section, whose acknowledgement is a `mv`
 Firstmate creates the inbox and its `handled/` at launch so the root resolves.
 
 Every root is emitted with its symlinks resolved, because codex resolves a granted root that way and the launch's own turn-end path is already canonical.
+A state or data RECORD that is itself a symlink refuses the whole codex launch instead of resolving through the link or composing a grant short of what the brief needs, and the refusal names the path to repair before respawning.
 
 `$FM_HOME` itself, `.env`, `config/`, `projects/`, and every other home stay denied, and the brief's own rule against writing outside the worktree remains stricter than the sandbox.
 
