@@ -46,6 +46,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
+  Every one of them must also parse under stock macOS `/bin/bash` 3.2, whose lexer tracks quote state through a heredoc body nested in `$(...)`, so never build a variable with `VAR=$(cat <<EOF ... EOF)`; use a plain heredoc into `cat`, `IFS= read -r -d '' VAR <<EOF || true`, or a function that prints the block instead.
+  The `macos-stock-bash` CI job runs the `/bin/bash -n` sweep below on real 3.2 for every pull request, and `tests/fm-brief.test.sh` guards the brief renderers' shape locally.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and both CI and the no-mistakes pre-push gate invoke it with no arguments.
   Its header and `--help` output own the exact local lint modes, file-set selection, and analysis flags.
   A malformed `.github/workflows/*.yml`, including a self-broken `ci.yml`, fails that local lint path before merge because a broken workflow cannot report its own breakage.
