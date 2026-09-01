@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports four active guarantees for promised public replies made through the myfirstmate relay:
+This record supports five active guarantees for promised public replies made through the myfirstmate relay:
 
 1. A promised final reply survives compaction and restart, reconciles from disk alone, and lands in the original thread exactly once.
 2. A home that never opted into the relay pays nothing for any of it.
