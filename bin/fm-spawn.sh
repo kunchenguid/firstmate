@@ -1884,6 +1884,17 @@ real_path_or_raw() {  # <path>
 # record by hand. The refusal message already names the owning task, the record
 # file, and the unresolvable path, which is what an operator needs to clear it.
 #
+# A --relaunch is exempt from the unresolvable-value refusal and continues past
+# such a record exactly as an absent value is skipped. A relaunch allocates no
+# worktree - $WT is the task's own recorded copy, where its endpoint already
+# sits - and freshen_spawn_worktree_base only runs when RELAUNCH is 0, so the
+# destructive base reset this refusal exists to prevent cannot occur there.
+# Without the exemption a single stale foreign record would refuse every
+# relaunch in the home, so a guard meant to prevent losing work would block the
+# recovery path used to replace a stuck worker. A resolved foreign claim that
+# matches the candidate still refuses on relaunch, as does an unresolvable value
+# on a fresh spawn.
+#
 # Widening the scan across sibling homes is tracked separately and is
 # deliberately out of scope here: it would add a cross-home read, and a new
 # failure mode, to the spawn path.
@@ -1898,7 +1909,8 @@ assert_spawn_worktree_unclaimed() {
     recorded=$(fm_meta_get "$meta" worktree)
     [ -n "$recorded" ] || continue
     if ! recorded_real=$(cd "$recorded" 2>/dev/null && pwd -P); then
-      if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+      [ "$RELAUNCH" -eq 0 ] || continue
+      if [ "$BACKEND" != orca ]; then
         SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=1
       fi
       echo "error: task $owner record $meta has worktree='$recorded', but that recorded path could not be resolved; refusing to launch task $ID because an unresolvable claim is not evidence of a free worktree." >&2

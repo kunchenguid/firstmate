@@ -190,7 +190,7 @@ test_spawn_isolation_abort() {
 # --- GUARD 1c: fm-spawn durable worktree claims ----------------------------
 
 test_spawn_durable_worktree_claims() {
-  local home proj claimed free own alias broken fakebin rec out status
+  local home proj claimed free own alias broken recover fakebin rec out status
   home="$TMP_ROOT/spawn-claim-home"
   mkdir -p "$home/data" "$home/state"
   proj=$(make_repo "$TMP_ROOT/spawn-claim-proj")
@@ -294,6 +294,36 @@ test_spawn_durable_worktree_claims() {
     "the unresolvable-claim refusal did not explain why it stopped the spawn"
   assert_grep 'kill-window -t =firstmate:=fm-unresolvable-kk1' "$rec" \
     "an unresolvable claim refusal must retire the endpoint it created"
+
+  # The same unresolvable foreign record must NOT wedge the recovery path: a
+  # relaunch allocates no worktree and never refreshes a pooled base, so the
+  # destructive reset the refusal above prevents cannot happen on a relaunch.
+  recover="$TMP_ROOT/spawn-recover-wt"
+  git -C "$proj" worktree add -q --detach "$recover" >/dev/null 2>&1
+  fm_test_spawn_brief "$home" recover-ll2 brief
+  {
+    echo 'window=firstmate:fm-recover-ll2'
+    echo 'endpoint_task_id=recover-ll2'
+    echo "worktree=$recover/"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'tasktmp=/tmp/fm-recover-ll2'
+    echo 'model=default'
+    echo 'effort=default'
+  } > "$home/state/recover-ll2.meta"
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_WINDOWS='fm-recover-ll2' FM_FAKE_PANE_COMMAND=zsh \
+    fm_test_run_spawn "$home" "$recover" "$fakebin" recover-ll2 --relaunch)
+  status=$?
+  expect_code 0 "$status" \
+    "an unrelated unresolvable claim must not block relaunching a correctly recorded task"
+  assert_contains "$out" 'spawned recover-ll2' "the relaunch did not report success"
+  assert_not_contains "$out" 'could not be resolved' \
+    "the relaunch must not refuse on another record's unresolvable worktree value"
+  rm "$home/state/recover-ll2.meta"
   rm "$home/state/broken-claim.meta"
 
   {
