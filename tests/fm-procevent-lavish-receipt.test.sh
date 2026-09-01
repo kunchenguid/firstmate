@@ -34,6 +34,7 @@ STUB_IDX="$STUB_ROOT/idx"
 STUB_LOG="$STUB_ROOT/argv.log"
 STUB_FAIL_ONCE="$STUB_ROOT/fail-once"
 STUB_INTERRUPT_ONCE="$STUB_ROOT/interrupt-once"
+STUB_HOLD="$STUB_ROOT/hold"
 STUB_BIN_DIR="$STUB_ROOT/bin"
 
 make_home() {  # <name>
@@ -86,10 +87,13 @@ tasks_in() {  # <home> <args...>
 install_stub() {
   mkdir -p "$STUB_BIN_DIR"
   : > "$STUB_QUEUE"
-  rm -f "$STUB_IDX" "$STUB_LOG" "$STUB_FAIL_ONCE" "$STUB_INTERRUPT_ONCE"
+  rm -f "$STUB_IDX" "$STUB_LOG" "$STUB_FAIL_ONCE" "$STUB_INTERRUPT_ONCE" "$STUB_HOLD"
   cat > "$STUB_BIN_DIR/lavish-axi" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$STUB_LOG"
+# A held poll blocks in the runner's own process group, so the runner's leader
+# can be killed with a live child of its generation still running.
+while [ -e "$STUB_HOLD" ]; do sleep 0.05; done
 if [ -e "$STUB_FAIL_ONCE" ]; then
   rm -f "$STUB_FAIL_ONCE"
   exit 1
@@ -792,5 +796,65 @@ PATH="$STUB_BIN_DIR:$PATH" run_lavish "$H15" arm "$ART15" >/dev/null \
 assert_present "$H15/state/procevent/$SID15.source" \
   "arm did not register the source once its captures were settled"
 pass "arm refuses while unhandled captured generations remain on the artifact"
+
+# --- a crashed leader's verdict is recovered before its group is reaped ------
+# SIGKILL on a runner leader alone leaves its owned group running, so the claim
+# reads as the crash cut rather than as gone. That leader can never run its own
+# seam, and the reap that stops its group drops the whole staging set - so a
+# recovery that defers to the crash cut destroys the verdict the dead runner
+# had already recorded, and the round is published with no acknowledgement and
+# never appears on any receipt.
+H16=$(make_home h16)
+RECEIPT_HOME=$H16
+ART16="$TMP_ROOT/deck16.html"
+printf '<h1>deck</h1>\n' > "$ART16"
+RECEIPT_SID=$(run_lavish "$H16" source-id "$ART16")
+tasks_in "$H16" add deck-alpha "Alpha call" --kind ship --repo sample --body 'Alpha plan.' >/dev/null
+run_captain "$H16" hold deck-alpha --reason "alpha choice pending" >/dev/null
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+run_captain "$H16" bind "$RECEIPT_SID" >/dev/null
+run_lavish "$H16" arm "$ART16" >/dev/null
+journal="$H16/state/procevent/$RECEIPT_SID.receipts"
+result="$H16/state/procevent-inbox/$RECEIPT_SID.1.result"
+reconcile_once
+wait_i=0
+while [ ! -e "$result" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+wait_claim_free
+[ -e "$result" ] || fail "the round was never captured"
+# The next runner blocks inside its poll, so killing its leader leaves that
+# generation's own child alive - the crash cut, not a gone claim.
+: > "$STUB_HOLD"
+reconcile_once
+claim="$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+wait_i=0
+while [ ! -e "$claim" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+[ -e "$claim" ] || fail "the replacement runner never claimed the source"
+crash_leader=$(sed -n '2p' "$claim")
+crash_token=$(sed -n '3p' "$claim")
+case "$crash_leader" in ''|*[!0-9]*) fail "could not read the runner leader pid: $crash_leader" ;; esac
+[ -n "$crash_token" ] || fail "could not read the crashed generation's claim token"
+kill -KILL "$crash_leader" 2>/dev/null || fail "could not kill the runner leader"
+for _ in $(seq 1 50); do kill -0 "$crash_leader" 2>/dev/null || break; sleep 0.1; done
+kill -0 "$crash_leader" 2>/dev/null && fail "the runner leader survived SIGKILL"
+kill -0 -"$crash_leader" 2>/dev/null \
+  || fail "fixture invalid: the crashed leader's owned group did not survive it"
+# Roll the durable state back to the instant before that generation reached its
+# seam, leaving behind exactly what it had already staged: its recorded verdict
+# and the note pinning that verdict to this one sequence.
+rm -f "$journal" "$H16/state/procevent-inbox/$RECEIPT_SID.1.receipted"
+staged="$H16/state/procevent/.$RECEIPT_SID.$crash_token.rcpt.output"
+printf 'fed 0\nclosed: deck-alpha\n' > "$staged"
+printf '%s\t%s\n' "$RECEIPT_SID" 1 > "$staged.gen"
+chmod 0600 "$staged" "$staged.gen"
+reconcile_once
+grep -qs '^received' "$journal" \
+  || fail "the crashed leader's generation was reaped without ever running its seam"
+[ "$(awk -F '\t' '$1 == "saved" && $2 == 1 { print $4 }' "$journal")" = 1 ] \
+  || fail "recovery lost the verdict the crashed leader had already staged"
+text=$(run_lavish "$H16" receipt-text "$RECEIPT_SID")
+assert_contains "$text" "saved 1 of 1" "the recovered round never reached the visible receipt"
+rm -f "$STUB_HOLD" "$staged" "$staged.gen"
+pass "a crashed leader's staged verdict is recovered before its group is reaped"
 
 printf '\nall Lavish receipt tests passed\n'

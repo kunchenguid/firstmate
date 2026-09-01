@@ -454,6 +454,8 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file> <outcome-file>
   # never sees a half-written verdict as a whole one.
   [ ! -e "$outcome.tmp" ] && [ ! -L "$outcome.tmp" ] \
     || { printf 'not-fed\n' > "$outcome"; rm -f -- "$body"; return 1; }
+  (umask 077; : > "$outcome.tmp") \
+    || { printf 'not-fed\n' > "$outcome"; rm -f -- "$body"; return 1; }
   {
     if [ "$answers_rc" -ne 0 ]; then
       # The adapter failed to extract its own answers. The intake above may
@@ -1129,17 +1131,21 @@ recover_receipt_seams() {
     [ -n "$adapter" ] || continue
     fm_procevent_source_lock_acquire "$id" || continue
     if ! fm_procevent_receipt_seam_ran "$STATE" "$id" "$seq"; then
-      # A generation whose runner is still alive owns its own seam: the runner
-      # runs it between its capture and its publication, and recovery stepping
-      # in now would present a half-kept verdict. The claim is the liveness
-      # fact: any held or terminal-marked claim (0, 2, 3, 4) leaves the
-      # generation to its runner, and only a gone claim (1) is recoverable
-      # here. The seam-ran re-check above stays, so a runner that completed
-      # its seam while this reconcile waited on the lock is still respected.
+      # A generation whose runner can still reach its own seam owns it: that
+      # runner runs it between its capture and its publication, and recovery
+      # stepping in now would present a half-kept verdict. The claim is the
+      # liveness fact, and only a claim whose LEADER is gone is recoverable
+      # here: a gone claim (1), and equally the crash cut (3), where the leader
+      # is dead and only its owned group survives. That leader can never run
+      # its seam, and the reap that stops its group drops the whole staging
+      # set, so deferring 3 would destroy the verdict it had already recorded.
+      # A held or terminal-marked claim (0, 2, 4) is still left to its runner.
+      # The seam-ran re-check above stays, so a runner that completed its seam
+      # while this reconcile waited on the lock is still respected.
       fm_procevent_claim_state_locked "$id"
       claim_state=$?
       case "$claim_state" in
-        1) ;;
+        1|3) ;;
         *) fm_procevent_source_lock_release "$id"; continue ;;
       esac
       # The dead generation's own outcome is left where it lies: it belongs to
