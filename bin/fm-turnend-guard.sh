@@ -64,6 +64,29 @@
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
 #      fail-open only for an already verified failure episode.
+# An auto-arm that reached its own consecutive-failure cap records outcome
+# failed-capped and stops creating continuations, so this guard treats that
+# outcome exactly like the other exhausted-failure outcomes and carries the
+# episode to its bounded blocks and one attended fail-open. Two consequences of
+# that handover are load-bearing here. A capped firing still takes a generation
+# and briefly publishes an "arming" claim it will never act on, so inside a
+# capped episode an open claim is NOT recovery to step aside for; deferring to it
+# would allow a stop with no watcher and no continuation from either layer. And
+# the capping firing can be the one that never wrote the failure notice - at a
+# cap of 1, or when the notice write was refused - so the durable stop record
+# state/.claude-autoarm-failure-capped counts as this episode's failure record
+# wherever that notice does, or the escalation would block forever without ever
+# reaching its one attended fail-open.
+#
+# Ownership, --claude mode only: a Pi primary can run its turns through a nested
+# `claude` subprocess in this same checkout, so where that subprocess loads
+# project settings this Claude-registered entry would guard the same logical turn
+# end that .pi/extensions/fm-primary-turnend-guard.ts already guards from
+# `agent_settled`. When a live Pi primary provably owns this home's turn-end
+# protection, the Claude entry stands down for that owner; without the proof it
+# protects exactly as before, so a missing, crashed, or unclaimable owner leaves
+# no gap. The DEFAULT mode never defers, because the Pi extension itself is the
+# caller that runs this guard with no flags.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -147,12 +170,38 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+# Exactly one protection layer per logical turn end (see the header). Only the
+# Claude-registered entry defers, and only to a proven live owner; the default
+# mode is how the owning Pi extension calls this guard.
+if [ "$CLAUDE_MODE" -eq 1 ] && fm_turnend_owner_is_pi_primary "$STATE" "$FM_ROOT"; then
+  exit 0
+fi
+
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
-SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+SESSION_ID=$(fm_autoarm_session_key "$PAYLOAD" "$STATE")
+
+# This episode's durable operator-visible failure record: the once-per-episode
+# notice, or the auto-arm's own cap record for THIS session. Either one proves
+# the episode is a real exhausted-failure episode rather than a first unexplained
+# failure, which is the question every caller below is actually asking (see the
+# header). The cap record is session-keyed exactly as the auto-arm writes it, so
+# both layers read "capped" as "capped for this session"; within one Stop event
+# they see the same session_id and therefore always agree.
+failure_episode_recorded() {
+  [ -e "$FAILURE_NOTICE" ] || fm_autoarm_failure_capped "$STATE" "$SESSION_ID"
+}
+
+# An open auto-arm claim owns recovery only while the episode is not capped. A
+# capped firing claims a generation and then exits 0 without arming, so its
+# claim proves no continuation is coming.
+autoarm_claim_owns_recovery() {
+  ! fm_autoarm_failure_capped "$STATE" "$SESSION_ID" && fm_autoarm_claim_open "$STATE" "$GRACE"
+}
+
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
@@ -162,7 +211,7 @@ budget_reset() {
 
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
-  [ -e "$FAILURE_NOTICE" ] || budget_reset
+  failure_episode_recorded || budget_reset
   exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
@@ -232,8 +281,8 @@ budget_account_current_epoch() {
   fi
   if [ ! -f "$BUDGET_FILE" ] || [ "${old_session:-}" != "$SESSION_ID" ]; then
     case "$outcome" in
-      failed|failed-suppressed)
-        if [ -e "$FAILURE_NOTICE" ]; then
+      failed|failed-suppressed|failed-capped)
+        if failure_episode_recorded; then
           initialized=1
           COUNT=0
         else
@@ -267,8 +316,8 @@ autoarm_owns_recovery() {
   # watcher go unnoticed for turn after turn; the outcome cases below still
   # cover a claim that finished moments ago, so a genuine handoff is not
   # duplicated, while a stale one now reaches the block.
-  if fm_autoarm_claim_open "$STATE" "$GRACE"; then
-    [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+  if autoarm_claim_owns_recovery; then
+    ! failure_episode_recorded || budget_account_current_epoch || true
     return 0
   fi
   # Legacy shim: a pre-generation build's claim holds the owner lock with the
@@ -278,7 +327,7 @@ autoarm_owns_recovery() {
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if fm_pid_alive "$pid" && [ "$role" = autoarm ] \
     && ! fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
-    [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+    ! failure_episode_recorded || budget_account_current_epoch || true
     return 0
   fi
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
@@ -286,20 +335,20 @@ autoarm_owns_recovery() {
     rewake)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
       if [ "$age" -lt "$EPOCH_FRESH" ]; then
-        [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+        ! failure_episode_recorded || budget_account_current_epoch || true
         return 0
       fi
       ;;
     failed)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
-      if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
+      if [ "$age" -lt "$EPOCH_FRESH" ] && failure_episode_recorded \
         && budget_account_current_epoch; then
         [ "$BUDGET_INITIALIZED_FAILURE" -eq 1 ] && return 0
       fi
       ;;
-    failed-suppressed)
+    failed-suppressed|failed-capped)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
-      if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
+      if [ "$age" -lt "$EPOCH_FRESH" ] && failure_episode_recorded \
         && budget_account_current_epoch; then
         :
       fi
@@ -315,7 +364,7 @@ terminal_fail_open() {
   [ ! -e "$FAILURE_ALARM" ] || return 1
   # A live open generation claim is a concurrent recovery decision to step
   # aside for, exactly like the legacy live-owner case below.
-  fm_autoarm_claim_open "$STATE" "$GRACE" && return 2
+  autoarm_claim_owns_recovery && return 2
   if ! fm_lock_try_acquire "$OWNER_LOCK"; then
     pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
     role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
@@ -368,7 +417,7 @@ terminal_fail_open() {
   # claimant that published "arming" between the pre-check above and the lock
   # acquisition is active recovery, and alarming over it would fire the
   # episode's one attended fail-open while a continuation is under way.
-  if fm_autoarm_claim_open "$STATE" "$GRACE"; then
+  if autoarm_claim_owns_recovery; then
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
     return 2
@@ -386,10 +435,10 @@ terminal_fail_open() {
 failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
-  [ -e "$FAILURE_NOTICE" ] || return 1
+  failure_episode_recorded || return 1
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
-    failed|failed-suppressed) return 0 ;;
+    failed|failed-suppressed|failed-capped) return 0 ;;
     *) return 1 ;;
   esac
 }

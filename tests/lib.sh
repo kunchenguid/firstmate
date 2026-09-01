@@ -313,3 +313,69 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# fm_dead_pid: a pid guaranteed not to be running, for the evidence a dead
+# process left behind.
+fm_dead_pid() {
+  local pid=999999
+  while kill -0 "$pid" 2>/dev/null; do
+    pid=$((pid + 1))
+  done
+  printf '%s\n' "$pid"
+}
+
+# fm_pid_identity_of <wake-lib> <state> <pid>: the identity the real
+# fm_pid_identity computes for <pid>, which is what every marker and lock in this
+# repo records. Prints nothing and returns nonzero when <pid> has no identity to
+# record, i.e. it is not alive: the status is propagated deliberately, because
+# most callers record that identity into a fixture and a silent empty value
+# would make the fixture prove something other than what its test is named for.
+fm_pid_identity_of() {
+  local wake_lib=$1 state=$2 pid=$3
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$wake_lib" "$pid" 2>/dev/null
+}
+
+# The identity a marker for a process that is no longer running carries: a real
+# recorded value that can never recompute to a live process, which is exactly
+# what a crashed owner leaves behind.
+FM_STALE_PID_IDENTITY='proc-starttime=1 cmdline-hex=00'
+
+# fm_record_pi_extension_session <dir> <session-pid> [drift] [write-lock] [identity]:
+# stand up the durable evidence a live Pi primary session leaves behind, which is
+# what fm_pi_extension_owns_supervision (and the turn-end ownership predicate
+# built on it) reads. Writes both primary extensions under <dir>/.pi/extensions
+# and one marker per extension in <dir>/state recording that extension's build
+# version, <session-pid>, and that pid's identity. Pass drift="drift" to record a
+# version that is NOT the current build, i.e. a session that loaded an older
+# extension. Pass write-lock="lock" to also claim <dir>/state/.lock for
+# <session-pid>. Pass identity to record one explicitly, which is how a fixture
+# reproduces a crashed owner whose pid was later reused; by default the real
+# identity of <session-pid> is recorded, falling back to a stale one when that
+# pid is already dead. <dir>/bin/fm-wake-lib.sh must already be installed, since
+# the real fm_pi_extension_version and fm_pid_identity compute what a marker
+# carries.
+fm_record_pi_extension_session() {
+  local dir=$1 session_pid=$2 drift=${3:-} write_lock=${4:-} identity=${5:-}
+  local pair source marker version
+  mkdir -p "$dir/.pi/extensions"
+  if [ -z "$identity" ]; then
+    identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$session_pid")
+    [ -n "$identity" ] || identity=$FM_STALE_PID_IDENTITY
+  fi
+  for pair in \
+    "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
+    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"; do
+    source=${pair%%:*}
+    marker=${pair#*:}
+    printf '// %s fixture\n' "$source" > "$dir/.pi/extensions/$source"
+    if [ "$drift" = drift ]; then
+      version="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    else
+      version=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
+        _ "$dir/bin/fm-wake-lib.sh" "$dir/.pi/extensions/$source") || return 1
+    fi
+    printf '%s\n%s\n%s\n' "$version" "$session_pid" "$identity" > "$dir/state/$marker"
+  done
+  [ "$write_lock" != lock ] || printf '%s\n' "$session_pid" > "$dir/state/.lock"
+  return 0
+}

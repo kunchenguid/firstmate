@@ -96,11 +96,19 @@ run_guard_case_extension() {
 #   omit         "" | watch | turnend - skip that extension's marker
 #   drift        "" | watch | turnend - write a marker whose version is not the
 #                current build, i.e. the session loaded an older extension
+#   identity     "" records session_pid's real identity (a stale placeholder when
+#                that pid is already dead); pass one explicitly to reproduce a
+#                crashed session whose pid was later reused by another process
 record_pi_extension_session() {
-  local dir=$1 session_pid=${2:-} omit=${3:-} drift=${4:-} home root pair source marker version
+  local dir=$1 session_pid=${2:-} omit=${3:-} drift=${4:-} identity=${5:-}
+  local home root pair source marker version
   home=$(case_home "$dir")
   root=$(case_root "$dir")
   mkdir -p "$root/.pi/extensions"
+  if [ -z "$identity" ]; then
+    identity=$(fm_pid_identity_of "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$session_pid")
+    [ -n "$identity" ] || identity=$FM_STALE_PID_IDENTITY
+  fi
   for pair in \
     "fm-primary-pi-watch.ts:.pi-watch-extension-loaded:watch" \
     "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded:turnend"; do
@@ -114,7 +122,7 @@ record_pi_extension_session() {
       version=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
         _ "$ROOT/bin/fm-wake-lib.sh" "$root/.pi/extensions/$source") || return 1
     fi
-    printf '%s\n%s\n' "$version" "$session_pid" > "$home/state/$marker"
+    printf '%s\n%s\n%s\n' "$version" "$session_pid" "$identity" > "$home/state/$marker"
   done
   [ -n "$session_pid" ] && printf '%s\n' "$session_pid" > "$home/state/.lock"
   return 0

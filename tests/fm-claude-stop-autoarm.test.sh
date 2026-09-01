@@ -69,10 +69,39 @@ make_crewmate_worktree_dir() {
 # session lock. $1 = fixture dir. Any extra env assignments must be exported
 # before invocation. Captures stdout+stderr; exit code on stdout of the caller.
 run_autoarm() {
+  run_autoarm_as_session "$1" sess-autoarm
+}
+
+# Same, with an explicit Stop payload session_id: that field is the key the
+# consecutive-failure run and its cap are scoped by, so a test that spans two
+# sessions delivers two different ones.
+run_autoarm_as_session() {
+  local dir=$1 session=$2 rc=0
+  printf '{"session_id":"%s","stop_hook_active":false}\n' "$session" \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1 || rc=$?
+  printf 'RC=%s\n' "$rc" >&2
+  return "$rc"
+}
+
+# Same, after re-pointing the recorded Pi ownership markers at the fake harness's
+# own live pid, which is how a pid reuse looks from disk: the markers and their
+# recorded identity belong to a process that has since died, and this unrelated
+# live process now carries that very pid.
+run_autoarm_with_reused_owner_pid() {
   local dir=$1 rc=0
   printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        for marker in .pi-watch-extension-loaded .pi-turnend-extension-loaded; do
+          printf "%s\n%s\n%s\n" \
+            "$(sed -n 1p "$FM_HOME/state/$marker")" \
+            "$$" \
+            "$(sed -n 3p "$FM_HOME/state/$marker")" \
+            > "$FM_HOME/state/$marker"
+        done
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
       ' 2>&1 || rc=$?
   printf 'RC=%s\n' "$rc" >&2
@@ -202,11 +231,6 @@ run_autoarm_bg() {
   RUN_AUTOARM_BG_PID=$!
 }
 
-watcher_identity() {
-  local dir=$1 pid=$2
-  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
-}
-
 record_watcher_lock() {
   local dir=$1 pid=$2 identity=$3 root bin_dir
   root=$dir
@@ -221,6 +245,246 @@ record_watcher_lock() {
 # --- registration contract ----------------------------------------------------
 
 # --- scope and gates ----------------------------------------------------------
+
+# Run the hook WITHOUT the fake harness claiming the session lock, so a fixture
+# that records its own lock owner (a Pi session) keeps it.
+run_autoarm_unclaimed() {
+  local dir=$1 rc=0
+  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" 2>&1 || rc=$?
+  return "$rc"
+}
+
+# --- consecutive-failure cap --------------------------------------------------
+
+test_consecutive_failures_stop_at_the_cap() {
+  local dir out1 out2 out3 status1 status2 status3 arms_at_cap arms_after
+  dir=$(make_primary_dir "$TMP_ROOT/failure-cap")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  export FM_CLAUDE_AUTOARM_FAILURE_CAP=2
+  out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
+  out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
+  arms_at_cap=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+  out3=$(run_autoarm "$dir" 2>/dev/null); status3=$?
+  arms_after=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+  unset FM_CLAUDE_AUTOARM_FAILURE_CAP
+
+  expect_code 2 "$status1" "the first exhausted failure must still force a Stop-owned retry"
+  assert_contains "$out1" "automatic supervision mechanism is broken" "the first failure must deliver its one notice"
+  expect_code 2 "$status2" "the capping firing must deliver its notice, which only exit 2 hands to the harness"
+  assert_contains "$out2" "auto-arm CAPPED" "reaching the cap must surface the stop once"
+  assert_present "$dir/state/.claude-autoarm-failure-capped" "reaching the cap must record the stop durably"
+  assert_contains "$(cat "$dir/state/.claude-autoarm-failure-capped")" "reason=" "the durable stop record must name the reason"
+  [ "$(epoch_outcome "$dir")" = failed-capped ] || fail "the capping firing must record outcome=failed-capped, got: $(epoch_outcome "$dir")"
+
+  expect_code 0 "$status3" "a firing after the cap must not create another continuation"
+  [ -z "$out3" ] || fail "a firing after the cap repeated an operator notice: $out3"
+  [ "$arms_after" -eq "$arms_at_cap" ] \
+    || fail "a firing after the cap kept re-arming: $arms_at_cap attempts before, $arms_after after"
+  pass "auto-arm: consecutive failed re-arms stop at the cap with one durable, once-surfaced record"
+}
+
+test_capped_episode_ends_on_positive_watcher_recovery() {
+  local dir out status pid identity arms_before
+  dir=$(make_primary_dir "$TMP_ROOT/failure-cap-recovery")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  export FM_CLAUDE_AUTOARM_FAILURE_CAP=1
+  out=$(run_autoarm "$dir" 2>/dev/null) || true
+  unset FM_CLAUDE_AUTOARM_FAILURE_CAP
+  assert_present "$dir/state/.claude-autoarm-failure-capped" "the episode did not reach the cap"
+  arms_before=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+
+  # A verified healthy watcher is positive recovery: it must end the capped
+  # episode from this hook alone, so a home whose synchronous guard never runs is
+  # not left permanently un-armed.
+  sleep 30 &
+  pid=$!
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") \
+    || fail "could not identify the recovered home's live watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  assert_absent "$dir/state/.claude-autoarm-failure-capped" "positive watcher recovery did not clear the durable stop record"
+  assert_absent "$dir/state/.claude-autoarm-failure-count" "positive watcher recovery did not clear the consecutive-failure count"
+  expect_code 2 "$status" "the recovered home must arm and translate again"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -gt "$arms_before" ] \
+    || fail "the recovered home never re-armed after the cap was cleared"
+  pass "auto-arm: positive watcher recovery ends a capped failure episode and re-arms"
+}
+
+# --- single ownership per logical turn end ------------------------------------
+
+test_stands_down_for_a_proven_pi_primary_owner() {
+  local dir status pid
+  dir=$(make_primary_dir "$TMP_ROOT/pi-owner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 30 &
+  pid=$!
+  printf '%s\n' "$pid" > "$dir/state/.lock"
+  fm_record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi ownership evidence"
+  run_autoarm_unclaimed "$dir" >/dev/null 2>&1; status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "the nested Claude Stop entry must stand down for a proven Pi owner"
+  [ ! -e "$dir/state/arm-ran" ] || fail "the nested Stop entry armed while a Pi primary owned the turn end"
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "the nested Stop entry claimed a generation under a Pi owner"
+  pass "auto-arm: stands down while a live Pi primary provably owns the turn end"
+}
+
+test_protects_when_the_pi_owner_cannot_be_proven() {
+  local dir status pid dead case_name
+  for case_name in dead-session drifted-build; do
+    dir=$(make_primary_dir "$TMP_ROOT/pi-owner-$case_name")
+    : > "$dir/state/task.meta"
+    write_arm_fixture "$dir" actionable
+    if [ "$case_name" = dead-session ]; then
+      # A crashed Pi session: its markers survive, its process does not. The
+      # ownership proof must fail, and the fake harness then owns the lock and
+      # arms exactly as it does with no Pi in the picture at all.
+      dead=$(fm_dead_pid)
+      fm_record_pi_extension_session "$dir" "$dead" || fail "could not record the Pi ownership evidence"
+      run_autoarm "$dir" >/dev/null 2>&1; status=$?
+    else
+      sleep 30 &
+      pid=$!
+      printf '%s\n' "$pid" > "$dir/state/.lock"
+      fm_record_pi_extension_session "$dir" "$pid" drift || fail "could not record the Pi ownership evidence"
+      run_autoarm_unclaimed "$dir" >/dev/null 2>&1; status=$?
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+    expect_code 2 "$status" "$case_name: an unprovable Pi owner must leave the Claude Stop entry protecting the turn end"
+    [ -e "$dir/state/arm-ran" ] || fail "$case_name: the Claude Stop entry did not arm without a proven owner"
+  done
+  pass "auto-arm: keeps protecting the turn end when Pi ownership cannot be proven"
+}
+
+# A SIGKILLed Pi leaves its markers and its lock behind, and the operating system
+# later hands that pid to an unrelated live process. Everything a pid-only proof
+# can see still lines up - current builds, marker pid equal to the lock pid, that
+# pid alive - so only recomputing the recorded identity can tell that the owner is
+# gone. It must, or this hook would stand down over nothing.
+test_a_reused_owner_pid_never_proves_pi_ownership() {
+  local dir status other stale
+  dir=$(make_primary_dir "$TMP_ROOT/pi-owner-reused-pid")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 30 &
+  other=$!
+  stale=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$other")
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  [ -n "$stale" ] || fail "could not capture the crashed owner's identity"
+  fm_record_pi_extension_session "$dir" "$other" "" "" "$stale" \
+    || fail "could not record the Pi ownership evidence"
+  run_autoarm_with_reused_owner_pid "$dir" >/dev/null 2>&1; status=$?
+  expect_code 2 "$status" "a reused owner pid must leave the Claude Stop entry protecting the turn end"
+  [ -e "$dir/state/arm-ran" ] || fail "the Claude Stop entry did not arm behind a dead owner whose pid was reused"
+  pass "auto-arm: a reused owner pid never proves Pi ownership"
+}
+
+# --- session scope of the cap -------------------------------------------------
+
+# The consecutive-failure run and its cap belong to one session, exactly as the
+# synchronous guard's block budget does. A later session in the same home must
+# therefore get its own honest arm attempt instead of inheriting a previous
+# session's cap before it has failed even once.
+test_a_new_session_is_not_capped_by_a_previous_session() {
+  local dir status arms_before arms_after
+  dir=$(make_primary_dir "$TMP_ROOT/failure-cap-new-session")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  export FM_CLAUDE_AUTOARM_FAILURE_CAP=1
+  run_autoarm_as_session "$dir" sess-first >/dev/null 2>&1 || true
+  assert_present "$dir/state/.claude-autoarm-failure-capped" "the first session did not reach the cap"
+  arms_before=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+
+  run_autoarm_as_session "$dir" sess-second >/dev/null 2>&1; status=$?
+  unset FM_CLAUDE_AUTOARM_FAILURE_CAP
+  arms_after=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+
+  [ "$arms_after" -gt "$arms_before" ] \
+    || fail "the new session was capped before its own first failure: $arms_before arm attempts before, $arms_after after"
+  expect_code 2 "$status" "the new session's own first failure must still force its Stop-owned retry"
+  assert_contains "$(cat "$dir/state/.claude-autoarm-failure-capped")" "session=sess-second" \
+    "the new session's own cap must replace the previous session's stop record"
+  pass "auto-arm: a new session gets an honest arm attempt after a previous session's cap"
+}
+
+# A PATH holding only the tools this hook needs, with jq deliberately absent.
+# The hook is jq-optional and runs fully without it, so the key it scopes the
+# consecutive-failure run and its cap by has to keep varying per session there;
+# the synchronous guard cannot cover for a shared one, because it exits before
+# its own jq-dependent read and so never reaches the fail-open that would end
+# such an episode.
+make_nojq_bin() {
+  local dir=$1 bin tool real
+  bin="$dir/nojq-bin"
+  mkdir -p "$bin"
+  for tool in awk bash basename cat chmod cksum date dirname env find git grep head \
+    ln ls mkdir mktemp mv od ps readlink rm sed sha256sum shasum sleep sort stat \
+    tail touch tr uname wc; do
+    real=$(command -v "$tool") || continue
+    case "$real" in /*) ln -sf "$real" "$bin/$tool" ;; esac
+  done
+  for tool in bash cat git grep ps sed; do
+    [ -x "$bin/$tool" ] || return 1
+  done
+  printf '%s\n' "$bin"
+}
+
+# Same fake harness and same Stop payload as run_autoarm_as_session, run against
+# a PATH with no jq on it. The payload's session_id is unreadable there, so the
+# key can only come from the harness pid this session writes into state/.lock.
+run_autoarm_without_jq() {
+  local dir=$1 session=$2 bin=$3 rc=0
+  printf '{"session_id":"%s","stop_hook_active":false}\n' "$session" \
+    | FM_HOME="$dir" PATH="$bin" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' 2>&1 || rc=$?
+  printf 'RC=%s\n' "$rc" >&2
+  return "$rc"
+}
+
+# The cap must stay session-scoped on a host without jq, which is one of the
+# three cases the cap exists for: there the synchronous guard never runs at all,
+# so a cap shared across sessions would leave the next session un-armed on its
+# very first Stop with no automatic escape.
+test_a_new_session_is_not_capped_by_a_previous_session_without_jq() {
+  local dir bin status arms_before arms_after first_key second_key
+  dir=$(make_primary_dir "$TMP_ROOT/failure-cap-new-session-nojq")
+  bin=$(make_nojq_bin "$dir") || fail "could not build a jq-less fixture PATH"
+  ! PATH="$bin" command -v jq >/dev/null 2>&1 \
+    || fail "the jq-less fixture PATH still resolves jq"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  export FM_CLAUDE_AUTOARM_FAILURE_CAP=1
+  run_autoarm_without_jq "$dir" sess-nojq "$bin" >/dev/null 2>&1 || true
+  assert_present "$dir/state/.claude-autoarm-failure-capped" "the first jq-less session did not reach the cap"
+  first_key=$(sed -n '1s/^session=//p' "$dir/state/.claude-autoarm-failure-capped")
+  arms_before=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+
+  run_autoarm_without_jq "$dir" sess-nojq "$bin" >/dev/null 2>&1; status=$?
+  unset FM_CLAUDE_AUTOARM_FAILURE_CAP
+  arms_after=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+  second_key=$(sed -n '1s/^session=//p' "$dir/state/.claude-autoarm-failure-capped")
+
+  [ "$arms_after" -gt "$arms_before" ] \
+    || fail "without jq the new session was capped before its own first failure: $arms_before arm attempts before, $arms_after after"
+  expect_code 2 "$status" "the new jq-less session's own first failure must still force its Stop-owned retry"
+  [ -n "$first_key" ] || fail "the jq-less cap recorded no session key at all"
+  [ "$first_key" != "$second_key" ] \
+    || fail "the jq-less session key did not vary between sessions: both recorded $first_key"
+  pass "auto-arm: without jq a new session still gets an honest arm attempt after a previous cap"
+}
 
 test_inert_in_child_worktree() {
   local base dir out status
@@ -398,7 +662,7 @@ test_actionable_close_with_live_successor_rewakes_once() {
   write_arm_fixture "$dir" actionable
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live successor for actionable close"
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || fail "could not identify live successor for actionable close"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
 
@@ -475,7 +739,9 @@ test_failure_notice_marker_write_refuses_delivery_and_retries() {
   [ "$(epoch_field "$dir" epoch)" -gt "$gen1" ] || fail "the successor did not supersede the refused terminal entry"
   assert_present "$marker" "the successful successor did not record the failure notice"
   assert_contains "$out2" "automatic supervision mechanism is broken" "the successful successor did not deliver the failure notice"
-  [ -z "$out3" ] || fail "the firing after the successful marker commit repeated the notice: $out3"
+  # The third consecutive failed re-arm reaches the default cap, so its output is
+  # the cap's own once-only notice, never a repeat of the failure notice.
+  assert_not_contains "$out3" "automatic supervision mechanism is broken" "the firing after the successful marker commit repeated the notice"
   delivered=$(printf '%s\n%s\n' "$out2" "$out3" | grep -c 'automatic supervision mechanism is broken' || true)
   [ "$delivered" -eq 1 ] || fail "the restored episode delivered $delivered failure notices instead of one"
   pass "auto-arm: marker-write refusal defers delivery until one successor commits the notice"
@@ -517,7 +783,7 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   write_arm_fixture "$dir" benign-live
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for benign close"
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || fail "could not identify live watcher holder for benign close"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
@@ -546,7 +812,7 @@ test_positive_recovery_budget_contention_preserves_episode() {
   write_arm_fixture "$dir" benign-live
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for recovery contention"
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || fail "could not identify live watcher holder for recovery contention"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
@@ -582,7 +848,7 @@ test_owner_mutex_contention_preserves_failure_episode_reset() {
   write_arm_fixture "$dir" reset-boundary
   sleep 60 &
   watcher=$!
-  watcher_id=$(watcher_identity "$dir" "$watcher") || fail "could not identify reset-contention watcher"
+  watcher_id=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$watcher") || fail "could not identify reset-contention watcher"
   record_watcher_lock "$dir" "$watcher" "$watcher_id"
   touch "$dir/state/.last-watcher-beat"
   out="$dir/state/hook.out"
@@ -1186,5 +1452,12 @@ test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
+test_consecutive_failures_stop_at_the_cap
+test_capped_episode_ends_on_positive_watcher_recovery
+test_stands_down_for_a_proven_pi_primary_owner
+test_protects_when_the_pi_owner_cannot_be_proven
+test_a_reused_owner_pid_never_proves_pi_ownership
+test_a_new_session_is_not_capped_by_a_previous_session
+test_a_new_session_is_not_capped_by_a_previous_session_without_jq
 test_active_in_marked_secondmate_home
 test_fm_lock_status_still_works_with_shared_lib

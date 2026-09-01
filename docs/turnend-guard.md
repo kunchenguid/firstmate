@@ -37,7 +37,8 @@ Under the Claude Stop auto-arm model a beacon fresh within grace is healthy even
 Under the Pi extension model a live identity-matched watcher is the ordinary healthy state, but a genuinely unheld lock with a beacon fresh within grace is also healthy while a live Pi session provably owns continuity, because `.pi/extensions/fm-primary-pi-watch.ts` tears the watcher down on every actionable wake and spawns the replacement itself.
 A lock is genuinely unheld only when the lock directory or its symlinked owner directory is absent, or when the existing lock records no pid at all.
 Any lock with a recorded pid remains down when its pid, home, watcher path, or process identity fails the strict watcher health check.
-That ownership proof is `fm_pi_extension_owns_supervision` in `bin/fm-wake-lib.sh`: both Pi primary extensions must be recorded in their state markers at their current on-disk builds by the process named in `state/.lock`, and that process must still be alive.
+That ownership proof is `fm_pi_extension_owns_supervision` in `bin/fm-wake-lib.sh`: both Pi primary extensions must be recorded in their state markers at their current on-disk builds by the process named in `state/.lock`, and that process must still be alive under the very pid-identity those markers recorded.
+The marker's three-line shape and the reason its identity line is mandatory belong to the "Turn-end ownership" section below, which reuses this same proof.
 Requiring the turn-end guard extension as well as the watch extension is deliberate, because a home without that structural backstop has no benign hand-off to tolerate.
 Without that proof an unheld lock alarms exactly as it did before, so an unloaded, version-drifted, or exited Pi session is loud immediately, and a cycle the extension never restores is loud once the beacon passes grace.
 Under every persistent-watcher harness a live identity-matched watcher with a fresh beacon is still required, so the pull guard keeps the same strict semantics there.
@@ -66,6 +67,28 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
   The same marker guard carries every tracked `.claude/settings.json` entry whose event Grok already covers through its own `.grok/hooks/` registration, which is both `Stop` entries, the `SessionStart` entry, and the two `PreToolUse` Bash entries; `bin/fm-subagent-pretool-check.sh` is the one deliberate unguarded exception because no Grok registration covers the subagent-spawn event, recorded in [`subagent-guard.md`](subagent-guard.md) "Known residual gap".
   `tests/fm-turnend-guard.test.sh` pins that inventory so neither the guarded set nor the exception can change silently.
 
+## Turn-end ownership
+
+Exactly one protection layer is responsible for each logical turn end.
+The layers above are registered per harness, so under a single primary they never overlap; a NESTED primary is the case that can put two of them on one turn end.
+A Pi primary can run its model turns through a nested `claude` subprocess in this same checkout, which is an ordinary Claude Code process: where that subprocess loads project settings, both tracked `Stop` entries fire inside it while `.pi/extensions/fm-primary-turnend-guard.ts` is already guarding the same logical turn end from `agent_settled`.
+Two layers that do not know about each other can then block or re-arm independently for one turn end.
+
+The tracked Claude-shaped entries therefore stand down for a proven owner.
+`fm_turnend_owner_is_pi_primary` in `bin/fm-wake-lib.sh` is that ownership record, and it reuses the same durable evidence the pull guard already trusts: both Pi primary extensions recorded in their state markers at their current on-disk builds by the process named in `state/.lock`, and that process still alive under the very pid-identity those markers recorded.
+Each marker is three lines - build version, loading pid, and that pid's `fm_pid_identity` - and the identity is mandatory exactly as it is for an auto-arm claim, because a pid alone cannot authenticate an owner.
+The markers outlive a SIGKILLed Pi and the operating system reuses pids, so without recomputing the identity an unrelated live process that inherited the dead owner's pid would prove ownership and stand both Claude-shaped layers down over nothing.
+The extensions obtain that identity by calling `fm_pid_identity` itself through `bash` rather than re-implementing its per-platform format, so the writer and the reader cannot drift apart, and a marker whose identity cannot be computed is never written.
+No compatibility shim exists for the older two-line marker and none is needed: the marker version is a digest of the extension file, so a build that writes identities also fails the version comparison until it has re-marked itself.
+`bin/fm-claude-stop-autoarm.sh` checks it immediately after the primary scope, and `bin/fm-turnend-guard.sh` checks it in `--claude` mode only.
+The default mode never defers, because the owning Pi extension is itself the caller that runs that guard with no flags.
+
+The claim is a positive proof of an owner, never an assumption of one, and that direction is what keeps the safety effect whole.
+Every way the owning layer can be missing - Pi not primary, an extension unloaded, a drifted build, an exited or crashed session even where its pid was later reused, a lock held by someone else - fails the predicate, and the Claude entries then protect the turn end exactly as they did before.
+A plain Claude primary, a plain Pi primary, and Pi on any other provider each keep exactly one working guard, because in each of those the predicate's answer is already the correct one.
+For the same reason this must never be relaxed into a host or environment sniff: Pi exports its own variables into every child process, so an environment guard would also disable a Claude session a human started by hand from a Pi pane, the `GROK_SESSION_ID` hazard recorded above.
+The nested subprocess's own settings loading is not a signal this repo controls, so ownership is asserted here rather than inferred from whether the duplicate happens to fire today.
+
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
 In the default Codex mode, a true value lets the second stop finish after one forced continuation.
@@ -73,6 +96,7 @@ In the default Codex mode, a true value lets the second stop finish after one fo
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
 The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, the auto-arm's generation claim is open, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+An open claim counts as recovery only outside a capped failure episode, for the reason the cap section below records.
 The claim is the ledger entry itself: the epoch sequence in `state/.claude-autoarm-epoch` is a monotonic claim generation, line 1 is the classic epoch record, and line 2 records the claiming process's mandatory pid-identity (`fm_autoarm_claim_open` and `fm_autoarm_claim_next` in `bin/fm-wake-lib.sh` own the contract).
 A claim is open while its outcome is `arming`, its owner pid is alive, its recorded identity successfully recomputes and matches that pid, and it is not stuck - stuck meaning the entry and the watcher beacon are both older than the guard grace, which proves the owner hung mid-arm (a healthy hours-long foregrounded cycle keeps the beacon beating, and every arming phase with no watcher is bounded in seconds).
 Anything else - a finished outcome, a dead or identity-mismatched owner, a stuck owner, an identityless entry, or no entry - lets the next Stop-owned firing take the next generation and arm; taking a newer generation is the reclaim, and a steady-state predecessor is never signalled or revoked.
@@ -86,14 +110,37 @@ Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure pro
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).
-In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
-The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice is already consumed, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.
+In Claude mode, positive watcher recovery clears the whole episode state - block budget, failure notice, attended alarm, consecutive-failure count, and the durable stop record below - together under the existing budget lock before either hook reports ordinary recovery.
+The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice or the durable stop record below already stands for that episode, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.
 Each epoch identity is accounted at most once under the budget lock.
 Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
-A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
+A positively verified healthy watcher clears that whole episode state for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
+
+The auto-arm additionally bounds its own CONSECUTIVE failed re-arm attempts, which is a different bound from `FM_CLAUDE_AUTOARM_ATTEMPTS` (retries inside one firing) and from the notice and alarm markers (which dedupe one operator notice and the one attended fail-open and bound neither the retries nor the episode).
+Without it an exhausted failure exits 2 on every firing indefinitely whenever this synchronous guard never reaches its attended fail-open, because it is not registered, has no `jq`, or stood down for another host.
+`fm_autoarm_failure_record` in `bin/fm-wake-lib.sh` counts those failures in `state/.claude-autoarm-failure-count`, keyed by the auto-arm generation so one generation counts at most once, written under the same single-flight micro-mutex and ownership re-verification as every other ledger write.
+The run is consecutive in the literal sense, and two rules make it so.
+A successful arm ends the run: `fm_autoarm_failure_count_reset` clears the count on the ACTIONABLE close that is this model's ordinary success, so isolated transient failures arbitrarily far apart never accumulate into a cap on a home whose mechanism demonstrably works.
+That reset is deliberately narrower than positive recovery and clears the COUNT only, because the failure notice, the attended-alarm marker, the block budget, and the stop record end only on a verified healthy watcher, which an actionable arm close is not.
+The run is also scoped to one session by `fm_autoarm_session_key` in `bin/fm-wake-lib.sh`, the single derivation this guard's block budget in `state/.turnend-claude-blocks` uses as well, so a later session never inherits a previous session's run and cap on its own first failure.
+That key is the Stop payload's `session_id` whenever it is readable, and otherwise the harness pid holding `state/.lock`, which changes with every session; a pid-derived key always carries a reserved prefix and a payload `session_id` inside that namespace is refused, so the two kinds can never collide.
+The fallback is not cosmetic, because a constant one would make the cap durable across sessions on a host with no `jq`: the auto-arm runs fully without `jq` while this guard exits before its own `jq`-dependent read, so it never reaches the attended fail-open that would end such an episode, and the next session would be capped before its own first failure with no automatic escape.
+The two bounds are alike in derivation but not in consequence, and the block budget is the milder of the two: a shared budget errs toward BLOCKING a turn end, while a shared cap errs toward NOT ARMING one.
+Only `unknown` remains for an unreadable or non-numeric lock, which the auto-arm's identity gate makes reachable only under a concurrent rewrite of that lock, and it degrades to one shared run rather than to no cap at all.
+At `FM_CLAUDE_AUTOARM_FAILURE_CAP` (default 3) the hook creates the durable stop record `state/.claude-autoarm-failure-capped` naming the session and the reason, delivers that reason once on its one exit-2, and stops re-arming.
+That record carries the session key the count carries, and both this hook and the synchronous guard compare it, so `capped` means capped for THIS session in both layers; within one Stop event both derive that key from the same payload and the same lock through the one shared function, and therefore always agree.
+A record left by an earlier session is that session's cap: the new session gets its one honest arm attempt, and the capping write replaces the foreign record rather than being refused by it, so a session can always record its own cap.
+Later firings in the same episode start no arm and create no continuation; they record `failed-capped` for their own generation and exit 0.
+That per-generation record is required rather than a frozen ledger, because this guard accounts its bounded progression per epoch identity and a frozen epoch would leave it blocking the same identity forever instead of reaching its one attended fail-open.
+So the cap hands the episode over: this guard treats `failed-capped` exactly like the other exhausted-failure outcomes, blocks its bounded number of times, and then raises the one loud attended alarm.
+Two properties of that handover are what make it a handover rather than a gap.
+Because a post-cap firing still takes a generation, it briefly publishes an `arming` claim it will never act on, so inside a capped episode this guard does not read an open claim as recovery under way; deferring to one would allow a stop with no watcher and no continuation from either layer.
+And because the capping firing can be the one that never wrote the failure notice, at a cap of 1 or when that notice write was refused, the durable stop record counts as the episode's failure record wherever the notice does, so the escalation always reaches its one attended fail-open instead of blocking until Claude Code's hard consecutive-block override.
+A capped episode is neither a silent loop nor a silent surrender.
+Positive watcher recovery ends it, and the auto-arm applies that reset itself when it verifies a healthy watcher, so a home whose synchronous guard never runs is not left permanently un-armed by its own cap.
 
 OpenCode, Pi, and pi-signed expose passive callbacks for this purpose.
 Their adapters fail open at the hook boundary to protect the user session but schedule one bounded follow-up when the predicate blocks.
@@ -160,6 +207,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` open-generation claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, generation and legacy claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+It also pins the ownership model end to end: with both layers present exactly one blocks per logical turn end and the standing-down entry consumes no block budget, an absent, crashed, or version-drifted owner leaves the Claude entry protecting the turn end, and at both defaults a capped auto-arm stops re-arming while this guard still reaches its one attended fail-open.
+It pins the cap handover from both ends too: a capped auto-arm firing overlapping this guard on one Stop event never lets the blind stop through, and at a cap of 1, where the capping firing writes no failure notice at all, the attended fail-open is still reached.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and stale-beacon alarm, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, Pi-host stand-down without Cursor identity and continued parking when `PI_CODING_AGENT` leaks alongside `CURSOR_AGENT` or `CURSOR_INVOKED_AS`, child-worktree exclusion, and that the adapter never exits 2.

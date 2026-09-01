@@ -50,7 +50,32 @@
 #     hook. Only an exhausted failure with no verified watcher emits one
 #     last-resort notice per failure episode; later consecutive failures still
 #     exit 2 to guarantee the next Stop-owned retry without repeating notice,
-#     until the synchronous guard has consumed its attended fail-open.
+#     until this hook's own consecutive-failure cap is reached or the
+#     synchronous guard has consumed its attended fail-open.
+#   - Failure cap: consecutive exhausted failures are counted durably per
+#     auto-arm GENERATION in state/.claude-autoarm-failure-count, under the same
+#     single-flight micro-mutex and ownership re-verification as every other
+#     ledger write (fm_autoarm_failure_record in bin/fm-wake-lib.sh). The run is
+#     genuinely consecutive: a successful arm clears the count, including the
+#     ACTIONABLE close that is this model's ordinary success, and the run is
+#     keyed by fm_autoarm_session_key exactly as the synchronous guard keys its
+#     block budget - the Stop payload's session_id, or this session's harness pid
+#     from state/.lock when that field cannot be read, never a constant - so a
+#     fresh session never inherits a previous run, jq or no jq. At
+#     FM_CLAUDE_AUTOARM_FAILURE_CAP (default 3) this hook writes the durable stop
+#     record state/.claude-autoarm-failure-capped naming the reason, prints that
+#     reason ONCE, and stops re-arming: every later firing in the same episode
+#     starts no arm, records failed-capped for its own generation, and exits 0
+#     silently instead of translating another rewake. It is not a silent
+#     surrender - the exit-0 removes the automatic continuation proof the
+#     synchronous guard looks for, while the per-generation record keeps that
+#     guard's per-epoch progression advancing, so it takes over with its own
+#     bounded blocks and one loud attended fail-open. Positive watcher recovery
+#     clears the count and the record with the rest of the episode.
+#   - Nested-layer stand-down: when a live Pi primary provably owns this home's
+#     turn-end protection (fm_turnend_owner_is_pi_primary), this Stop entry is
+#     the nested duplicate for the same logical turn end and exits 0 before
+#     touching anything. Absent that positive proof it protects as before.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome so the synchronous Stop guard
@@ -77,6 +102,10 @@ GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+FAILURE_CAP=${FM_CLAUDE_AUTOARM_FAILURE_CAP:-3}
+case "$FAILURE_CAP" in
+  ''|*[!0-9]*|0) FAILURE_CAP=3 ;;
+esac
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
@@ -109,6 +138,15 @@ fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# --- ownership: exactly one protection layer per logical turn end ------------
+# A Pi primary can run its turns through a nested `claude` subprocess, which is
+# an ordinary Claude Code process in this same checkout. Where that subprocess
+# loads project settings, this hook fires inside it while Pi's own agent_settled
+# guard already owns the same logical turn end. Stand down for that proven owner
+# only; without the proof this hook protects the turn end exactly as before
+# (fm_turnend_owner_is_pi_primary in bin/fm-wake-lib.sh owns the contract).
+fm_turnend_owner_is_pi_primary "$STATE" "$FM_ROOT" && exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.
@@ -189,6 +227,36 @@ autoarm_commit() {  # <outcome> [marker-file]
 autoarm_record() {  # <outcome>
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
 }
+
+# The session this Stop belongs to, which scopes the consecutive-failure run.
+# Same derivation the synchronous guard keys state/.turnend-claude-blocks by, so
+# the two bounds agree on what one session is (fm_autoarm_session_key in
+# bin/fm-wake-lib.sh owns the contract). Resolved HERE, after the stale-lock
+# recovery above, so its jq-less fallback names THIS session's harness pid rather
+# than a dead predecessor's.
+SESSION_ID=$(fm_autoarm_session_key "$PAYLOAD" "$STATE")
+
+# --- capped failure episode: stop re-arming ----------------------------------
+# Once THIS session's episode reached the consecutive-failure cap, the durable
+# stop record state/.claude-autoarm-failure-capped stands with this session's key
+# and its reason was surfaced once. A record left by a previous session is that
+# session's cap and never this one's, so a fresh session still gets its own honest
+# arm attempt here and caps only on its own consecutive run.
+# From here this hook starts no further arm and creates no further continuation.
+# It still records failed-capped for its own generation, because the synchronous
+# guard's bounded progression is accounted per epoch identity: a frozen ledger
+# would leave that guard blocking the same epoch forever instead of reaching its
+# one attended fail-open, which is the escalation the cap hands over to.
+# Positive watcher recovery ends the episode, and this hook applies that reset
+# itself rather than waiting on the guard, so a home whose synchronous guard
+# never runs is not left permanently un-armed by its own cap.
+if fm_autoarm_failure_capped "$STATE" "$SESSION_ID"; then
+  if ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" \
+    || ! fm_failure_episode_reset "$STATE"; then
+    autoarm_record failed-capped
+    exit 0
+  fi
+fi
 
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
@@ -297,11 +365,42 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
+    # This arm worked, so the consecutive-failure run ends here: only the COUNT
+    # clears, because an actionable close is not the verified positive recovery
+    # that ends a failure episode's notice, alarm, and stop record.
+    fm_autoarm_failure_count_reset "$STATE" "$MY_GEN" >/dev/null 2>&1 || true
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
+fi
+
+# A concurrent firing may have capped this episode while this one was arming:
+# the durable stop record already carries the reason, so add no second notice
+# and no further continuation.
+if fm_autoarm_failure_capped "$STATE" "$SESSION_ID"; then
+  autoarm_record failed-capped
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+
+# Account this exhausted failure against the hook's own consecutive-failure cap
+# before deciding whether to force another Stop-owned retry. The count is keyed
+# by this generation, so a superseded owner can neither advance nor cap the
+# episode, and a refusal or unwritable record deliberately falls through to the
+# ordinary retry paths below rather than turning into a silent stop.
+if fm_autoarm_failure_record "$STATE" "$MY_GEN" "$FAILURE_CAP" "$SESSION_ID" \
+  "auto-arm exhausted its bounded retries on $FAILURE_CAP consecutive Stop firings with no verified watcher" \
+  && [ "$FM_AUTOARM_FAILURE_CAPPED_NOW" -eq 1 ]; then
+  {
+    printf 'firstmate watcher auto-arm CAPPED - %s consecutive Stop-owned re-arm attempts failed, so the automatic re-arm has stopped retrying for this failure episode.\n' "$FM_AUTOARM_FAILURE_COUNT"
+    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+    printf 'The reason is recorded in state/.claude-autoarm-failure-capped. No further automatic continuation will be created until a healthy watcher is verified; investigate the automatic Stop hook and watcher startup before ending blind.\n'
+  } >&2
+  autoarm_record failed-capped
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 2
 fi
 
 # Notify only once for this continuous failure episode; every later invocation

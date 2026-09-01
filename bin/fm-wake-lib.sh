@@ -178,9 +178,17 @@ fm_supervision_model() {
 }
 
 # Pi primary supervision evidence. The Pi extensions record, in their state
-# markers, the exact build they loaded and the session process that loaded it, so
-# "a live Pi session owns supervision" is provable from durable state without a
-# watcher process and without reading any vendor-rendered surface.
+# markers, the exact build they loaded, the session process that loaded it, and
+# that process's pid-identity, so "a live Pi session owns supervision" is provable
+# from durable state without a watcher process and without reading any
+# vendor-rendered surface. The marker is three lines, written by markLoaded in
+# .pi/extensions/fm-primary-pi-watch.ts and
+# .pi/extensions/fm-primary-turnend-guard.ts:
+#   1  the build version below
+#   2  the pid of the process that loaded that build
+#   3  that pid's fm_pid_identity, which those extensions obtain by calling this
+#      very function through bash rather than re-implementing its per-platform
+#      format, so the two can never drift apart
 #
 # fm_pi_extension_version <file>
 # Print the marker version string the Pi extensions record for <file>. Must stay
@@ -201,22 +209,38 @@ fm_pi_extension_version() {
 }
 
 # fm_pi_extension_loaded <marker> <expected-version> <session-lock>
-# True when <marker> records <expected-version> and names the session process in
-# <session-lock>, i.e. the session holding this home loaded exactly this build.
+# True when <marker> records <expected-version>, names the session process in
+# <session-lock>, and that pid still recomputes to the identity the marker
+# recorded - i.e. the session holding this home loaded exactly this build and is
+# still the very same process.
+#
+# The identity is MANDATORY, exactly as it is for an auto-arm claim
+# (fm_autoarm_claim_open): a pid alone cannot authenticate an owner, because the
+# markers survive a SIGKILLed Pi and the OS reuses pids. Without the recomputed
+# identity an unrelated live process that inherited the dead owner's pid would
+# prove ownership and stand every Claude-shaped turn-end layer down over nothing.
+# An identityless marker therefore fails closed, which costs nothing: a failed
+# proof simply leaves those layers protecting the turn end as they were.
 fm_pi_extension_loaded() {
-  local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
+  local marker=$1 expected_version=$2 lock=$3
+  local marker_version marker_pid marker_identity lock_pid current_identity
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
   marker_pid=$(sed -n '2p' "$marker")
+  marker_identity=$(sed -n '3p' "$marker")
   lock_pid=$(sed -n '1p' "$lock")
-  [ -n "$marker_pid" ] || return 1
-  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
+  [ -n "$marker_pid" ] && [ -n "$marker_identity" ] || return 1
+  [ "$marker_version" = "$expected_version" ] || return 1
+  [ "$marker_pid" = "$lock_pid" ] || return 1
+  current_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null) || return 1
+  [ "$current_identity" = "$marker_identity" ]
 }
 
 # fm_pi_extension_owns_supervision <state> <root>
 # True when a LIVE Pi session owns supervision continuity for this home: both
 # primary extensions are loaded at their current on-disk builds by the process
-# recorded in this home's session lock, and that process is still alive.
+# recorded in this home's session lock, that process still recomputes to the
+# identity each marker recorded, and it is still alive.
 # Requiring the turn-end guard extension too is deliberate - it is the structural
 # backstop that catches a cycle the watch extension failed to restore, so a home
 # missing it has no benign hand-off to tolerate.
@@ -233,6 +257,248 @@ fm_pi_extension_owns_supervision() {
   done
   session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
   fm_pid_alive "$session_pid"
+}
+
+# fm_turnend_owner_is_pi_primary <state> <root>
+# TRUE when a live Pi primary session provably owns this home's turn-end
+# protection, so the tracked Claude-shaped Stop entries are the NESTED duplicate
+# layer for that same logical turn end and must stand down.
+#
+# Why an ownership record and not host detection: a Pi primary can run its model
+# turns through a nested `claude` subprocess (the claude-code-cli provider), and
+# that subprocess is an ordinary Claude Code process in this same checkout. If it
+# ever loads project settings, both tracked Stop entries fire INSIDE it while
+# .pi/extensions/fm-primary-turnend-guard.ts is already guarding the same logical
+# turn end from `agent_settled`, giving one turn end two independent guards that
+# can each block or re-arm. Env markers cannot separate the two cases: Pi exports
+# its own variables into every child, so an env guard would also disable a Claude
+# session a human started by hand from a Pi pane - the GROK_SESSION_ID hazard
+# recorded in docs/turnend-guard.md.
+#
+# The claim is therefore the same durable, verifiable record the pull guard
+# already trusts: both Pi primary extensions recorded at their current on-disk
+# builds by the process holding this home's session lock, and that process still
+# alive under the very pid-identity the markers recorded.
+# It is a positive proof of an owner, never an assumption of one, so every way the
+# owning layer can be absent - Pi not primary, extension unloaded, build drifted,
+# session exited or crashed (even where its pid was later reused), lock held by
+# someone else - fails this predicate and
+# leaves the Claude entries protecting the turn end exactly as before. That is the
+# no-protection-gap direction, and it is why this must never be relaxed into a
+# host or environment sniff.
+fm_turnend_owner_is_pi_primary() {  # <state> <root>
+  local state=$1 root=$2
+  [ -n "$state" ] && [ -n "$root" ] || return 1
+  fm_pi_extension_owns_supervision "$state" "$root"
+}
+
+# --- Claude turn-end per-session key -------------------------------------------
+# The key BOTH Claude-shaped turn-end layers scope their per-session bounds by:
+# the auto-arm's consecutive-failure run and its durable stop record
+# (bin/fm-claude-stop-autoarm.sh), and the synchronous guard's block budget in
+# state/.turnend-claude-blocks (bin/fm-turnend-guard.sh). One owner of the
+# derivation, because both layers fire on the SAME Stop event and must agree on
+# what one session is: the guard reads the auto-arm's stop record as this
+# episode's failure record, and a key the two derive differently would leave that
+# guard blocking an episode it can no longer recognize as recorded.
+#
+# The Stop payload's session_id is the key whenever it is readable. It is not
+# always: jq is optional for the auto-arm, which runs fully without it, and a
+# payload can carry no session_id at all. A CONSTANT fallback would make the cap
+# durable across sessions rather than session-scoped, and on a jq-less host that
+# is not a small residual - the guard exits before its own jq-dependent read, so
+# it never reaches the attended fail-open that ends such an episode, and a later
+# session would be capped before its own first failure with no automatic escape.
+# The harness pid holding state/.lock is therefore the fallback: this hook already
+# depends on that lock, and it changes with every session.
+#
+# The two kinds cannot collide. A pid-derived key always carries the reserved
+# prefix below, and a payload session_id in that namespace is refused as
+# unusable, so no recorded key is ever ambiguous about which kind wrote it.
+#
+# unknown remains ONLY for an unreadable or non-numeric lock. Every caller
+# reaches this after the identity gate has proven this session owns state/.lock
+# or has recovered it, so that residual needs a concurrent rewrite of the lock to
+# occur at all, and it degrades to one shared run rather than to no cap.
+FM_AUTOARM_SESSION_LOCK_PREFIX='lock-pid-'
+fm_autoarm_session_key() {  # <payload> <state-dir>
+  local payload=$1 state=$2 id lock_pid
+  id=$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null || printf '')
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*|"$FM_AUTOARM_SESSION_LOCK_PREFIX"*) id= ;;
+  esac
+  if [ -z "$id" ]; then
+    lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+    case "$lock_pid" in
+      ''|*[!0-9]*) id=unknown ;;
+      *) id="$FM_AUTOARM_SESSION_LOCK_PREFIX$lock_pid" ;;
+    esac
+  fi
+  printf '%s\n' "$id"
+}
+
+# --- Claude Stop auto-arm consecutive-failure cap ------------------------------
+# The auto-arm's own bound on CONSECUTIVE failed re-arm attempts across Stop
+# firings, distinct from FM_CLAUDE_AUTOARM_ATTEMPTS (retries inside one firing)
+# and from the notice/alarm markers (which dedupe one operator notice and the
+# guard's one attended fail-open, and bound neither the retries nor the episode).
+# Without it an exhausted failure exits 2 on every firing forever whenever the
+# synchronous guard never reaches its attended fail-open - it is not registered,
+# has no jq, or stood down - so the session re-wakes itself indefinitely.
+#
+# CONSECUTIVE is literal, and two things make it so. A successful arm clears the
+# count through fm_autoarm_failure_count_reset below, including the ACTIONABLE
+# close that is this model's ordinary success, so isolated transient failures
+# arbitrarily far apart never accumulate into a cap on a home whose mechanism
+# demonstrably works. And the run is SESSION-scoped by fm_autoarm_session_key
+# above, the same derivation the synchronous guard's block budget in
+# state/.turnend-claude-blocks uses, which falls back to the harness pid holding
+# state/.lock rather than to a constant when the payload's session_id cannot be
+# read. Both the count and the durable stop record carry that key, and every
+# reader of the record compares it, so a fresh session never inherits a previous
+# session's run and cap on its own first failure - including on a host with no
+# jq, where the guard never runs to end the episode itself - and it gets one
+# honest arm attempt.
+#
+# The count is durable, keyed by the auto-arm GENERATION so one generation counts
+# at most once, and written under the existing single-flight micro-mutex with the
+# same ownership re-verification every other ledger write uses; a superseded
+# generation can neither advance nor cap the episode. Positive watcher recovery
+# clears it through fm_failure_episode_reset, so a later independent failure
+# episode starts from zero.
+#
+# Sets FM_AUTOARM_FAILURE_COUNT and FM_AUTOARM_FAILURE_CAPPED_NOW (1 only for the
+# firing that created the durable stop record, so the notice is surfaced once).
+# Returns 0 accounted, 2 superseded, 1 unable (contention or write failure) -
+# and 1 deliberately leaves the caller on its ordinary retry path, because
+# failing to record a stop must never become a silent stop.
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_AUTOARM_FAILURE_COUNT=0
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_AUTOARM_FAILURE_CAPPED_NOW=0
+fm_autoarm_failure_record() {  # <state-dir> <gen> <cap> <session> [reason]
+  local state=$1 gen=$2 cap=$3 session=$4 reason=${5:-} lock count_file capped
+  local pid i count recorded recorded_session tmp
+  lock="$state/.claude-autoarm.lock"
+  count_file="$state/.claude-autoarm-failure-count"
+  capped="$state/.claude-autoarm-failure-capped"
+  pid=${BASHPID:-$$}
+  FM_AUTOARM_FAILURE_COUNT=0
+  FM_AUTOARM_FAILURE_CAPPED_NOW=0
+  case "$cap" in ''|*[!0-9]*|0) return 1 ;; esac
+  # An unusable session key degrades to one shared run rather than to no cap at
+  # all, exactly as the guard's budget degrades when it cannot read session_id.
+  case "$session" in ''|*[!A-Za-z0-9._-]*) session=unknown ;; esac
+  i=0
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$i" -lt 20 ] || return 1
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if ! fm_autoarm_ledger_read "$state" \
+    || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  count=$(sed -n '1s/^count=//p' "$count_file" 2>/dev/null || true)
+  recorded=$(sed -n '2s/^gen=//p' "$count_file" 2>/dev/null || true)
+  recorded_session=$(sed -n '3s/^session=//p' "$count_file" 2>/dev/null || true)
+  case "$count" in
+    ''|*[!0-9]*) count=0 ;;
+  esac
+  if [ "$recorded_session" != "$session" ]; then
+    count=0
+    recorded=
+  fi
+  [ "$recorded" = "$gen" ] || count=$((count + 1))
+  tmp="$count_file.tmp.$pid"
+  if ! printf 'count=%s\ngen=%s\nsession=%s\n' "$count" "$gen" "$session" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$count_file" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$lock"
+    return 1
+  fi
+  # shellcheck disable=SC2034 # Read by callers after the function returns.
+  FM_AUTOARM_FAILURE_COUNT=$count
+  # The stop record carries the same session key as the count, so a run and its
+  # cap belong to one session. A record left by a DIFFERENT session is that
+  # session's finished run and must be REPLACED rather than refused: an O_EXCL
+  # create would fail on it, this session could never record its own cap, and it
+  # would keep re-arming past the bound. The replace is safe here because the
+  # whole section runs under the single-flight micro-mutex with this generation's
+  # ownership re-verified, and CAPPED_NOW is set only when this write created the
+  # record for THIS session, so the reason is still surfaced exactly once.
+  if [ "$count" -ge "$cap" ] && ! fm_autoarm_failure_capped "$state" "$session"; then
+    tmp="$capped.tmp.$pid"
+    if ! printf 'session=%s\ncount=%s\ncap=%s\ngen=%s\nat=%s\nreason=%s\n' \
+        "$session" "$count" "$cap" "$gen" "$(date +%s)" "$reason" > "$tmp" 2>/dev/null \
+      || ! mv -f "$tmp" "$capped" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null || true
+      fm_lock_release "$lock"
+      return 1
+    fi
+    # shellcheck disable=SC2034 # Read by callers after the function returns.
+    FM_AUTOARM_FAILURE_CAPPED_NOW=1
+  fi
+  fm_lock_release "$lock"
+  return 0
+}
+
+# True once THIS session's failure episode has reached the consecutive-failure
+# cap and its durable stop record exists, so no further automatic re-arm may be
+# attempted until positive watcher recovery clears the episode. The synchronous
+# guard reads it too: a capped firing still takes a generation and briefly
+# publishes an "arming" claim it will never act on, which is not recovery to
+# defer to.
+#
+# The record is keyed by the same session and sanitized the same way the count is
+# (fm_autoarm_failure_record above), so both layers agree on what one session is
+# and a later session is never capped before its own first failure - it gets one
+# honest arm attempt, and caps again only on its own consecutive run. A record
+# from another session, or one written by a build that recorded no session at
+# all, is therefore not this session's cap.
+fm_autoarm_failure_capped() {  # <state-dir> <session>
+  local state=$1 session=${2:-} capped recorded
+  capped="$state/.claude-autoarm-failure-capped"
+  [ -e "$capped" ] || return 1
+  case "$session" in ''|*[!A-Za-z0-9._-]*) session=unknown ;; esac
+  recorded=$(sed -n '1s/^session=//p' "$capped" 2>/dev/null || true)
+  [ -n "$recorded" ] && [ "$recorded" = "$session" ]
+}
+
+# Clear ONLY the consecutive-failure count, for a generation this process still
+# owns. A successful arm proves the mechanism works right now, so the next
+# failure starts a fresh consecutive run. Deliberately narrower than
+# fm_failure_episode_reset: the failure notice, the attended-alarm marker, the
+# guard's block budget, and the durable stop record are episode state that only
+# VERIFIED positive recovery clears, and an actionable arm close is not that
+# proof. Returns 0 cleared, 2 superseded, 1 unable.
+fm_autoarm_failure_count_reset() {  # <state-dir> <gen>
+  local state=$1 gen=$2 lock count_file pid i
+  lock="$state/.claude-autoarm.lock"
+  count_file="$state/.claude-autoarm-failure-count"
+  pid=${BASHPID:-$$}
+  i=0
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$i" -lt 20 ] || return 1
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if ! fm_autoarm_ledger_read "$state" \
+    || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
+    fm_lock_release "$lock"
+    return 2
+  fi
+  if [ -d "$count_file" ] && [ ! -L "$count_file" ]; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  if ! rm -f "$count_file" 2>/dev/null; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  return 0
 }
 
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
@@ -972,7 +1238,9 @@ fm_failure_episode_reset() {
   for path in \
     "$state/.turnend-claude-blocks" \
     "$state/.claude-autoarm-failure-notified" \
-    "$state/.claude-autoarm-failure-alarmed"
+    "$state/.claude-autoarm-failure-alarmed" \
+    "$state/.claude-autoarm-failure-count" \
+    "$state/.claude-autoarm-failure-capped"
   do
     if [ -d "$path" ] && [ ! -L "$path" ]; then
       [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
@@ -983,6 +1251,8 @@ fm_failure_episode_reset() {
     "$state/.turnend-claude-blocks" \
     "$state/.claude-autoarm-failure-notified" \
     "$state/.claude-autoarm-failure-alarmed" \
+    "$state/.claude-autoarm-failure-count" \
+    "$state/.claude-autoarm-failure-capped" \
     2>/dev/null; then
     [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
     return 1

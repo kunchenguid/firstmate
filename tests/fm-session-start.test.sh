@@ -255,8 +255,14 @@ SH
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
 }
 
+# The stub answers the harness-identification queries (comm=, args=, ppid=) and
+# delegates the pid-identity query to the real ps, which is not what it is here to
+# control: on a host with no readable /proc that form IS fm_pid_identity, and
+# answering it differently from the caller that recorded a marker would reject a
+# genuinely live owner.
 make_fake_ps_pi_holder() {
-  local fakebin=$1 holder_pid=$2
+  local fakebin=$1 holder_pid=$2 real_ps
+  real_ps=$(command -v ps)
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
@@ -284,6 +290,7 @@ case "\$*" in
     exit 0
     ;;
   *"ppid="*) printf '%s\n' "$holder_pid"; exit 0 ;;
+  *"lstart="*) exec "$real_ps" "\$@" ;;
 esac
 exit 1
 SH
@@ -679,16 +686,23 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$root/.pi/extensions/fm-primary-pi-watch.ts"
 }
 
+# A loaded marker is three lines: build version, loading pid, and that pid's
+# identity, which every reader recomputes so a reused pid cannot authenticate a
+# marker its dead writer left behind.
 write_pi_watch_loaded_marker() {
-  local home=$1 root=$2 pid=$3 version
+  local home=$1 root=$2 pid=$3 version identity
   version=$(hash_file_for_test "$root/.pi/extensions/fm-primary-pi-watch.ts")
-  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.pi-watch-extension-loaded"
+  identity=$(fm_pid_identity_of "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$pid")
+  [ -n "$identity" ] || identity=$FM_STALE_PID_IDENTITY
+  printf '%s\n%s\n%s\n' "$version" "$pid" "$identity" > "$home/state/.pi-watch-extension-loaded"
 }
 
 write_pi_turnend_loaded_marker() {
-  local home=$1 root=$2 pid=$3 version
+  local home=$1 root=$2 pid=$3 version identity
   version=$(hash_file_for_test "$root/.pi/extensions/fm-primary-turnend-guard.ts")
-  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.pi-turnend-extension-loaded"
+  identity=$(fm_pid_identity_of "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$pid")
+  [ -n "$identity" ] || identity=$FM_STALE_PID_IDENTITY
+  printf '%s\n%s\n%s\n' "$version" "$pid" "$identity" > "$home/state/.pi-turnend-extension-loaded"
 }
 
 write_pi_loaded_markers() {
@@ -2358,8 +2372,14 @@ EOF
   pass "session start preserves pi-signed primary identity while applying Pi extension guarantees"
 }
 
+# The marker records the loading session exactly as a live current one would -
+# the holding pid and that pid's real identity - so the drifted build version is
+# the only signal left for the verdict to turn on. The control arm then corrects
+# that one signal and nothing else: without it this case would keep passing even
+# if the version comparison were deleted, or if the predicate later grew another
+# mandatory field this fixture does not carry.
 test_pi_diagnostic_rejects_stale_loaded_marker() {
-  local rec root home fakebin out marker holder_pid
+  local rec root home fakebin out control marker holder_pid identity
   rec=$(new_world pi-stale-loaded-marker)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2372,15 +2392,26 @@ EOF
   install_pi_turnend_extension_fixture "$root"
   install_pi_watch_extension_fixture "$root"
   marker="$home/state/.pi-watch-extension-loaded"
-  printf 'stale-extension-version\n%s\n' "$holder_pid" > "$marker"
+  identity=$(fm_pid_identity_of "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$holder_pid") \
+    || fail "could not identify the live Pi session holding this home"
+  printf 'stale-extension-version\n%s\n%s\n' "$holder_pid" "$identity" > "$marker"
   write_pi_turnend_loaded_marker "$home" "$root" "$holder_pid"
   touch -t 203001010000 "$marker" 2>/dev/null || touch "$marker"
 
   out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  write_pi_watch_loaded_marker "$home" "$root" "$holder_pid"
+  touch -t 203001010000 "$marker" 2>/dev/null || touch "$marker"
+  control=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
 
   assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi diagnostic trusted a stale loaded marker"
+  assert_contains "$control" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi" \
+    "the control run never reached the stage that emits the Pi extension diagnostic"
+  assert_not_contains "$control" "PI_WATCH_EXTENSION: not loaded" \
+    "the rejection did not depend on the drifted version at all"
 
   pass "session start rejects stale Pi loaded markers"
 }
@@ -2435,8 +2466,14 @@ EOF
   pass "session start rejects Pi sessions missing the turn-end guard marker"
 }
 
+# The marker is everything a genuinely live OTHER Pi process would have written -
+# the current build, its own pid, and its own real identity - so the one thing
+# wrong is that it is not the session holding this home. The control arm then
+# re-points that marker at the holding session and nothing else, so this case
+# cannot pass on a missing or unmatchable field instead.
 test_pi_diagnostic_rejects_previous_session_loaded_marker() {
-  local rec root home fakebin out marker version holder_pid
+  local rec root home fakebin out control marker version holder_pid
+  local previous_pid previous_identity
   rec=$(new_world pi-previous-session-loaded-marker)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2445,19 +2482,33 @@ EOF
 
   sleep 300 &
   holder_pid=$!
+  sleep 300 &
+  previous_pid=$!
   make_fake_ps_pi_holder "$fakebin" "$holder_pid"
   install_pi_turnend_extension_fixture "$root"
   install_pi_watch_extension_fixture "$root"
   marker="$home/state/.pi-watch-extension-loaded"
   version=$(hash_file_for_test "$root/.pi/extensions/fm-primary-pi-watch.ts")
-  printf '%s\n999999\n' "$version" > "$marker"
+  previous_identity=$(fm_pid_identity_of "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$previous_pid") \
+    || fail "could not identify the other live Pi process"
+  printf '%s\n%s\n%s\n' "$version" "$previous_pid" "$previous_identity" > "$marker"
   write_pi_turnend_loaded_marker "$home" "$root" "$holder_pid"
 
   out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  write_pi_watch_loaded_marker "$home" "$root" "$holder_pid"
+  control=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
+  kill "$previous_pid" 2>/dev/null || true
+  wait "$previous_pid" 2>/dev/null || true
 
   assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi diagnostic trusted a marker from a previous Pi process"
+  assert_contains "$control" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi" \
+    "the control run never reached the stage that emits the Pi extension diagnostic"
+  assert_not_contains "$control" "PI_WATCH_EXTENSION: not loaded" \
+    "the rejection did not depend on which session recorded the marker at all"
 
   pass "session start rejects Pi loaded markers from previous sessions"
 }

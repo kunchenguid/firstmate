@@ -148,10 +148,38 @@ function lockOwnership(): LockOwnership {
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
+// The identity every consumer of this marker re-verifies. It is obtained by
+// calling this repo's own fm_pid_identity rather than re-implementing it here:
+// that value is per-platform (Linux proc starttime plus hex cmdline, a
+// proc-starttime variant elsewhere, a locale-pinned ps lstart fallback when
+// /proc is unreadable), and a hand-ported copy would drift on some platform and
+// silently stop matching. One owner of the format keeps byte-identity true by
+// construction. markLoaded runs only at load and on session_start, so the cost
+// of the shell-out is irrelevant.
+function pidIdentity(pid: number): string {
+  const result = spawnSync(
+    "bash",
+    ["-c", '. "$1"; fm_pid_identity "$2"', "fm-pid-identity", `${fmRoot}/bin/fm-wake-lib.sh`, String(pid)],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) return "";
+  // The identity is one line, and it must come back byte-identical to what the
+  // shell reader recomputes: take the last non-empty line rather than trimming,
+  // so a trailing newline (or a CRLF host) is dropped while the value itself is
+  // left untouched.
+  const lines = result.stdout.split(/\r?\n/).filter((line) => line.length > 0);
+  return lines.length > 0 ? lines[lines.length - 1] : "";
+}
+
+// A marker without an identity proves nothing, so failing to compute one writes
+// no marker at all. That direction is safe: an unproven owner simply leaves the
+// Claude-shaped turn-end layers protecting the turn end as they were.
 function markLoaded(): void {
   if (lockOwnership() === "other") return;
   mkdirSync(state, { recursive: true });
-  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+  const identity = pidIdentity(process.pid);
+  if (!identity) return;
+  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n${identity}\n`);
 }
 
 function actionableLine(output: string): string {

@@ -195,19 +195,6 @@ run_hook() {
   printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
-nonexistent_pid() {
-  local pid=999999
-  while kill -0 "$pid" 2>/dev/null; do
-    pid=$((pid + 1))
-  done
-  printf '%s\n' "$pid"
-}
-
-watcher_identity() {
-  local dir=$1 pid=$2
-  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
-}
-
 record_watcher_lock() {
   local dir=$1 pid=$2 identity=$3 root bin_dir
   root=$(cd "$dir" && pwd)
@@ -253,7 +240,7 @@ test_hook_blocks_source_only_home() {
 test_hook_blocks_when_dead_lock_has_fresh_beacon() {
   local dir dead out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-dead-lock-fresh")
-  dead=$(nonexistent_pid)
+  dead=$(fm_dead_pid)
   : > "$dir/state/task1.meta"
   record_watcher_lock "$dir" "$dead" "dead watcher identity"
   touch "$dir/state/.last-watcher-beat"
@@ -269,7 +256,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
   : > "$dir/state/task1.meta"
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || {
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     fail "could not identify live watcher holder"
@@ -291,7 +278,7 @@ test_hook_non_claude_health_ignores_claude_budget_contention() {
   : > "$dir/state/task1.meta"
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || {
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     fail "could not identify non-Claude contention watcher"
@@ -337,7 +324,7 @@ test_hook_blocks_with_live_lock_and_stale_beacon() {
   : > "$dir/state/task1.meta"
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || {
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     fail "could not identify live watcher holder"
@@ -487,7 +474,7 @@ test_hook_secondmate_reinvoke_recovery_loop() {
   : > "$dir/state/child1.meta"
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || {
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     fail "could not identify live watcher holder"
@@ -1096,6 +1083,81 @@ run_hook_claude() {
   printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
 }
 
+# --- single ownership per logical turn end ------------------------------------
+# A Pi primary can run its model turns through a nested `claude` subprocess in
+# this same checkout. Where that subprocess loads project settings, the tracked
+# Claude Stop entry fires INSIDE it for the very same logical turn end that
+# .pi/extensions/fm-primary-turnend-guard.ts already guards from `agent_settled`,
+# and that extension calls this guard in its DEFAULT mode. Exactly one of the two
+# must act per turn end, and the owning layer must be the one that does.
+
+test_exactly_one_layer_acts_per_logical_turn_end() {
+  local dir pid claude_out claude_status pi_out pi_status
+  dir=$(make_primary_dir "$TMP_ROOT/turnend-owner-pi")
+  : > "$dir/state/task1.meta"
+  sleep 30 &
+  pid=$!
+  fm_record_pi_extension_session "$dir" "$pid" "" lock || fail "could not record the Pi ownership evidence"
+
+  claude_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" false); claude_status=$?
+  pi_out=$(run_hook "$dir" false); pi_status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  expect_code 0 "$claude_status" "the nested Claude-registered entry must stand down for the owning Pi layer"
+  [ -z "$claude_out" ] || fail "the standing-down Claude entry still emitted: $claude_out"
+  expect_code 2 "$pi_status" "the owning Pi layer must still block the same blind turn end"
+  assert_contains "$pi_out" "TURN WOULD END BLIND" "the owning layer's block must carry the blind-turn banner"
+  [ ! -f "$dir/state/.turnend-claude-blocks" ] \
+    || fail "the standing-down Claude entry consumed a block budget for a turn end it does not own"
+  pass "fm-turnend-guard: with both layers present exactly one blocks per logical turn end"
+}
+
+test_no_protection_gap_when_the_owning_layer_is_unprovable() {
+  local dir pid other stale out status case_name
+  for case_name in dead-session drifted-build reused-pid no-evidence; do
+    dir=$(make_primary_dir "$TMP_ROOT/turnend-owner-$case_name")
+    : > "$dir/state/task1.meta"
+    pid=
+    case "$case_name" in
+      dead-session)
+        fm_record_pi_extension_session "$dir" "$(fm_dead_pid)" "" lock \
+          || fail "$case_name: could not record the Pi ownership evidence"
+        ;;
+      drifted-build)
+        sleep 30 &
+        pid=$!
+        fm_record_pi_extension_session "$dir" "$pid" drift lock \
+          || fail "$case_name: could not record the Pi ownership evidence"
+        ;;
+      reused-pid)
+        # A SIGKILLed Pi leaves its markers and its lock behind, and the OS later
+        # hands that pid to an unrelated live process. Everything a pid-only
+        # proof can see still lines up - current builds, marker pid equal to the
+        # lock pid, that pid alive - so only recomputing the recorded identity
+        # can tell that the owner is gone.
+        sleep 30 &
+        other=$!
+        stale=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$other")
+        kill "$other" 2>/dev/null || true
+        wait "$other" 2>/dev/null || true
+        [ -n "$stale" ] || fail "$case_name: could not capture the crashed owner's identity"
+        sleep 30 &
+        pid=$!
+        fm_record_pi_extension_session "$dir" "$pid" "" lock "$stale" \
+          || fail "$case_name: could not record the Pi ownership evidence"
+        ;;
+      no-evidence) : ;;
+    esac
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" false); status=$?
+    [ -z "$pid" ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
+    expect_code 2 "$status" "$case_name: an unprovable owner must leave the Claude entry protecting the turn end"
+    assert_contains "$out" "TURN WOULD END BLIND" "$case_name: the protecting block must carry the blind-turn banner"
+  done
+  pass "fm-turnend-guard: an absent, crashed, drifted, or pid-reused owner leaves no protection gap"
+}
+
+
 seed_claude_failure() {
   local dir=$1 outcome=${2:-failed-suppressed}
   : > "$dir/state/.claude-autoarm-failure-notified"
@@ -1469,12 +1531,170 @@ test_hook_claude_mode_preserves_fresh_failed_progression() {
   pass "fm-turnend-guard --claude: fresh failed epochs preserve and advance monotonic fail-open progression"
 }
 
+# The two bounds at their DEFAULTS: the auto-arm's consecutive-failure cap stops
+# the automatic re-arm, and the guard must still carry the same episode to its
+# one loud attended fail-open. Neither a silent loop nor a silent surrender.
+test_hook_claude_mode_autoarm_cap_still_reaches_the_fail_open() {
+  local dir out status guard_out guard_status arms_at_cap arms_after alarmed i
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-cap-fail-open")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  # A persistently failing arm that also counts its invocations, so the cap can
+  # be proven to stop the re-arming itself, not only the continuations.
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'watcher: FAILED - persistent fixture failure\n'
+exit 1
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+
+  # Drive consecutive failed Stop events until the auto-arm records its cap.
+  for i in 1 2 3 4 5 6; do
+    out=$(run_integrated_autoarm "$dir") || true
+    [ -e "$dir/state/.claude-autoarm-failure-capped" ] && break
+    guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true) || true
+  done
+  assert_present "$dir/state/.claude-autoarm-failure-capped" "consecutive failures never reached the auto-arm cap"
+  assert_contains "$out" "auto-arm CAPPED" "reaching the cap did not surface the stop"
+  arms_at_cap=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+
+  # From here the auto-arm neither re-arms nor creates another continuation, so
+  # the guard owns the escalation: bounded blocks, then exactly one alarm.
+  alarmed=0
+  for i in 1 2 3 4 5 6; do
+    out=$(run_integrated_autoarm "$dir"); status=$?
+    expect_code 0 "$status" "a capped auto-arm must not create another continuation"
+    [ -z "$out" ] || fail "a capped auto-arm repeated an operator notice: $out"
+    guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true) || true
+    case "$guard_out" in
+      *'FIRSTMATE SUPERVISION IS GENUINELY DOWN'*) alarmed=1; break ;;
+      *'TURN WOULD END BLIND'*) : ;;
+      *) fail "a capped episode left the guard neither blocking nor alarming: $guard_out" ;;
+    esac
+  done
+  arms_after=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+
+  [ "$alarmed" -eq 1 ] || fail "a capped auto-arm never reached the guard's attended fail-open"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the capped episode did not consume its one attended alarm"
+  [ "$arms_after" -eq "$arms_at_cap" ] \
+    || fail "the capped auto-arm kept re-arming: $arms_at_cap attempts at the cap, $arms_after after"
+  pass "fm-turnend-guard --claude: a capped auto-arm stops retrying and the guard still reaches one attended fail-open"
+}
+
+# The two bounds composed at a cap of ONE, where the capping firing is also the
+# first failure and therefore never writes state/.claude-autoarm-failure-notified
+# at all. The auto-arm still stops re-arming, and the episode must still reach
+# this guard's one attended fail-open instead of blocking every turn end until
+# Claude Code's hard consecutive-block override.
+test_hook_claude_mode_cap_of_one_still_reaches_the_fail_open() {
+  local dir out status guard_out i alarmed
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-cap-one-fail-open")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_failed_arm "$dir"
+  export FM_CLAUDE_AUTOARM_FAILURE_CAP=1
+
+  out=$(run_integrated_autoarm "$dir"); status=$?
+  expect_code 2 "$status" "the capping firing must deliver its one notice, which only exit 2 hands to the harness"
+  assert_contains "$out" "auto-arm CAPPED" "reaching the cap must surface the stop once"
+  assert_present "$dir/state/.claude-autoarm-failure-capped" "reaching the cap must record the stop durably"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" \
+    "this case is only meaningful while the cap is reached before any failure notice exists"
+
+  alarmed=0
+  for i in 1 2 3 4 5 6 7 8; do
+    out=$(run_integrated_autoarm "$dir"); status=$?
+    expect_code 0 "$status" "a capped auto-arm must not create another continuation"
+    [ -z "$out" ] || fail "a capped auto-arm repeated an operator notice: $out"
+    guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true) || true
+    case "$guard_out" in
+      *'FIRSTMATE SUPERVISION IS GENUINELY DOWN'*) alarmed=1; break ;;
+      *'TURN WOULD END BLIND'*) : ;;
+      *) fail "a notice-less capped episode left the guard neither blocking nor alarming: $guard_out" ;;
+    esac
+  done
+  unset FM_CLAUDE_AUTOARM_FAILURE_CAP
+
+  [ "$alarmed" -eq 1 ] || fail "a capped episode with no failure notice never reached the attended fail-open"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the episode did not consume its one attended alarm"
+  pass "fm-turnend-guard --claude: a cap reached before any failure notice still reaches one attended fail-open"
+}
+
+# Both layers fire on the SAME Stop event, and this is the interleaving the
+# sequential cases above cannot see. A post-cap auto-arm firing still takes a
+# generation and publishes an "arming" claim for a live pid, then exits 0 without
+# arming and without any continuation. While that claim is open the synchronous
+# guard must not read it as recovery under way: doing so allows the stop with no
+# watcher, no continuation from either layer, and no attended alarm.
+#
+# The real hook is frozen inside its own arming window with SIGSTOP, so the guard
+# runs against exactly the ledger state a concurrent capped firing publishes.
+test_hook_claude_mode_capped_arming_claim_never_allows_a_blind_stop() {
+  local dir out status guard_out i probe pid bg bg_out caught frozen_status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-capped-arming-race")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_failed_arm "$dir"
+  export FM_CLAUDE_AUTOARM_FAILURE_CAP=1
+  out=$(run_integrated_autoarm "$dir") || true
+  assert_present "$dir/state/.claude-autoarm-failure-capped" "the fixture never reached the auto-arm cap"
+
+  bg_out="$dir/state/capped-firing.out"
+  caught=0
+  i=0
+  while [ "$i" -lt 25 ] && [ "$caught" -eq 0 ]; do
+    i=$((i + 1))
+    run_integrated_autoarm "$dir" > "$bg_out" 2>&1 &
+    bg=$!
+    probe=0
+    while [ "$probe" -lt 600 ]; do
+      probe=$((probe + 1))
+      pid=$(sed -n '1s/^epoch=[0-9][0-9]* owner_pid=\([0-9][0-9]*\) outcome=arming .*/\1/p' \
+        "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true)
+      [ -n "$pid" ] || continue
+      kill -STOP "$pid" 2>/dev/null || break
+      # The firing may have moved on between the read and the signal: only a
+      # ledger that still names this frozen pid as arming is the window.
+      if sed -n '1p' "$dir/state/.claude-autoarm-epoch" 2>/dev/null \
+        | grep -q "owner_pid=$pid outcome=arming"; then
+        caught=1
+      else
+        kill -CONT "$pid" 2>/dev/null || true
+      fi
+      break
+    done
+    [ "$caught" -eq 1 ] && break
+    wait "$bg" 2>/dev/null || true
+  done
+  [ "$caught" -eq 1 ] || fail "could not observe a post-cap firing inside its arming window"
+
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  kill -CONT "$pid" 2>/dev/null || true
+  frozen_status=0
+  wait "$bg" 2>/dev/null || frozen_status=$?
+
+  expect_code 2 "$status" "an arming claim inside a capped episode must not pass for recovery under way"
+  assert_contains "$guard_out" "TURN WOULD END BLIND" "the capped-episode block must carry the blind-turn banner"
+  expect_code 0 "$frozen_status" "the concurrent capped firing must create no continuation of its own"
+  [ ! -s "$bg_out" ] || fail "the concurrent capped firing emitted: $(cat "$bg_out")"
+  assert_absent "$dir/state/.watch.lock" "no watcher was ever established, so the stop would have ended blind"
+  unset FM_CLAUDE_AUTOARM_FAILURE_CAP
+  pass "fm-turnend-guard --claude: a capped firing's open arming claim never allows a blind stop"
+}
+
 test_hook_claude_mode_integrated_monotonic_fail_open() {
   local dir out status guard_out guard_status i pid identity count
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-integrated-fail-open")
   : > "$dir/state/task1.meta"
   install_integrated_autoarm "$dir"
   write_integrated_failed_arm "$dir"
+  # This case owns the GUARD's monotonic progression across more consecutive
+  # failures than the auto-arm's own default cap allows. That cap is an
+  # orthogonal bound with its own coverage, and their default composition is
+  # pinned by test_hook_claude_mode_autoarm_cap_still_reaches_the_fail_open, so
+  # lift it here rather than letting it truncate the progression under test.
+  export FM_CLAUDE_AUTOARM_FAILURE_CAP=9
 
   out=$(run_integrated_autoarm "$dir"); status=$?
   expect_code 2 "$status" "the first exhausted auto-arm cycle must emit its one failure notice"
@@ -1508,7 +1728,7 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
 
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || {
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     fail "could not identify the positive recovery watcher"
@@ -1531,6 +1751,7 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   out=$(run_integrated_autoarm "$dir"); status=$?
   expect_code 2 "$status" "a later failure after positive recovery must start a new episode"
   assert_contains "$out" "automatic supervision mechanism is broken" "the new failure episode notice was suppressed"
+  unset FM_CLAUDE_AUTOARM_FAILURE_CAP
   pass "fm-turnend-guard --claude: integrated fresh failures reach one bounded fail-open, stop continuation, and reset on recovery"
 }
 
@@ -1543,7 +1764,7 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify recovery-contention watcher"
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || fail "could not identify recovery-contention watcher"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   sleep 60 &
@@ -1579,7 +1800,7 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify concurrent recovery watcher"
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || fail "could not identify concurrent recovery watcher"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   (run_integrated_autoarm "$dir" > "$dir/auto.out"; printf '%s\n' "$?" > "$dir/auto.status") &
@@ -1691,7 +1912,7 @@ test_hook_claude_mode_allow_resets_budget() {
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   sleep 60 &
   pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || {
+  identity=$(fm_pid_identity_of "$dir/bin/fm-wake-lib.sh" "$dir/state" "$pid") || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     fail "could not identify live watcher holder"
@@ -1789,6 +2010,11 @@ test_grok_adapter_native_false_blocks_without_resume
 test_grok_adapter_native_true_allows_without_resume
 test_grok_adapter_snake_case_native_and_camel_precedence
 test_grok_adapter_invalid_inputs_start_neither_path
+test_hook_claude_mode_autoarm_cap_still_reaches_the_fail_open
+test_hook_claude_mode_cap_of_one_still_reaches_the_fail_open
+test_hook_claude_mode_capped_arming_claim_never_allows_a_blind_stop
+test_exactly_one_layer_acts_per_logical_turn_end
+test_no_protection_gap_when_the_owning_layer_is_unprovable
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
