@@ -1,13 +1,4 @@
 {
-  "firstmate-turnend": {
-    "Stop": [
-      {
-        "type": "command",
-        "command": "for d in \"$PWD/bin\" \"$PWD/../bin\" \"$PWD/.agents/bin\"; do [ -f \"$d/fm-turnend-guard-agy.sh\" ] && exec bash \"$d/fm-turnend-guard-agy.sh\"; done",
-        "timeout": 28800
-      }
-    ]
-  },
   "firstmate-hardrule1": {
     "PreToolUse": [
       {
