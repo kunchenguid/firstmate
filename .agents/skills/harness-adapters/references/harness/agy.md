@@ -3,7 +3,7 @@
 Verified worker/scout adapter. Interactive primary sessions are supported and are hands-on-keyboard: the captain drives them directly.
 AGY has NO turn-end Stop hook by design — the Stop hook blocked chat output, so it was deliberately removed from `.agents/hooks.json`; do not re-add it.
 Turn-end supervision for AGY primaries is owned by the external background watcher (`bin/fm-watch.sh`), started by the primary or the captain, not by an in-process hook.
-Hard Rule 1 is enforced by the tracked `.agents/hooks.json` `"firstmate-hardrule1"` `PreToolUse` hook routing to `bin/fm-selfdo-pretool-check.sh` (AGY payload branch); session start is nudged by the `"firstmate-sessionstart"` `PreInvocation` hook.
+Hard Rule 1 enforcement: the former `.agents/hooks.json` `"firstmate-hardrule1"` PreToolUse hook and its `bin/fm-selfdo-*` scripts were ARCHIVED by captain order 2026-09-02 (retired as a misfiring 2-day-old local patch; scripts preserved under `data/archived-scripts/2026-09-02-selfdo/`). Do not re-register; delegation discipline is behavioral, not mechanical.
 
 | Fact | Value |
 |---|---|

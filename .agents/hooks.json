@@ -1,18 +1,4 @@
 {
-  "firstmate-hardrule1": {
-    "PreToolUse": [
-      {
-        "matcher": "write_to_file|replace_file_content|multi_replace_file_content|run_command",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "for d in \"$PWD/bin\" \"$PWD/../bin\" \"$PWD/.agents/bin\"; do [ -f \"$d/fm-selfdo-pretool-check.sh\" ] && exec bash \"$d/fm-selfdo-pretool-check.sh\"; done",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  },
   "firstmate-sessionstart": {
     "PreInvocation": [
       {
