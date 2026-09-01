@@ -553,6 +553,8 @@ These skills are not captain-invocable; load them only at their precise triggers
   Never run a registered source's blocking command yourself in a conversational turn.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
+- `pstack-hermes` - load when the request asks for pstack or rigorous non-trivial engineering, or names a bug, feature, refactor, performance/runtime investigation, evaluation, PR readiness, multi-phase delivery, or session pickup that no more specific owner fully governs.
+- `project-verification-harness` - load when a project lacks repeatable live/E2E proof, workers improvise browser or CLI verification, a Feature Map has drifted, or green tests do not prove the requested behavior.
 - `implement-spec` - load when the captain provides a spec, feature design, or implementation plan that decomposes into multiple concurrent tasks with a dependency graph between them.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 

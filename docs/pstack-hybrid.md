@@ -1,50 +1,52 @@
 # pstack hybrid
 
-This fork ports the engineering-discipline habits of [pstack](https://github.com/cursor/plugins/tree/main/pstack) by Lauren Tan ([@poteto](https://x.com/poteto), MIT) onto Firstmate's own worker stack, so the discipline fires inside the code-writing worker instead of competing with Firstmate for routing authority.
+This is a selective Firstmate adaptation of Lauren Tan's MIT-licensed pstack engineering discipline.
+It keeps Firstmate as the only router and reuses Firstmate's owners for isolation, delivery, review, and authority.
+The adaptation does not install the Cursor plugin, its 21 principle skills, or its 48-skill surface.
 
-The design recipe this page summarizes lives in the captain's private data (the reference artifact); this page is the tracked summary.
-When this page and an authoritative file disagree, the authoritative file wins.
+## Router
 
-## One runtime, not two routers
+[`pstack-hermes`](../.agents/skills/pstack-hermes/SKILL.md) is the conditional router for rigorous non-trivial engineering work.
+It selects one compact principle set and one playbook, then points at existing Firstmate owners instead of copying their procedures.
+Its playbook index covers investigation, bug fixing, features, refactors, performance, forensics, prototypes, evaluation, verification, PR readiness, multi-phase delivery, and pickup.
+A task that does not match the trigger or already has a complete owner does not load the router.
+The task brief and backlog remain the durable place for the chosen steps, skipped reasons, fixed point, owner, and acceptance proof.
 
-Firstmate remains the only router.
-Plays never pick work, isolate copies, or decide delivery; the lifecycle in [`AGENTS.md`](../AGENTS.md) sections 7 and 11 keeps that authority.
-Plays are habits for the worker that is already writing code, loaded just in time through the task brief.
+Firstmate/Sol owns coordination, scope, synthesis, and integration judgment.
+Workers and ordinary reviews use the configured Luna route when the current dispatch profile actually selects it.
+Several Luna executions with different rubrics are perspectives, not a multi-model panel.
+Azure Opus is reserved for one small, explicit critique because its known limit is 80k tokens per minute.
+Receipts record the actual harness, model, and provider rather than inferred role names.
 
-Nothing is always-on: a brief names exactly the plays that job needs, and an unnamed play never applies.
+## Principles and owners
 
-## Plays library
+[`references/principles.md`](../.agents/skills/pstack-hermes/references/principles.md) compresses the useful pstack decisions into a small selective index.
+[`references/playbooks.md`](../.agents/skills/pstack-hermes/references/playbooks.md) owns the adapted sequences and exclusions.
+The router defers defects to [`diagnostic-reasoning`](../.agents/skills/diagnostic-reasoning/SKILL.md), dependent plans to [`implement-spec`](../.agents/skills/implement-spec/SKILL.md), and project proof gaps to [`project-verification-harness`](../.agents/skills/project-verification-harness/SKILL.md).
+Firstmate's lifecycle in [`AGENTS.md`](../AGENTS.md) remains the owner of worker isolation, steering, review, merge authority, cleanup, and PR state.
+The four brief-conditional plays remain available through `bin/fm-brief.sh --plays` for task-level subtract-first, walk-if-needed, prove-the-artifact, and no-comments discipline.
+Plays never pick work, isolate copies, or decide delivery.
 
-Each play is a small internal skill under `.agents/skills/`, one principle each:
+## Project verification harness
 
-- [play-subtract-first](../.agents/skills/play-subtract-first/SKILL.md) - task-level anti-overengineering: trace the real flow and callers, plan the smallest scope, remove before adding, fix the root cause once, test only changed uncovered behavior, and prove the final diff.
-- [play-walk-if-needed](../.agents/skills/play-walk-if-needed/SKILL.md) - walk the system only when the change crosses into unfamiliar areas or shared boundaries; otherwise write one line saying why you skipped it.
-- [play-prove-the-artifact](../.agents/skills/play-prove-the-artifact/SKILL.md) - prove with a live command, flow, record, or local verifier; tests existing is not done.
-- [play-no-comments](../.agents/skills/play-no-comments/SKILL.md) - strip AI-tell comments from your own diff before review.
+[`project-verification-harness`](../.agents/skills/project-verification-harness/SKILL.md) creates or maintains a project-local proof surface when tests or builds do not close the real behavior loop.
+It requires a narrow CLI or driver, a user-oriented Feature Map, synthetic fixtures, sanitized receipts, and a deliberate-break proof when a project needs those artifacts.
+It extends an existing project convention instead of forcing a global `verification/` framework.
+Its pass proves the real flow and observable state, not only compilation or process exit.
+The harness never grants merge, deploy, publish, customer-message, secret-change, or destructive authority.
 
-A play is loaded by a worker only when its brief names it.
-`bin/fm-brief.sh --plays <name[,name...]>` validates names against this home's plays library and emits a task-scoped `# Plays` section; the script's header owns the exact mechanics.
-Plays deliberately exclude pstack's orchestration plays (`orchestrate`, `autopilot-full`, `autopilot-stack`, and friends): routing, isolation, and delivery stay with Firstmate.
+## Provenance and exclusions
 
-## Setup-pstack analog: model roles are already covered
-
-pstack's `/setup-pstack` writes per-role model configuration for code, judgment, and review roles.
-This fork already has the machinery for that, so the deliverable is this mapping, not new code:
-
-- Code role: the per-task harness, model, and effort chosen by a `config/crew-dispatch.json` dispatch profile; [`docs/configuration.md`](configuration.md) owns that schema.
-- Judgment role: the strongest-reasoning-class rule in `AGENTS.md` section 4, which prevents silently downgrading ambiguous work to conserve quota.
-- Review role: the task's selected delivery path (`AGENTS.md` section 7), which owns review through the no-mistakes pipeline or the configured merge authority; Firstmate never spawns a separate reviewer for it.
-- Quota-aware model choice among candidates: `quota-axi` ranked by `spendPriority`, with the `quota-array-dispatch` skill owning the selection procedure.
-
-There is no per-role model config file to write, and none is needed.
-
-## No-comments analog and the delivery path
-
-[play-no-comments](../.agents/skills/play-no-comments/SKILL.md) is the worker-side habit: the worker sweeps its own diff for AI-tell comments as implementation hygiene before declaring done.
-It adds no review gate, no reviewer, and no multi-model loop; the selected delivery path still owns review.
-Its findings fold into the worker's own commit, so no-mistakes validates the already-clean diff.
+The technical source is the pinned [pstack subtree at commit `b9ddc83c32972210b8a94d389130713e8eed346e`](https://github.com/cursor/plugins/tree/b9ddc83c32972210b8a94d389130713e8eed346e).
+The editorial sources are [The Complete Guide to pstack Pt. 1](https://x.com/i/article/2094151284949688320) and [the announcing tweet](https://x.com/poteto/status/2094457600259842065).
+The local adaptation was checked against the frozen handoff archive whose SHA-256 is `5f45a6a242f2a2053a34b4744b21fc215b0012a5810a336faff8fd9edb252e16`.
+The adaptation excludes Cursor hooks, sticky mode, `/loop`, Graphite, Benny, `make-bot-ui`, `bootstrap.ts`, `orch`, `watch-pr`, `worktree-audit.sh`, auto-merge, auto-deploy, force-push, destructive cleanup, and raw plugin metadata.
+It also excludes unsupported model-panel claims and treats the article's 2,000 PRs per month and 100-1000x figures as first-party claims, not Firstmate KPIs.
+No Herdr runtime or other unrelated backend surface is changed by this layer.
 
 ## Verification
 
-- `tests/fm-brief.test.sh` covers conditional play loading, unknown-play refusal, and the charter refusal.
-- `bin/fm-lint.sh` and `bin/fm-doc-audience-check.sh` gate style and classification.
+The documentation inventory checks every new skill and reference for classification and local links.
+`bin/fm-skill-check.sh` checks internal skill frontmatter and the section 13 routing pointers.
+`tests/fm-pstack-adaptation.test.sh` covers positive routing, negative routing, authority boundaries, and the harness contract.
+`bin/fm-lint.sh` and `bin/fm-doc-audience-check.sh` remain the repository gates for shell and maintained prose.

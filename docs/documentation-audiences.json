@@ -153,6 +153,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/implement-spec/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -423,6 +427,22 @@
     {
       "path": "docs/pstack-hybrid.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": ".agents/skills/pstack-hermes/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/pstack-hermes/references/principles.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/pstack-hermes/references/playbooks.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/project-verification-harness/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }
