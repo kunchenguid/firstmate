@@ -800,6 +800,7 @@ FM_HOME_SUMMARY_FAILURE_REPORT=2   # recorded publication failures since the led
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=10   # seconds bounding each per-task current-state read inside bin/fm-fleet-snapshot.sh, so one unreachable remote secondmate host cannot extend a snapshot or a ledger publication without limit; a read that hits the bound reports that task as unknown
 FM_SNAPSHOT_ENDPOINT_TIMEOUT=2   # seconds bounding local secondmate agent-alive probes inside bin/fm-fleet-snapshot.sh's home-summary mode; timed-out endpoint evidence reports unknown rather than absent
 FM_SNAPSHOT_TASK_STATE_JOBS=32   # concurrent per-task evidence workers inside bin/fm-fleet-snapshot.sh; invalid or zero values are rejected
+FM_SNAPSHOT_TASK_STATE_BUDGET=20   # seconds bounding total per-task current-state and endpoint probing inside bin/fm-fleet-snapshot.sh's home-summary mode; tasks that cannot be probed within the budget keep their row with unknown live evidence
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_INACTIVE_RECONCILE_SECS=900  # 60..1800-second watcher cadence and inactivity threshold; locked session start also scans immediately

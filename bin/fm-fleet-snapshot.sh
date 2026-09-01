@@ -105,6 +105,7 @@ FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
 FM_SNAPSHOT_ENDPOINT_TIMEOUT=${FM_SNAPSHOT_ENDPOINT_TIMEOUT:-2}
 FM_SNAPSHOT_TASK_STATE_JOBS=${FM_SNAPSHOT_TASK_STATE_JOBS:-32}
+FM_SNAPSHOT_TASK_STATE_BUDGET=${FM_SNAPSHOT_TASK_STATE_BUDGET:-20}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -138,6 +139,7 @@ validate_positive_bound FM_SNAPSHOT_SECONDMATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_
 validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_ENDPOINT_TIMEOUT "$FM_SNAPSHOT_ENDPOINT_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_TASK_STATE_JOBS "$FM_SNAPSHOT_TASK_STATE_JOBS"
+validate_positive_bound FM_SNAPSHOT_TASK_STATE_BUDGET "$FM_SNAPSHOT_TASK_STATE_BUDGET"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
@@ -191,6 +193,8 @@ Each per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
 the snapshot without limit; a read that hits the bound reports state unknown.
 Task current-state and endpoint evidence is collected concurrently under
 FM_SNAPSHOT_TASK_STATE_JOBS (default 32).
+Home-summary task probing is additionally bounded by
+FM_SNAPSHOT_TASK_STATE_BUDGET (default 20 seconds).
 In home-summary mode, ordinary task endpoint presence is derived from that
 bounded current-state read when it proves presence or absence; local secondmate
 agent-alive checks are bounded by FM_SNAPSHOT_ENDPOINT_TIMEOUT (default 2
@@ -597,9 +601,13 @@ task_json_one() {  # <meta-file>
       pr_source=absent
     fi
 
-    current_json=$(crew_state_json "$id")
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
+    if [ "${FM_SNAPSHOT_TASK_STATE_UNKNOWN:-0}" = 1 ]; then
+      current_json=$(jq -n '{state:"unknown",source:"none",detail:"probe budget exhausted",raw:""}')
+    else
+      current_json=$(crew_state_json "$id")
+    fi
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
     current_detail=$(printf '%s' "$current_json" | jq -r '.detail // ""')
@@ -637,7 +645,10 @@ task_json_one() {  # <meta-file>
 
     endpoint_exists=null
     agent_alive=not_checked
-    if [ -n "$remote_host" ]; then
+    if [ "${FM_SNAPSHOT_TASK_STATE_UNKNOWN:-0}" = 1 ]; then
+      endpoint_exists=null
+      [ "$kind" = secondmate ] && agent_alive=unknown
+    elif [ -n "$remote_host" ]; then
       if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
         "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
         remote_rc=0
@@ -771,18 +782,126 @@ task_json_one() {  # <meta-file>
       }'
 }
 
+task_json_budget_unknown_lines() {  # <meta-file>...
+  local meta id kind harness mode yolo project worktree home projects spawn_gen
+  local backend=tmux target= remote_host= remote_root= pr= agent_alive=not_checked
+  local meta_present=false status_present=false report_present=false worktree_present=false home_present=false
+  local terminal= window= remote_backend= remote_target= key value
+  for meta in "$@"; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=ship harness= mode= yolo= project= worktree= home= projects= spawn_gen=
+    backend=tmux target= remote_host= remote_root= pr= agent_alive=not_checked
+    terminal= window= remote_backend= remote_target=
+    meta_present=false status_present=false report_present=false worktree_present=false home_present=false
+    while IFS='=' read -r key value || [ -n "$key" ]; do
+      case "$key" in
+        kind) kind=$value ;;
+        harness) harness=$value ;;
+        mode) mode=$value ;;
+        yolo) yolo=$value ;;
+        project) project=$value ;;
+        worktree) worktree=$value ;;
+        home) home=$value ;;
+        projects) projects=$value ;;
+        spawn_gen) spawn_gen=$value ;;
+        remote_host) remote_host=$value ;;
+        remote_root) remote_root=$value ;;
+        remote_backend) remote_backend=$value ;;
+        remote_target) remote_target=$value ;;
+        backend) backend=$value ;;
+        terminal) terminal=$value ;;
+        window) window=$value ;;
+        pr) pr=$value ;;
+      esac
+    done < "$meta"
+    if [ -n "$remote_host" ]; then
+      backend=${remote_backend:-unknown}
+      target=$remote_target
+    elif [ "$backend" = orca ] && [ -n "$terminal" ]; then
+      target=$terminal
+    else
+      target=$window
+    fi
+    [ "$kind" = secondmate ] && agent_alive=unknown
+    [ -e "$meta" ] && meta_present=true
+    [ -f "$STATE/$id.status" ] && status_present=true
+    [ -f "$DATA/$id/report.md" ] && report_present=true
+    [ -n "$worktree" ] && [ -e "$worktree" ] && worktree_present=true
+    [ -n "$home" ] && [ -e "$home" ] && home_present=true
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "$kind" "$harness" "$mode" "$yolo" "$project" "$worktree" "$home" \
+      "$projects" "$spawn_gen" "$backend" "$target" "$remote_host" "$remote_root" "$pr" \
+      "$agent_alive" "$meta" "$STATE/$id.status" "$DATA/$id/report.md" \
+      "$meta_present" "$status_present" "$report_present" "$worktree_present" "$home_present"
+  done | jq -R -n \
+    --arg observed_at "$SNAPSHOT_NOW" \
+    'inputs
+    | split("\t")
+    | {
+      id:.[0],
+      kind:.[1],
+      harness:(.[2] // ""),
+      mode:(.[3] // ""),
+      yolo:(.[4] // ""),
+      project:(.[5] // ""),
+      spawn_gen:(.[9] | if . == "" then null else . end),
+      backend:.[10],
+      remote:(if .[12] == "" then null else {host:.[12],root:.[13]} end),
+      paths:{
+        meta:{path:.[16],present:(.[19] == "true")},
+        status_log:{path:.[17],present:(.[20] == "true"),kind:"event_history",last_event:{state:"",note:"",raw:""}},
+        worktree:(if .[6] == "" then {path:null,present:false} else {path:.[6],present:(.[22] == "true")} end),
+        home:(if .[7] == "" then {path:null,present:false} else {path:.[7],present:(.[23] == "true")} end),
+        report:{path:.[18],present:(.[21] == "true")}
+      },
+      secondmate_projects:(.[8] | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
+      current_state:{state:"unknown",source:"none",detail:"probe budget exhausted",raw:"",observed_at:$observed_at,freshness:"fresh"},
+      endpoint:{target:(.[11] | if . == "" then null else . end),exists:null,agent_alive:.[15],status:"unknown",observed_at:$observed_at,freshness:"fresh"},
+      pr:{url:(.[14] | if . == "" then null else . end),source:(if .[14] == "" then "absent" else "meta" end)},
+      hints:{pending_decision:false,blocked_event:false,open_decisions:[],scout_report_present:(.[21] == "true"),last_event_text:""},
+      actions:(
+        if .[1] == "secondmate" then
+          {send:"bin/fm-send.sh fm-\(.[0]) \u0027<request>\u0027",
+           watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",
+           return_channel_note:"Secondmate answers come back through status/doc paths after a marked fm-send request."}
+        else
+          {watch:"bin/fm-peek.sh fm-\(.[0])",
+           steer:"bin/fm-send.sh fm-\(.[0]) \u0027<instruction>\u0027",
+           return_channel_note:null}
+        end)
+    }'
+}
+
 task_json_lines() {
-  local meta tmpdir index=0 out rc=0 pid
+  local meta tmpdir index=0 out rc=0 pid deadline=0 remaining=0 probe_cost
+  local task_budget_active=0 budget_exhausted=0
   local -a batch_pids=()
+  local -a unknown_metas=()
   tmpdir=$(snapshot_mktemp_dir "${TMPDIR:-/tmp}/fm-fleet-snapshot-tasks.XXXXXX") || return 1
+  if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
+    task_budget_active=1
+    deadline=$(( $(date +%s) + FM_SNAPSHOT_TASK_STATE_BUDGET ))
+  fi
+  probe_cost=$FM_SNAPSHOT_SECONDMATE_TIMEOUT
+  [ "$FM_SNAPSHOT_ENDPOINT_TIMEOUT" -gt "$probe_cost" ] && probe_cost=$FM_SNAPSHOT_ENDPOINT_TIMEOUT
+  probe_cost=$((FM_SNAPSHOT_CREW_STATE_TIMEOUT + probe_cost))
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     index=$((index + 1))
     out=$(printf '%s/%06d.json' "$tmpdir" "$index")
-    ( task_json_one "$meta" > "$out" ) &
-    batch_pids+=("$!")
-    if [ "${#batch_pids[@]}" -ge "$FM_SNAPSHOT_TASK_STATE_JOBS" ]; then
+    if [ "$budget_exhausted" -eq 0 ] && [ "$task_budget_active" -eq 1 ]; then
+      remaining=$((deadline - $(date +%s)))
+      [ "$remaining" -ge "$probe_cost" ] || budget_exhausted=1
+    fi
+    if [ "$budget_exhausted" -eq 1 ]; then
+      unknown_metas+=("$meta")
+    else
+      ( task_json_one "$meta" > "$out" ) &
+      batch_pids+=("$!")
+    fi
+    if [ "$budget_exhausted" -eq 0 ] && [ "${#batch_pids[@]}" -ge "$FM_SNAPSHOT_TASK_STATE_JOBS" ]; then
       for pid in "${batch_pids[@]}"; do
         wait "$pid" || rc=1
       done
@@ -790,6 +909,10 @@ task_json_lines() {
       if [ "$rc" -ne 0 ]; then
         snapshot_rm_rf "$tmpdir" || true
         return 1
+      fi
+      if [ "$task_budget_active" -eq 1 ]; then
+        remaining=$((deadline - $(date +%s)))
+        [ "$remaining" -ge "$probe_cost" ] || budget_exhausted=1
       fi
     fi
   done
@@ -799,6 +922,12 @@ task_json_lines() {
   if [ "$rc" -ne 0 ]; then
     snapshot_rm_rf "$tmpdir" || true
     return 1
+  fi
+  if [ "${#unknown_metas[@]}" -gt 0 ]; then
+    task_json_budget_unknown_lines "${unknown_metas[@]}" > "$tmpdir/unknown.json" || {
+      snapshot_rm_rf "$tmpdir" || true
+      return 1
+    }
   fi
   if [ "$index" -eq 0 ]; then
     snapshot_rm_rf "$tmpdir" || true
@@ -844,7 +973,7 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
-secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
+secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
   jq -n \
     --arg generated "$SNAPSHOT_NOW" \
     --argjson generated_epoch "$SNAPSHOT_EPOCH" \
@@ -853,8 +982,11 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-    --argjson backlog "$1" \
-    --argjson tasks "$2" '
+    --slurpfile backlog_doc "$1" \
+    --slurpfile tasks_doc "$2" '
+    ($backlog_doc[0]) as $backlog
+    | ($tasks_doc[0]) as $tasks
+    |
     def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
@@ -1579,7 +1711,22 @@ BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" 
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
-  secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" \
+  SUMMARY_INPUT_DIR=$(snapshot_mktemp_dir "${TMPDIR:-/tmp}/fm-fleet-snapshot-summary.XXXXXX") \
+    || { echo "fm-fleet-snapshot: summary input setup failed" >&2; exit 1; }
+  printf '%s' "$BACKLOG_JSON" > "$SUMMARY_INPUT_DIR/backlog.json" || {
+    snapshot_rm_rf "$SUMMARY_INPUT_DIR" || true
+    echo "fm-fleet-snapshot: summary input write failed" >&2
+    exit 1
+  }
+  printf '%s' "$TASKS_JSON" > "$SUMMARY_INPUT_DIR/tasks.json" || {
+    snapshot_rm_rf "$SUMMARY_INPUT_DIR" || true
+    echo "fm-fleet-snapshot: summary input write failed" >&2
+    exit 1
+  }
+  secondmate_home_summary_json "$SUMMARY_INPUT_DIR/backlog.json" "$SUMMARY_INPUT_DIR/tasks.json"
+  SUMMARY_RC=$?
+  snapshot_rm_rf "$SUMMARY_INPUT_DIR" || true
+  [ "$SUMMARY_RC" -eq 0 ] \
     || { echo "fm-fleet-snapshot: secondmate home summary failed" >&2; exit 1; }
   exit 0
 fi
