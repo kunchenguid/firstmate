@@ -33,6 +33,7 @@ STUB_QUEUE="$STUB_ROOT/queue"
 STUB_IDX="$STUB_ROOT/idx"
 STUB_LOG="$STUB_ROOT/argv.log"
 STUB_FAIL_ONCE="$STUB_ROOT/fail-once"
+STUB_INTERRUPT_ONCE="$STUB_ROOT/interrupt-once"
 STUB_BIN_DIR="$STUB_ROOT/bin"
 
 make_home() {  # <name>
@@ -85,12 +86,17 @@ tasks_in() {  # <home> <args...>
 install_stub() {
   mkdir -p "$STUB_BIN_DIR"
   : > "$STUB_QUEUE"
-  rm -f "$STUB_IDX" "$STUB_LOG" "$STUB_FAIL_ONCE"
+  rm -f "$STUB_IDX" "$STUB_LOG" "$STUB_FAIL_ONCE" "$STUB_INTERRUPT_ONCE"
   cat > "$STUB_BIN_DIR/lavish-axi" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$STUB_LOG"
 if [ -e "$STUB_FAIL_ONCE" ]; then
   rm -f "$STUB_FAIL_ONCE"
+  exit 1
+fi
+if [ -e "$STUB_INTERRUPT_ONCE" ]; then
+  rm -f "$STUB_INTERRUPT_ONCE"
+  printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'
   exit 1
 fi
 n=\$(cat "$STUB_IDX" 2>/dev/null || echo 0)
@@ -435,5 +441,61 @@ out=$(run_lavish "$H7" receipt-text "$RECEIPT_SID" 2>&1) || status=$?
 rm -f "$journal"
 mv "$TMP_ROOT/h7-record" "$journal"
 pass "a symlinked receipts record is refused rather than read or written through"
+
+# --- one visible receipt per round, however many quiet retries it takes ------
+# The retried condition interrupts the poll response after the server accepted
+# the request, so the receipt is already on the page; a retry that re-sent it
+# would leave the captain reading the same acknowledgement many times.
+stub_calls_at_least() { [ "$(stub_calls)" -ge "$1" ]; }
+export FM_LAVISH_POLL_RETRY_DELAY=0
+H8=$(make_home h8)
+RECEIPT_HOME=$H8
+ART8="$TMP_ROOT/deck8.html"
+printf '<h1>deck</h1>\n' > "$ART8"
+RECEIPT_SID=$(run_lavish "$H8" source-id "$ART8")
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+stub_ended_empty
+run_lavish "$H8" arm "$ART8" >/dev/null
+reconcile_until [ -e "$H8/state/procevent-inbox/$RECEIPT_SID.1.result" ] \
+  || fail "the round whose receipt is delivered was never captured"
+wait_claim_free
+: > "$STUB_INTERRUPT_ONCE"
+reconcile_until stub_calls_at_least 3 \
+  || fail "the interrupted delivery poll never completed its quiet retry"
+presentations=$(grep -c -- "--agent-reply" "$STUB_LOG")
+[ "$presentations" = 1 ] \
+  || fail "one round's receipt was presented $presentations times across the quiet retry"
+journal="$H8/state/procevent/$RECEIPT_SID.receipts"
+reconcile_until grep -q "^delivered" "$journal" \
+  || fail "the quietly retried delivery never journaled the displayed receipt"
+pass "a quietly retried delivery presents the round's receipt exactly once"
+
+# --- arm never registers a source whose record it could not reset ------------
+H9=$(make_home h9)
+RECEIPT_HOME=$H9
+ART9="$TMP_ROOT/deck9.html"
+printf '<h1>deck</h1>\n' > "$ART9"
+RECEIPT_SID=$(run_lavish "$H9" source-id "$ART9")
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+record="$H9/state/procevent/$RECEIPT_SID.receipts"
+mkdir -p "$record"
+status=0
+out=$(PATH="$STUB_BIN_DIR:$PATH" run_lavish "$H9" arm "$ART9" 2>&1) || status=$?
+[ "$status" -ne 0 ] || fail "arm registered a source whose receipts record it could not reset"
+assert_contains "$out" "cannot reset the receipts record" "the refusal names the record it could not reset"
+assert_absent "$H9/state/procevent/$RECEIPT_SID.source" "a refused arm left the source registered"
+rmdir "$record"
+# A dangling symlink is removed rather than inherited, so the armed source can
+# actually poll instead of dying on an unreadable record forever.
+ln -s "$TMP_ROOT/absent-record-target" "$record"
+PATH="$STUB_BIN_DIR:$PATH" run_lavish "$H9" arm "$ART9" >/dev/null \
+  || fail "arm refused a source whose record was a dangling symlink"
+[ ! -L "$record" ] || fail "arm inherited the planted record symlink"
+[ ! -e "$TMP_ROOT/absent-record-target" ] || fail "arm wrote through the planted record symlink"
+reconcile_until [ -e "$H9/state/procevent-inbox/$RECEIPT_SID.1.result" ] \
+  || fail "the armed source could never poll after the planted record was reset"
+pass "arm resets a planted record or refuses to register the source"
 
 printf '\nall Lavish receipt tests passed\n'

@@ -416,7 +416,9 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file> <outcome-file>
     return 1
   fi
   # Both staged files can carry task-id rows, so neither may depend on the
-  # caller's umask for its privacy.
+  # caller's umask for its privacy, and neither may be written through anything
+  # already standing at its path.
+  [ ! -e "$body" ] && [ ! -L "$body" ] || { printf 'not-fed\n' > "$outcome"; return 1; }
   (umask 077; : > "$body") || return 1
   "$script" answers "$result" 2>/dev/null \
     | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
@@ -892,6 +894,8 @@ EOF
   # seam runs after the feed so a receipt can state the intake's verdict, and
   # before publication so recording a receipt can never delay a capture's wake.
   RECEIPT_OUTCOME=$(staging_file "$id" "$CLAIM_TOKEN.rcpt")
+  [ ! -e "$RECEIPT_OUTCOME" ] && [ ! -L "$RECEIPT_OUTCOME" ] \
+    || { fm_procevent_source_lock_release "$id"; die "cannot safely stage the receipt outcome"; }
   (umask 077; : > "$RECEIPT_OUTCOME") || { fm_procevent_source_lock_release "$id"; die "cannot stage the receipt outcome"; }
   if [ "$extension_owner" -eq 0 ] \
     && feed_keyed_answers "$adapter" "$id" "$durable" "$RECEIPT_OUTCOME"; then
