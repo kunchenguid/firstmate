@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-startup-network.test.sh - behavior tests for bin/fm-startup-network.sh,
-# the deferred network stage a session start launches instead of running its
-# network work on the blocking path.
+# the deferred startup stage a session start launches instead of running its
+# network work or inactive-outcome scan on the blocking path.
 #
 # The session-start suite proves the digest no longer waits and that the deferred
 # sweeps still land. This suite pins the stage's own contract, whose whole job is

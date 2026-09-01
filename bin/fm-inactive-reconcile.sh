@@ -8,9 +8,9 @@
 # This is an adjunct to the existing watcher poll loop and session-start path,
 # not a watcher, daemon, PR poll, or forge client of its own.
 # `scan` evaluates at most once per FM_INACTIVE_RECONCILE_SECS (default 900,
-# valid 60..1800) per home, except that --startup performs the same cheap scan
-# immediately during a locked session start. Each scan uses an aggregate
-# FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
+# valid 60..1800) per home, except that --startup performs the same scan
+# immediately in the locked session start's deferred worker. Each scan uses an
+# aggregate FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
 # resumes after its last visited child on the next scan.
 # The scan enforces that budget itself through a whole-second deadline, and the
 # first due child of every scan is always visited with at least a one-second
