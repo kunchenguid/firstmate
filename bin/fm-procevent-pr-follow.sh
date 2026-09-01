@@ -165,8 +165,11 @@
 #   FM_PR_FOLLOW_FETCH_TIMEOUT (per-fetch bound, default 60),
 #   FM_PR_FOLLOW_ERROR_BUDGET (consecutive failed fetches before an error
 #   document, default 3), FM_PR_FOLLOW_MAX_PAGES (per-collection page bound,
-#   default 5), FM_PR_FOLLOW_MAX_EVENTS (per-document event bound, default 60),
-#   FM_PR_FOLLOW_MAP_LIMIT (bounded review/check/thread map size, default 40),
+#   default 5), FM_PR_FOLLOW_MAX_EVENTS (per-document event bound, default 60,
+#   at most 198 so a document plus its two exempt lifecycle lines stays inside
+#   the 200-event document limit the reader enforces),
+#   FM_PR_FOLLOW_MAP_LIMIT (bounded review/check/thread map size, default 40,
+#   at most 2048; a map is trimmed to the reader's 8192-character limit too),
 #   FM_PR_FOLLOW_ROTATION_SLOT (rotation slot seconds, default 300),
 #   FM_PR_FOLLOW_SETTLED_EVERY (settled sources poll every N-th duty visit,
 #   default 3), FM_PR_FOLLOW_APPLY_BOUND (adapter-validation failures before
@@ -195,6 +198,16 @@ FOLLOW_DIR="$STATE/pr-follow"
 REG_DIR=$(fm_procevent_registry_dir "$STATE")
 CURSOR_SCHEMA=fm-pr-follow-cursor-v1
 DOC_SCHEMA=fm-pr-follow-event-v1
+
+# The reader's hard limits on one captured document and on one stored map or
+# set. They own both halves of the writer-versus-reader boundary: the
+# validators below enforce them, the writer trims to them, and env_bounds_valid
+# refuses any configured bound that could compose bytes past them.
+DOC_EVENT_LIMIT=200
+DOC_EXEMPT_EVENTS=2
+MAP_CHARS_LIMIT=8192
+MAP_MIN_ENTRY_CHARS=4
+APPROVAL_SET_CHARS_LIMIT=4096
 
 INTERVAL=${FM_PR_FOLLOW_INTERVAL:-300}
 FETCH_TIMEOUT=${FM_PR_FOLLOW_FETCH_TIMEOUT:-60}
@@ -230,7 +243,9 @@ env_bounds_valid() {
   positive_int "$ERROR_BUDGET" || return 1
   positive_int "$MAX_PAGES" || return 1
   positive_int "$MAX_EVENTS" || return 1
+  [ "$MAX_EVENTS" -le "$((DOC_EVENT_LIMIT - DOC_EXEMPT_EVENTS))" ] || return 1
   positive_int "$MAP_LIMIT" || return 1
+  [ "$MAP_LIMIT" -le "$((MAP_CHARS_LIMIT / MAP_MIN_ENTRY_CHARS))" ] || return 1
   positive_int "$ROTATION_SLOT" || return 1
   positive_int "$SETTLED_EVERY" || return 1
   positive_int "$APPLY_FAIL_BOUND"
@@ -370,7 +385,7 @@ prf_check_token_valid() {
 prf_map_valid() {
   local map=${1-} rest entry id token
   [ -n "$map" ] || return 0
-  [ "${#map}" -le 8192 ] || return 1
+  [ "${#map}" -le "$MAP_CHARS_LIMIT" ] || return 1
   rest=$map
   while [ -n "$rest" ]; do
     entry=${rest%%,*}
@@ -390,7 +405,7 @@ prf_map_valid() {
 prf_review_map_valid() {
   local map=${1-} rest entry id state
   [ -n "$map" ] || return 0
-  [ "${#map}" -le 8192 ] || return 1
+  [ "${#map}" -le "$MAP_CHARS_LIMIT" ] || return 1
   rest=$map
   while [ -n "$rest" ]; do
     entry=${rest%%,*}
@@ -411,7 +426,7 @@ prf_review_map_valid() {
 prf_thread_map_valid() {
   local map=${1-} rest entry id state
   [ -n "$map" ] || return 0
-  [ "${#map}" -le 8192 ] || return 1
+  [ "${#map}" -le "$MAP_CHARS_LIMIT" ] || return 1
   rest=$map
   while [ -n "$rest" ]; do
     entry=${rest%%,*}
@@ -434,7 +449,7 @@ prf_thread_map_valid() {
 prf_approval_set_valid() {
   local set=${1-} rest entry
   [ -n "$set" ] || return 0
-  [ "${#set}" -le 4096 ] || return 1
+  [ "${#set}" -le "$APPROVAL_SET_CHARS_LIMIT" ] || return 1
   rest=$set
   while [ -n "$rest" ]; do
     entry=${rest%%,*}
@@ -465,12 +480,21 @@ map_put() {
   ' | tr '\n' ',' | sed 's/,$//'
 }
 
-# max_map_entries <map> <limit>: keep the limit highest-id entries.
+# max_map_entries <map> <limit>: keep the limit highest-id entries that also
+# fit the reader's character limit, so no configured bound and no forge id
+# length can compose a map the validators refuse.
 max_map_entries() {
   [ -n "$1" ] || return 0
   printf '%s' "$1" | tr ',' '\n' | awk -F: '{print $1 + 0 " " $0}' \
     | sort -n -r | head -n "$2" \
-    | awk '{printf "%s%s", sep, substr($0, index($0, " ") + 1); sep = ","}'
+    | awk -v budget="$MAP_CHARS_LIMIT" '{
+        entry = substr($0, index($0, " ") + 1)
+        need = length(entry) + (used == 0 ? 0 : 1)
+        if (used + need > budget) next
+        printf "%s%s", sep, entry
+        sep = ","
+        used += need
+      }'
 }
 
 # reverse_rows <rows-var-name>: print the rows oldest first. Descending API
@@ -893,11 +917,18 @@ delta_head_and_state() {
 
 # Post-cap announced-only map and maximum rebuild: every collection's stored
 # state advances only to what the surviving event lines announce.
-approval_set_add() {  # <user>
-  case ",$NEW_APPROVALS," in
-    *",$1,"*) ;;
-    *) NEW_APPROVALS="${NEW_APPROVALS:+$NEW_APPROVALS,}$1" ;;
+approval_set_insert() {  # <set-variable-name> <user>
+  local current=${!1} candidate
+  case ",$current," in
+    *",$2,"*) return 0 ;;
   esac
+  candidate="${current:+$current,}$2"
+  [ "${#candidate}" -le "$APPROVAL_SET_CHARS_LIMIT" ] || return 0
+  printf -v "$1" '%s' "$candidate"
+}
+
+approval_set_add() {  # <user>
+  approval_set_insert NEW_APPROVALS "$1"
 }
 
 approval_set_del() {  # <user>
@@ -984,6 +1015,9 @@ advance_from_surviving() {
         ;;
     esac
   done <<< "$EV_LINES"
+  NEW_CHECKS=$(max_map_entries "$NEW_CHECKS" "$MAP_LIMIT")
+  NEW_REVIEWS=$(max_map_entries "$NEW_REVIEWS" "$MAP_LIMIT")
+  NEW_THREADS=$(max_map_entries "$NEW_THREADS" "$MAP_LIMIT")
 }
 
 compute_delta_github() {
@@ -1673,10 +1707,7 @@ baseline_write() {
       while IFS= read -r user; do
         [ -n "$user" ] || continue
         prf_login_valid "$user" || continue
-        case ",$CUR_APPROVALS," in
-          *",$user,"*) ;;
-          *) CUR_APPROVALS="${CUR_APPROVALS:+$CUR_APPROVALS,}$user" ;;
-        esac
+        approval_set_insert CUR_APPROVALS "$user"
       done <<< "$SN_APPROVAL_ROWS"
     fi
   fi
@@ -1836,7 +1867,7 @@ parse_apply_doc() {
   case "$DOC_STATUS" in events|backfill|error) ;; *) return 1 ;; esac
   DOC_EVENTS=$(doc_header_field "$file" 'events:') || return 1
   nonnegative_int "$DOC_EVENTS" || return 1
-  [ "$DOC_EVENTS" -le 200 ] || return 1
+  [ "$DOC_EVENTS" -le "$DOC_EVENT_LIMIT" ] || return 1
   if [ "$DOC_STATUS" = error ]; then
     # A diagnostic error document carries no cursor section and merges nothing;
     # applying it only commits its receipt and acknowledges the generation.

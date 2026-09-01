@@ -1077,6 +1077,22 @@ RESULT=$(latest_result "$H" "$glsid")
 assert_grep 'event: thread' "$RESULT" "the remainder of an overflowed poll is announced later"
 assert_no_grep 'event: pr-state' "$RESULT" "an announced lifecycle change is never re-announced"
 ack "$H" "$glsid" 2 "$RESULT"
+# A bound the apply step would refuse never starts polling: the 200-event
+# document limit and the map validators' character limit own the range, so a
+# configured bound above them is refused up front instead of composing a
+# document this adapter's own apply would reject and quarantine it for.
+out=$(FM_HOME="$H" FM_PR_FOLLOW_MAX_EVENTS=250 perl -e 'alarm 3; exec @ARGV' \
+  "$ROOT/bin/fm-procevent-pr-follow.sh" run "$glsid" 2>&1 || true)
+assert_contains "$out" "environment bounds are invalid" \
+  "an event bound above the document limit was accepted"
+out=$(FM_HOME="$H" FM_PR_FOLLOW_MAP_LIMIT=99999 perl -e 'alarm 3; exec @ARGV' \
+  "$ROOT/bin/fm-procevent-pr-follow.sh" run "$glsid" 2>&1 || true)
+assert_contains "$out" "environment bounds are invalid" \
+  "a map bound above the cursor validators' limit was accepted"
+out=$(FM_HOME="$H" FM_PR_FOLLOW_MAX_EVENTS=198 perl -e 'alarm 3; exec @ARGV' \
+  "$ROOT/bin/fm-procevent-pr-follow.sh" run "$glsid" 2>&1 || true)
+assert_not_contains "$out" "environment bounds are invalid" \
+  "the largest bound the apply step accepts was refused"
 unset FM_PR_FOLLOW_MAX_EVENTS
 pass "the event bound truncates review noise and never the lifecycle line"
 
