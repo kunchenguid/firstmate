@@ -344,9 +344,7 @@ fm_procevent_claim_state_root_field_valid() {  # <canonical-state-root>
 
 fm_procevent_claim_state_root_identity() {  # <state-root>
   local state=$1 canonical device inode owner mode
-  fm_procevent_private_directory_valid "$state" 0 || return 1
-  canonical=$(cd -P -- "$state" && pwd -P) || return 1
-  [ "$canonical" = "$(fm_procevent_path_normalize "$state")" ] || return 1
+  canonical=$(fm_procevent_state_root_resolve "$state") || return 1
   fm_procevent_claim_state_root_field_valid "$canonical" || return 1
   device=$(fm_pr_file_device "$canonical") || return 1
   inode=$(fm_pr_file_inode "$canonical") || return 1
@@ -586,6 +584,21 @@ fm_procevent_directory_owned_by_current_user() {
   [ "$owner" = "$(id -u)" ]
 }
 
+# fm_procevent_state_root_resolve <state-root>
+# Print the physical private directory this module operates on, or fail. A home
+# is legitimately spelled through a symlinked ancestor - /tmp and $TMPDIR are
+# symlinks on macOS - so the caller's spelling is resolved exactly once here and
+# every derived path, recorded claim identity, and later confinement check uses
+# the physical root instead. Resolving before validating is what makes the
+# private-directory contract hold for the directory actually operated on, rather
+# than only for callers that already spelled it physically.
+fm_procevent_state_root_resolve() {  # <state-root>
+  local state=$1 canonical
+  canonical=$(CDPATH='' cd -P -- "$state" 2>/dev/null && pwd -P) || return 1
+  fm_procevent_private_directory_valid "$canonical" 0 || return 1
+  printf '%s\n' "$canonical"
+}
+
 fm_procevent_private_directory_valid() {
   local directory=$1 exact_mode=$2 canonical normalized mode
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
@@ -604,7 +617,7 @@ fm_procevent_private_directory_valid() {
 
 fm_procevent_capture_inbox_prepare() {
   local state=$1 inbox
-  fm_procevent_private_directory_valid "$state" 0 || return 1
+  state=$(fm_procevent_state_root_resolve "$state") || return 1
   inbox=$(fm_procevent_inbox_dir "$state")
   if [ ! -e "$inbox" ] && [ ! -L "$inbox" ]; then
     (umask 077; mkdir "$inbox") || return 1
@@ -615,14 +628,14 @@ fm_procevent_capture_inbox_prepare() {
 
 fm_procevent_extension_staging_prepare() {
   local state=$1 registry
-  fm_procevent_private_directory_valid "$state" 0 || return 1
+  state=$(fm_procevent_state_root_resolve "$state") || return 1
   registry=$(fm_procevent_registry_dir "$state")
   fm_procevent_private_directory_valid "$registry" 1
 }
 
 fm_procevent_capture_reservation_prepare() {
   local state=$1 reservation
-  fm_procevent_private_directory_valid "$state" 0 || return 1
+  state=$(fm_procevent_state_root_resolve "$state") || return 1
   reservation=$(fm_procevent_capture_reservation_dir "$state")
   if [ ! -e "$reservation" ] && [ ! -L "$reservation" ]; then
     (umask 077; mkdir "$reservation") || return 1
