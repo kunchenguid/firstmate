@@ -23,6 +23,14 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# This guard drives the real bin/fm-spawn.sh, and the no-mistakes gate runs the
+# suite from a gate worktree, where both refusal signals fire: NO_MISTAKES_GATE
+# is stamped into the environment and the cwd's git-common-dir lives under
+# .no-mistakes/repos/*.git. This file is standalone rather than a tests/lib.sh
+# consumer, so it takes the bypass the way tests/fm-gotmp.test.sh does. An
+# ordinary checkout and CI have neither signal and are unaffected.
+export FM_GATE_REFUSE_BYPASS=1
+
 fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
@@ -271,6 +279,11 @@ SHIP_WT="$LAB/wt-ship"
 mkdir -p "$HOME_DIR/data/$SHIP_ID"
 printf 'brief\n' > "$HOME_DIR/data/$SHIP_ID/brief.md"
 git -C "$PROJECT" worktree add -q -b "fm/$SHIP_ID" "$SHIP_WT"
+# Section 3 gave this home a backlog, so from here on every spawn needs a row of
+# its own; the scout above ran before one existed. Firstmate owns backlog state,
+# so the row is seeded here rather than from inside the sandbox.
+( cd "$HOME_DIR" && tasks-axi add "$SHIP_ID" --title "file-form guard" ) >/dev/null \
+  || fail "could not seed the ship task's backlog row"
 
 SHIP_LOG="$LAB/launch-ship.log"
 : > "$SHIP_LOG"
