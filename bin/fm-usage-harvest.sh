@@ -34,14 +34,24 @@
 # no incarnation delimiter; per-incarnation turns are therefore not derivable
 # from durable data, and scoping only the window to an incarnation would
 # report whole-task turns against a one-incarnation window and token sum.
-# ONE condition narrows a row below that span, and only for a task that was
-# actually relaunched: a filesystem that reports no birth time for
-# state/<task-id>.status leaves the meta's spawn_gen as the only durable
-# start, and fm-spawn rewrites that token on every relaunch, so wall_secs and
-# the token sum then cover the final incarnation while turns still cover the
-# whole task. No per-task record of the first spawn survives a relaunch on
-# such a host, so a relaunched row there is narrowed rather than wrong; a task
-# that was never relaunched always yields a whole-task row on every
+# TWO conditions narrow a row below that span, both only for a task that was
+# actually relaunched.
+# First, a filesystem that reports no birth time for state/<task-id>.status
+# leaves the meta's spawn_gen as the only durable start, and fm-spawn rewrites
+# that token on every relaunch, so wall_secs and the token sum then cover the
+# final incarnation while turns still cover the whole task. No per-task record
+# of the first spawn survives a relaunch on such a host, so a relaunched row
+# there is narrowed rather than wrong.
+# Second, a relaunch may switch the harness, and the meta records only the
+# final incarnation's harness, so the scan below reads only that harness's log
+# tree: the TOKEN fields and the session-log window they are summed over then
+# cover the final harness alone, and an earlier incarnation's usage under a
+# different harness is not summed. wall_secs, turns, spawned_at and
+# completed_at still span the whole task in that case, so only the token
+# fields and their window narrow. Summing every incarnation across different
+# harness trees is separate follow-up work and is deliberately not attempted
+# here.
+# A task that was never relaunched always yields a whole-task row on every
 # filesystem.
 #
 # Wall clock: task start epoch -> status-file mtime epoch; the meta file's
@@ -122,6 +132,12 @@
 #     mere presence of an in-window file.
 # A corrupt log line is skipped best-effort by the parser, which reads each
 # line on its own and keeps the rest of that file's usage.
+# Matching logs are scanned in a deterministic order, oldest mtime first and
+# ties broken by path, and the row's model is the one recorded by the LAST
+# such log that yielded usage, so a task relaunched onto another model on the
+# same harness reports the final incarnation's model, which is the one the
+# meta itself records. The same inputs therefore always produce the same model
+# field. It falls back to the meta model when no log yields one.
 # The two cwd-bound scans (codex, pi) run inside a synchronous teardown over a
 # session tree holding thousands of unrelated sibling logs, so a candidate
 # that survives the mtime window is first probed for the cwd on its FIRST
@@ -284,13 +300,17 @@ matched_files() {  # <dir> <maxdepth-or-empty> : print in-window *.jsonl paths
   if [ -n "$2" ]; then
     depthargs=(-maxdepth "$2")
   fi
+  # find's enumeration order is unspecified, so the mtime it already read is
+  # promoted to a sort key: oldest first, ties broken by path. The caller
+  # depends on that order to resolve the model to the last incarnation's.
   while IFS= read -r f; do
     m=$(file_mtime_epoch "$f") || continue
     if [ "$m" -ge "$START_EPOCH" ] && [ "$m" -le "$END_EPOCH" ]; then
-      printf '%s\n' "$f"
+      printf '%s\t%s\n' "$m" "$f"
     fi
   done < <(find "$dir" ${depthargs[@]+"${depthargs[@]}"} -type f -name '*.jsonl' \
-    -newer "$REFDIR/start" ! -newer "$REFDIR/end" -print 2>/dev/null) || true
+    -newer "$REFDIR/start" ! -newer "$REFDIR/end" -print 2>/dev/null) \
+    | LC_ALL=C sort -t "$(printf '\t')" -k1,1n -k2,2 | cut -f2-
 }
 
 IT=null; CT=null; OT=null; RT=null
@@ -304,8 +324,9 @@ IT=null; CT=null; OT=null; RT=null
 # parses to nothing leaves the source unavailable. Each program also reads its
 # input line by line through "try fromjson", so one corrupt line costs that
 # line rather than the whole file's usage. This loop then binds the row to
-# this task by the cwd it reports, sums the counts and remembers the first
-# model seen.
+# this task by the cwd it reports, sums the counts and keeps the model of the
+# LAST matching log in matched_files' oldest-first order, which is the final
+# incarnation's.
 #
 # <cwd-probe> is a jq program run against the file's FIRST LINE only, printing
 # the cwd that line records or nothing. A candidate whose probe names a
@@ -340,7 +361,7 @@ accumulate_usage() {
     IFS=$'\037' read -r cwd m it ct ot rt <<<"$row"
     [ "$cwd" = "$WORKTREE" ] || continue
     SRC=$label
-    [ -n "$m" ] && [ -z "$MODEL_LOG" ] && MODEL_LOG=$m
+    [ -n "$m" ] && MODEL_LOG=$m
     IT=$((IT + ${it:-0}))
     CT=$((CT + ${ct:-0}))
     OT=$((OT + ${ot:-0}))

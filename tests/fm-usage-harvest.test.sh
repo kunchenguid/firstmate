@@ -12,7 +12,9 @@
 # the rule that a source is named only after a log yields assistant usage.
 # Also covers the one token convention every parser normalizes onto, the
 # first-line cwd probe that rejects an unrelated sibling session before
-# parsing it in full, and the report's per-model grouping and column sums.
+# parsing it in full, the report's per-model grouping and column sums, the
+# documented harness-switch narrowing, and deterministic final-incarnation
+# model attribution.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1044,6 +1046,102 @@ relaunch_birthless_case() {
   pass "usage harvest: the birthless relaunch narrowing matches the stated contract"
 }
 
+# fm-spawn's --relaunch may switch the harness, and it rewrites the meta with
+# only the new incarnation's harness. The token fields then cover the final
+# harness alone, while wall_secs and turns still span the whole task. This case
+# pins that documented narrowing from both sides: a widened scan that summed
+# the earlier harness's log, and a scan narrowed to the final incarnation's
+# window, would each change a number asserted here.
+harness_switch_case() {
+  local id=usageharnessswitch wt="$TMP_ROOT/.no-mistakes/wt-usageharnessswitch"
+  local data home state row out base encoded logdir d1
+  data=$(harvest_case "$id" codex "$wt" default high)
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.4242.3\n' "$((base - 600))" >> "$state/$id.meta"
+  touch -t "$(touch_stamp "$base")" "$state/$id.status"
+
+  # The first incarnation ran under claude and left its own session log inside
+  # the task window, at the encoded project directory the claude parser reads.
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/first-harness.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgH","model":"claude-test","usage":{"input_tokens":700,"output_tokens":70}}}
+JSON
+  touch -t "$(touch_stamp $((base - 500)))" "$logdir/first-harness.jsonl"
+
+  # The task was relaunched onto codex, which is what the meta records.
+  d1="$FM_USAGE_CODEX_DIR/2026/09/01"
+  mkdir -p "$d1"
+  cat > "$d1/rollout-second.jsonl" <<JSON
+{"type":"session_meta","payload":{"cwd":"$wt"}}
+{"type":"turn_context","payload":{"model":"glm-5.3"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":9,"cached_input_tokens":0,"output_tokens":3,"reasoning_output_tokens":1}}}}
+JSON
+  touch -t "$(touch_stamp $((base - 100)))" "$d1/rollout-second.jsonl"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "harness-switch harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"source":"codex-sessions"' \
+    "the row names the final incarnation's harness tree"
+  assert_contains "$row" '"input_tokens":9' \
+    "tokens cover the final harness only, never the earlier harness's log"
+  assert_contains "$row" '"output_tokens":3' \
+    "the earlier harness's output is not summed either"
+  assert_contains "$row" '"wall_secs":600' \
+    "wall seconds still span the whole task across the harness switch"
+  assert_contains "$row" '"turns":2' \
+    "turns still count the whole task's working lines"
+  pass "usage harvest: a harness switch narrows the tokens only, as documented"
+}
+
+# A relaunch onto another model on the SAME harness leaves both incarnations'
+# logs in the window, and the row has one model field. It must be the final
+# incarnation's, and it must not depend on the order the filesystem enumerates
+# the logs in: the older log is created first here, so a first-log-wins rule
+# reports the superseded model.
+model_final_incarnation_case() {
+  local id=usagemodelfinal wt="$TMP_ROOT/.no-mistakes/wt-usagemodelfinal"
+  local data home state row out base encoded logdir
+  data=$(harvest_case "$id" claude "$wt" meta-fallback-model default)
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session-a-first.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgM1","model":"first-incarnation-model","usage":{"input_tokens":5,"output_tokens":1}}}
+JSON
+  cat > "$logdir/session-b-second.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgM2","model":"final-incarnation-model","usage":{"input_tokens":7,"output_tokens":2}}}
+JSON
+
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.4242.4\n' "$((base - 600))" >> "$state/$id.meta"
+  touch -t "$(touch_stamp "$base")" "$state/$id.status"
+  touch -t "$(touch_stamp $((base - 400)))" "$logdir/session-a-first.jsonl"
+  touch -t "$(touch_stamp $((base - 100)))" "$logdir/session-b-second.jsonl"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "model-attribution harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"model":"final-incarnation-model"' \
+    "the row reports the last incarnation's model, not the first log's"
+  assert_contains "$row" '"input_tokens":12' \
+    "both incarnations' usage is still summed on one harness (5+7)"
+  assert_contains "$row" '"output_tokens":3' "both incarnations' output is summed (1+2)"
+  pass "usage harvest: the model is the final incarnation's, whatever the scan order"
+}
+
 # --- corrupt lines: one bad line costs that line, not the file --------------
 
 # Pi's session logs are append-only, so a truncated tail line is a realistic
@@ -1188,6 +1286,8 @@ spawn_gen_malformed_case
 spawn_gen_future_case
 relaunch_scope_case
 relaunch_birthless_case
+harness_switch_case
+model_final_incarnation_case
 corrupt_line_case
 nonobject_line_case
 missing_model_case
