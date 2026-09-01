@@ -256,8 +256,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_grep "For an ordinary no-mistakes task, that next phase is /no-mistakes validation and PR delivery." "$brief" \
+    "explicit no-mistakes brief did not render the ordinary pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -345,6 +345,16 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  assert_grep "do not start no-mistakes until Firstmate has loaded \`bits-development\`" "$brief" \
+    "no-mistakes DOD must route deployable BITS/PPE work before validation"
+  assert_grep "deployed it to a fresh dedicated PPE, and passed E2E against that deployment" "$brief" \
+    "no-mistakes DOD must place exact-candidate PPE E2E before final validation"
+  assert_grep "must not own rebase, push, PR, or CI" "$brief" \
+    "no-mistakes DOD must keep BITS delivery phases outside the final validation pass"
+  assert_grep "a code-changing fix creates a new candidate that repeats BITS PPE deployment and E2E" "$brief" \
+    "no-mistakes DOD must restart BITS candidate proof after a code-changing fix"
+  assert_grep "BITS owns the MR and CI" "$brief" \
+    "no-mistakes DOD must use the BITS-owned ready signal"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
