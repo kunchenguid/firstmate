@@ -56,6 +56,14 @@ META_LOCK=
 META_LOCK_HELD=0
 PR_CHECK_LOCK="$STATE/.pr-check-$ID.lock"
 PR_CHECK_LOCK_HELD=0
+pr_check_parent_owns_lock() {
+  local lock=$1 owner pid
+  [ -L "$lock" ] || return 1
+  owner=$(fm_lock_link_owner "$lock") || return 1
+  fm_lock_points_to_owner "$lock" "$owner" || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null) || return 1
+  [ "$pid" = "$PPID" ] && fm_pid_alive "$pid"
+}
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
@@ -72,8 +80,20 @@ trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 [ -d "$STATE" ] && [ ! -L "$STATE" ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
-fm_lock_acquire_wait "$PR_CHECK_LOCK"
-PR_CHECK_LOCK_HELD=1
+case "${FM_PR_LIFECYCLE_PARENT_LOCK:-0}" in
+  0)
+    fm_lock_acquire_wait "$PR_CHECK_LOCK"
+    PR_CHECK_LOCK_HELD=1
+    ;;
+  1)
+    pr_check_parent_owns_lock "$PR_CHECK_LOCK" \
+      || { echo "error: parent PR lifecycle ownership is unavailable" >&2; exit 1; }
+    ;;
+  *)
+    echo "error: invalid parent PR lifecycle ownership request" >&2
+    exit 1
+    ;;
+esac
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
 TASK_MODE=$(fm_backend_meta_exact_value "$META" mode 2>/dev/null || true)
@@ -122,8 +142,20 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
-fm_lock_acquire_wait "$META_LOCK"
-META_LOCK_HELD=1
+case "${FM_PR_METADATA_PARENT_LOCK:-0}" in
+  0)
+    fm_lock_acquire_wait "$META_LOCK"
+    META_LOCK_HELD=1
+    ;;
+  1)
+    pr_check_parent_owns_lock "$META_LOCK" \
+      || { echo "error: parent task metadata ownership is unavailable" >&2; exit 1; }
+    ;;
+  *)
+    echo "error: invalid parent task metadata ownership request" >&2
+    exit 1
+    ;;
+esac
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
 [ "$(fm_pr_sha256 "$META")" = "$META_PREIMAGE_HASH" ] \
@@ -162,6 +194,8 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
-fm_lock_release "$META_LOCK"
-META_LOCK_HELD=0
+if [ "$META_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$META_LOCK"
+  META_LOCK_HELD=0
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

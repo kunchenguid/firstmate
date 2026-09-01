@@ -76,17 +76,24 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *"/branches/"*"/protection"*)
+    printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n'
+    ;;
   *"/check-runs?"*)
     [ -z "${FM_TEST_GH_CHECK_STARTED:-}" ] || : > "$FM_TEST_GH_CHECK_STARTED"
     [ "${FM_TEST_GH_CHECK_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_CHECK_SLEEP"
-    printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' \
+    printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\n' \
       "${FM_TEST_GH_CHECK_HEAD:-${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}}"
     ;;
   *"/status?"*) ;;
+  *" baseRefName "*) printf '%s\n' main ;;
   *" state,headRefOid "*)
     printf '%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     ;;
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" headRefOid "*)
+    [ -z "${FM_TEST_GH_HEAD_READ:-}" ] || : > "$FM_TEST_GH_HEAD_READ"
+    printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -300,17 +307,24 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
+  *"/branches/"*"/protection"*)
+    printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n'
+    ;;
   *"/check-runs?"*)
     [ -z "${FM_TEST_GH_CHECK_STARTED:-}" ] || : > "$FM_TEST_GH_CHECK_STARTED"
     [ "${FM_TEST_GH_CHECK_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_CHECK_SLEEP"
-    printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' \
+    printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\n' \
       "${FM_TEST_GH_CHECK_HEAD:-${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}}"
     ;;
   *"/status?"*) ;;
+  *" baseRefName "*) printf '%s\n' main ;;
   *" state,headRefOid "*)
     printf '%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     ;;
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" headRefOid "*)
+    [ -z "${FM_TEST_GH_HEAD_READ:-}" ] || : > "$FM_TEST_GH_HEAD_READ"
+    printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+    ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
@@ -330,6 +344,13 @@ case "${1:-} ${2:-}" in
   "pr view")
     [ "$#" -eq 5 ] && [ "${4:-}" = --repo ] || exit 2
     printf 'pull_request:\n  number: %s\n  state: %s\n' "$3" "${FM_TEST_GH_MERGE_STATE:-merged}"
+    ;;
+  "pr merge")
+    if [ -n "${FM_TEST_GH_MERGE_STARTED:-}" ]; then
+      : > "$FM_TEST_GH_MERGE_STARTED"
+      while [ ! -e "$FM_TEST_GH_MERGE_RELEASE" ]; do sleep 0.01; done
+    fi
+    printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}"
     ;;
 esac
 exit "${FM_TEST_GH_AXI_RC:-0}"
@@ -1093,6 +1114,47 @@ test_pr_check_refuses_replaced_task_incarnation() {
   assert_absent "$state/task-a.pr-poll" "stale PR check published poll data"
   assert_absent "$state/task-a.pr-poll-registration" "stale PR check published poll registration"
   pass "PR check publication stays bound to the observed task incarnation"
+}
+
+test_merge_holds_pr_lifecycle_against_concurrent_check() {
+  local dir head_a head_b merge_pid check_pid i
+  dir=$(make_case merge-check-lifecycle-owner)
+  head_a=dddddddddddddddddddddddddddddddddddddddd
+  head_b=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  write_task_meta "$dir"
+
+  FM_TEST_GH_HEAD="$head_a" FM_TEST_GH_CHECK_HEAD="$head_a" \
+    FM_TEST_GH_MERGE_STARTED="$dir/merge-started" \
+    FM_TEST_GH_MERGE_RELEASE="$dir/merge-release" \
+    run_merge_entry "$dir" task-a https://github.com/o/r/pull/1 \
+      > "$dir/merge.out" 2> "$dir/merge.err" &
+  merge_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/merge-started" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ "$i" -lt 200 ] || fail "merge did not reach its forge operation"
+
+  FM_TEST_GH_HEAD="$head_b" FM_TEST_GH_CHECK_HEAD="$head_b" \
+    FM_TEST_GH_HEAD_READ="$dir/concurrent-check-read" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+      > "$dir/check.out" 2> "$dir/check.err" &
+  check_pid=$!
+  i=0
+  while [ "$i" -lt 20 ] && [ ! -e "$dir/concurrent-check-read" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ ! -e "$dir/concurrent-check-read" ] \
+    || fail "a concurrent checker entered while the merge lifecycle was in flight"
+
+  : > "$dir/merge-release"
+  wait "$merge_pid" || fail "merge lifecycle owner failed: $(cat "$dir/merge.err")"
+  wait "$check_pid" || fail "checker failed after merge lifecycle release: $(cat "$dir/check.err")"
+  [ -e "$dir/concurrent-check-read" ] \
+    || fail "concurrent checker did not proceed after merge lifecycle release"
+  pass "merge owns the PR lifecycle through its final forge outcome"
 }
 
 test_poll_publication_refuses_unsafe_destinations() {
@@ -2345,6 +2407,7 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_concurrent_pr_checks_preserve_newer_poll
 test_pr_check_refuses_replaced_task_incarnation
+test_merge_holds_pr_lifecycle_against_concurrent_check
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_postrename_poll_validation_revokes_and_retries

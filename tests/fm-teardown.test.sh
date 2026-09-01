@@ -251,10 +251,22 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+case " \$* " in
+  *"/branches/"*"/protection"*)
+    printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n'
+    exit 0
+    ;;
+  *"/check-runs?"*)
+    printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\n' '$head'
+    exit 0
+    ;;
+  *"/status?"*) exit 0 ;;
+esac
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"baseRefName"*) printf '%s\n' main ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;

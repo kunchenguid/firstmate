@@ -2,8 +2,9 @@
 # Wait a bounded number of times for terminal successful GitHub checks on one
 # exact pull-request head SHA.
 #
-# Check runs and commit statuses are read directly for the expected SHA, while
-# the PR head is confirmed immediately before and after each snapshot.
+# Required contexts and provider identities come from the PR base branch,
+# while check runs and commit statuses are read directly for the expected SHA.
+# The PR head, base, and requirement set are confirmed around each snapshot.
 # Missing, pending, skipped, failed, ambiguous, stale, or different-head
 # results are never green, regardless of a CLI's exit status.
 # Usage: fm-pr-ci.sh <full-pr-url> <exact-head-sha> [--attempts <1-60>] [--interval <0-60>]
@@ -45,20 +46,58 @@ command -v gh >/dev/null 2>&1 || {
   echo "error: exact-head verification requires gh on PATH" >&2
   exit 1
 }
+
 read_head() {
   gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null
 }
 
+read_base() {
+  gh pr view "$URL" --json baseRefName -q .baseRefName 2>/dev/null
+}
+
+base_valid() {
+  local base=${1-}
+  [ -n "$base" ] && [ "${#base}" -le 255 ] || return 1
+  case "$base" in *$'\n'*|*$'\r'*) return 1 ;; esac
+}
+
+read_required_checks() {
+  local base_path
+  base_path=$(fm_pr_urlencode_path_segment "$1") || return 1
+  # shellcheck disable=SC2016
+  gh api -H 'Accept: application/vnd.github+json' \
+    "repos/$OWNER/$REPO/branches/$base_path/protection" \
+    --jq '
+      if (.required_status_checks | type) != "object" or
+         (.required_status_checks.checks | type) != "array" or
+         (.required_status_checks.contexts | type) != "array"
+      then error("required status checks are unavailable")
+      else
+        .required_status_checks as $required |
+        (($required.checks | map(.context)) // []) as $bound_contexts |
+        (($required.checks | map({context: .context, app_id: (.app_id // -1)})) +
+         ($required.contexts |
+          map(select(. as $context | ($bound_contexts | index($context) | not)) |
+              {context: ., app_id: -1})))[] |
+        ["require", "required", "none", .context, "none", "none",
+         (if .app_id == -1 then "any" else (.app_id | tostring) end), "none"] |
+        @tsv
+      end
+    ' 2>/dev/null
+}
+
 read_check_runs() {
+  # shellcheck disable=SC2016
   gh api --paginate -H 'Accept: application/vnd.github+json' \
     "repos/$OWNER/$REPO/commits/$EXPECTED_HEAD/check-runs?filter=latest&per_page=100" \
-    --jq '.check_runs[] | ["check", .head_sha, .name, .status, (.conclusion // "")] | @tsv' 2>/dev/null
+    --jq '.check_runs[] | ["result", "check", .head_sha, .name, .status, (.conclusion // "none"), ((.app.id // -1) | tostring), (.app.slug // "none")] | @tsv' 2>/dev/null
 }
 
 read_commit_statuses() {
+  # shellcheck disable=SC2016
   gh api --paginate -H 'Accept: application/vnd.github+json' \
     "repos/$OWNER/$REPO/commits/$EXPECTED_HEAD/status?per_page=100" \
-    --jq '[{head: .sha, item: .statuses[]}][] | ["status", .head, .item.context, "completed", .item.state] | @tsv' 2>/dev/null
+    --jq '[{head: .sha, item: .statuses[]}][] | ["result", "status", .head, .item.context, "completed", .item.state, "none", "none"] | @tsv' 2>/dev/null
 }
 
 validate_exact_head_evidence() {
@@ -67,47 +106,95 @@ validate_exact_head_evidence() {
       if (problem == "") problem = reason
     }
     NF == 0 { next }
-    {
-      if (NF != 5) {
-        reject("malformed exact-head check evidence")
+    NF != 8 {
+      reject("malformed exact-head requirement or result evidence")
+      next
+    }
+    $1 == "require" {
+      if ($2 != "required" || $3 != "none" || $4 == "" ||
+          $5 != "none" || $6 != "none" || $8 != "none") {
+        reject("malformed required-check evidence")
         next
       }
-      kind = $1
-      sha = $2
-      name = $3
-      status = $4
-      conclusion = $5
-      if (kind != "check" && kind != "status") reject("unknown exact-head check evidence type")
+      name = $4
+      provider = $7
+      if (provider != "any" && provider !~ /^[1-9][0-9]*$/) {
+        reject("malformed required-check provider for " name)
+      }
+      if (++required_seen[name] > 1) {
+        reject("ambiguous required-check evidence for " name)
+      }
+      required_provider[name] = provider
+      required_total++
+      if (name == "Verify exact PR head") canonical_required++
+      next
+    }
+    $1 == "result" {
+      kind = $2
+      sha = $3
+      name = $4
+      status = $5
+      conclusion = $6
+      app_id = $7
+      app_slug = $8
+      if (kind != "check" && kind != "status") reject("unknown exact-head result type")
       if (sha != expected) reject("different-head check evidence for " name)
       if (name == "") reject("unnamed exact-head check evidence")
-      if (++seen[name] > 1) reject("ambiguous exact-head check evidence for " name)
-      successful = status == "completed" && conclusion == "success"
-      if (name == "Verify exact PR head") {
-        canonical++
-        if (!successful) canonical_failed = 1
-      } else if (!successful) {
-        reject("check is not terminal-successful: " name)
+      if (++result_seen[name] > 1) reject("ambiguous exact-head check evidence for " name)
+      if (kind == "check") {
+        if (app_id !~ /^[1-9][0-9]*$/ || app_slug == "" || app_slug == "none") {
+          reject("malformed check-run provider for " name)
+        }
+      } else if (app_id != "none" || app_slug != "none") {
+        reject("malformed commit-status provider for " name)
       }
-      total++
+      result_kind[name] = kind
+      result_app_id[name] = app_id
+      result_app_slug[name] = app_slug
+      if (status != "completed" || conclusion != "success") {
+        if (name == "Verify exact PR head") {
+          reject("canonical Verify exact PR head check is not terminal-successful")
+        } else {
+          reject("check is not terminal-successful: " name)
+        }
+      }
+      result_total++
+      next
     }
+    { reject("unknown exact-head evidence record") }
     END {
+      if (required_total == 0) reject("no effective required checks were found for the PR base branch")
+      if (canonical_required == 0) reject("canonical Verify exact PR head requirement is missing")
+      if (canonical_required > 1) reject("canonical Verify exact PR head requirement is ambiguous")
+      if (result_total == 0) reject("no exact-head checks or statuses were found")
+      for (name in required_seen) {
+        if (!(name in result_seen)) {
+          if (name == "Verify exact PR head") {
+            reject("canonical Verify exact PR head check is missing")
+          } else {
+            reject("required check is missing: " name)
+          }
+          continue
+        }
+        provider = required_provider[name]
+        if (provider != "any" &&
+            (result_kind[name] != "check" || result_app_id[name] != provider)) {
+          reject("required check provider mismatch: " name)
+        }
+      }
+      canonical = "Verify exact PR head"
+      if (canonical in result_seen) {
+        if (result_kind[canonical] != "check" ||
+            result_app_id[canonical] !~ /^[1-9][0-9]*$/ ||
+            result_app_slug[canonical] != "github-actions") {
+          reject("canonical Verify exact PR head result is not an authorized GitHub Actions check run")
+        }
+      }
       if (problem != "") {
         print "not-green: " problem
         exit 1
       }
-      if (total == 0) {
-        print "not-green: no exact-head checks or statuses were found"
-        exit 1
-      }
-      if (canonical == 0) {
-        print "not-green: canonical Verify exact PR head check is missing"
-        exit 1
-      }
-      if (canonical_failed) {
-        print "not-green: canonical Verify exact PR head check is not terminal-successful"
-        exit 1
-      }
-      print "green: " total
+      print "green: " result_total
     }
   '
 }
@@ -115,26 +202,40 @@ validate_exact_head_evidence() {
 attempt=1
 while [ "$attempt" -le "$ATTEMPTS" ]; do
   head_before=$(read_head) || head_before=
+  base_before=$(read_base) || base_before=
   if ! fm_pr_head_valid "$head_before"; then
     echo "not-green: attempt=$attempt/$ATTEMPTS could not read a valid PR head" >&2
   elif [ "$head_before" != "$EXPECTED_HEAD" ]; then
     echo "error: PR $URL is at head $head_before; expected head $EXPECTED_HEAD" >&2
     exit 1
+  elif ! base_valid "$base_before"; then
+    echo "not-green: attempt=$attempt/$ATTEMPTS could not read a valid PR base branch" >&2
   else
+    requirements_before_status=0
+    requirements_before=$(read_required_checks "$base_before") || requirements_before_status=$?
     check_runs_status=0
     check_runs=$(read_check_runs) || check_runs_status=$?
     statuses_status=0
     statuses=$(read_commit_statuses) || statuses_status=$?
+    requirements_after_status=0
+    requirements_after=$(read_required_checks "$base_before") || requirements_after_status=$?
+    base_after=$(read_base) || base_after=
     head_after=$(read_head) || head_after=
     if [ "$head_after" != "$EXPECTED_HEAD" ]; then
       echo "error: PR $URL changed head while checks were read; expected head $EXPECTED_HEAD, observed ${head_after:-unknown}" >&2
       exit 1
+    elif [ "$base_after" != "$base_before" ]; then
+      echo "error: PR $URL changed base while checks were read; expected base $base_before, observed ${base_after:-unknown}" >&2
+      exit 1
+    elif [ "$requirements_before_status" -ne 0 ] || [ "$requirements_after_status" -ne 0 ]; then
+      echo "not-green: attempt=$attempt/$ATTEMPTS required checks are unavailable for base branch $base_before" >&2
+    elif [ "$(printf '%s\n' "$requirements_before" | LC_ALL=C sort)" != "$(printf '%s\n' "$requirements_after" | LC_ALL=C sort)" ]; then
+      echo "not-green: attempt=$attempt/$ATTEMPTS required checks changed while exact-head evidence was read" >&2
     elif [ "$check_runs_status" -ne 0 ] || [ "$statuses_status" -ne 0 ]; then
       echo "not-green: attempt=$attempt/$ATTEMPTS exact-head check evidence is unavailable for head $EXPECTED_HEAD" >&2
-    fi
-    if [ "$check_runs_status" -eq 0 ] && [ "$statuses_status" -eq 0 ]; then
+    else
       evidence_status=0
-      evidence_result=$(printf '%s\n%s\n' "$check_runs" "$statuses" \
+      evidence_result=$(printf '%s\n%s\n%s\n' "$requirements_after" "$check_runs" "$statuses" \
         | validate_exact_head_evidence) || evidence_status=$?
       if [ "$evidence_status" -eq 0 ]; then
         total=${evidence_result#green: }

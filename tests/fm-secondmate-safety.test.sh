@@ -82,8 +82,10 @@ test_fm_home_parameterization() {
 #!/usr/bin/env bash
 head=0000000000000000000000000000000000000001
 case " $* " in
-  *"/check-runs?"*) printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' "$head" ;;
+  *"/branches/"*"/protection"*) printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n' ;;
+  *"/check-runs?"*) printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\n' "$head" ;;
   *"/status?"*) ;;
+  *" baseRefName "*) printf '%s\n' main ;;
   *" headRefOid "*) printf '%s\n' "$head" ;;
 esac
 SH

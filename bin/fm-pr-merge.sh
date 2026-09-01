@@ -43,6 +43,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # Role partition: merging is MAIN-owned; the Pi supervision branch reports the
@@ -117,10 +119,33 @@ reject_repo_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
-if [ ! -f "$META" ] || [ -L "$META" ]; then
+if [ ! -d "$STATE" ] || [ -L "$STATE" ] || [ ! -f "$META" ] || [ -L "$META" ] \
+  || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+
+PR_LIFECYCLE_LOCK="$STATE/.pr-check-$ID.lock"
+PR_LIFECYCLE_LOCK_HELD=0
+META_LOCK=
+META_LOCK_HELD=0
+pr_merge_cleanup() {
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
+  fi
+  if [ "$PR_LIFECYCLE_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$PR_LIFECYCLE_LOCK" || true
+    PR_LIFECYCLE_LOCK_HELD=0
+  fi
+}
+trap pr_merge_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+fm_lock_acquire_wait "$PR_LIFECYCLE_LOCK"
+PR_LIFECYCLE_LOCK_HELD=1
+META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+fm_lock_acquire_wait "$META_LOCK"
+META_LOCK_HELD=1
 
 # Read one live GitHub pull request view after gh-axi returns. The selected
 # fields distinguish a landed pull request from a merge-queue entry and retain
@@ -183,24 +208,6 @@ github_read_outcome() {
   return 1
 }
 
-github_urlencode_path_segment() {
-  local LC_ALL=C input=$1 encoded='' char octet hex
-  while [ -n "$input" ]; do
-    char=${input%"${input#?}"}
-    input=${input#?}
-    case "$char" in
-      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
-      *)
-        printf -v octet '%d' "'$char"
-        [ "$octet" -ge 0 ] || octet=$((octet + 256))
-        printf -v hex '%02X' "$octet"
-        encoded=$encoded%$hex
-        ;;
-    esac
-  done
-  printf '%s' "$encoded"
-}
-
 # Read the effective merge-queue method for the observed base branch. The four
 # situations the refusal has to keep apart - no queue rule, a rules response
 # that could not be read, several rules that disagree, and a rule whose method
@@ -217,7 +224,7 @@ github_read_queue_method() {
   FM_PR_GITHUB_QUEUE_STATUS=unreadable
   command -v gh >/dev/null 2>&1 || return 0
   [ -n "$FM_PR_GITHUB_BASE" ] || return 0
-  branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE")
+  branch_path=$(fm_pr_urlencode_path_segment "$FM_PR_GITHUB_BASE")
   if ! methods=$(gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" \
     --jq '.[] | select(.type == "merge_queue") | "merge_method=" + (.parameters.merge_method // "")' \
@@ -263,7 +270,8 @@ METHODS
 }
 
 record_pr_metadata() {
-  if ! "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
+  if ! FM_PR_LIFECYCLE_PARENT_LOCK=1 FM_PR_METADATA_PARENT_LOCK=1 \
+    "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
     return 1
   fi
   fm_pr_metadata_identity_parse "$META" \
@@ -278,6 +286,38 @@ record_pr_metadata() {
     return 1
   }
   FM_PR_MERGE_HEAD=$FM_PR_META_HEAD
+}
+
+FM_PR_MERGE_META_HASH=
+FM_PR_MERGE_META_IDENTITY=
+fm_pr_merge_task_incarnation_capture() {
+  [ -f "$META" ] && [ ! -L "$META" ] \
+    && [ "$(fm_pr_file_link_count "$META")" = 1 ] || return 1
+  FM_PR_MERGE_META_HASH=$(fm_pr_sha256 "$META") || return 1
+  FM_PR_MERGE_META_IDENTITY=$(fm_pr_file_identity "$META") || return 1
+  fm_pr_metadata_identity_parse "$META" \
+    && [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] \
+    && [ "$FM_PR_META_URL" = "$URL" ] \
+    && [ "$FM_PR_META_HOST" = "$PR_HOST" ] \
+    && [ "$FM_PR_META_PATH" = "$PR_PATH" ] \
+    && [ "$FM_PR_META_NUMBER" = "$PR_NUMBER" ] \
+    && [ "$FM_PR_META_HEAD" = "$FM_PR_MERGE_HEAD" ] \
+    && [ "$FM_PR_META_GREEN_HEAD" = "$FM_PR_MERGE_HEAD" ]
+}
+
+fm_pr_merge_task_incarnation_valid() {
+  [ -f "$META" ] && [ ! -L "$META" ] \
+    && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
+    && [ "$(fm_pr_sha256 "$META")" = "$FM_PR_MERGE_META_HASH" ] \
+    && [ "$(fm_pr_file_identity "$META")" = "$FM_PR_MERGE_META_IDENTITY" ] \
+    && fm_pr_metadata_identity_parse "$META" \
+    && [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] \
+    && [ "$FM_PR_META_URL" = "$URL" ] \
+    && [ "$FM_PR_META_HOST" = "$PR_HOST" ] \
+    && [ "$FM_PR_META_PATH" = "$PR_PATH" ] \
+    && [ "$FM_PR_META_NUMBER" = "$PR_NUMBER" ] \
+    && [ "$FM_PR_META_HEAD" = "$FM_PR_MERGE_HEAD" ] \
+    && [ "$FM_PR_META_GREEN_HEAD" = "$FM_PR_MERGE_HEAD" ]
 }
 
 FM_PR_GITHUB_MERGE_ACCEPTED=false
@@ -405,6 +445,22 @@ github_report_refused_outcome() {
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 record_pr_metadata || exit 1
+fm_pr_merge_task_incarnation_capture \
+  || { echo "error: task incarnation changed after exact-head verification" >&2; exit 1; }
+fm_pr_poll_snapshot_capture "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" \
+  || { echo "error: exact-head merge poll is unavailable after publication" >&2; exit 1; }
+[ "$FM_PR_POLL_SNAPSHOT_PROVIDER" = "$PROVIDER" ] \
+  && [ "$FM_PR_POLL_SNAPSHOT_URL" = "$URL" ] \
+  && [ "$FM_PR_POLL_SNAPSHOT_HOST" = "$PR_HOST" ] \
+  && [ "$FM_PR_POLL_SNAPSHOT_PATH" = "$PR_PATH" ] \
+  && [ "$FM_PR_POLL_SNAPSHOT_NUMBER" = "$PR_NUMBER" ] \
+  && [ "$FM_PR_POLL_SNAPSHOT_HEAD" = "$FM_PR_MERGE_HEAD" ] \
+  || { echo "error: exact-head merge poll does not match the verified task incarnation" >&2; exit 1; }
+if ! fm_pr_merge_task_incarnation_valid \
+  || ! fm_pr_poll_snapshot_matches "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+  echo "error: task incarnation or merge poll changed before the forge attempt" >&2
+  exit 1
+fi
 
 case "$PROVIDER" in
   github)
@@ -436,6 +492,16 @@ case "$PROVIDER" in
     if ! github_read_outcome; then
       github_report_forge_output "$merge_output"
       github_clear_auto_merge_after_unproven_outcome || true
+      exit 1
+    fi
+    if github_outcome_is_accepted \
+      && { ! fm_pr_merge_task_incarnation_valid \
+        || ! fm_pr_poll_snapshot_matches "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; }; then
+      github_report_forge_output "$merge_output"
+      echo "error: task incarnation or merge poll changed during the forge attempt" >&2
+      if [ "$FM_PR_GITHUB_MERGED" != true ]; then
+        github_clear_auto_merge_after_unproven_outcome || true
+      fi
       exit 1
     fi
     if github_outcome_matches_recorded_head && [ "$FM_PR_GITHUB_MERGED" = true ]; then

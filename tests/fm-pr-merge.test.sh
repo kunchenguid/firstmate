@@ -88,13 +88,15 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case " \$* " in
-  *"/check-runs?"*) printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' '$head'; exit 0 ;;
+  *"/branches/"*"/protection"*) printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n'; exit 0 ;;
+  *"/check-runs?"*) printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\n' '$head'; exit 0 ;;
   *"/status?"*) exit 0 ;;
 esac
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *state,headRefOid*) printf 'MERGED\t%s\n' '$head' ; exit 0 ;;
+      *baseRefName*) printf '%s\n' main ; exit 0 ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -129,8 +131,10 @@ SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 case " \$* " in
-  *"/check-runs?"*) printf 'check\t%s\tVerify exact PR head\tin_progress\t\n' '$head' ;;
+  *"/branches/"*"/protection"*) printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n' ;;
+  *"/check-runs?"*) printf 'result\tcheck\t%s\tVerify exact PR head\tin_progress\tnone\t15368\tgithub-actions\n' '$head' ;;
   *"/status?"*) ;;
+  *" baseRefName "*) printf '%s\n' main ;;
   *" headRefOid "*) printf '%s\n' '$head' ;;
 esac
 SH
@@ -171,13 +175,15 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *"/check-runs?"*) printf '%s\n' $'check\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tVerify exact PR head\tcompleted\tsuccess'; exit 0 ;;
+  *"/branches/"*"/protection"*) printf '%s\n' $'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone'; exit 0 ;;
+  *"/check-runs?"*) printf '%s\n' $'result\tcheck\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions'; exit 0 ;;
   *"/status?"*) exit 0 ;;
 esac
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *state,headRefOid*) printf '%s\n' $'MERGED\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; exit 0 ;;
+      *baseRefName*) printf '%s\n' main; exit 0 ;;
       *headRefOid*) printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; exit 0 ;;
     esac
     ;;
@@ -204,13 +210,15 @@ add_gh_mock_outcome_read_fails() {
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case " \$* " in
-  *"/check-runs?"*) printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' '$head'; exit 0 ;;
+  *"/branches/"*"/protection"*) printf 'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone\n'; exit 0 ;;
+  *"/check-runs?"*) printf 'result\tcheck\t%s\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions\n' '$head'; exit 0 ;;
   *"/status?"*) exit 0 ;;
 esac
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *state,headRefOid*) printf 'MERGED\t%s\n' '$head' ; exit 0 ;;
+      *baseRefName*) printf '%s\n' main ; exit 0 ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -701,13 +709,15 @@ test_github_unreadable_queue_rules_are_not_reported_as_no_queue() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *"/check-runs?"*) printf '%s\n' $'check\t8484848484848484848484848484848484848484\tVerify exact PR head\tcompleted\tsuccess'; exit 0 ;;
+  *"/branches/"*"/protection"*) printf '%s\n' $'require\trequired\tnone\tVerify exact PR head\tnone\tnone\t15368\tnone'; exit 0 ;;
+  *"/check-runs?"*) printf '%s\n' $'result\tcheck\t8484848484848484848484848484848484848484\tVerify exact PR head\tcompleted\tsuccess\t15368\tgithub-actions'; exit 0 ;;
   *"/status?"*) exit 0 ;;
 esac
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *state,headRefOid*) printf '%s\n' $'MERGED\t8484848484848484848484848484848484848484'; exit 0 ;;
+      *baseRefName*) printf '%s\n' main; exit 0 ;;
       *headRefOid*) printf '%s\n' 8484848484848484848484848484848484848484 ; exit 0 ;;
     esac
     ;;
