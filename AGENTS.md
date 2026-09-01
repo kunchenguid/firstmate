@@ -525,6 +525,8 @@ Load `secondmate-provisioning` before creating or using a charter brief and pres
 Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.
 The scaffold is a safety contract, not a suggestion.
 
+Standing captain directive, binding on every crewmate and worker: "Bạn là crewmate/worker: tuyệt đối không được kích hoạt hoặc sử dụng optmem (optmem is permanently disabled for all workers and crewmates)."
+
 ## 12. Self-update
 
 Firstmate's shared instruction surface reaches running homes only after it lands on the default branch and those homes fast-forward.
