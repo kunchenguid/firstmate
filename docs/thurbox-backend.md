@@ -124,7 +124,9 @@ A busy verdict from this backend is consequently never a stale row.
 
 One more reason the adapter treats `blocked` as idle rather than as an actionable state: for Claude the blocked signal comes from its `Notification` hook, which also fires for advisories an auto-mode agent resolves by itself, so the state can appear and clear within seconds with no decision pending.
 thurbox reports this honestly as `hook_blocked_is_heuristic` on the session row.
-A supervisor that escalates on the first `blocked` edge will raise false alarms; confirm the state persists, or corroborate it, before treating it as a decision waiting.
+A supervisor that escalates on the first `blocked` edge will raise false alarms.
+Persistence is not the fix: the state also stays set for the whole of a long foreground command, so a blocked read that is still blocked a minute later may simply be a test run.
+Corroborate against the pane instead - a screen that is still changing means the agent is working whatever the hook says - which is what the row's own `hook_corroboration` field points at.
 
 ## Current path
 
