@@ -40,7 +40,11 @@
 #      DIFFERENT, still-active run for the same branch outranks it there, that
 #      terminal verdict is a superseded run (the common shape right after
 #      custody recovery, where the crew's worktree HEAD equals the superseded
-#      run's own recorded head) and folds to the live run's state instead.
+#      run's own recorded head) and folds to the live run's state instead. That
+#      folded verdict is marked so the coarse checks-green status-log shortcut
+#      (see RUN_SOURCE_SUPERSEDED_FOLD) never overrides it with a stale log
+#      line - only genuinely coarse attribution (no matching branch row at
+#      all) trusts the log for a done verdict.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
