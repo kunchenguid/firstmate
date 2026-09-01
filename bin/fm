@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Firstmate native core shim (posix). Executes the compiled TS CLI.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec node "$here/fm.mjs" "$@"

@@ -1,0 +1,37 @@
+{
+  "name": "firstmate",
+  "version": "0.1.0",
+  "description": "Firstmate — a crew of coding agents for one captain. Cross-platform native core (Windows / macOS / Linux).",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.15.1",
+  "bin": {
+    "fm": "./bin/fm.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:windows": "cross-env FIRSTMATE_NATIVE=1 vitest run",
+    "lint": "eslint src tests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["node-pty", "esbuild"]
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "cross-env": "^7.0.3",
+    "eslint": "^9.17.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vitest": "^2.1.8"
+  }
+}
