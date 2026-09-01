@@ -4,7 +4,8 @@ description: >-
   Agent-only procedure for Firstmate project management.
   Use before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
-  Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, and outward-consent decisions.
+  Also use when judging what belongs in a project's own instructions rather than in a Firstmate brief.
+  Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, outward-consent, and project-instruction boundary decisions.
 user-invocable: false
 metadata:
   internal: true
@@ -32,6 +33,24 @@ If the owning second mate cannot accept the route, report that concrete blocker 
 Resolve the project name, destination, delivery posture, and autonomy posture before changing local or remote state.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
+
+## Project instructions versus Firstmate orchestration
+
+Use this boundary whenever a project's own instructions are written, reviewed, or found to disagree with a brief.
+Firstmate's briefs own orchestration and state it once, generically: intake, backlog and dependency state, model, harness and backend selection, quota routing, worktrees, writer and reviewer assignment, parallelism, supervision, recovery, waiting on CI, PR, merge and cleanup, and captain communication.
+A project's instructions must not restate, override, or assert facts about any of that.
+A project file is not a position from which another system's behavior can be described accurately, and a copy of an orchestration rule drifts the moment only one side is edited.
+
+Project instructions add only genuinely project-specific product, safety, and proof constraints: product semantics, safety and authorization boundaries, repository structure, contracts and specifications, domain methods, accepted implementation constraints, and the project's own proof obligations.
+Each such constraint is legitimate only when it is necessary and labelled with its risk, its exact scope, why generic Firstmate behavior is insufficient, its consumer, its enforcement, its proof, and its precedence.
+An unlabelled special case cannot be reviewed, because nothing records what it was for or what would retire it.
+
+Where a project rule and a Firstmate rule disagree, reconcile at the source: correct whichever owner is wrong, or narrow the project's copy to the genuinely project-specific remainder and point at the Firstmate owner for the generic part.
+Never leave the conflict for a worker to arbitrate mid-task.
+The worker-facing half of this boundary is carried by the "Project authority" section `bin/fm-brief.sh` puts in every generated task brief: the worker reconciles against current project authority, names prose the brief intentionally supersedes, and escalates a genuine conflict instead of deciding it.
+
+Keep a factual claim about a tool or harness no broader than what is actually verified.
+A capability claim belongs to the owner that verifies it against a version: `harness-adapters` owns harness capability facts, so a project may state the behavior it depends on ("this harness does not auto-discover `.claude/skills`, so a rule that must bind it belongs in this file") but not a blanket claim about what that harness can do.
 
 ## Delivery posture
 

@@ -52,6 +52,16 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Every ship and scout scaffold carries a "Project authority" section: the worker
+# resolves the governing set at dispatch time from the project's own current
+# registry of authority rather than any remembered or legacy list, reconciles the
+# brief against it before acting, names project prose the brief intentionally
+# supersedes, and escalates a genuine conflict instead of arbitrating it.
+# A secondmate charter is not a task brief and does not carry it.
+# Ship briefs also carry a batched-findings rule: enumerate the complete finding
+# set and check the surfaces sharing each defect's mechanism before repairing or
+# resubmitting, rather than looping one defect at a time. It is appended as rule 8
+# because bin/fm-dod-lib.sh cross-references the ask-user rule by its number.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -321,6 +331,16 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+IFS= read -r -d '' PROJECT_AUTHORITY_SECTION <<'EOF' || true
+# Project authority
+This brief carries firstmate's orchestration; the project's own instructions and governing requirements own its product, safety, and proof constraints.
+Resolve that governing set at dispatch time from the project's own current registry of authority - start at its `AGENTS.md` and follow what that file currently designates as governing - and never work from a remembered, inherited, or legacy list of authority documents.
+Before you act, reconcile this brief against that current project authority, and let the project's current authority win over any stale detail quoted here.
+Name any project prose this brief intentionally supersedes, and where you are authorized to change that project, include its correction or removal in the same change.
+If a genuine conflict remains, append `needs-decision:` naming both readings and stop; never arbitrate a project-authority conflict silently.
+EOF
+PROJECT_AUTHORITY_SECTION=${PROJECT_AUTHORITY_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -329,6 +349,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$PROJECT_AUTHORITY_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -403,6 +425,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+$PROJECT_AUTHORITY_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
@@ -437,6 +461,10 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find.
+   Enumerate the COMPLETE finding set first, then check the surfaces that can share each defect's mechanism -
+   same pattern, same generator, same template, sibling files - and report or repair the whole batch at once
+   so one re-review covers all of it. One-at-a-time stop-fix-rereview loops are forbidden.
 
 $INBOX_SECTION
 

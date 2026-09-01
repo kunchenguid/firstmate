@@ -213,6 +213,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
+    assert_grep "no unresolved \`FINALIZE-AFTER(\` sentinel" "$brief" \
+      "$id: every delivery mode must gate on zero unresolved FINALIZE-AFTER sentinels"
+    assert_no_grep "bin/fm-dod-lib.sh" "$brief" \
+      "$id: brief leaked scaffold source paths (a backtick ran as command substitution in an unquoted heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
@@ -762,6 +766,65 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_task_briefs_carry_project_authority_reconciliation() {
+  local home id brief
+  home="$TMP_ROOT/project-authority-home"
+  mkdir -p "$home/data"
+
+  for id in brief-authority-ship brief-authority-scout; do
+    case "$id" in
+      *-ship)  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 ;;
+      *-scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id brief was not scaffolded"
+    assert_grep "# Project authority" "$brief" \
+      "$id brief lost the project-authority section"
+    assert_grep "reconcile this brief against that current project authority" "$brief" \
+      "$id brief must require reconciling against current project authority before acting"
+    assert_grep "from the project's own current registry of authority" "$brief" \
+      "$id brief must resolve the governing set from the project's current registry at dispatch time"
+    assert_grep "never work from a remembered, inherited, or legacy list of authority documents" "$brief" \
+      "$id brief must forbid a hardcoded or legacy authority list"
+    assert_grep "Name any project prose this brief intentionally supersedes" "$brief" \
+      "$id brief must require naming intentionally superseded project prose"
+    assert_grep "never arbitrate a project-authority conflict silently" "$brief" \
+      "$id brief must route an unreconciled conflict to firstmate instead of the worker"
+  done
+
+  # A charter is not a task brief and must not carry a task's authority section.
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-authority-sm --secondmate alpha >/dev/null 2>&1
+  brief="$home/data/brief-authority-sm/brief.md"
+  assert_present "$brief" "secondmate charter was not scaffolded"
+  assert_no_grep "# Project authority" "$brief" \
+    "secondmate charter must not carry a task brief's project-authority section"
+
+  pass "fm-brief.sh: ship and scout briefs carry the project-authority reconciliation contract"
+}
+
+test_ship_briefs_batch_findings_before_resubmitting() {
+  local home id brief
+  home="$TMP_ROOT/batched-findings-home"
+  mkdir -p "$home/data"
+  id="brief-batched-findings"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "ship brief was not scaffolded"
+  assert_grep "never fix and resubmit the first defect you find" "$brief" \
+    "ship brief must forbid fixing and resubmitting the first defect alone"
+  assert_grep "Enumerate the COMPLETE finding set first" "$brief" \
+    "ship brief must require the complete finding set before any repair"
+  assert_grep "surfaces that can share each defect's mechanism" "$brief" \
+    "ship brief must require checking surfaces that share the defect mechanism"
+  assert_grep "One-at-a-time stop-fix-rereview loops are forbidden." "$brief" \
+    "ship brief must forbid one-at-a-time stop-fix-rereview loops"
+  # Renumbering the rules would break fm-dod-lib.sh's "(rule 6)" cross-reference.
+  assert_grep "escalate to firstmate (rule 6) and stop" "$brief" \
+    "the ask-user escalation must still point at rule 6"
+  pass "fm-brief.sh: ship briefs require batching findings before repair or resubmission"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -783,3 +846,5 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_task_briefs_carry_project_authority_reconciliation
+test_ship_briefs_batch_findings_before_resubmitting
