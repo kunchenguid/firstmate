@@ -136,6 +136,15 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
   done
 }
 
+fm_task_endpoint_metadata_lock_acquire() {  # <meta-path> <expected-command>
+  local meta=$1 expected=$2 wait=${FM_TASK_INBOX_LOCK_WAIT_SECS:-$FM_TASK_INBOX_LOCK_WAIT_DEFAULT}
+  local attempts
+  case "$wait" in ''|*[!0-9]*|???*) wait=$FM_TASK_INBOX_LOCK_WAIT_DEFAULT ;; esac
+  [ "$((10#$wait))" -le 59 ] || wait=$FM_TASK_INBOX_LOCK_WAIT_DEFAULT
+  attempts=$((10#$wait * 10 + 1))
+  fm_meta_lock_acquire_bounded "$meta" "$expected" "$attempts" 0.1
+}
+
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
 _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]

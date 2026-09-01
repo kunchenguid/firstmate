@@ -920,6 +920,13 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
+fmx_meta_writer_command() {
+  case "${0##*/}" in
+    fm-x-link.sh|fm-x-followup.sh) printf '%s\n' "${0##*/}" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
 # atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
 # reply-platform context, dropping any prior link and preserving every other meta
@@ -928,10 +935,11 @@ fmx_meta_tmp() {
 # budget against a binding the relay already knows about. Returns non-zero if
 # <meta> is missing or the rewrite fails.
 fmx_meta_link_set() {
-  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp lock
+  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp lock expected
   [ -f "$meta" ] || return 1
+  expected=$(fmx_meta_writer_command) || return 1
   lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock"
+  fm_meta_lock_acquire_bounded "$meta" "$expected" || return 1
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 1; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
   if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
@@ -959,10 +967,11 @@ fmx_meta_link_set() {
 # line, preserving every other meta line including link and reply context.
 # Returns non-zero if <meta> is missing or the rewrite fails.
 fmx_meta_followups_set() {
-  local meta=$1 n=$2 tmp lock
+  local meta=$1 n=$2 tmp lock expected
   [ -f "$meta" ] || return 1
+  expected=$(fmx_meta_writer_command) || return 1
   lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock"
+  fm_meta_lock_acquire_bounded "$meta" "$expected" || return 1
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 1; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
   if ! { grep -vE '^x_followups=' "$meta" || true; } > "$tmp"; then
@@ -981,11 +990,12 @@ fmx_meta_followups_set() {
 # succeeds whether or not a link is present, and is a no-op when <meta> is
 # missing.
 fmx_meta_link_clear() {
-  local meta=$1 tmp lock
+  local meta=$1 tmp lock expected
   [ ! -L "$meta" ] || return 1
   [ -f "$meta" ] || return 0
+  expected=$(fmx_meta_writer_command) || return 1
   lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock"
+  fm_meta_lock_acquire_bounded "$meta" "$expected" || return 1
   [ ! -L "$meta" ] || { fm_lock_release "$lock"; return 1; }
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }

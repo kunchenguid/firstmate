@@ -1224,7 +1224,7 @@ backlog_record_reconcile() {
     fi
     label=$(basename "$marker" .backlog-close)
     meta_lock=$(fm_meta_lock_path "$STATE/$label.meta") || continue
-    fm_lock_try_acquire "$meta_lock" || continue
+    fm_meta_lock_acquire_bounded "$STATE/$label.meta" fm-bootstrap.sh 1 0 || continue
     if fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA"; then
       case "$FM_BACKLOG_CLOSE_REPLAY_RESULT" in
         closed)
@@ -1261,7 +1261,7 @@ backlog_record_reconcile() {
     fi
     id=$(basename "$meta" .meta)
     meta_lock=$(fm_meta_lock_path "$meta") || continue
-    fm_lock_try_acquire "$meta_lock" || continue
+    fm_meta_lock_acquire_bounded "$meta" fm-bootstrap.sh 1 0 || continue
     if [ -e "$STATE/$id.backlog-close" ] || [ -L "$STATE/$id.backlog-close" ]; then
       fm_lock_release "$meta_lock"
       continue

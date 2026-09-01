@@ -432,7 +432,7 @@ fm_lock_claim() {
   return 0
 }
 
-fm_lock_try_create() {
+_fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} expected=${3:-} ownerdir
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
@@ -457,6 +457,25 @@ fm_lock_try_create() {
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
+}
+
+fm_lock_path_is_metadata() {
+  local base=${1##*/} id
+  case "$base" in
+    .meta-*.lock)
+      id=${base#.meta-}
+      id=${id%.lock}
+      ;;
+    *) return 1 ;;
+  esac
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
+fm_lock_try_create() {
+  fm_lock_path_is_metadata "$1" && return 2
+  _fm_lock_try_create "$@"
 }
 
 fm_lock_typed_owner_proven_stale() {
@@ -869,15 +888,18 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
-fm_lock_try_acquire() {
+_fm_lock_try_acquire() {
   local lockdir=$1 expected=${2:-} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
   [ -z "$expected" ] || fm_lock_expected_command_valid "$expected" || return 1
 
-  if fm_lock_try_create "$lockdir" "" "$expected"; then
+  if _fm_lock_try_create "$lockdir" "" "$expected"; then
     return 0
+  fi
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 1
   fi
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
@@ -893,7 +915,7 @@ fm_lock_try_acquire() {
     # - the hang reproduced by the self-held reclaim regression in
     # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
     fm_lock_remove_path "$lockdir" || true
-    if fm_lock_try_create "$lockdir" "" "$expected"; then
+    if _fm_lock_try_create "$lockdir" "" "$expected"; then
       return 0
     fi
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -910,7 +932,7 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal" "$expected"; then
+  if ! _fm_lock_try_acquire "$steal" "$expected"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
@@ -959,7 +981,7 @@ fm_lock_try_acquire() {
   fi
   fm_lock_remove_path "$lockdir" || true
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner" "$expected"; then
+  if _fm_lock_try_create "$lockdir" "$steal_owner" "$expected"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
@@ -973,8 +995,14 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+fm_lock_try_acquire() {
+  fm_lock_path_is_metadata "$1" && return 2
+  _fm_lock_try_acquire "$@"
+}
+
 fm_lock_acquire_wait() {
   local lockdir=$1 expected=${2:-}
+  fm_lock_path_is_metadata "$lockdir" && return 2
   while ! fm_lock_try_acquire "$lockdir" "$expected"; do
     sleep 0.1
   done
@@ -1015,19 +1043,44 @@ fm_meta_lock_path() {
 }
 
 fm_meta_lock_acquire_bounded() {
-  local meta=$1 expected=$2 attempts=$3 interval=$4 lock attempt=1
-  fm_lock_expected_command_valid "$expected" || return 2
-  case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
-  [ "$attempts" -le 600 ] || return 2
-  [[ "$interval" =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]] || return 2
-  lock=$(fm_meta_lock_path "$meta") || return 2
+  local meta=$1 expected=$2 attempts=${3:-${FM_META_LOCK_ATTEMPTS:-50}}
+  local interval=${4:-${FM_META_LOCK_INTERVAL:-0.1}} lock attempt=1 id held
+  id=${meta##*/}
+  id=${id%.meta}
+  if ! fm_lock_expected_command_valid "$expected"; then
+    printf 'error: invalid typed metadata lock request for task %s\n' "$id" >&2
+    return 2
+  fi
+  case "$attempts" in
+    ''|*[!0-9]*|0)
+      printf 'error: invalid typed metadata lock request for task %s\n' "$id" >&2
+      return 2
+      ;;
+  esac
+  if [ "$attempts" -gt 600 ] \
+    || ! [[ "$interval" =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]] \
+    || ! lock=$(fm_meta_lock_path "$meta"); then
+    printf 'error: invalid typed metadata lock request for task %s\n' "$id" >&2
+    return 2
+  fi
+  if ! declare -F fm_process_command_identity >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-session-lock-lib.sh
+    . "$FM_WAKE_LIB_DIR/fm-session-lock-lib.sh"
+  fi
+  if ! declare -F fm_process_command_identity >/dev/null 2>&1; then
+    printf 'error: process identity is unavailable for task %s metadata ownership\n' "$id" >&2
+    return 2
+  fi
   while [ "$attempt" -le "$attempts" ]; do
-    if fm_lock_try_acquire "$lock" "$expected"; then
+    if _fm_lock_try_acquire "$lock" "$expected"; then
       return 0
     fi
     [ "$attempt" -ge "$attempts" ] || [ "$interval" = 0 ] || sleep "$interval"
     attempt=$((attempt + 1))
   done
+  held=${FM_LOCK_HELD_PID:-unknown}
+  printf 'error: task %s metadata remained owned by process %s after %s bounded attempt(s)\n' \
+    "$id" "$held" "$attempts" >&2
   return 1
 }
 

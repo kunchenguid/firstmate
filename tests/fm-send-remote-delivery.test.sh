@@ -395,21 +395,21 @@ test_remote_fire_and_forget_never_arms_reply_recovery() {
 }
 
 test_remote_send_revalidates_after_retirement_lock() {
-  local dir rhome meta lock ready release rc sender_pid holder_pid
+  local dir rhome meta ready release rc sender_pid holder_pid
   dir="$TMP_ROOT/remote-retire-race"; mkdir -p "$dir"
   rhome=$(setup_remote_secondmate_home remote-retire-race)
   meta="$rhome/state/parent-route/rsm.meta"
-  lock="$rhome/state/parent-route/.meta-rsm.lock"
   ready="$dir/lock-ready"
   release="$dir/release-lock"
   FM_STATE_OVERRIDE="$rhome/state/parent-route" bash -c '
     . "$1"
-    fm_task_inbox_lock_acquire "$2" || exit 91
+    fm_task_endpoint_metadata_lock_acquire "$2" fm-send-remote-delivery.test.sh || exit 91
     : > "$3"
     while [ ! -e "$4" ]; do sleep 0.05; done
     rm -f "$5"
-    fm_lock_release "$2"
-  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$lock" "$ready" "$release" "$meta" &
+    lock=$(fm_meta_lock_path "$2") || exit 92
+    fm_lock_release "$lock"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$meta" "$ready" "$release" "$meta" &
   holder_pid=$!
   while [ ! -e "$ready" ]; do kill -0 "$holder_pid" 2>/dev/null || fail "metadata-lock holder exited early"; sleep 0.05; done
 
@@ -429,23 +429,23 @@ test_remote_send_revalidates_after_retirement_lock() {
 }
 
 test_remote_send_revalidates_parent_route_after_retirement_lock() {
-  local dir fb ssh_log home rhome meta lock ready release rc sender_pid holder_pid
+  local dir fb ssh_log home rhome meta ready release rc sender_pid holder_pid
   dir="$TMP_ROOT/remote-parent-retire-race"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
   rhome=$(setup_remote_secondmate_home remote-parent-retire-race)
   home=$(setup_remote_parent_home remote-parent-retire-race "$rhome")
   meta="$home/state/rsm.meta"
-  lock="$home/state/.meta-rsm.lock"
   ready="$dir/lock-ready"
   release="$dir/release-lock"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"
-    fm_task_inbox_lock_acquire "$2" || exit 91
+    fm_task_endpoint_metadata_lock_acquire "$2" fm-send-remote-delivery.test.sh || exit 91
     : > "$3"
     while [ ! -e "$4" ]; do sleep 0.05; done
     rm -f "$5"
-    fm_lock_release "$2"
-  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$lock" "$ready" "$release" "$meta" &
+    lock=$(fm_meta_lock_path "$2") || exit 92
+    fm_lock_release "$lock"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$meta" "$ready" "$release" "$meta" &
   holder_pid=$!
   while [ ! -e "$ready" ]; do kill -0 "$holder_pid" 2>/dev/null || fail "parent metadata-lock holder exited early"; sleep 0.05; done
 

@@ -386,7 +386,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
 reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   local id=$1 meta=$2 self=${3:-} timeout=$4 lock rc=0
   lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock" || return 1
+  fm_meta_lock_acquire_bounded "$meta" fm-inactive-reconcile.sh || return 1
   reconcile_direct_child_locked "$id" "$meta" "$self" "$timeout" || rc=$?
   fm_lock_release "$lock"
   return "$rc"

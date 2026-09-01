@@ -281,7 +281,7 @@ cmd_notify() {
       release_active_locks
       continue
     }
-    if ! fm_lock_try_acquire "$meta_lock"; then
+    if ! fm_meta_lock_acquire_bounded "$meta" fm-secondmate-reconcile.sh 1 0; then
       printf 'skipped: %s lock\n' "$id"
       release_active_locks
       continue
@@ -332,7 +332,7 @@ cmd_notify() {
       continue
     fi
     ACTIVE_CONTROL_LOCK=$control_lock
-    if ! fm_lock_try_acquire "$meta_lock"; then
+    if ! fm_meta_lock_acquire_bounded "$meta" fm-secondmate-reconcile.sh 1 0; then
       printf 'sent-unrecorded: %s %s\n' "$id" "$kind"
       rc=1
       release_active_locks

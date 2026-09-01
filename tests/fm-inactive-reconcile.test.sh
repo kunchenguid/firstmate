@@ -272,7 +272,7 @@ SH
     . "$1/bin/fm-wake-lib.sh"
     meta="$FM_STATE_OVERRIDE/child.meta"
     lock=$(fm_meta_lock_path "$meta")
-    fm_lock_acquire_wait "$lock"
+    fm_meta_lock_acquire_bounded "$meta" fm-inactive-reconcile.test.sh || exit 1
     awk '\''{ sub(/^spawn_gen=.*/, "spawn_gen=spawn-new"); print }'\'' "$meta" > "$meta.tmp"
     mv "$meta.tmp" "$meta"
     printf "working: replacement active\n" > "$FM_STATE_OVERRIDE/child.status"

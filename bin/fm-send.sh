@@ -775,7 +775,7 @@ else
     # open indefinitely; a bound hit exits through the same
     # unconfirmed-delivery contract.
     REMOTE_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
-    if ! fm_task_inbox_lock_acquire "$REMOTE_META_LOCK"; then
+    if ! fm_task_endpoint_metadata_lock_acquire "$TARGET_META" fm-send.sh; then
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -882,7 +882,7 @@ else
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
     INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
-    if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
+    if ! fm_task_endpoint_metadata_lock_acquire "$TARGET_META" fm-send.sh; then
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi

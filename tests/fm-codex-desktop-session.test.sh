@@ -17,7 +17,7 @@ cat > "$FAKEBIN/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
   *"comm="*) printf '%s\n' bash ;;
-  *"args="*) printf '%s\n' "${FM_TEST_PS_ARGS:-bash /fixture/bin/fm-session-start.sh /fixture/bin/fm-codex-app-task.sh}" ;;
+  *"args="*) printf '%s\n' "${FM_TEST_PS_ARGS:-bash /fixture/bin/fm-session-start.sh /fixture/bin/fm-codex-app-task.sh /fixture/bin/fm-teardown.sh}" ;;
   *"lstart="*) printf '%s\n' "${FM_TEST_PS_START:-Mon Aug 31 10:00:00 2026}" ;;
   *"ppid="*) printf '%s\n' 1 ;;
   *) exit 1 ;;
@@ -246,7 +246,7 @@ export STATE=$TASK_HOME/state
 . "$ROOT/bin/fm-wake-lib.sh"
 SHARED_META_LOCK=$(fm_meta_lock_path "$META") \
   || fail "could not resolve the shared task metadata lock"
-fm_lock_acquire_wait "$SHARED_META_LOCK" \
+fm_meta_lock_acquire_bounded "$META" fm-codex-app-task.sh \
   || fail "could not hold the shared task metadata lock"
 CODEX_THREAD_ID="$THREAD_A" \
   CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \

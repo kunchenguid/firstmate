@@ -119,7 +119,7 @@ CONTROL_LOCK_HELD=1
 META="$STATE/$ID.meta"
 [ -d "$STATE" ] || { echo "error: state dir not found: $STATE" >&2; exit 1; }
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
-fm_lock_acquire_wait "$META_LOCK"
+fm_meta_lock_acquire_bounded "$META" fm-promote.sh || exit 1
 META_LOCK_HELD=1
 if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   echo "error: task record for $ID is unsafe or missing ($FM_BACKLOG_TRANSITION_ERROR)" >&2

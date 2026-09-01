@@ -192,7 +192,7 @@ cmd_send() {
   validate_home "$id"
   meta=$(meta_path "$id")
   meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
-  fm_task_inbox_lock_acquire "$meta_lock" \
+  fm_task_endpoint_metadata_lock_acquire "$meta" fm-remote-secondmate-control.sh \
     || die "remote secondmate endpoint metadata could not be locked for final delivery validation"
   if ! remote_endpoint_load "$id"; then
     fm_lock_release "$meta_lock"

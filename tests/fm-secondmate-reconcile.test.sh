@@ -194,7 +194,14 @@ inbox_text() {  # <state-dir> <task-id>
 hold_lock_until_released() {  # <lock> <ready> <release>
   bash -c '
     . "$1"
-    fm_lock_acquire_wait "$2"
+    if fm_lock_path_is_metadata "$2"; then
+      base=${2##*/}
+      id=${base#.meta-}
+      id=${id%.lock}
+      fm_meta_lock_acquire_bounded "${2%/*}/$id.meta" fm-secondmate-reconcile.test.sh || exit 1
+    else
+      fm_lock_acquire_wait "$2" || exit 1
+    fi
     : > "$3"
     while [ ! -f "$4" ]; do sleep 0.01; done
     fm_lock_release "$2"
@@ -540,7 +547,8 @@ SH
   (
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_acquire_wait "$home/state/.control-mate.lock"
-    fm_lock_acquire_wait "$home/state/.meta-mate.lock"
+    fm_meta_lock_acquire_bounded "$home/state/mate.meta" \
+      fm-secondmate-reconcile.test.sh || exit 1
     rm -rf "$home/state/mate.inbox"
     rm -f "$home/state/mate.meta" "$home/state/mate.reconcile-nudged"
     cat > "$home/state/mate.meta" <<META
@@ -664,7 +672,8 @@ SH
 
   . "$ROOT/bin/fm-wake-lib.sh"
   fm_lock_acquire_wait "$home/state/.control-remote-send-race-mate.lock"
-  fm_lock_acquire_wait "$home/state/.meta-remote-send-race-mate.lock"
+  fm_meta_lock_acquire_bounded "$home/state/remote-send-race-mate.meta" \
+    fm-secondmate-reconcile.test.sh || fail "could not hold remote route metadata lock"
   sed 's/^remote_host=.*/remote_host=new-host/' \
     "$home/state/remote-send-race-mate.meta" > "$home/state/remote-send-race-mate.meta.tmp"
   mv "$home/state/remote-send-race-mate.meta.tmp" "$home/state/remote-send-race-mate.meta"

@@ -273,7 +273,7 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   exit 1
 }
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
-fm_lock_acquire_wait "$META_LOCK"
+fm_meta_lock_acquire_bounded "$META" fm-teardown.sh || exit 1
 META_LOCK_HELD=1
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -2261,7 +2261,7 @@ preflight_descendant_task_locks() {
       return 1
     fi
     DESCENDANT_LOCK_PATHS+=("$control_lock")
-    if ! fm_lock_try_acquire "$meta_lock"; then
+    if ! fm_meta_lock_acquire_bounded "$meta" fm-teardown.sh 1 0; then
       echo "REFUSED: descendant task $task_id has a metadata update in flight (metadata lock is held); forced teardown changed nothing" >&2
       return 1
     fi

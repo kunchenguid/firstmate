@@ -149,7 +149,8 @@ test_metadata_lock_serializes_destructive_cleanup() {
   (
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
-    fm_lock_try_acquire "$lock" || exit 1
+    fm_meta_lock_acquire_bounded "$dir/home/state/$id.meta" \
+      fm-teardown-endpoint-safety.test.sh || exit 1
     trap 'fm_lock_release "$lock"' EXIT
     : > "$ready"
     while [ ! -e "$release" ]; do

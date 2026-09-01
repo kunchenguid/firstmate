@@ -297,16 +297,16 @@ SH
 }
 
 test_meta_lock_contention_fails_bounded() {
-  local dir err rc holder marker lock i
+  local dir err rc holder marker i
   dir=$(setup_case meta-lock); err="$dir/send.err"
   marker="$dir/meta-lock-held"
-  lock="$dir/home/state/.meta-t1.lock"
   bash -c '
     . "$1"
-    fm_lock_acquire_wait "$2"
+    fm_meta_lock_acquire_bounded "$2" fm-send-inbox.test.sh || exit 1
     touch "$3"
     sleep 30
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$marker" &
+    :
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/home/state/t1.meta" "$marker" &
   holder=$!
   i=0
   while [ ! -e "$marker" ] && [ "$i" -lt 100 ]; do

@@ -1095,7 +1095,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   SPAWN_META_LOCK=$(fm_meta_lock_path "$RELAUNCH_META") || exit 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  fm_meta_lock_acquire_bounded "$RELAUNCH_META" fm-spawn.sh || exit 1
   SPAWN_META_LOCK_HELD=1
   fm_backlog_record_present "$RELAUNCH_META" "task record" "$STATE" || {
     echo "error: --relaunch refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -2039,7 +2039,7 @@ fi
 
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  fm_meta_lock_acquire_bounded "$STATE/$ID.meta" fm-spawn.sh || exit 1
   SPAWN_META_LOCK_HELD=1
 fi
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
@@ -2826,7 +2826,7 @@ SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  fm_meta_lock_acquire_bounded "$STATE/$ID.meta" fm-spawn.sh || exit 1
   SPAWN_META_LOCK_HELD=1
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -3007,7 +3007,7 @@ spawn_record_traceparent() {
   # independent critical section so other metadata interfaces can serialize.
   if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
     SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
-    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    fm_meta_lock_acquire_bounded "$meta" fm-spawn.sh || return 1
     SPAWN_META_LOCK_HELD=1
     acquired=1
   fi
@@ -3095,7 +3095,7 @@ fi
 # per-task lock as metadata publication, then and only then report success.
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  fm_meta_lock_acquire_bounded "$STATE/$ID.meta" fm-spawn.sh || exit 1
   SPAWN_META_LOCK_HELD=1
 fi
 SPAWN_DEFERRED_SIGNAL=

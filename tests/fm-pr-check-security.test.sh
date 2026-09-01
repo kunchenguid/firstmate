@@ -1331,18 +1331,45 @@ test_pr_lifecycle_recovers_reused_pid_owner() {
 }
 
 test_pr_metadata_lock_recovers_reused_pid_owner() {
-  local dir state meta lock owner holder_pid out
+  local dir state meta lock owner holder_pid out sibling
   dir=$(make_case pr-metadata-pid-reuse)
   state="$dir/home/state"
   meta="$state/task-a.meta"
   write_task_meta "$dir"
+  sibling=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-pr-lifecycle-lock-lib.sh"
+    lock=$(fm_meta_lock_path "$2") || exit 1
+    fm_lock_try_create "$lock"
+    [ "$?" -eq 2 ] || exit 2
+    fm_lock_try_acquire "$lock"
+    [ "$?" -eq 2 ] || exit 3
+    fm_lock_acquire_wait "$lock"
+    [ "$?" -eq 2 ] || exit 4
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 5
+    fm_process_command_identity() { return 1; }
+    rc=0
+    fm_meta_lock_acquire_bounded "$2" fm-captain-hold.sh 1 0 2>/dev/null || rc=$?
+    [ "$rc" -eq 1 ] || exit 6
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] \
+      && [ ! -e "$lock.steal" ] && [ ! -L "$lock.steal" ] || exit 7
+    fm_process_command_identity() { printf "%064d\n" 1; }
+    fm_meta_lock_acquire_bounded "$2" fm-captain-hold.sh 1 0 || exit 8
+    printf "expected=%s identity=%s\n" \
+      "$(cat "$lock/expected-command")" "$(cat "$lock/pid-identity")"
+    fm_lock_release "$lock"
+  ' fm-captain-hold.sh "$ROOT" "$meta") \
+    || fail "legacy generic lock APIs admitted untyped task metadata ownership"
+  case "$sibling" in
+    expected=fm-captain-hold.sh\ identity=0000000000000000000000000000000000000000000000000000000000000001) ;;
+    *) fail "sibling metadata writer did not publish typed command ownership: $sibling" ;;
+  esac
   sleep 30 &
   holder_pid=$!
   lock="$state/.meta-task-a.lock"
   owner="$lock.owner.reused"
   mkdir "$owner"
   printf '%s\n' "$holder_pid" > "$owner/pid"
-  printf '%s\n' fm-pr-check.sh > "$owner/expected-command"
+  printf '%s\n' fm-captain-hold.sh > "$owner/expected-command"
   printf '%064d\n' 0 > "$owner/pid-identity"
   chmod 0600 "$owner/pid" "$owner/expected-command" "$owner/pid-identity"
   ln -s "$owner" "$lock"
@@ -1368,7 +1395,7 @@ test_pr_metadata_lock_recovers_reused_pid_owner() {
   esac
   [ ! -e "$lock" ] && [ ! -L "$lock" ] \
     || fail "PR metadata PID-reuse recovery left its lock held"
-  pass "PR metadata ownership is typed, bounded, and PID-reuse safe"
+  pass "sibling metadata ownership is typed, bounded, and PID-reuse safe"
 }
 
 test_poll_publication_refuses_unsafe_destinations() {
