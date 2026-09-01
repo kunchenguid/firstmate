@@ -9,6 +9,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BOARD="$ROOT/bin/fm-workstream-board.sh"
+SNAPSHOT="$ROOT/bin/fm-workstream-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-workstream-board)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -164,6 +165,94 @@ test_lane_counts_must_total_the_whole_lane_exactly() {
     || fail "the balanced lane-total payload was refused"
   [ -f "$home/.lavish/workstreams.html" ] || fail "the balanced payload produced no board"
   pass "lane counts are refused unless they total the shipped rows plus more_tasks"
+}
+
+# The documented compose path end to end: run the real composer, apply only the
+# mechanical joins SKILL.md step 2 names, and hand the result to the real
+# builder. The composer emits `pr_url: null` on every task with no PR, so the
+# shapes it actually produces have to validate.
+compose_from_snapshot() {  # <home> <fakebin> <out.json>
+  local home=$1 fb=$2 out=$3 snapshot
+  snapshot=$(NET_LOG="$home/net.log" PATH="$fb:$PATH" FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$TMP_ROOT/fixture-root" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    "$SNAPSHOT" --json) || return 1
+  printf '%s' "$snapshot" | jq '
+    . as $root
+    | {
+        schema: "fm-workstream-board.v1",
+        home: $root.home,
+        generated: $root.generated,
+        workstreams: [ $root.workstreams[] as $w
+          | { id: $w.id, name: $w.name, outcome: $w.outcome,
+              tasks: [ $root.tasks[] | select(.ws == $w.id) ],
+              counts: { done: $w.done, review: $w.review, active: $w.active,
+                        held: $w.held, decision: $w.decision, queued: $w.queued },
+              more_tasks: $w.more } ],
+        edges: [ $root.edges[] | {from, to} ],
+        waiting: [ $root.decisions[]
+          | { key: .id, title: .summary, allow_freeform: true, options: [],
+              close: "release" } ],
+        agents: [ $root.agents[]
+          | { id: .id, doing: .doing,
+              tone: (if .state == "working" then "working"
+                     elif .state == "decision" then "decision"
+                     else "paused" end) } ],
+        divergence: [ $root.divergence[] | {id, note} ]
+      }' > "$out"
+}
+
+test_the_composers_own_output_shape_builds() {
+  local home fb data
+  home=$(make_home composed)
+  mkdir -p "$home/projects" "$home/config" "$TMP_ROOT/fixture-root"
+  fb="$home/fakebin"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '%%1\n' ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  # A PR-less task, a task with a PR, a captain hold, and an ungrouped row, so
+  # both the null and the populated pr_url branches ship in one payload.
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+- [ ] quote - Quote Flow (kind: program)
+  Intended outcome: a quote flow that never silently drops a part.
+- [ ] quote-fixes - G9 loud failure and friends
+
+## Queued
+
+- [ ] quote-review - Analytics triage weekly study
+- [ ] spend-call - Eval spend decision (hold: full baseline or returns-only?, hold-kind: captain)
+- [ ] loner - Completely ungrouped work with no PR anywhere
+
+## Done
+EOF
+  fm_write_meta "$home/state/quote-fixes.meta" "backend=tmux" "window=fm:1" \
+    "kind=ship" "project=$home/projects/sample"
+  printf 'working: fixing G20\n' > "$home/state/quote-fixes.status"
+  fm_write_meta "$home/state/quote-review.meta" "backend=tmux" "window=fm:2" \
+    "kind=ship" "project=$home/projects/sample" "pr=https://github.com/acme/repo/pull/197"
+
+  data="$home/payload.json"
+  compose_from_snapshot "$home" "$fb" "$data" || fail "the composer did not run"
+
+  # The payload really does carry the shape under test, in both branches.
+  jq -e '
+    ([.workstreams[].tasks[] | select(.pr_url == null)] | length) > 0
+      and ([.workstreams[].tasks[] | select(.pr_url != null)] | length) > 0
+  ' "$data" >/dev/null || fail "the composed payload has no null pr_url to prove: $(cat "$data")"
+
+  run_board "$home" build "$data" >/dev/null 2>&1 \
+    || fail "the composer's own output was refused by the builder: $(cat "$data")"
+  [ -f "$home/.lavish/workstreams.html" ] || fail "the composed payload produced no board"
+  pass "the composer's own output shape builds through the real builder"
 }
 
 test_build_refuses_malformed_payloads_before_touching_the_board() {
@@ -383,6 +472,7 @@ test_build_refuses_a_template_without_exactly_one_slot() {
 test_path_is_stable_home_scoped_and_mockup_safe
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_an_uncapped_lane_may_omit_its_counts
+test_the_composers_own_output_shape_builds
 test_lane_counts_must_total_the_whole_lane_exactly
 test_build_injects_binds_then_arms
 test_build_does_not_bind_or_arm_when_session_start_fails

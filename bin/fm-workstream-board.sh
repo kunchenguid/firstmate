@@ -31,12 +31,14 @@
 # schema=fm-workstream-board.v1 and every renderer-consumed field must satisfy
 # the types and item invariants below. Every waiting item's key is a
 # captain-held TASK ID, so the bound keyed-answer intake can close or release
-# that task at answer time. A workstream's `counts` object carries that lane's
-# whole-lane state tallies, so the progress bar reports the lane and not
-# whatever subset of rows the row cap left visible; it is REQUIRED whenever
-# `more_tasks` is above zero, must carry all six state keys, and must total
-# EXACTLY the lane - the rows it ships plus `more_tasks`. Anything else refuses
-# before the existing board is touched.
+# that task at answer time. An optional field carrying an explicit null reads
+# as absent, so a composer can pass a snapshot row through unedited; the
+# renderer already draws the two the same way. A workstream's `counts` object
+# carries that lane's whole-lane state tallies, so the progress bar reports
+# the lane and not whatever subset of rows the row cap left visible; it is
+# REQUIRED whenever `more_tasks` is above zero, must carry all six state keys,
+# and must total EXACTLY the lane - the rows it ships plus `more_tasks`.
+# Anything else refuses before the existing board is touched.
 #
 # The board path is stable - $FM_HOME/.lavish/workstreams.html - so a
 # re-invocation rebuilds the same file in place, keeping the same Lavish
@@ -77,9 +79,11 @@ validate_payload() {  # <data.json>
   jq -e --arg schema "$BOARD_SCHEMA" '
     def nonempty_string: type == "string" and length > 0;
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
-    def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
+    def optional_string($name):
+      (has($name) | not) or (.[$name] == null) or (.[$name] | type == "string");
     def optional_https_url($name):
       (has($name) | not)
+      or (.[$name] == null)
       or (.[$name]
         | type == "string"
           and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
