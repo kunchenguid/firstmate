@@ -10,9 +10,11 @@
 # the block on stdout with no trailing blank line. The caller validates the mode;
 # an unknown mode is refused rather than silently rendered as the pipeline contract.
 # Every mode's block binds one canonical task worktree and fm/<task-id> ref from
-# the task record, requires a clean worktree, scans that committed ref for
-# unresolved FINALIZE-AFTER( sentinels, and binds later delivery actions to that
-# worktree. A scan error is a delivery failure, never the same result as no matches.
+# the task record, requires a clean worktree, requires every recursively referenced
+# submodule to be initialized at its recorded commit, scans that ref and those
+# submodule commits for unresolved FINALIZE-AFTER( sentinels, and binds later
+# delivery actions to that worktree. An inspection or scan error is a delivery
+# failure, never the same result as no matches.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
