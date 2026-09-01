@@ -21,6 +21,28 @@
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
+//
+// Ordinary wake presentation coalescing (stated once here):
+// The watcher enqueues every actionable event durably before it exits, so this
+// extension only decides whether Pi's fixed follow-up dock gains another row.
+// While one ordinary work-waiting row is pending, later ordinary wakes add no
+// row; the pending row already directs the model to drain the durable queue.
+// The latch lives on the session generation, is set before the delivery await
+// because an idle agent consumes the row and emits agent_start inside that
+// call, clears on agent_start (the consumption edge), and rolls back when
+// delivery rejects before a row exists. A replacement session activates a
+// fresh generation with a clear latch, so no stale latch leaks across
+// generations and a genuinely later burst creates one new row.
+// Urgent supervision failures bypass the latch and always surface as their own
+// row: call sites mark the paths they own, and any message carrying the
+// `watcher: FAILED` marker is urgent regardless of which branch delivered it,
+// so a typed failure riding the ordinary branch is never coalesced away. Every
+// failure text in this extension must keep that marker; a false-urgent costs
+// one extra row, a false-ordinary could sit on a real supervision failure.
+// Pi exposes no per-row consumption signal, so a captain prompt that starts a
+// run while a row is still docked clears the latch early and a close during
+// that run can dock a second row. That transient is bounded at two rows, both
+// consumed in order, and is the accepted cost of using agent_start as the edge.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -82,6 +104,8 @@ type UnconsumedWake = {
   pending: PendingActionableClose;
 };
 
+type WakePresentation = "ordinary" | "urgent";
+
 type SessionGeneration = {
   id: number;
   stopping: boolean;
@@ -103,6 +127,7 @@ type SessionGeneration = {
   // still delivering the wake it was started for; its bounded retry runs once
   // that delivery settles instead of being skipped by the single-flight guard.
   deferredClose: { message: string; predecessorArmPid: string } | null;
+  pendingOrdinaryWakeRow: boolean;
 };
 
 function refreshWatchToolShell(
@@ -376,6 +401,11 @@ function clearReplacementHandoff(pending: PendingActionableClose): void {
   }
 }
 
+// The marker every failure text in this extension embeds (header contract).
+function isUrgentSupervisionFailure(message: string): boolean {
+  return message.includes("watcher: FAILED");
+}
+
 function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
   const reason = actionableLine(combined);
@@ -422,6 +452,7 @@ function createGeneration(): SessionGeneration {
     cleanupFailure: "",
     unconsumedWakes: new Map(),
     deferredClose: null,
+    pendingOrdinaryWakeRow: false,
   };
 }
 
@@ -514,18 +545,28 @@ export default function (pi: ExtensionAPI) {
   async function sendWake(
     owner: SessionGeneration,
     message: string,
+    presentation: WakePresentation,
     pending?: PendingActionableClose,
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
+    const urgent = presentation === "urgent" || isUrgentSupervisionFailure(message);
+    // The already-pending row directs the model to drain the durable queue, so
+    // this event is presented by that row; its durable record is untouched.
+    if (!urgent && owner.pendingOrdinaryWakeRow) return true;
     const content = encodeFirstmateOperationalInput(
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
+    if (!urgent) owner.pendingOrdinaryWakeRow = true;
     try {
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
+      // Delivery rejected before a row existed, so release the latch rather
+      // than suppressing every later ordinary wake behind a row that is not
+      // there, then let the caller handle the failure as it already does.
+      if (!urgent) owner.pendingOrdinaryWakeRow = false;
       throw error;
     }
     // Accepted by Pi. A generation replaced while Pi was accepting it may
@@ -627,7 +668,7 @@ export default function (pi: ExtensionAPI) {
         if (!pidAlive(watcherPid)) {
           await retireArm(owner.child);
         }
-        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
+        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, "urgent", pending);
       }
     }
     if (!repairFailed) {
@@ -639,11 +680,11 @@ export default function (pi: ExtensionAPI) {
         } catch {}
       }
     }
-    return await sendWake(owner, message, pending);
+    return await sendWake(owner, message, "ordinary", pending);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
-    void sendWake(owner, message).catch(() => {
+    void sendWake(owner, message, "urgent").catch(() => {
       // Pi owns delivery errors; continuity restoration never waits on prompting.
     });
   }
@@ -1089,6 +1130,13 @@ export default function (pi: ExtensionAPI) {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
+  });
+  // The consumption edge: an idle send starts its run inside sendUserMessage,
+  // and a row docked on a busy agent is consumed by the continuation run after
+  // the in-flight run ends. Either way the run that consumes the pending row
+  // begins with agent_start, so re-arm ordinary presentation there.
+  pi.on?.("agent_start", () => {
+    generation.pendingOrdinaryWakeRow = false;
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {

@@ -1269,6 +1269,788 @@ EOF
   pass "Pi late unretired closes resume classified supervision"
 }
 
+# Production-timing Pi follow-up fake used by every coalescing test below.
+# Pi 0.84.4: sendUserMessage(deliverAs followUp) calls prompt(). On an idle
+# agent prompt() runs the whole agent loop inside the call - agent_start is
+# emitted at run start, long before the returned promise resolves at run end.
+# On a busy agent the row docks and the call resolves at once, and a later
+# continuation run emits agent_start when it consumes the docked row. The
+# fakes below reproduce exactly that ordering, which is what makes a latch set
+# after the await strand itself on the idle path.
+
+test_pi_ordinary_burst_coalesces_to_one_dock_row() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-burst-root"
+  home="$TMP_ROOT/pi-burst-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+# The watcher enqueues durably before it exits; the extension only prompts.
+if [ "$count" -eq 1 ]; then
+  printf '1\t1\tsignal\tburst-1\tsignal: burst event 1\n' >> "${FM_WAKE_QUEUE:?}"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: burst event 1\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+[ -e "${FM_STOP_FILE:?}" ] && exit 0
+printf '1\t%s\tsignal\tburst-%s\tsignal: burst event %s\n' "$count" "$count" "$count" >> "${FM_WAKE_QUEUE:?}"
+printf 'signal: burst event %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-burst-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-burst-confirm.log" FM_WAKE_QUEUE="$home/state/.wake-queue" FM_BURST_GO="$TMP_ROOT/pi-burst-go" FM_STOP_FILE="$TMP_ROOT/pi-burst.stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const sent = [];
+let running = false;
+let endRun = () => {};
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    sent.push(String(message));
+    // Busy agent: the follow-up docks and the call resolves immediately.
+    if (running) return;
+    running = true;
+    const runEnded = new Promise((resolve) => {
+      endRun = resolve;
+    });
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await runEnded;
+    running = false;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+// The captain is mid-turn, so Pi is already running an agent loop and every
+// watcher follow-up docks instead of starting its own run.
+running = true;
+await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await tool.execute("tool-call-burst", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+const lines = (file) => (existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : []);
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const confirms = () => lines(process.env.FM_CONFIRM_LOG).length;
+await waitFor(() => confirms() >= 1 && sent.length >= 1, "first close delivery");
+for (const count of [2, 3, 4]) {
+  writeFileSync(`${process.env.FM_BURST_GO}/${count}`, "go\n");
+  await waitFor(() => confirms() >= count, `close ${count} processing`);
+}
+await waitFor(() => lines(process.env.FM_ARM_LOG).length >= 5, "final successor start");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (sent.length !== 1) throw new Error(`burst produced ${sent.length} dock rows: ${sent.join(" || ")}`);
+const row = sent[0];
+if (!row.includes("FIRSTMATE WATCHER WAKE")) throw new Error(`row lost the typed wake header: ${row}`);
+if (!row.includes("signal: burst event 1")) throw new Error(`row lost its own triggering event: ${row}`);
+if (!row.includes("Run bin/fm-wake-drain.sh")) throw new Error(`row lost the durable-drain instruction: ${row}`);
+for (const later of [2, 3, 4]) {
+  if (row.includes(`burst event ${later}`)) throw new Error(`row embedded later event ${later}: ${row}`);
+}
+const queue = lines(process.env.FM_WAKE_QUEUE);
+if (queue.length !== 4) throw new Error(`durable queue kept ${queue.length} of 4 events: ${queue.join(" | ")}`);
+for (const count of [1, 2, 3, 4]) {
+  if (!queue.some((line) => line.endsWith(`signal: burst event ${count}`))) {
+    throw new Error(`durable queue lost event ${count}: ${queue.join(" | ")}`);
+  }
+}
+if (confirms() !== 4) throw new Error(`expected every burst close to complete its handshake, saw ${confirms()}`);
+const armRows = lines(process.env.FM_ARM_LOG).length;
+if (armRows !== 5) throw new Error(`expected 4 closes plus one final successor, saw ${armRows} arm rows`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+endRun();
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a many-event ordinary burst must present exactly one dock row while every record stays durable"
+  [ -z "$out" ] || fail "Pi burst-coalescing test printed output: $out"
+  pass "Pi ordinary burst coalesces to one dock row and preserves every durable event"
+}
+
+test_pi_consumed_row_rearms_for_genuinely_later_wake() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-rearm-root"
+  home="$TMP_ROOT/pi-rearm-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: first event\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+[ -e "${FM_STOP_FILE:?}" ] && exit 0
+printf 'signal: later event %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-rearm-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-rearm-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-rearm-go" FM_STOP_FILE="$TMP_ROOT/pi-rearm.stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const sent = [];
+let running = false;
+let settledSends = 0;
+let agentStarts = 0;
+let endRun = () => {};
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  // Idle agent: this call runs the whole handling turn. agent_start fires
+  // inside it and the promise resolves only when the driver ends that run.
+  sendUserMessage: async (message) => {
+    sent.push(String(message));
+    if (running) return;
+    running = true;
+    const runEnded = new Promise((resolve) => {
+      endRun = resolve;
+    });
+    agentStarts += 1;
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await runEnded;
+    running = false;
+    settledSends += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-rearm", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+await waitFor(() => sent.length === 1 && agentStarts === 1, "first row presented and consumed");
+if (settledSends !== 0) throw new Error("fake lost production timing: the idle send resolved before its run ended");
+// End the handling run. Only now does the idle send resolve, which is the
+// point where a latch set after the await would strand itself.
+endRun();
+await waitFor(() => settledSends === 1, "first handling run to end");
+await new Promise((resolve) => setTimeout(resolve, 50));
+// A genuinely later wake, with the agent idle again.
+writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
+await waitFor(() => sent.length === 2, "genuinely later idle wake row");
+if (!sent[1].includes("signal: later event 2")) throw new Error(`later wake row lost its event: ${sent.join(" || ")}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (sent.length !== 2) throw new Error(`later idle wake presented ${sent.length - 1} rows instead of one`);
+if (agentStarts !== 2) throw new Error(`expected one consumption edge per presented row, saw ${agentStarts}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+endRun();
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "an idle-consumed wake must leave presentation re-armed so a genuinely later wake presents exactly one new row"
+  [ -z "$out" ] || fail "Pi consumed-row re-arm test printed output: $out"
+  pass "Pi idle-consumed row re-arms presentation so a genuinely later wake presents one new row"
+}
+
+test_pi_restoration_exhaustion_bypasses_ordinary_latch() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-exhaust-root"
+  home="$TMP_ROOT/pi-exhaust-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: ordinary event 1\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-2\n' "$$"
+  while [ ! -e "${FM_BURST_GO:?}/2" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+  [ -e "${FM_STOP_FILE:?}" ] && exit 0
+  printf 'signal: ordinary event 2\n'
+  exit 0
+fi
+# Every successor for the second close hangs without reporting readiness, so
+# restoration exhausts its bounded retries and its typed failure rides the
+# same plain delivery branch an ordinary wake uses.
+trap 'exit 0' TERM INT
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-exhaust-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-exhaust-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-exhaust-go" FM_STOP_FILE="$TMP_ROOT/pi-exhaust.stop" FM_PI_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=1 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const sent = [];
+let running = false;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    sent.push(String(message));
+    if (running) return;
+    running = true;
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await new Promise(() => {});
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+// A long captain turn is under way, so every watcher row docks unconsumed.
+running = true;
+await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await tool.execute("tool-call-exhaust", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+const confirms = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
+async function waitFor(predicate, label, ticks = 500) {
+  for (let i = 0; i < ticks; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+await waitFor(() => confirms() >= 1 && sent.length === 1, "pending ordinary row");
+if (!sent[0].includes("signal: ordinary event 1")) throw new Error(`first row lost its event: ${sent.join(" || ")}`);
+// The ordinary row is still docked and unconsumed. The second close cannot
+// restore continuity at all, and that typed failure must present anyway.
+writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
+await waitFor(() => sent.length === 2, "typed restoration-exhaustion row", 1500);
+if (!sent[1].includes("could not restore watcher continuity after 1 retries")) {
+  throw new Error(`restoration exhaustion was coalesced away: ${sent.join(" || ")}`);
+}
+if (!sent[1].includes("signal: ordinary event 2")) throw new Error(`failure row lost its actionable reason: ${sent.join(" || ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "continuity-restoration exhaustion must present its own row while an ordinary row is pending"
+  [ -z "$out" ] || fail "Pi restoration-exhaustion bypass test printed output: $out"
+  pass "Pi restoration exhaustion surfaces separately from a pending ordinary row"
+}
+
+test_pi_restoration_lock_loss_bypasses_ordinary_latch() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-restore-lock-root"
+  home="$TMP_ROOT/pi-restore-lock-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: ordinary event 1\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+[ -e "${FM_STOP_FILE:?}" ] && exit 0
+printf 'signal: ordinary event %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-restore-lock-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-restore-lock-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-restore-lock-go" FM_STOP_FILE="$TMP_ROOT/pi-restore-lock.stop" node --input-type=module 2>&1 <<'EOF'
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const sent = [];
+let running = false;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    sent.push(String(message));
+    if (running) return;
+    running = true;
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await new Promise(() => {});
+  },
+};
+const lock = `${process.env.FM_HOME}/state/.lock`;
+writeFileSync(lock, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+running = true;
+await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await tool.execute("tool-call-restore-lock", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+const confirms = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+await waitFor(() => confirms() >= 1 && sent.length === 1, "pending ordinary row");
+// The ordinary row is still docked. Another session now owns the lock, so the
+// second close loses ownership during restoration and rides the same plain
+// delivery branch: that typed failure must still present.
+const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  writeFileSync(lock, `${other.pid}\n`);
+  writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
+  await waitFor(() => sent.length === 2, "restoration-time lock-loss row");
+  if (!sent[1].includes("no longer owns the lock")) {
+    throw new Error(`restoration-time lock loss was coalesced away: ${sent.join(" || ")}`);
+  }
+  if (!sent[1].includes("signal: ordinary event 2")) throw new Error(`failure row lost its actionable reason: ${sent.join(" || ")}`);
+} finally {
+  other.kill("SIGTERM");
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "restoration-time lock loss must present its own row while an ordinary row is pending"
+  [ -z "$out" ] || fail "Pi restoration lock-loss bypass test printed output: $out"
+  pass "Pi restoration-time lock loss surfaces separately from a pending ordinary row"
+}
+
+test_pi_retry_lock_loss_bypasses_ordinary_latch() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-lockloss-root"
+  home="$TMP_ROOT/pi-lockloss-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: ordinary event 1\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+[ -e "${FM_STOP_FILE:?}" ] && exit 0
+# Empty close: non-actionable, so the close handler rechecks lock ownership
+# before scheduling a continuity retry.
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-lockloss-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-lockloss-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-lockloss-go" FM_STOP_FILE="$TMP_ROOT/pi-lockloss.stop" node --input-type=module 2>&1 <<'EOF'
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const sent = [];
+let running = false;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    sent.push(String(message));
+    if (running) return;
+    running = true;
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await new Promise(() => {});
+  },
+};
+const lock = `${process.env.FM_HOME}/state/.lock`;
+writeFileSync(lock, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+running = true;
+await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await tool.execute("tool-call-lockloss", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+const confirms = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+await waitFor(() => confirms() >= 1 && sent.length === 1, "pending ordinary row");
+const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  writeFileSync(lock, `${other.pid}\n`);
+  writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
+  await waitFor(() => sent.length === 2, "urgent lock-loss row");
+  if (!sent[1].includes("no longer owns the lock")) throw new Error(`lock-loss failure was coalesced away: ${sent.join(" || ")}`);
+} finally {
+  other.kill("SIGTERM");
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a retry-path lock-loss failure must bypass the ordinary presentation latch"
+  [ -z "$out" ] || fail "Pi lock-loss bypass test printed output: $out"
+  pass "Pi retry-path lock loss surfaces separately from a pending ordinary row"
+}
+
+test_pi_refused_handshake_bypasses_ordinary_latch() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-refuse-root"
+  home="$TMP_ROOT/pi-refuse-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'handshake\n' >> "${FM_CONFIRM_LOG:?}"
+  # The first close confirms normally so its wake docks an ordinary row; every
+  # later handshake refuses, which is a supervision failure.
+  count=$(grep -c '^handshake$' "$FM_CONFIRM_LOG")
+  [ "$count" -eq 1 ] && exit 0
+  exit 1
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: ordinary event 1\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+[ -e "${FM_STOP_FILE:?}" ] && exit 0
+printf 'signal: ordinary event %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-refuse-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-refuse-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-refuse-go" FM_STOP_FILE="$TMP_ROOT/pi-refuse.stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const sent = [];
+let running = false;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    sent.push(String(message));
+    if (running) return;
+    running = true;
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await new Promise(() => {});
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+running = true;
+await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await tool.execute("tool-call-refuse", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+const handshakes = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+await waitFor(() => handshakes() >= 1 && sent.length === 1, "pending ordinary row");
+if (sent[0].includes("handling delivery confirmation was rejected")) {
+  throw new Error(`first row should be an ordinary wake, not a failure: ${sent.join(" || ")}`);
+}
+// With that ordinary row still docked, a close whose handling handshake is
+// refused must surface its own row rather than being coalesced into silence.
+writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
+await waitFor(() => sent.length === 2, "refused-handshake row");
+if (!sent[1].includes("handling delivery confirmation was rejected")) throw new Error(`refused handshake was coalesced away: ${sent.join(" || ")}`);
+if (!sent[1].includes("signal: ordinary event 2")) throw new Error(`second event lost its actionable reason: ${sent.join(" || ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a refused handling handshake must surface as its own row even while another row is pending"
+  [ -z "$out" ] || fail "Pi refused-handshake bypass test printed output: $out"
+  pass "Pi refused handshake surfaces separately from a pending ordinary row"
+}
+
+test_pi_rejected_delivery_rolls_back_ordinary_latch() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-reject-root"
+  home="$TMP_ROOT/pi-reject-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: ordinary event 1\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+[ -e "${FM_STOP_FILE:?}" ] && exit 0
+printf 'signal: ordinary event %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-reject-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-reject-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-reject-go" FM_STOP_FILE="$TMP_ROOT/pi-reject.stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const attempts = [];
+const sent = [];
+let running = false;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    attempts.push(String(message));
+    // Only the first delivery is rejected, and it establishes no row.
+    if (attempts.length === 1) throw new Error("synthetic follow-up delivery rejection");
+    sent.push(String(message));
+    if (running) return;
+    running = true;
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await new Promise(() => {});
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+running = true;
+await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await tool.execute("tool-call-reject", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+// The rejected ordinary delivery is reported through the failure path.
+await waitFor(() => attempts.length === 2 && sent.length === 1, "rejected delivery reported as a failure");
+if (!sent[0].includes("could not deliver an actionable wake")) throw new Error(`delivery rejection was not surfaced: ${sent.join(" || ")}`);
+// A rejected send established no row, so the next ordinary wake must present.
+writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
+await waitFor(() => sent.length === 2, "ordinary wake after a rejected delivery");
+if (!sent[1].includes("signal: ordinary event 2")) throw new Error(`ordinary wake after rejection lost its event: ${sent.join(" || ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a rejected ordinary delivery must roll the presentation latch back instead of stranding it"
+  [ -z "$out" ] || fail "Pi rejected-delivery rollback test printed output: $out"
+  pass "Pi rejected ordinary delivery rolls the presentation latch back"
+}
+
+test_pi_session_replacement_discards_ordinary_latch() {
+  local repo home plugin child_pid_file out status
+  repo="$TMP_ROOT/pi-latchgen-root"
+  home="$TMP_ROOT/pi-latchgen-home"
+  child_pid_file="$TMP_ROOT/pi-latchgen-child.pid"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: pre-replacement event\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+trap 'exit 0' TERM INT
+while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+[ -e "${FM_STOP_FILE:?}" ] && exit 0
+printf 'signal: post-replacement event\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_ARM_LOG="$TMP_ROOT/pi-latchgen-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-latchgen-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-latchgen-go" FM_STOP_FILE="$TMP_ROOT/pi-latchgen.stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const sent = [];
+let running = false;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    sent.push(String(message));
+    if (running) return;
+    running = true;
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await new Promise(() => {});
+  },
+};
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+running = true;
+await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await tool.execute("tool-call-latchgen", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+const confirms = () => (existsSync(process.env.FM_CONFIRM_LOG) ? readFileSync(process.env.FM_CONFIRM_LOG, "utf8").trim().split("\n").filter(Boolean).length : 0);
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+await waitFor(() => confirms() >= 1 && sent.length === 1, "pre-replacement row");
+if (!sent[0].includes("signal: pre-replacement event")) throw new Error(`pre-replacement row lost its event: ${sent.join(" || ")}`);
+// Replace the session without any agent_start: the successor generation must
+// not inherit the replaced generation pending-presentation latch.
+const previousChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+for (let i = 0; i < 250 && pidAlive(previousChild); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (pidAlive(previousChild)) throw new Error("replacement left the old arm child alive");
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+const armed = await tool.execute("tool-call-latchgen-replacement", {}, undefined, undefined, {});
+if (!armed.details?.ok) throw new Error(`replacement arm failed: ${JSON.stringify(armed.details)}`);
+let replacementChild = "";
+for (let i = 0; i < 250; i += 1) {
+  replacementChild = existsSync(process.env.FM_CHILD_PID_FILE) ? readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim() : "";
+  if (replacementChild && replacementChild !== previousChild && pidAlive(replacementChild)) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!replacementChild || replacementChild === previousChild || !pidAlive(replacementChild)) {
+  throw new Error("replacement generation did not start its own successor arm");
+}
+writeFileSync(`${process.env.FM_BURST_GO}/3`, "go\n");
+await waitFor(() => sent.length === 2, "post-replacement row");
+if (!sent[1].includes("signal: post-replacement event")) throw new Error(`post-replacement row lost its event: ${sent.join(" || ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "session replacement must discard the pending-presentation latch with its generation"
+  [ -z "$out" ] || fail "Pi session-replacement latch test printed output: $out"
+  pass "Pi session replacement discards the ordinary latch so a new session presents fresh"
+}
+
 test_pi_empty_close_retries_instead_of_disappearing() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-empty-close-root"
@@ -3617,6 +4399,14 @@ test_pi_handling_delivery_failure_is_typed_once
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
+test_pi_ordinary_burst_coalesces_to_one_dock_row
+test_pi_consumed_row_rearms_for_genuinely_later_wake
+test_pi_restoration_exhaustion_bypasses_ordinary_latch
+test_pi_restoration_lock_loss_bypasses_ordinary_latch
+test_pi_retry_lock_loss_bypasses_ordinary_latch
+test_pi_refused_handshake_bypasses_ordinary_latch
+test_pi_rejected_delivery_rolls_back_ordinary_latch
+test_pi_session_replacement_discards_ordinary_latch
 test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock

@@ -473,6 +473,33 @@ Stale prior-generation tool callbacks could not mutate the active child, repeate
 The strict no-emit check used the installed Pi SDK declarations to hold the lifecycle event contract.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+Ordinary wake presentation coalescing was verified on 2026-09-01 with Node v22.23.1 against Pi 0.84.4, driving the tracked extension through a production-timing follow-up fake rather than a live Pi session.
+The fake reproduces Pi 0.84.4's own ordering, read from the installed `@earendil-works/pi-coding-agent` runtime: on an idle agent `sendUserMessage` runs the whole handling turn inside the call, emitting `agent_start` before the returned promise resolves, while on a busy agent the row docks and the call resolves at once.
+That ordering is what the regressions turn on, so each new test was also run against deliberately broken variants of the extension to prove it is not vacuous: the unmodified extension fails only the burst test; setting the latch after the delivery await fails only the idle-consumed re-arm test; classifying urgency by call site alone fails both restoration-failure tests; dropping the rejection rollback fails only the rejected-delivery test; sharing one latch across generations fails only the session-replacement test; and removing urgency entirely fails all four failure-bypass tests.
+
+```sh
+node --version
+pi --version
+tests/fm-pi-watch-extension.test.sh
+tests/fm-watch-arm.test.sh
+tests/fm-watch-recovery-loop.test.sh
+tests/fm-pi-branch-extension.test.sh
+tests/fm-calm-pi-extension.test.sh
+tests/fm-turnend-guard.test.sh
+CI=true bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+```
+
+Observed guarantee: `ok - Pi ordinary burst coalesces to one dock row and preserves every durable event`, `ok - Pi idle-consumed row re-arms presentation so a genuinely later wake presents one new row`, `ok - Pi restoration exhaustion surfaces separately from a pending ordinary row`, `ok - Pi restoration-time lock loss surfaces separately from a pending ordinary row`, `ok - Pi retry-path lock loss surfaces separately from a pending ordinary row`, `ok - Pi refused handshake surfaces separately from a pending ordinary row`, `ok - Pi rejected ordinary delivery rolls the presentation latch back`, and `ok - Pi session replacement discards the ordinary latch so a new session presents fresh`, inside a 45-test extension suite at exit 0, with the watcher-arm (14), recovery-loop (2), branch-extension (31), Calm-extension (9), and turn-end-guard (70) suites also at exit 0, `fm-lint.sh` green under the pinned ShellCheck 0.11.0 and actionlint 1.7.12, and `fm-doc-audience-check: ok surfaces=89 local_links=300`.
+`tests/fm-pi-primary-types.test.sh` reported `skip: tsc not found for Pi extension typecheck`, so the TypeScript surface is exercised only by importing the real extension under Node type stripping, which the extension suite does.
+
+Applicability across supported primaries and runtime backends was reviewed by inspecting each integration surface rather than assumed.
+Plain Pi and pi-signed load the same tracked extension and are both changed.
+OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` re-arms the same way and delivers through `client.session.promptAsync`, a structurally comparable queued prompt, but it has no accumulating fixed dock and no recorded accumulation symptom, so it is deliberately unchanged here and behaves exactly as before.
+Claude and Cursor run the watcher only between turns under their Stop-hook auto-arm and stop-hook park, so a wake arrives as a single turn-boundary message with no window in which unconsumed wake prompts stack.
+Codex takes its wake as the return of the one bounded foreground checkpoint it is already blocked on, and Grok, Kimi, Muse, and the other persistent-model harnesses surface a wake through their own single arm return, so none of them has a presentation surface to coalesce.
+Every runtime backend is unaffected because the change lives entirely inside the Pi session process's own follow-up presentation and touches no spawn, endpoint, or task-metadata path.
+
 On 2026-09-02 the same suite, the strict typecheck, and the credential-free real-SDK guard were rerun against `@earendil-works/pi-coding-agent` 0.84.4 after the extension stopped waiting for `before_agent_start` before settling a main delivery; [`runtime-backends.md`](runtime-backends.md#2026-09-02-streaming-time-watcher-delivery) owns the exact commands and output.
 Observed guarantee: a wake delivered while main was streaming was followed by a verified successor and by delivery of the next actionable close, a replacement replayed only the follow-up Pi had not consumed, an exhausted restoration delivered its typed failure without launching an arm past the retry bound, and a verified successor that failed while a branch settlement still held its wake took the ordinary bounded retry once that delivery settled.
 
