@@ -801,6 +801,7 @@ FM_SNAPSHOT_CREW_STATE_TIMEOUT=10   # seconds bounding each per-task current-sta
 FM_SNAPSHOT_ENDPOINT_TIMEOUT=2   # seconds bounding local secondmate agent-alive probes inside bin/fm-fleet-snapshot.sh's home-summary mode; timed-out endpoint evidence reports unknown rather than absent
 FM_SNAPSHOT_TASK_STATE_JOBS=32   # concurrent per-task evidence workers inside bin/fm-fleet-snapshot.sh; invalid or zero values are rejected
 FM_SNAPSHOT_TASK_STATE_BUDGET=20   # seconds bounding total per-task current-state and endpoint probing inside bin/fm-fleet-snapshot.sh's home-summary mode; tasks that cannot be probed within the budget keep their row with unknown live evidence
+FM_SNAPSHOT_BOUND_ENDPOINTS=auto   # internal endpoint-probe mode for bin/fm-fleet-snapshot.sh: auto bounds home-summary endpoint reads and leaves ordinary --json probing unchanged; accepted override values are 0 or 1
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_INACTIVE_RECONCILE_SECS=900  # 60..1800-second watcher cadence and inactivity threshold; locked session start also scans immediately
