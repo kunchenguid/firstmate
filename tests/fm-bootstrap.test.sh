@@ -28,6 +28,12 @@ set -u
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
+# The locked session boundary arms PR lifecycle follow-through for every
+# recorded PR, which takes the machine-wide process-event source lock; keep
+# that claim root inside this suite's tree so a run never writes to the
+# developer's or runner's real user state directory and two concurrent runs
+# cannot block on the same derived lock.
+export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/procevent-claims"
 export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 
 # Hermetic runtime-backend detection. These cases pin the backend per-home via

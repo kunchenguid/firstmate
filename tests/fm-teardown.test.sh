@@ -58,6 +58,11 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+# fm-pr-check.sh arms PR lifecycle follow-through, which takes the machine-wide
+# process-event source lock; keep that claim root inside this suite's tree so a
+# run never writes to the developer's or runner's real user state directory and
+# two concurrent runs cannot block on the same derived lock.
+export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/procevent-claims"
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
