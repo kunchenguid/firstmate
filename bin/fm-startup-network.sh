@@ -47,8 +47,11 @@
 #
 # Usage: fm-startup-network.sh start --locked <0|1> --harvest-pid <pid>
 #          Launch the detached worker and return immediately. Single-flight: a
-#          worker already running for the same lock owner is left alone. A new
-#          owner gets a distinct generation. --locked 1 asks
+#          running worker is reused only when its phases cover this request and,
+#          for locked work, it belongs to the same lock owner. A probe-only
+#          worker therefore cannot satisfy a later locked request; the later
+#          request gets a distinct generation and runs the locked phases. A new
+#          owner also gets a distinct generation. --locked 1 asks
 #          for the inactive-outcome scan and mutating sweeps as well as the
 #          read-only probe; --locked 0 asks for the probe only. --harvest-pid
 #          names the session-start process
@@ -222,9 +225,9 @@ cmd_start() {  # <locked> <harvest-pid>
   fm_lock_acquire_wait "$PUBLISH_LOCK"
   if [ "$(status_get state)" = running ] && worker_alive \
     && worker_covers_request "$locked" "$lock_pid"; then
-    # A worker from this or a previous session is still going. Starting a second
-    # one would run the same mutating sweeps concurrently, so leave it alone and
-    # let the harvest report its real state.
+    # A worker whose phases cover this request is still going. Starting another
+    # would duplicate its work and, for a locked request, race the same mutating
+    # sweeps, so leave it alone and let harvest report its real state.
     generation=$(status_get generation)
     printf '%s\t%s\n' "$generation" "$harvest_pid" > "$CLAIM_FILE" 2>/dev/null || true
     fm_lock_release "$PUBLISH_LOCK"

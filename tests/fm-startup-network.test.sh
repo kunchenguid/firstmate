@@ -15,7 +15,8 @@
 #   - the aggregate bound turns a wedged sweep into an actionable line
 #   - an abandoned `running` record is reported as needing a rerun rather than
 #     staying "in progress" forever
-#   - single-flight: a second `start` never launches a competing worker
+#   - phase-aware single-flight: a covering worker is reused, while a later
+#     locked request supersedes an in-flight probe-only worker
 set -u
 
 # shellcheck source=tests/lib.sh
