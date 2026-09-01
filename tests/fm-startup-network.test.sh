@@ -343,6 +343,32 @@ EOF
   pass "fm-startup-network: an actionable state=done report still queues a wake"
 }
 
+test_deferred_invalid_secondmate_markers_queue_durable_findings() {
+  local kind rec home root log target report
+  for kind in malformed symlink; do
+    rec=$(new_world "deferred-invalid-marker-$kind")
+    IFS='|' read -r home root log <<EOF
+$rec
+EOF
+    printf '%s\n' $$ > "$home/state/.lock"
+    if [ "$kind" = malformed ]; then
+      printf '../other-home\n' > "$home/.fm-secondmate-home"
+    else
+      target="$TMP_ROOT/deferred-invalid-marker-$kind/marker-target"
+      printf 'mate\n' > "$target"
+      ln -s "$target" "$home/.fm-secondmate-home"
+    fi
+
+    FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 1
+    assert_grep $'check\tinactive-reconcile:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+      "$kind marker finding was swallowed by the deferred startup stage"
+    report=$(run_stage "$home" "$root" report)
+    assert_contains "$report" "(silent - no problems found)" \
+      "$kind marker fixture unexpectedly depended on the network report"
+  done
+  pass "fm-startup-network: deferred invalid secondmate markers produce durable wakes"
+}
+
 # The worker outlives the command that launched it. If another session took the
 # lock meanwhile, running the mutating sweeps would sweep underneath that
 # session, so they are refused - and the refusal is reported, not silent.
@@ -698,6 +724,7 @@ test_a_claimant_crash_after_publish_still_queues_the_wake
 test_a_report_publication_failure_is_failed_and_still_wakes
 test_a_successful_result_never_queues_a_wake
 test_an_actionable_successful_result_still_queues_a_wake
+test_deferred_invalid_secondmate_markers_queue_durable_findings
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun
