@@ -337,6 +337,49 @@ test_lock_does_not_steal_live_lock() {
   pass "live-held lock is not stolen"
 }
 
+test_lock_does_not_steal_eperm_owner() {
+  local dir state lockdir owner owner_pid out
+  dir=$(make_case lock-eperm-owner)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  owner="$lockdir.owner.fixture"
+  owner_pid=424242
+  mkdir "$owner"
+  printf '%s\n' "$owner_pid" > "$owner/pid"
+  printf '%s\n' fm-pr-check.sh > "$owner/expected-command"
+  printf '%064d\n' 0 > "$owner/pid-identity"
+  chmod 0600 "$owner/pid" "$owner/expected-command" "$owner/pid-identity"
+  ln -s "$owner" "$lockdir"
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    owner_pid=$3
+    kill() {
+      if [ "${2:-}" = "$owner_pid" ]; then
+        printf "kill: (%s) - Operation not permitted\n" "$owner_pid" >&2
+        return 1
+      fi
+      builtin kill "$@"
+    }
+    fm_process_command_identity() {
+      [ "$1" != "$owner_pid" ] || return 1
+      printf "%064d\n" 1
+    }
+    ps() {
+      case "$*" in
+        *"-p $owner_pid"*) printf "bash /fixture/bin/fm-pr-check.sh\n" ;;
+        *) command ps "$@" ;;
+      esac
+    }
+    if fm_lock_try_acquire "$2" fm-pr-check.sh; then rc=0; else rc=$?; fi
+    printf "rc=%s pid=%s\n" "$rc" "$(cat "$2/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir" "$owner_pid")
+  case "$out" in
+    "rc=1 pid=$owner_pid") ;;
+    *) fail "EPERM-visible typed lock owner was stolen: $out" ;;
+  esac
+  pass "EPERM-visible typed lock owner remains exclusive"
+}
+
 test_lock_empty_pid_uses_minimum_grace() {
   local dir state lockdir out
   dir=$(make_case lock-empty-grace)
@@ -1102,6 +1145,13 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+case "${FM_TEST_FOCUS:-}" in
+  typed-lock-eperm)
+    test_lock_does_not_steal_eperm_owner
+    exit 0
+    ;;
+esac
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1115,6 +1165,7 @@ test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
+test_lock_does_not_steal_eperm_owner
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal

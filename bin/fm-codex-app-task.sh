@@ -145,11 +145,20 @@ task_mutation_cleanup() {
 }
 
 task_metadata_lock_acquire() {  # <task-id>
-  local id=$1
+  local id=$1 attempts interval rc=0 held=unknown
+  attempts=${FM_CODEX_APP_METADATA_LOCK_ATTEMPTS:-50}
+  interval=${FM_CODEX_APP_METADATA_LOCK_INTERVAL:-0.1}
   TASK_META_LOCK=$(fm_meta_lock_path "$STATE/$id.meta") \
     || die "cannot resolve task $id metadata lock"
-  fm_lock_acquire_wait "$TASK_META_LOCK" \
-    || die "cannot acquire task $id metadata lock"
+  fm_meta_lock_acquire_bounded "$STATE/$id.meta" fm-codex-app-task.sh \
+    "$attempts" "$interval" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    die "invalid task $id metadata lock wait configuration"
+  fi
+  if [ "$rc" -ne 0 ]; then
+    held=${FM_LOCK_HELD_PID:-unknown}
+    die "task $id metadata remained owned by process $held after $attempts bounded attempt(s)"
+  fi
   TASK_META_LOCK_HELD=1
 }
 

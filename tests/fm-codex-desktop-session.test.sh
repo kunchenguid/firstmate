@@ -270,6 +270,56 @@ wait "$META_RECONCILE_PID" \
 assert_grep 'detail=published after shared metadata lock' "$CURRENT" \
   "Desktop reconciliation did not publish through the shared metadata boundary"
 
+mkdir "$SHARED_META_LOCK"
+printf '%s\n' "$TASK_LEASE" > "$SHARED_META_LOCK/pid"
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  FM_CODEX_APP_METADATA_LOCK_ATTEMPTS=2 \
+  FM_CODEX_APP_METADATA_LOCK_INTERVAL=0 \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
+    --state working --detail 'must not cross ambiguous metadata owner' \
+    > "$TMP_ROOT/metadata-legacy-pid.out" 2>&1 &
+METADATA_LEGACY_PID=$!
+index=0
+while kill -0 "$METADATA_LEGACY_PID" 2>/dev/null && [ "$index" -lt 200 ]; do
+  sleep 0.01
+  index=$((index + 1))
+done
+if kill -0 "$METADATA_LEGACY_PID" 2>/dev/null; then
+  kill -TERM "$METADATA_LEGACY_PID" 2>/dev/null || true
+  wait "$METADATA_LEGACY_PID" 2>/dev/null || true
+  fail "ambiguous reused metadata pid left Desktop mutation unbounded"
+fi
+status=0
+wait "$METADATA_LEGACY_PID" || status=$?
+expect_code 1 "$status" "ambiguous reused metadata pid must fail within the configured bound"
+assert_grep "metadata remained owned by process $TASK_LEASE after 2 bounded attempt(s)" \
+  "$TMP_ROOT/metadata-legacy-pid.out" \
+  "bounded metadata refusal did not identify its owner and attempt limit"
+rm -f "$SHARED_META_LOCK/pid"
+rmdir "$SHARED_META_LOCK"
+
+METADATA_REUSED_OWNER="$SHARED_META_LOCK.owner.reused"
+mkdir "$METADATA_REUSED_OWNER"
+printf '%s\n' "$TASK_LEASE" > "$METADATA_REUSED_OWNER/pid"
+printf '%s\n' fm-codex-app-task.sh > "$METADATA_REUSED_OWNER/expected-command"
+printf '%064d\n' 0 > "$METADATA_REUSED_OWNER/pid-identity"
+chmod 0600 "$METADATA_REUSED_OWNER/pid" \
+  "$METADATA_REUSED_OWNER/expected-command" \
+  "$METADATA_REUSED_OWNER/pid-identity"
+ln -s "$METADATA_REUSED_OWNER" "$SHARED_META_LOCK"
+CODEX_THREAD_ID="$THREAD_A" \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop' \
+  FM_HOME="$TASK_HOME" \
+  "$ROOT/bin/fm-codex-app-task.sh" reconcile "$TASK_ID" \
+    --thread "$THREAD_B" --host "$HOST_ID" --generation 1 --epoch 1 \
+    --state working --detail 'recovered stale metadata owner' >/dev/null \
+  || fail "Desktop metadata mutation did not recover a proven reused PID owner"
+[ ! -e "$SHARED_META_LOCK" ] && [ ! -L "$SHARED_META_LOCK" ] \
+  || fail "Desktop metadata PID-reuse recovery left its lock held"
+
 MUTATION_LOCK="$TASK_HOME/state/.$TASK_ID.codex-app-mutation-lock"
 STALE_MUTATION_IDENTITY=$(FM_TEST_PS_START='Mon Aug 31 09:59:59 2026' \
   fm_process_command_identity "$TASK_LEASE" fm-codex-app-task.sh) \

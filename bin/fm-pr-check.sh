@@ -63,7 +63,8 @@ pr_check_parent_owns_metadata_lock() {
   owner=$(fm_lock_link_owner "$lock") || return 1
   fm_lock_points_to_owner "$lock" "$owner" || return 1
   pid=$(cat "$owner/pid" 2>/dev/null) || return 1
-  [ "$pid" = "$PPID" ] && fm_pid_alive "$pid"
+  [ "$pid" = "$PPID" ] \
+    && fm_lock_typed_owner_matches "$owner" "$pid" fm-pr-merge.sh
 }
 pr_check_cleanup() {
   fm_pr_poll_cleanup
@@ -146,7 +147,7 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 case "${FM_PR_METADATA_PARENT_LOCK:-0}" in
   0)
-    fm_pr_lifecycle_metadata_lock_acquire "$META" \
+    fm_pr_lifecycle_metadata_lock_acquire "$META" check \
       || { echo "error: task metadata ownership is unavailable" >&2; exit 1; }
     META_LOCK_HELD=1
     ;;

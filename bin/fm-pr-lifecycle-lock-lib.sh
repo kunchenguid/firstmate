@@ -213,19 +213,16 @@ fm_pr_lifecycle_lock_acquire() {
 }
 
 fm_pr_lifecycle_metadata_lock_acquire() {
-  local meta=$1 lock attempts interval attempt=1 owner_pid=unknown
+  local meta=$1 role=$2 expected attempts interval rc owner_pid=unknown
   fm_pr_lifecycle_wait_config || return 2
   attempts=$FM_PR_LIFECYCLE_WAIT_ATTEMPTS
   interval=$FM_PR_LIFECYCLE_WAIT_INTERVAL
-  lock=$(fm_meta_lock_path "$meta") || return 2
-  while [ "$attempt" -le "$attempts" ]; do
-    if fm_lock_try_acquire "$lock"; then
-      return 0
-    fi
-    owner_pid=${FM_LOCK_HELD_PID:-unknown}
-    [ "$attempt" -ge "$attempts" ] || [ "$interval" = 0 ] || sleep "$interval"
-    attempt=$((attempt + 1))
-  done
+  expected=$(fm_pr_lifecycle_role_command "$role") || return 2
+  rc=0
+  fm_meta_lock_acquire_bounded "$meta" "$expected" "$attempts" "$interval" || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  [ "$rc" -eq 1 ] || return 2
+  owner_pid=${FM_LOCK_HELD_PID:-unknown}
   printf 'error: task metadata %s remained owned by process %s after %s bounded attempt(s)\n' \
     "$meta" "$owner_pid" "$attempts" >&2
   return 1

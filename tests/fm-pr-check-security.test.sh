@@ -1330,6 +1330,47 @@ test_pr_lifecycle_recovers_reused_pid_owner() {
   pass "PR lifecycle ownership rejects PID reuse without wedging delivery"
 }
 
+test_pr_metadata_lock_recovers_reused_pid_owner() {
+  local dir state meta lock owner holder_pid out
+  dir=$(make_case pr-metadata-pid-reuse)
+  state="$dir/home/state"
+  meta="$state/task-a.meta"
+  write_task_meta "$dir"
+  sleep 30 &
+  holder_pid=$!
+  lock="$state/.meta-task-a.lock"
+  owner="$lock.owner.reused"
+  mkdir "$owner"
+  printf '%s\n' "$holder_pid" > "$owner/pid"
+  printf '%s\n' fm-pr-check.sh > "$owner/expected-command"
+  printf '%064d\n' 0 > "$owner/pid-identity"
+  chmod 0600 "$owner/pid" "$owner/expected-command" "$owner/pid-identity"
+  ln -s "$owner" "$lock"
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_PR_LIFECYCLE_LOCK_ATTEMPTS=2 FM_PR_LIFECYCLE_LOCK_INTERVAL=0 \
+    bash -c '
+      . "$1/bin/fm-pr-lifecycle-lock-lib.sh"
+      fm_process_command_identity() { printf "%064d\n" 1; }
+      fm_pr_lifecycle_metadata_lock_acquire "$2" check || exit 1
+      lock=$(fm_meta_lock_path "$2") || exit 1
+      printf "expected=%s identity=%s\n" \
+        "$(cat "$lock/expected-command")" "$(cat "$lock/pid-identity")"
+      fm_lock_release "$lock"
+    ' fm-pr-check.sh "$ROOT" "$meta") \
+    || fail "PR metadata lock did not recover a reused PID owner"
+  kill -0 "$holder_pid" 2>/dev/null \
+    || fail "PR metadata PID-reuse fixture process exited unexpectedly"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  case "$out" in
+    expected=fm-pr-check.sh\ identity=0000000000000000000000000000000000000000000000000000000000000001) ;;
+    *) fail "PR metadata lock did not publish typed command ownership: $out" ;;
+  esac
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] \
+    || fail "PR metadata PID-reuse recovery left its lock held"
+  pass "PR metadata ownership is typed, bounded, and PID-reuse safe"
+}
+
 test_poll_publication_refuses_unsafe_destinations() {
   local artifact kind dir state destination
   for artifact in task-a.pr-poll task-a.pr-poll-registration task-a.check.sh; do
@@ -2564,12 +2605,14 @@ case "${FM_TEST_FOCUS:-}" in
     test_stale_watcher_cannot_report_republished_poll
     test_watcher_waits_for_inflight_forge_lifecycle
     test_pr_lifecycle_recovers_reused_pid_owner
+    test_pr_metadata_lock_recovers_reused_pid_owner
     echo "# focused PR lifecycle review tests passed"
     exit 0
     ;;
   pr-lifecycle-stale) test_stale_watcher_cannot_report_republished_poll; exit 0 ;;
   pr-lifecycle-forge) test_watcher_waits_for_inflight_forge_lifecycle; exit 0 ;;
   pr-lifecycle-pid) test_pr_lifecycle_recovers_reused_pid_owner; exit 0 ;;
+  pr-metadata-pid) test_pr_metadata_lock_recovers_reused_pid_owner; exit 0 ;;
 esac
 
 test_parser_matrix
@@ -2597,6 +2640,7 @@ test_merge_holds_pr_lifecycle_against_concurrent_check
 test_stale_watcher_cannot_report_republished_poll
 test_watcher_waits_for_inflight_forge_lifecycle
 test_pr_lifecycle_recovers_reused_pid_owner
+test_pr_metadata_lock_recovers_reused_pid_owner
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_postrename_poll_validation_revokes_and_retries

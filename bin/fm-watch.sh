@@ -1426,7 +1426,7 @@ pr_watch_lifecycle_acquire() {
     pr_watch_lifecycle_release
     return 1
   }
-  if ! fm_pr_lifecycle_metadata_lock_acquire "$meta"; then
+  if ! fm_pr_lifecycle_metadata_lock_acquire "$meta" watch; then
     pr_watch_lifecycle_release
     return 1
   fi

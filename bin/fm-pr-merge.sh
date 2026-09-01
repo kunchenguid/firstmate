@@ -146,7 +146,7 @@ fm_pr_lifecycle_lock_acquire "$STATE" "$ID" merge \
   || { echo "error: PR lifecycle ownership is unavailable" >&2; exit 1; }
 PR_LIFECYCLE_LOCK_HELD=1
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
-fm_pr_lifecycle_metadata_lock_acquire "$META" \
+fm_pr_lifecycle_metadata_lock_acquire "$META" merge \
   || { echo "error: task metadata ownership is unavailable" >&2; exit 1; }
 META_LOCK_HELD=1
 

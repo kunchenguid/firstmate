@@ -29,11 +29,17 @@ fm_current_pid() {
 }
 
 fm_pid_alive() {
-  local pid=$1
+  local pid=$1 err
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  kill -0 "$pid" 2>/dev/null
+  if err=$(LC_ALL=C kill -0 "$pid" 2>&1); then
+    return 0
+  fi
+  case "$err" in
+    *'Operation not permitted'*|*'operation not permitted'*) return 0 ;;
+  esac
+  return 1
 }
 
 fm_pid_identity() {
@@ -487,6 +493,27 @@ fm_lock_typed_owner_proven_stale() {
   [ -n "$args" ] || return 1
   case "$args" in *"$expected"*) return 1 ;; esac
   return 0
+}
+
+fm_lock_typed_owner_matches() {
+  local lockdir=$1 pid=$2 expected=$3 recorded observed lines
+  fm_pid_alive "$pid" || return 1
+  fm_lock_expected_command_valid "$expected" || return 1
+  [ -f "$lockdir/expected-command" ] && [ ! -L "$lockdir/expected-command" ] \
+    && [ -f "$lockdir/pid-identity" ] && [ ! -L "$lockdir/pid-identity" ] \
+    || return 1
+  lines=$(wc -l < "$lockdir/expected-command" 2>/dev/null | tr -d '[:space:]') \
+    || return 1
+  [ "$lines" = 1 ] || return 1
+  lines=$(wc -l < "$lockdir/pid-identity" 2>/dev/null | tr -d '[:space:]') \
+    || return 1
+  [ "$lines" = 1 ] || return 1
+  [ "$(cat "$lockdir/expected-command" 2>/dev/null)" = "$expected" ] || return 1
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null) || return 1
+  [[ "$recorded" =~ ^[0-9a-f]{64}$ ]] || return 1
+  declare -F fm_process_command_identity >/dev/null 2>&1 || return 1
+  observed=$(fm_process_command_identity "$pid" "$expected") || return 1
+  [ "$observed" = "$recorded" ]
 }
 
 fm_lock_remove_path() {
@@ -985,6 +1012,23 @@ fm_meta_lock_path() {
     ''|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
   printf '%s/.meta-%s.lock\n' "$dir" "$id"
+}
+
+fm_meta_lock_acquire_bounded() {
+  local meta=$1 expected=$2 attempts=$3 interval=$4 lock attempt=1
+  fm_lock_expected_command_valid "$expected" || return 2
+  case "$attempts" in ''|*[!0-9]*|0) return 2 ;; esac
+  [ "$attempts" -le 600 ] || return 2
+  [[ "$interval" =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]] || return 2
+  lock=$(fm_meta_lock_path "$meta") || return 2
+  while [ "$attempt" -le "$attempts" ]; do
+    if fm_lock_try_acquire "$lock" "$expected"; then
+      return 0
+    fi
+    [ "$attempt" -ge "$attempts" ] || [ "$interval" = 0 ] || sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 # fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,
