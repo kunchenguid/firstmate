@@ -571,7 +571,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result
+  local pid pid_identity current_identity result=0 read_result stop_wait_iters
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -592,7 +592,16 @@ fm_afk_launch_stop() {
       fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
       result=1
     fi
-    for _ in $(seq 1 40); do
+    # fm-afk-inject-wedge Fix 3: the daemon's cleanup trap flushes, then kills
+    # and waits on its watcher child (bin/fm-watch.sh) before exiting. That
+    # watcher traps TERM but spends most of its life in a foreground
+    # `sleep "${FM_POLL:-15}"`, and bash defers a trapped signal until the
+    # foreground command returns, so shutdown can legitimately take up to
+    # FM_POLL seconds plus the flush. This wait must stay strictly greater
+    # than that budget or a watcher caught mid-sleep reports a false "did not
+    # exit after SIGTERM" and leaves lifecycle state preserved for no reason.
+    stop_wait_iters=$(( (${FM_POLL:-15} + 10) * 4 ))
+    for _ in $(seq 1 "$stop_wait_iters"); do
       fm_pid_alive "$pid" || break
       sleep 0.25
     done

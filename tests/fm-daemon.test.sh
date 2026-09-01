@@ -1939,6 +1939,51 @@ test_max_defer_flushes_empty_idle_pane() {
   pass "max-defer flushes and clears the buffer on an empty bordered pane"
 }
 
+# fm-afk-inject-wedge Fix 2: the max-defer escape must actually escape rather
+# than retrying the identical blocked call. A pane the busy guard would defer
+# on forever must still receive the digest once MAX_DEFER_SECS has elapsed,
+# because the composer-empty guard - not the busy guard - is what protects
+# against merging with a human's half-typed line.
+test_max_defer_forced_escape_bypasses_busy_guard() {
+  local dir state
+  dir=$(make_supercase maxdefer-forced-busy)
+  state="$dir/state"
+  escalate_add "$state" "done: PR https://x/y/pull/9"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  (
+    pane_is_busy() { return 0; }
+    fm_backend_target_exists() { return 0; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'empty'; }
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  ) || fail "forced max-defer housekeeping subshell failed"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "max-defer forced escape did not clear the buffer despite a permanently-busy pane"
+  [ ! -e "$state/.subsuper-inject-wedged" ] \
+    || fail "wedge marker survived a successful forced max-defer flush"
+  pass "max-defer forced escape bypasses the busy guard and delivers"
+}
+
+test_batch_flush_does_not_force_bypass_busy_guard() {
+  local dir state
+  dir=$(make_supercase batch-flush-not-forced)
+  state="$dir/state"
+  escalate_add "$state" "done: PR https://x/y/pull/10"
+  afk_enter "$state"
+  (
+    pane_is_busy() { return 0; }
+    fm_backend_target_exists() { return 0; }
+    fm_backend_composer_state() { fail "composer_state should not be consulted: the ordinary busy guard must defer first"; }
+    fm_backend_send_text_submit() { fail "send_text_submit must not run: the ordinary busy guard must defer first"; }
+    if escalate_flush "$state"; then
+      fail "ordinary (non-forced) escalate_flush must not bypass a busy pane"
+    fi
+  ) || fail "non-forced escalate_flush busy-guard subshell failed"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer lost after a deferred non-forced flush"
+  pass "escalate_flush without force still honors the busy guard"
+}
+
 test_max_defer_pending_composer_alarms_without_typing() {
   local dir state fakebin sent
   dir=$(make_bordered_case maxdefer-pending-digest)
@@ -2452,16 +2497,47 @@ test_discover_supervisor_target_herdr() {
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
 }
 
-test_pane_is_busy_herdr_native_busy_state() {
+test_pane_is_busy_herdr_native_busy_corroborated_by_rendered() {
   local dir
-  dir=$(make_supercase primary-herdr-busy)
+  dir=$(make_supercase primary-herdr-busy-corroborated)
   (
     fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
-    fm_backend_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
+    fm_backend_capture() { printf 'esc to interrupt\n'; }
     FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
-      || fail "pane_is_busy should report busy from herdr's native busy_state"
-  ) || fail "herdr native-busy pane_is_busy subshell failed"
-  pass "pane_is_busy: herdr native busy_state='busy' short-circuits without a capture fallback"
+      || fail "pane_is_busy should report busy when herdr's native busy_state is corroborated by the rendered footer"
+  ) || fail "herdr native-busy corroborated pane_is_busy subshell failed"
+  pass "pane_is_busy: herdr native busy_state='busy' still reports busy when the rendered footer corroborates it"
+}
+
+# fm-afk-inject-wedge Fix 1: a live tracked background shell pins Herdr's
+# native agent_status to 'working' for as long as the shell is alive, even once
+# the turn has ended and the pane sits idle at an empty prompt. Before the fix
+# this native 'busy' verdict short-circuited pane_is_busy and blocked every
+# away-mode delivery for the daemon's entire lifetime. It must now be
+# corroborated by the rendered footer.
+test_pane_is_busy_herdr_native_busy_uncorroborated_by_rendered_idle() {
+  local dir
+  dir=$(make_supercase primary-herdr-busy-uncorroborated)
+  (
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { printf '❯\n'; }
+    if FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
+      fail "pane_is_busy must not trust a native busy verdict the rendered footer does not corroborate (fm-afk-inject-wedge)"
+    fi
+  ) || fail "herdr native-busy uncorroborated pane_is_busy subshell failed"
+  pass "pane_is_busy: herdr native busy_state='busy' alone (idle rendered footer) no longer wedges the guard"
+}
+
+test_pane_is_busy_herdr_falls_back_to_native_when_capture_fails() {
+  local dir
+  dir=$(make_supercase primary-herdr-busy-capture-fails)
+  (
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_backend_capture() { return 1; }
+    FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
+      || fail "pane_is_busy should fall back to the native verdict when the pane cannot be captured at all"
+  ) || fail "herdr capture-failure fallback pane_is_busy subshell failed"
+  pass "pane_is_busy: falls back to the native busy verdict when the pane is unreadable, rather than guessing idle"
 }
 
 test_primary_busy_guard_is_harness_scoped() {
@@ -2699,6 +2775,8 @@ test_submit_ack_confirms_on_bordered_empty_composer
 test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
+test_max_defer_forced_escape_bypasses_busy_guard
+test_batch_flush_does_not_force_bypass_busy_guard
 test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
@@ -2728,7 +2806,9 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
-test_pane_is_busy_herdr_native_busy_state
+test_pane_is_busy_herdr_native_busy_corroborated_by_rendered
+test_pane_is_busy_herdr_native_busy_uncorroborated_by_rendered_idle
+test_pane_is_busy_herdr_falls_back_to_native_when_capture_fails
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch

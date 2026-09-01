@@ -632,14 +632,26 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
+# A live tracked background shell (e.g. this daemon's own `run_in_background`
+# launch, per the /afk skill's no-separate-terminal exception) pins Herdr's
+# native agent_status to `working` for as long as the shell is alive, even
+# once the turn has actually ended and the pane sits idle at an empty prompt
+# (fm-afk-inject-wedge: proven live, 34 wedge-free hours with the daemon
+# launched OUTSIDE the pane vs. thousands of false "busy" deferrals with it
+# launched inside). A native "busy" verdict is therefore NOT sufficient proof
+# on its own; require the harness-scoped rendered busy footer (the same
+# fm_busy_lines_match signature fm_backend_herdr_send_text_submit already uses
+# to confirm a queued-while-busy submit) to corroborate before treating the
+# pane as unavailable. A native verdict of idle/unknown was never trusted
+# alone either, so this only changes the busy case. If the pane cannot be
+# captured at all, fall back to the native verdict rather than guessing idle:
+# a false "busy" costs one deferred cycle, a false "idle" risks injecting into
+# an unreadable pane.
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
   harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
-  case "$native" in
-    busy) return 0 ;;
-  esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
+  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || { [ "$native" = busy ]; return $?; }
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
     | fm_busy_lines_match "$harness"
 }
@@ -691,9 +703,10 @@ escalate_add() {  # <state> <distilled-item>
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
-# inject failure (buffer preserved for retry / catch-up).
-escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+# inject failure (buffer preserved for retry / catch-up). <force>=1 passes
+# through to inject_msg's forced mode (max-defer escape only, see inject_msg).
+escalate_flush() {  # <state> [force]
+  local state=$1 force="${2:-0}" buf item n msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
@@ -702,7 +715,7 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state" "$force"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
   return 1
 }
 
@@ -945,7 +958,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 n first_item summary
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
@@ -979,7 +992,14 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    # fm-afk-inject-wedge Fix 2: a bare age+path told the captain something was
+    # stuck but never what, so 47 identical banners in one 4h episode read as
+    # noise rather than an alert. Carry the item count and first buffered line
+    # so one banner is actually informative.
+    n=$(wc -l < "$state/.subsuper-escalations" 2>/dev/null || echo 0)
+    first_item=$(head -n1 "$state/.subsuper-escalations" 2>/dev/null)
+    summary="away-mode escalations WEDGED ${age}s undelivered (${n} item(s)): ${first_item} - see $marker"
+    wedge_alarm_notify "$summary" "$marker"
   fi
 }
 
@@ -1025,8 +1045,12 @@ housekeeping() {  # <state>
   fi
 
   # (1b) max-defer escape. If anything is still buffered past MAX_DEFER_SECS,
-  # retry the normal delivery path. If that still cannot confirm, raise a loud
-  # wedge alarm while preserving the buffer.
+  # FORCE the delivery path (fm-afk-inject-wedge Fix 2): this is the one call
+  # site that drops the busy guard (the composer-empty guard still applies),
+  # so unbounded silent non-delivery becomes a bounded worst case of
+  # MAX_DEFER_SECS instead of retrying the identical blocked call forever. If
+  # that still cannot confirm a submit, raise a loud wedge alarm while
+  # preserving the buffer.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
@@ -1035,8 +1059,8 @@ housekeeping() {  # <state>
     # and waits.
     if [ "$oldest" -ge "$max_defer" ] \
        && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
-      if escalate_flush "$state"; then
-        log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
+      if escalate_flush "$state" 1; then
+        log "inject recovered: max-defer forced flush succeeded after ${oldest}s undelivered"
         rm -f "$state/.subsuper-inject-wedged"
       else
         inject_wedge_alarm "$state" "$oldest"
@@ -1206,9 +1230,10 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
-inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+inject_msg() {  # <message> [state] [force]
+  local msg=$1 state force target backend retries sleep_s verdict composer encoded
   state="${2:-$(_state_root)}"
+  force="${3:-0}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
@@ -1228,8 +1253,14 @@ inject_msg() {  # <message> [state]
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use supervisor pane.
-  if pane_is_busy "$target" "$backend"; then
+  # (3) Busy-guard: never inject into an in-use supervisor pane, UNLESS this is
+  # the max-defer forced escape (fm-afk-inject-wedge Fix 2). The composer-empty
+  # guard below still applies unconditionally - it is what actually protects
+  # against merging with a human's half-typed line - so a forced call can still
+  # queue behind a real turn (fm_backend_send_text_submit already confirms a
+  # queued-while-busy submit) without risking a corrupted composer. This turns
+  # unbounded silent non-delivery into a bounded worst case of FM_MAX_DEFER_SECS.
+  if [ "$force" != 1 ] && pane_is_busy "$target" "$backend"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi

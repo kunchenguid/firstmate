@@ -732,6 +732,40 @@ unit_stop_confirms_daemon_exit() {
   rm -rf "$st"
 }
 
+# fm-afk-inject-wedge Fix 3: the watcher child the daemon's cleanup() waits on
+# traps TERM but can sit in a foreground `sleep FM_POLL` (15s default), so
+# shutdown can legitimately take up to FM_POLL seconds plus the flush. The stop
+# wait must stay strictly greater than FM_POLL, not the old fixed 10s budget
+# that reported a false "did not exit after SIGTERM" whenever the watcher
+# happened to be mid-sleep.
+unit_stop_wait_exceeds_configured_poll() {
+  local st daemon_pid seq_arg
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-poll-budget.XXXXXX")
+  mkdir -p "$st/state/.supervise-daemon.lock"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  bash -c 'trap "" TERM; while :; do sleep 1; done' &
+  daemon_pid=$!
+  printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  seq_arg="$st/seq-arg"
+  SEQ_ARG="$seq_arg" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_POLL=30 bash -c '
+    . "$1"
+    seq() { printf "%s" "$2" > "$SEQ_ARG"; printf "1\n"; }
+    sleep() { :; }
+    kill() { command kill "$@"; }
+    ! fm_afk_launch_stop
+  ' _ "$LAUNCH" >/dev/null 2>&1 || true
+  if [ -e "$seq_arg" ] && [ "$(cat "$seq_arg")" -gt $(( (30 + 10) * 4 - 1 )) ]; then
+    pass "stop wait: iteration budget exceeds FM_POLL plus margin"
+  else
+    fail "stop wait: iteration budget did not scale with FM_POLL (got $(cat "$seq_arg" 2>/dev/null))"
+  fi
+  kill -KILL "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_refresh_validates_record() {
   local st daemon_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX")
@@ -950,6 +984,7 @@ unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
+unit_stop_wait_exceeds_configured_poll
 unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
