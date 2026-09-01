@@ -37,14 +37,22 @@
 #      green, so a green PR is never silently read as still-validating. A
 #      done/failed verdict attributed straight from bare `axi status` is then
 #      cross-checked against the branch's own newest-first runs list: when a
-#      DIFFERENT, still-active run for the same branch outranks it there, that
-#      terminal verdict is a superseded run (the common shape right after
-#      custody recovery, where the crew's worktree HEAD equals the superseded
-#      run's own recorded head) and folds to the live run's state instead. That
-#      folded verdict is marked so the coarse checks-green status-log shortcut
-#      (see RUN_SOURCE_SUPERSEDED_FOLD) never overrides it with a stale log
-#      line - only genuinely coarse attribution (no matching branch row at
-#      all) trusts the log for a done verdict.
+#      DIFFERENT, still-active run for the same branch outranks it there AND
+#      its sha is not PROVEN to be a different code lineage from this
+#      worktree (nm_run_top_sha_provably_unrelated - an unresolvable sha, the
+#      common shape for a live retry's unfetched tip, stays eligible; a
+#      resolvable sha that is neither this worktree's HEAD nor a descendant
+#      of it does not), the terminal verdict is a superseded run (the common
+#      shape right after custody recovery, where the crew's worktree HEAD
+#      equals the superseded run's own recorded head) and folds to the live
+#      run's state instead. That folded verdict is marked so the coarse
+#      checks-green status-log shortcut (see RUN_SOURCE_SUPERSEDED_FOLD)
+#      never overrides it with a stale log line - only genuinely coarse
+#      attribution (no matching branch row at all) trusts the log for a done
+#      verdict. The runs-list lookups behind both this fold and the
+#      cross-branch fallback in point 4 below share ONE inconclusive-capture
+#      rule: an empty capture from either lookup is a failed query, not a
+#      confirmed absence of runs (RUN_LOOKUP_INCONCLUSIVE).
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -391,7 +399,14 @@ nm_ci_checks_state() {
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows. Takes the
+# already-captured listing as a parameter, same convention as
+# nm_runs_list_top_for_branch below: the caller captures the one `nm_run runs
+# --limit` call itself so an empty capture (the command not completing) is
+# visible to it directly, rather than hidden behind a return value that
+# cannot distinguish "query failed" from "query answered, branch not found"
+# once this function's own inner call ran inside a caller's command
+# substitution (a subshell - any flag it set would never reach the caller).
 nm_runs_list_row_parse() {  # <row> -> "<status> <branch> <sha>"
   local row=$1 st rest br sha
   row=$(trim "$row")
@@ -406,9 +421,8 @@ nm_runs_list_row_parse() {  # <row> -> "<status> <branch> <sha>"
   printf '%s %s %s' "$st" "$br" "$sha"
 }
 
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row parsed st rest br sha
-  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+nm_runs_status_for_branch() {  # <runs-list-output> <branch>
+  local out=$1 branch=$2 row parsed st rest br sha
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     parsed=$(nm_runs_list_row_parse "$row") || continue
@@ -503,6 +517,23 @@ nm_coarse_head_matches_worktree() {  # <short-sha>
   fm_nm_head_matches_worktree "$WT" "$1"
 }
 
+# 0 if a candidate superseding runs-list sha is PROVEN to belong to a
+# different code lineage than this worktree: it resolves to a real commit
+# locally (fm_nm_head_resolvable), yet is neither equal to nor a descendant
+# of local HEAD (nm_coarse_head_matches_worktree fails). Used by the
+# supersession guard below to reject an unrelated same-branch running row
+# (a reused branch name) while still folding for the legitimate custody-
+# recovery shape, where the live retry's advanced tip is routinely NOT a git
+# object in this worktree yet (same reasoning as the pipeline-owned-active
+# exemption) - an UNRESOLVABLE sha is unknown attribution, not proof of a
+# different lineage, so it stays eligible to fold. This is not a complete
+# fix: an unrelated row at a sha that never reached this worktree is
+# genuinely indistinguishable, with the data the plain runs list carries,
+# from a pipeline-lane successor's own unfetched tip.
+nm_run_top_sha_provably_unrelated() {  # <short-sha>
+  fm_nm_head_resolvable "$WT" "$1" && ! nm_coarse_head_matches_worktree "$1"
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail; "coarse" means only
@@ -526,9 +557,14 @@ RUN_SOURCE_SUPERSEDED_FOLD=0
 # ("runs: 0 runs yet in this repository", verified against the installed
 # no-mistakes v1.57.0), so a truly empty capture means the query itself did
 # not complete (a bounded timeout, or a crash whose stderr fm_nm_run_checked
-# discards) - not a confirmed absence of any run. The status-log fallback
-# below downgrades a terminal (done/failed) log verb to unknown in this case:
-# a live run could exist and simply not have been observed.
+# discards) - not a confirmed absence of any run. Set from TWO call sites: the
+# primary `axi status` capture immediately below, and the secondary runs-list
+# capture in the cross-branch fallback further down - either one not
+# completing is equally inconclusive, so a stale terminal log line surviving
+# only because the WEAKER of the two lookups happened to answer is exactly
+# the failure this flag exists to prevent. The status-log fallback below
+# downgrades a terminal (done/failed) log verb to unknown in this case: a
+# live run could exist and simply not have been observed.
 RUN_LOOKUP_INCONCLUSIVE=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
@@ -554,10 +590,20 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
-        HAVE_RUN=1
-        RUN_SOURCE=coarse
+      # Captured directly here (not inside nm_runs_status_for_branch) so an
+      # empty capture - the runs-list query itself not completing, the same
+      # inconclusive shape as the primary axi-status call above - is visible
+      # to THIS scope: a command-substitution call from inside the function
+      # cannot set a caller variable, so the flag has to be raised here.
+      runs_list_out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+      if [ -z "$runs_list_out" ]; then
+        RUN_LOOKUP_INCONCLUSIVE=1
+      else
+        COARSE_STATUS=$(nm_runs_status_for_branch "$runs_list_out" "$CREW_BRANCH")
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+        fi
       fi
     fi
   fi
@@ -656,7 +702,13 @@ if [ "$HAVE_RUN" = 1 ]; then
     # fold to that live run's state via the one coarse-mapping owner rather
     # than trust a terminal verdict a fresher run has already moved past. No
     # newer row, or an unreadable runs list, leaves the terminal verdict
-    # untouched: a genuinely failed run with nothing later still surfaces failed.
+    # untouched: a genuinely failed run with nothing later still surfaces
+    # failed. A branch name alone is not attribution though - a reused branch
+    # could have this crew's genuine terminal run AND an unrelated running
+    # row at another sha, so also require nm_run_top_sha_provably_unrelated
+    # to fail: fold unless the top row's sha is a resolvable commit that is
+    # PROVEN not to be this worktree's own lineage (see that helper's header
+    # for the residual gap an unresolvable sha still leaves).
     if [ "$RUN_STATE" = "done" ] || [ "$RUN_STATE" = failed ]; then
       this_run_head=$(strip_quotes "$(nm_field head)")
       if [ -n "$this_run_head" ]; then
@@ -664,7 +716,8 @@ if [ "$HAVE_RUN" = 1 ]; then
         if [ -n "$run_top" ]; then
           run_top_status=${run_top%% *}
           run_top_sha=${run_top#* }
-          if [ "$run_top_status" = running ] && ! sha_prefix_match "$this_run_head" "$run_top_sha"; then
+          if [ "$run_top_status" = running ] && ! sha_prefix_match "$this_run_head" "$run_top_sha" \
+            && ! nm_run_top_sha_provably_unrelated "$run_top_sha"; then
             coarse_map=$(coarse_state_for_status "$run_top_status")
             RUN_STATE=${coarse_map%%$'\t'*}
             RUN_DETAIL="${coarse_map#*$'\t'}${SEP}superseded a terminal run for this branch"

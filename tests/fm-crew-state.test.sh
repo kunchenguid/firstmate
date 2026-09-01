@@ -1056,6 +1056,30 @@ test_inconclusive_run_lookup_does_not_trust_stale_done_log() {
   pass "an inconclusive run lookup does not let a stale done: log outrank a possibly-live run"
 }
 
+# Same failure family, reached via the OTHER call site that can set
+# RUN_LOOKUP_INCONCLUSIVE: the primary `axi status` answers - just for a
+# different branch - so the primary capture is non-empty and the cross-branch
+# fallback's own `no-mistakes runs --limit` capture is what fails to
+# complete. Before this fix only the primary capture's emptiness controlled
+# the flag, so this shape let a stale done: log win by mistake.
+test_inconclusive_fallback_lookup_does_not_trust_stale_done_log() {
+  reset_fakes
+  local d; d=$(new_case inconclusive-fallback)
+  make_repo_on_branch "$d/wt" fm/feat-inconclusive-fb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/incfb.meta" "window=fm:fm-incfb" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: implemented X\n' > "$d/state/incfb.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/some-other-branch)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" incfb
+  local out; out=$(run_crew_state "$d" incfb)
+  assert_not_contains "$out" "state: done" "a stale done: line must not win when the fallback runs-list lookup itself did not complete"
+  assert_contains "$out" "state: unknown" "an inconclusive fallback lookup is reported as unknown, not a confident verdict"
+  assert_not_contains "$out" "source: status-log" "the stale log line is not used as the state source here"
+  pass "an inconclusive fallback runs-list lookup does not let a stale done: log outrank a possibly-live run"
+}
+
 # Negative control: when the CLI genuinely and definitively reports no runs
 # for the repository at all (the real "runs: 0 runs yet" shape, not an empty
 # capture), the status-log fallback is unaffected - the guard must not turn
@@ -1068,7 +1092,7 @@ test_genuinely_no_runs_repo_still_uses_status_log() {
   fm_write_meta "$d/state/norun.meta" "window=fm:fm-norun" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'done: implemented X\n' > "$d/state/norun.status"
   FM_FAKE_AXI_STATUS="runs: 0 runs yet in this repository"
-  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_RUNS_LIST="runs: 0 runs yet in this repository"
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" norun
   local out; out=$(run_crew_state "$d" norun)
@@ -1608,6 +1632,36 @@ test_head_equal_genuinely_failed_no_later_run_still_surfaces() {
   pass "the supersession guard does not hide a genuine failure with no later run"
 }
 
+# Negative control: a reused branch name. The top row's sha is a REAL commit
+# in this worktree (unlike the custody-recovery fixtures above, where the
+# live retry's tip is routinely unfetched) but on a lineage with no
+# ancestor/descendant relationship to local HEAD - a PROVEN different code
+# identity, not just a different string. The guard must not fold this
+# crew's genuine terminal verdict onto that unrelated running row.
+test_head_equal_unrelated_running_row_on_reused_branch_not_folded() {
+  reset_fakes
+  local d short other; d=$(new_case gov-reused-branch)
+  local branch=fm/infra_q-phase0-governance
+  make_repo_on_branch "$d/wt" "$branch"
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q --orphan unrelated-lineage
+  git -C "$d/wt" commit -q --allow-empty -m unrelated
+  other=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q "$branch"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gov.meta" "window=fm:fm-gov" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_custody_recovered "$branch" "$short")"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    $branch ${other}  2026-08-31 05:10
+  failed     $branch ${short}  2026-08-31 04:52
+EOF
+)"
+  local out; out=$(run_crew_state "$d" gov)
+  assert_contains "$out" "state: failed" "an unrelated running row on a reused branch must not mask this crew's genuine terminal verdict"
+  assert_contains "$out" "source: run-step" "the genuine failure remains run-step sourced"
+  pass "an unrelated same-branch running row at a provably different lineage is not folded over"
+}
+
 # The coarse runs-list scan: an ACTIVE row for this branch at an unresolvable
 # head is unknown attribution and must STOP the scan, never fall through onto
 # the older failed row (axi status answers another branch here, so attribution
@@ -1733,6 +1787,7 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_inconclusive_run_lookup_does_not_trust_stale_done_log
+test_inconclusive_fallback_lookup_does_not_trust_stale_done_log
 test_genuinely_no_runs_repo_still_uses_status_log
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
@@ -1756,6 +1811,7 @@ test_failed_run_with_no_later_run_still_surfaces
 test_head_equal_superseded_failed_run_beats_live_run
 test_head_equal_superseded_stale_ci_ready_log_does_not_override_fold
 test_head_equal_genuinely_failed_no_later_run_still_surfaces
+test_head_equal_unrelated_running_row_on_reused_branch_not_folded
 test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_non_pipeline_owned_unresolvable_head_not_attributed
 test_pipeline_owned_terminal_run_not_exempt
