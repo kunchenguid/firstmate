@@ -9,7 +9,7 @@ Fleet supervision on the Pi primary harness runs on a second, persistent convers
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back into the captain conversation's transcript.
 Ordinary main-only rows remain on main even when eligible task-local rows share their queue.
 An unresolvable row makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
-Captain-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries without opening a model turn.
+Captain-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries and then open one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
 This feature is Pi-only by construction and changes nothing anywhere else:
@@ -59,7 +59,14 @@ The captain entry contains the store sequence, task, verdict, exact summary, and
 Pi custom session entries persist in the transcript but do not enter model context, so a stale compaction summary, an unrelated assistant response, prompt caching, or model instruction noncompliance cannot acknowledge or rewrite the outcome.
 The store sequence is the idempotency key: reload after entry persistence but before cursor advancement finds the matching entry, avoids a duplicate, and advances the cursor; conflicting content for one sequence fails closed.
 Reconciliation runs at session start when that generation already owns the fleet lock and at the first post-lock `turn_end`, so a cold start that acquires the lock through the startup digest still delivers stored captain outcomes without waiting for another wake.
-The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes, while deterministic entry delivery owns captain visibility.
+Display is only half of a captain outcome; the other half is processing, because a blocker, a decision, or a ready PR needs main to act, not only the captain to see it.
+After the visible entry exists and the read cursor has passed it, the extension hands every still-unprocessed captain row to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`) listing each `[seq N] task: summary`, and that request opens exactly one main turn.
+Main closes it only by calling `fm_branch_processed` with the highest sequence the request listed, which advances a processed marker that `bin/fm-branch-outcome.sh` keeps separately from the read cursor and never moves past it or backwards.
+Nothing else advances that marker: an unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed, and the extension presents the same request again at the end of the next main run and at every session start.
+The first two presentations of a given sequence set open a turn of their own; after that the request rides the captain's next prompt so an ignored request cannot become an unbounded loop of empty turns, and a session replacement starts that budget over.
+Routine outcomes never enter this path and stay turn-free.
+A home upgraded with outcomes already delivered treats those rows as processed once, at the first reconciliation that finds no processed marker, so its history is not re-presented.
+The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty, while deterministic entry delivery owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The branch prompt owns the verdict criteria, including its unconditional explicit-request rule; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
@@ -92,8 +99,8 @@ What is new is only the attended path: outside away mode, the branch absorbs the
 
 ## Verification
 
-Portable regressions: `tests/fm-pi-branch-extension.test.sh` covers dispatch, requested-versus-unsolicited delivery, exact visible entry content, no model turn, idle and busy main state, incident-shaped compaction and unrelated-assistant context, cold-start post-lock recovery, crash-before-cursor reload recovery, repeated-reload idempotency, mirroring, fallback, cache key, persistence, and model and effort selection.
-`tests/fm-branch-supervision.test.sh` covers prompt stability, store append-only behavior, the captain cursor barrier, leases, guards, and non-branch-home invariance.
+Portable regressions: `tests/fm-pi-branch-extension.test.sh` covers dispatch, requested-versus-unsolicited delivery, exact visible entry content, no unkeyed model turn, the sequence-keyed processing request and its acknowledgement, re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, session-start re-presentation, routine outcomes staying turn-free, the processed-marker migration, idle and busy main state, incident-shaped compaction and unrelated-assistant context, cold-start post-lock recovery, crash-before-cursor reload recovery, repeated-reload idempotency, mirroring, fallback, cache key, persistence, and model and effort selection.
+`tests/fm-branch-supervision.test.sh` covers prompt stability, store append-only behavior, the captain cursor barrier, the processed marker's sequence bounds, leases, guards, and non-branch-home invariance.
 The branch-offer, heartbeat-offer, heartbeat-not-ridden-by-a-check, and main-only-check-class tests remain in `tests/fm-pi-watch-extension.test.sh`, the recovery test remains in `tests/fm-session-start.test.sh`, and the per-actor consume regression remains in `tests/fm-wake-queue.test.sh`.
 Live guard: `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exercises the real installed Pi SDK's immediate active-transcript appendEntry rendering, persistence, custom-entry model exclusion, and branch-session surfaces with no user credentials and no provider call; run it after every Pi upgrade and record the dated result in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
 The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.

@@ -4,8 +4,11 @@
 // pi process as the captain's MAIN session. The watcher extension offers each
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
-// writes the durable outcome store FIRST (bin/fm-branch-outcome.sh) and then
-// persists a sequence-keyed visible record in main's transcript.
+// writes the durable outcome store FIRST (bin/fm-branch-outcome.sh), then
+// persists a sequence-keyed visible record in main's transcript, and for a
+// captain-facing outcome opens one sequence-keyed processing turn on main
+// that stays open until main acknowledges that sequence (see
+// presentUnprocessedOutcomes).
 // Main's captain/assistant dialog is mirrored into the branch as read-only
 // fm-main-mirror context from Pi's
 // before_agent_start prompt and at main's turn_end. Pi-only by construction: this
@@ -136,6 +139,27 @@ const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
+// The processing half of the captain-outcome contract. The visible entry
+// above is the DISPLAY: crash-safe and exact-once. This hidden, typed request
+// is the PROCESSING: it opens the one turn in which main acts on the outcome,
+// and only main's explicit sequence-bound acknowledgement (fm_branch_processed)
+// closes it. An unrelated or empty answer leaves the sequence open, so it is
+// presented again at the end of the next main run and at session start. Pi
+// gives the model only a custom message's `content`, so the request carries
+// its own identity through the typed operational envelope.
+const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
+// Triggered re-presentations per unprocessed sequence set before the request
+// stops opening turns of its own and instead rides the captain's next prompt
+// (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
+// request cannot become an unbounded loop of empty turns.
+const PROCESSING_TRIGGERED_ATTEMPTS = 2;
+const PROCESSING_INSTRUCTION =
+  "This is a supervision processing request delivered automatically by the supervision branch. " +
+  "It was not typed by the captain. " +
+  "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
+  "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
@@ -449,6 +473,15 @@ export default function (pi: ExtensionAPI) {
     stagedCaptain: null,
   };
   let currentMainSession: ReadonlyEntries | null = null;
+  // Volatile view of the open processing request: the highest sequence it
+  // presented, how many turns it has opened for that set, whether a
+  // presentation is still pending its run boundary, and whether a copy is
+  // queued for the captain's next prompt. The durable truth is the store's
+  // processed marker; this only paces re-presentation and resets with the
+  // session generation.
+  type ProcessingState = { through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
+  let processing: ProcessingState | null = null;
+  let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
   let branchSelectionRevision = 0;
@@ -659,32 +692,119 @@ export default function (pi: ExtensionAPI) {
     else pi.sendMessage(message, {});
   }
 
-  // Reconcile in sequence order so the cursor can never cross a captain row
-  // whose visible entry is absent. This is also the reload/crash recovery
-  // path and runs before new branch work is accepted.
-  function reconcileUnreadOutcomes(expectedGeneration: number): boolean {
-    if (!generationOwnsLock(expectedGeneration)) return false;
-    const unread = runOutcomeScript(["unread"]);
-    if (!unread.ok) return false;
-    if (!unread.stdout) return true;
-    if (!currentMainSession) return false;
-    for (const line of unread.stdout.split("\n")) {
+  // Captain rows that are read (their visible entry exists) but not yet
+  // acknowledged as processed by main, in sequence order. null means the store
+  // could not be read safely, never "nothing".
+  function readUnprocessedOutcomes(expectedGeneration: number): OutcomeRow[] | null {
+    if (!generationOwnsLock(expectedGeneration)) return null;
+    const listed = runOutcomeScript(["unprocessed"]);
+    if (!listed.ok) return null;
+    const rows: OutcomeRow[] = [];
+    for (const line of listed.stdout.split("\n")) {
+      if (!line) continue;
       let row: OutcomeRow | null = null;
       try {
         row = parseOutcomeRow(JSON.parse(line));
       } catch {
         row = null;
       }
-      if (!row || !generationOwnsLock(expectedGeneration)) return false;
-      if (row.verdict === "captain") {
-        if (!ensureVisibleCaptainOutcome(row)) return false;
-      } else {
-        deliverRoutineOutcome(row);
-      }
-      if (!generationOwnsLock(expectedGeneration)) return false;
-      if (!runOutcomeScript(["mark-read", "--through", String(row.seq)]).ok) return false;
+      if (!row || row.verdict !== "captain") return null;
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  // Encoding shells out, so it can fail on a broken checkout. This file's
+  // failure direction applies: a request that cannot be typed is still
+  // delivered as plain text, because an untyped request main can still act on
+  // beats an outcome that is never processed.
+  function processingRequestInput(rows: OutcomeRow[]): string {
+    const through = rows[rows.length - 1].seq;
+    const listed = rows.map((row) => `[seq ${row.seq}] ${row.task}: ${row.summary}`).join("\n");
+    const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
+    try {
+      return encodeFirstmateOperationalInput("branch-outcome", body);
+    } catch {
+      return body;
+    }
+  }
+
+  // Present every unprocessed captain outcome to main as ONE sequence-keyed
+  // processing request. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
+  // of a given sequence set open a turn of their own (queued as a follow-up
+  // while main is busy); after that the request rides the captain's next
+  // prompt instead, once per run, and a session replacement starts the
+  // triggered budget over. Nothing here advances the processed marker: only
+  // fm_branch_processed does, keyed to the sequence main acknowledges.
+  function presentUnprocessedOutcomes(expectedGeneration: number): boolean {
+    const rows = readUnprocessedOutcomes(expectedGeneration);
+    if (rows === null) return false;
+    if (rows.length === 0) {
+      processing = null;
+      return true;
+    }
+    const through = rows[rows.length - 1].seq;
+    if (!processing || processing.through !== through) {
+      processing = { through, triggered: 0, pending: false, nextTurnQueued: false };
+    }
+    // A presentation already sent for this exact sequence set is consumed by
+    // the run it joins or opens; until that run settles, sending another copy
+    // would only hand the same request to the same run twice. A newer outcome
+    // widens the set and is presented at once, so main learns of it promptly.
+    if (processing.pending) return true;
+    const message = { customType: PROCESSING_MESSAGE_TYPE, content: processingRequestInput(rows), display: false };
+    if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
+      processing.triggered += 1;
+      processing.pending = true;
+      pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
+    } else if (!processing.nextTurnQueued) {
+      processing.nextTurnQueued = true;
+      processing.pending = true;
+      pi.sendMessage(message, { deliverAs: "nextTurn" });
     }
     return true;
+  }
+
+  // Reconcile in sequence order so the cursor can never cross a captain row
+  // whose visible entry is absent. This is also the reload/crash recovery
+  // path and runs before new branch work is accepted. With `present`, every
+  // captain row that is now read but still unprocessed is handed to main as
+  // one processing request; callers that run inside a main turn (turn_end)
+  // leave presentation to the run boundary (agent_settled) instead, so one
+  // multi-tool run never receives duplicate requests.
+  function reconcileUnreadOutcomes(expectedGeneration: number, present = true): boolean {
+    if (!generationOwnsLock(expectedGeneration)) return false;
+    // One-time migration per generation: a home whose outcomes were all
+    // delivered before the processed marker existed treats them as processed
+    // rather than re-presenting its whole history. Runs before any new row
+    // can be read below, so nothing delivered from here on is ever skipped.
+    if (processedInitializedGeneration !== expectedGeneration) {
+      if (!runOutcomeScript(["processed-init"]).ok) return false;
+      processedInitializedGeneration = expectedGeneration;
+    }
+    const unread = runOutcomeScript(["unread"]);
+    if (!unread.ok) return false;
+    if (unread.stdout) {
+      if (!currentMainSession) return false;
+      for (const line of unread.stdout.split("\n")) {
+        let row: OutcomeRow | null = null;
+        try {
+          row = parseOutcomeRow(JSON.parse(line));
+        } catch {
+          row = null;
+        }
+        if (!row || !generationOwnsLock(expectedGeneration)) return false;
+        if (row.verdict === "captain") {
+          if (!ensureVisibleCaptainOutcome(row)) return false;
+        } else {
+          deliverRoutineOutcome(row);
+        }
+        if (!generationOwnsLock(expectedGeneration)) return false;
+        if (!runOutcomeScript(["mark-read", "--through", String(row.seq)]).ok) return false;
+      }
+    }
+    if (!present) return true;
+    return presentUnprocessedOutcomes(expectedGeneration);
   }
 
   function createReportTool(toolGeneration: number): ToolDefinition {
@@ -692,7 +812,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry without a model turn; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -1071,12 +1191,24 @@ ${context.command}
 
   pi.on?.("agent_start", () => {
     mainStreaming = true;
+    // Pi delivers a queued nextTurn copy with the prompt that starts this run,
+    // so a fresh copy may be queued again once this run settles unacknowledged.
+    if (processing) processing.nextTurnQueued = false;
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
   });
+  // The run boundary is where an ignored processing request is detected: every
+  // presentation sent before this point has been consumed by the run that just
+  // settled (a follow-up joins the running turn, a triggered send opens its
+  // own), so any sequence still unprocessed here was answered by something
+  // other than its acknowledgement - an unrelated reply, an empty reply, or a
+  // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", () => {
     mainStreaming = false;
+    if (processing) processing.pending = false;
+    if (!actingAsOwner()) return;
+    presentUnprocessedOutcomes(generation);
   });
 
   // before_agent_start stages Pi's authoritative in-flight prompt before
@@ -1089,7 +1221,7 @@ ${context.command}
     rememberMainModel(ctx);
     currentMainSession = ctx.sessionManager;
     if (!actingAsOwner()) return;
-    if (!reconcileUnreadOutcomes(generation)) {
+    if (!reconcileUnreadOutcomes(generation, false)) {
       branchBroken = "could not reconcile unread supervision outcomes into main";
       return;
     }
@@ -1145,6 +1277,7 @@ ${context.command}
     deactivateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(generation));
     shuttingDown = true;
     generation += 1;
+    processing = null;
     pendingMirror.length = 0;
     currentMainSession = null;
     mirrorCollection.collectAnchor = null;
@@ -1550,6 +1683,79 @@ ${context.command}
       }
       return {
         content: [{ type: "text", text: listed.stdout || "(no branch outcomes recorded)" }],
+        details: undefined,
+      };
+    },
+  });
+
+  // Main's only way to close a captain outcome. The acknowledgement is keyed
+  // to the sequence main names, validated by the store (never past the read
+  // cursor, never backwards), and refused outside lock ownership, so neither a
+  // paraphrase, an empty reply, nor a stale generation can mark an outcome
+  // processed.
+  pi.registerTool?.({
+    name: "fm_branch_processed",
+    label: "Acknowledge processed supervision outcomes",
+    description:
+      "Acknowledge that every captain-facing supervision outcome up to a sequence number has been processed by this conversation. Call it exactly once after handling a supervision processing request, with through set to the highest sequence that request listed; an outcome that is not acknowledged is presented again.",
+    promptSnippet: "Acknowledge processed captain-facing supervision outcomes by sequence.",
+    parameters: Type.Object({
+      through: Type.Number({ description: "The highest outcome sequence number this conversation has processed" }),
+    }),
+    renderShell: "self",
+    renderCall: (_args, theme, context) => {
+      if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
+      if (calmHides("assistant-tool-call")) return new Container();
+      const shellState = context.state as OutcomesToolShellState;
+      shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_processed")), 0, 0);
+      return refreshOutcomesToolShell(shellState, theme, context);
+    },
+    renderResult: (result, _options, theme, context) => {
+      if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
+      if (calmHides("tool-result")) return new Container();
+      const output = result.content
+        .filter((item) => item.type === "text")
+        .map((item) => normalizeOutcomesToolOutput(item.text))
+        .join("\n");
+      const shellState = context.state as OutcomesToolShellState;
+      shellState.result = output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
+      refreshOutcomesToolShell(shellState, theme, context);
+      return new Container();
+    },
+    execute: async (_toolCallId, params) => {
+      const raw = (params as { through?: unknown }).through;
+      const through = typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 ? raw : null;
+      if (through === null) {
+        return {
+          content: [{ type: "text", text: "acknowledgement refused: through must be a positive outcome sequence number" }],
+          details: undefined,
+          isError: true,
+        };
+      }
+      if (!actingAsOwner()) {
+        return {
+          content: [{ type: "text", text: "acknowledgement refused: this session does not own the fleet lock" }],
+          details: undefined,
+          isError: true,
+        };
+      }
+      const marked = runOutcomeScript(["mark-processed", "--through", String(through)]);
+      if (!marked.ok) {
+        return {
+          content: [{ type: "text", text: `acknowledgement refused: ${marked.detail}` }],
+          details: undefined,
+          isError: true,
+        };
+      }
+      const remaining = readUnprocessedOutcomes(generation);
+      if (remaining !== null && remaining.length === 0) processing = null;
+      const open = remaining === null
+        ? "the remaining outcomes could not be read"
+        : remaining.length === 0
+          ? "no captain outcome remains unprocessed"
+          : `${remaining.length} newer captain outcome(s) remain unprocessed (seq ${remaining.map((row) => row.seq).join(", ")}) and will be presented again`;
+      return {
+        content: [{ type: "text", text: `processed through seq ${through}; ${open}` }],
         details: undefined,
       };
     },

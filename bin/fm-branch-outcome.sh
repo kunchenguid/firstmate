@@ -21,6 +21,19 @@
 #     A captain row advances only after its matching visible entry exists in
 #     Pi's session, so reload recovery is idempotent across that crash window.
 #     A cursor beyond the validated store tail fails closed.
+#   - Processed marker: $STATE/.branch-outcomes-processed holds the highest
+#     seq whose captain rows main has ACKNOWLEDGED as processed, separately
+#     from the read cursor: reading (the visible entry) is the branch's act,
+#     processing (main acting on the outcome and calling its acknowledgement
+#     tool) is main's. A captain row between the two markers is "unprocessed":
+#     delivered and shown, not yet acted on. Routine rows never wait on this
+#     marker. It only advances through an explicit sequence-bound
+#     acknowledgement, never past the read cursor and never backwards, so an
+#     unrelated or empty model answer cannot move it. An absent marker reads as
+#     0 (every delivered captain row is unprocessed, the safe direction);
+#     processed-init is the one-time migration that sets an absent marker to
+#     the read cursor so rows delivered before the marker existed are not
+#     re-presented. A marker ahead of the read cursor fails closed.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -35,6 +48,15 @@
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
 #     Advance the cursor (never backwards) after handing the records to Pi.
+#   fm-branch-outcome.sh unprocessed
+#     Print every captain record that is read but not yet processed (raw
+#     JSONL, ascending seq). Exit 0 with no output when none.
+#   fm-branch-outcome.sh mark-processed --through <seq>
+#     Advance the processed marker (never backwards, never past the read
+#     cursor) after main acknowledged the captain rows through <seq>.
+#   fm-branch-outcome.sh processed-init
+#     Create the processed marker at the current read cursor when it does not
+#     exist yet; a present marker is left untouched.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
@@ -53,10 +75,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
+PROCESSED="$STATE/.branch-outcomes-processed"
 LOCK="$STATE/.branch-outcomes.lock"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -86,6 +109,22 @@ read_cursor() {
   case "$value" in
     ''|*[!0-9]*|0[0-9]*)
       echo "error: refusing operation because the outcome cursor is malformed" >&2
+      return 1
+      ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+read_processed() {
+  local value
+  [ -e "$PROCESSED" ] || { printf '0\n'; return 0; }
+  if ! value=$(cat "$PROCESSED" 2>/dev/null); then
+    echo "error: refusing operation because the processed marker is unreadable" >&2
+    return 1
+  fi
+  case "$value" in
+    ''|*[!0-9]*|0[0-9]*)
+      echo "error: refusing operation because the processed marker is malformed" >&2
       return 1
       ;;
     *) printf '%s\n' "$value" ;;
@@ -141,6 +180,35 @@ advance_cursor() { # <seq>
   tmp=$(mktemp "$STATE/.branch-outcomes-cursor.XXXXXX")
   printf '%s\n' "$through" > "$tmp"
   mv -f -- "$tmp" "$CURSOR"
+}
+
+write_processed() { # <seq>
+  local through=$1 tmp
+  tmp=$(mktemp "$STATE/.branch-outcomes-processed.XXXXXX")
+  printf '%s\n' "$through" > "$tmp"
+  mv -f -- "$tmp" "$PROCESSED"
+}
+
+# Captain rows above the processed marker and at or below the read cursor.
+print_unprocessed() {
+  local cursor processed last
+  cursor=$(read_cursor) || return 1
+  processed=$(read_processed) || return 1
+  if ! last=$(last_seq); then
+    echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
+    return 1
+  fi
+  if [ "$cursor" -gt "$last" ]; then
+    echo "error: refusing read because the outcome cursor is ahead of the store" >&2
+    return 1
+  fi
+  if [ "$processed" -gt "$cursor" ]; then
+    echo "error: refusing read because the processed marker is ahead of the read cursor" >&2
+    return 1
+  fi
+  [ -s "$STORE" ] || return 0
+  jq -c --argjson processed "$processed" --argjson cursor "$cursor" \
+    'select(.verdict == "captain" and .seq > $processed and .seq <= $cursor)' "$STORE"
 }
 
 CMD=${1:-}
@@ -203,6 +271,46 @@ case "$CMD" in
       exit 1
     fi
     advance_cursor "$THROUGH"
+    fm_lock_release "$LOCK"
+    ;;
+  unprocessed)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    print_unprocessed
+    STATUS=$?
+    fm_lock_release "$LOCK"
+    exit "$STATUS"
+    ;;
+  mark-processed)
+    [ "${1:-}" = --through ] || usage
+    THROUGH=${2:-}
+    case "$THROUGH" in ''|*[!0-9]*) usage ;; esac
+    [ "$#" -eq 2 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if ! CURSOR_SEQ=$(read_cursor) || ! PROCESSED_SEQ=$(read_processed); then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
+    if [ "$THROUGH" -gt "$CURSOR_SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing processed advancement beyond the read cursor ($CURSOR_SEQ)" >&2
+      exit 1
+    fi
+    if [ "$THROUGH" -gt "$PROCESSED_SEQ" ]; then
+      write_processed "$THROUGH"
+    fi
+    fm_lock_release "$LOCK"
+    ;;
+  processed-init)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if [ ! -e "$PROCESSED" ]; then
+      if ! CURSOR_SEQ=$(read_cursor); then
+        fm_lock_release "$LOCK"
+        exit 1
+      fi
+      write_processed "$CURSOR_SEQ"
+    fi
     fm_lock_release "$LOCK"
     ;;
   list)

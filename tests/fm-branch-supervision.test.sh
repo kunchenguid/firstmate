@@ -231,6 +231,83 @@ test_outcome_sequence_conflicts_fail_closed() {
   pass "middle sequence conflicts fail closed for reads and appends"
 }
 
+test_outcome_processed_marker_is_sequence_bound() {
+  local home marker out status
+  home="$TMP_ROOT/store-processed-home"
+  mkdir -p "$home/state"
+  marker="$home/state/.branch-outcomes-processed"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'routine first' >/dev/null || fail "routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'captain second' >/dev/null || fail "captain append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-3 --verdict captain --summary 'captain third' >/dev/null || fail "second captain append failed"
+
+  # Nothing is unprocessed until it has been read (its visible entry exists).
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
+    || fail "an unread captain row was reported as unprocessed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 || fail "mark-read failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) || fail "unprocessed failed"
+  case "$out" in
+    '{"seq":2,'*) ;;
+    *) fail "unprocessed did not return exactly the read captain rows: $out" ;;
+  esac
+  assert_not_contains "$out" '"seq":1' "a routine row entered the processing path"
+
+  # The marker never passes the read cursor and never moves backwards.
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 3 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-processed advanced past the read cursor"
+  assert_contains "$out" "beyond the read cursor" "past-cursor refusal lost its diagnostic"
+  [ ! -e "$marker" ] || fail "a refused acknowledgement created the processed marker"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 2 || fail "mark-processed failed"
+  [ "$(cat "$marker")" = 2 ] || fail "processed marker was not written"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
+    || fail "an acknowledged row stayed unprocessed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 || fail "backwards mark-processed failed"
+  [ "$(cat "$marker")" = 2 ] || fail "processed marker moved backwards"
+
+  # Reading the next captain row reopens exactly that row for processing.
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 3 || fail "second mark-read failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed) || fail "second unprocessed failed"
+  case "$out" in
+    '{"seq":3,'*) ;;
+    *) fail "the newly read captain row was not the only unprocessed row: $out" ;;
+  esac
+
+  # processed-init leaves a present marker alone and fails closed on a
+  # malformed one instead of skipping an outcome.
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "processed-init failed on a present marker"
+  [ "$(cat "$marker")" = 2 ] || fail "processed-init rewrote a present marker"
+  printf '2x\n' > "$marker"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unprocessed accepted a malformed processed marker"
+  assert_contains "$out" "processed marker is malformed" "malformed marker refusal lost its diagnostic"
+  printf '5\n' > "$marker"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unprocessed accepted a marker ahead of the read cursor"
+  assert_contains "$out" "ahead of the read cursor" "ahead-of-cursor refusal lost its diagnostic"
+
+  # Migration: a home with delivered history and no marker starts processed
+  # at its read cursor, so that history is not re-presented; an absent marker
+  # otherwise reads as zero, the safe direction.
+  home="$TMP_ROOT/store-processed-migration-home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-old --verdict captain --summary 'delivered before the marker existed' >/dev/null || fail "migration append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 || fail "migration mark-read failed"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" '"seq":1' \
+    "an absent marker hid a delivered captain row instead of reading as zero"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init || fail "migration processed-init failed"
+  [ "$(cat "$home/state/.branch-outcomes-processed")" = 1 ] || fail "processed-init did not start at the read cursor"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
+    || fail "migrated history was re-presented for processing"
+  pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and migrates delivered history once"
+}
+
 # --- lease contract -----------------------------------------------------------
 
 test_lease_exclusivity_release_stale_and_sweep() {
@@ -629,6 +706,7 @@ test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
 test_outcome_sequence_conflicts_fail_closed
+test_outcome_processed_marker_is_sequence_bound
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
