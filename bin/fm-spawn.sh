@@ -2290,6 +2290,7 @@ case "$BACKEND" in
           set -e
           case "$HERDR_RECLAIM_STATUS" in
             0)
+              HERDR_TASK_LABEL=$HERDR_RECOVERY_TASK_LABEL
               HERDR_PROJECTED=1
               HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
               HERDR_SEEDED_DEFAULT_TAB_ID=""

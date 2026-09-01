@@ -214,9 +214,9 @@ CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '
 [ "$CM2_WSID" != "$CM1_WSID" ] || fail "a crewmate spawned FROM the secondmate home must NOT land in the primary's workspace"
 pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in the secondmate's OWN workspace - falls out of per-home resolution, no glue needed"
 
-# New workers keep their human-readable labels, while bulk recovery remains
-# conservative about arbitrary human tabs. Verify the real labels before adding
-# explicit legacy-label fixtures for the list_live compatibility checks below.
+# New workers keep their human-readable labels, and list_live discovers those
+# labels alongside historical legacy labels. Verify the real labels before
+# adding explicit legacy-label fixtures for the compatibility checks below.
 CM1_LABEL=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null \
   | jq -r --arg tab "$CM1_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
 SM_LABEL=$(herdr tab list --workspace "$SM_WSID" --session "$SESSION" 2>/dev/null \
@@ -233,9 +233,8 @@ pass "real herdr E2E: new workers use human-readable labels with their exact tas
 
 # --- 4. list-live recovery: each home sees only its own tabs ---------------
 
-# list_live intentionally discovers legacy fm-<id> labels only: a bulk sweep has
-# no task id in hand to distinguish a human tab from a task safely. Add separate
-# legacy fixtures here without renaming any newly-created worker pane.
+# Add separate historical legacy fixtures here without renaming any
+# newly-created worker pane.
 herdr tab create --workspace "$CM1_WSID" --cwd "$TMP_ROOT" --label fm-cm1 --no-focus --session "$SESSION" >/dev/null \
   || fail "could not create the primary home's legacy list_live fixture"
 herdr tab create --workspace "$SM_WSID" --cwd "$TMP_ROOT" --label fm-e2esm1 --no-focus --session "$SESSION" >/dev/null \
@@ -244,12 +243,15 @@ herdr tab create --workspace "$SM_WSID" --cwd "$TMP_ROOT" --label fm-cm2 --no-fo
   || fail "could not create the secondmate home's second legacy list_live fixture"
 
 PRIMARY_LIVE=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_list_live "$SESSION")
+assert_contains_local "$PRIMARY_LIVE" "$CM1_LABEL" "the primary home's list_live did not see its human-readable task"
 assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not see its own task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-e2esm1" "the primary home's list_live must not see the secondmate's own task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-cm2" "the primary home's list_live must not see the secondmate-owned crewmate's task"
 pass "real herdr E2E: list_live from the primary's own context sees only the primary's own task"
 
 SM_LIVE=$(FM_HOME="$SM_HOME" fm_backend_herdr_list_live "$SESSION")
+assert_contains_local "$SM_LIVE" "$SM_LABEL" "the secondmate home's list_live did not see its human-readable task"
+assert_contains_local "$SM_LIVE" "$CM2_LABEL" "the secondmate home's list_live did not see its human-readable child task"
 assert_contains_local "$SM_LIVE" "fm-e2esm1" "the secondmate home's list_live did not see its own task"
 assert_contains_local "$SM_LIVE" "fm-cm2" "the secondmate home's list_live did not see the crewmate spawned from it"
 assert_not_contains_local "$SM_LIVE" "fm-cm1" "the secondmate home's list_live must not see the primary's task"

@@ -2996,20 +2996,24 @@ test_list_live_scoped_to_this_homes_workspace_only() {
   pass "fm_backend_herdr_list_live: scoped to this home's own workspace, never a sibling home's"
 }
 
-test_list_live_ignores_unowned_human_readable_task_labels() {
+test_list_live_discovers_supported_task_labels() {
   local dir log resp fb out
   dir="$TMP_ROOT/list-live-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"NeoMD I/F/A instant (fm-css)","workspace_id":"w1"},{"tab_id":"w1:t2","label":"Meeting (draft)","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-legacy","workspace_id":"w1"},{"tab_id":"w1:t4","label":"fm-followup (draft)","workspace_id":"w1"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"},{"pane_id":"w1:p4","tab_id":"w1:t4"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"NeoMD I/F/A instant (fm-css)","workspace_id":"w1"},{"tab_id":"w1:t2","label":"Captain notes","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-legacy","workspace_id":"w1"},{"tab_id":"w1:t4","label":"fm-followup (draft)","workspace_id":"w1"},{"tab_id":"w1:t5","label":"fm-followup note","workspace_id":"w1"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p4","tab_id":"w1:t4"}]}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
-  [ "$out" = $'fmtest:w1:p3\tfm-legacy' ] \
-    || fail "list_live should report only legacy task labels, got '$out'"
-  assert_not_contains "$out" "Meeting (draft)" \
-    "list_live treated an unrelated human label as a task"
-  pass "fm_backend_herdr_list_live: ignores unowned human-readable labels and keeps legacy discovery"
+  [ "$out" = $'fmtest:w1:p1\tNeoMD I/F/A instant (fm-css)\nfmtest:w1:p3\tfm-legacy\nfmtest:w1:p4\tfm-followup (draft)' ] \
+    || fail "list_live should report supported legacy and human task labels, got '$out'"
+  assert_not_contains "$out" "Captain notes" \
+    "list_live treated an unrelated tab as a task"
+  assert_not_contains "$out" $'fmtest:w1:p5\tfm-followup note' \
+    "list_live treated a prefix-only fm- label as a task"
+  pass "fm_backend_herdr_list_live: discovers legacy and human-readable task labels"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -4721,7 +4725,7 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_task_label_is_human_readable_and_id_bound
 test_list_live_scoped_to_this_homes_workspace_only
-test_list_live_ignores_unowned_human_readable_task_labels
+test_list_live_discovers_supported_task_labels
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read

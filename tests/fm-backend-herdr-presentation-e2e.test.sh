@@ -1185,11 +1185,15 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   OLD_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   OLD_RESTART_TAB=$(grep '^herdr_tab_id=' "$RESTART_META" | cut -d= -f2-)
   OLD_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  EXPECTED_RESTART_TASK_LABEL=$(grep '^herdr_task_label=' "$RESTART_META" | cut -d= -f2-)
+  [ -n "$EXPECTED_RESTART_TASK_LABEL" ] \
+    || fail "$RESTART_ID fresh metadata did not record its Herdr task label"
   OLD_RESTART_LABEL=$(lab workspace get "$OLD_RESTART_WSID" | jq -r '.result.workspace.label')
   [ "$(grep '^version=' "$HOME_DIR/state/$RESTART_ID.herdr-presentation")" = version=2 ] \
     || fail "$RESTART_ID fresh projection did not publish an exact restart binding"
   if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
     LEGACY_RESTART_LABEL="fm-$RESTART_ID"
+    EXPECTED_RESTART_TASK_LABEL=$LEGACY_RESTART_LABEL
     lab tab rename "$OLD_RESTART_TAB" "$LEGACY_RESTART_LABEL" >/dev/null \
       || fail "$RESTART_ID legacy-label fixture could not rename its task tab"
     sed -i.bak "s/^task_label=.*/task_label=$LEGACY_RESTART_LABEL/" \
@@ -1220,8 +1224,11 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  NEW_RESTART_TASK_LABEL=$(grep '^herdr_task_label=' "$RESTART_META" | cut -d= -f2-)
   [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
     || fail "$RESTART_ID reclaim flattened into a different workspace"
+  [ "$NEW_RESTART_TASK_LABEL" = "$EXPECTED_RESTART_TASK_LABEL" ] \
+    || fail "$RESTART_ID metadata recorded '$NEW_RESTART_TASK_LABEL' instead of the recovered endpoint label '$EXPECTED_RESTART_TASK_LABEL'"
   [ "$NEW_RESTART_PANE" != "$OLD_RESTART_PANE" ] \
     || fail "$RESTART_ID reclaim reused the old husk pane"
   [ "$(lab workspace get "$NEW_RESTART_WSID" | jq -r '.result.workspace.label')" = "$OLD_RESTART_LABEL" ] \

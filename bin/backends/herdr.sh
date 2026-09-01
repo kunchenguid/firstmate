@@ -52,9 +52,10 @@
 #
 # Authoritative task recovery/orphan discovery (ids may not deterministically match live state
 # after a server restart in a differently-configured session; see the
-# verification doc) uses LABEL matching for legacy fm-<id> tab labels, never
-# trusts a stored pane id blindly: fm_backend_herdr_list_live. The presentation journal
-# is deliberately excluded from that path.
+# verification doc) uses LABEL matching for legacy fm-<id> and human-readable
+# <short title> (<id>) tab labels, never trusts a stored pane id blindly:
+# fm_backend_herdr_list_live. The presentation journal is deliberately excluded
+# from that path.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
@@ -3249,16 +3250,16 @@ EOF
 }
 
 # fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label is a legacy fm-<id> firstmate task window in <session>'s, THIS
-# HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
-# home's), by LABEL - never by trusting a stored pane id, since ids are not
-# guaranteed stable across every server lifecycle (see herdr-verification-p2.md
-# "ID stability"). A caller running as a given home (e.g. a secondmate
-# recovering its own in-flight work) naturally scopes to that home's own
-# workspace because FM_HOME already names it - no glue needed, unlike the
-# primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session/
-# workspace that does not exist yet simply lists nothing. One
-# "<session>:<pane_id>\t<label>" line per live task tab.
+# label is a legacy fm-<id> or human-readable <short title> (<id>) firstmate
+# task window in <session>'s, THIS HOME'S OWN workspace
+# (fm_backend_herdr_workspace_label - never another home's), by LABEL - never
+# by trusting a stored pane id, since ids are not guaranteed stable across
+# every server lifecycle (see herdr-verification-p2.md "ID stability"). A
+# caller running as a given home (e.g. a secondmate recovering its own in-flight
+# work) naturally scopes to that home's own workspace because FM_HOME already
+# names it - no glue needed, unlike the primary-spawns-a-secondmate path in
+# fm-spawn.sh. Read-only: a session/workspace that does not exist yet simply
+# lists nothing. One "<session>:<pane_id>\t<label>" line per live task tab.
 fm_backend_herdr_list_live() {  # <session>
   local session=$1 wsid tabs tab_id label pane_id
   wsid=$(fm_backend_herdr_workspace_find "$session") || return 0
@@ -3272,7 +3273,10 @@ fm_backend_herdr_list_live() {  # <session>
   done < <(printf '%s' "$tabs" | jq -r '
     .result.tabs[]?
     | select((.label | type) == "string")
-    | select(.label | test("^fm-[A-Za-z0-9._-]+$"))
+    | select(
+        (.label | test("^fm-[A-Za-z0-9._-]+$"))
+        or (.label | test("^.+ \\([A-Za-z0-9._-]+\\)$"))
+      )
     | "\(.tab_id)\t\(.label)"
   ' 2>/dev/null)
 }
