@@ -842,6 +842,58 @@ fm_procevent_mark_handled() {
   return 2
 }
 
+# fm_procevent_receipt_marker <state> <source-id> <sequence>
+# fm_procevent_receipt_seam_ran <state> <source-id> <sequence>
+# fm_procevent_mark_receipt_seam <state> <source-id> <sequence>
+# The runner's durable note that the adapter-owned receipt seam has already been
+# given its one chance at one captured generation. Same private per-generation
+# layout as the handled marker, and a strictly different fact: handled records
+# what the HANDLER did with a result, this records only that the seam ran. It
+# exists because a runner killed between its durable capture and that seam
+# leaves a generation the adapter never saw, which reconcile must be able to
+# tell apart from a generation whose seam already ran - rerunning a completed
+# seam would let an adapter journal acknowledgement state no fact supports yet.
+# 0 = newly recorded, 1 = already recorded, 2 = error.
+fm_procevent_receipt_marker() {
+  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" = 1 ]; then
+    printf './%s.%s.receipted\n' "$2" "$3"
+    return
+  fi
+  printf '%s/%s.%s.receipted\n' "$(fm_procevent_inbox_dir "$1")" "$2" "$3"
+}
+
+fm_procevent_receipt_seam_ran() {
+  local marker; marker=$(fm_procevent_receipt_marker "$1" "$2" "$3")
+  [ -f "$marker" ] && [ ! -L "$marker" ]
+}
+
+fm_procevent_mark_receipt_seam() {
+  local state=$1 id=$2 seq=$3 inbox result marker tmp
+  fm_procevent_source_id_valid "$id" || return 2
+  case "$seq" in ''|*[!0-9]*) return 2 ;; esac
+  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" = 1 ]; then
+    inbox=.
+  else
+    inbox=$(fm_procevent_inbox_dir "$state")
+  fi
+  result="$inbox/$id.$seq.result"
+  [ -f "$result" ] && [ ! -L "$result" ] || return 2
+  marker=$(fm_procevent_receipt_marker "$state" "$id" "$seq")
+  [ ! -L "$marker" ] || return 2
+  tmp=$(umask 077; mktemp "$inbox/.receipted.XXXXXX") || return 2
+  if ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 2
+  fi
+  if ln "$tmp" "$marker" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  [ -f "$marker" ] && [ ! -L "$marker" ] && return 1
+  return 2
+}
+
 # fm_procevent_result_source_id <result-path>
 fm_procevent_result_source_id() {
   local base=${1##*/}
