@@ -199,9 +199,15 @@ network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
 # an actionable diagnostic because it means recorded PRs are not being
 # followed.
 pr_follow_backfill_sweep() {
-  local out
+  local out line
   if ! out=$("$SCRIPT_DIR/fm-procevent-pr-follow.sh" backfill 2>&1); then
-    echo "PR_FOLLOW_BACKFILL: refused: $out"
+    [ -n "$out" ] || out="the backfill sweep failed without a reason"
+    # The adapter reports one line per armed PR before its summary, so every
+    # line carries the prefix the digest reader matches on.
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      echo "PR_FOLLOW_BACKFILL: refused: $line"
+    done <<< "$out"
     return 0
   fi
   if printf '%s\n' "$out" | grep -q 'armed=0 already=[0-9]* skipped=0 capped=0'; then
@@ -209,7 +215,10 @@ pr_follow_backfill_sweep() {
     # completed fleet refresh with no skips.
     return 0
   fi
-  echo "PR_FOLLOW_BACKFILL: $out"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "PR_FOLLOW_BACKFILL: $line"
+  done <<< "$out"
 }
 
 network_mutation_authorized() {

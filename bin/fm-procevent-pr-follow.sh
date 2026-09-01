@@ -121,9 +121,10 @@
 #   collection that still has entries above the cursor, each page capped at 100
 #   rows and FM_PR_FOLLOW_MAX_PAGES pages per collection; state maps keep the
 #   FM_PR_FOLLOW_MAP_LIMIT highest ids; one document carries at most
-#   FM_PR_FOLLOW_MAX_EVENTS events and per-collection maxima advance only to
-#   what was announced, so an overflowed poll re-announces its remainder next
-#   poll instead of losing it. GitHub reviews come from one fixed GraphQL
+#   FM_PR_FOLLOW_MAX_EVENTS events plus the head and pr-state lines, which are
+#   exempt because their cursor advance is not re-announced, and per-collection
+#   maxima advance only to what was announced, so an overflowed poll
+#   re-announces its remainder next poll instead of losing it. GitHub reviews come from one fixed GraphQL
 #   last-100 query, so more than 100 reviews between two polls can only be
 #   partially observed; the announced-only maximum keeps the remainder bounded
 #   to that same shape.
@@ -492,7 +493,7 @@ SN_REVIEW_ROWS=
 SN_CHECK_ROWS=
 SN_THREAD_ROWS=
 SN_NOTE_ROWS=
-SN_APPROVAL_SET=
+SN_APPROVAL_ROWS=
 SN_FETCH_ERROR=
 GH_OUT=
 
@@ -506,7 +507,7 @@ sn_reset() {
   SN_CHECK_ROWS=''
   SN_THREAD_ROWS=''
   SN_NOTE_ROWS=''
-  SN_APPROVAL_SET=''
+  SN_APPROVAL_ROWS=''
   SN_FETCH_ERROR=
 }
 
@@ -699,8 +700,8 @@ poll_gitlab() {
     if [ -z "$rows" ]; then
       break
     fi
-    note_rows+=$(printf '%s\n' "$rows" | awk -F '\t' '$1 != "T"'$'\n')
-    thread_rows+=$(printf '%s\n' "$rows" | awk -F '\t' '$1 == "T" {print $2 "\t" $3}'$'\n')
+    note_rows+=$(printf '%s\n' "$rows" | awk -F '\t' '$1 != "T"')$'\n'
+    thread_rows+=$(printf '%s\n' "$rows" | awk -F '\t' '$1 == "T" {print $2 "\t" $3}')$'\n'
     n=$(printf '%s\n' "$rows" | awk -F '\t' '$1 == "T"' | grep -c .)
     [ "$n" -eq 100 ] || break
     page=$((page + 1))
@@ -752,8 +753,7 @@ poll_gitlab() {
         print "$name\n";
       }
     '; then
-    SN_APPROVAL_SET=$(printf '%s\n' "$GH_OUT" | grep . | sort | tr '\n' ',' || true)
-    SN_APPROVAL_SET=${SN_APPROVAL_SET%,}
+    SN_APPROVAL_ROWS=$(printf '%s\n' "$GH_OUT" | grep . | sort || true)
   fi
   return 0
 }
@@ -779,21 +779,29 @@ EVENTS_DROPPED=0
 
 ev_add() { EV_LINES+="$1"$'\n'; }
 
+# Lines carrying the exempt sort key sort ahead of everything else and are
+# kept without consuming the bound, so the head and pr-state announcements
+# their cursor advancement depends on can never be truncated.
+EV_KEY_EXEMPT=-1
+
 ev_sort_and_cap() {
-  local line kept=0 budget=$MAX_EVENTS sorted=''
-  local total=0
+  local key line kept=0 budget=$MAX_EVENTS sorted=''
+  local total=0 exempt=0
   EVENTS_DROPPED=0
   if [ -n "$EV_LINES" ]; then
     total=$(printf '%s\n' "$EV_LINES" | grep -c .)
+    exempt=$(printf '%s\n' "$EV_LINES" | awk -F '\t' -v k="$EV_KEY_EXEMPT" '$1 == k' | grep -c . || true)
     sorted=$(printf '%s\n' "$EV_LINES" | sort -n -k1,1)
   fi
-  [ "$total" -gt "$budget" ] && EVENTS_DROPPED=1
+  [ "$((total - exempt))" -gt "$budget" ] && EVENTS_DROPPED=1
   EV_LINES=
-  while IFS=$'\t' read -r _key line; do
+  while IFS=$'\t' read -r key line; do
     [ -n "$line" ] || continue
-    [ "$kept" -lt "$budget" ] || break
+    if [ "$key" != "$EV_KEY_EXEMPT" ]; then
+      [ "$kept" -lt "$budget" ] || break
+      kept=$((kept + 1))
+    fi
     EV_LINES+="$line"$'\n'
-    kept=$((kept + 1))
   done <<< "$sorted"
 }
 
@@ -856,14 +864,14 @@ delta_common_start() {
 delta_head_and_state() {
   local check_id check_sc check_name
   if [ "$CUR_BASELINE" = "done" ] && [ "$CUR_STATE" != "$SN_STATE" ]; then
-    ev_add "0	event: pr-state from=$CUR_STATE state=$SN_STATE"
+    ev_add "$EV_KEY_EXEMPT	event: pr-state from=$CUR_STATE state=$SN_STATE"
   fi
   NEW_STATE=$SN_STATE
   if [ -z "$SN_HEAD" ] || [ "$SN_HEAD" = "$CUR_HEAD" ]; then
     return 1
   fi
   if [ -n "$CUR_HEAD" ]; then
-    ev_add "0	event: head from=${CUR_HEAD%"${CUR_HEAD#????????????}"} to=${SN_HEAD%"${SN_HEAD#????????????}"}"
+    ev_add "$EV_KEY_EXEMPT	event: head from=${CUR_HEAD%"${CUR_HEAD#????????????}"} to=${SN_HEAD%"${SN_HEAD#????????????}"}"
   fi
   NEW_HEAD=$SN_HEAD
   NEW_CHECKS=
@@ -1132,14 +1140,18 @@ compute_delta_gitlab() {
     done <<< "$SN_CHECK_ROWS"
   fi
 
-  # Threads: resolved-state transitions.
-  local thread_id thread_state old
+  # Threads: resolved-state transitions. A thread opened after the baseline
+  # has no map entry yet; it is seeded silently below (its notes are already
+  # announced by the notes pass) so its later transition is detected.
+  local thread_id thread_state old thread_seeds=''
   while IFS=$'\t' read -r thread_id thread_state; do
     [ -n "$thread_id" ] || continue
     case "$thread_state" in resolved|unresolved) ;; *) continue ;; esac
     case "$thread_id" in *[!A-Za-z0-9_-]*) continue ;; esac
     old=$(map_get "$CUR_THREADS" "$thread_id")
-    if [ -n "$old" ] && [ "$old" != "$thread_state" ]; then
+    if [ -z "$old" ]; then
+      thread_seeds+="$thread_id"$'\t'"$thread_state"$'\n'
+    elif [ "$old" != "$thread_state" ]; then
       ev_add "0	event: thread id=$thread_id state=$thread_state"
     fi
   done <<< "$SN_THREAD_ROWS"
@@ -1155,7 +1167,7 @@ compute_delta_gitlab() {
       *",$user,"*) ;;
       *) ev_add "0	event: review id=approval-$user state=APPROVED author=$user" ;;
     esac
-  done <<< "$SN_APPROVAL_SET"
+  done <<< "$SN_APPROVAL_ROWS"
   if [ -n "$CUR_APPROVALS" ]; then
     local rest=$CUR_APPROVALS
     while [ -n "$rest" ]; do
@@ -1197,6 +1209,12 @@ compute_delta_gitlab() {
 
   ev_sort_and_cap
   advance_from_surviving
+  while IFS=$'\t' read -r thread_id thread_state; do
+    [ -n "$thread_id" ] || continue
+    [ -z "$(map_get "$NEW_THREADS" "$thread_id")" ] || continue
+    NEW_THREADS=$(map_put "$NEW_THREADS" "$thread_id" "$thread_state")
+  done <<< "$thread_seeds"
+  NEW_THREADS=$(max_map_entries "$NEW_THREADS" "$MAP_LIMIT")
   return 0
 }
 
@@ -1474,6 +1492,14 @@ quarantine_write() {  # <sid> <count> <surfaced>: caller holds the lifecycle loc
   mv -f -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
 }
 
+# quarantine_active <sid>: 0 only when the recorded refusal count has reached
+# FM_PR_FOLLOW_APPLY_BOUND. A record below the bound is a counted attempt, not
+# a pause, so polling continues until the documented bound is reached.
+quarantine_active() {
+  quarantine_read "$1" || return 1
+  [ "$QUAR_COUNT" -ge "$APPLY_FAIL_BOUND" ]
+}
+
 # prf_quarantine_gate: the run child's pause point. Returns 0 to proceed with
 # polling, returns 1 after one pause sleep while quarantined, and exits after
 # emitting the one monitoring-loss document that is still unsurfaced. The
@@ -1482,7 +1508,7 @@ quarantine_write() {  # <sid> <count> <surfaced>: caller holds the lifecycle loc
 prf_quarantine_gate() {
   while :; do
     fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
-    if quarantine_read "$SID"; then
+    if quarantine_active "$SID"; then
       if [ "$QUAR_SURFACED" -eq 0 ]; then
         fm_lock_release "$(lifecycle_lock_path "$SID")"
         emit_error_doc "monitoring loss: source $SID paused after $QUAR_COUNT unapplicable captures; inspect the captured result and state/pr-follow/$SID.quarantine; rerun arm to resume after the adapter is repaired"
@@ -1642,7 +1668,7 @@ baseline_write() {
         *",$user,"*) ;;
         *) CUR_APPROVALS="${CUR_APPROVALS:+$CUR_APPROVALS,}$user" ;;
       esac
-    done <<< "$SN_APPROVAL_SET"
+    done <<< "$SN_APPROVAL_ROWS"
   fi
   CUR_BASELINE="done"
   cursor_store
@@ -1943,7 +1969,7 @@ cmd_apply() {  # <source-id> <sequence> <result-file>
         # Applying a quarantined source's monitoring-loss document is what
         # latches it surfaced, so the bounded surface cannot repeat.
         if [ "$DOC_STATUS" = error ] \
-           && quarantine_read "$sid" 2>/dev/null \
+           && quarantine_active "$sid" 2>/dev/null \
            && [ "$QUAR_SURFACED" -eq 0 ]; then
           quarantine_write "$sid" "$QUAR_COUNT" 1 || true
         fi

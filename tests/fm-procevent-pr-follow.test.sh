@@ -787,6 +787,15 @@ chmod 600 "$H/state/procevent-inbox/$sid.1.result" "$H/state/procevent-inbox/$si
 out=$(prf "$H" handle "$sid" 1 "$H/state/procevent-inbox/$sid.1.result" 2>&1) && fail "an unapplicable document must be refused"
 assert_contains "$out" "attempt 1 of 2" "the first refusal names its attempt against the bound"
 assert_grep 'count=1' "$H/state/pr-follow/$sid.quarantine" "the refusal is durably counted"
+# Below the bound the source keeps polling: a counted attempt is not a pause,
+# so this poll is the ordinary quiet one and surfaces no monitoring loss.
+out=$(FM_HOME="$H" perl -e 'alarm 2; exec @ARGV' \
+  "$ROOT/bin/fm-procevent-pr-follow.sh" run "$sid" 2>/dev/null || true)
+printf '%s' "$out" > "$TMP_ROOT/below-bound"
+assert_no_grep 'monitoring loss' "$TMP_ROOT/below-bound" \
+  "a refusal below the bound never pauses monitoring"
+assert_contains "$(printf '%s' "$out" | wc -c | tr -d ' ')" 0 \
+  "polling continues quietly below the bound"
 # Attempt two reaches the bound: acknowledge, pause, surface once.
 out=$(prf "$H" handle "$sid" 1 "$H/state/procevent-inbox/$sid.1.result" 2>&1) || fail "the bounded refusal must settle"
 assert_contains "$out" "monitoring-loss: $sid paused" "the bound surfaces an actionable monitoring-loss line"
@@ -946,14 +955,36 @@ RESULT=$(first_result "$H" "$glsid")
 assert_grep 'event: check id=7 change=pending->green status=success' "$RESULT" "the pipeline recovery is announced"
 assert_grep 'event: review id=approval-dave state=APPROVED author=dave' "$RESULT" "the approval grant is announced"
 ack "$H" "$glsid" 1 "$RESULT"
+assert_contains "$(cursor_field "$H" "$glsid" approvals)" "dave" "the applied approval is durable"
+# A second approver announces its own grant and revokes nobody, and a
+# discussion opened after the baseline enters the durable thread map.
 restart_runner "$H"
-printf '[{"id":"D1","resolved":true,"notes":[{"id":90,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/x.py","new_line":10}}]}]' > "$GL_FIX/discussions"
+printf '{"approved_by":[{"user":{"username":"dave"}},{"user":{"username":"erin"}}]}' > "$GL_FIX/approvals"
+printf '[{"id":"D1","resolved":false,"notes":[{"id":90,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/x.py","new_line":10}}]},{"id":"D2","resolved":false,"notes":[{"id":91,"author":{"username":"erin"},"type":"DiffNote","position":{"new_path":"src/y.py","new_line":4}}]}]' > "$GL_FIX/discussions"
+wait_for_result_count "$H" "$glsid" 2 || fail "the second approver produced no result"
+RESULT=$(latest_result "$H" "$glsid")
+assert_grep 'event: review id=approval-erin state=APPROVED author=erin' "$RESULT" \
+  "the second approval grant is announced"
+assert_no_grep 'state=DISMISSED' "$RESULT" "a second approver never revokes the first"
+ack "$H" "$glsid" 2 "$RESULT"
+assert_contains "$(cursor_field "$H" "$glsid" approvals)" "dave,erin" "both approvals are durable"
+assert_contains "$(cursor_field "$H" "$glsid" threads)" "D2:unresolved" \
+  "a discussion opened after the baseline is tracked from its first sighting"
+restart_runner "$H"
+printf '[{"id":"D1","resolved":false,"notes":[{"id":90,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/x.py","new_line":10}}]},{"id":"D2","resolved":true,"notes":[{"id":91,"author":{"username":"erin"},"type":"DiffNote","position":{"new_path":"src/y.py","new_line":4}}]}]' > "$GL_FIX/discussions"
+wait_for_result_count "$H" "$glsid" 3 || fail "the post-baseline thread resolution produced no result"
+RESULT=$(latest_result "$H" "$glsid")
+assert_grep 'event: thread id=D2 state=resolved' "$RESULT" \
+  "a thread opened after the baseline announces its resolution"
+ack "$H" "$glsid" 3 "$RESULT"
+restart_runner "$H"
+printf '[{"id":"D1","resolved":true,"notes":[{"id":90,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/x.py","new_line":10}}]},{"id":"D2","resolved":true,"notes":[{"id":91,"author":{"username":"erin"},"type":"DiffNote","position":{"new_path":"src/y.py","new_line":4}}]}]' > "$GL_FIX/discussions"
 printf '{"state":"merged","sha":"2222222222222222222222222222222222222222","author":{"username":"alice"}}' > "$GL_FIX/mr"
-wait_for_result_count "$H" "$glsid" 2 || fail "GitLab merge and resolve produced no result"
+wait_for_result_count "$H" "$glsid" 4 || fail "GitLab merge and resolve produced no result"
 RESULT=$(latest_result "$H" "$glsid")
 assert_grep 'event: thread id=D1 state=resolved' "$RESULT" "the thread resolution is announced"
 assert_grep 'event: pr-state from=open state=merged' "$RESULT" "the GitLab merge is announced"
-ack "$H" "$glsid" 2 "$RESULT"
+ack "$H" "$glsid" 4 "$RESULT"
 assert_present "$H/state/procevent/$glsid.source" "a merged GitLab MR keeps its registration"
 pass "GitLab comments, pipelines, approvals, threads, and merge are tracked"
 
@@ -990,6 +1021,42 @@ assert_grep 'event: check id=14 change=none->pending status=unknown' "$RESULT" \
 ack "$H" "$glsid" 2 "$RESULT"
 assert_contains "$(cursor_field "$H" "$glsid" checks)" "14:unknown" "the unknown token round-trips"
 pass "created, preparing, running, and unknown GitLab pipeline states round-trip"
+
+# --- the event bound truncates review noise but never the lifecycle line -------
+new_section cap
+gh_fix_default
+mkdir -p "$GL_FIX"
+# One event per document: enough to prove that the bound truncates the review
+# collections while the head and pr-state lines the cursor advance depends on
+# still reach the reader, and that the truncated remainder is re-announced.
+export FM_PR_FOLLOW_MAX_EVENTS=1
+printf '{"state":"opened","sha":"2222222222222222222222222222222222222222","author":{"username":"alice"}}' > "$GL_FIX/mr"
+printf '[{"id":"D1","resolved":false,"notes":[{"id":90,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/1.py","new_line":3}}]},{"id":"D2","resolved":false,"notes":[{"id":91,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/2.py","new_line":3}}]},{"id":"D3","resolved":false,"notes":[{"id":92,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/3.py","new_line":3}}]}]' > "$GL_FIX/discussions"
+printf '[]' > "$GL_FIX/pipelines"
+printf '{"approved_by":[]}' > "$GL_FIX/approvals"
+prf "$H" arm task-cap "$GL_URL" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_baseline "$H" "$glsid" || fail "the bounded-document baseline never completed"
+# Three resolutions and a merge land in one poll: the bound keeps one thread
+# event, and the merge announcement rides along instead of being truncated.
+printf '[{"id":"D1","resolved":true,"notes":[{"id":90,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/1.py","new_line":3}}]},{"id":"D2","resolved":true,"notes":[{"id":91,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/2.py","new_line":3}}]},{"id":"D3","resolved":true,"notes":[{"id":92,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/3.py","new_line":3}}]}]' > "$GL_FIX/discussions"
+printf '{"state":"merged","sha":"2222222222222222222222222222222222222222","author":{"username":"alice"}}' > "$GL_FIX/mr"
+wait_for_result "$H" "$glsid" || fail "the bounded poll produced no result"
+RESULT=$(first_result "$H" "$glsid")
+assert_grep 'dropped: 1' "$RESULT" "the overflowed poll records that it dropped events"
+assert_grep 'events: 2' "$RESULT" "the bound keeps one review event plus the exempt lifecycle line"
+assert_grep 'event: pr-state from=open state=merged' "$RESULT" \
+  "the lifecycle line is exempt from the event bound"
+assert_contains "$(grep -c 'event: thread' "$RESULT")" 1 "the thread events are truncated to the bound"
+ack "$H" "$glsid" 1 "$RESULT"
+restart_runner "$H"
+wait_for_result_count "$H" "$glsid" 2 || fail "the truncated remainder was never re-announced"
+RESULT=$(latest_result "$H" "$glsid")
+assert_grep 'event: thread' "$RESULT" "the remainder of an overflowed poll is announced later"
+assert_no_grep 'event: pr-state' "$RESULT" "an announced lifecycle change is never re-announced"
+ack "$H" "$glsid" 2 "$RESULT"
+unset FM_PR_FOLLOW_MAX_EVENTS
+pass "the event bound truncates review noise and never the lifecycle line"
 
 # --- deterministic rotation bounds aggregate load without starvation ----------
 new_section rotation

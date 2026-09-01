@@ -928,6 +928,45 @@ SH
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
 }
 
+# The migration sweep's digest is consumed line by line by the
+# bootstrap-diagnostics skill, so every line it emits - the per-PR armed lines
+# and the summary the skill matches on - has to carry the PR_FOLLOW_BACKFILL
+# prefix, including the run that actually arms something.
+test_pr_follow_backfill_digest_prefixes_every_line() {
+  local case_dir fakebin out line
+  case_dir="$TMP_ROOT/pr-follow-digest"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  printf 'task=pr-one\npr=https://github.com/octo/app/pull/7\n' > "$case_dir/home/state/pr-one.meta"
+  printf 'task=pr-two\npr=https://github.com/octo/app/pull/8\n' > "$case_dir/home/state/pr-two.meta"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "PR_FOLLOW_BACKFILL: backfill: armed prf-gh-" \
+    "the arming detail lost its digest prefix"
+  assert_contains "$out" \
+    "PR_FOLLOW_BACKFILL: backfill summary: scanned=2 armed=2 already=0 skipped=0 capped=0" \
+    "the summary line the diagnostics skill matches on lost its digest prefix"
+  while IFS= read -r line; do
+    case "$line" in
+      *backfill*)
+        case "$line" in
+          "PR_FOLLOW_BACKFILL: "*) ;;
+          *) fail "a backfill digest line escaped its prefix: $line" ;;
+        esac
+        ;;
+    esac
+  done <<< "$out"
+
+  # A second run arms nothing new, so the sweep stays silent.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "PR_FOLLOW_BACKFILL" \
+    "an already-armed home still reported a backfill digest"
+  pass "bootstrap: the PR follow-through backfill digest prefixes every line"
+}
+
 test_network_sweeps_recheck_lock_ownership() {
   local case_dir fakebin fake_root marker out
   case_dir="$TMP_ROOT/network-lock-handoff"
@@ -1172,6 +1211,7 @@ test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
+test_pr_follow_backfill_digest_prefixes_every_line
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
