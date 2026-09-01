@@ -17,6 +17,22 @@
 # picker offers, Pi's own clamp is what lowers a level a model cannot run, and
 # an explicit thinking level must beat the level a reopened session recorded.
 #
+# It also pins the vendor-side invariant the delivery-time freshness re-check
+# rides on. A note reported while the captain's turn is running is HELD until
+# Pi emits agent_settled with an idle context, so the hazard is a run that
+# starts without ever settling: that would strand the held note. This guard
+# proves, against the real SDK, that the real loader wires an extension's
+# handlers and that a prompt Pi refuses to run emits no lifecycle event.
+# LIMIT, stated rather than glossed: an isolated agent dir has no credentials
+# and no model, so no extension event is deliverable at all here and this guard
+# cannot exercise a real run's own agent_settled emission. The event NAMES are pinned
+# separately by the strict typecheck against the installed package
+# (tests/fm-pi-primary-types.test.sh).
+#
+# No credentials are read and no provider call leaves the machine: the guard
+# points PI_CODING_AGENT_DIR at an empty directory, so model resolution stays
+# empty by construction. Run after every Pi upgrade and before trusting
+# refreshed per-harness evidence (docs/verification/runtime-backends.md).
 # No provider call leaves the machine. The branch probe points
 # PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
 # model resolution stays empty by construction. The precedence probe reads
@@ -194,6 +210,66 @@ const pinFallback = mainUserMessages[1].content;
 if (!pinFallback.includes("openai/no-such-live-model") || !pinFallback.includes("supervision model pin")) {
   throw new Error(`the real-SDK fallback did not name the unusable pin: ${pinFallback}`);
 }
+
+// Held-note release waits for Pi's idle agent_settled event. Drive a prompt
+// the real SDK refuses to run and assert it emits no lifecycle event through
+// handlers the real loader actually wired.
+const sdk = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+let factoryWired = 0;
+const seen = [];
+const probeLoader = new sdk.DefaultResourceLoader({
+  cwd: home,
+  agentDir: sdk.getAgentDir(),
+  noExtensions: true,
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+  noContextFiles: true,
+  systemPrompt: "turn-end probe",
+  extensionFactories: [
+    {
+      name: "fm-turn-end-probe",
+      factory: (probePi) => {
+        factoryWired += 1;
+        for (const name of ["agent_start", "agent_end", "agent_settled"]) {
+          probePi.on(name, () => {
+            seen.push(name);
+          });
+        }
+      },
+    },
+  ],
+});
+await probeLoader.reload();
+mkdirSync(`${home}/state/probe-session`, { recursive: true });
+const probe = await sdk.createAgentSession({
+  cwd: home,
+  sessionManager: sdk.SessionManager.create(home, `${home}/state/probe-session`),
+  resourceLoader: probeLoader,
+  tools: [],
+  customTools: [],
+});
+let promptRefused = false;
+try {
+  await probe.session.prompt("probe turn");
+} catch {
+  // Expected: the isolated agent dir resolves no model and no credentials.
+  promptRefused = true;
+}
+try {
+  probe.session.dispose();
+} catch {
+  // Already gone.
+}
+if (factoryWired !== 1) {
+  throw new Error(`real resource loader did not wire the extension factory (ran ${factoryWired} times)`);
+}
+if (!promptRefused) {
+  throw new Error("credential-free probe prompt was accepted: this guard can no longer prove the refused-turn case");
+}
+if (seen.length !== 0) {
+  throw new Error(`a refused turn emitted unexpected lifecycle events: ${JSON.stringify(seen)}`);
+}
 console.log("LIVE_OK");
 process.exit(0);
 EOF
@@ -202,7 +278,8 @@ out=$(cat "$TMP_ROOT/node-output")
 if [ "$status" -ne 0 ] || [ "$out" != "LIVE_OK" ]; then
   fail "real-SDK Pi branch guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-pass "real Pi SDK $PI_VERSION accepts the branch session construction and preserves an unpromptable wake"
+pass "real Pi SDK $PI_VERSION accepts the branch session construction, preserves an unpromptable wake, and emits no lifecycle event for a refused turn"
+
 
 # Second probe: the vendor contract the supervision-branch model pin rests on.
 # An explicit model must beat the model a reopened session recorded, or a pin

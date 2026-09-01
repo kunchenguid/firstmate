@@ -5,40 +5,63 @@
 # CONTRACT (this header is the one owner of the store's format).
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
-#     "verdict":"routine"|"captain","summary":"...","silent":true|false}.
-#     Legacy rows without `silent` remain valid and are treated as visible.
+#     "verdict":"routine"|"captain","summary":"...","silent":true|false,
+#     "anchor":"..."}.
+#     Legacy rows without `silent` remain valid and are treated as visible;
+#     legacy rows without `anchor` remain valid and are never treated as stale.
 #     Existing lines are never rewritten, reordered, or deleted by any
 #     subcommand; the read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
-#     Pi as an append-only merge note, emitted by the locked session-start
+#     Pi as an append-only merge note, deliberately dropped as a stale routine
+#     note at the delivery boundary, emitted by the locked session-start
 #     replay, or silently consumed there because `silent` is true. Records
-#     above the cursor are "unread": the branch stored them but
-#     did not reach either handoff. A crash inside Pi's delivery window after
+#     above the cursor are "unread": the branch stored them but did not reach
+#     a delivery boundary or replay. A crash inside Pi's delivery window after
 #     cursor advancement does not auto-replay the row; it remains durable and
 #     available through the main session's fm_branch_outcomes tool.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
-#   - The store is written BEFORE the merge note is appended to main
-#     (store-first durability): nothing about a handled event depends on
-#     conversation memory.
+#   - The store is written BEFORE the delivery boundary can append a merge
+#     note to main (store-first durability): nothing about a handled event
+#     depends on conversation memory.
+#   - CLAIM ANCHOR (freshness). An outcome is recorded when its claim is true
+#     and delivered later, so every delivery re-checks the claim instead of
+#     trusting the recorded text. `anchor` is the task's claim anchor at
+#     append time: the durable records that decide whether a task-local claim
+#     is still current, which are the task metadata's presence and recorded
+#     `pr=`, plus whether the task's PR merge poll is still armed. Teardown
+#     and a merged PR both move it; ordinary status appends do not, so a
+#     routine note is not invalidated by mere progress. `fleet` has no
+#     task-local claim and anchors to the constant `fleet`. An anchor that
+#     cannot be computed is empty, which never reads as stale: an
+#     unverifiable claim is delivered unchanged rather than suppressed, so
+#     uncertainty never loses a captain-relevant outcome.
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
-#       --summary <text> [--wake <text>] [--silent true|false]
+#       --summary <text> [--wake <text>] [--silent true|false] \
+#       [--anchor <text>]
 #     Append one outcome record; prints the assigned seq.
+#   fm-branch-outcome.sh claim-anchor --task <id>
+#     Print the task's claim anchor right now. Compare a stored anchor with a
+#     fresh one to decide whether a recorded outcome is still current.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
-#     Advance the cursor (never backwards) after handing the records to Pi.
+#     Advance the cursor (never backwards) after accounting for records at the
+#     delivery boundary.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print visible unread records under a labeled
 #     header into the locked startup digest, skip rows whose `silent` field is
-#     true, and mark every unread row read. Prints nothing when nothing visible
+#     true, and mark every unread row read. A row whose stored anchor no longer
+#     matches its task's current anchor is emitted with "superseded":true added
+#     so the replay cannot relay a stale claim as current; the stored line is
+#     not rewritten. Prints nothing when nothing visible
 #     is unread, so a home that never ran the branch stays silent. Run it only
 #     when the session holds the lock (fm-session-start.sh owns the call site).
 set -eu
@@ -46,13 +69,16 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# fm_task_id_path_safe: the shared owner of task-id path safety.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
 LOCK="$STATE/.branch-outcomes.lock"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--anchor <text>] | claim-anchor --task <id> | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -83,10 +109,9 @@ last_seq() {
   [ -s "$STORE" ] || { printf '0\n'; return 0; }
   value=$(tail -n 1 "$STORE" 2>/dev/null | jq -er '
     select(type == "object")
-    | select(
-        keys == ["epoch", "seq", "summary", "task", "verdict", "wake"]
-        or (keys == ["epoch", "seq", "silent", "summary", "task", "verdict", "wake"] and (.silent | type) == "boolean")
-      )
+    | select((keys - ["anchor", "silent"]) == ["epoch", "seq", "summary", "task", "verdict", "wake"])
+    | select((has("silent") | not) or (.silent | type) == "boolean")
+    | select((has("anchor") | not) or (.anchor | type) == "string")
     | select((.seq | type) == "number" and .seq >= 1 and .seq == (.seq | floor))
     | select((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
     | select((.task | type) == "string" and (.wake | type) == "string")
@@ -94,6 +119,46 @@ last_seq() {
     | .seq
   ') || return 1
   printf '%s\n' "$value"
+}
+
+# The task's claim anchor: the durable records that decide whether a
+# task-local outcome is still current (header CONTRACT owns the semantics).
+# Fails only for a task id that is not path-safe, so a caller that cannot
+# compute one treats the claim as unverifiable rather than stale.
+claim_anchor() { # <task-id>
+  local id=$1 meta=0 poll=0 pr='' path
+  if [ "$id" = fleet ]; then
+    printf 'fleet\n'
+    return 0
+  fi
+  fm_task_id_path_safe "$id" || return 1
+  path="$STATE/$id.meta"
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    meta=1
+    pr=$(sed -n 's/^pr=//p' "$path" | head -n 1 | tr -d '\r')
+  fi
+  path="$STATE/$id.pr-poll"
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    poll=1
+  fi
+  printf 'meta=%s;poll=%s;pr=%s\n' "$meta" "$poll" "$pr"
+}
+
+# Annotate replayed rows whose stored anchor no longer matches the task's
+# current one. The stored line is never rewritten; the marker is added only to
+# what the replay emits.
+annotate_superseded() { # reads rows on stdin
+  local line task anchor current
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    task=$(printf '%s\n' "$line" | jq -r '.task // ""')
+    anchor=$(printf '%s\n' "$line" | jq -r '.anchor // ""')
+    if [ -n "$anchor" ] && current=$(claim_anchor "$task") && [ "$current" != "$anchor" ]; then
+      printf '%s\n' "$line" | jq -c '. + {superseded: true}'
+    else
+      printf '%s\n' "$line"
+    fi
+  done
 }
 
 record_seq() { # <jsonl-line>
@@ -131,6 +196,7 @@ case "$CMD" in
     SUMMARY=''
     WAKE=''
     SILENT=false
+    ANCHOR=''
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --task) TASK=${2:-}; shift 2 || usage ;;
@@ -138,6 +204,7 @@ case "$CMD" in
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
         --silent) SILENT=${2:-}; shift 2 || usage ;;
+        --anchor) ANCHOR=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
     done
@@ -152,11 +219,20 @@ case "$CMD" in
       exit 1
     fi
     SEQ=$(( LAST_SEQ + 1 ))
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s}\n' \
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"anchor":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
-      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" >> "$STORE"
+      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$(json_escape "$ANCHOR")" >> "$STORE"
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
+    ;;
+  claim-anchor)
+    [ "${1:-}" = --task ] || usage
+    [ "$#" -eq 2 ] || usage
+    [ -n "${2:-}" ] || usage
+    claim_anchor "$2" || {
+      echo "error: task id is not path-safe" >&2
+      exit 1
+    }
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
@@ -189,7 +265,7 @@ case "$CMD" in
     fm_lock_acquire_wait "$LOCK"
     UNREAD=$(print_unread)
     if [ -n "$UNREAD" ]; then
-      VISIBLE=$(printf '%s\n' "$UNREAD" | jq -c 'select(.silent != true)')
+      VISIBLE=$(printf '%s\n' "$UNREAD" | jq -c 'select(.silent != true)' | annotate_superseded)
       if [ -n "$VISIBLE" ]; then
         printf 'BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):\n'
         printf '%s\n' "$VISIBLE"

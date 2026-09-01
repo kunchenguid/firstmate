@@ -144,6 +144,60 @@ test_outcome_startup_replay_preserves_silence() {
   pass "startup replay skips silent outcomes and preserves visible and legacy rows"
 }
 
+test_claim_anchor_marks_a_superseded_replay() {
+  local home anchor replay outcome
+  home="$TMP_ROOT/store-anchor-home"
+  outcome="$ROOT/bin/fm-branch-outcome.sh"
+  mkdir -p "$home/state"
+
+  # A live task with an open PR: metadata recorded and the merge poll armed.
+  printf 'project=%s\nwindow=w\npr=%s\n' "$home/p" 'https://github.com/acme/ledger-lab/pull/7' \
+    > "$home/state/ledger-lab.meta"
+  printf 'github\n' > "$home/state/ledger-lab.pr-poll"
+
+  anchor=$(FM_HOME="$home" "$outcome" claim-anchor --task ledger-lab) || fail "claim-anchor failed"
+  assert_contains "$anchor" "pr=https://github.com/acme/ledger-lab/pull/7" "anchor lost the recorded PR"
+  [ "$anchor" = "$(FM_HOME="$home" "$outcome" claim-anchor --task ledger-lab)" ] \
+    || fail "claim-anchor is not stable for an unchanged task"
+  FM_HOME="$home" "$outcome" claim-anchor --task ../escape >/dev/null 2>&1 \
+    && fail "claim-anchor accepted a task id that is not path-safe"
+
+  # An ordinary status append is progress, not invalidation.
+  printf 'working: still going\n' >> "$home/state/ledger-lab.status"
+  [ "$anchor" = "$(FM_HOME="$home" "$outcome" claim-anchor --task ledger-lab)" ] \
+    || fail "an ordinary status append invalidated a task claim"
+
+  FM_HOME="$home" "$outcome" append --task ledger-lab --verdict captain \
+    --summary 'PR https://github.com/acme/ledger-lab/pull/7 checks green, ready for review' \
+    --anchor "$anchor" >/dev/null || fail "anchored append failed"
+  FM_HOME="$home" "$outcome" append --task fleet --verdict routine \
+    --summary 'fleet review rebased two branches' \
+    --anchor "$(FM_HOME="$home" "$outcome" claim-anchor --task fleet)" >/dev/null \
+    || fail "fleet anchored append failed"
+  printf '%s\n' '{"seq":3,"epoch":1,"task":"old-task","wake":"","verdict":"routine","summary":"legacy anchorless row"}' \
+    >> "$home/state/branch-outcomes.jsonl"
+  FM_HOME="$home" "$outcome" append --task ledger-lab --verdict routine \
+    --summary 'appended after a legacy tail' --anchor "$anchor" >/dev/null \
+    || fail "append refused a valid legacy tail after the anchor field was added"
+
+  # The PR merges and the finished task is torn down before the session that
+  # would have shown those outcomes ever starts.
+  rm -f "$home/state/ledger-lab.pr-poll" "$home/state/ledger-lab.meta"
+
+  replay=$(FM_HOME="$home" "$outcome" startup-replay) || fail "startup replay failed"
+  assert_contains "$replay" '"superseded":true' "replay relayed a stale claim as current"
+  assert_contains "$replay" "ready for review" "replay dropped a captain-relevant outcome instead of marking it"
+  [ "$(printf '%s\n' "$replay" | grep -c '"superseded":true')" = 2 ] \
+    || fail "replay did not mark every stale row: $replay"
+  printf '%s\n' "$replay" | grep 'fleet review rebased' | grep -q 'superseded' \
+    && fail "a fleet-wide row has no task-local claim and must never be superseded"
+  printf '%s\n' "$replay" | grep 'legacy anchorless row' | grep -q 'superseded' \
+    && fail "a legacy row with no anchor must never be superseded"
+  assert_contains "$replay" "legacy anchorless row" "replay dropped a legacy row"
+  [ -z "$(FM_HOME="$home" "$outcome" unread)" ] || fail "replay left rows unread"
+  pass "a recorded outcome whose task claim moved on replays as superseded, and fleet and legacy rows do not"
+}
+
 # --- lease contract -----------------------------------------------------------
 
 test_lease_exclusivity_release_stale_and_sweep() {
@@ -539,6 +593,7 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
+test_claim_anchor_marks_a_superseded_replay
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor

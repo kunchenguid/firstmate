@@ -1018,5 +1018,29 @@ FM_TEST_END 2026-08-29T01:01:01Z tests/fm-pi-branch-live-e2e.test.sh exit=0 dura
 
 The focused extension suite also exercised the installed Pi 0.84.4 picker and outcome-renderer consumers; [`calm-mode-feasibility.md`](../calm-mode-feasibility.md#2026-08-28-pi-0844-outcome-renderer-compatibility-verification) owns the version-scoped renderer evidence.
 
+### 2026-08-31 delivery-time freshness re-verification against Pi 0.84.4
+
+The live guard and the strict typecheck were rerun after the supervision branch gained its delivery-time freshness boundary.
+That change re-checks every merge note immediately before handoff, holds notes reported during an observed main run until an idle-confirmed boundary, and adds a refused-turn lifecycle assertion to the live guard, so the guard's own recorded line changes with it.
+The live guard still pointed `PI_CODING_AGENT_DIR` at an empty directory, read no credentials, and made no provider call.
+Environment: macOS 15.7.3 arm64, Node v26.5.0, installed `@earendil-works/pi-coding-agent` 0.84.4, signed `pi` CLI 0.84.4.
+
+```sh
+npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+```
+
+```text
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
+ok - real Pi SDK 0.84.4 accepts the branch session construction, preserves an unpromptable wake, and emits no lifecycle event for a refused turn
+ok - real Pi SDK 0.84.4 applies an explicit branch model on create and over a reopened session's recorded model
+ok - real Pi SDK 0.84.4 reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level
+ok - real Pi SDK 0.84.4 delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model
+FM_TEST_END 2026-08-31T18:25:31Z tests/fm-pi-branch-live-e2e.test.sh exit=0 duration_ms=2509 gate_skip=false
+```
+
+Measured limit of the refused-turn clause on 0.84.4: with no credentials the SDK delivers no extension event at all, so this guard pins the refused-turn case and the fact that the real `DefaultResourceLoader` wires an extension's handlers, not a successfully started turn's own end emission.
+The `agent_start` and `agent_settled` event names the held-note release depends on are pinned separately by the strict typecheck above against the installed package; `agent_end` is exercised only as a non-release event by the live guard.
+
 Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running the live guard, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
