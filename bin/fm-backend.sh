@@ -773,7 +773,7 @@ fm_backend_kill() {  # <backend> <target>
 # Conservative by construction: anything short of proof reads as "still there".
 fm_backend_endpoint_blocks_respawn() {  # <backend> <target> <label>
   local backend=$1 target=$2 label=$3 check_status
-  fm_backend_source "$backend" || return 1
+  fm_backend_source "$backend" || return 0
   check_status=0
   case "$backend" in
     tmux)

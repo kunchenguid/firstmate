@@ -85,7 +85,7 @@ fm_backend_tmux_window_exists() {  # <session> <window-name>
   local ses=$1 wname=$2 windows
   [ -n "$ses" ] && [ -n "$wname" ] || return 1
   windows=$(tmux list-windows -t "$ses" -F '#{window_name}') || return 2
-  printf '%s\n' "$windows" | grep -qx "$wname"
+  printf '%s\n' "$windows" | grep -qxF -- "$wname"
 }
 
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,

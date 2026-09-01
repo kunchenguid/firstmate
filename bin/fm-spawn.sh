@@ -1870,8 +1870,19 @@ real_path_or_raw() {  # <path>
 #
 # A present worktree= value that cannot resolve to a real path refuses because
 # it cannot prove a candidate is free, while an absent worktree= remains
-# skipped. Failing closed on every unreadable record was rejected because one
-# corrupt or half-written record would wedge every spawn in this home.
+# skipped. Failing closed on every unreadable record was rejected because a
+# single unreadable record would wedge every spawn in this home.
+#
+# That wedge is not limited to a corrupt or half-written record; there is a
+# routine path into it. bin/fm-teardown.sh deletes an orca task's worktree
+# (fm_backend_remove_worktree) before it removes the durable record, and record
+# removal has an explicitly handled failure exit ("$ID's endpoint and local copy
+# are cleaned up, but its task record could not be removed"). A record that
+# survives that window points at a directory that no longer exists, so it cannot
+# resolve, and from then on EVERY spawn in this home refuses - including spawns
+# targeting entirely unrelated worktrees - until an operator removes the stale
+# record by hand. The refusal message already names the owning task, the record
+# file, and the unresolvable path, which is what an operator needs to clear it.
 #
 # Widening the scan across sibling homes is tracked separately and is
 # deliberately out of scope here: it would add a cross-home read, and a new
