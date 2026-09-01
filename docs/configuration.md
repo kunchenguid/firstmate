@@ -929,6 +929,12 @@ FM_INBOX_ASK_MODEL=     # overrides config/inbox-ask-model for fm-inbox.sh ask
 FM_INBOX_PROFILE=       # overrides config/inbox-profile; explicitly empty forces ambient credentials
 ```
 
+A task that was already in flight when the per-task temp root became home-scoped recorded the older undiscriminated `<base>/fm-<id>` shape, so its teardown prints `warning: recorded temp root ... is not <id>'s own` and leaves the directory in place.
+That is intended one-time upgrade behavior rather than a fault: the old shape cannot be attributed to a home, because two homes with colliding task ids both recorded exactly it, so removing it would risk deleting a live sibling home's directory.
+What is left behind is small and bounded - those roots hold only Go build temp, since agent scratch was never pinned there before this change - and it stops appearing once the tasks in flight at the upgrade are gone.
+An operator who wants the space back can remove such a directory by hand after confirming no live task is using it.
+[`bin/fm-task-tmp-lib.sh`](../bin/fm-task-tmp-lib.sh)'s header owns the full rationale for that refusal.
+
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
 `FM_TREEHOUSE_RETURN_LOCK_RETRIES` accepts a nonnegative integer, and an unset, blank, or invalid value uses the default of 3.
 `FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS` accepts nonnegative whole or fractional seconds between attempts.
