@@ -16,6 +16,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Marker detection precedes ancestry. Drop the launching harness's ambient
+# markers so each case proves only the fixture evidence it supplies itself.
+unset CODEX_THREAD_ID CODEX_SESSION_ID CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+
 TMP_ROOT=$(fm_test_tmproot fm-session-lock-ancestry)
 fm_git_identity fmtest fmtest@example.invalid
 

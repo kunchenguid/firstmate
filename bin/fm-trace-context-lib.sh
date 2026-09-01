@@ -42,9 +42,6 @@
 #     task's recorded carrier wins so recovery keeps identity; otherwise a
 #     fresh root is minted, never derived from this process's environment.
 
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
-#
 # Enablement (see docs/configuration.md for the schema):
 #   config/trace-context   presence flag under the home's config dir enables it.
 #   FM_TRACE_CONTEXT        env override: 1/on/true/yes enables, any other
@@ -96,6 +93,9 @@
 #              spawning process's ambient TRACEPARENT is never adopted, so a
 #              persistent supervisor's environment cannot chain its unrelated
 #              routed tasks into one trace.
+
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
 
 # Strict W3C traceparent validator: version 00, 32-hex trace id, 16-hex span id,
 # 2-hex flags, with neither id all-zero. The regex lives in a variable because

@@ -526,7 +526,7 @@ EOF
   next_owner=$(/bin/ps -o ppid= -p $$ | tr -d ' ')
   started=$(date +%s)
   rc=0
-  out=$(PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
+  out=$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-lock.sh" 2>&1) || rc=$?
   elapsed=$(( $(date +%s) - started ))
   [ "$rc" -ne 0 ] || fail "lock takeover succeeded while the prior sweep was mutating"
@@ -537,14 +537,11 @@ EOF
     || fail "the lease-blocked takeover replaced the prior owner"
 
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the leased sweep never settled"
-  out=$(PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
+  out=$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-lock.sh" 2>&1) \
     || fail "lock takeover still failed after the sweep released its lease"
   new_owner=$(cat "$home/state/.lock")
-  case "$new_owner" in
-    codex:*) expected="lock acquired: session $new_owner" ;;
-    *) expected="lock acquired: harness pid $new_owner" ;;
-  esac
+  expected="lock acquired: harness pid $new_owner"
   assert_contains "$out" "$expected" "the fleet lock did not record the session owner reported by acquisition"
   [ "$new_owner" != "$$" ] || fail "the prior harness still owned the lock after takeover"
   pass "fm-startup-network: fleet-lock takeover cannot overlap a mutating sweep"

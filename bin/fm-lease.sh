@@ -124,7 +124,8 @@ case "$CMD" in
     HOLDER_PID=${FM_LEASE_HOLDER_PID:-}
     case "$HOLDER_PID" in *[!0-9]*) HOLDER_PID= ;; esac
     if [ -z "$HOLDER_PID" ]; then
-      HOLDER_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
+      HOLDER_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null | sed 's/^[[:blank:]]*//; s/[[:blank:]]*$//' || true)
+      case "$HOLDER_PID" in *[!0-9]*) HOLDER_PID= ;; esac
     fi
     [ -n "$HOLDER_PID" ] || HOLDER_PID=$$
     TMP=$(mktemp "$STATE/.fm-lease-tmp.XXXXXX")
