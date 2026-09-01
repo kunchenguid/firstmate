@@ -2221,9 +2221,14 @@ if [ "$KIND" = ship ]; then
   # the operator's own config, so egress is on for every firstmate codex crewmate
   # regardless of the machine. The pipeline denial is the reliable blocker, so say
   # it at dispatch rather than leaving it to be rediscovered at the gate; this is a
-  # notice, not a refusal, because local-only work and a firstmate-driven landing
-  # are both legitimate.
-  if [ "$HARNESS" = codex ] && [ "$MODE" != local-only ]; then
+  # notice, not a refusal, because a firstmate-driven landing is legitimate.
+  # It fires for no-mistakes ALONE, because that is the only mode whose contract
+  # needs the denied directory. A direct-PR brief (bin/fm-dod-lib.sh) says "Do NOT
+  # run /no-mistakes" and completes by pushing and opening the PR itself, which
+  # the git common dir grant and the unconditional network_access grant already
+  # cover; local-only never leaves the machine. On either of those modes every
+  # clause here would describe a limit the worker does not have.
+  if [ "$HARNESS" = codex ] && [ "$MODE" = no-mistakes ]; then
     echo "notice: $ID ships mode=$MODE on codex, whose sandbox denies the no-mistakes data directory - the worker can commit and reach the network but cannot run validation itself; expect to land it another way or choose another harness" >&2
   fi
 fi
