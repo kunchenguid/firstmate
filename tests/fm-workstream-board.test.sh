@@ -126,6 +126,46 @@ test_an_uncapped_lane_may_omit_its_counts() {
   pass "a lane that ships all of its rows may omit its lane counts"
 }
 
+# The board's one lane-total invariant: the six counts sum to EXACTLY the rows
+# the lane ships plus its more_tasks. Sweep both sides of that equation rather
+# than pinning one example payload, so a later hole cannot open unnoticed.
+test_lane_counts_must_total_the_whole_lane_exactly() {
+  local home data delta rc out
+  home=$(make_home lanetotal)
+  data="$home/payload.json"
+
+  # write_valid_payload ships 3 rows, more_tasks 2, and counts totalling 5.
+  for delta in -3 -2 -1 1 2 3; do
+    write_valid_payload "$data"
+    jq --argjson d "$delta" '.workstreams[0].counts.queued += $d' \
+      "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] \
+      || fail "lane counts off the lane total by $delta were accepted: $out"
+  done
+
+  # Same equation from the other side: move the lane total, keep counts fixed.
+  for delta in -2 -1 1 2 3; do
+    write_valid_payload "$data"
+    jq --argjson d "$delta" '.workstreams[0].more_tasks += $d' \
+      "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] \
+      || fail "a lane total moved $delta away from its counts was accepted: $out"
+  done
+
+  [ ! -e "$home/.lavish/workstreams.html" ] \
+    || fail "a refused lane-total payload still produced a board"
+
+  # The balanced payload the sweep perturbs must itself build, so the sweep is
+  # proving the invariant rather than refusing everything.
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null 2>&1 \
+    || fail "the balanced lane-total payload was refused"
+  [ -f "$home/.lavish/workstreams.html" ] || fail "the balanced payload produced no board"
+  pass "lane counts are refused unless they total the shipped rows plus more_tasks"
+}
+
 test_build_refuses_malformed_payloads_before_touching_the_board() {
   local home data board rc out
   home=$(make_home refusal)
@@ -199,6 +239,11 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "lane counts totalling fewer than the lane's own rows were accepted"
+
+  write_valid_payload "$data"
+  jq 'del(.workstreams[0].more_tasks)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "lane counts describing rows the lane no longer omits were accepted"
 
   write_valid_payload "$data"
   jq '.waiting[0].key = (reduce range(129) as $i (""; . + "x"))' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
@@ -338,6 +383,7 @@ test_build_refuses_a_template_without_exactly_one_slot() {
 test_path_is_stable_home_scoped_and_mockup_safe
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_an_uncapped_lane_may_omit_its_counts
+test_lane_counts_must_total_the_whole_lane_exactly
 test_build_injects_binds_then_arms
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm

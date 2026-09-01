@@ -32,7 +32,8 @@ The board is a sibling of the bearings board and shares its build mechanics thro
    - Pass the snapshot's workstreams through, including the explicit `unassigned` lane, and keep each lane's `more` count as the payload's `more_tasks`.
    - Distribute the snapshot's flat `tasks[]` into each lane's `tasks` array by each row's `ws` field; a lane's `tasks` holds exactly the rows tagged with that lane's id.
    - Carry each lane's whole-lane state tallies through as its `counts` object with all six keys (`done`, `review`, `active`, `held`, `decision`, `queued`), so the progress bar reports the lane rather than the rows the cap left visible.
-     The builder REFUSES a lane that ships `more_tasks` above zero without `counts`, a partial `counts`, or a `counts` totalling fewer than the rows the lane ships.
+     The six counts must total EXACTLY the lane - the rows the payload ships plus its `more_tasks` - which the snapshot's own `total` already satisfies.
+     The builder REFUSES a lane that ships `more_tasks` above zero without `counts`, a partial or empty `counts`, or any `counts` whose total is not that exact lane total.
    - Pass the snapshot's `edges` and `divergence` rows through; the divergence callout is how the captain learns the backlog and the live fleet disagree.
    - Map each agent's state to a chip tone: `working` for a working agent, `decision` for one waiting on the captain, `paused` otherwise.
      The same tone rule fills the roster's `agents[].tone` and each pinned chip's `tasks[].agent_tone`.

@@ -200,7 +200,8 @@ test_every_task_row_exposes_its_full_title() {
   home=$(make_home titles)
   payload=$(base_payload | jq '
     .workstreams[0].tasks += [{ id: "long-queued", state: "queued",
-      title: "A queued backlog row whose title is far too long to fit on one line of the board" }]')
+      title: "A queued backlog row whose title is far too long to fit on one line of the board" }]
+    | .workstreams[0].counts.queued += 1')
   out=$(render "$home" "$payload")
   # The plain row has no disclosure control, so its full title has to be
   # reachable from the summary itself.

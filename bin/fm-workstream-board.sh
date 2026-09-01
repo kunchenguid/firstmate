@@ -34,9 +34,9 @@
 # that task at answer time. A workstream's `counts` object carries that lane's
 # whole-lane state tallies, so the progress bar reports the lane and not
 # whatever subset of rows the row cap left visible; it is REQUIRED whenever
-# `more_tasks` is above zero, must carry all six state keys, and must total at
-# least the rows it ships. Anything else refuses before the existing board is
-# touched.
+# `more_tasks` is above zero, must carry all six state keys, and must total
+# EXACTLY the lane - the rows it ships plus `more_tasks`. Anything else refuses
+# before the existing board is touched.
 #
 # The board path is stable - $FM_HOME/.lavish/workstreams.html - so a
 # re-invocation rebuilds the same file in place, keeping the same Lavish
@@ -85,11 +85,11 @@ validate_payload() {  # <data.json>
           and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
     def tone: . == "working" or . == "paused" or . == "decision";
     def whole_number: type == "number" and . >= 0 and (floor == .);
-    def lane_counts($rows):
+    def lane_counts($total):
       type == "object"
       and ((keys - ["active", "decision", "done", "held", "queued", "review"]) | length) == 0
       and ([.done, .review, .active, .held, .decision, .queued] | all(whole_number))
-      and (([.done, .review, .active, .held, .decision, .queued] | add) >= $rows);
+      and (([.done, .review, .active, .held, .decision, .queued] | add) == $total);
     def task_item:
       type == "object"
       and (.id | slug(128))
@@ -109,8 +109,8 @@ validate_payload() {  # <data.json>
       and (.tasks | type == "array")
       and ([.tasks[] | task_item] | all)
       and ((has("more_tasks") | not) or (.more_tasks | whole_number))
-      and ((.tasks | length) as $rows
-        | if has("counts") then (.counts | lane_counts($rows))
+      and (((.tasks | length) + (.more_tasks // 0)) as $total
+        | if has("counts") then (.counts | lane_counts($total))
           else (.more_tasks // 0) == 0 end);
     def edge_item:
       type == "object" and (.from | slug(128)) and (.to | slug(128));

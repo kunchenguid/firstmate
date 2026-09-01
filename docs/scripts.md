@@ -19,6 +19,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
+| `fm-workstream-snapshot.sh` | Project the fleet snapshot into bounded workstream lanes, edges, and divergence rows; always local-only |
+| `fm-workstream-board.sh` | Build and arm the stable interactive `/workstreams` lavish board                     |
+| `fm-board-lib.sh`        | Shared lavish board build sequence for the bearings and workstream builders: inject, round-trip check, serve then bind then arm |
+| `fm-toon-lib.sh`         | Shared TOON encoder for the snapshot wrappers' output boundary                       |
 | `fm-secondmate-reconcile.sh` | Ask each secondmate to reconcile an inventory mismatch through its durable inbox, limited by a per-home cooldown |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes       |
 | `fm-on.sh`               | Execute one tracked Firstmate command in a configured remote secondmate home, using its job worker except for the doctor bootstrap |
