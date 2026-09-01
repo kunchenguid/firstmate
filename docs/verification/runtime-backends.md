@@ -1075,6 +1075,130 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## thurbox
+
+The current compatibility floor is thurbox-cli 2.11.0, and the active live evidence uses 2.11.0 on Linux x86_64, verified 2026-09-01.
+Real checks create only `fm-*-probe` sessions in a scratch git repository and remove them with `session delete --force`.
+
+```sh
+thurbox-cli version --json
+```
+
+Observed version:
+
+```text
+{"data_dir":"/home/<user>/.local/share/thurbox","schema_version":41,"tmux_socket":"thurbox","version":"2.11.0"}
+```
+
+### Error stream
+
+`thurbox-cli` reports failures as a JSON object on stdout with an empty stderr and a non-zero exit.
+
+```sh
+thurbox-cli session get 00000000-0000-0000-0000-000000000000 --json
+```
+
+```text
+{"error":"Session not found: 00000000-0000-0000-0000-000000000000","suggestion":"the command ran and failed; the message says what went wrong - `thurbox-cli` prints the state it was working against"}
+```
+
+Exit status 1, stderr empty.
+The consequence for a driver is that a naive parse turns the failure into a silent empty success:
+
+```sh
+thurbox-cli session get 00000000-0000-0000-0000-000000000000 --json | jq -r '.state // empty'
+```
+
+```text
+(no output)
+exit 0
+```
+
+This is why the adapter checks the CLI's own exit status before any parse and additionally rejects an `error`-keyed payload.
+
+### Capture bounds
+
+`--lines N` prepends up to N scrollback rows to the whole visible screen, matching tmux's `capture-pane -p -S -N`.
+Measured on a 63-row pane after writing 400 lines of scrollback:
+
+| `--lines` | Rows returned |
+| --- | --- |
+| 0 | 63 |
+| 50 | 113 |
+| 500 | 403 |
+| 2000 | 403 |
+
+The 500 and 2000 results are equal because that is all the scrollback the pane held.
+A pane running an alternate-screen agent holds no scrollback, so every value returns the visible screen there.
+
+`cursor_row` is 0-based relative to the visible pane and does not shift when scrollback is prepended, which is why the composer read uses `--lines 0`.
+
+### Event stream
+
+`thurbox-cli watch --json` emits one newline-delimited JSON object per transition.
+Observed across a full create/signal/stop/delete cycle on a probe session:
+
+```text
+{"at":...,"backend_id":"%52","event":"created","name":"fm-probe-throwaway","session":"<uuid>","state":null,"stopped":false}
+{"at":...,"backend_id":"%52","event":"changed","name":"fm-probe-throwaway","session":"<uuid>","state":"blocked","stopped":false}
+{"at":...,"backend_id":"%52","event":"changed","name":"fm-probe-throwaway","session":"<uuid>","state":"working","stopped":false}
+{"at":...,"backend_id":"%52","event":"changed","name":"fm-probe-throwaway","session":"<uuid>","state":null,"stopped":true}
+{"at":...,"backend_id":"%52","event":"gone","name":"fm-probe-throwaway","session":"<uuid>","state":null,"stopped":true}
+```
+
+`--initial` additionally emits one `present` row per live session before the first change.
+Event timestamps trailed each `session signal` by about one second, so the stream removes the driver's poll but is not synchronous with the agent's hook.
+
+### Pane identity
+
+A session created for one task carries that task's own identity in its pane.
+
+```sh
+thurbox-cli session send <probe> 'echo "PANE_THURBOX_SESSION=$THURBOX_SESSION"'
+```
+
+```text
+PANE_THURBOX_SESSION=<probe uuid>
+```
+
+The value is the probe's uuid, not the creating session's, so an agent's hooks in a spawned pane report state for the correct session.
+
+`session exec` does not share that guarantee.
+
+```sh
+thurbox-cli session exec <probe> -- sh -c 'echo FM_PROBE=$FM_PROBE; echo THURBOX_SESSION=$THURBOX_SESSION'
+```
+
+```text
+FM_PROBE=
+THURBOX_SESSION=<calling session uuid>
+```
+
+`--env FM_PROBE=1` given at create time is absent, and the caller's own `THURBOX_SESSION` is inherited.
+`session exec` therefore sets the cwd and host but not the session's environment.
+The adapter does not use it.
+
+### Metadata output shape
+
+`session meta get` prints the record, not the bare value, unless output is forced.
+
+```sh
+v=$(thurbox-cli session meta get <session> somekey)
+```
+
+```text
+id: <session uuid>
+key: somekey
+value: plain-value
+```
+
+An unset key prints `value: null` and exits 0.
+`--json` returns `{"id":...,"key":...,"value":...}`; `--text` prints the bare value and prints nothing for an unset key.
+
+### Regression coverage
+
+`tests/fm-backend-thurbox.test.sh` pins every contract above against a fake `thurbox-cli` with a real `jq`, so it runs everywhere CI does with no thurbox installation.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.

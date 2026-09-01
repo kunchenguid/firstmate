@@ -336,6 +336,12 @@ family_for_basename() {
     fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh)
       printf '%s\n' standalone
       ;;
+    # The thurbox suite drives a FAKE thurbox-cli, so it needs no real binary
+    # and stays in the ordinary backend-dispatch family rather than an
+    # optional-binary one.
+    fm-backend-thurbox.test.sh)
+      printf '%s\n' backend-dispatch
+      ;;
     *)
       printf '%s\n' unclassified
       ;;
@@ -548,6 +554,7 @@ tests/fm-ask-user-authority.test.sh 128
 tests/fm-backend-cmux-smoke.test.sh 33
 tests/fm-backend-cmux.test.sh 3657
 tests/fm-backend-orca.test.sh 19253
+tests/fm-backend-thurbox.test.sh 4200
 tests/fm-backend-tmux-smoke.test.sh 393
 tests/fm-backend-zellij-smoke.test.sh 23
 tests/fm-backend-zellij.test.sh 9418
@@ -1197,6 +1204,9 @@ families_for_changed_path() {
     bin/backends/orca*|bin/backends/tmux.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
+      ;;
+    bin/backends/thurbox.sh)
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
       printf '%s\n' backend-dispatch

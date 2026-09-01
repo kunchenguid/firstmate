@@ -1100,6 +1100,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=orca does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = thurbox ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=thurbox does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
   if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
@@ -2397,6 +2401,15 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
+  thurbox)
+    fm_backend_thurbox_container_ensure || exit 1
+    T=$(fm_backend_thurbox_create_task "$W" "$PROJ_ABS") || exit 1
+    if [ -z "$T" ]; then
+      echo "error: thurbox did not return a session id for $W" >&2
+      exit 1
+    fi
+    THURBOX_SESSION_ID=${T#thurbox:}
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -2442,6 +2455,7 @@ spawn_send_text_line() {  # <target> <text>
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+    thurbox) fm_backend_thurbox_send_text_line "$1" "$2" ;;
   esac
 }
 spawn_current_path() {  # <target>
@@ -2450,6 +2464,7 @@ spawn_current_path() {  # <target>
     herdr) fm_backend_herdr_current_path "$1" ;;
     zellij) fm_backend_zellij_current_path "$1" "$W" ;;
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+    thurbox) fm_backend_thurbox_current_path "$1" ;;
   esac
 }
 spawn_send_literal() {  # <target> <text>
@@ -2459,6 +2474,7 @@ spawn_send_literal() {  # <target> <text>
     zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_literal "$1" "$2" ;;
     cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+    thurbox) fm_backend_thurbox_send_literal "$1" "$2" ;;
   esac
 }
 spawn_send_key() {  # <target> <key>
@@ -2468,6 +2484,7 @@ spawn_send_key() {  # <target> <key>
     zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+    thurbox) fm_backend_thurbox_send_key "$1" "$2" ;;
   esac
 }
 
@@ -3038,7 +3055,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id thurbox_session_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3081,6 +3098,11 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
+  fi
+  if [ "$BACKEND" = thurbox ]; then
+    # The session uuid is already inside window=thurbox:<uuid>; recording it on
+    # its own line keeps a bare-uuid read from having to parse the target.
+    echo "thurbox_session_id=$THURBOX_SESSION_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"

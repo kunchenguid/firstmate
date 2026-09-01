@@ -893,17 +893,24 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  # No record at all. A native herdr busy verdict is semantic enough to trust
-  # for BUSY (streaming means a turn is running); native idle is narrower
-  # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
-  if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
-    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
-    if [ "$native" = busy ]; then
-      printf 'busy herdr-native'
-      return 0
-    fi
-  fi
+  # No record at all. A native herdr or thurbox busy verdict is semantic enough
+  # to trust for BUSY (streaming, or a hook-reported `working`, means a turn is
+  # running); native idle is narrower than turn state (a long foreground tool
+  # call reads idle) and stays unknown here. thurbox's own adapter already
+  # refuses to answer at all unless the state came from a live agent hook that
+  # thurbox has not marked contradicted, so a busy verdict here is never a
+  # stale row (bin/backends/thurbox.sh's fm_backend_thurbox_busy_state).
+  case "$backend" in
+    herdr|thurbox)
+      if command -v fm_backend_busy_state >/dev/null 2>&1; then
+        native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+        if [ "$native" = busy ]; then
+          printf 'busy %s-native' "$backend"
+          return 0
+        fi
+      fi
+      ;;
+  esac
   case "$harness" in
     muse*)
       # Semantic, on demand: fold this task's bound session log. An open run is
