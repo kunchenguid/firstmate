@@ -1194,7 +1194,8 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID legacy-label fixture could not rename its task tab"
     sed -i.bak "s/^task_label=.*/task_label=$LEGACY_RESTART_LABEL/" \
       "$HOME_DIR/state/$RESTART_ID.herdr-presentation" \
-      && rm -f "$HOME_DIR/state/$RESTART_ID.herdr-presentation.bak" \
+      || fail "$RESTART_ID legacy-label fixture could not update its journal"
+    rm -f "$HOME_DIR/state/$RESTART_ID.herdr-presentation.bak" \
       || fail "$RESTART_ID legacy-label fixture could not update its journal"
   fi
   EXPECTED_CONCISE=${RESTART_ID#fm-}
