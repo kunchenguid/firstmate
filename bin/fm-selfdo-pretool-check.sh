@@ -96,6 +96,7 @@ if [ "$PATH_SET" -eq 0 ] && [ "$COMMAND_SET" -eq 0 ]; then
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
   # Detect cursor duplicate like other guards.
+  # shellcheck source=bin/fm-hook-host-lib.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh" 2>/dev/null || true
   if command -v fm_hook_payload_is_foreign_host >/dev/null 2>&1; then
     if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD" 2>/dev/null; then

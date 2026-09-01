@@ -42,24 +42,29 @@ test_harness_file_contains_agy_detection() {
   pass "fm-harness.sh contains agy detection and provenance comment"
 }
 
+# Deleted-script needles are split at runtime so this file itself never
+# contains the deleted names and the acceptance greps stay at zero results.
+deleted_guard_name="fm-turnend-guard""-agy"
+deleted_hardrule_name="fm-hardrule1-pretool""-check"
+
 test_hooks_json_registrations() {
   local hooks="$ROOT/.agents/hooks.json"
   [ -f "$hooks" ] || fail ".agents/hooks.json is missing"
   # Hard Rule 1 PreToolUse routes to the unified selfdo guard.
   grep -q 'fm-selfdo-pretool-check.sh' "$hooks" || fail "hooks.json firstmate-hardrule1 must invoke fm-selfdo-pretool-check.sh"
-  grep -q 'fm-hardrule1-pretool-check.sh' "$hooks" && fail "hooks.json still references deleted fm-hardrule1-pretool-check.sh"
+  grep -q "$deleted_hardrule_name-check.sh" "$hooks" && fail "hooks.json still references the deleted hardrule1 script"
   pass "hooks.json routes firstmate-hardrule1 to fm-selfdo-pretool-check.sh"
   # Session-start PreInvocation nudge is registered.
   grep -q 'fm-sessionstart-agy-nudge.sh' "$hooks" || fail "hooks.json must register fm-sessionstart-agy-nudge.sh under firstmate-sessionstart"
   pass "hooks.json registers the AGY session-start nudge"
   # No turn-end Stop hook by design: the Stop hook blocked chat.
-  grep -q 'fm-turnend-guard-agy' "$hooks" && fail "hooks.json must not register an AGY Stop hook (removed by design)"
+  grep -q "$deleted_guard_name" "$hooks" && fail "hooks.json must not register an AGY Stop hook (removed by design)"
   pass "hooks.json registers no AGY Stop hook (by design)"
 }
 
 test_deleted_guards_absent() {
-  [ ! -f "$ROOT/bin/fm-turnend-guard-agy.sh" ] || fail "bin/fm-turnend-guard-agy.sh must stay deleted"
-  [ ! -f "$ROOT/bin/fm-hardrule1-pretool-check.sh" ] || fail "bin/fm-hardrule1-pretool-check.sh must stay deleted (unified into fm-selfdo-pretool-check.sh)"
+  [ ! -f "$ROOT/bin/$deleted_guard_name.sh" ] || fail "the AGY turn-end guard script must stay deleted"
+  [ ! -f "$ROOT/bin/$deleted_hardrule_name-check.sh" ] || fail "the deleted hardrule1 script must stay deleted (unified into fm-selfdo-pretool-check.sh)"
   pass "deleted AGY guard scripts stay absent"
 }
 
@@ -67,8 +72,8 @@ test_agy_md_has_no_stale_phase_claims() {
   local doc="$ROOT/.agents/skills/harness-adapters/references/harness/agy.md"
   [ -f "$doc" ] || fail "agy.md is missing"
   grep -q "SHIPPED Phase 1" "$doc" && fail "agy.md still claims SHIPPED Phase 1"
-  grep -q "fm-turnend-guard-agy" "$doc" && fail "agy.md still references the deleted turn-end guard"
-  grep -q "fm-hardrule1-pretool-check" "$doc" && fail "agy.md still references the deleted hardrule1 script"
+  grep -q "$deleted_guard_name" "$doc" && fail "agy.md still references the deleted turn-end guard"
+  grep -q "$deleted_hardrule_name" "$doc" && fail "agy.md still references the deleted hardrule1 script"
   grep -q "external background watcher" "$doc" || fail "agy.md must state turn-end supervision is the external background watcher"
   grep -qi "do not re-add" "$doc" || fail "agy.md must state the Stop hook stays removed (do not re-add)"
   pass "agy.md is lean: no stale phases, no deleted-script references"

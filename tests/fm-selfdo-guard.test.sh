@@ -5,21 +5,9 @@ set -u
 ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 POLICY="$ROOT/bin/fm-selfdo-policy.mjs"
 CHECK="$ROOT/bin/fm-selfdo-pretool-check.sh"
-SCOPE_LIB="$ROOT/bin/fm-primary-scope-lib.sh"
 
 pass=0
 fail=0
-assert() {
-  local desc=$1
-  shift
-  if "$@"; then
-    echo "PASS: $desc"
-    pass=$((pass+1))
-  else
-    echo "FAIL: $desc"
-    fail=$((fail+1))
-  fi
-}
 
 # 1. Policy unit: path under projects/ is denied
 echo "=== policy path checks ==="
