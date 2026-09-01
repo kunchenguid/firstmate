@@ -1092,7 +1092,6 @@ test_recovered_lock_retired_episode_settles() {
   dir=$(make_case recovered-retired-settles)
   state="$dir/state"
   out="$dir/watch.out"
-  mark_pr_check_migration_complete "$state"
   dead_pid=999999
   while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
   mkdir "$state/.watch.lock"
@@ -1132,7 +1131,6 @@ test_recovered_lock_pending_episode_still_resurfaces() {
   dir=$(make_case recovered-pending-resurfaces)
   state="$dir/state"
   out="$dir/watch.out"
-  mark_pr_check_migration_complete "$state"
   dead_pid=999999
   while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid + 1)); done
   mkdir "$state/.watch.lock"
@@ -1152,7 +1150,7 @@ test_recovered_lock_pending_episode_still_resurfaces() {
   grep -F 'check: rearm-resurface' "$out" >/dev/null \
     || fail "pending episode after lock recovery did not resurface: $(cat "$out")"
   token=$(cat "$state/.watcher-down" 2>/dev/null || true)
-  [ "$token" = "pending:downtime:genpending" ] \
+  [ "$token" = "announced:downtime:genpending" ] \
     || fail "recovery resurface did not preserve the pending episode's generation: $token"
   pass "recovered lock with a pending episode still resurfaces and keeps its generation"
 }
@@ -1162,7 +1160,6 @@ test_recovered_lock_queued_row_still_resurfaces() {
   dir=$(make_case recovered-queued-resurfaces)
   state="$dir/state"
   out="$dir/watch.out"
-  mark_pr_check_migration_complete "$state"
   append_wake "$state" check test-key "check: queued during downtime" \
     || fail "could not append a durable wake"
   # Force the acked shape AFTER the append, so only the recovery's own

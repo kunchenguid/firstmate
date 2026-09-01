@@ -1494,17 +1494,17 @@ test_scan_honors_seen_marker_for_terminal_pr() {
   line='done: PR https://github.com/x/y/pull/12 checks green'
   printf '%s\n' "$line" > "$state/seen-t12.status"
   key=$(printf '%s' "seen-t12" | tr ':/.' '___')
-  printf '%s' "$line" > "$state/.subsuper-seen-status-$key"
+  seen_through "$state" seen-t12
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   [ -s "$state/.subsuper-escalations" ] \
     && fail "catch-all scan re-escalated a terminal already recorded in the seen marker"
-  printf '%s' "stale different line" > "$state/.subsuper-seen-status-$key"
+  rm -f "$state/.subsuper-seen-status-$key"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
   grep -F "$line" "$state/.subsuper-escalations" >/dev/null \
     || fail "catch-all scan skipped a terminal the seen marker does not cover"
-  [ "$(cat "$state/.subsuper-seen-status-$key")" = "$line" ] \
+  [ "$(status_seen_offset "$state" seen-t12)" = "$(log_size "$state/seen-t12.status")" ] \
     || fail "catch-all scan escalated without refreshing the seen marker"
   pass "catch-all scan honors the exact seen-status marker for a terminal PR line"
 }
