@@ -1158,9 +1158,8 @@ export default function (pi: ExtensionAPI) {
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
   });
-  // The idle-path consumption edge: an idle send starts its run inside
-  // sendUserMessage, so the row is consumed at run start and presentation
-  // re-arms promptly.
+  // The idle-path consumption edge: a run that takes a pending row begins by
+  // emitting this, so presentation re-arms at run start rather than at run end.
   pi.on?.("agent_start", () => {
     generation.pendingOrdinaryWakeRow = false;
   });

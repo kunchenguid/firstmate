@@ -1572,7 +1572,6 @@ const handlers = new Map();
 const sent = [];
 const queued = [];
 const consumed = [];
-const discarded = [];
 let running = false;
 let runScheduled = false;
 let agentStarts = 0;
@@ -1595,12 +1594,6 @@ async function startRun() {
 // queued row is consumed with no second agent_start.
 function drainQueuedInline() {
   while (queued.length > 0) consumed.push(queued.shift());
-}
-// Escape while streaming restores the queued rows to the editor and aborts the
-// run, so the row is dropped without ever being consumed and without any
-// agent_start. The dequeue keybinding drops it the same way.
-function clearQueuedRows() {
-  while (queued.length > 0) discarded.push(queued.shift());
 }
 // agent_settled is the boundary both paths share: Pi emits it once a run has
 // fully settled, an aborted run included.
@@ -1663,7 +1656,6 @@ if (agentStarts !== 2) throw new Error(`expected the later idle wake to start ex
 if (consumed.length !== 2) throw new Error(`expected the inline-drained row plus the later row, saw ${consumed.length}`);
 if (!consumed[0].includes("signal: first event")) throw new Error(`inline drain took the wrong row: ${consumed[0]}`);
 if (!consumed[1].includes("signal: later event 2")) throw new Error(`later run took the wrong row: ${consumed[1]}`);
-if (discarded.length !== 0) throw new Error("no row was discarded in this case");
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
@@ -1727,11 +1719,6 @@ async function startRun() {
   agentStarts += 1;
   while (queued.length > 0) consumed.push(queued.shift());
   await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-}
-// Pi 0.84.4 drains rows queued during a run inline inside that same run, so a
-// queued row is consumed with no second agent_start.
-function drainQueuedInline() {
-  while (queued.length > 0) consumed.push(queued.shift());
 }
 // Escape while streaming restores the queued rows to the editor and aborts the
 // run, so the row is dropped without ever being consumed and without any
