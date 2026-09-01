@@ -323,8 +323,96 @@ fm_pr_native_windows_private_paths_valid() {
   return 1
 }
 
+fm_pr_private_file_secure() {  # <path> <mode>
+  local path=$1 mode=$2 native
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  chmod "$mode" "$path" || return 1
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*)
+      command -v cygpath >/dev/null 2>&1 || return 1
+      command -v powershell.exe >/dev/null 2>&1 || return 1
+      native=$(cygpath -w "$path" 2>/dev/null) || return 1
+      [ -n "$native" ] || return 1
+      for _ in 1 2 3; do
+        # shellcheck disable=SC2016 # The single-quoted script is evaluated by PowerShell.
+        if FM_PR_PRIVATE_NATIVE=$native \
+          powershell.exe -NoProfile -NonInteractive -Command '
+          $ErrorActionPreference = "Stop"
+          $item = [IO.FileInfo]::new($env:FM_PR_PRIVATE_NATIVE)
+          if (-not $item.Exists) { exit 1 }
+          if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 1 }
+          $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
+          $security = $item.GetAccessControl()
+          if (
+            $security.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne
+            $current.Value
+          ) {
+            exit 1
+          }
+          $security.SetAccessRuleProtection($true, $false)
+          $rules = @(
+            $security.GetAccessRules(
+              $true,
+              $false,
+              [Security.Principal.SecurityIdentifier]
+            )
+          )
+          foreach ($rule in $rules) {
+            [void]$security.RemoveAccessRuleSpecific($rule)
+          }
+          foreach ($sid in @($current.Value, "S-1-5-18", "S-1-5-32-544")) {
+            $identity = [Security.Principal.SecurityIdentifier]::new($sid)
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+              $identity,
+              [Security.AccessControl.FileSystemRights]::FullControl,
+              [Security.AccessControl.AccessControlType]::Allow
+            )
+            [void]$security.AddAccessRule($rule)
+          }
+          $item.SetAccessControl($security)
+          $applied = $item.GetAccessControl()
+          if (
+            $applied.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne
+            $current.Value
+          ) {
+            exit 1
+          }
+          $descriptor = $applied.GetSecurityDescriptorBinaryForm()
+          $raw = [Security.AccessControl.RawSecurityDescriptor]::new($descriptor, 0)
+          if ($null -eq $raw.DiscretionaryAcl) { exit 1 }
+          $allowed = @($current.Value, "S-1-5-18", "S-1-5-32-544")
+          $appliedRules = $applied.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+          )
+          foreach ($rule in $appliedRules) {
+            if (
+              $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+              $allowed -notcontains $rule.IdentityReference.Value
+            ) {
+              exit 1
+            }
+          }
+        ' >/dev/null 2>&1; then
+          return 0
+        fi
+      done
+      return 1
+      ;;
+  esac
+  [ "$(fm_pr_file_mode "$path")" = "$mode" ]
+}
+
+fm_pr_private_file_structure_valid() {  # <path> <device>
+  local path=$1 device=$2
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
+  [ "$(fm_pr_file_link_count "$path")" = 1 ]
+}
+
 fm_pr_private_files_valid() {  # <device> <path> <mode> [<path> <mode> ...]
-  local device=$1 path mode
+  local device=$1 path mode index=0
   local -a windows_paths=()
   shift
   [ "$#" -ge 2 ] && [ $(( $# % 2 )) -eq 0 ] || return 1
@@ -332,15 +420,16 @@ fm_pr_private_files_valid() {  # <device> <path> <mode> [<path> <mode> ...]
     path=$1
     mode=$2
     shift 2
-    [ -f "$path" ] && [ ! -L "$path" ] || return 1
-    [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
-    [ "$(fm_pr_file_link_count "$path")" = 1 ] || return 1
+    fm_pr_private_file_structure_valid "$path" "$device" || return 1
     case "$(uname -s 2>/dev/null)" in
       MSYS*|MINGW*|CYGWIN*) windows_paths+=("$path") ;;
       *) [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1 ;;
     esac
   done
-  [ "${#windows_paths[@]}" -eq 0 ] || fm_pr_native_windows_private_paths_valid "${windows_paths[@]}"
+  while [ "$index" -lt "${#windows_paths[@]}" ]; do
+    fm_pr_native_windows_private_paths_valid "${windows_paths[@]:index:3}" || return 1
+    index=$((index + 3))
+  done
 }
 
 fm_pr_private_file_valid() {
@@ -561,8 +650,7 @@ fm_pr_poll_prepare() {
   }
 
   if ! printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$FM_PR_POLL_DATA_TMP" \
-    || ! chmod 0600 "$FM_PR_POLL_DATA_TMP" \
-    || ! fm_pr_private_file_valid "$FM_PR_POLL_DATA_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
+    || ! fm_pr_private_file_secure "$FM_PR_POLL_DATA_TMP" 600 \
     || ! fm_pr_poll_data_parse "$FM_PR_POLL_DATA_TMP" \
     || [ "$FM_PR_DATA_PROVIDER" != "$provider" ] \
     || [ "$FM_PR_DATA_URL" != "$url" ] \
@@ -570,8 +658,7 @@ fm_pr_poll_prepare() {
     || [ "$FM_PR_DATA_PATH" != "$path" ] \
     || [ "$FM_PR_DATA_NUMBER" != "$number" ] \
     || ! cp "$template" "$FM_PR_POLL_CHECK_TMP" \
-    || ! chmod 0600 "$FM_PR_POLL_CHECK_TMP" \
-    || ! fm_pr_private_file_valid "$FM_PR_POLL_CHECK_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
+    || ! fm_pr_private_file_secure "$FM_PR_POLL_CHECK_TMP" 600 \
     || ! cmp -s "$template" "$FM_PR_POLL_CHECK_TMP"; then
     fm_pr_poll_cleanup
     return 1
@@ -585,8 +672,7 @@ fm_pr_poll_prepare() {
       "$FM_PR_POLL_EXPECT_DATA_HASH" "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" \
       "$FM_PR_POLL_EXPECT_DATA_IDENTITY" "$FM_PR_POLL_EXPECT_CHECK_IDENTITY" \
       > "$FM_PR_POLL_REG_TMP" \
-    || ! chmod 0600 "$FM_PR_POLL_REG_TMP" \
-    || ! fm_pr_private_file_valid "$FM_PR_POLL_REG_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
+    || ! fm_pr_private_file_secure "$FM_PR_POLL_REG_TMP" 600 \
     || ! fm_pr_poll_registration_parse "$FM_PR_POLL_REG_TMP" \
     || [ "$FM_PR_REG_ID" != "$id" ] \
     || [ "$FM_PR_REG_DATA_HASH" != "$FM_PR_POLL_EXPECT_DATA_HASH" ] \
@@ -655,7 +741,8 @@ fm_pr_poll_publish_prepared() {
 }
 
 fm_pr_poll_artifacts_valid() {
-  local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
+  local state=$1 id=$2 template=$3 private_validated=${4:-0}
+  local state_device check data registration meta data_hash template_hash data_identity check_identity
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -663,8 +750,14 @@ fm_pr_poll_artifacts_valid() {
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
   meta="$state/$id.meta"
-  fm_pr_private_files_valid "$state_device" \
-    "$check" 600 "$data" 600 "$registration" 600 || return 1
+  if [ "$private_validated" = 1 ]; then
+    fm_pr_private_file_structure_valid "$check" "$state_device" || return 1
+    fm_pr_private_file_structure_valid "$data" "$state_device" || return 1
+    fm_pr_private_file_structure_valid "$registration" "$state_device" || return 1
+  else
+    fm_pr_private_files_valid "$state_device" \
+      "$check" 600 "$data" 600 "$registration" 600 || return 1
+  fi
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
   cmp -s "$template" "$check" || return 1
@@ -711,9 +804,10 @@ fm_pr_poll_snapshot_capture() {
 }
 
 fm_pr_poll_snapshot_matches() {
-  local state=$1 id=$2 template=$3 registration reg_hash reg_identity
+  local state=$1 id=$2 template=$3 private_validated=${4:-0}
+  local registration reg_hash reg_identity
   [ -n "$FM_PR_POLL_SNAPSHOT_ID" ] && [ "$id" = "$FM_PR_POLL_SNAPSHOT_ID" ] || return 1
-  fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
+  fm_pr_poll_artifacts_valid "$state" "$id" "$template" "$private_validated" || return 1
   registration="$state/$id.pr-poll-registration"
   reg_hash=$(fm_pr_sha256 "$registration") || return 1
   reg_identity=$(fm_pr_file_identity "$registration") || return 1
@@ -869,23 +963,33 @@ fm_pr_poll_retirement_check_valid() {
 }
 
 fm_pr_poll_retirement_state_valid() {
-  local state=$1 id=$2 state_device check data registration
+  local state=$1 id=$2 private_validated=${3:-0}
+  local state_device receipt check data registration path index
   local has_check=0 has_data=0 has_registration=0
   local -a private_files
   state_device=$(fm_pr_file_device "$state") || return 1
+  receipt="$state/$id.pr-poll-retirement"
   check="$state/$id.check.sh"
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
   [ ! -e "$check" ] && [ ! -L "$check" ] || has_check=1
   [ ! -e "$data" ] && [ ! -L "$data" ] || has_data=1
   [ ! -e "$registration" ] && [ ! -L "$registration" ] || has_registration=1
-  fm_pr_poll_retirement_receipt_valid "$state" "$id" || return 1
-  private_files=()
+  private_files=("$receipt" 600)
   [ "$has_check" -eq 0 ] || private_files+=("$check" 600)
   [ "$has_data" -eq 0 ] || private_files+=("$data" 600)
   [ "$has_registration" -eq 0 ] || private_files+=("$registration" 600)
-  [ "${#private_files[@]}" -eq 0 ] \
-    || fm_pr_private_files_valid "$state_device" "${private_files[@]}" || return 1
+  if [ "$private_validated" = 1 ]; then
+    index=0
+    while [ "$index" -lt "${#private_files[@]}" ]; do
+      path=${private_files[$index]}
+      fm_pr_private_file_structure_valid "$path" "$state_device" || return 1
+      index=$((index + 2))
+    done
+  else
+    fm_pr_private_files_valid "$state_device" "${private_files[@]}" || return 1
+  fi
+  fm_pr_poll_retirement_receipt_valid "$state" "$id" 1 || return 1
   if [ "$has_check" -eq 1 ]; then
     [ "$has_data" -eq 1 ] && [ "$has_registration" -eq 1 ] || return 1
     fm_pr_poll_retirement_check_valid "$state" "$id" 1 || return 1
@@ -904,7 +1008,12 @@ fm_pr_poll_retirement_state_valid() {
 
 fm_pr_poll_retirement_remove_exact() {
   local path=$1 state_device=$2 expected_identity=$3 expected_hash=$4
-  fm_pr_private_file_valid "$path" 600 "$state_device" || return 1
+  local private_validated=${5:-0}
+  if [ "$private_validated" = 1 ]; then
+    fm_pr_private_file_structure_valid "$path" "$state_device" || return 1
+  else
+    fm_pr_private_file_valid "$path" 600 "$state_device" || return 1
+  fi
   [ "$(fm_pr_file_identity "$path")" = "$expected_identity" ] || return 1
   [ "$(fm_pr_sha256 "$path")" = "$expected_hash" ] || return 1
   rm -f -- "$path" || return 1
@@ -940,7 +1049,7 @@ fm_pr_poll_retirement_discard_obsolete() {
 fm_pr_poll_retirement_publish() {
   local state=$1 id=$2 template=$3 result=$4 receipt state_device tmp
   [ "$result" = merged ] || return 1
-  fm_pr_poll_snapshot_matches "$state" "$id" "$template" || return 1
+  fm_pr_poll_snapshot_matches "$state" "$id" "$template" 1 || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   receipt="$state/$id.pr-poll-retirement"
   fm_pr_regular_destination_on_device_or_absent "$receipt" "$state_device" || return 1
@@ -962,11 +1071,10 @@ fm_pr_poll_retirement_publish() {
       "$FM_PR_POLL_SNAPSHOT_REG_HASH" \
       "$FM_PR_POLL_SNAPSHOT_REG_IDENTITY" \
       merged > "$tmp" \
-    || ! chmod 0600 "$tmp" \
-    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+    || ! fm_pr_private_file_secure "$tmp" 600 \
     || ! fm_pr_poll_retirement_parse "$tmp" \
     || [ "$FM_PR_RETIRE_ID" != "$id" ] \
-    || ! fm_pr_poll_snapshot_matches "$state" "$id" "$template" \
+    || ! fm_pr_poll_snapshot_matches "$state" "$id" "$template" 1 \
     || ! fm_pr_regular_destination_on_device_or_absent "$receipt" "$state_device" \
     || [ -e "$receipt" ] || [ -L "$receipt" ] \
     || ! mv -f -- "$tmp" "$receipt"; then
@@ -977,14 +1085,15 @@ fm_pr_poll_retirement_publish() {
 }
 
 fm_pr_poll_retirement_recover_one() {
-  local state=$1 id=$2 template=$3 receipt state_device check data registration
+  local state=$1 id=$2 template=$3 private_validated=${4:-0}
+  local receipt state_device check data registration
   local receipt_hash receipt_identity
   fm_pr_task_id_valid "$id" || return 1
   receipt="$state/$id.pr-poll-retirement"
   if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
     return 0
   fi
-  if ! fm_pr_poll_retirement_state_valid "$state" "$id"; then
+  if ! fm_pr_poll_retirement_state_valid "$state" "$id" "$private_validated"; then
     fm_pr_poll_retirement_discard_obsolete "$state" "$id" "$template" && return 0
     return 1
   fi
@@ -996,18 +1105,18 @@ fm_pr_poll_retirement_recover_one() {
   receipt_identity=$FM_PR_RETIRE_RECEIPT_IDENTITY
   if [ -e "$check" ] || [ -L "$check" ]; then
     fm_pr_poll_retirement_remove_exact "$check" "$state_device" \
-      "$FM_PR_RETIRE_CHECK_IDENTITY" "$FM_PR_RETIRE_TEMPLATE_HASH" || return 1
+      "$FM_PR_RETIRE_CHECK_IDENTITY" "$FM_PR_RETIRE_TEMPLATE_HASH" 1 || return 1
   fi
   if [ -e "$registration" ] || [ -L "$registration" ]; then
     fm_pr_poll_retirement_remove_exact "$registration" "$state_device" \
-      "$FM_PR_RETIRE_REG_IDENTITY" "$FM_PR_RETIRE_REG_HASH" || return 1
+      "$FM_PR_RETIRE_REG_IDENTITY" "$FM_PR_RETIRE_REG_HASH" 1 || return 1
   fi
   if [ -e "$data" ] || [ -L "$data" ]; then
     fm_pr_poll_retirement_remove_exact "$data" "$state_device" \
-      "$FM_PR_RETIRE_DATA_IDENTITY" "$FM_PR_RETIRE_DATA_HASH" || return 1
+      "$FM_PR_RETIRE_DATA_IDENTITY" "$FM_PR_RETIRE_DATA_HASH" 1 || return 1
   fi
   fm_pr_poll_retirement_remove_exact "$receipt" "$state_device" \
-    "$receipt_identity" "$receipt_hash" || return 1
+    "$receipt_identity" "$receipt_hash" 1 || return 1
   [ ! -e "$check" ] && [ ! -L "$check" ] \
     && [ ! -e "$registration" ] && [ ! -L "$registration" ] \
     && [ ! -e "$data" ] && [ ! -L "$data" ] \
@@ -1040,8 +1149,13 @@ fm_pr_poll_retirement_recover_all() {
 # outcome is published.
 fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number>
   local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
+  local private_validated=${7:-0}
   local version provider host path number
-  fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  if [ "$private_validated" = 1 ]; then
+    fm_pr_private_file_structure_valid "$marker" "$device" || return 1
+  else
+    fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  fi
   exec 8< "$marker" || return 1
   IFS= read -r version <&8 || { exec 8<&-; return 1; }
   IFS= read -r provider <&8 || { exec 8<&-; return 1; }
@@ -1081,9 +1195,9 @@ fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <num
   tmp=$(mktemp "$state/.fm-pr-poll-merge-notified.XXXXXX") || return 1
   if ! printf '%s\n%s\n%s\n%s\n%s\n' \
       fm-pr-poll-merge-notified-v1 "$provider" "$host" "$path" "$number" > "$tmp" \
-    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_secure "$tmp" 600 \
     || ! fm_pr_poll_merge_marker_matches "$tmp" "$state_device" \
-      "$provider" "$host" "$path" "$number" \
+      "$provider" "$host" "$path" "$number" 1 \
     || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
     || ! mv -f -- "$tmp" "$marker" \
     || ! fm_pr_poll_merge_marker_matches "$marker" "$state_device" \

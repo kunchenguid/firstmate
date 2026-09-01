@@ -1449,7 +1449,7 @@ fi
 retire_merged_pr_poll() {  # <id>
   local id=$1
   if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" merged; then
-    fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+    fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" 1 \
       || triage_log "merged PR poll retirement remains recoverable for $id"
   else
     triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"

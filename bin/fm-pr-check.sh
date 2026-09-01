@@ -111,8 +111,7 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$META"
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
 [ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
-chmod 0600 "$META_TMP" || exit 1
-fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
+fm_pr_private_file_secure "$META_TMP" 600 || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \

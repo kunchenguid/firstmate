@@ -66,7 +66,8 @@ fm_custom_check_snapshot_prepare() {
     && [ "$(fm_pr_file_device "$check")" = "$state_device" ] || return 1
   FM_CUSTOM_CHECK_SNAPSHOT=$(mktemp "$state/.fm-custom-check.XXXXXX") || return 1
   cp "$check" "$FM_CUSTOM_CHECK_SNAPSHOT" || { fm_custom_check_snapshot_cleanup; return 1; }
-  chmod 0600 "$FM_CUSTOM_CHECK_SNAPSHOT" || { fm_custom_check_snapshot_cleanup; return 1; }
+  fm_pr_private_file_secure "$FM_CUSTOM_CHECK_SNAPSHOT" 600 \
+    || { fm_custom_check_snapshot_cleanup; return 1; }
   fm_pr_private_files_valid "$state_device" \
     "$trust" 600 "$check" 700 "$FM_CUSTOM_CHECK_SNAPSHOT" 600 \
     || { fm_custom_check_snapshot_cleanup; return 1; }
