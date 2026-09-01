@@ -1169,6 +1169,48 @@ test_endpoint_blocks_respawn_when_workspace_inventory_is_unreadable() {
 # cmux can exit successfully while returning malformed data. That is no more
 # evidence of absence than a nonzero inventory command: a cleanup warning must
 # remain visible until a well-formed workspace inventory proves the title gone.
+# A listed entry that carries the title but no usable id is the same class of
+# unreadable inventory: the workspace is demonstrably still there, so nothing
+# about it proves the next spawn's title is free.
+test_endpoint_blocks_respawn_when_matching_entry_has_no_id() {
+  local dir fb out title
+  dir="$TMP_ROOT/blocks-respawn-null-id"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-corph "$dir")
+  printf '{"workspaces":[{"title":"%s"}]}\n' "$title" > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      t=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+      if fm_backend_endpoint_blocks_respawn cmux "$t" fm-corph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "a listed workspace whose entry carries no usable id must not be reported retired"
+  pass "fm_backend_endpoint_blocks_respawn: a matching cmux entry with no usable id blocks a respawn"
+}
+
+# The same unreadable entry must not license a duplicate workspace either: the
+# create-task duplicate gate refuses instead of adding a second same-titled one.
+test_create_task_refuses_when_matching_entry_has_no_id() {
+  local dir fb out status title
+  dir="$TMP_ROOT/create-task-null-id"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-nullid1 "$dir")
+  printf '{"workspaces":[{"title":"%s"}]}\n' "$title" > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-nullid1 /tmp/proj' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should refuse when the workspace inventory cannot be read"
+  assert_contains "$out" "could not inspect cmux workspaces" \
+    "create_task did not report the unreadable workspace inventory"
+  if grep -q 'new-workspace' "$dir/log" 2>/dev/null; then
+    fail "create_task created a second workspace despite an unreadable inventory"
+  fi
+  pass "fm_backend_cmux_create_task: refuses a matching entry with no usable id instead of duplicating the title"
+}
+
 test_endpoint_blocks_respawn_when_workspace_inventory_is_malformed() {
   local dir fb out
   dir="$TMP_ROOT/blocks-respawn-malformed"; mkdir -p "$dir/responses"
@@ -1252,3 +1294,5 @@ test_endpoint_blocks_respawn_sees_the_workspace_a_surface_read_misses
 test_endpoint_blocks_respawn_clear_when_no_workspace_carries_the_title
 test_endpoint_blocks_respawn_when_workspace_inventory_is_unreadable
 test_endpoint_blocks_respawn_when_workspace_inventory_is_malformed
+test_endpoint_blocks_respawn_when_matching_entry_has_no_id
+test_create_task_refuses_when_matching_entry_has_no_id

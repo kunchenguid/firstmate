@@ -336,8 +336,16 @@ fm_backend_cmux_workspace_id_for_label() {  # <label>
   # inventory before looking for a title: the old jq|head pipeline let head
   # hide jq's parse failure and falsely reported a surviving workspace gone.
   printf '%s' "$workspaces" | jq -e 'type == "object" and (.workspaces | type == "array")' >/dev/null 2>&1 || return 2
+  # Existence is decided by the matched ENTRY, never by its id: a listed
+  # workspace whose entry carries the title but no usable id string is an
+  # unreadable inventory too, not proof the title is free.
   workspace_id=$(printf '%s' "$workspaces" \
-    | jq -r --arg want "$label" '[.workspaces[] | select(.title == $want) | .id][0] // empty' 2>/dev/null) || return 2
+    | jq -r --arg want "$label" '
+        [.workspaces[] | select(.title == $want)] as $matched
+        | if ($matched | length) == 0 then ""
+          elif ($matched[0].id | type) == "string" and (($matched[0].id | length) > 0) then $matched[0].id
+          else error("cmux workspace entry carries no usable id")
+          end' 2>/dev/null) || return 2
   printf '%s' "$workspace_id"
 }
 

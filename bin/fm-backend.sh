@@ -774,29 +774,27 @@ fm_backend_kill() {  # <backend> <target>
 fm_backend_endpoint_blocks_respawn() {  # <backend> <target> <label>
   local backend=$1 target=$2 label=$3 check_status
   fm_backend_source "$backend" || return 1
+  check_status=0
   case "$backend" in
     tmux)
-      fm_backend_tmux_window_exists "${target%%:*}" "${target#*:}"
-      check_status=$?
+      fm_backend_tmux_window_exists "${target%%:*}" "${target#*:}" || check_status=$?
       ;;
     herdr)
-      ! fm_backend_herdr_endpoint_confirmed_gone "$target"
-      check_status=$?
+      ! fm_backend_herdr_endpoint_confirmed_gone "$target" || check_status=$?
       ;;
     zellij)
-      fm_backend_zellij_tab_exists "${target%%:*}" "$label"
-      check_status=$?
+      fm_backend_zellij_tab_exists "${target%%:*}" "$label" || check_status=$?
       ;;
     cmux)
-      fm_backend_cmux_workspace_exists "$label"
-      check_status=$?
+      fm_backend_cmux_workspace_exists "$label" || check_status=$?
       ;;
     *)
-      fm_backend_target_exists "$backend" "$target"
-      check_status=$?
+      fm_backend_target_exists "$backend" "$target" || check_status=$?
       ;;
   esac
-  [ "$check_status" -eq 1 ] && return 1
+  if [ "$check_status" -eq 1 ]; then
+    return 1
+  fi
   return 0
 }
 

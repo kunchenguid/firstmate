@@ -1854,6 +1854,23 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# assert_spawn_worktree_unclaimed: refuse a candidate worktree that another
+# still-recorded task in THIS home already records as its worktree=.
+#
+# The claim set is deliberately this home's own $STATE/*.meta and nothing else.
+# The invariant it establishes therefore holds within one firstmate home, not
+# across homes. The uncovered condition is two or more homes sharing a single
+# treehouse pool for the same project: treehouse marks a pooled slot in-use by
+# live PROCESS detection, so after a terminal-app or session restart kills every
+# pane, every pooled slot reads AVAILABLE. A spawn in one home can then be handed
+# a worktree that a DIFFERENT home's state/<id>.meta still claims, this scan
+# finds no claim in its own $STATE, and the launch proceeds - after which
+# freshen_spawn_worktree_base resets that worktree to origin's default-branch
+# tip, losing any uncommitted work in it.
+#
+# Widening the scan across sibling homes is tracked separately and is
+# deliberately out of scope here: it would add a cross-home read, and a new
+# failure mode, to the spawn path.
 assert_spawn_worktree_unclaimed() {
   local wt_real meta owner recorded recorded_real
   wt_real=$(real_path_or_raw "$WT")
