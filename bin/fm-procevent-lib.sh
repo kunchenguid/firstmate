@@ -626,11 +626,15 @@ fm_procevent_capture_inbox_prepare() {
   printf '%s\n' "$inbox"
 }
 
+# Print the validated physical registry directory, like the inbox and
+# reservation preparers beside it, so a caller that pins the boundary with
+# `pwd -P` compares against the same physical path this validated.
 fm_procevent_extension_staging_prepare() {
   local state=$1 registry
   state=$(fm_procevent_state_root_resolve "$state") || return 1
   registry=$(fm_procevent_registry_dir "$state")
-  fm_procevent_private_directory_valid "$registry" 1
+  fm_procevent_private_directory_valid "$registry" 1 || return 1
+  printf '%s\n' "$registry"
 }
 
 fm_procevent_capture_reservation_prepare() {
