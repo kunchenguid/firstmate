@@ -391,7 +391,7 @@ jobs:
           }
 
           command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
-          npm install -g tasks-axi >/dev/null
+          npm install -g tasks-axi@0.2.5 >/dev/null
           PATH="$(npm prefix -g)/bin:$PATH"
           export PATH
           command -v tasks-axi >/dev/null || { echo "::error::tasks-axi is required for the public-followup bash 3.2 register regression"; exit 1; }
