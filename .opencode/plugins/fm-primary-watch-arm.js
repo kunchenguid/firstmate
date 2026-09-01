@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { effectiveHomePaths, sendWakePrompt } from "./lib/fm-wake-delivery.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
@@ -80,14 +80,6 @@ function resolvePath(anchor) {
   } catch {
     return resolve(anchor);
   }
-}
-
-function effectivePaths(root) {
-  const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
-  const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || fmRoot;
-  const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
-  const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
-  return { root: fmRoot, home: fmHome, state, config };
 }
 
 async function isPrimaryRoot(root, home) {
@@ -184,14 +176,12 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   }
 }
 
-async function sendPrompt(paths, client, sessionID, text) {
-  const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
-  await client.session.promptAsync({
-    path: { id: sessionID },
-    body: {
-      parts: [{ type: "text", text: encoded }],
-    },
-  });
+// Wake delivery is owned by lib/fm-wake-delivery.js: a bounded promptAsync
+// retry with a per-attempt accept timeout, and a loud durable-record plus
+// wedge-alarm notification path (bin/fm-wake-delivery-alarm.sh) once the
+// budget is exhausted. It resolves false instead of throwing on failure.
+function sendPrompt(paths, client, sessionID, text, context) {
+  return sendWakePrompt(paths, client, sessionID, "watcher", text, context);
 }
 
 function confirmHandlingDelivery(paths, recovery) {
@@ -237,11 +227,11 @@ async function deliverActionableWake(paths, client, sessionID, message, recovery
           await retireArm(child);
         }
       }
-      await sendPrompt(paths, client, sessionID, wakePrompt(`${message}\n\n${confirmed.detail}`));
+      await sendPrompt(paths, client, sessionID, wakePrompt(`${message}\n\n${confirmed.detail}`), "actionable wake with failed delivery confirmation");
       return;
     }
   }
-  await sendPrompt(paths, client, sessionID, wakePrompt(message));
+  await sendPrompt(paths, client, sessionID, wakePrompt(message), "actionable wake");
 }
 
 function wakePrompt(reason) {
@@ -249,9 +239,9 @@ function wakePrompt(reason) {
 }
 
 function surfaceFailure(paths, client, sessionID, reason) {
-  void sendPrompt(paths, client, sessionID, wakePrompt(reason)).catch(() => {
-    // OpenCode owns delivery errors; continuity restoration never waits on prompting.
-  });
+  // Continuity restoration never waits on prompting; an undeliverable failure
+  // prompt is itself recorded and alarmed by lib/fm-wake-delivery.js.
+  void sendPrompt(paths, client, sessionID, wakePrompt(reason), "watcher failure");
 }
 
 function retryDelay(attempt) {
@@ -479,7 +469,7 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
 
 export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
   const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
-  const paths = effectivePaths(root);
+  const paths = effectiveHomePaths(root);
   globalThis[COORDINATOR_KEY] = {
     ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),
   };

@@ -502,7 +502,7 @@ tests/fm-turnend-guard.test.sh
 
 ## Wedge-alarm channels
 
-The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
+The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3, and the argv shape was reverified on 2026-08-30 on macOS (osascript) after the notification title became the second argv item so `bin/fm-wake-delivery-alarm.sh` can label its own failure class through the shared `bin/fm-wedge-alarm-lib.sh` channels.
 Automated suites never execute these real notification commands.
 
 Argv-safe Notification Center command:
@@ -510,12 +510,13 @@ Argv-safe Notification Center command:
 ```sh
 /usr/bin/osascript \
   -e 'on run argv' \
-  -e 'display notification (item 1 of argv) with title "FIRSTMATE TEST - IGNORE" sound name "Basso"' \
+  -e 'display notification (item 1 of argv) with title (item 2 of argv) sound name "Basso"' \
   -e 'end run' \
-  'FIRSTMATE TEST - IGNORE (wedge-alarm channel verification)'
+  'FIRSTMATE TEST - IGNORE (wedge-alarm channel verification)' \
+  'FIRSTMATE TEST - IGNORE'
 ```
 
-Observed output: no stdout, exit 0, and one banner with the supplied body.
+Observed output: no stdout, exit 0, and one banner with the supplied body and title.
 
 Herdr command:
 
@@ -532,3 +533,4 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+The shared-consumer path - a failed OpenCode wake-delivery prompt recorded in `state/.wake-delivery-failures`, alarmed within one watcher cycle, cooldown-bounded, and surfaced once by the bootstrap `WAKE_DELIVERY` diagnostic - is covered by `tests/fm-wake-delivery.test.sh` and `tests/fm-bootstrap.test.sh`, again without any real notification.

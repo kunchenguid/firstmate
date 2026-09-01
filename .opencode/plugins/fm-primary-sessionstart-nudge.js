@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { effectiveHomePaths, sendEncodedWakePrompt } from "./lib/fm-wake-delivery.js";
 
 const handledSessions = new Set();
 
@@ -46,15 +47,20 @@ export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }
       const nudge = result.code === 0 ? result.stdout.trim() : "";
       if (!nudge) return;
 
-      try {
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text: nudge }],
-          },
-        });
-      } catch {
-      }
+      // The nudge wrapper already emitted operational-encoded text, so deliver
+      // it as-is. That delivery doubles as the session-start self-check of the
+      // running build's wake-injection path: a stale OpenCode TUI that cannot
+      // accept prompts is recorded and alarmed here instead of being discovered
+      // through missed watcher wakes, and the next bootstrap surfaces it as the
+      // WAKE_DELIVERY diagnostic.
+      await sendEncodedWakePrompt(
+        effectiveHomePaths(root),
+        client,
+        sessionID,
+        "session-start",
+        nudge,
+        "session-start nudge",
+      );
     },
   };
 };

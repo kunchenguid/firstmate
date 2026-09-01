@@ -101,6 +101,7 @@ The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `
 Each passive adapter owns a loop latch.
 Pi keeps the latch across internal tool turns and clears it only when the generated follow-up settles or delivery fails.
 OpenCode's forced follow-up is supported for persistent TUI sessions and remains fail-open in headless `opencode run`.
+OpenCode delivers that follow-up through `.opencode/plugins/lib/fm-wake-delivery.js` like every other wake prompt, so an injection the running build cannot accept is retried boundedly and then declared loudly instead of ending the turn blind; [`supervision-protocols/opencode.md`](supervision-protocols/opencode.md) owns that loud-failure contract.
 
 Grok makes exactly one typed capability decision from each running Stop payload.
 A boolean `stopHookActive` selects native blocking, including both false on the initial stop and true on the bounded continuation.
@@ -166,5 +167,6 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
+`tests/fm-wake-delivery.test.sh` covers the OpenCode plugins' loud wake-delivery failure path end to end: bounded retry, per-attempt timeout, the durable failure record, and the wedge-alarm channel notification.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.
