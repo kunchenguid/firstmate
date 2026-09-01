@@ -320,11 +320,17 @@ test_precreated_state_files_are_not_read_as_new_activity() {
 # scout holds state/ wholesale, so it can plant either shape for the next spawn of
 # another id. Refusal must be loud and must fail the spawn, because a silently
 # dropped root strands the worker the way this grant exists to prevent.
-# Every emitted root must live under state/, data/<id>/, or the git common dir.
-# Nothing may name the home, config/, or projects/, however it was reached.
-assert_no_root_outside_state() {  # <what>
-  local what=$1 home_real r
+# The emitted-grant half of the refusal: no root may name the home, config/, or
+# projects/, however it was reached, and a refused spawn must compose no launch at
+# all. Both arms operate on evidence that exists in the case they cover - the
+# emitted set, empty when the refusal worked and populated when it did not - so
+# each can fail. CALL THIS BEFORE the exit-code expectation: `fail` exits, so an
+# assertion placed after one that also breaks would never be reached, which is
+# exactly how the earlier version of this check protected nothing.
+assert_grant_escaped_nothing() {  # <what>
+  local what=$1 home_real roots r
   home_real=$(cd "$HOME_DIR" && pwd -P)
+  roots=$(granted_roots "$LAUNCH_LOG")
   while IFS= read -r r; do
     [ -n "$r" ] || continue
     case "$r" in
@@ -332,8 +338,10 @@ assert_no_root_outside_state() {  # <what>
         fail "a symlinked $what produced a granted root outside the task's own paths: $r" ;;
     esac
   done <<EOF
-$(granted_roots "$LAUNCH_LOG")
+$roots
 EOF
+  [ -z "$roots" ] \
+    || fail "a symlinked $what must refuse before any launch is composed, but these roots were granted: $roots"
 }
 
 test_grant_never_follows_a_symlinked_state_record() {
@@ -348,12 +356,12 @@ test_grant_never_follows_a_symlinked_state_record() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
   status=$?
-  expect_code 1 "$status" "a dangling symlinked status record must refuse the spawn"
+  assert_grant_escaped_nothing "status record"
   [ ! -e "$escaped" ] \
     || fail "the spawn followed the dangling symlink and created its target outside the granted tree: $escaped"
+  expect_code 1 "$status" "a dangling symlinked status record must refuse the spawn"
   printf '%s\n' "$out" | grep -q 'is a symlink' \
     || fail "the refusal must name the symlink it declined: $out"
-  assert_no_root_outside_state "status record"
 
   # 2. A link on the status file pointing at an EXISTING directory: emission must
   # not resolve through it into a granted root.
@@ -362,10 +370,10 @@ test_grant_never_follows_a_symlinked_state_record() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
   status=$?
+  assert_grant_escaped_nothing "status record"
   expect_code 1 "$status" "a status record linked to a real directory must refuse the spawn"
   printf '%s\n' "$out" | grep -q 'is a symlink' \
     || fail "the refusal must name the symlink it declined: $out"
-  assert_no_root_outside_state "status record"
 
   # 3. A link on the INBOX pointing at the home: neither handled/ nor a root may
   # be created or emitted through it. This is the shape that granted $FM_HOME.
@@ -374,12 +382,12 @@ test_grant_never_follows_a_symlinked_state_record() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
   status=$?
-  expect_code 1 "$status" "an inbox linked to the home must refuse the spawn"
+  assert_grant_escaped_nothing "inbox"
   [ ! -d "$HOME_DIR/handled" ] \
     || fail "the spawn created handled/ through the inbox symlink, outside state/"
+  expect_code 1 "$status" "an inbox linked to the home must refuse the spawn"
   printf '%s\n' "$out" | grep -q 'is a symlink' \
     || fail "the refusal must name the symlink it declined: $out"
-  assert_no_root_outside_state "inbox"
 
   pass "the grant refuses a symlinked state record or inbox: nothing is created through it and no root outside the task's own paths is ever emitted"
 }
