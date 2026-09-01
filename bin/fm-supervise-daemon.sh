@@ -186,6 +186,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
+# The single owner of bounded command execution (fm_run_timed), used to hard
+# bound every backend capture the daemon issues from its supervision loop.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_DAEMON_DIR/fm-timeout-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -205,6 +210,11 @@ HOUSEKEEPING_TICK_DEFAULT=15
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
+# Hard bound on each backend capture read (daemon_capture_bounded below). The
+# daemon runs everything on one thread, so a capture that never returns would
+# stall every housekeeping job behind it. Local tmux/herdr reads normally
+# finish well under a second; invalid or zero values use the default.
+CAPTURE_TIMEOUT_SECS_DEFAULT=5
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
 # The captain-relevant verb set and the status classifiers (last_status_line,
@@ -632,6 +642,23 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
+# Every capture the daemon reads goes through this hard bound: a tmux or herdr
+# capture that stops responding must not stall the single supervision thread
+# (escalation retries, wedge-alarm publication, stale/pause reconciliation, and
+# shutdown cleanup all run behind it). A hit bound surfaces as a plain capture
+# failure, which every caller already treats as "endpoint not readable".
+# fm_backend_capture is a shell function (and the tests' capture seam), so the
+# external timeout/gtimeout/perl mechanisms - which exec argv - can never run
+# it: force fm_run_timed's in-process bash fallback, which runs the function in
+# a watched subshell of this shell.
+daemon_capture_bounded() {  # <backend> <target> <lines> [expected-label]
+  local bound=${FM_DAEMON_CAPTURE_TIMEOUT_SECS:-$CAPTURE_TIMEOUT_SECS_DEFAULT}
+  case "$bound" in
+    ''|0|*[!0-9]*) bound=$CAPTURE_TIMEOUT_SECS_DEFAULT ;;
+  esac
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed "$bound" fm_backend_capture "$@"
+}
+
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
   harness=$(fm_daemon_primary_harness)
@@ -639,7 +666,7 @@ pane_is_busy() {  # <target> [backend]
   case "$native" in
     busy) return 0 ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
+  tail40=$(daemon_capture_bounded "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
     | fm_busy_lines_match "$harness"
 }
@@ -677,7 +704,7 @@ stale_window_is_busy() {  # <window> <state>
   harness=$(task_window_harness "$win" "$state")
   task=$(window_to_task "$win" "$state")
   label="fm-$task"
-  tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
+  tail40=$(daemon_capture_bounded "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
   verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
   [ "${verdict%% *}" = busy ]
 }
@@ -960,17 +987,21 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   fi
   # Owner-only marker: it embeds the buffered escalation digests, which can
-  # carry captured captain-pane text. Create under umask 077 so a permissive
-  # inherited umask never exposes it, and chmod any pre-existing marker whose
-  # mode predates this guarantee (redirection alone never tightens an old one).
+  # carry captured captain-pane text. Compose the rewrite in a fresh temp inode
+  # created under umask 077, then rename it over the marker. Writing through a
+  # pre-existing marker instead would expose the new text mid-write - to a
+  # permissive leftover mode, or to any reader that already holds the old inode
+  # open - and no chmod afterwards can close either window.
   (
     umask 077
     {
       printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
       printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
       cat "$state/.subsuper-escalations" 2>/dev/null
-    } 2>/dev/null > "$marker"
-  ) || true
+    } 2>/dev/null > "$marker.tmp.$$" && mv -f "$marker.tmp.$$" "$marker"
+  ) || rm -f "$marker.tmp.$$" 2>/dev/null || true
+  # Legacy tightening only: when the rewrite above could not land, an old
+  # permissive marker may still exist; its content is stale but private.
   chmod 600 "$marker" 2>/dev/null || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"

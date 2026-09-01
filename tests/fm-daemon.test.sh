@@ -2380,6 +2380,35 @@ test_inject_wedge_alarm_marker_is_owner_only() {
   pass "wedge marker stays owner-only under a permissive umask, including on rewrite of a permissive leftover"
 }
 
+test_inject_wedge_alarm_rewrite_never_flows_through_the_old_inode() {
+  # A local reader who already reached the permissive leftover keeps its inode
+  # open across a chmod (modeled with a hard link, which pins the inode exactly
+  # like a retained fd does). The rewrite must land the newly buffered captain
+  # text in a fresh owner-only inode, so that retained handle only ever sees
+  # the stale content it could already read - never the new secrets.
+  local dir state marker retained
+  dir=$(make_wedge_case wedge-marker-fresh-inode); state="$dir/state"
+  marker="$state/.subsuper-inject-wedged"
+  retained="$dir/retained-handle"
+  escalate_add "$state" "needs-decision: pick A"
+  WEDGE_ALARM_LAST_EPOCH=0
+  FM_STATE_OVERRIDE="$state" FM_WEDGE_ALARM_CHANNEL=off FM_SUPERVISOR_BACKEND=herdr \
+    inject_wedge_alarm "$state" 30600
+  [ -s "$marker" ] || fail "inject_wedge_alarm did not write the durable marker"
+  chmod 644 "$marker"
+  ln "$marker" "$retained"
+  escalate_add "$state" "needs-decision: secret-followup-item"
+  WEDGE_ALARM_LAST_EPOCH=0
+  FM_STATE_OVERRIDE="$state" FM_WEDGE_ALARM_CHANNEL=off FM_SUPERVISOR_BACKEND=herdr \
+    FM_MAX_DEFER_SECS=0 inject_wedge_alarm "$state" 30615
+  grep -q "secret-followup-item" "$marker" \
+    || fail "rewritten wedge marker lost the newly buffered escalation text"
+  if grep -q "secret-followup-item" "$retained"; then
+    fail "wedge rewrite leaked new buffered text through the retained permissive inode"
+  fi
+  pass "wedge rewrite lands in a fresh inode: a retained handle on the permissive leftover never sees new captain text"
+}
+
 test_fm_send_reports_delivered_unconfirmed_submit() {
   # When typed-plane text was typed and Enter sent but the submit read-back
   # remains pending, fm-send must return its documented delivered-unconfirmed status and prevent
@@ -2494,7 +2523,9 @@ test_pane_is_busy_herdr_native_busy_state() {
   local dir
   dir=$(make_supercase primary-herdr-busy)
   (
+    # shellcheck disable=SC2329 # invoked indirectly through pane_is_busy
     fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
+    # shellcheck disable=SC2329 # invoked indirectly through pane_is_busy
     fm_backend_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
     FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
       || fail "pane_is_busy should report busy from herdr's native busy_state"
@@ -2504,7 +2535,9 @@ test_pane_is_busy_herdr_native_busy_state() {
 
 test_primary_busy_guard_is_harness_scoped() {
   (
+    # shellcheck disable=SC2329 # invoked indirectly through pane_is_busy
     fm_backend_busy_state() { printf 'unknown'; }
+    # shellcheck disable=SC2329 # invoked indirectly through pane_is_busy
     fm_backend_capture() { printf 'esc interrupt\n'; }
     if FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
       fail "OpenCode's rendered signature must not classify a Claude primary busy"
@@ -2513,6 +2546,29 @@ test_primary_busy_guard_is_harness_scoped() {
       || fail "OpenCode's rendered signature should classify an OpenCode primary busy"
   ) || fail "harness-scoped primary busy guard subshell failed"
   pass "primary busy guard isolates rendered signatures by detected harness"
+}
+
+test_pane_is_busy_capture_is_hard_bounded() {
+  # A tmux/herdr capture that stops responding must not stall the daemon's
+  # single supervision thread: escalation retries, wedge-alarm publication, and
+  # stale/pause reconciliation all run behind this read. The bounded read gives
+  # up at FM_DAEMON_CAPTURE_TIMEOUT_SECS and reports the pane not readable
+  # instead of hanging housekeeping forever.
+  local start elapsed
+  (
+    # shellcheck disable=SC2329 # invoked indirectly through pane_is_busy
+    fm_backend_busy_state() { printf 'unknown'; }
+    # shellcheck disable=SC2329 # invoked indirectly through pane_is_busy's bounded capture
+    fm_backend_capture() { sleep 60; }
+    start=$SECONDS
+    if FM_DAEMON_CAPTURE_TIMEOUT_SECS=1 FM_DAEMON_PRIMARY_HARNESS=claude \
+       pane_is_busy "default:w1:p2" herdr; then
+      fail "a hung capture must not classify the pane busy"
+    fi
+    elapsed=$((SECONDS - start))
+    [ "$elapsed" -le 15 ] || fail "hung capture stalled pane_is_busy for ${elapsed}s despite the 1s bound"
+  ) || fail "bounded-capture subshell failed"
+  pass "pane_is_busy: a wedged capture is cut off at the bound and read as not-busy"
 }
 
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
@@ -2762,6 +2818,7 @@ test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_inject_wedge_alarm_marker_is_owner_only
+test_inject_wedge_alarm_rewrite_never_flows_through_the_old_inode
 test_fm_send_reports_delivered_unconfirmed_submit
 test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
@@ -2769,6 +2826,7 @@ test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
+test_pane_is_busy_capture_is_hard_bounded
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers
