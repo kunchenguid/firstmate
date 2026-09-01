@@ -2648,6 +2648,48 @@ test_guarded_clear_serializes_an_absent_link_with_publication() {
   pass "guarded clear serializes absence with link publication"
 }
 
+# A read-only directory prevents a new publisher from taking the meta lock, but
+# a publisher that already owns it may later restore write access and publish.
+# An unlocked absence scan must refuse while that existing owner is active.
+test_guarded_clear_refuses_absence_with_read_only_lock_owner() {
+  local home state meta lock ready go holder rc=0
+  home="$TMP_ROOT/guarded-clear-read-only-race"
+  state="$home/state"
+  mkdir -p "$state"
+  meta="$state/race-task.meta"
+  printf 'kind=ship\n' > "$meta"
+  lock="$state/.meta-race-task.lock"
+  ready="$home/holder-ready"
+  go="$home/holder-go"
+
+  FM_HOME="$home" STATE="$state" ROOT="$ROOT" META="$meta" LOCK="$lock" \
+    READY="$ready" GO="$go" bash -c '
+      . "$ROOT/bin/fm-wake-lib.sh"
+      fm_lock_acquire_wait "$LOCK"
+      : > "$READY"
+      while [ ! -f "$GO" ]; do sleep 0.01; done
+      chmod 700 "$STATE"
+      printf "%s\n" "kind=ship" "x_request=req-new" \
+        "x_request_ts=1700000000" "x_followups=0" > "$META.next"
+      mv "$META.next" "$META"
+      fm_lock_release "$LOCK"
+    ' &
+  holder=$!
+  while [ ! -f "$ready" ]; do sleep 0.01; done
+  chmod 500 "$state"
+
+  FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --clear race-task \
+    --expect-request req-old >/dev/null 2>&1 || rc=$?
+  : > "$go"
+  wait "$holder"
+  chmod 700 "$state"
+
+  expect_code 1 "$rc" "guarded clear with a read-only active lock exit"
+  assert_grep 'x_request=req-new' "$meta" \
+    "guarded clear reported success before the lock owner published"
+  pass "guarded clear refuses unlocked absence while a publisher owns the lock"
+}
+
 test_link_rejects_unsafe_and_missing() {
   local home rc
   home="$TMP_ROOT/link-bad"; mkdir -p "$home/state"
@@ -3125,6 +3167,7 @@ test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
 test_meta_helpers_refuse_a_symlinked_task_record
 test_guarded_clear_serializes_an_absent_link_with_publication
+test_guarded_clear_refuses_absence_with_read_only_lock_owner
 test_link_rejects_unsafe_and_missing
 test_link_missing_task_without_secondmates_stays_plain
 test_link_refuses_secondmate_routed_task_with_promised_final_pointer
