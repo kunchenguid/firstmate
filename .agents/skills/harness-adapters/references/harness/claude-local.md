@@ -4,7 +4,8 @@ The verified `claude` CLI pinned to a locally served OpenAI/Anthropic-compatible
 Verified 2026-09-01 against LM Studio serving `qwen3-coder-next-mlx` on an Apple M1 Max (64 GB).
 
 **Not a second harness implementation.**
-It is the same binary, so its composer shape, trust dialog, lifecycle hooks, control family, and semantic busy source are claude's, reached through the `claude*` prefix rule that `../../../../../bin/fm-control-lib.sh` owns.
+It is the same binary, so its trust dialog, lifecycle hooks, control family, and semantic busy source are claude's, reached through the `claude*` prefix rule that `../../../../../bin/fm-control-lib.sh` owns.
+Its composer busy signature is explicitly mapped to claude's shared signature in `../../../../../bin/fm-composer-lib.sh`.
 Never give it a private copy of a shape the shared classifier owns.
 
 ## Standing boundary
@@ -55,7 +56,7 @@ A window the harness prompt alone fills is refused outright, naming the one acti
 
 LM Studio unloads an idle model on its own TTL and auto-evict settings, so the model can vanish under a running worker, and the server can simply be off.
 Both are silent to the worker - Claude Code retries rather than exiting, and was observed sitting in a multi-minute retry backoff with no request reaching the server at all.
-Arm `bin/fm-local-model.sh check <model>` as the task's custom watcher check (register it with `bin/fm-check-register.sh`, retire it with `bin/fm-check-unregister.sh`).
+`bin/fm-spawn.sh` automatically arms `bin/fm-local-model.sh check <model>` as the task's registered custom watcher check and teardown retires it through `bin/fm-check-unregister.sh`.
 It prints one actionable line for a stopped server and a different one for an evicted model, and nothing while the runtime is healthy.
 
 ## Latency

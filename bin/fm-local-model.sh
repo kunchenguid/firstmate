@@ -105,7 +105,7 @@ for e in entries:
     if not isinstance(e, dict) or e.get("id") != want:
         continue
     state = e.get("state") or "unknown"
-    ctx = e.get("loaded_context_length") or e.get("max_context_length") or 0
+    ctx = e.get("loaded_context_length") or 0
     try:
         ctx = int(ctx)
     except (TypeError, ValueError):
@@ -131,14 +131,19 @@ cmd_model_state() {  # <model>
 }
 
 # The enforced budget: the smaller of what the server actually loaded and the
-# firstmate ceiling. Refuses rather than guessing when the model is not loaded,
-# because an unloaded model reports no meaningful window.
+# firstmate ceiling. Refuses rather than guessing when the model is not loaded
+# or does not report a positive loaded window.
 cmd_context_budget() {  # <model>
   local body row state ctx cap
   body=$(catalog) || exit $?
   row=$(catalog_lookup "$1" "$body") || exit $?
   state=${row%% *}; ctx=${row##* }
   [ "$state" = loaded ] || exit 4
+  if [ "$ctx" -le 0 ]; then
+    echo "error: the local model '$1' is loaded but reports no positive loaded context length." >&2
+    echo "       Reload it in LM Studio with a positive context length, then retry." >&2
+    exit 4
+  fi
   cap=$(ceiling) || exit $?
   if [ "$ctx" -gt 0 ] && [ "$ctx" -lt "$cap" ]; then printf '%s\n' "$ctx"; else printf '%s\n' "$cap"; fi
 }
@@ -186,7 +191,10 @@ cmd_check() {  # <model>
     printf 'blocked: the local model server at %s stopped answering; the worker cannot make progress until it is running again\n' "$ENDPOINT"
     return 0
   fi
-  row=$(catalog_lookup "$1" "$body" 2>/dev/null) || return 0
+  if ! row=$(catalog_lookup "$1" "$body" 2>/dev/null); then
+    printf 'blocked: the local model endpoint at %s answered with an unreadable catalog; verify that LM Studio is serving /api/v0/models before the worker can make progress\n' "$ENDPOINT"
+    return 0
+  fi
   state=${row%% *}
   [ "$state" = loaded ] && return 0
   printf 'blocked: the local model %s is no longer loaded at %s (state: %s); the worker cannot make progress until it is loaded again\n' "$1" "$ENDPOINT" "$state"

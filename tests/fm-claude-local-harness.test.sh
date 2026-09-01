@@ -30,6 +30,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$ROOT/bin/fm-composer-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-claude-local-harness)
@@ -43,7 +45,7 @@ make_world() {  # <name> -> echoes "<home> <fakebin> <endpoint> <case-dir>"
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" gh gh-axi)
   dir="$case_dir/endpoint/api/v0"
   mkdir -p "$dir"
   cat > "$dir/models" <<'EOF'
@@ -52,6 +54,15 @@ make_world() {  # <name> -> echoes "<home> <fakebin> <endpoint> <case-dir>"
 ]}
 EOF
   printf '%s %s file://%s %s\n' "$home" "$fakebin" "$case_dir/endpoint" "$case_dir"
+}
+
+set_model_state() {  # <case-dir> <state> <loaded-context-length>
+  local case_dir=$1 state=$2 ctx=$3
+  cat > "$case_dir/endpoint/api/v0/models" <<EOF
+{"object":"list","data":[
+ {"id":"local-coder","object":"model","type":"llm","state":"$state","max_context_length":262144,"loaded_context_length":$ctx}
+]}
+EOF
 }
 
 # run_spawn <home> <fakebin> <endpoint> [args...]
@@ -214,8 +225,59 @@ test_it_inherits_claudes_verified_tables() {
   pass "claude-local inherits claude's control family and semantic busy source"
 }
 
+test_it_uses_claudes_shared_busy_signature() {
+  local busy_tail idle_tail
+  busy_tail='working  esc to interrupt'
+  idle_tail='ready for the next instruction'
+
+  printf '%s' "$busy_tail" | fm_busy_lines_match claude \
+    || fail "claude did not classify its known busy tail as busy"
+  printf '%s' "$busy_tail" | fm_busy_lines_match claude-local \
+    || fail "claude-local did not classify claude's known busy tail as busy"
+  if printf '%s' "$idle_tail" | fm_busy_lines_match claude; then
+    fail "claude classified an idle tail as busy"
+  fi
+  if printf '%s' "$idle_tail" | fm_busy_lines_match claude-local; then
+    fail "claude-local classified an idle tail as busy"
+  fi
+
+  pass "claude and claude-local classify the same busy and idle tails identically"
+}
+
+test_spawn_arms_an_executable_eviction_check() {
+  local home fakebin endpoint case_dir project worktree id out status
+  read -r home fakebin endpoint case_dir <<<"$(make_world watcher)"
+  id="cl-watcher-x1"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  fm_test_spawn_brief "$home" "$id" "tiny brief"
+  fm_git_worktree "$project" "$worktree" "fm/$id"
+
+  status=0
+  FM_FAKE_PANE_PATH="$worktree" run_spawn "$home" "$fakebin" "$endpoint" \
+    "$id" "$project" --scout --harness claude-local --model local-coder || status=$?
+  [ "$status" -eq 0 ] || fail "claude-local spawn did not arm its watcher check: $(cat "$RUN_OUT")"
+  assert_present "$home/state/$id.check.sh" "claude-local spawn did not register a watcher check"
+  assert_present "$home/state/$id.check-trust" "claude-local spawn did not bind its watcher check"
+
+  set_model_state "$case_dir" not-loaded 0
+  out=$("$home/state/$id.check.sh")
+  status=$?
+  [ "$status" -eq 0 ] || fail "the registered watcher check did not run"
+  case "$out" in
+    blocked:*"no longer loaded"*) : ;;
+    *) fail "the registered watcher check did not report eviction: '$out'" ;;
+  esac
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the registered watcher check must print exactly one wake line"
+
+  pass "a claude-local spawn registers an executable watcher check that reports eviction"
+}
+
 test_home_default_cannot_select_it
 test_secondmate_is_refused_in_both_planes
 test_no_mistakes_mode_is_refused
 test_missing_model_is_refused
 test_it_inherits_claudes_verified_tables
+test_it_uses_claudes_shared_busy_signature
+test_spawn_arms_an_executable_eviction_check

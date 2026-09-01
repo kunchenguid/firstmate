@@ -760,6 +760,8 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+LOCAL_MODEL_CHECK_PENDING=0
+LOCAL_MODEL_CHECK_STATE=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -807,6 +809,8 @@ spawn_abort_cleanup() {
         "$RELAUNCH_REPLACEMENT_STATE" \
         "$ID"; then
       echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
+    else
+      LOCAL_MODEL_CHECK_PENDING=0
     fi
     if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
       if ! "$FM_ROOT/bin/fm-busy-event.sh" retire \
@@ -815,6 +819,13 @@ spawn_abort_cleanup() {
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
     fi
+  fi
+  if [ "$LOCAL_MODEL_CHECK_PENDING" = 1 ]; then
+    if ! FM_STATE_OVERRIDE="$LOCAL_MODEL_CHECK_STATE" \
+        "$SCRIPT_DIR/fm-check-unregister.sh" "$ID" >/dev/null; then
+      echo "warning: could not remove local-model check after aborted spawn of $ID" >&2
+    fi
+    LOCAL_MODEL_CHECK_PENDING=0
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -924,7 +935,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  local harness=$1 wt=$2 state=$3 id=$4 original_harness token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -932,7 +943,11 @@ clear_relaunch_harness_wiring() {
   # as, say, `grok-2` would have wiring armed and never retired. An
   # unrecognized value resolves to no adapter, which is also the case in which
   # no wiring was armed to begin with.
+  original_harness=$harness
   harness=$(fm_control_harness_family "$harness") || harness=
+  if [ "$original_harness" = claude-local ]; then
+    FM_STATE_OVERRIDE="$state" "$SCRIPT_DIR/fm-check-unregister.sh" "$id" >/dev/null || return 1
+  fi
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
@@ -948,6 +963,24 @@ clear_relaunch_harness_wiring() {
   done <<EOF
 $(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
 EOF
+}
+
+arm_local_model_check() {  # <state> <id> <endpoint> <model>
+  local state=$1 id=$2 endpoint=$3 model=$4 check tmp
+  check="$state/$id.check.sh"
+  [ ! -e "$check" ] && [ ! -L "$check" ] || return 1
+  tmp=$(mktemp "$state/.$id.check.XXXXXX") || return 1
+  if ! {
+    printf '#!/usr/bin/env bash\n'
+    printf 'export FM_LOCAL_MODEL_ENDPOINT=%s\n' "$(shell_quote "$endpoint")"
+    printf 'exec %s check %s\n' "$(shell_quote "$SCRIPT_DIR/fm-local-model.sh")" "$(shell_quote "$model")"
+  } > "$tmp" || ! chmod 0700 "$tmp" || ! mv -- "$tmp" "$check"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  LOCAL_MODEL_CHECK_PENDING=1
+  LOCAL_MODEL_CHECK_STATE=$state
+  FM_STATE_OVERRIDE="$state" "$SCRIPT_DIR/fm-check-register.sh" "$id" >/dev/null
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -1964,12 +1997,13 @@ if [ "$HARNESS" = claude-local ]; then
   fi
   # 5. The endpoint must be answering and the model actually loaded.
   #    fm-local-model.sh owns the verdict and prints the actionable refusal.
-  "$SCRIPT_DIR/fm-local-model.sh" preflight "$MODEL" >/dev/null || exit 1
-  LOCAL_CTX=$("$SCRIPT_DIR/fm-local-model.sh" context-budget "$MODEL") || exit 1
+  LOCAL_MODEL_ENDPOINT=${FM_LOCAL_MODEL_ENDPOINT:-http://127.0.0.1:1234}
+  FM_LOCAL_MODEL_ENDPOINT="$LOCAL_MODEL_ENDPOINT" "$SCRIPT_DIR/fm-local-model.sh" preflight "$MODEL" >/dev/null || exit 1
+  LOCAL_CTX=$(FM_LOCAL_MODEL_ENDPOINT="$LOCAL_MODEL_ENDPOINT" "$SCRIPT_DIR/fm-local-model.sh" context-budget "$MODEL") || exit 1
   # 6. A brief that obviously exceeds the usable headroom is refused loudly here
   #    rather than silently degrading into auto-compaction against a window the
   #    server does not have.
-  "$SCRIPT_DIR/fm-local-model.sh" brief-fits "$MODEL" "$BRIEF" >/dev/null || exit 1
+  FM_LOCAL_MODEL_ENDPOINT="$LOCAL_MODEL_ENDPOINT" "$SCRIPT_DIR/fm-local-model.sh" brief-fits "$MODEL" "$BRIEF" >/dev/null || exit 1
 fi
 
 
@@ -2738,6 +2772,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
+if [ "$HARNESS" = claude-local ]; then
+  arm_local_model_check "$STATE_REAL" "$ID" "$LOCAL_MODEL_ENDPOINT" "$MODEL" || {
+    echo "error: could not arm the local-model watcher check for $ID" >&2
+    exit 1
+  }
+fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
@@ -3247,7 +3287,7 @@ case "$HARNESS" in
   # endpoint above, so the bound the worker runs under is the one the server
   # actually loaded, capped by the firstmate ceiling.
   claude-local)
-    LAUNCH=${LAUNCH//__LOCALENDPOINT__/"$(shell_quote "${FM_LOCAL_MODEL_ENDPOINT:-http://127.0.0.1:1234}")"}
+    LAUNCH=${LAUNCH//__LOCALENDPOINT__/"$(shell_quote "$LOCAL_MODEL_ENDPOINT")"}
     LAUNCH=${LAUNCH//__LOCALTOKEN__/"$(shell_quote "${FM_LOCAL_MODEL_TOKEN:-local}")"}
     LAUNCH=${LAUNCH//__LOCALMODEL__/"$(shell_quote "$MODEL")"}
     LAUNCH=${LAUNCH//__LOCALCTX__/"$(shell_quote "$LOCAL_CTX")"}
@@ -3439,3 +3479,4 @@ fi
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+LOCAL_MODEL_CHECK_PENDING=0

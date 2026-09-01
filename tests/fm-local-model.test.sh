@@ -55,6 +55,26 @@ dead_endpoint() {
   printf 'file://%s\n' "$TMP_ROOT/dead"
 }
 
+missing_loaded_window_endpoint() {
+  local dir
+  dir="$TMP_ROOT/missing-window/api/v0"
+  mkdir -p "$dir"
+  cat > "$dir/models" <<'EOF'
+{"object":"list","data":[
+ {"id":"local-coder","object":"model","type":"llm","state":"loaded","max_context_length":262144}
+]}
+EOF
+  printf 'file://%s\n' "$TMP_ROOT/missing-window"
+}
+
+unreadable_catalog_endpoint() {
+  local dir
+  dir="$TMP_ROOT/unreadable/api/v0"
+  mkdir -p "$dir"
+  printf '<html>another service</html>\n' > "$dir/models"
+  printf 'file://%s\n' "$TMP_ROOT/unreadable"
+}
+
 # A loaded model is reported loaded, and the budget is the smaller of the
 # server's own loaded window and the firstmate ceiling - in BOTH directions, so
 # neither side can be the only one that ever binds.
@@ -153,6 +173,41 @@ test_unreachable_endpoint_is_loud_and_distinct() {
   pass "an unreachable endpoint exits 3 and wakes firstmate with its own distinct line"
 }
 
+test_loaded_model_without_loaded_window_is_refused() {
+  local url out status
+  url=$(missing_loaded_window_endpoint)
+
+  out=$(FM_LOCAL_MODEL_ENDPOINT="$url" "$LOCAL_MODEL" context-budget local-coder 2>&1)
+  status=$?
+  [ "$status" -eq 4 ] || fail "a loaded model without a loaded window must exit 4, got $status"
+  case "$out" in *"no positive loaded context length"*) : ;; *) fail "missing loaded window did not explain the refusal: $out" ;; esac
+
+  FM_LOCAL_MODEL_ENDPOINT="$url" "$LOCAL_MODEL" headroom local-coder >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 4 ] || fail "headroom must refuse a model without a loaded window, got $status"
+
+  pass "a loaded model without loaded_context_length is refused instead of using its maximum"
+}
+
+test_unreadable_catalog_wakes_once() {
+  local url out
+  url=$(unreadable_catalog_endpoint)
+
+  out=$(FM_LOCAL_MODEL_ENDPOINT="$url" "$LOCAL_MODEL" check local-coder) \
+    || fail "check exited nonzero for an unreadable catalog"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "an unreadable catalog must print exactly one wake line"
+  case "$out" in
+    blocked:*"unreadable catalog"*) : ;;
+    *) fail "an unreadable catalog did not produce its own wake line: '$out'" ;;
+  esac
+  case "$out" in
+    *"no longer loaded"*|*"stopped answering"*) fail "an unreadable catalog was confused with another failure: '$out'" ;;
+  esac
+
+  pass "an unreadable catalog wakes firstmate with one distinct actionable line"
+}
+
 # The short-context boundary is enforced, not documented. It is enforced against
 # the HEADROOM above the harness's own prompt, because that baseline - measured
 # at ~60k tokens on 2026-09-01 - is what actually consumes this window.
@@ -244,6 +299,8 @@ test_loaded_model_and_budget
 test_evicted_model_is_loud
 test_absent_model_names_the_gap
 test_unreachable_endpoint_is_loud_and_distinct
+test_loaded_model_without_loaded_window_is_refused
+test_unreadable_catalog_wakes_once
 test_oversized_brief_is_refused
 test_no_headroom_is_refused_with_the_fix
 test_bad_ceiling_is_refused
