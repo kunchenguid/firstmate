@@ -2383,6 +2383,113 @@ test_open_decision_busy_pane_keeps_one_shot() {
   pass "an open decision keeps its one-shot across a busy interlude, buying no further bare wake"
 }
 
+# A decision answered and then reopened - even byte-for-byte, the same key,
+# verb and note - is a NEW gate the captain is owed, so it must buy the one-shot
+# surface again. The identity that keys the one-shot is the durable open set,
+# and a close followed by an identical reopen between two polls folds back to
+# the same open-set bytes; an identity built from those bytes alone matched the
+# marker the earlier surface left behind, so the reopened gate was absorbed as
+# already surfaced and hid until FM_PAUSE_RESURFACE_SECS - the exact demotion
+# the one-shot exists to prevent (upstream review of PR 3325). The identity
+# therefore carries each open key's generation, and this drives the real
+# watcher across the reopen: surface once, answer, reopen identically between
+# polls, then churn again - the reopened gate must surface exactly once more.
+test_open_decision_identical_reopen_surfaces_again() {
+  local dir state fakebin out capture_file statusf window sig counts total bare before
+  dir=$(make_case decision-identical-reopen); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-gate"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'needs-decision [key=w25-design]: playtest-suite + physics design committed for review\n' \
+    > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+
+  declared_wait_churn_rounds "$state" "$fakebin" "$window" "$capture_file" "$out" 3 \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting the decision'
+  counts=$(count_stale_wakes "$state" "$window")
+  before=${counts##* }
+  # Exactly the one-shot, so the reopen assertion below cannot be satisfied by a
+  # first surface that merely arrived late.
+  [ "$before" -eq 1 ] \
+    || fail "an open decision on a churning pane queued $before bare stale wakes before the reopen, not the one-shot"
+
+  # Answered, then reopened byte-for-byte between polls, re-priming the seen
+  # baseline exactly as firstmate does after handling the status signal: the
+  # open set reads the same bytes again, but the gate is new.
+  printf 'resolved [key=w25-design]: answered: revise then build\n' >> "$statusf"
+  printf 'needs-decision [key=w25-design]: playtest-suite + physics design committed for review\n' \
+    >> "$statusf"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$statusf" \
+    || fail "could not re-prime the status baseline after the reopen"
+  declared_wait_churn_rounds "$state" "$fakebin" "$window" "$capture_file" "$out" 3 \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting the decision'
+  counts=$(count_stale_wakes "$state" "$window")
+  total=${counts%% *}; bare=${counts##* }
+  [ "$bare" -gt "$before" ] \
+    || fail "a decision answered and identically reopened stayed absorbed behind the earlier one-shot instead of surfacing the new gate"
+  [ "$bare" -le $((before + 1)) ] \
+    || fail "a reopened decision bought $bare bare stale wakes in total; a reopen is one new gate, not one per pane hash"
+  [ "$total" -le $((before + 1)) ] \
+    || fail "a reopened decision queued $total stale wakes in total across the reopen"
+  pass "a decision answered and identically reopened surfaces its one-shot again, exactly once"
+}
+
+# The one-shot's suppressor may exist only once the wake it stands for is
+# durable. stale_declared_wait_absorb used to publish the declaration-keyed
+# .paused-surfaced marker and the pause-cadence files first and hand the
+# enqueue back to its caller, so a watcher that died between the two - or whose
+# enqueue failed - left the suppressor standing for a wake that never reached
+# the queue: every later sighting of that declaration absorbed silently and the
+# live gate hid until FM_PAUSE_RESURFACE_SECS (Codex review of PR 3325). This
+# drives the real watcher with sequence publication failing on the first
+# sighting - a directory at .wake-queue.seq, the fault fm-pr-check-security
+# uses, chosen over one at .wake-queue because that now (correctly) triggers
+# re-arm recovery before any poll runs - then repairs the queue and churns
+# again: the initial bare wake must still surface, exactly once.
+test_declared_wait_one_shot_survives_a_failed_enqueue() {
+  local dir state fakebin out capture_file statusf window key sig counts total bare
+  dir=$(make_case decision-enqueue-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-gate"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'needs-decision [key=w25-design]: playtest-suite + physics design committed for review\n' \
+    > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+
+  # First sighting with the queue unable to publish a sequence: the watcher
+  # exits through the shared wake owner's failure path with nothing queued, and
+  # nothing may stand in for the wake that never landed.
+  mkdir "$state/.wake-queue.seq"
+  printf '%s' 'idle, awaiting the captain (tokens 0)' > "$capture_file"
+  declared_wait_churn_launch "$state" "$fakebin" "$capture_file" "$out" \
+    FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting the decision'
+  rmdir "$state/.wake-queue.seq" || fail "the failed-enqueue fixture published a sequence anyway"
+  counts=$(count_stale_wakes "$state" "$window")
+  [ "${counts%% *}" -eq 0 ] \
+    || fail "a stale wake reached the queue while sequence publication was failing: $counts"
+  [ ! -e "$state/.paused-surfaced-$key" ] \
+    || fail "the declared-wait one-shot suppressor was published before its wake was durable"
+
+  # Queue repaired: the one-shot the crew is still owed must surface now, and
+  # only once - the later churn absorbs under the identity it publishes.
+  declared_wait_churn_rounds "$state" "$fakebin" "$window" "$capture_file" "$out" 3 \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting the decision'
+  counts=$(count_stale_wakes "$state" "$window")
+  total=${counts%% *}; bare=${counts##* }
+  [ "$bare" -ge 1 ] \
+    || fail "a failed enqueue left the declared-wait one-shot suppressed: the repaired queue never received the initial stale wake"
+  [ "$bare" -le 1 ] \
+    || fail "the repaired queue received $bare bare stale wakes for one declaration"
+  [ "$total" -le 1 ] \
+    || fail "the repaired queue received $total stale wakes for one declaration"
+  pass "a failed enqueue publishes no one-shot suppressor, so the initial stale wake still surfaces once the queue is repaired"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4193,6 +4300,8 @@ test_declared_pause_churning_pane_surfaces_once_per_declaration
 test_open_decision_churning_pane_surfaces_once_per_declaration
 test_open_decision_survives_unrelated_status_appends
 test_open_decision_busy_pane_keeps_one_shot
+test_open_decision_identical_reopen_surfaces_again
+test_declared_wait_one_shot_survives_a_failed_enqueue
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

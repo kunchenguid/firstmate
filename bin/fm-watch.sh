@@ -977,11 +977,13 @@ pause_state_class() {  # <window> <task>
   printf '%s' "$class"
 }
 
-# The ONE declared-wait triage a normal-mode stale sighting passes before it may
-# queue a bare wake, so no stale-emission path answers "is this quiet endpoint
-# expected?" on its own. fm-classify-lib.sh's status_declared_wait_kind owns the
-# vocabulary (a declared pause, a verified captain-held transfer, or a decision
-# the durable fold still holds open); this owns what the watcher does with it.
+# The ONE declared-wait triage a normal-mode stale sighting passes, and the one
+# place such a sighting queues its bare wake, so no stale-emission path answers
+# "is this quiet endpoint expected?" on its own and none can publish the
+# suppressor below ahead of the wake it stands for. fm-classify-lib.sh's
+# status_declared_wait_kind owns the vocabulary (a declared pause, a verified
+# captain-held transfer, or a decision the durable fold still holds open); this
+# owns what the watcher does with it.
 #
 # A declared wait still surfaces ONCE, so a live gate is never hidden behind the
 # bounded cadence - but that one-shot is keyed on the DECLARATION itself
@@ -1003,16 +1005,21 @@ pause_state_class() {  # <window> <task>
 # only the last-line paused or captain-held wait, which any append ends outright,
 # and the daemon owns triage there and classifies the plain identity.
 #
-# Pause tracking is set here on the one-shot surface and cleared here when there
-# is no declared wait, so a caller cannot surface without the bookkeeping that
-# puts the NEXT sighting on the bounded cadence.
-# 0 when the declared wait absorbed this sighting; 1 when the caller must surface.
+# Pause tracking is published here on the one-shot surface - only AFTER the
+# wake is durable in the queue - and cleared here when there is no declared
+# wait, so a caller cannot surface without the bookkeeping that puts the NEXT
+# sighting on the bounded cadence, and no exit between the two can leave a
+# suppressor standing for a wake that never landed.
+# 0 when the declared wait absorbed this sighting; 1 when it surfaced - the bare
+# stale wake is already queued and the caller finishes only its own per-site
+# bookkeeping; a failed enqueue exits the cycle with nothing published.
 stale_declared_wait_absorb() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 statusf key marker declared
   statusf="$STATE/$task.status"
   key=$(window_key "$win")
   if [ -z "$(status_declared_wait_kind "$statusf")" ]; then
     clear_pause_state "$key"
+    fm_wake_append stale "$win" "stale: $win" || exit 1
     return 1
   fi
   marker="$STATE/.paused-surfaced-$key"
@@ -1028,6 +1035,13 @@ stale_declared_wait_absorb() {  # <window> <task> <hash>
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
+  # Queue first, publish second. The marker suppresses every later sighting of
+  # this declaration, so it may exist only once the wake it stands for is
+  # durable: published ahead of the enqueue, a watcher exiting between the two
+  # left it standing for a wake that never reached the queue, and the live gate
+  # hid until the long cadence. Ordered this way, an exit between the two costs
+  # at most one repeated surface on the next round, never a hidden gate.
+  fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$declared" > "$marker"
   : > "$STATE/.paused-$key"
   date +%s > "$STATE/.paused-rechecked-$key"
@@ -1040,7 +1054,6 @@ surface_nonterminal_stale() {  # <window> <hash>
   task=$(window_to_task "$win" "$STATE")
   stale_declared_wait_absorb "$win" "$task" "$h" && return 0
   key=$(window_key "$win")
-  fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
@@ -1874,7 +1887,8 @@ EOF
               # a new pane hash must not buy another bare wake.
               triage_log "absorbed stale (declared wait behind a captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
+              # Surfaced: the triage queued the bare wake itself, so only this
+              # arm's own bookkeeping remains.
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
