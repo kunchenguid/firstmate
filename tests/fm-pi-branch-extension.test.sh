@@ -621,9 +621,11 @@ console.log(`CACHE_KEY=${rewriteA.prompt_cache_key}`);
 
 // 4. Two-stage filter, stage 2: routine while main is idle appends with no
 // turn; routine while main is busy defers to after the captain's next prompt;
-// captain-relevant appends and triggers exactly one turn. Store rows are
-// written BEFORE the merge note and marked read after it.
+// guarded terminal no-op receipts stay store-only and deduplicate per task
+// incarnation; captain-relevant appends and triggers exactly one turn. Store
+// rows are written BEFORE the visible merge note and marked read after it.
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+writeFileSync(`${home}/state/task-9.meta`, `project=${home}/projects/approved\nwindow=fm-task-9\nspawn_gen=spawn-nine\n`);
 const r1 = await report.execute("call-1", { task: "task-9", verdict: "routine", summary: "worker healthy, no action needed", wake: "signal: working" }, undefined, undefined, {});
 if (r1.isError) throw new Error(`routine report failed: ${JSON.stringify(r1)}`);
 if (sentToMain.length !== 1) throw new Error("routine report did not merge exactly one note");
@@ -640,6 +642,35 @@ await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "P
 if (sentToMain[2].options.triggerTurn !== true || sentToMain[2].options.deliverAs !== "followUp") {
   throw new Error(`captain merge must trigger exactly one follow-up turn: ${JSON.stringify(sentToMain[2].options)}`);
 }
+const terminalWake = `signal: ${home}/state/task-9.status ${home}/state/task-9.turn-ended`;
+const r4 = await report.execute(
+  "call-4",
+  { task: "task-9", verdict: "routine", summary: "the completed worker is already stopped; no action is needed", wake: terminalWake, receipt: "terminal-noop" },
+  undefined,
+  undefined,
+  {},
+);
+if (r4.isError) throw new Error(`terminal-noop receipt failed: ${JSON.stringify(r4)}`);
+if (sentToMain.length !== 3) throw new Error("store-only terminal receipt rendered a merge note");
+const r5 = await report.execute(
+  "call-5",
+  { task: "task-9", verdict: "routine", summary: "the completed worker is still stopped; no action is needed", wake: terminalWake, receipt: "terminal-noop" },
+  undefined,
+  undefined,
+  {},
+);
+if (r5.isError || !String(r5.content[0].text).includes("already recorded")) {
+  throw new Error(`duplicate terminal-noop receipt did not deduplicate: ${JSON.stringify(r5)}`);
+}
+if (sentToMain.length !== 3) throw new Error("duplicate terminal receipt rendered a merge note");
+const invalidReceipt = await report.execute(
+  "call-bad-receipt",
+  { task: "task-9", verdict: "captain", summary: "captain-facing work must not be hidden", wake: terminalWake, receipt: "terminal-noop" },
+  undefined,
+  undefined,
+  {},
+);
+if (!invalidReceipt.isError) throw new Error("captain-facing terminal receipt was accepted as store-only");
 if (typeof sentToMain[0].message.content !== "string" || !sentToMain[0].message.content.startsWith("⛵ ")) {
   throw new Error(`routine note missing sailboat prefix: ${sentToMain[0].message.content}`);
 }
@@ -679,13 +710,15 @@ if (sentToMain.filter((sent) => sent.options.triggerTurn).length !== 1) {
   throw new Error("one captain outcome must open exactly one turn on main");
 }
 
-// The store (the owned durable contract) holds all three outcomes in order,
-// and each merged note advanced the read cursor.
+// The store (the owned durable contract) holds the visible outcomes plus the
+// first store-only terminal receipt. The duplicate terminal receipt is a
+// per-incarnation no-op and must not append a fifth row.
 const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-if (rows.length !== 3) throw new Error(`expected 3 store rows, got ${rows.length}`);
-if (rows[0].verdict !== "routine" || rows[2].verdict !== "captain") throw new Error("store verdicts out of order");
+if (rows.length !== 4) throw new Error(`expected 4 store rows, got ${rows.length}`);
+if (rows[0].verdict !== "routine" || rows[2].verdict !== "captain" || rows[3].verdict !== "routine") throw new Error("store verdicts out of order");
 if (rows[0].wake !== "signal: working") throw new Error("store lost the wake reason");
-if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes were not marked read");
+if (rows[3].silent !== true || rows[3].wake !== terminalWake) throw new Error(`terminal receipt was not stored silently: ${JSON.stringify(rows[3])}`);
+if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes and store-only receipts were not marked read");
 
 // 5. Main-side surfaces: the on-demand store reader tool and the merge-note
 // renderer.
@@ -1169,6 +1202,7 @@ await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "heartbeat wake 
 // escalate a captain-worthy finding into one main turn.
 const heartbeatSession = globalThis.__fmSessions[globalThis.__fmSessions.length - 1];
 const heartbeatReport = heartbeatSession.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const beforeNoopMessages = sentToMain.length;
 await heartbeatReport.execute(
   "heartbeat-noop",
   { task: "fleet", verdict: "routine", summary: "fleet reviewed, nothing changed", silent: true },
@@ -1176,9 +1210,7 @@ await heartbeatReport.execute(
   undefined,
   {},
 );
-const noopMerge = sentToMain[sentToMain.length - 1];
-if (noopMerge.options.triggerTurn) throw new Error("a no-op heartbeat pass must not open a main turn");
-if (noopMerge.message.display !== false) throw new Error("a no-op heartbeat pass must not render a merge note");
+if (sentToMain.length !== beforeNoopMessages) throw new Error("a no-op heartbeat pass rendered or delivered a merge note");
 const storedNoop = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")
   .trim()
   .split("\n")

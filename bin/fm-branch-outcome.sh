@@ -10,8 +10,10 @@
 #     Existing lines are never rewritten, reordered, or deleted by any
 #     subcommand; the read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
-#     the log. Retention: the log is small (one line per handled fleet event)
-#     and truncation, if ever needed, is a captain-approved manual act.
+#     the log. `silent:true` means store-only: session-start replay skips the
+#     row after recording the read cursor. Retention: the log is small (one
+#     line per handled fleet event) and truncation, if ever needed, is a
+#     captain-approved manual act.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
 #     Pi as an append-only merge note, emitted by the locked session-start
 #     replay, or silently consumed there because `silent` is true. Records

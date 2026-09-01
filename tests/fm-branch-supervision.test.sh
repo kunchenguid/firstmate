@@ -52,6 +52,10 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"Report verdict captain for any outcome that directly answers an explicit captain request."*"This rule is unconditional"*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
     *) fail "branch prompt lost the unconditional requested-outcome or routine-silence rules" ;;
   esac
+  case "$out_a" in
+    *"A signal batch containing same-task \`.status\` and \`.turn-ended\` rows is one handled event"*"receipt: \"terminal-noop\""*"deduplicated per task incarnation"*) ;;
+    *) fail "branch prompt lost task-local terminal receipt or same-task signal coalescing rules" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
@@ -126,16 +130,20 @@ test_outcome_startup_replay_preserves_silence() {
     --task fleet --verdict routine --summary 'fleet reviewed, nothing changed' --silent true >/dev/null \
     || fail "silent outcome append failed"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-terminal --verdict routine --summary 'terminal no-op stored only' --silent true >/dev/null \
+    || fail "task-local silent outcome append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-1 --verdict routine --summary 'worker recovered automatically' >/dev/null \
     || fail "visible outcome append failed"
 
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "mixed startup replay failed"
   assert_not_contains "$replay" "fleet reviewed, nothing changed" "startup replay printed a silent outcome"
+  assert_not_contains "$replay" "terminal no-op stored only" "startup replay printed a task-local silent outcome"
   assert_contains "$replay" "worker recovered automatically" "startup replay lost a visible routine outcome"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the silent and visible rows read"
 
-  printf '%s\n' '{"seq":3,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
+  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
     >> "$home/state/branch-outcomes.jsonl"
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "legacy startup replay failed"
   assert_contains "$replay" "legacy visible outcome" "startup replay hid a legacy row with no silent field"

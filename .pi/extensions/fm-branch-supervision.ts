@@ -133,6 +133,9 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
+const TERMINAL_NOOP_RECEIPT = "terminal-noop";
+const routineReceiptDir = join(state, "branch-routine-receipts");
+type RoutineReceipt = "" | typeof TERMINAL_NOOP_RECEIPT;
 // Carried inside the captain note's own text because that text is the only
 // part of a custom message Pi gives the model (see mergeIntoMain).
 //
@@ -600,9 +603,10 @@ export default function (pi: ExtensionAPI) {
   // (queued as a follow-up while main is busy) - that follow-up turn is
   // itself the captain-visible outcome, so the captain-facing note is
   // delivered silently (display: false) rather than printed or rendered a
-  // second time; routine notes stay rendered except an explicitly silent
-  // no-change heartbeat. The read cursor advances once the note is handed to
-  // Pi; a crash inside Pi's
+  // second time. Ordinary routine notes stay rendered, while explicitly
+  // silent routine receipts are store-only and only advance the read cursor.
+  // The read cursor advances once the note is handed to Pi, or immediately
+  // for a store-only receipt; a crash inside Pi's
   // own delivery window leaves the outcome durable in the store, where
   // main's fm_branch_outcomes tool still reads it on demand.
   //
@@ -631,6 +635,85 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function signalWakeIsSameTaskTerminal(task: string, wake: string): boolean {
+    const match = /^signal:\s+(.+)$/.exec(wake);
+    if (!match) return false;
+    const files = match[1].trim().split(/\s+/).filter(Boolean);
+    if (files.length === 0) return false;
+    let hasTurnEnded = false;
+    for (const file of files) {
+      const slash = Math.max(file.lastIndexOf("/"), file.lastIndexOf("\\"));
+      const base = slash >= 0 ? file.slice(slash + 1) : file;
+      let rowTask = "";
+      if (base.endsWith(".turn-ended")) {
+        rowTask = base.slice(0, -".turn-ended".length);
+        hasTurnEnded = true;
+      } else if (base.endsWith(".status")) {
+        rowTask = base.slice(0, -".status".length);
+      } else {
+        return false;
+      }
+      if (rowTask !== task) return false;
+    }
+    return hasTurnEnded;
+  }
+
+  function metaField(text: string, key: string): string {
+    const prefix = `${key}=`;
+    return text.split(/\r?\n/).find((line) => line.startsWith(prefix))?.slice(prefix.length).trim() ?? "";
+  }
+
+  function taskIncarnation(task: string): string {
+    try {
+      const text = readFileSync(join(state, `${task}.meta`), "utf8");
+      const spawnGen = metaField(text, "spawn_gen");
+      if (/^[A-Za-z0-9._-]+$/.test(spawnGen)) return `spawn:${spawnGen}`;
+      const tasktmp = metaField(text, "tasktmp");
+      const window = metaField(text, "window");
+      const worktree = metaField(text, "worktree");
+      const identity = tasktmp || `${window}|${worktree}`;
+      if (!identity || identity === "|") return "";
+      return `legacy:${createHash("sha256").update(identity).digest("hex")}`;
+    } catch {
+      return "";
+    }
+  }
+
+  function terminalNoopReceipt(task: string, wake: string): { fingerprint: string; path: string; incarnation: string } | null {
+    if (!signalWakeIsSameTaskTerminal(task, wake)) return null;
+    const incarnation = taskIncarnation(task);
+    if (!incarnation) return null;
+    const fingerprint = createHash("sha256")
+      .update(`fm-branch-terminal-noop-v1\0${task}\0${incarnation}`)
+      .digest("hex")
+      .slice(0, 32);
+    return { fingerprint, path: join(routineReceiptDir, `${fingerprint}.receipt`), incarnation };
+  }
+
+  function receiptSeq(path: string): string {
+    try {
+      const text = readFileSync(path, "utf8");
+      return /^seq=([0-9]+)$/m.exec(text)?.[1] ?? "";
+    } catch {
+      return "";
+    }
+  }
+
+  function recordTerminalNoopReceipt(receipt: { fingerprint: string; path: string; incarnation: string }, task: string, seq: string): boolean {
+    try {
+      mkdirSync(routineReceiptDir, { recursive: true });
+      writeFileSync(
+        receipt.path,
+        `schema=fm-branch-routine-receipt.v1\nreceipt=${TERMINAL_NOOP_RECEIPT}\nfingerprint=${receipt.fingerprint}\ntask=${task}\nincarnation=${receipt.incarnation}\nseq=${seq}\n`,
+        { flag: "wx", mode: 0o600 },
+      );
+      return true;
+    } catch (error) {
+      if ((error as { code?: string }).code === "EEXIST") return true;
+      return false;
+    }
+  }
+
   function mergeIntoMain(
     expectedGeneration: number,
     seq: string,
@@ -647,8 +730,8 @@ export default function (pi: ExtensionAPI) {
         display: false,
       };
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
-    } else {
-      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
+    } else if (!silent) {
+      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: true };
       if (mainStreaming) {
         pi.sendMessage(message, { deliverAs: "nextTurn" });
       } else {
@@ -667,7 +750,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation. verdict captain surfaces it to the captain in one turn; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation unless the routine outcome is store-only. verdict captain surfaces it to the captain in one turn; ordinary routine notes render; guarded routine receipts stay store-only.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -680,7 +763,10 @@ export default function (pi: ExtensionAPI) {
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
-          description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
+          description: "True only for a store-only routine outcome: a fleet-wide no-change heartbeat, or a task-local terminal-noop receipt that has no new captain-visible consequence",
+        })),
+        receipt: Type.Optional(Type.Union([Type.Literal(TERMINAL_NOOP_RECEIPT)], {
+          description: "Use terminal-noop only for a task-local routine signal whose same-task turn-ended row has already been handled and only needs a durable no-action receipt",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -688,8 +774,9 @@ export default function (pi: ExtensionAPI) {
         const verdictRaw = String((params as { verdict: unknown }).verdict || "");
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
-        const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
+        const receipt = String((params as { receipt?: unknown }).receipt ?? "").trim() as RoutineReceipt;
+        const requestedSilent = (params as { silent?: unknown }).silent === true;
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (receipt && receipt !== TERMINAL_NOOP_RECEIPT)) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
             details: undefined,
@@ -697,6 +784,30 @@ export default function (pi: ExtensionAPI) {
           };
         }
         const verdict = verdictRaw as Verdict;
+        const terminalReceipt = receipt === TERMINAL_NOOP_RECEIPT ? terminalNoopReceipt(task, wake) : null;
+        const receiptValid = receipt !== TERMINAL_NOOP_RECEIPT || (verdict === "routine" && task !== "fleet" && terminalReceipt !== null);
+        const silent = requestedSilent || receipt === TERMINAL_NOOP_RECEIPT;
+        if ((silent && verdict !== "routine") || (silent && task !== "fleet" && receipt !== TERMINAL_NOOP_RECEIPT) || !receiptValid) {
+          return {
+            content: [{ type: "text", text: "invalid report: silent task-local receipts require verdict routine, receipt terminal-noop, and a same-task turn-ended signal wake" }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        if (terminalReceipt && existsSync(terminalReceipt.path)) {
+          const existingSeq = receiptSeq(terminalReceipt.path);
+          if (!existingSeq) {
+            return {
+              content: [{ type: "text", text: "terminal-noop receipt marker is unreadable; refusing to guess whether to merge" }],
+              details: undefined,
+              isError: true,
+            };
+          }
+          return {
+            content: [{ type: "text", text: `terminal-noop receipt already recorded seq ${existingSeq}; no merge needed` }],
+            details: undefined,
+          };
+        }
         const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
         if (wake) appendArgs.push("--wake", wake);
         if (!actingAsOwner(toolGeneration)) {
@@ -714,6 +825,13 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
+        if (terminalReceipt && !recordTerminalNoopReceipt(terminalReceipt, task, appended.stdout)) {
+          return {
+            content: [{ type: "text", text: `recorded seq ${appended.stdout}, but terminal-noop receipt could not be saved safely` }],
+            details: undefined,
+            isError: true,
+          };
+        }
         if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent)) {
           return {
             content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
@@ -722,7 +840,7 @@ export default function (pi: ExtensionAPI) {
           };
         }
         return {
-          content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
+          content: [{ type: "text", text: silent ? `recorded seq ${appended.stdout} as store-only [${verdict}]` : `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
           details: undefined,
         };
       },
