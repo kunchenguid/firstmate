@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "for d in \"$PWD/bin\" \"$PWD/../bin\" \"$PWD/.agents/bin\"; do [ -f \"$d/fm-hardrule1-pretool-check.sh\" ] && exec bash \"$d/fm-hardrule1-pretool-check.sh\"; done",
+            "command": "for d in \"$PWD/bin\" \"$PWD/../bin\" \"$PWD/.agents/bin\"; do [ -f \"$d/fm-selfdo-pretool-check.sh\" ] && exec bash \"$d/fm-selfdo-pretool-check.sh\"; done",
             "timeout": 10
           }
         ]
