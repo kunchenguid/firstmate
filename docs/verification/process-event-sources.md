@@ -209,7 +209,7 @@ While `state/.afk` exists the watcher stays one-shot as before, because this del
 
 ## PR lifecycle follow-through adapter
 
-Verified 2026-09-01 on macOS (Darwin 27.0.0, bash 3.2.57) with ShellCheck 0.11.0, jq 1.x, and no forge credentials, entirely through `tests/fm-procevent-pr-follow.test.sh` (25 scenarios, five consecutive green runs), whose stub `gh` and `glab` executables serve representative REST and GraphQL payloads as raw JSON while the adapter's own production projections (its real `--jq`/`-q` filters and its real `JSON::PP` programs) produce every asserted row, so no fixture can drift from what the forge path emits.
+Verified 2026-08-31 on macOS (Darwin 27.0.0, bash 3.2.57) with ShellCheck 0.11.0, jq 1.x, and no forge credentials, entirely through `tests/fm-procevent-pr-follow.test.sh` (26 scenarios, three consecutive green runs against this head), whose stub `gh` and `glab` executables serve representative REST and GraphQL payloads as raw JSON while the adapter's own production projections (its real `--jq`/`-q` filters and its real `JSON::PP` programs) produce every asserted row, so no fixture can drift from what the forge path emits.
 
 The suite proves the load-bearing guarantees end to end through the adapter's public commands plus the generic runner:
 
@@ -217,16 +217,18 @@ The suite proves the load-bearing guarantees end to end through the adapter's pu
 - one announcement per forge event across open-PR comments, inline review comments and replies, review submissions and dismissals, head moves, check additions, pending transitions, regressions, and recoveries, merge, close, and reopen, and post-merge comments, each reaching the durable wake queue as the fixed line `check: procevent pr-follow <sid> <seq>` with no remote text;
 - the shared-vocabulary contract as the independent judge's disconfirming regressions: GitHub check runs in `queued`, `in_progress`, `waiting`, `requested`, and `pending` states and GitLab pipelines in `created`, `preparing`, and `running` states apply through `handle`, store their real composite or bare tokens, advance the cursor, replay as `already-applied`, and never re-announce on later reconciles; unknown conclusion words normalize to `completed:unknown` (announced red), unknown review states and PR lifecycle words normalize to `unknown` and round-trip, and an unknown GitLab pipeline word stores bare `unknown`;
 - the bounded monitoring-loss contract: an adapter-produced document failing its own validation is refused with a distinct attempt-counted diagnostic, the second refusal acknowledges the capture, quarantines the source, and prints a monitoring-loss line, the paused source emits exactly one monitoring-loss error document whose apply latches `surfaced`, a quarantined source produces no further results on reconcile, and re-arming clears the record and resumes tracking, while a foreign-schema document stays loudly refused on every attempt with no latch;
+- the per-document event bound: with `FM_PR_FOLLOW_MAX_EVENTS=1`, a poll carrying three GitLab thread resolutions and a merge truncates the review events and marks the document `dropped: 1`, while the `pr-state` line the cursor advance depends on is exempt from the bound and still announced, and the truncated remainder is announced on a later poll instead of being lost;
 - the deterministic aggregate bound: with three tracked PRs sharing a two-second rotation slot, an eight-slot window shows every source polled (no starvation) while total poll bursts stay within one per slot plus one;
 - restart and byte-identical replay safety (`handle` reports `already-applied` for a replayed generation and refuses a conflicting generation bound to the same sequence);
 - the bounded failure contract (three failed fetches produce one diagnostic document that invents no forge event, then recovery resumes from the durable cursor);
 - hostile remote payloads (`$(touch ...)` in author, path, and check names) stay sanitized data, the hostile login collapses to the `invalid` sentinel, nothing executes, and a doctored cursor section claiming the adapter's identity is refused whole without an applied receipt;
-- task cleanup does not erase tracking, explicit `retire` is the only off switch and refuses while unhandled captures exist without `--force`, the backfill sweep is idempotent, GitLab comments, pipelines, approvals, thread resolution, and merge flow through the real JSON parser, and `fm-pr-check.sh` keeps its exact single-line success output (asserted in `tests/fm-pr-check-security.test.sh`).
+- the approval set is only ever compared against an approval list the poll actually read: an approvals endpoint that stops answering announces no revocation and leaves the durable set intact, and its recovery re-announces nothing, so an intermittent endpoint cannot produce a repeating DISMISSED/APPROVED cycle;
+- task cleanup does not erase tracking, explicit `retire` is the only off switch and refuses while unhandled captures exist without `--force` - leaving the registration and the durable cursor in place, so a refused retirement is a true no-op - the backfill sweep is idempotent, GitLab comments, pipelines, approvals, thread resolution, and merge flow through the real JSON parser, and `fm-pr-check.sh` keeps its exact single-line success output (asserted in `tests/fm-pr-check-security.test.sh`).
 
-Exact commands (all green on this head):
+Exact commands (the follow-through suite was re-run against this exact head; the others were last green on the head that introduced the code they cover):
 
 ```sh
-bin/fm-test-run.sh tests/fm-procevent-pr-follow.test.sh          # 25 scenarios, five consecutive green runs (~163 s each)
+bin/fm-test-run.sh tests/fm-procevent-pr-follow.test.sh          # 26 scenarios, three consecutive green runs (~200 s each)
 bin/fm-test-run.sh tests/fm-procevent.test.sh tests/fm-procevent-when.test.sh
 bin/fm-test-run.sh tests/fm-pr-check-security.test.sh
 bin/fm-test-run.sh tests/fm-bootstrap.test.sh tests/fm-watch-triage.test.sh tests/fm-wake-queue.test.sh

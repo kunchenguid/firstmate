@@ -794,8 +794,7 @@ out=$(FM_HOME="$H" perl -e 'alarm 2; exec @ARGV' \
 printf '%s' "$out" > "$TMP_ROOT/below-bound"
 assert_no_grep 'monitoring loss' "$TMP_ROOT/below-bound" \
   "a refusal below the bound never pauses monitoring"
-assert_contains "$(printf '%s' "$out" | wc -c | tr -d ' ')" 0 \
-  "polling continues quietly below the bound"
+[ -z "$out" ] || fail "polling below the bound emitted a document: $out"
 # Attempt two reaches the bound: acknowledge, pause, surface once.
 out=$(prf "$H" handle "$sid" 1 "$H/state/procevent-inbox/$sid.1.result" 2>&1) || fail "the bounded refusal must settle"
 assert_contains "$out" "monitoring-loss: $sid paused" "the bound surfaces an actionable monitoring-loss line"
@@ -873,6 +872,10 @@ wait_for_result "$H" "$sid" || fail "no result before retirement"
 if prf "$H" retire "$sid" >/dev/null 2>&1; then
   fail "retirement must refuse while unhandled captured results exist"
 fi
+assert_present "$H/state/procevent/$sid.source" \
+  "a refused retirement still deregistered the source"
+assert_present "$H/state/pr-follow/$sid.cursor" \
+  "a refused retirement still discarded the durable cursor"
 out=$(prf "$H" retire "$sid" --force)
 assert_contains "$out" "retired: $sid" "the explicit retirement reports what it retired"
 assert_absent "$H/state/procevent/$sid.source" "retirement drops the registration"
@@ -970,21 +973,40 @@ ack "$H" "$glsid" 2 "$RESULT"
 assert_contains "$(cursor_field "$H" "$glsid" approvals)" "dave,erin" "both approvals are durable"
 assert_contains "$(cursor_field "$H" "$glsid" threads)" "D2:unresolved" \
   "a discussion opened after the baseline is tracked from its first sighting"
+# An approvals endpoint that stops answering is not evidence that anybody
+# withdrew an approval, so the poll that carries an unrelated event must
+# neither announce a revocation nor drop the durable set.
 restart_runner "$H"
+rm -f "$GL_FIX/approvals"
+printf '[{"id":7,"sha":"2222222222222222222222222222222222222222","status":"failed"}]' > "$GL_FIX/pipelines"
+wait_for_result_count "$H" "$glsid" 3 || fail "the unreadable approvals endpoint produced no result"
+RESULT=$(latest_result "$H" "$glsid")
+assert_grep 'event: check id=7 change=green->red status=failed' "$RESULT" \
+  "the poll that could not read approvals still announced its other events"
+assert_no_grep 'state=DISMISSED' "$RESULT" \
+  "an unreadable approvals endpoint faked a revocation"
+ack "$H" "$glsid" 3 "$RESULT"
+assert_contains "$(cursor_field "$H" "$glsid" approvals)" "dave,erin" \
+  "the durable approval set survives an unreadable approvals endpoint"
+# Recovery announces nothing: the approvals never changed, so nothing repeats.
+restart_runner "$H"
+printf '{"approved_by":[{"user":{"username":"dave"}},{"user":{"username":"erin"}}]}' > "$GL_FIX/approvals"
 printf '[{"id":"D1","resolved":false,"notes":[{"id":90,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/x.py","new_line":10}}]},{"id":"D2","resolved":true,"notes":[{"id":91,"author":{"username":"erin"},"type":"DiffNote","position":{"new_path":"src/y.py","new_line":4}}]}]' > "$GL_FIX/discussions"
-wait_for_result_count "$H" "$glsid" 3 || fail "the post-baseline thread resolution produced no result"
+wait_for_result_count "$H" "$glsid" 4 || fail "the recovered approvals endpoint produced no result"
 RESULT=$(latest_result "$H" "$glsid")
 assert_grep 'event: thread id=D2 state=resolved' "$RESULT" \
   "a thread opened after the baseline announces its resolution"
-ack "$H" "$glsid" 3 "$RESULT"
+assert_no_grep 'state=APPROVED' "$RESULT" \
+  "a recovered approvals endpoint re-announced an unchanged approval"
+ack "$H" "$glsid" 4 "$RESULT"
 restart_runner "$H"
 printf '[{"id":"D1","resolved":true,"notes":[{"id":90,"author":{"username":"codex"},"type":"DiffNote","position":{"new_path":"src/x.py","new_line":10}}]},{"id":"D2","resolved":true,"notes":[{"id":91,"author":{"username":"erin"},"type":"DiffNote","position":{"new_path":"src/y.py","new_line":4}}]}]' > "$GL_FIX/discussions"
 printf '{"state":"merged","sha":"2222222222222222222222222222222222222222","author":{"username":"alice"}}' > "$GL_FIX/mr"
-wait_for_result_count "$H" "$glsid" 4 || fail "GitLab merge and resolve produced no result"
+wait_for_result_count "$H" "$glsid" 5 || fail "GitLab merge and resolve produced no result"
 RESULT=$(latest_result "$H" "$glsid")
 assert_grep 'event: thread id=D1 state=resolved' "$RESULT" "the thread resolution is announced"
 assert_grep 'event: pr-state from=open state=merged' "$RESULT" "the GitLab merge is announced"
-ack "$H" "$glsid" 4 "$RESULT"
+ack "$H" "$glsid" 5 "$RESULT"
 assert_present "$H/state/procevent/$glsid.source" "a merged GitLab MR keeps its registration"
 pass "GitLab comments, pipelines, approvals, threads, and merge are tracked"
 

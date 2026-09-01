@@ -494,6 +494,7 @@ SN_CHECK_ROWS=
 SN_THREAD_ROWS=
 SN_NOTE_ROWS=
 SN_APPROVAL_ROWS=
+SN_APPROVALS_OK=0
 SN_FETCH_ERROR=
 GH_OUT=
 
@@ -508,6 +509,7 @@ sn_reset() {
   SN_THREAD_ROWS=''
   SN_NOTE_ROWS=''
   SN_APPROVAL_ROWS=''
+  SN_APPROVALS_OK=0
   SN_FETCH_ERROR=
 }
 
@@ -737,8 +739,10 @@ poll_gitlab() {
   SN_CHECK_ROWS=$pipeline_rows
 
   # Approvals are GitLab's review-submission surface. A project without the
-  # approvals feature refuses this call; that refusal only empties the
-  # approval set and never counts as a poll failure (documented boundary).
+  # approvals feature refuses this call, and so does a transient endpoint
+  # failure; neither counts as a poll failure, and neither is evidence that
+  # anybody withdrew an approval, so the whole approval comparison is skipped
+  # unless this fetch actually answered (documented boundary).
   # shellcheck disable=SC2016 # Perl owns every $ expression in this program.
   if glab_rows "projects/$enc/merge_requests/$number/approvals" '
       use strict; use warnings;
@@ -754,6 +758,8 @@ poll_gitlab() {
       }
     '; then
     SN_APPROVAL_ROWS=$(printf '%s\n' "$GH_OUT" | grep . | sort || true)
+    SN_APPROVALS_OK=1
+    SN_FETCH_ERROR=
   fi
   return 0
 }
@@ -1156,20 +1162,22 @@ compute_delta_gitlab() {
     fi
   done <<< "$SN_THREAD_ROWS"
 
-  # Approvals: grants and revocations against the durable set.
+  # Approvals: grants and revocations against the durable set, compared only
+  # against an approval list this poll actually read.
   local user found u
   local -a users_now=()
-  while IFS= read -r user; do
-    [ -n "$user" ] || continue
-    prf_login_valid "$user" || continue
-    users_now+=("$user")
-    case ",$CUR_APPROVALS," in
-      *",$user,"*) ;;
-      *) ev_add "0	event: review id=approval-$user state=APPROVED author=$user" ;;
-    esac
-  done <<< "$SN_APPROVAL_ROWS"
-  if [ -n "$CUR_APPROVALS" ]; then
-    local rest=$CUR_APPROVALS
+  local rest
+  if [ "$SN_APPROVALS_OK" -eq 1 ]; then
+    while IFS= read -r user; do
+      [ -n "$user" ] || continue
+      prf_login_valid "$user" || continue
+      users_now+=("$user")
+      case ",$CUR_APPROVALS," in
+        *",$user,"*) ;;
+        *) ev_add "0	event: review id=approval-$user state=APPROVED author=$user" ;;
+      esac
+    done <<< "$SN_APPROVAL_ROWS"
+    rest=$CUR_APPROVALS
     while [ -n "$rest" ]; do
       user=${rest%%,*}
       case "$rest" in
@@ -1661,14 +1669,16 @@ baseline_write() {
       CUR_MAX_REVIEW_COMMENT=$(( n_id > CUR_MAX_REVIEW_COMMENT ? n_id : CUR_MAX_REVIEW_COMMENT ))
     done <<< "$SN_NOTE_ROWS"
     local user
-    while IFS= read -r user; do
-      [ -n "$user" ] || continue
-      prf_login_valid "$user" || continue
-      case ",$CUR_APPROVALS," in
-        *",$user,"*) ;;
-        *) CUR_APPROVALS="${CUR_APPROVALS:+$CUR_APPROVALS,}$user" ;;
-      esac
-    done <<< "$SN_APPROVAL_ROWS"
+    if [ "$SN_APPROVALS_OK" -eq 1 ]; then
+      while IFS= read -r user; do
+        [ -n "$user" ] || continue
+        prf_login_valid "$user" || continue
+        case ",$CUR_APPROVALS," in
+          *",$user,"*) ;;
+          *) CUR_APPROVALS="${CUR_APPROVALS:+$CUR_APPROVALS,}$user" ;;
+        esac
+      done <<< "$SN_APPROVAL_ROWS"
+    fi
   fi
   CUR_BASELINE="done"
   cursor_store
@@ -2157,11 +2167,13 @@ cmd_retire() {  # <source-id> [--force]
   local sid=$1 force=${2-} pending receipt
   prf_source_id_valid "$sid" || die "invalid source id: $sid"
   [ -z "$force" ] || [ "$force" = --force ] || die "invalid retirement option: $force"
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" >/dev/null 2>&1 || true
+  # The refusal has to precede every destructive step: deregistering first
+  # would stop monitoring the PR while telling the operator it refused to.
   pending=$(fm_procevent_pending "$STATE" | grep -c "/$sid\." || true)
   if [ "$pending" -gt 0 ] && [ "$force" != --force ]; then
     die "$sid has $pending unhandled captured result(s); resolve or acknowledge them, or retire again with --force"
   fi
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" >/dev/null 2>&1 || true
   rm -f -- "$(cursor_file "$sid")"
   rm -f -- "$(quarantine_file "$sid")"
   for receipt in "$FOLLOW_DIR/$sid".*.applied; do
