@@ -76,6 +76,11 @@ fm_git_identity fmtest fmtest@example.invalid
 
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge-tests)
+# fm-pr-check.sh arms PR lifecycle follow-through, which takes the machine-wide
+# process-event source lock; keep that claim root inside this suite's tree so a
+# run never writes to the developer's or runner's real user state directory and
+# two concurrent homes cannot block on the same derived lock.
+export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/procevent-claims"
 BASE_PATH=$PATH
 
 # The GitLab fixture. A placeholder host that resolves nowhere, and a namespace

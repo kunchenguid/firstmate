@@ -228,12 +228,12 @@ The suite proves the load-bearing guarantees end to end through the adapter's pu
 - the approval set is only ever compared against an approval list the poll actually read: an approvals endpoint that stops answering announces no revocation and leaves the durable set intact, and its recovery re-announces nothing, so an intermittent endpoint cannot produce a repeating DISMISSED/APPROVED cycle;
 - task cleanup does not erase tracking, explicit `retire` is the only off switch and refuses while unhandled captures exist without `--force` - leaving the registration and the durable cursor in place, so a refused retirement is a true no-op - the backfill sweep is idempotent, GitLab comments, pipelines, approvals, thread resolution, and merge flow through the real JSON parser, and `fm-pr-check.sh` keeps its exact single-line success output (asserted in `tests/fm-pr-check-security.test.sh`).
 
-Exact commands (the follow-through suite was re-run against this exact head; the others were last green on the head that introduced the code they cover):
+Exact commands (the follow-through, PR-check security, and merge suites were re-run against this exact head; the others were last green on the head that introduced the code they cover):
 
 ```sh
 bin/fm-test-run.sh tests/fm-procevent-pr-follow.test.sh          # 29 scenarios, two consecutive green runs (~230 s each)
 bin/fm-test-run.sh tests/fm-procevent.test.sh tests/fm-procevent-when.test.sh
-bin/fm-test-run.sh tests/fm-pr-check-security.test.sh
+bin/fm-test-run.sh tests/fm-pr-check-security.test.sh tests/fm-pr-merge.test.sh
 bin/fm-test-run.sh tests/fm-bootstrap.test.sh tests/fm-watch-triage.test.sh tests/fm-wake-queue.test.sh
 bin/fm-lint.sh                                                   # ShellCheck 0.11.0 and actionlint 1.7.12, clean
 ```

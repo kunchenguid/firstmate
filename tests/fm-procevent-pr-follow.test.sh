@@ -1068,7 +1068,8 @@ assert_grep 'dropped: 1' "$RESULT" "the overflowed poll records that it dropped 
 assert_grep 'events: 2' "$RESULT" "the bound keeps one review event plus the exempt lifecycle line"
 assert_grep 'event: pr-state from=open state=merged' "$RESULT" \
   "the lifecycle line is exempt from the event bound"
-assert_contains "$(grep -c 'event: thread' "$RESULT")" 1 "the thread events are truncated to the bound"
+[ "$(grep -c 'event: thread' "$RESULT")" = 1 ] \
+  || fail "the thread events were not truncated to exactly the bound"
 ack "$H" "$glsid" 1 "$RESULT"
 restart_runner "$H"
 wait_for_result_count "$H" "$glsid" 2 || fail "the truncated remainder was never re-announced"

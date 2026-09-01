@@ -17,6 +17,11 @@ WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
+# fm-pr-check.sh arms PR lifecycle follow-through, which takes the machine-wide
+# process-event source lock; keep that claim root inside this suite's tree so a
+# run never writes to the developer's or runner's real user state directory and
+# two concurrent homes cannot block on the same derived lock.
+export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/procevent-claims"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
