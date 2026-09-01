@@ -318,9 +318,10 @@ cmd_managed_poll() {  # <artifact.html>
     journal_append "$id" "$(printf 'armed\t%s\t%s\t%s' "$(date +%s)" "$upto" "$digest")" \
       || { fm_lock_release "$(receipts_lock_path "$id")"; die "cannot journal the armed receipt"; }
     fm_lock_release "$(receipts_lock_path "$id")"
-    exec lavish-axi poll "$real" --agent-reply "$text"
+    run_poll "$real" --agent-reply "$text"
+    return  # the poll's exit status is the delivery attempt's outcome
   fi
-  exec lavish-axi poll "$real"
+  run_poll "$real"
 }
 
 # The runner's receipt seam: journal what this capture proved. Delivery first
@@ -610,11 +611,11 @@ poll_retry_delay() {
   printf '%s\n' "$delay"
 }
 
-cmd_poll() {
+run_poll() {  # <artifact> [additional lavish-axi poll arguments...]
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc
   local pipeline_status
-  [ -n "$artifact" ] || usage
-  [ "$#" -eq 1 ] || usage
+  [ -n "$artifact" ] || return 1
+  shift
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
@@ -631,7 +632,7 @@ cmd_poll() {
     trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
   done
   while :; do
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
+    lavish-axi poll "$artifact" "$@" | poll_response_filter "$response"
     pipeline_status=("${PIPESTATUS[@]}")
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}
@@ -650,6 +651,13 @@ cmd_poll() {
     esac
   done
   return "$rc"
+}
+
+cmd_poll() {
+  local artifact=${1-}
+  [ -n "$artifact" ] || usage
+  [ "$#" -eq 1 ] || usage
+  run_poll "$artifact"
 }
 
 # Read one field of the response's leading `session:` block. Those fields are
