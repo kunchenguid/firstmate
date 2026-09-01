@@ -1250,10 +1250,17 @@ assert_present "$FEED_OUTCOME.gen" "the killed runner dropped the generation not
 assert_present "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim" \
   "the killed runner released the claim that owns its staged verdict"
 pe_adapter "$HFEED" retire feed-src >/dev/null
-assert_absent "$FEED_OUTCOME.gen" "retirement left the staged generation note behind"
-assert_absent "$FEED_OUTCOME" "retirement left the staged intake verdict behind"
 assert_absent "$FEED_OUTCOME.body" "retirement left the staged intake body behind"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim" "retirement left the reaped claim behind"
+# The verdict and the note pinning it to one round are the only proof of a
+# submission whose answers the intake may already have applied, so reaping the
+# claim does not take them while their seam is still owed - recovery consumes
+# them, and only then is the pair dropped.
+assert_present "$FEED_OUTCOME.gen" "retirement destroyed a generation note whose seam never ran"
+assert_present "$FEED_OUTCOME" "retirement destroyed a verdict whose seam never ran"
+pe_adapter "$HFEED" reconcile >/dev/null
+assert_absent "$FEED_OUTCOME.gen" "recovery left the generation note it consumed behind"
+assert_absent "$FEED_OUTCOME" "recovery left the verdict it consumed behind"
 pass "a runner killed inside the intake leaves its claim and staged set to the reaper"
 
 HJ="$TMP_ROOT/hj"; new_home "$HJ"

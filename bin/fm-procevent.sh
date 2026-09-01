@@ -390,14 +390,26 @@ staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 # bounded output, the receipt outcome, the generation note that pins that
 # outcome to one sequence, the intake body staged beside it, and the outcome's
 # atomic-rename staging name. A runner killed mid-generation leaves any of
-# them, so recovery drops the whole set rather than the one name it happened
-# to know about.
+# them, so reaping a claim drops them rather than the one name the caller
+# happened to know about - with one exception. The outcome and its note are a
+# verdict the receipt seam is still owed: while that seam has not run they are
+# the only proof of a round whose answers the intake may already have applied,
+# and recover_receipt_seams consumes them even after the source is retired. So
+# they go only once the seam has had its chance, exactly as the claim reclaim
+# in fm-procevent-lib.sh treats them.
 remove_staged_generation() {  # <source-id> <claim-token>
-  rm -f -- "$(staging_file "$1" "$2")" \
-    "$(staging_file "$1" "$2.rcpt")" \
-    "$(staging_file "$1" "$2.rcpt").gen" \
-    "$(staging_file "$1" "$2.rcpt").body" \
-    "$(staging_file "$1" "$2.rcpt").tmp"
+  local outcome gen_id gen_seq
+  outcome=$(staging_file "$1" "$2.rcpt")
+  rm -f -- "$(staging_file "$1" "$2")" "$outcome.body" "$outcome.tmp"
+  gen_seq=
+  if [ -f "$outcome.gen" ] && [ ! -L "$outcome.gen" ]; then
+    IFS=$'\t' read -r gen_id gen_seq < "$outcome.gen" || gen_seq=
+    [ "$gen_id" = "$1" ] || gen_seq=
+    case "$gen_seq" in ''|*[!0-9]*) gen_seq= ;; esac
+  fi
+  if [ -z "$gen_seq" ] || fm_procevent_receipt_seam_ran "$STATE" "$1" "$gen_seq"; then
+    rm -f -- "$outcome" "$outcome.gen"
+  fi
 }
 
 # Let the source's own adapter apply and acknowledge one captured result. See

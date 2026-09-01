@@ -1100,4 +1100,70 @@ text=$(run_lavish "$H19" receipt-text "$RECEIPT_SID")
 assert_contains "$text" "saved 1 of 1" "the recovered first round never reached the visible receipt"
 pass "a first round whose record was never created is still recovered after retirement"
 
+# --- explicit retirement never reaps a verdict its seam still owes -----------
+# Retiring a source reaps the staging set of the claim it releases. That set
+# includes the verdict a runner killed inside its unlocked intake left behind,
+# and deleting it would both lose a round whose answers were already applied
+# and re-enable the unacknowledged publication the generation note exists to
+# hold back. The reap therefore takes only what has nothing left to prove.
+H20=$(make_home h20)
+RECEIPT_HOME=$H20
+ART20="$TMP_ROOT/deck20.html"
+printf '<h1>deck</h1>\n' > "$ART20"
+RECEIPT_SID=$(run_lavish "$H20" source-id "$ART20")
+tasks_in "$H20" add deck-alpha "Alpha call" --kind ship --repo sample --body 'Alpha plan.' >/dev/null
+run_captain "$H20" hold deck-alpha --reason "alpha choice pending" >/dev/null
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+run_captain "$H20" bind "$RECEIPT_SID" >/dev/null
+run_lavish "$H20" arm "$ART20" >/dev/null
+journal="$H20/state/procevent/$RECEIPT_SID.receipts"
+result="$H20/state/procevent-inbox/$RECEIPT_SID.1.result"
+reconcile_once
+wait_i=0
+while [ ! -e "$result" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+wait_claim_free
+[ -e "$result" ] || fail "the submitted round was never captured"
+# Roll back to the instant before that runner's seam ran, with its dead claim
+# and the whole staging set standing exactly as the reap will find them.
+rm -f "$journal" "$H20/state/procevent-inbox/$RECEIPT_SID.1.receipted" \
+  "$H20/state/.wake-queue"
+staged="$H20/state/procevent/.$RECEIPT_SID.dead-token.rcpt.output"
+printf 'fed 0\nclosed: deck-alpha\n' > "$staged"
+printf '%s\t%s\n' "$RECEIPT_SID" 1 > "$staged.gen"
+printf 'partial intake body\n' > "$staged.body"
+printf 'half-written verdict\n' > "$staged.tmp"
+printf 'stale capture\n' > "$H20/state/procevent/.$RECEIPT_SID.dead-token.output"
+chmod 0600 "$staged" "$staged.gen" "$staged.body" "$staged.tmp" \
+  "$H20/state/procevent/.$RECEIPT_SID.dead-token.output"
+printf '%s\n%s\ndead-token\ndead-identity\n%s\n' \
+  "$H20" 999999 "$H20/state/procevent" > "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+pe "$H20" retire "$RECEIPT_SID" >/dev/null \
+  || fail "explicit retirement refused a source whose runner had died"
+assert_absent "$H20/state/procevent/$RECEIPT_SID.source" "retirement left the source registered"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim" "retirement left the dead claim behind"
+assert_absent "$H20/state/procevent/.$RECEIPT_SID.dead-token.output" \
+  "retirement left the dead generation's captured output staged"
+assert_absent "$staged.body" "retirement left the dead generation's intake body staged"
+assert_absent "$staged.tmp" "retirement left the dead generation's half-written verdict staged"
+assert_present "$staged" "retirement destroyed a verdict whose receipt seam never ran"
+assert_present "$staged.gen" "retirement destroyed the note pinning that verdict to its round"
+# The round the retirement preserved is still journaled and still announced.
+reconcile_until grep -qs '^saved' "$journal" \
+  || fail "an explicitly retired source stranded the verdict its runner staged"
+[ "$(awk -F '\t' '$1 == "received" { print $4 }' "$journal")" = 1 ] \
+  || fail "the recovered round lost its answer count"
+[ "$(awk -F '\t' '$1 == "saved" && $2 == 1 { print $4 }' "$journal")" = 1 ] \
+  || fail "recovery lost the save the preserved verdict recorded"
+straggler=''
+for leftover in "$H20"/state/procevent/.*.rcpt.output*; do
+  [ -e "$leftover" ] || continue
+  straggler="$straggler $leftover"
+done
+[ -z "$straggler" ] || fail "recovery left its consumed staging behind:$straggler"
+grep -qs "procevent lavish $RECEIPT_SID 1" "$H20/state/.wake-queue" \
+  || fail "the recovered round was never announced to a handler"
+pass "explicit retirement preserves a verdict its receipt seam still owes"
+
 printf '\nall Lavish receipt tests passed\n'
