@@ -29,10 +29,23 @@
 // row; the pending row already directs the model to drain the durable queue.
 // The latch lives on the session generation, is set before the delivery await
 // because an idle agent consumes the row and emits agent_start inside that
-// call, clears on agent_start (the consumption edge), and rolls back when
+// call, clears on both agent_start and agent_settled, and rolls back when
 // delivery rejects before a row exists. A replacement session activates a
 // fresh generation with a clear latch, so no stale latch leaks across
 // generations and a genuinely later burst creates one new row.
+// Both clearing edges are needed because Pi 0.84.4 consumes a docked row
+// without a second agent_start. An idle send starts its run inside
+// sendUserMessage and emits agent_start there; a row docked on a busy agent is
+// drained inline by the run already in flight, which emits turn_start only.
+// agent_start therefore stays the idle-path edge, re-arming presentation the
+// moment that row is consumed rather than at the end of the run it started,
+// while agent_settled is the settle boundary that implies no docked row
+// remains: Pi emits it once a run has fully settled with no automatic retry,
+// compaction, or queued continuation left, including when the run aborts and
+// its queue is discarded.
+// The worst case is therefore bounded: a wake arriving after an inline drain
+// but before settle is suppressed for the remainder of that one run, never
+// indefinitely for the generation, and the durable queue still holds it.
 // Urgent supervision failures bypass the latch and always surface as their own
 // row: call sites mark the paths they own, and any message carrying the
 // `watcher: FAILED` marker is urgent regardless of which branch delivered it,
@@ -42,7 +55,8 @@
 // Pi exposes no per-row consumption signal, so a captain prompt that starts a
 // run while a row is still docked clears the latch early and a close during
 // that run can dock a second row. That transient is bounded at two rows, both
-// consumed in order, and is the accepted cost of using agent_start as the edge.
+// consumed in order, and is the accepted cost of using run boundaries as the
+// only consumption evidence Pi offers.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -1131,11 +1145,16 @@ export default function (pi: ExtensionAPI) {
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
   });
-  // The consumption edge: an idle send starts its run inside sendUserMessage,
-  // and a row docked on a busy agent is consumed by the continuation run after
-  // the in-flight run ends. Either way the run that consumes the pending row
-  // begins with agent_start, so re-arm ordinary presentation there.
+  // The idle-path consumption edge: an idle send starts its run inside
+  // sendUserMessage, so the row is consumed at run start and presentation
+  // re-arms promptly.
   pi.on?.("agent_start", () => {
+    generation.pendingOrdinaryWakeRow = false;
+  });
+  // The settle boundary: a row drained inline by a busy run, or discarded when
+  // a run is aborted, produces no further agent_start, so this is what keeps
+  // the latch from outliving the run that consumed or dropped the row.
+  pi.on?.("agent_settled", () => {
     generation.pendingOrdinaryWakeRow = false;
   });
 

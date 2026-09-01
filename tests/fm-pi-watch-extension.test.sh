@@ -1273,10 +1273,15 @@ EOF
 # Pi 0.84.4: sendUserMessage(deliverAs followUp) calls prompt(). On an idle
 # agent prompt() runs the whole agent loop inside the call - agent_start is
 # emitted at run start, long before the returned promise resolves at run end.
-# On a busy agent the row docks and the call resolves at once, and a later
-# continuation run emits agent_start when it consumes the docked row. The
-# fakes below reproduce exactly that ordering, which is what makes a latch set
-# after the await strand itself on the idle path.
+# That timing is what makes a latch set after the await strand itself.
+# On a busy agent the row docks and the call resolves at once, and the run
+# already in flight drains that row inline (agent-loop runLoop sets
+# pendingMessages from the follow-up queue and continues), so the docked row is
+# consumed with no second agent_start. A row can also be discarded without ever
+# being consumed, which is what Escape while streaming does. agent_settled is
+# the only boundary both paths share: Pi emits it once a run has fully settled,
+# including an aborted one. The fakes below drive those transitions from the
+# test driver rather than treating a docked row as a no-op.
 
 test_pi_ordinary_burst_coalesces_to_one_dock_row() {
   local repo home plugin out status
@@ -1315,7 +1320,16 @@ let tool = null;
 const handlers = new Map();
 const sent = [];
 let running = false;
-let endRun = () => {};
+let finishRun = () => {};
+const docked = [];
+async function startCaptainRun() {
+  running = true;
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
+async function settleRun() {
+  running = false;
+  await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+}
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -1326,15 +1340,19 @@ const pi = {
   },
   sendUserMessage: async (message) => {
     sent.push(String(message));
-    // Busy agent: the follow-up docks and the call resolves immediately.
-    if (running) return;
+    // Busy agent: the follow-up docks on the run already in flight and the
+    // call resolves at once. No agent_start is ever emitted for that row.
+    if (running) {
+      docked.push(String(message));
+      return;
+    }
     running = true;
     const runEnded = new Promise((resolve) => {
-      endRun = resolve;
+      finishRun = resolve;
     });
     await handlers.get("agent_start")?.({ type: "agent_start" }, {});
     await runEnded;
-    running = false;
+    await settleRun();
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -1342,8 +1360,7 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 // The captain is mid-turn, so Pi is already running an agent loop and every
 // watcher follow-up docks instead of starting its own run.
-running = true;
-await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+await startCaptainRun();
 await tool.execute("tool-call-burst", {}, undefined, undefined, {});
 mkdirSync(process.env.FM_BURST_GO, { recursive: true });
 const lines = (file) => (existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : []);
@@ -1363,6 +1380,7 @@ for (const count of [2, 3, 4]) {
 await waitFor(() => lines(process.env.FM_ARM_LOG).length >= 5, "final successor start");
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (sent.length !== 1) throw new Error(`burst produced ${sent.length} dock rows: ${sent.join(" || ")}`);
+if (docked.length !== 1) throw new Error(`expected exactly one row docked on the running turn, saw ${docked.length}`);
 const row = sent[0];
 if (!row.includes("FIRSTMATE WATCHER WAKE")) throw new Error(`row lost the typed wake header: ${row}`);
 if (!row.includes("signal: burst event 1")) throw new Error(`row lost its own triggering event: ${row}`);
@@ -1381,7 +1399,8 @@ if (confirms() !== 4) throw new Error(`expected every burst close to complete it
 const armRows = lines(process.env.FM_ARM_LOG).length;
 if (armRows !== 5) throw new Error(`expected 4 closes plus one final successor, saw ${armRows} arm rows`);
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
-endRun();
+await settleRun();
+finishRun();
 process.exit(0);
 EOF
 )
@@ -1428,6 +1447,11 @@ let running = false;
 let settledSends = 0;
 let agentStarts = 0;
 let endRun = () => {};
+const docked = [];
+async function settleRun() {
+  running = false;
+  await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+}
 const pi = {
   on(event, handler) {
     handlers.set(event, handler);
@@ -1440,7 +1464,10 @@ const pi = {
   // inside it and the promise resolves only when the driver ends that run.
   sendUserMessage: async (message) => {
     sent.push(String(message));
-    if (running) return;
+    if (running) {
+      docked.push(String(message));
+      return;
+    }
     running = true;
     const runEnded = new Promise((resolve) => {
       endRun = resolve;
@@ -1448,7 +1475,7 @@ const pi = {
     agentStarts += 1;
     await handlers.get("agent_start")?.({ type: "agent_start" }, {});
     await runEnded;
-    running = false;
+    await settleRun();
     settledSends += 1;
   },
 };
@@ -1478,6 +1505,7 @@ if (!sent[1].includes("signal: later event 2")) throw new Error(`later wake row 
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (sent.length !== 2) throw new Error(`later idle wake presented ${sent.length - 1} rows instead of one`);
 if (agentStarts !== 2) throw new Error(`expected one consumption edge per presented row, saw ${agentStarts}`);
+if (docked.length !== 0) throw new Error("an idle send must run its row, not dock it");
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 endRun();
 process.exit(0);
@@ -1487,6 +1515,266 @@ EOF
   expect_code 0 "$status" "an idle-consumed wake must leave presentation re-armed so a genuinely later wake presents exactly one new row"
   [ -z "$out" ] || fail "Pi consumed-row re-arm test printed output: $out"
   pass "Pi idle-consumed row re-arms presentation so a genuinely later wake presents one new row"
+}
+
+test_pi_busy_consumed_row_rearms_for_genuinely_later_wake() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-busy-rearm-root"
+  home="$TMP_ROOT/pi-busy-rearm-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: first event\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+[ -e "${FM_STOP_FILE:?}" ] && exit 0
+printf 'signal: later event %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-busy-rearm-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-busy-rearm-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-busy-rearm-go" FM_STOP_FILE="$TMP_ROOT/pi-busy-rearm.stop" node --input-type=module 2>&1 <<'EOF'
+import { mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const sent = [];
+const docked = [];
+const consumed = [];
+const discarded = [];
+let running = false;
+let agentStarts = 0;
+let finishRun = () => {};
+// The captain is already mid-turn: a run this extension did not start is in
+// flight, so every watcher follow-up docks on it.
+async function startCaptainRun() {
+  running = true;
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
+// Pi 0.84.4 drains rows docked during a run inline inside that same run, so a
+// docked row is consumed with no second agent_start.
+function drainDockedInline() {
+  while (docked.length > 0) consumed.push(docked.shift());
+}
+// Escape while streaming restores the docked rows to the editor and aborts the
+// run, so the row is dropped without ever being consumed and without any
+// agent_start. The dequeue keybinding drops it the same way.
+function clearDockedQueue() {
+  while (docked.length > 0) discarded.push(docked.shift());
+}
+// agent_settled is the boundary both paths share: Pi emits it once a run has
+// fully settled, an aborted run included.
+async function settleRun() {
+  running = false;
+  await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+}
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    sent.push(String(message));
+    if (running) {
+      docked.push(String(message));
+      return;
+    }
+    // Idle agent: this call runs the whole handling turn, emitting agent_start
+    // inside it and resolving only when the driver ends that run.
+    running = true;
+    const runEnded = new Promise((resolve) => {
+      finishRun = resolve;
+    });
+    agentStarts += 1;
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await runEnded;
+    await settleRun();
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await startCaptainRun();
+await tool.execute("tool-call-pi-busy-rearm", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+await waitFor(() => sent.length === 1 && docked.length === 1, "first ordinary wake docked on the busy run");
+if (agentStarts !== 0) throw new Error("a docked row must not start its own run");
+// Pi consumes the docked row inline, inside the run already in flight. No
+// second agent_start is emitted, which is the whole point of this case.
+drainDockedInline();
+if (consumed.length !== 1) throw new Error(`expected the docked row to be consumed inline, saw ${consumed.length}`);
+if (agentStarts !== 0) throw new Error("an inline drain must not emit a second agent_start");
+await settleRun();
+await new Promise((resolve) => setTimeout(resolve, 50));
+// A genuinely later actionable close, with the agent idle again.
+writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
+await waitFor(() => sent.length === 2, "genuinely later wake row");
+if (!sent[1].includes("signal: later event 2")) throw new Error(`later wake row lost its event: ${sent.join(" || ")}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (sent.length !== 2) throw new Error(`later wake presented ${sent.length - 1} rows instead of one`);
+if (agentStarts !== 1) throw new Error(`expected the later idle wake to start exactly one run, saw ${agentStarts}`);
+if (consumed.length !== 1) throw new Error(`expected exactly one inline-consumed row, saw ${consumed.length}`);
+if (discarded.length !== 0) throw new Error("no row was discarded in this case");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+finishRun();
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a row consumed by the inline follow-up drain must re-arm presentation so a genuinely later wake presents exactly one new row"
+  [ -z "$out" ] || fail "Pi busy-path consumed-row re-arm test printed output: $out"
+  pass "Pi busy-path consumed row re-arms presentation so a genuinely later wake presents one new row"
+}
+
+test_pi_cleared_dock_rearms_for_genuinely_later_wake() {
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-cleared-rearm-root"
+  home="$TMP_ROOT/pi-cleared-rearm-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: first event\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
+while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+[ -e "${FM_STOP_FILE:?}" ] && exit 0
+printf 'signal: later event %s\n' "$count"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-cleared-rearm-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-cleared-rearm-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-cleared-rearm-go" FM_STOP_FILE="$TMP_ROOT/pi-cleared-rearm.stop" node --input-type=module 2>&1 <<'EOF'
+import { mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const sent = [];
+const docked = [];
+const consumed = [];
+const discarded = [];
+let running = false;
+let agentStarts = 0;
+let finishRun = () => {};
+// The captain is already mid-turn: a run this extension did not start is in
+// flight, so every watcher follow-up docks on it.
+async function startCaptainRun() {
+  running = true;
+  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
+// Pi 0.84.4 drains rows docked during a run inline inside that same run, so a
+// docked row is consumed with no second agent_start.
+function drainDockedInline() {
+  while (docked.length > 0) consumed.push(docked.shift());
+}
+// Escape while streaming restores the docked rows to the editor and aborts the
+// run, so the row is dropped without ever being consumed and without any
+// agent_start. The dequeue keybinding drops it the same way.
+function clearDockedQueue() {
+  while (docked.length > 0) discarded.push(docked.shift());
+}
+// agent_settled is the boundary both paths share: Pi emits it once a run has
+// fully settled, an aborted run included.
+async function settleRun() {
+  running = false;
+  await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
+}
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    sent.push(String(message));
+    if (running) {
+      docked.push(String(message));
+      return;
+    }
+    // Idle agent: this call runs the whole handling turn, emitting agent_start
+    // inside it and resolving only when the driver ends that run.
+    running = true;
+    const runEnded = new Promise((resolve) => {
+      finishRun = resolve;
+    });
+    agentStarts += 1;
+    await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+    await runEnded;
+    await settleRun();
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await startCaptainRun();
+await tool.execute("tool-call-pi-cleared-rearm", {}, undefined, undefined, {});
+mkdirSync(process.env.FM_BURST_GO, { recursive: true });
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+await waitFor(() => sent.length === 1 && docked.length === 1, "first ordinary wake docked on the busy run");
+if (agentStarts !== 0) throw new Error("a docked row must not start its own run");
+// Escape while streaming: the docked row is dropped back into the editor and
+// the run aborts, so the row is never consumed and no agent_start ever fires.
+clearDockedQueue();
+if (discarded.length !== 1) throw new Error(`expected the docked row to be discarded, saw ${discarded.length}`);
+if (agentStarts !== 0) throw new Error("a discarded row must not emit agent_start");
+await settleRun();
+await new Promise((resolve) => setTimeout(resolve, 50));
+// A genuinely later actionable close, with the agent idle again.
+writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
+await waitFor(() => sent.length === 2, "genuinely later wake row");
+if (!sent[1].includes("signal: later event 2")) throw new Error(`later wake row lost its event: ${sent.join(" || ")}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (sent.length !== 2) throw new Error(`later wake presented ${sent.length - 1} rows instead of one`);
+if (agentStarts !== 1) throw new Error(`expected the later idle wake to start exactly one run, saw ${agentStarts}`);
+if (consumed.length !== 0) throw new Error("the discarded row must never be reported as consumed");
+if (discarded.length !== 1) throw new Error(`expected exactly one discarded row, saw ${discarded.length}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+finishRun();
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "a docked row discarded without ever being consumed must re-arm presentation so a genuinely later wake still presents one new row"
+  [ -z "$out" ] || fail "Pi cleared-dock re-arm test printed output: $out"
+  pass "Pi discarded dock row re-arms presentation so a genuinely later wake still presents"
 }
 
 test_pi_restoration_exhaustion_bypasses_ordinary_latch() {
@@ -4401,6 +4689,8 @@ test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
 test_pi_ordinary_burst_coalesces_to_one_dock_row
 test_pi_consumed_row_rearms_for_genuinely_later_wake
+test_pi_busy_consumed_row_rearms_for_genuinely_later_wake
+test_pi_cleared_dock_rearms_for_genuinely_later_wake
 test_pi_restoration_exhaustion_bypasses_ordinary_latch
 test_pi_restoration_lock_loss_bypasses_ordinary_latch
 test_pi_retry_lock_loss_bypasses_ordinary_latch
