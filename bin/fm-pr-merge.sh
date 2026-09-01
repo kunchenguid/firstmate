@@ -76,6 +76,21 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
+usage() {
+  cat >&2 <<'EOF'
+usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
+
+Records PR metadata, checks GitHub PR base content, runs the forge merge, and
+verifies the outcome. Pass --override-pr-base-check after -- only to continue
+after a failed GitHub PR base check. The override flag never reaches the forge.
+EOF
+}
+
+if [ "$#" -eq 1 ] && { [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; }; then
+  usage
+  exit 0
+fi
+
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh

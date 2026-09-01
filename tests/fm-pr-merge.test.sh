@@ -75,6 +75,7 @@
 #   (bb) --against replaces the main default
 #   (bc) a foreign origin fails closed
 #   (bd) the PR base guard removes its fetched PR head ref on exit
+#   (be) --help documents the explicit base-check override
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1504,6 +1505,22 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+test_help_documents_base_check_override() {
+  local out rc
+  set +e
+  out=$("$PR_MERGE" --help 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merge-help: --help should succeed"
+  assert_contains "$out" \
+    'usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]' \
+    "merge-help: usage is missing"
+  assert_contains "$out" '--override-pr-base-check' \
+    "merge-help: override flag is missing"
+  pass "fm-pr-merge help documents the explicit base-check override"
+}
+
 test_gitlab_url_resolves_and_merges() {
   local case_dir rc merge_line
   case_dir=$(make_gitlab_case gitlab-merges)
@@ -2360,6 +2377,7 @@ test_bundled_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_help_documents_base_check_override
 test_github_still_forwards_sha_arg
 test_gitlab_url_resolves_and_merges
 test_gitlab_host_comes_from_the_url
