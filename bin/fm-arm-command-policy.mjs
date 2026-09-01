@@ -51,7 +51,7 @@ function parseArguments(argv) {
 }
 
 function rawMentionsProtected(command) {
-  return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(
+  return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.(?:sh|ps1)\b/.test(
     platformCaseFold(normalizeLineContinuations(command)),
   );
 }
@@ -622,6 +622,7 @@ export function commandPosition(tokens) {
 
 const PROTECTED_SCRIPTS = [
   { relative: "bin/fm-watch-arm.sh", kind: "arm" },
+  { relative: "bin/fm-watch-arm.ps1", kind: "arm" },
   { relative: "bin/fm-watch-checkpoint.sh", kind: "checkpoint" },
   { relative: "bin/fm-watch.sh", kind: "watch" },
 ];

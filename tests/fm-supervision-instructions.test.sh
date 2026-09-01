@@ -23,19 +23,24 @@ test_copilot_primary_protocol() {
   local out ordinary
   out=$("$RENDER" --harness copilot)
   assert_contains "$out" "primary harness: copilot" "copilot heading missing"
-  assert_contains "$out" "Mode: GitHub Copilot CLI agentStop-hook-owned park." \
+  assert_contains "$out" "Mode: GitHub Copilot CLI tracked asynchronous shell supervision." \
     "copilot supervision protocol missing"
   assert_contains "$out" "stops at seven" "copilot protocol lost its bounded continuation contract"
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$ordinary" "agentStop-hook park already owns watcher continuity" \
-    "copilot ordinary wake does not leave continuity to the hook"
-  assert_contains "$ordinary" "do not arm another cycle" \
-    "copilot ordinary wake does not forbid a second arm"
+  assert_contains "$ordinary" "completed asynchronous watcher task delivered this turn" \
+    "copilot ordinary wake does not identify the completed asynchronous task"
+  assert_contains "$ordinary" "start the next tracked asynchronous watcher task" \
+    "copilot ordinary wake does not preserve watcher continuity"
   out=$("$RENDER" --harness copilot --repair-line)
-  assert_contains "$out" "agentStop-hook park" "copilot repair line lost hook ownership"
-  assert_not_contains "$out" "bin/fm-watch-arm.sh" \
-    "copilot repair line must not create a model-owned arm loop"
-  pass "renderer exposes Copilot's hook-owned bounded primary supervision protocol"
+  assert_contains "$out" "Copilot-tracked asynchronous shell task" \
+    "copilot repair line lost asynchronous task ownership"
+  assert_contains "$out" "bin/fm-watch-arm.sh" \
+    "copilot repair line lost the portable watcher command"
+  assert_contains "$out" "./bin/fm-watch-arm.ps1" \
+    "copilot repair line lost the native Windows watcher command"
+  assert_contains "$out" "never a shell ampersand" \
+    "copilot repair line lost its duplicate-watcher prohibition"
+  pass "renderer exposes Copilot's asynchronous bounded primary supervision protocol"
 }
 
 test_unknown_fallback() {

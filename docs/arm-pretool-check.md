@@ -24,7 +24,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 
 - Stdin JSON at `.tool_input.command` for Claude and Codex.
 - Stdin JSON at `.toolInput.command` for Grok.
-- Stdin JSON at `.tool_input.command` for GitHub Copilot CLI, rendered through `--copilot` as a native `permissionDecision: "deny"` response.
+- Stdin JSON at `.tool_input.command` for GitHub Copilot CLI's Bash and Windows PowerShell tools, rendered through `--copilot` as a native `permissionDecision: "deny"` response.
 - `--command <exact string>` for OpenCode, Pi, and pi-signed.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
@@ -64,6 +64,7 @@ A command word in executed position is a protected execution when its normalized
 
 ```text
 bin/fm-watch-arm.sh          (arm; blessed entry point)
+bin/fm-watch-arm.ps1         (Windows arm bridge; blessed entry point)
 bin/fm-watch-checkpoint.sh   (checkpoint; blessed entry point)
 bin/fm-watch.sh              (watch; protected but never blessed)
 ```
@@ -92,7 +93,7 @@ An actual protected command with a heredoc still has a redirection and is denied
 ## Blessed syntax tree
 
 An allowed watcher program is one linear outer command list with zero or more approved setup nodes followed by exactly one direct protected node.
-`bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
+`bin/fm-watch-arm.sh`, `bin/fm-watch-arm.ps1`, and `bin/fm-watch-checkpoint.sh` are the only blessed final nodes, including their expanded-path forms; a `bin/fm-watch.sh` final node is never blessed and denies with `watcher-direct`.
 
 Approved setup nodes are:
 
@@ -161,7 +162,7 @@ Prose may improve without changing adapter behavior.
 | --- | --- | --- |
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
-| GitHub Copilot CLI | `.tool_input.command` | `.github/hooks/firstmate.json` matches `Bash` and forwards stdin through the Bash or PowerShell transport with `--copilot`; Copilot consumes the returned native permission decision. |
+| GitHub Copilot CLI | `.tool_input.command` | `.github/hooks/firstmate.json` matches `Bash`, `bash`, or `powershell` and forwards stdin through the Bash or PowerShell transport with `--copilot`; Copilot consumes the returned native permission decision. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
 | Pi / pi-signed | `event.input.command` | `.pi/extensions/fm-primary-turnend-guard.ts` passes one `--command` argument and returns `{block: true}` only for exit 2. |

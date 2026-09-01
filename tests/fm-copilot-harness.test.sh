@@ -36,9 +36,11 @@ install_primary_fixture() {
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
-  for f in fm-ghcp-hook.sh fm-turnend-guard-cursor.sh fm-turnend-guard.sh \
+  for f in fm-ghcp-hook.sh fm-copilot-stop.sh fm-turnend-guard.sh \
+           fm-turnend-guard-cursor.sh \
            fm-operational-input.sh fm-primary-scope-lib.sh fm-supervision-lib.sh \
-           fm-wake-lib.sh fm-session-lock-lib.sh fm-cursor-lib.sh fm-lock.sh \
+           fm-wake-lib.sh fm-session-lock-lib.sh fm-cursor-lib.sh \
+           fm-hook-host-lib.sh fm-lock.sh \
            fm-gate-refuse-lib.sh fm-busy-event.sh fm-busy-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
@@ -55,8 +57,12 @@ fm_lock_release() {
   rmdir "$1" 2>/dev/null || true
 }
 fm_watcher_healthy() {
-  return 1
+  [ "${FM_FAKE_COPILOT_HEALTHY:-0}" = 1 ]
 }
+SH
+  cat > "$dir/bin/fm-supervision-instructions.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'start watcher supervision as one Copilot-tracked asynchronous shell task'
 SH
   cat > "$dir/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
@@ -72,7 +78,8 @@ else
   printf 'stale: copilot fixture needs attention\n'
 fi
 SH
-  chmod +x "$dir/bin/fm-sessionstart-run.sh" "$dir/bin/fm-watch-arm.sh"
+  chmod +x "$dir/bin/fm-sessionstart-run.sh" "$dir/bin/fm-supervision-instructions.sh" \
+    "$dir/bin/fm-watch-arm.sh"
   printf '876543\n' > "$dir/state/.lock"
 }
 
@@ -81,7 +88,6 @@ run_hook() {  # <fixture> <fakebin> <action> [args...]
   shift 3
   COPILOT_CLI=1 COPILOT_LOADER_PID=876543 COPILOT_AGENT_SESSION_ID=sess-copilot \
     FM_HOME="$dir" PATH="$fakebin:$PATH" \
-    FM_COPILOT_PARK_POLL=0 FM_COPILOT_TURNEND_BLOCK_BUDGET=3 \
     "$dir/bin/fm-ghcp-hook.sh" "$action" "$@"
 }
 
@@ -95,10 +101,13 @@ test_tracked_hook_registration() {
     .version == 1 and
     (.hooks.sessionStart | length) == 1 and
     (.hooks.agentStop | length) == 1 and
-    ([.hooks.PreToolUse[].matcher] | sort) == ["Agent|Task", "Bash", "Bash"] and
+    (.hooks.agentStop[0].timeoutSec <= 15) and
+    (.hooks.notification | length) == 1 and
+    .hooks.notification[0].matcher == "shell_completed|shell_detached_completed" and
+    ([.hooks.PreToolUse[].matcher] | sort) == ["Agent|Task", "Bash", "Bash|bash|powershell"] and
     ([.hooks[][] | select(.bash == null or .powershell == null)] | length) == 0
   ' "$config" >/dev/null || fail "tracked Copilot hook registration is incomplete"
-  pass "Copilot tracked hook registration covers session, guard, and stop boundaries on both shells"
+  pass "Copilot tracked hooks cover session, shell completion, guard, and nonblocking stop boundaries"
 }
 
 test_marker_identity_outranks_inherited_harnesses() {
@@ -240,7 +249,7 @@ public static class WrongBash {
   pass "Copilot Windows bearings transport bypasses a hanging ambient bash"
 }
 
-test_primary_stop_parks_and_bounds_forced_continuations() {
+test_primary_stop_requests_async_arm_and_bounds_forced_continuations() {
   local dir fakebin out reason parent_state parent_id=secondmate-copilot parent_gen
   dir="$TMP_ROOT/primary-stop"
   fakebin=$(make_fakebin "$dir")
@@ -259,31 +268,104 @@ test_primary_stop_parks_and_bounds_forced_continuations() {
     FM_COPILOT_PARENT_BUSY_GEN="$parent_gen" \
     run_hook "$dir" "$fakebin" primary-stop)
   reason=$(printf '%s' "$out" | decision_reason)
-  assert_contains "$reason" "copilot fixture needs attention" \
-    "the first stop did not deliver the watcher result"
+  assert_contains "$reason" "Copilot-tracked asynchronous shell task" \
+    "the first stop did not request the missing asynchronous watcher task"
   [ "$(fm_busy_classify tmux none copilot "$parent_id" "$parent_state")" = "busy copilot-hook" ] \
     || fail "a blocked Copilot secondmate stop did not restore parent-visible busy state"
   [ "$(sed -n '2s/^count=//p' "$dir/state/.turnend-copilot-continuations")" = 1 ] \
     || fail "the first forced continuation was not persisted"
+  assert_absent "$dir/state/arm-ran" \
+    "the agentStop hook must not run or wait for the watcher itself"
 
   out=$(printf '{"sessionId":"sess-copilot","stop_hook_active":true}' | \
     FM_COPILOT_TURNEND_LOOP_CEILING=2 run_hook "$dir" "$fakebin" primary-stop)
   reason=$(printf '%s' "$out" | decision_reason)
   assert_contains "$reason" "FOLLOW-UP CEILING REACHED" \
     "the inner ceiling did not warn on the final allowed continuation"
-  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" = 1 ] \
-    || fail "the ceiling continuation must not arm another watcher cycle"
+  assert_absent "$dir/state/arm-ran" \
+    "the ceiling continuation must not arm a watcher cycle"
 
   out=$(printf '{"sessionId":"sess-copilot","stop_hook_active":true}' | \
     FM_COPILOT_TURNEND_LOOP_CEILING=2 run_hook "$dir" "$fakebin" primary-stop)
-  [ -z "$out" ] || fail "the park must allow stop after its inner ceiling: $out"
+  [ -z "$out" ] || fail "the stop backstop must allow stop after its inner ceiling: $out"
 
   out=$(printf '{"sessionId":"sess-copilot","stop_hook_active":false}' | \
     FM_COPILOT_TURNEND_LOOP_CEILING=2 run_hook "$dir" "$fakebin" primary-stop)
   reason=$(printf '%s' "$out" | decision_reason)
-  assert_contains "$reason" "copilot fixture needs attention" \
+  assert_contains "$reason" "Copilot-tracked asynchronous shell task" \
     "a real captain prompt did not reset the continuation ledger"
-  pass "Copilot agentStop parks synchronously, renders decision:block, and stops before vendor override"
+  pass "Copilot agentStop requests an asynchronous arm without parking and stops before vendor override"
+}
+
+test_primary_stop_allows_healthy_async_watcher() {
+  local dir fakebin out
+  dir="$TMP_ROOT/primary-healthy"
+  fakebin=$(make_fakebin "$dir")
+  install_primary_fixture "$dir"
+  : > "$dir/state/task.meta"
+
+  out=$(printf '{"sessionId":"sess-copilot","stop_hook_active":false}' | \
+    FM_FAKE_COPILOT_HEALTHY=1 run_hook "$dir" "$fakebin" primary-stop)
+  [ -z "$out" ] || fail "a healthy asynchronous watcher must allow the turn to end: $out"
+  assert_absent "$dir/state/.turnend-copilot-continuations" \
+    "a healthy stop must not retain a continuation ledger"
+  assert_absent "$dir/state/arm-ran" \
+    "the healthy stop must not run another watcher"
+  pass "Copilot agentStop allows the turn to end while the asynchronous watcher is healthy"
+}
+
+test_legacy_copilot_park_entry_redirects_without_parking() {
+  local dir fakebin out reason
+  dir="$TMP_ROOT/legacy-primary-stop"
+  fakebin=$(make_fakebin "$dir")
+  install_primary_fixture "$dir"
+  : > "$dir/state/task.meta"
+
+  out=$(printf '{"sessionId":"sess-copilot-legacy","stop_hook_active":false}' | \
+    COPILOT_CLI=1 COPILOT_LOADER_PID=876543 COPILOT_AGENT_SESSION_ID=sess-copilot \
+    FM_HOME="$dir" PATH="$fakebin:$PATH" \
+    "$dir/bin/fm-turnend-guard-cursor.sh" --copilot)
+  reason=$(printf '%s' "$out" | decision_reason)
+  assert_contains "$reason" "Copilot-tracked asynchronous shell task" \
+    "the legacy Copilot park entry did not redirect to the nonblocking backstop"
+  assert_absent "$dir/state/arm-ran" \
+    "the legacy Copilot park entry still launched or waited for the watcher"
+  pass "Copilot's legacy park entry redirects to the nonblocking backstop"
+}
+
+test_shell_completion_notification_routes_supervision() {
+  local dir fakebin out context
+  dir="$TMP_ROOT/notification"
+  fakebin=$(make_fakebin "$dir")
+  install_primary_fixture "$dir"
+  : > "$dir/state/task.meta"
+  printf '1\t1\tsignal\ttask\tstatus\n' > "$dir/state/.wake-queue"
+
+  out=$(printf '{"sessionId":"sess-copilot","notification_type":"shell_completed"}' | \
+    run_hook "$dir" "$fakebin" notification)
+  context=$(printf '%s' "$out" | jq -r '.additionalContext // empty')
+  assert_contains "$context" "FIRSTMATE_OP: v1 watcher:" \
+    "a completed watcher with queued input did not inject a watcher turn"
+  assert_contains "$context" "fm-wake-drain.sh" \
+    "the watcher notification lost the drain-first instruction"
+
+  rm -f "$dir/state/.wake-queue"
+  out=$(printf '{"sessionId":"sess-copilot","notification_type":"shell_detached_completed"}' | \
+    run_hook "$dir" "$fakebin" notification)
+  context=$(printf '%s' "$out" | jq -r '.additionalContext // empty')
+  assert_contains "$context" "FIRSTMATE_OP: v1 turn-end-guard:" \
+    "an unhealthy completed watcher did not inject a recovery turn"
+  assert_contains "$context" "./bin/fm-watch-arm.ps1" \
+    "the recovery notification lost the Windows asynchronous launcher"
+
+  out=$(printf '{"sessionId":"sess-copilot","notification_type":"shell_completed"}' | \
+    FM_FAKE_COPILOT_HEALTHY=1 run_hook "$dir" "$fakebin" notification)
+  [ -z "$out" ] || fail "an unrelated shell completion must stay silent while the watcher is healthy: $out"
+
+  out=$(printf '{"sessionId":"sess-copilot","notification_type":"agent_completed"}' | \
+    run_hook "$dir" "$fakebin" notification)
+  [ -z "$out" ] || fail "a non-shell notification must stay outside watcher routing: $out"
+  pass "Copilot shell completion notifications wake only unhealthy supervision paths"
 }
 
 test_primary_repair_continuation_restores_parent_busy() {
@@ -300,7 +382,6 @@ test_primary_repair_continuation_restores_parent_busy() {
     || fail "could not stage the repair-path Copilot idle event"
 
   out=$(printf '{"sessionId":"sess-copilot-repair","stop_hook_active":false}' | \
-    FM_FAKE_COPILOT_REPAIR=1 \
     FM_COPILOT_PARENT_STATE="$parent_state" FM_COPILOT_PARENT_TASK_ID="$parent_id" \
     FM_COPILOT_PARENT_BUSY_GEN="$parent_gen" \
     run_hook "$dir" "$fakebin" primary-stop)
@@ -313,7 +394,6 @@ test_primary_repair_continuation_restores_parent_busy() {
   current_gen=$("$dir/bin/fm-busy-event.sh" arm "$parent_state" "$parent_id")
   [ "$current_gen" != "$parent_gen" ] || fail "repair-path stale-generation fixture did not advance"
   out=$(printf '{"sessionId":"sess-copilot-repair","stop_hook_active":false}' | \
-    FM_FAKE_COPILOT_REPAIR=1 \
     FM_COPILOT_PARENT_STATE="$parent_state" FM_COPILOT_PARENT_TASK_ID="$parent_id" \
     FM_COPILOT_PARENT_BUSY_GEN="$parent_gen" \
     run_hook "$dir" "$fakebin" primary-stop)
@@ -366,7 +446,10 @@ test_loader_marker_rejects_foreign_live_process
 test_primary_session_start_returns_additional_context
 test_windows_powershell_pretool_transport
 test_windows_bearings_transport_avoids_ambient_bash
-test_primary_stop_parks_and_bounds_forced_continuations
+test_primary_stop_requests_async_arm_and_bounds_forced_continuations
+test_primary_stop_allows_healthy_async_watcher
+test_legacy_copilot_park_entry_redirects_without_parking
+test_shell_completion_notification_routes_supervision
 test_primary_repair_continuation_restores_parent_busy
 test_worker_hook_semantic_lifecycle
 

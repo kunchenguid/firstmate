@@ -16,9 +16,9 @@
 #
 # Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
 # Claude and Codex. Cursor and Copilot deliver the same .tool_input.command
-# shape, so they need no new extraction - only their native deny rendering
-# and marks this invocation as the Cursor registration rather than the
-# Claude-settings duplicate Cursor also loads.
+# shape, including Copilot's Windows PowerShell tool, so they need no new
+# extraction. Their flags select native deny rendering and distinguish Cursor's
+# own registration from the Claude-settings duplicate Cursor also loads.
 # CLI mode is used by OpenCode and Pi after their adapters extract the exact
 # command string.
 # --background remains accepted for compatibility, but harness-native tracked

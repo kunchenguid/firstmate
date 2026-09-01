@@ -10,8 +10,8 @@ Task-specific chronology, temporary paths, run identifiers, and delivery transcr
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
 
-GitHub Copilot CLI 1.0.81-7 was added to the run tier on 2026-08-21.
-Its repository `sessionStart` hook returned `additionalContext`, and a fresh installed-CLI process quoted the injected probe token before answering the initial prompt.
+GitHub Copilot CLI 1.0.83-0 was revalidated on 2026-09-01.
+Its repository `sessionStart` hook returned `additionalContext`, and its native asynchronous PowerShell task emitted a `shell_completed` notification whose hook-provided `additionalContext` produced a follow-up model turn.
 
 Codex command shape:
 
@@ -62,7 +62,7 @@ The third is recorded below.
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
 | Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
-| Copilot | 1.0.81-7 | `source=startup`, `additionalContext` token quoted back | Not established | Not established |
+| Copilot | 1.0.83-0 | `source=startup`, `additionalContext` token quoted back | Not established | Not established |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
 Two harness-specific consequences are load-bearing rather than incidental.
@@ -237,26 +237,33 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-08-21, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and Copilot's native blocked continuation validated on 2026-08-21.
+The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-01, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and Copilot's asynchronous shell-completion re-entry validated on 2026-09-01.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
 | Claude | 2.1.219 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session ran session start first, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
-| Copilot | 1.0.81-7 | Awaited `agentStop` park returning `decision=block` | The hook parked, returned an actionable watcher result as a native blocked continuation, received `stop_hook_active=true` on the forced turn, and stopped at Firstmate's inner ceiling before the vendor's eighth-block override. |
+| Copilot | 1.0.83-0 | Tracked asynchronous shell task plus completion notification; nonblocking `agentStop` repair backstop | The initiating turn continued after starting the background PowerShell task, `shell_completed` fired the repository notification hook, hook-provided context produced a follow-up turn, and the portable contract kept missing-watcher repair continuations below the vendor's eighth-block override without parking in the hook. |
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
 
-### Copilot primary park, 2026-08-21
+### Copilot asynchronous supervision, 2026-09-01
 
-GitHub Copilot CLI 1.0.81-7 was run in a throwaway repository carrying a recorder hook before the tracked integration was exercised.
-Genuine payloads established camel-case `sessionId`, boolean `stop_hook_active`, and the `agentStop` event.
-A native `{"decision":"block","reason":"..."}` response forced a second model turn, which answered `COPILOT_BLOCK_CONTINUED`; the next `agentStop` payload carried `stop_hook_active:true`.
-Copilot overrides the hook after eight consecutive blocked stops, so Firstmate's session-scoped ledger allows at most seven and uses the seventh response to report its ceiling without arming another cycle.
+GitHub Copilot CLI 1.0.83-0 was run in two throwaway repositories with:
 
-The same installed-CLI probe established repository `sessionStart` context injection and a native `PreToolUse` denial.
+```sh
+copilot --version
+FM_COPILOT_HOOKS_LIVE_E2E=1 tests/fm-copilot-hooks-live-e2e.test.sh
+```
+
+The first repository retained the hook-discovery negative control and proved that Copilot loads visible repository hook files in descending filename order while ignoring hidden JSON files.
+The second instructed Copilot to start one native asynchronous PowerShell task.
+The initiating turn continued with `ASYNC_STARTED`, the completed task produced a genuine `notification_type=shell_completed` payload, and the notification hook's `additionalContext` produced a later turn containing the unique probe token.
+
+`tests/fm-copilot-harness.test.sh` separately proves the tracked Firstmate integration: the `agentStop` path returns promptly, allows a healthy asynchronous watcher to keep running, requests a missing watcher through a bounded native blocked continuation, resets on a real captain prompt, restores parent busy ownership before continuation, and routes shell-completion notifications only when supervision remains necessary and unhealthy.
+Copilot overrides an eighth consecutive blocked stop, so Firstmate's session-scoped repair ledger allows at most seven and uses the seventh response to report its ceiling without launching or waiting for another watcher.
 The Windows PowerShell transport is covered end to end by `tests/fm-copilot-harness.test.sh`, including the real watcher-command policy decision rather than only its response renderer.
 
 ### Cursor primary park, 2026-08-13

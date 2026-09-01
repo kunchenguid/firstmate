@@ -1,6 +1,6 @@
 # GitHub Copilot CLI
 
-Verified for crew, scout, secondmate, and primary work on 2026-08-21 with GitHub Copilot CLI 1.0.81-7.
+Verified for crew, scout, secondmate, and primary work on 2026-09-01 with GitHub Copilot CLI 1.0.83-0.
 Cross-harness provider and credential identity is owned by `references/common/model-and-effort.md`.
 
 ## Operating facts
@@ -28,8 +28,8 @@ Copilot marker checks run before inherited Claude, Pi, Grok, and Cursor markers.
 
 ## Hook transport and primary integration
 
-Primary supervision is the `agentStop` park in `../../../docs/supervision-protocols/copilot.md`.
-Tracked `.github/hooks/firstmate.json` registers session start, pre-tool protection, and `agentStop` with Bash and PowerShell transports.
+Primary supervision is the tracked asynchronous watcher in `../../../docs/supervision-protocols/copilot.md`.
+Tracked `.github/hooks/firstmate.json` registers session start, pre-tool protection, shell-completion notification, and the nonblocking `agentStop` backstop with Bash and PowerShell transports.
 Unix hook entries invoke `../../../bin/fm-ghcp-hook.sh`.
 Windows entries invoke `../../../bin/fm-ghcp-hook.ps1`, which resolves Git for Windows Bash through `../../../bin/fm-windows-git-bash.ps1` rather than selecting WSL.
 The shared dispatcher is inert unless `COPILOT_CLI=1`, so repository hooks do not take over another consumer of `.github/hooks`.
@@ -37,6 +37,8 @@ The shared dispatcher is inert unless `COPILOT_CLI=1`, so repository hooks do no
 Worker hook files are generated under `.github/hooks/zz-firstmate-<task-id>.json`, visible to Copilot's loader and excluded locally from git.
 They are generated for secondmates and ordinary workers so prompt delivery can be confirmed from hook acknowledgement rather than a version-specific composer shape.
 
-`agentStop` returns `{"decision":"block","reason":"..."}` for an actionable supervision result or repair continuation.
+Firstmate starts `../../../bin/fm-watch-arm.sh` through Copilot's native asynchronous shell mode, or `../../../bin/fm-watch-arm.ps1` on native Windows.
+The tracked notification hook translates an actionable watcher shell completion into typed Firstmate input.
+`agentStop` returns `{"decision":"block","reason":"..."}` only for a missing-watcher repair continuation and never launches or waits for the watcher.
 `stop_hook_active=false` resets the session-scoped continuation ledger because it proves a real captain prompt, while `true` continues the ledger.
 Copilot overrides an eighth consecutive blocked stop, so Firstmate stops at seven and uses the last block for a ceiling warning.

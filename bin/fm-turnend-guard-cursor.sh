@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Synchronous stop-hook park for Cursor and GitHub Copilot CLI primaries.
+# Synchronous stop-hook park for Cursor primaries.
 #
 # Registered in tracked .cursor/hooks.json. Cursor runs this hook SYNCHRONOUSLY
 # and awaits it at every turn boundary, so one script owns both halves of Cursor
@@ -58,10 +58,9 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PARK_ADAPTER=cursor
 case "${1:-}" in
   '') ;;
-  --copilot) PARK_ADAPTER=copilot; shift ;;
+  --copilot) exec "$SCRIPT_DIR/fm-copilot-stop.sh" ;;
   *) exit 0 ;;
 esac
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -70,28 +69,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
-OWNER="$STATE/.$PARK_ADAPTER-park-owner"
-OWNER_LOCK="$STATE/.$PARK_ADAPTER-park-owner.lock"
-BUDGET_FILE="$STATE/.turnend-$PARK_ADAPTER-blocks"
-CONTINUATION_FILE="$STATE/.turnend-copilot-continuations"
+OWNER="$STATE/.cursor-park-owner"
+OWNER_LOCK="$STATE/.cursor-park-owner.lock"
+BUDGET_FILE="$STATE/.turnend-cursor-blocks"
 
 LOOP_CEILING=${FM_CURSOR_TURNEND_LOOP_CEILING:-180}
-[ "$PARK_ADAPTER" = cursor ] || LOOP_CEILING=${FM_COPILOT_TURNEND_LOOP_CEILING:-7}
 BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
 ARM_ATTEMPTS=${FM_CURSOR_PARK_ATTEMPTS:-2}
 POLL=${FM_CURSOR_PARK_POLL:-2}
 LOCK_ATTEMPTS=${FM_CURSOR_LOCK_ATTEMPTS:-50}
-if [ "$PARK_ADAPTER" = copilot ]; then
-  BLOCK_BUDGET=${FM_COPILOT_TURNEND_BLOCK_BUDGET:-3}
-  ARM_ATTEMPTS=${FM_COPILOT_PARK_ATTEMPTS:-2}
-  POLL=${FM_COPILOT_PARK_POLL:-2}
-  LOCK_ATTEMPTS=${FM_COPILOT_LOCK_ATTEMPTS:-50}
-fi
-case "$LOOP_CEILING" in
-  ''|*[!0-9]*|0)
-    if [ "$PARK_ADAPTER" = copilot ]; then LOOP_CEILING=7; else LOOP_CEILING=180; fi
-    ;;
-esac
+case "$LOOP_CEILING" in ''|*[!0-9]*|0) LOOP_CEILING=180 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 case "$ARM_ATTEMPTS" in 1|2|3) : ;; *) ARM_ATTEMPTS=2 ;; esac
 case "$POLL" in ''|*[!0-9]*|0) POLL=2 ;; esac
@@ -112,30 +99,14 @@ PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
-if [ "$PARK_ADAPTER" = cursor ]; then
-  LOOP_COUNT=$(printf '%s' "$PAYLOAD" | jq -r '
-    if type != "object" then error("payload")
-    elif has("loop_count") then
-      if ((.loop_count | type) == "number") then (.loop_count | floor) else error("loop_count") end
-    else 0
-    end
-  ' 2>/dev/null) || exit 0
-  SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
-  STOP_HOOK_ACTIVE=false
-else
-  SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '
-    if type == "object" and (.sessionId | type) == "string" then .sessionId
-    elif type == "object" and (.session_id | type) == "string" then .session_id
-    else error("sessionId")
-    end
-  ' 2>/dev/null) || exit 0
-  STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
-    if type == "object" and (.stop_hook_active | type) == "boolean" then .stop_hook_active
-    else error("stop_hook_active")
-    end
-  ' 2>/dev/null) || exit 0
-  LOOP_COUNT=0
-fi
+LOOP_COUNT=$(printf '%s' "$PAYLOAD" | jq -r '
+  if type != "object" then error("payload")
+  elif has("loop_count") then
+    if ((.loop_count | type) == "number") then (.loop_count | floor) else error("loop_count") end
+  else 0
+  end
+' 2>/dev/null) || exit 0
+SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 case "$LOOP_COUNT" in ''|*[!0-9]*) exit 0 ;; esac
 case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
 
@@ -164,25 +135,13 @@ lock_acquire_bounded() {  # <lock>
 emit_followup() {  # <kind> <body> [reset-budget]
   local kind=$1 body=$2 reset_budget=${3-} encoded response
   fm_operational_input_encode "$kind" "$body" encoded || exit 0
-  if [ "$PARK_ADAPTER" = copilot ]; then
-    response=$(jq -n --arg m "$encoded" '{decision:"block",reason:$m}' 2>/dev/null) || exit 0
-  else
-    response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
-  fi
+  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
   lock_acquire_bounded "$OWNER_LOCK" || exit 0
   if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
   if [ "$reset_budget" = reset-budget ] && ! budget_reset; then
-    fm_lock_release "$OWNER_LOCK"
-    exit 0
-  fi
-  if [ "$PARK_ADAPTER" = copilot ] && ! copilot_continuation_write "$((LOOP_COUNT + 1))"; then
-    fm_lock_release "$OWNER_LOCK"
-    exit 0
-  fi
-  if [ "$PARK_ADAPTER" = copilot ] && ! copilot_mark_continuation_busy; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
@@ -216,42 +175,6 @@ budget_reset() {
   rm -f "$BUDGET_FILE" 2>/dev/null
 }
 
-copilot_continuation_write() {  # <count>
-  local tmp="$CONTINUATION_FILE.tmp.$$"
-  printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$1" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$CONTINUATION_FILE" 2>/dev/null
-  local status=$?
-  rm -f "$tmp" 2>/dev/null || true
-  return "$status"
-}
-
-copilot_mark_continuation_busy() {
-  local parent_state=${FM_COPILOT_PARENT_STATE:-}
-  local parent_id=${FM_COPILOT_PARENT_TASK_ID:-}
-  local parent_gen=${FM_COPILOT_PARENT_BUSY_GEN:-}
-  [ "$PARK_ADAPTER" = copilot ] || return 0
-  if [ -z "$parent_state$parent_id$parent_gen" ]; then
-    return 0
-  fi
-  [ -n "$parent_state" ] && [ -n "$parent_id" ] && [ -n "$parent_gen" ] || return 1
-  "$SCRIPT_DIR/fm-busy-event.sh" apply "$parent_state" "$parent_id" busy \
-    --gen "$parent_gen" --source copilot-hook --event stop-continuation \
-    >/dev/null 2>&1
-}
-
-copilot_continuation_read() {
-  local session count
-  if [ "$STOP_HOOK_ACTIVE" != true ]; then
-    LOOP_COUNT=0
-    rm -f "$CONTINUATION_FILE" 2>/dev/null || true
-    return 0
-  fi
-  session=$(sed -n '1s/^session=//p' "$CONTINUATION_FILE" 2>/dev/null || true)
-  count=$(sed -n '2s/^count=//p' "$CONTINUATION_FILE" 2>/dev/null || true)
-  case "$count" in ''|*[!0-9]*) count=1 ;; esac
-  if [ "$session" = "$SESSION_ID" ]; then LOOP_COUNT=$count; else LOOP_COUNT=1; fi
-}
-
 budget_reset_if_ours() {
   lock_acquire_bounded "$OWNER_LOCK" || exit 0
   if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
@@ -278,11 +201,7 @@ $arm_tail
 
 $reason"
   fm_operational_input_encode turn-end-guard "$body" encoded || exit 0
-  if [ "$PARK_ADAPTER" = copilot ]; then
-    response=$(jq -n --arg m "$encoded" '{decision:"block",reason:$m}' 2>/dev/null) || exit 0
-  else
-    response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
-  fi
+  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
 
   lock_acquire_bounded "$OWNER_LOCK" || exit 0
   if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
@@ -291,14 +210,6 @@ $reason"
   fi
   budget_read
   if [ "$BUDGET_COUNT" -ne "$prior" ] || ! budget_write "$count"; then
-    fm_lock_release "$OWNER_LOCK"
-    exit 0
-  fi
-  if [ "$PARK_ADAPTER" = copilot ] && ! copilot_continuation_write "$((LOOP_COUNT + 1))"; then
-    fm_lock_release "$OWNER_LOCK"
-    exit 0
-  fi
-  if [ "$PARK_ADAPTER" = copilot ] && ! copilot_mark_continuation_busy; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
   fi
@@ -358,20 +269,11 @@ case "$OWNER_ID" in ''|*[!0-9]*) exit 0 ;; esac
 PARK_SEQ=
 claim_park || exit 0
 
-if [ "$PARK_ADAPTER" = copilot ]; then
-  copilot_continuation_read
-fi
-
-# Cursor has a configured outer loop_limit; Copilot has a hard eight-block
-# override. The inner ceilings bite first so supervision never disappears
-# without one final handling turn explaining that it stopped.
-if { [ "$PARK_ADAPTER" = cursor ] && [ "$LOOP_COUNT" -ge "$LOOP_CEILING" ]; } \
-   || { [ "$PARK_ADAPTER" = copilot ] && [ "$LOOP_COUNT" -ge "$((LOOP_CEILING - 1))" ]; }; then
-  if [ "$PARK_ADAPTER" = cursor ]; then
-    [ "$LOOP_COUNT" -eq "$LOOP_CEILING" ] || exit 0
-  else
-    [ "$LOOP_COUNT" -eq "$((LOOP_CEILING - 1))" ] || exit 0
-  fi
+# Cursor's inner ceiling bites before the configured outer loop_limit so
+# supervision never disappears without one final handling turn explaining that
+# it stopped.
+if [ "$LOOP_COUNT" -ge "$LOOP_CEILING" ]; then
+  [ "$LOOP_COUNT" -eq "$LOOP_CEILING" ] || exit 0
   fm_supervision_needed "$STATE" "$GRACE" || exit 0
   emit_followup turn-end-guard "FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED - this session has taken $LOOP_COUNT consecutive hook-driven turns without a captain message, so automatic wake delivery stops here to bound the loop. Queued wakes stay durable: run bin/fm-wake-drain.sh, handle them, and run its exact WAKE_ACK_REQUIRED command. Supervision resumes automatically at the next turn end after the captain's next message."
 fi
@@ -407,7 +309,7 @@ attempt=0
 while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
   current_session_still_ours || exit 0
   attempt=$((attempt + 1))
-  ARM_OUT=$(mktemp "$STATE/.$PARK_ADAPTER-park-output.XXXXXX") || ARM_OUT=
+  ARM_OUT=$(mktemp "$STATE/.cursor-park-output.XXXXXX") || ARM_OUT=
   if [ -n "$ARM_OUT" ]; then
     "$SCRIPT_DIR/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 &
   else
@@ -477,12 +379,8 @@ fi
 # this turn would genuinely end blind, rather than deciding that here a second
 # time: bin/fm-turnend-guard.sh owns the block decision and its banner for every
 # harness.
-GUARD_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-$PARK_ADAPTER.XXXXXX") || exit 0
-if [ "$PARK_ADAPTER" = copilot ]; then
-  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" --copilot 2>"$GUARD_ERR"
-else
-  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" --cursor 2>"$GUARD_ERR"
-fi
+GUARD_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-cursor.XXXXXX") || exit 0
+printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" --cursor 2>"$GUARD_ERR"
 GUARD_RC=$?
 REASON=$(cat "$GUARD_ERR" 2>/dev/null || true)
 rm -f "$GUARD_ERR" 2>/dev/null || true

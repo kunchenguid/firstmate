@@ -76,8 +76,10 @@ Codex and OpenCode are also verified and supported as primary harnesses; Codex u
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
 GitHub Copilot CLI is verified for primary and worker use through tracked `.github/hooks/firstmate.json`.
-Its `agentStop` hook parks between turns and returns a native blocked continuation for actionable work, while a seven-continuation inner ceiling stays below Copilot CLI's eight-block override.
-Copilot primary support does not yet include away-mode escalation injection because its interactive composer has no structurally verified empty shape; attended supervision, session start, and stop-hook parking are unaffected.
+It runs the watcher as a tracked asynchronous shell task, so captain input remains available while supervision waits.
+Shell-completion notifications deliver actionable watcher results, while a short nonblocking `agentStop` hook requests a replacement asynchronous arm only when supervision is missing.
+Native Windows runs use a guarded PowerShell bridge to Git for Windows Bash.
+Copilot primary support does not yet include away-mode escalation injection because its interactive composer has no structurally verified empty shape; attended supervision, session start, and asynchronous watcher supervision are unaffected.
 
 ### Install and launch
 

@@ -153,7 +153,7 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
       ;;
     copilot)
-      printf '%s%s\n' "$prefix" 'watcher supervision is owned by the agentStop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
+      printf '%s%s\n' "$prefix" 'start watcher supervision as one Copilot-tracked asynchronous shell task: run bin/fm-watch-arm.sh from the Bash tool, or ./bin/fm-watch-arm.ps1 from the Windows PowerShell tool, using the tool native async mode and never a shell ampersand.'
       ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'
@@ -182,7 +182,7 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     copilot)
-      printf '%s\n' '- Ordinary wake: the agentStop-hook park already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      printf '%s\n' '- Ordinary wake: the completed asynchronous watcher task delivered this turn; drain and handle the wake, then start the next tracked asynchronous watcher task if supervision is still needed.'
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'

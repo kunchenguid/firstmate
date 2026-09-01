@@ -10,6 +10,9 @@ Each adapter starts the next arm before delivering the wake prompt, checks curre
 A failed follow-up never cancels continuity restoration.
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`.
 Cursor's `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) owns routine tokenless re-arm for a Cursor primary by parking that awaited hook on `bin/fm-watch-arm.sh` and returning an actionable close as one follow-up; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns its Pi-host stand-down, loop bounds, and supersession baton.
+Copilot runs `bin/fm-watch-arm.sh` through its shell tool's native asynchronous mode, with `bin/fm-watch-arm.ps1` as the native Windows bridge.
+The tracked `notification` hook converts `shell_completed` and `shell_detached_completed` into typed Firstmate input only when the completed watcher left queued work or required supervision unhealthy.
+Its short `agentStop` hook runs `bin/fm-copilot-stop.sh`, which requests a missing asynchronous arm but never launches or waits for the watcher.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
@@ -39,6 +42,9 @@ The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
+Copilot starts its successor after the notification-driven handling turn acknowledges the completed event.
+Because the watcher is a tracked asynchronous shell task, Copilot delivers the completion notification without holding conversational control during the wait.
+The notification hook ignores healthy, stale-session, away-mode, non-primary, and no-supervision completions, so an unrelated shell completion cannot create a duplicate supervision turn.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
@@ -114,6 +120,6 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-Claude depends on the Stop `asyncRewake` rewake, Copilot and Cursor depend on their awaited stop-hook parks, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+Claude depends on the Stop `asyncRewake` rewake, Copilot depends on tracked asynchronous shell completion notifications, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

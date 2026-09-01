@@ -14,7 +14,50 @@ case "${1:-}" in
     jq -n --arg c "$DIGEST" '{additionalContext:$c}' 2>/dev/null || true
     ;;
   primary-stop)
-    exec "$SCRIPT_DIR/fm-turnend-guard-cursor.sh" --copilot
+    exec "$SCRIPT_DIR/fm-copilot-stop.sh"
+    ;;
+  notification)
+    PAYLOAD=$(cat 2>/dev/null || true)
+    [ -n "$PAYLOAD" ] || exit 0
+    command -v jq >/dev/null 2>&1 || exit 0
+    TYPE=$(printf '%s' "$PAYLOAD" | jq -r '
+      if type == "object" and (.notification_type | type) == "string" then .notification_type
+      else error("notification_type")
+      end
+    ' 2>/dev/null) || exit 0
+    case "$TYPE" in shell_completed|shell_detached_completed) ;; *) exit 0 ;; esac
+
+    FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+    FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+    STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+    GRACE=${FM_GUARD_GRACE:-300}
+    # shellcheck source=bin/fm-operational-input.sh
+    . "$SCRIPT_DIR/fm-operational-input.sh"
+    # shellcheck source=bin/fm-primary-scope-lib.sh
+    . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+    # shellcheck source=bin/fm-session-lock-lib.sh
+    . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+    # shellcheck source=bin/fm-supervision-lib.sh
+    . "$SCRIPT_DIR/fm-supervision-lib.sh"
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+
+    fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+    fm_session_lock_owned_by_self "$STATE" || exit 0
+    [ -e "$STATE/.afk" ] && exit 0
+    fm_supervision_status "$STATE" "$GRACE"
+    [ "$FM_SUP_NEEDED" = true ] || exit 0
+    fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" && exit 0
+
+    if [ "$FM_SUP_QUEUE_PENDING" = true ]; then
+      BODY='A tracked asynchronous watcher task completed and durable supervision input is waiting. Run bin/fm-wake-drain.sh first, handle every presented event, and run its exact WAKE_ACK_REQUIRED command. If supervision is still needed afterward, start the next watcher as one native asynchronous shell task.'
+      KIND=watcher
+    else
+      BODY='A tracked asynchronous watcher task completed without leaving a healthy watcher or a queued event. Inspect the completed shell task output. If supervision is still needed, start bin/fm-watch-arm.sh again as one native asynchronous shell task; on Windows use ./bin/fm-watch-arm.ps1. Never use a shell ampersand.'
+      KIND=turn-end-guard
+    fi
+    fm_operational_input_encode "$KIND" "$BODY" CONTEXT || exit 0
+    jq -n --arg c "$CONTEXT" '{additionalContext:$c}' 2>/dev/null || true
     ;;
   pretool)
     case "${2:-}" in
