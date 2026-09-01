@@ -1717,6 +1717,26 @@ fm_wake_signal_seen_current() {  # <state> <file>
   esac
 }
 
+# Record <file>'s CURRENT state as already reported, whatever kind of signal file
+# it is, so the next scan does not surface it. The exact inverse of
+# fm_wake_signal_seen_current above, and the one primitive a consumer that
+# CREATES a signal file itself must call: a file conjured by machinery rather
+# than by a worker has no activity to announce, and scan_signals would otherwise
+# report it on the next poll. Later real activity changes the signature and
+# surfaces normally.
+fm_wake_signal_mark_current() {  # <state> <file>
+  local sig marker
+  case "$2" in
+    *.status) fm_wake_status_mark_current "$1" "$2" ;;
+    *)
+      sig=$(fm_wake_signal_sig "$2") || return 1
+      [ -n "$sig" ] || return 1
+      marker=$(fm_wake_signal_seen_path "$1" "$2")
+      printf '%s' "$sig" > "$marker" 2>/dev/null
+      ;;
+  esac
+}
+
 fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>
   _fm_wake_require_classify || return 1
   status_presentation_marker_report "$(fm_wake_signal_seen_path "$1" "$2")" "$3"
