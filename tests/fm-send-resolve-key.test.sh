@@ -203,6 +203,61 @@ test_colon_first_key_position_is_answerable() {
   pass "fm-send --resolve-key: a colon-first stated key is open under that key and answerable"
 }
 
+# The 2026-08 incident, end to end: a worker opened its decision with the token
+# LAST (needs-decision: <summary> [key=w2-design]), the drain listed it as open
+# and reprinted that token inside the note, and --resolve-key w2-design refused
+# as unknown - a dead end, because the only key a reader could see was the one
+# that refuses.
+#
+# The contract this pins is the general one, not a particular key: whatever key
+# the OPEN DECISIONS listing brackets is the key that answers that decision. The
+# test reads the key back OUT of the real drain output and feeds exactly that to
+# the real fm-send, so the two sides cannot drift apart again whatever the
+# grammar decides a given line's key is.
+test_the_key_the_listing_names_is_the_key_that_answers() {
+  local dir fb log home rc out key err
+  dir="$TMP_ROOT/named-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home named-key)
+  fm_write_meta "$home/state/t10.meta" "window=sess:fm-t10" "kind=ship"
+  printf 'needs-decision: wave-2 design committed for captain review [key=w2-design]\n' \
+    > "$home/state/t10.status"
+  # The live shape: a later working: line does NOT close the decision.
+  printf 'working: wave-2 design revised per panel, ready for captain\n' \
+    >> "$home/state/t10.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null \
+    || fail "precondition: the decision should list as open: $out"
+  # Exactly one bracketed key per listed decision, and it is the answerable one.
+  key=$(printf '%s' "$out" | sed -n 's/^t10 \[key=\([A-Za-z0-9._-]*\)\].*/\1/p' | head -1)
+  [ -n "$key" ] \
+    || fail "the OPEN DECISIONS listing named no answerable key for the decision: $out"
+  printf '%s' "$out" | grep -F 'prose' >/dev/null \
+    || fail "the listing did not flag the summary's foreign key token as prose: $out"
+
+  # The key a supervisor could mistake it for refuses - safely, and without
+  # sending anything - and the refusal names what this log would answer to.
+  err="$dir/refuse.err"
+  run_send "$fb" "$home" "$log" t10 --resolve-key w2-design "two-holder drag" 2>"$err"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a key the fold does not hold was accepted"
+  [ ! -e "$home/state/t10.inbox/001.msg" ] || fail "the refused answer was still delivered"
+
+  # And the key the listing named answers it.
+  run_send "$fb" "$home" "$log" t10 --resolve-key "$key" "two-holder drag, cut order ruled"; rc=$?
+  expect_code 0 "$rc" "the key the OPEN DECISIONS listing named should answer the decision"
+  grep -F "resolved [key=$key]: answered: two-holder drag, cut order ruled" \
+    "$home/state/t10.status" >/dev/null \
+    || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/t10.status")"
+
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the answered decision still lists as open: $out"
+  fi
+  pass "fm-send --resolve-key: the key the OPEN DECISIONS listing names is the key that answers"
+}
+
 test_answer_starts_work_never_orphans() {
   local dir fb log home rc out
   dir="$TMP_ROOT/starts-work"; mkdir -p "$dir"
@@ -263,6 +318,9 @@ test_not_open_key_refuses_before_send() {
   [ "$rc" -ne 0 ] || fail "a not-open key should refuse"
   assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" "the refusal should name the bad key"
   assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
+  # A refusal that only says "not that one" is a dead end; it must name what
+  # this log would answer to, so a misread key is one corrected resend away.
+  assert_contains "$(cat "$err")" "real-key" "the refusal should name the keys still open in that log"
   [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
   [ ! -d "$home/state/t4.inbox" ] || fail "a refused answer still enqueued an inbox record"
   if grep -F 'resolved' "$home/state/t4.status" >/dev/null; then
@@ -538,6 +596,7 @@ test_flag_misuse_refuses() {
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
+test_the_key_the_listing_names_is_the_key_that_answers
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send

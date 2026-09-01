@@ -11,7 +11,10 @@
 # verb, regardless of order or count. These tests drive the REAL
 # status_line_verb / status_open_decisions / status_open_decisions_incremental
 # functions over crafted status files and assert their folded output, never the
-# fold's own source text. Also covers status_key_closing_verb, which reports how
+# fold's own source text. Also covers status_decision_render, the single owner of
+# how a still-open decision is NAMED to a supervisor, because a decision shown
+# under a name that cannot answer it is the same defect seen from the other end.
+# Also covers status_key_closing_verb, which reports how
 # the status side currently reads one key so a consumer can tell a settled key
 # from one handed to a durable captain-held task (bin/fm-captain-hold.sh
 # diverged). Cross-drain cursor persistence and the incremental
@@ -239,6 +242,157 @@ test_blocked_and_resolved_are_tag_order_independent() {
   pass "blocked/resolved parse their bare verb with any bracket-tag order preceding the colon"
 }
 
+# The 2026-08 "--resolve-key refuses a key the drain lists as open" incident.
+# A worker opened its decision with the token LAST
+# (needs-decision: <summary> [key=w2-design]), which the grammar reads as prose,
+# so the decision is genuinely named "default". That reading is deliberate and
+# must not drift: the same trailing position is also where a resolution mentions
+# ANOTHER decision's key, and reading it as a stated key would let prose close a
+# decision the captain is owed. The fix for the incident is that every surface
+# names the answerable key (status_decision_render), not that the fold guesses.
+test_note_tail_token_stays_prose() {
+  local dir f
+  dir=$(case_dir tail-prose)
+  printf 'needs-decision: wave-2 design committed for captain review [key=w2-design]\n' \
+    > "$dir/open.status"
+  assert_fold "$dir/open.status" \
+    "$(printf 'default\tneeds-decision\twave-2 design committed for captain review [key=w2-design]\n')" \
+    "trailing token on an opening line"
+
+  # The disconfirming half: a resolution whose note ENDS by naming another
+  # decision's key must not close that decision.
+  f="$dir/close.status"
+  printf 'needs-decision [key=w2-design]: pick the drag model\n' > "$f"
+  printf 'resolved: superseded by [key=w2-design]\n' >> "$f"
+  assert_fold "$f" "$(printf 'w2-design\tneeds-decision\tpick the drag model\n')" \
+    "a trailing token in a resolution's prose never closes that key"
+  pass "a [key=x] at the end of a note is prose in both directions: it opens nothing and closes nothing"
+}
+
+# status_decision_render is the ONE way a still-open decision is named to a
+# supervisor. Both halves of the incident are pinned here: a `default` decision
+# must show a key at all, and a summary carrying a foreign key-shaped token must
+# say which of the two answers it.
+test_decision_render_always_names_the_answerable_key() {
+  local line
+  line=$(status_decision_render default needs-decision "pick REST or RPC")
+  [ "$line" = "[key=default] needs-decision: pick REST or RPC" ] \
+    || fail "an unkeyed decision was rendered without its answerable key: '$line'"
+
+  line=$(status_decision_render api-shape needs-decision "pick REST or RPC")
+  [ "$line" = "[key=api-shape] needs-decision: pick REST or RPC" ] \
+    || fail "a keyed decision was not rendered under its own key: '$line'"
+
+  # The incident line: the only token a reader could see is the one that refuses.
+  line=$(status_decision_render default needs-decision \
+    "wave-2 design committed for captain review [key=w2-design]")
+  case "$line" in
+    "[key=default] "*) ;;
+    *) fail "the answerable key was not front-loaded: '$line'" ;;
+  esac
+  case "$line" in
+    *prose*) ;;
+    *) fail "a foreign key-shaped token in the summary was not called out: '$line'" ;;
+  esac
+
+  # No correction when the summary's token IS this decision's key: a worker that
+  # states its key in a documented position often keeps it visible in the note.
+  line=$(status_decision_render w2-design needs-decision "see [key=w2-design] in the design doc")
+  case "$line" in
+    *prose*) fail "a decision's own key was called out as prose: '$line'" ;;
+  esac
+  pass "status_decision_render always names the answerable key and flags a foreign token as prose"
+}
+
+# status_declared_wait_signature names WHAT a declared wait is, so the watcher's
+# one-shot surface can key on the declaration itself. The identity must survive
+# an unrelated status append while the same wait is still open - that append is
+# exactly the worker progress line that, when the identity carried the whole-file
+# size instead, bought another bare stale wake for a decision the captain still
+# owed - and must change the moment the wait genuinely changes.
+test_declared_wait_signature_is_stable_across_unrelated_appends() {
+  local dir f open_sig grown_sig second_sig answered_sig paused_sig repaused_sig
+  dir=$(case_dir declared-wait-sig)
+  f="$dir/t.status"
+
+  # An open decision, then a worker progress line that does not touch it.
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$f"
+  open_sig=$(status_declared_wait_signature "$f")
+  [ -n "$open_sig" ] || fail "an open decision produced no declared-wait signature"
+  printf 'working: still drafting the request schema\n' >> "$f"
+  grown_sig=$(status_declared_wait_signature "$f")
+  [ "$grown_sig" = "$open_sig" ] \
+    || fail "an unrelated append changed the open-decision declared-wait signature: '$open_sig' -> '$grown_sig'"
+
+  # A genuinely new decision is a new wait and must change the identity.
+  printf 'needs-decision [key=store]: sqlite or postgres\n' >> "$f"
+  second_sig=$(status_declared_wait_signature "$f")
+  [ "$second_sig" != "$grown_sig" ] \
+    || fail "a newly opened decision left the declared-wait signature unchanged"
+
+  # A decision resolved and then reopened under the same key - even to a
+  # byte-identical needs-decision line - is a NEW gate the captain is owed: the
+  # folded open set alone folds back to the same bytes, so without an open
+  # generation the reopen would reuse the earlier declaration's one-shot marker
+  # and hide behind the long recheck cadence. The identity must move on reopen,
+  # and a DIFFERENT key's open/close churn must NOT move it - otherwise a
+  # bystander decision's churn would buy a still-open gate another bare stale
+  # wake, the very leak the open-decision identity exists to close.
+  local reopen_before reopen_after churn_before churn_after
+  printf 'needs-decision [key=reopen-me]: which region\n' >> "$f"
+  reopen_before=$(status_declared_wait_signature "$f")
+  printf 'resolved [key=reopen-me]: answered: us-east\n' >> "$f"
+  printf 'needs-decision [key=reopen-me]: which region\n' >> "$f"
+  reopen_after=$(status_declared_wait_signature "$f")
+  [ "$reopen_after" != "$reopen_before" ] \
+    || fail "a decision resolved and reopened under the same key reused the declared-wait signature: '$reopen_before'"
+
+  # api-shape, store and reopen-me are all open now; open then close a bystander
+  # key and the identity of the surviving open set must be byte-identical.
+  churn_before=$(status_declared_wait_signature "$f")
+  printf 'needs-decision [key=bystander]: transient question\n' >> "$f"
+  printf 'resolved [key=bystander]: answered: never mind\n' >> "$f"
+  churn_after=$(status_declared_wait_signature "$f")
+  [ "$churn_after" = "$churn_before" ] \
+    || fail "a bystander decision's open/close churn moved the surviving declared-wait signature: '$churn_before' -> '$churn_after'"
+
+  # Restating an ALREADY-OPEN key - the worker refining the same question the
+  # captain still owes - is not a new gate: the fold re-appends the key (moving it
+  # to the end of the open order) and rewrites its note, so an identity that read
+  # the rendered open set's order or notes treated the continuously-open
+  # obligation as a new declaration and bought another bare stale wake for it. The
+  # identity must hold across the restatement, and a bystander key open at the
+  # same time must be undisturbed.
+  local restate_before restate_after
+  restate_before=$(status_declared_wait_signature "$f")
+  printf 'needs-decision [key=api-shape]: pick REST or RPC (now with a refined note)\n' >> "$f"
+  restate_after=$(status_declared_wait_signature "$f")
+  [ "$restate_after" = "$restate_before" ] \
+    || fail "restating an already-open decision moved the declared-wait signature: '$restate_before' -> '$restate_after'"
+
+  # Answer the reopened gate so only the two originals remain, then answer both;
+  # answering all leaves no wait, so the identity is empty.
+  {
+    printf 'resolved [key=reopen-me]: answered: us-east\n'
+    printf 'resolved [key=api-shape]: answered: REST\n'
+    printf 'resolved [key=store]: answered: postgres\n'
+  } >> "$f"
+  answered_sig=$(status_declared_wait_signature "$f")
+  [ -z "$answered_sig" ] \
+    || fail "an answered decision still carried a declared-wait signature: '$answered_sig'"
+
+  # A declared pause is named by the pause line itself: a new reason is a new wait.
+  printf 'paused: waiting on the upstream release\n' > "$f"
+  paused_sig=$(status_declared_wait_signature "$f")
+  [ -n "$paused_sig" ] || fail "a declared pause produced no declared-wait signature"
+  [ "$paused_sig" != "$answered_sig" ] || fail "a declared pause collapsed to the empty signature"
+  printf 'paused: waiting on a different upstream release\n' >> "$f"
+  repaused_sig=$(status_declared_wait_signature "$f")
+  [ "$repaused_sig" != "$paused_sig" ] \
+    || fail "a fresh pause reason reused the previous declared-wait signature"
+  pass "status_declared_wait_signature holds one identity for an unchanged wait and changes only when the wait does"
+}
+
 test_incremental_agrees_with_full_fold_across_appends() {
   local dir f expected
   dir=$(case_dir incremental)
@@ -275,6 +429,9 @@ test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
+test_note_tail_token_stays_prose
+test_decision_render_always_names_the_answerable_key
+test_declared_wait_signature_is_stable_across_unrelated_appends
 
 # status_key_closing_verb reports HOW the status side currently reads one key,
 # which is what lets a consumer tell a settled key from a key handed to a

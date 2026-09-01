@@ -165,8 +165,11 @@ age_cooldown() {  # <state-dir> <mate-id> <seconds-ago>
 run_notify() {  # <home> <fakebin> <name> <snapshot> [extra args...]
   local home=$1 fakebin=$2 name=$3 snap=$4
   shift 4
+  # Forward the optional pinned clock so a caller can make a boundary assertion
+  # deterministic; empty (the default) leaves reconcile on the real wall clock.
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" \
+    FM_RECONCILE_NOW_OVERRIDE="${FM_RECONCILE_NOW_OVERRIDE:-}" \
     FM_FAKE_TMUX_WINDOW="firstmate:fm-mate" \
     FM_FAKE_TMUX_LOG="$TMP_ROOT/$name-tmux.log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/$name-fake/pane.txt" \
@@ -284,22 +287,18 @@ test_the_window_is_four_hours() {
   snap="$home/snapshot.json"
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row"]}'
   run_notify "$home" "$fakebin" fourhours "$snap" >/dev/null || fail "the first ask failed"
-  now=$(date +%s)
-  cat > "$fakebin/date" <<'SH'
-#!/usr/bin/env bash
-if [ -n "${FM_TEST_DATE_NOW:-}" ] && [ "${1:-}" = +%s ]; then
-  printf '%s\n' "$FM_TEST_DATE_NOW"
-  exit 0
-fi
-exec /bin/date "$@"
-SH
-  chmod +x "$fakebin/date"
+  # Pin the reconcile clock to a fixed second (FM_RECONCILE_NOW_OVERRIDE) so the
+  # boundary is exact to the second, rather than racing the real wall clock: with
+  # a live clock a loaded runner could take over a second between writing the
+  # aged record and reading it back, turning a "one second short" record into a
+  # "one second past" one and flaking the assertion.
+  now=1700000000
   # One second short of four hours is still inside; one second past is not.
   printf '%s\n' "$((now - 14399))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  out=$(FM_RECONCILE_NOW_OVERRIDE="$now" run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "cooldown: mate" "the window was shorter than four hours: $out"
   printf '%s\n' "$((now - 14401))" > "$home/state/mate.reconcile-nudged"
-  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
+  out=$(FM_RECONCILE_NOW_OVERRIDE="$now" run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "sent: mate" "the window was longer than four hours: $out"
   pass "the cooldown window is four hours"
 }
@@ -415,7 +414,7 @@ test_a_failed_send_is_retried_on_the_next_run() {
 }
 
 test_busy_lifecycle_locks_never_hold_up_the_digest() {
-  local label home mate fakebin snap lock ready release holder notify out
+  local label home mate fakebin snap lock ready release holder notify out waited
   for label in reconcile control meta; do
     { read -r home; read -r mate; read -r fakebin; } < <(make_main_home "busy-$label" mate)
     snap="$home/snapshot.json"
@@ -432,13 +431,27 @@ test_busy_lifecycle_locks_never_hold_up_the_digest() {
     while [ ! -f "$ready" ]; do sleep 0.01; done
     run_notify "$home" "$fakebin" "busy-$label" "$snap" > "$home/notify.out" 2>&1 &
     notify=$!
-    sleep 0.2
-    if kill -0 "$notify" 2>/dev/null; then
-      : > "$release"
-      wait "$notify" 2>/dev/null || true
-      wait "$holder" 2>/dev/null || true
-      fail "a busy $label lock blocked the reconcile path"
-    fi
+    # A busy lifecycle lock must not BLOCK the reconcile path: notify has to
+    # return on its own while the lock is still held, i.e. WITHOUT us ever
+    # writing the release. Poll for that self-exit against a generous watchdog
+    # rather than sampling liveness after one fixed short sleep. The skip does
+    # real work first (a full shell start that sources the reconcile libraries),
+    # and a loaded runner can take well over a fifth of a second just to reach
+    # the non-blocking lock probe; treating that startup as "blocked" is a false
+    # failure, and is exactly how this test flaked on CI. The healthy skip still
+    # finishes in well under a second, so only a genuinely blocked notify - still
+    # waiting on a lock whose release we withhold - can reach the bound below.
+    waited=0
+    while kill -0 "$notify" 2>/dev/null; do
+      if [ "$waited" -ge 1000 ]; then
+        : > "$release"
+        wait "$notify" 2>/dev/null || true
+        wait "$holder" 2>/dev/null || true
+        fail "a busy $label lock blocked the reconcile path"
+      fi
+      sleep 0.02
+      waited=$((waited + 1))
+    done
     wait "$notify" || fail "a busy $label lock made notify fail"
     : > "$release"
     wait "$holder" || fail "the $label lock holder failed"

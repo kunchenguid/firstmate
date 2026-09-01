@@ -213,7 +213,15 @@ status_is_paused_or_captain_held() {  # <status-line>
 # note-head token is key metadata, stripped from the note); when both positions
 # carry a token, the documented before-colon one wins and the note-head token
 # stays note text. A token deeper inside the note is prose, never a stated key,
-# so a summary merely MENTIONING "[key=x]" cannot open or close that decision.
+# so a summary merely MENTIONING "[key=x]" cannot open or close that decision -
+# including a token at the very END of the note, which is the position a worker
+# most often uses for both meanings at once ("needs-decision: <summary>
+# [key=w2-design]" states a key, "resolved: superseded by [key=w2-design]" does
+# not) and which therefore cannot be read as a key without letting prose close a
+# decision the captain is owed. Refusing to guess leaves that decision open and
+# the answer refused, which is recoverable; guessing loses it silently, which is
+# not. status_decision_render below is what keeps that refusal from becoming a
+# dead end, by naming the answerable key wherever a decision is shown.
 # A line with no token in either position uses the key "default", preserving
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
@@ -469,6 +477,173 @@ status_open_decisions() {  # <status-file>
     open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
   done < "$f"
   printf '%s' "$open"
+}
+
+# The ONE way a still-open decision is NAMED to a supervisor, so no surface can
+# show a decision under a name that cannot answer it.
+#
+# Two facts make that easy to get wrong, and together they are how a decision
+# the fold lists as open gets answered with a key bin/fm-send.sh must refuse.
+# The key token is optional, so a decision opened without one is genuinely named
+# `default` - and a surface that printed the key only when it was NOT `default`
+# left the most common decision in the fleet with no visible name at all. And a
+# summary may carry a key-shaped token that is prose rather than this decision's
+# key (see the decision key grammar above), so the only token a reader could see
+# was sometimes the one that refuses.
+#
+# So this always prints the answerable key, and front-loads a short correction -
+# never a trailing one a byte cap could cut off - when the note carries a
+# different key-shaped token. Pure text transform, no file I/O; callers add
+# their own task-id prefix and apply their own byte cap.
+status_decision_render() {  # <key> <verb> <note> -> supervisor-facing line
+  local key=$1 verb=$2 note=$3 named
+  named="[key=$key]"
+  case "$note" in
+    *\[key=*\]*)
+      case "$note" in
+        *"[key=$key]"*) ;;
+        *) named="$named (the summary's own [key=...] is prose)" ;;
+      esac
+      ;;
+  esac
+  printf '%s %s: %s' "$named" "$verb" "$note"
+}
+
+# The kind of declared wait a task's status log carries, or nothing when it
+# carries none. This is the ONE triage a supervisor consults before it may treat
+# an idle endpoint as a possible wedge, so the several stale-emission paths
+# cannot each answer "is this quiet endpoint expected?" their own way:
+#   captain-held - the latest line is the verified captain-held transfer;
+#   paused       - the latest line declares an external-wait pause;
+#   decision     - neither, but the durable fold still holds an open decision,
+#                  so the supervisor itself owes the answer.
+# That third case is the one a last-line read alone cannot see: a needs-decision
+# or blocked line stays open under later unrelated appends, and while it is open
+# the worker is waiting on its supervisor rather than wedged - the same reason a
+# declared pause is absorbed rather than escalated. It is deliberately the
+# fold's whole open set rather than a narrower verb list, because "what this
+# task is still owed" already has an owner above and re-deriving a second,
+# narrower version of it here is exactly the drift this function removes.
+# Ordering is cost as well as precedence: both verb reads are pure last-line
+# reads, and the fold runs only when neither declared verb is present.
+status_declared_wait_kind() {  # <status-file> -> captain-held|paused|decision|<empty>
+  local f=$1 last
+  last=$(last_status_line "$f")
+  if status_is_captain_held "$last"; then printf 'captain-held'; return 0; fi
+  if status_is_paused "$last"; then printf 'paused'; return 0; fi
+  [ -n "$(status_open_decisions "$f")" ] && printf 'decision'
+  return 0
+}
+
+# The stable identity of the declared wait <status-file> currently carries, so a
+# one-shot surface can be keyed on the DECLARATION itself rather than on a
+# whole-file signature that any later unrelated status append would perturb.
+# status_declared_wait_kind above owns WHICH wait is declared; this owns WHAT
+# that wait is, so the same unanswered wait keeps one identity across later
+# status growth while a genuinely new wait - a fresh pause reason, a newly opened
+# decision, a decision answered then reopened - changes it. Empty when no wait is
+# declared.
+#
+# A paused or captain-held wait is named by the last status line that declares
+# it, so a new declaration line is a new wait. An open-decision wait is named by
+# the still-open key set and each key's OPEN GENERATION
+# (_fm_decision_open_generations), never by the durable open set's rendered bytes
+# (status_open_decisions): that rendering carries each open decision's note and
+# lists the keys in fold order, and restating an already-open key re-appends it -
+# moving it to the end of the fold order and rewriting its note - so an
+# order-or-note-sensitive identity treated a continuously-open obligation as a new
+# declaration and bought another bare stale wake for it, the same 2026-08-29 leak
+# the declaration-keyed one-shot exists to close (a worker refining or restating
+# the very question the captain still owes is not a new gate). The generation set
+# names WHICH keys are open and WHICH incarnation of each in a restatement-stable
+# order, and folds through the one _fm_decision_fold_line owner, so it cannot
+# disagree with the open/closed rule status_open_decisions applies: an unrelated
+# append opens nothing and leaves every generation untouched, a newly opened key
+# adds a generation line, and a decision resolved and then reopened under the same
+# key - even to a byte-identical needs-decision line - bumps that key's generation.
+# Without the generation a reopen would fold back to the same open set and hide
+# behind the earlier surface's one-shot marker until the long recheck cadence,
+# silently demoting a new gate the captain is owed. Output is a single line so a
+# marker file holds it as one token.
+status_declared_wait_signature() {  # <status-file> -> stable id of the declared wait, empty when none
+  local f=$1 kind payload encoded
+  kind=$(status_declared_wait_kind "$f") || return 1
+  [ -n "$kind" ] || return 0
+  case "$kind" in
+    decision)
+      # The generation set alone names the wait: one "<key>\t<gen>" line per
+      # still-open key, in a fold order a restatement cannot perturb, so a worker
+      # restating or renoting an already-open decision keeps one identity while a
+      # newly opened key or a close+reopen (higher generation) changes it.
+      encoded=$(printf '%s\0%s' "$kind" \
+        "$(_fm_decision_open_generations "$f")" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+      ;;
+    *)
+      payload=$(last_status_line "$f")
+      encoded=$(printf '%s\0%s' "$kind" "$payload" | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+      ;;
+  esac
+  printf 'dw1:%s' "$encoded"
+}
+
+# For each decision key still open in <status-file>, how many times it has gone
+# from closed to open across the whole stream - its OPEN GENERATION. A key opened
+# once has generation 1; a key resolved and then reopened (even to a byte-identical
+# needs-decision line) has generation 2. This is the history the folded open set
+# throws away, and it is exactly what status_declared_wait_signature needs to tell
+# a still-open decision from a resolved-then-reopened one whose open-set bytes are
+# identical: without it a reopen would reuse the earlier declaration's one-shot
+# marker and stay on the bounded cadence instead of surfacing the new gate once.
+#
+# Whether a line is an opening transition, and for which key, is answered by the
+# one _fm_decision_fold_line owner - a line opens key K exactly when folding that
+# line alone onto an empty set yields K - so this can never diverge from
+# status_open_decisions on what counts as opening a decision. Only a genuine
+# closed->open transition bumps a generation: a needs-decision restated while its
+# key is already open updates the note but is not a new gate, and a resolution or
+# an unrelated progress line opens nothing at all. Prints "<key>\t<gen>" per
+# still-open key in fold order; nothing when none are open.
+_fm_decision_open_generations() {  # <status-file>
+  local f=$1 line resolve held open='' single k gens='' out='' gline gk
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    single=$(_fm_decision_fold_line "" "$line" "$resolve" "$held")
+    if [ -n "$single" ] && ! _fm_open_set_has "$open" "${single%%$'\t'*}"; then
+      k=${single%%$'\t'*}
+      gens=$(_fm_gen_bump "$gens" "$k")
+    fi
+    open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+  done < "$f"
+  # A key opened and then closed carries no live wait, so drop its generation:
+  # only keys still in the final open set name a declared wait.
+  while IFS= read -r gline; do
+    [ -n "$gline" ] || continue
+    gk=${gline%%$'\t'*}
+    _fm_open_set_has "$open" "$gk" && out="${out}${gline}"$'\n'
+  done <<EOF
+$gens
+EOF
+  printf '%s' "$out"
+}
+
+# Increment (or start at 1) the "<key>\t<count>" generation record for <key> in a
+# newline-terminated generation set. Portable (no associative arrays) so it runs
+# on bash 3.2, like _fm_decision_drop, whose same drop-then-reappend shape it uses
+# to keep one record per key.
+_fm_gen_bump() {  # <gen-set> <key>
+  local set=$1 key=$2 line n=0
+  while IFS= read -r line; do
+    case "$line" in
+      "$key"$'\t'*) n=${line#*$'\t'}; n=${n%%$'\t'*} ;;
+    esac
+  done <<EOF
+$set
+EOF
+  set=$(_fm_decision_drop "$set" "$key")
+  [ -n "$set" ] && set="${set}"$'\n'
+  printf '%s%s\t%s\n' "$set" "$key" "$((n + 1))"
 }
 
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
