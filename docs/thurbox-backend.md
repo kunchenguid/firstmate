@@ -122,6 +122,10 @@ The adapter therefore gates the signal rather than trusting the row:
 A busy verdict from this backend is consequently never a stale row.
 `thurbox-cli session doctor <id>` reports whether hooks are wired and firing for a given session.
 
+One more reason the adapter treats `blocked` as idle rather than as an actionable state: for Claude the blocked signal comes from its `Notification` hook, which also fires for advisories an auto-mode agent resolves by itself, so the state can appear and clear within seconds with no decision pending.
+thurbox reports this honestly as `hook_blocked_is_heuristic` on the session row.
+A supervisor that escalates on the first `blocked` edge will raise false alarms; confirm the state persists, or corroborate it, before treating it as a decision waiting.
+
 ## Current path
 
 thurbox is the only backend whose current-path read is genuinely live.
