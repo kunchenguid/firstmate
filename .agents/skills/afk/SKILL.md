@@ -92,7 +92,8 @@ The daemon never injects into an in-use pane. Two checks run before every
 injection, dispatched through `bin/fm-backend.sh` for the supervisor's own
 backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
 
-- **Primary-pane busy guard** - `pane_is_busy` trusts Herdr native `busy` when available, otherwise matches rendered output against only the detected primary harness's signature.
+- **Primary-pane busy guard** - `pane_is_busy` requires the rendered output to match the detected primary harness's busy signature; a native `busy` verdict (e.g. Herdr's `agent_status`) is corroborating evidence, not sufficient alone, because a live tracked background shell (such as this daemon's own launch) can pin native state to `working` long after the pane is actually idle.
+  When the pane cannot be captured at all, `pane_is_busy` falls back to the native verdict rather than guessing idle.
   This narrow delivery guard never classifies a recorded worker task and never uses a global union of vendor patterns.
 - **Composer-state guard** - `inject_msg` reads the full `empty`/`pending`/`pending-unproven`/`unknown` verdict from `fm_backend_composer_state` and injects only when it is affirmatively `empty`.
   Every other or future verdict defers, including an unreadable pane, ambiguous geometry, a blank unidentified row, and a bare shell prompt left after the agent exits.
@@ -105,12 +106,17 @@ In afk mode the composer guard is belt-and-suspenders (no human is typing), but 
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
-attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
+attempts one FORCED flush that drops only the busy guard; the composer-empty guard
+still applies unconditionally, since that is what actually protects against merging
+with a human's half-typed line.
+This bounds worst-case silent non-delivery to `FM_MAX_DEFER_SECS` instead of retrying
+the identical blocked call forever.
 The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
-If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
+If that forced submit still cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
-catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
+catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert
+carrying the buffered item count and first line so the banner is actionable rather than a bare age and marker path.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
@@ -181,10 +187,13 @@ the operational prefix lets firstmate distinguish it from a real captain message
   A blank or otherwise unidentified input row carries no positive container proof and defers injection, so a modal dialog or a mid-redraw pane is never an injection target.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
-  normal flush, which still requires an idle pane and an affirmatively empty composer. If that
+  FORCED flush that drops only the busy guard, keeping the composer-empty guard
+  unconditionally, bounding worst-case silent non-delivery to `FM_MAX_DEFER_SECS`
+  instead of retrying the identical blocked call forever. If that
   cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
   durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
-  applicable, and a backend-independent active alert. A
+  applicable, and a backend-independent active alert carrying the buffered item
+  count and first line. A
   composer false-positive surfaces as a visible stall, never an unbounded silent
   no-op.
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
