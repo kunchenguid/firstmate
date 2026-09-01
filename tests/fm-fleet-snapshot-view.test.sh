@@ -8,6 +8,7 @@ set -u
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
+BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -799,6 +800,254 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# A backlog large enough that its rendered JSON crosses a single argv entry's
+# MAX_ARG_STRLEN cap (128 KiB on Linux, independent of the far larger ARG_MAX).
+# Every command that reads this home has to keep working: a document that big
+# can only reach jq through a file, never as one command-line argument.
+write_oversized_backlog() {  # <home>
+  local home=$1 pad i
+  pad=""
+  for i in $(seq 1 12); do
+    pad="$pad padding body text that makes each backlog row expensive to render"
+  done
+  {
+    printf '## In flight\n'
+    for i in $(seq 1 40); do
+      printf -- '- [ ] big-ship-%03d - Big Ship %d (repo: alpha) (kind: ship) (since 2026-08-01)\n' "$i" "$i"
+      printf '  %s\n' "$pad"
+    done
+    printf '\n## Queued\n'
+    for i in $(seq 1 40); do
+      printf -- '- [ ] big-queued-%03d - Big Queued %d (repo: alpha) (kind: ship) (since 2026-08-01)\n' "$i" "$i"
+      printf '  %s\n' "$pad"
+    done
+    printf '\n## Done\n'
+    for i in $(seq 1 40); do
+      printf -- '- [x] big-done-%03d - Big Done %d https://github.com/kunchenguid/firstmate/pull/%d (repo: alpha) (kind: ship) (merged 2026-08-02)\n' "$i" "$i" "$i"
+      printf '  %s\n' "$pad"
+    done
+  } > "$home/data/backlog.md"
+}
+
+# Regression: a large backlog used to break every fleet read in the home. The
+# rendered backlog document was handed to jq as a single --argjson argument, so
+# exec failed with E2BIG ("Argument list too long") and the snapshot, the
+# secondmate home summary, and bearings all exited non-zero with no output.
+test_oversized_backlog_still_reads() {
+  local home fakebin out summary bearings backlog_bytes
+  home=$(make_home oversized-backlog)
+  write_oversized_backlog "$home"
+  fakebin=$(make_fakebin "$home")
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a backlog larger than one argv entry"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot output must be valid JSON for an oversized backlog"
+
+  # Prove the fixture actually crosses the cap this test exists for; a smaller
+  # document would make the whole case vacuous.
+  backlog_bytes=$(printf '%s' "$out" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$backlog_bytes" -gt 131072 ] \
+    || fail "fixture backlog renders to only $backlog_bytes bytes; it must exceed the 131072-byte argv cap"
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) == 120
+      and .main_inventory.valid == false
+      and .main_inventory.unstructured_current_count == 0
+      and ((.main_inventory.orphan_in_flight | length) == 40)
+  ' >/dev/null || fail "oversized backlog must still project a complete main inventory: $backlog_bytes bytes"
+
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "secondmate home summary must survive a backlog larger than one argv entry"
+  printf '%s' "$summary" | jq -e '.schema == "fm-secondmate-home-summary.v1"' >/dev/null \
+    || fail "secondmate home summary must stay valid JSON for an oversized backlog"
+
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json) \
+    || fail "bearings must survive a backlog larger than one argv entry"
+  printf '%s' "$bearings" | jq -e '.schema == "fm-bearings.v1"' >/dev/null \
+    || fail "bearings output must stay valid JSON for an oversized backlog"
+
+  pass "a backlog past the single-argument size cap still reads through snapshot, home summary, and bearings"
+}
+
+# A single status-log line long enough to cross MAX_ARG_STRLEN on its own. It is
+# ordinary status-log text - one verb, one colon, one very long note - because
+# nothing bounds how much a worker writes on one line.
+write_oversized_status_line() {  # <status-file>
+  {
+    printf 'working: '
+    awk 'BEGIN { while (i++ < 4000) printf "a very long progress note that keeps on growing " }'
+    printf '\n'
+  } > "$1"
+}
+
+# Regression, and a worse failure than the oversized backlog above: the task's
+# own jq exec died with E2BIG while the snapshot still exited 0, so the task
+# disappeared from .tasks entirely and main_inventory then reported its backlog
+# row as an orphan, "in-flight backlog item has no child metadata". A supervisor
+# reading that would be told a live worker does not exist. The note also has to
+# survive whole, since renderers read it as the last event text.
+test_oversized_status_line_keeps_the_task() {
+  local home fakebin out line_bytes raw_len note_len
+  home=$(make_home oversized-status-line)
+  mkdir -p "$home/projects/big-worktree"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] big-line-task - Big Line Task (repo: alpha) (kind: ship) (since 2026-08-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/big-line-task.meta" \
+    "window=firstmate:fm-big-line-task" \
+    "worktree=$home/projects/big-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  write_oversized_status_line "$home/state/big-line-task.status"
+  fakebin=$(make_fakebin "$home")
+
+  # Prove the fixture actually crosses the cap this test exists for; a smaller
+  # line would make the whole case vacuous. Measured on disk, so the guard holds
+  # whether or not the snapshot manages to read the line at all.
+  line_bytes=$(LC_ALL=C wc -c < "$home/state/big-line-task.status" | tr -d ' ')
+  [ "$line_bytes" -gt 131072 ] \
+    || fail "fixture status line is only $line_bytes bytes; it must exceed the 131072-byte argv cap"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a status line larger than one argv entry"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot output must be valid JSON for an oversized status line"
+
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 1
+      and .tasks[0].id == "big-line-task"
+      and .main_inventory.valid == true
+      and (.main_inventory.orphan_in_flight | length) == 0
+  ' >/dev/null || fail "an oversized status line must not drop the task or invent an orphan"
+
+  raw_len=$(printf '%s' "$out" | jq -r '.tasks[0].paths.status_log.last_event.raw | length')
+  [ "$raw_len" -eq $((line_bytes - 1)) ] \
+    || fail "the recorded event must keep the whole line, got $raw_len of $((line_bytes - 1)) characters"
+  note_len=$(printf '%s' "$out" | jq -r '.tasks[0].paths.status_log.last_event.note | length')
+  [ "$note_len" -eq $((raw_len - 9)) ] \
+    || fail "the parsed note must keep the whole line, got $note_len of $raw_len characters"
+  printf '%s' "$out" | jq -e '
+    .tasks[0].paths.status_log.last_event.state == "working"
+      and .tasks[0].hints.last_event_text == .tasks[0].paths.status_log.last_event.raw
+  ' >/dev/null || fail "an oversized status line must still parse into verb and raw event text"
+  pass "a status line past the single-argument size cap keeps its task instead of dropping it"
+}
+
+# A status log carrying one PR-URL-shaped token long enough to cross
+# MAX_ARG_STRLEN on its own. first_pr_url_in_file greps
+# 'https?://[^[:space:])"]+/pull/[0-9]+', and POSIX ERE takes the longest
+# leftmost match, so an unbroken run of non-space, non-')', non-'"' bytes
+# between the scheme and /pull/N is returned whole however long it is.
+write_oversized_status_pr_url() {  # <status-file>
+  {
+    printf 'shipped: opened https://example.invalid/'
+    awk 'BEGIN { while (i++ < 4000) printf "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }'
+    printf '/pull/1\n'
+  } > "$1"
+}
+
+# Regression, the same E2BIG drop as the oversized status line above reached
+# through a sibling field: the PR URL is the one task-level value the script
+# derives from status-log text, which nothing bounds, so handing it to jq as a
+# single argv entry killed the per-task jq, dropped the task from .tasks while
+# the snapshot still exited 0, and made main_inventory report the live backlog
+# row as an orphan.
+test_oversized_status_pr_url_keeps_the_task() {
+  local home fakebin out url_bytes pr_len
+  home=$(make_home oversized-status-pr-url)
+  mkdir -p "$home/projects/big-pr-worktree"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] big-pr-task - Big Pr Task (repo: alpha) (kind: ship) (since 2026-08-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/big-pr-task.meta" \
+    "window=firstmate:fm-big-pr-task" \
+    "worktree=$home/projects/big-pr-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  write_oversized_status_pr_url "$home/state/big-pr-task.status"
+  fakebin=$(make_fakebin "$home")
+
+  # Prove the URL token itself - not merely the line - crosses the cap, since
+  # the line's other fields already reach jq through files.
+  url_bytes=$(grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$home/state/big-pr-task.status" \
+    | head -1 | LC_ALL=C wc -c | tr -d ' ')
+  [ "$url_bytes" -gt 131072 ] \
+    || fail "fixture PR URL is only $url_bytes bytes; it must exceed the 131072-byte argv cap"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a PR URL larger than one argv entry"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot output must be valid JSON for an oversized status PR URL"
+
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 1
+      and .tasks[0].id == "big-pr-task"
+      and .main_inventory.valid == true
+      and (.main_inventory.orphan_in_flight | length) == 0
+  ' >/dev/null || fail "an oversized status PR URL must not drop the task or invent an orphan"
+
+  pr_len=$(printf '%s' "$out" | jq -r '.tasks[0].pr.url | length')
+  [ "$pr_len" -eq $((url_bytes - 1)) ] \
+    || fail "the recorded PR URL must survive whole, got $pr_len of $((url_bytes - 1)) characters"
+  printf '%s' "$out" | jq -e '.tasks[0].pr.source == "status_event"' >/dev/null \
+    || fail "a PR URL recovered from the status log must be attributed to the status event"
+  pass "a status-log PR URL past the single-argument size cap keeps its task instead of dropping it"
+}
+
+# Regression: one registered secondmate whose home summary command exits 0 but
+# returns something unusable used to fail the whole snapshot for the entire
+# home. The unusable sample was carried into the record assembly, which could
+# not parse it, and the failure cascaded out through the accumulator to
+# "registered secondmate aggregation failed" with no output at all. An
+# unsamplable route has to degrade to the unknown-state record this function
+# already builds for every other unreachable mate.
+test_unusable_secondmate_summary_degrades_to_unknown_record() {
+  local home stub out rc
+  home=$(make_home unusable-secondmate-summary)
+  cat > "$home/data/secondmates.md" <<'EOF'
+- badjson - remote mate (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote testing; projects: alpha; added 2026-08-02)
+EOF
+  stub=$home/stubbin
+  mkdir -p "$stub"
+  cat > "$stub/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+printf 'Welcome to remote-mac\n'
+exit 0
+SH
+  chmod +x "$stub/fake-ssh"
+
+  out=$(FM_HOME="$home" FM_SSH_BIN="$stub/fake-ssh" "$SNAPSHOT" --json 2>"$home/summary-err"); rc=$?
+  expect_code 0 "$rc" \
+    "one unusable secondmate home summary must not fail the whole snapshot: $(cat "$home/summary-err")"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "snapshot must stay valid JSON when a secondmate home summary is unusable"
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.records
+    | length == 1
+      and (.[0].id == "badjson")
+      and (.[0].registered == true)
+      and (.[0].remote == true)
+      and (.[0].current.state == "unknown")
+      and (.[0].current.reason == "structured home snapshot was malformed or stale")
+      and (.[0].reconcile_inventory == null)
+  ' >/dev/null || fail "an unusable home summary must degrade to an unknown-state record: $out"
+  pass "an unusable secondmate home summary degrades to an unknown record instead of failing the snapshot"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -810,6 +1059,10 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_oversized_backlog_still_reads
+test_oversized_status_line_keeps_the_task
+test_oversized_status_pr_url_keeps_the_task
+test_unusable_secondmate_summary_degrades_to_unknown_record
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot

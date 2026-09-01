@@ -49,6 +49,17 @@ SH
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
+if [ "${FAKE_GH_BULK:-0}" != 0 ]; then
+  awk -v n="$FAKE_GH_BULK" 'BEGIN {
+    printf "["
+    for (i = 1; i <= n; i++) {
+      if (i > 1) printf ","
+      printf "{\"number\":%d,\"title\":\"Bulk %d\",\"url\":\"https://github.com/acme/bulk/pull/%d\",\"headRefName\":\"fm/bulk-%d\",\"reviewDecision\":\"APPROVED\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[{\"conclusion\":\"SUCCESS\",\"status\":\"COMPLETED\"}]}", i, i, i, i
+    }
+    printf "]\n"
+  }'
+  exit 0
+fi
 if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
   cat <<'JSON'
 [{"number":1,"title":"One","url":"https://github.com/acme/repo/pull/1","headRefName":"fm/one","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":2,"title":"Two","url":"https://github.com/acme/repo/pull/2","headRefName":"fm/two","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":3,"title":"Three","url":"https://github.com/acme/repo/pull/3","headRefName":"fm/three","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}]
@@ -1159,6 +1170,25 @@ test_per_repository_pr_cap_is_disclosed() {
   pass "per-repository open-PR caps are disclosed with an expansion knob"
 }
 
+# Regression: the accumulated candidate PR rows used to reach jq as one
+# --argjson argument, so a fleet with enough open PRs made the projection exec
+# fail with E2BIG ("Argument list too long") and bearings exit non-zero with no
+# output. The rows grow with the fleet, so they must travel as a document.
+test_oversized_candidate_pr_set_still_projects() {
+  local home fakebin json rows_bytes
+  home=$(make_home bulk-prs); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  json=$(FAKE_GH_BULK=900 FM_BEARINGS_PR_LIMIT=1000 run "$home" "$fakebin" --include-prs --json) \
+    || fail "bearings must survive a candidate PR set larger than one argv entry"
+  printf '%s' "$json" | jq -e '.schema == "fm-bearings.v1" and (.candidate_prs | length) == 900' \
+    >/dev/null || fail "oversized candidate PR set was dropped or truncated: got $(printf '%s' "$json" | jq -r '(.candidate_prs | length) // "none"') rows"
+  # Prove the fixture actually crosses the cap this test exists for.
+  rows_bytes=$(printf '%s' "$json" | jq -c '.candidate_prs' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$rows_bytes" -gt 131072 ] \
+    || fail "candidate PR rows render to only $rows_bytes bytes; they must exceed the 131072-byte argv cap"
+  pass "a candidate PR set past the single-argument size cap still projects"
+}
+
 install_failing_jq() {  # <fakebin> <model|toon>
   local fakebin=$1 phase=$2 real
   real=$(command -v jq)
@@ -1987,4 +2017,5 @@ test_section_caps_and_expansion_flags
 test_collapsed_captain_call_deferral_and_landed
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
+test_oversized_candidate_pr_set_still_projects
 test_projection_and_toon_fail_closed
