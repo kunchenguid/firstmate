@@ -10,6 +10,9 @@
 # that a harvest failure never blocks teardown. Also covers the whole-task row
 # scope a relaunch must not narrow, the per-line corrupt-log tolerance, and
 # the rule that a source is named only after a log yields assistant usage.
+# Also covers the one token convention every parser normalizes onto, the
+# first-line cwd probe that rejects an unrelated sibling session before
+# parsing it in full, and the report's per-model grouping and column sums.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -22,6 +25,7 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-usage-harvest)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+REAL_JQ=$(command -v jq)
 
 file_mtime_epoch() {  # <file>
   local t
@@ -166,6 +170,7 @@ codex_case() {
 {"timestamp":"2026-08-28T15:13:03.851Z","ordinal":0,"type":"session_meta","payload":{"session_id":"s1","cwd":"$wt"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":10,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":8},"last_token_usage":{"input_tokens":100,"cached_input_tokens":10,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":8}}}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":11,"reasoning_output_tokens":3}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":2,"cached_input_tokens":9,"cache_write_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}}}
 {"type":"turn_context","payload":{"cwd":"$wt","model":"glm-5.3"}}
 JSON
   # Same window but a different cwd: must be excluded.
@@ -191,11 +196,15 @@ JSON
   assert_contains "$row" '"model":"glm-5.3"' "codex row captures the turn_context model"
   assert_contains "$row" '"effort":"high"' "codex row carries meta effort"
   assert_contains "$row" '"source":"codex-sessions"' "codex row names its source"
-  assert_contains "$row" '"input_tokens":150' "codex input sums per-request deltas (100+50)"
-  assert_contains "$row" '"cached_input_tokens":15' "codex cached folds cached+cache_write (10+5+0)"
-  assert_contains "$row" '"output_tokens":31' "codex output sums deltas (20+11)"
-  assert_contains "$row" '"reasoning_tokens":11' "codex reasoning sums deltas (8+3)"
-  pass "codex harvest: cwd/window matching, delta sums, model capture"
+  # Codex counts its cached tokens inside its own input_tokens, so each event
+  # contributes only the fresh remainder: (100-15) + (50-0) + max(2-9, 0).
+  assert_contains "$row" '"input_tokens":135' \
+    "codex input reports fresh input, never the cached tokens it already contains"
+  assert_contains "$row" '"cached_input_tokens":24' \
+    "codex cached folds cached+cache_write (10+5+0+9)"
+  assert_contains "$row" '"output_tokens":32' "codex output sums deltas (20+11+1)"
+  assert_contains "$row" '"reasoning_tokens":11' "codex reasoning sums deltas (8+3+0)"
+  pass "codex harvest: cwd/window matching, delta sums, cache normalization, model capture"
 }
 
 # --- pi / pi-signed: shared session tree, cwd match, per-message usage -------
@@ -255,6 +264,171 @@ pi_case() {  # <task-id> <harness>
   assert_contains "$row" '"reasoning_tokens":8' "$harness reasoning sums per request (7+1)"
   assert_contains "$row" '"effort":"high"' "$harness row carries meta effort"
   pass "$harness harvest: cwd/window matching, per-request sums, replay dedupe"
+}
+
+# --- one token convention across every parser -------------------------------
+
+# The ledger's input_tokens counts FRESH input and cached_input_tokens counts
+# everything served from or written to cache, whatever the harness spelled.
+# Each fixture below encodes the SAME logical request in its own harness's
+# convention: 40 fresh input tokens, 60 cached ones, 7 output and 2 reasoning.
+# Claude and Pi log input excluding the cache, Codex logs it including the
+# cache, so every row must still report the same four numbers. A parser that
+# drifted back to its harness's raw spelling fails here.
+token_convention_case() {
+  local wt id data home ledger row out logdir encoded d1
+
+  id=usageconvclaude
+  wt="$TMP_ROOT/.no-mistakes/wt-$id"
+  data=$(harvest_case "$id" claude "$wt" default default)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgK","model":"conv-model","usage":{"input_tokens":40,"cache_read_input_tokens":50,"cache_creation_input_tokens":10,"output_tokens":7,"output_tokens_details":{"thinking_tokens":2}}}}
+JSON
+  touch -m -r "$logdir/session.jsonl" "$home/state/$id.status"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "claude convention harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"input_tokens":40,"cached_input_tokens":60,"output_tokens":7,"reasoning_tokens":2' \
+    "claude reports fresh input and folded cache in the ledger's one convention"
+
+  id=usageconvcodex
+  wt="$TMP_ROOT/wt-$id"
+  data=$(harvest_case "$id" codex "$wt" default high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  d1="$FM_USAGE_CODEX_DIR/2026/08/29"
+  mkdir -p "$d1"
+  cat > "$d1/rollout-conv.jsonl" <<JSON
+{"type":"session_meta","payload":{"cwd":"$wt"}}
+{"type":"turn_context","payload":{"model":"conv-model"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"cache_write_input_tokens":10,"output_tokens":7,"reasoning_output_tokens":2}}}}
+JSON
+  touch -m -r "$d1/rollout-conv.jsonl" "$home/state/$id.status"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "codex convention harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"input_tokens":40,"cached_input_tokens":60,"output_tokens":7,"reasoning_tokens":2' \
+    "codex reports the same fresh input as the other parsers, cache counted once"
+
+  id=usageconvpi
+  wt="$TMP_ROOT/wt-$id"
+  data=$(harvest_case "$id" pi "$wt" default high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  d1="$FM_USAGE_PI_DIR/--encoded-conv--"
+  mkdir -p "$d1"
+  cat > "$d1/session-conv.jsonl" <<JSON
+{"type":"session","version":3,"id":"sess-conv","cwd":"$wt"}
+{"type":"message","id":"mc","message":{"role":"assistant","provider":"zai","model":"conv-model","usage":{"input":40,"cacheRead":50,"cacheWrite":10,"output":7,"reasoning":2,"totalTokens":97}}}
+JSON
+  touch -m -r "$d1/session-conv.jsonl" "$home/state/$id.status"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "pi convention harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"input_tokens":40,"cached_input_tokens":60,"output_tokens":7,"reasoning_tokens":2' \
+    "pi reports the same fresh input and folded cache as the other parsers"
+  pass "usage harvest: every parser normalizes onto one token convention"
+}
+
+# --- candidate scanning is bound before the full parse ----------------------
+
+# jq_trace_bin <dir> <trace-file> : a jq on PATH that records every session log
+# handed to it as a FILE OPERAND before delegating to the real jq. The
+# harvester's first-line cwd probe pipes its one line in on stdin, so a path in
+# the trace means that whole file was parsed.
+jq_trace_bin() {  # <dir> <trace-file>
+  mkdir -p "$1"
+  cat > "$1/jq" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *.jsonl) printf '%s\n' "\$a" >> "$2" ;;
+  esac
+done
+exec "$REAL_JQ" "\$@"
+SH
+  chmod +x "$1/jq"
+}
+
+# A busy fleet leaves thousands of sibling sessions in the shared codex and pi
+# trees, and the harvest runs synchronously inside teardown, so a candidate
+# that the cwd binding will reject must be rejected from its first line rather
+# than after a full parse of a large file.
+prefilter_case() {
+  local id wt data home d1 fb trace row out i
+
+  id=usageprefiltercodex
+  wt="$TMP_ROOT/wt-$id"
+  data=$(harvest_case "$id" codex "$wt" default high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  d1="$FM_USAGE_CODEX_DIR/2026/08/30"
+  mkdir -p "$d1"
+  cat > "$d1/rollout-match.jsonl" <<JSON
+{"type":"session_meta","payload":{"cwd":"$wt"}}
+{"type":"turn_context","payload":{"model":"glm-5.3"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":30,"cached_input_tokens":0,"output_tokens":4,"reasoning_output_tokens":1}}}}
+JSON
+  # A large sibling session from another worktree in the same window.
+  printf '{"type":"session_meta","payload":{"cwd":"/elsewhere"}}\n' > "$d1/rollout-sibling.jsonl"
+  for i in $(seq 1 2000); do
+    printf '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":%s,"output_tokens":1}}}}\n' "$i"
+  done >> "$d1/rollout-sibling.jsonl"
+  touch -m -r "$d1/rollout-match.jsonl" "$d1/rollout-sibling.jsonl"
+  touch -m -r "$d1/rollout-match.jsonl" "$home/state/$id.status"
+
+  fb="$TMP_ROOT/prefilter-fakebin"
+  trace="$TMP_ROOT/prefilter-codex-trace"
+  : > "$trace"
+  jq_trace_bin "$fb" "$trace"
+  out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "codex prefilter harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"input_tokens":30' "the matching codex session is still summed"
+  assert_contains "$row" '"source":"codex-sessions"' "the matching codex session still names its source"
+  assert_contains "$(cat "$trace")" "rollout-match.jsonl" \
+    "the matching session is parsed in full"
+  assert_not_contains "$(cat "$trace")" "rollout-sibling.jsonl" \
+    "a sibling session from another worktree is rejected without being parsed"
+
+  id=usageprefilterpi
+  wt="$TMP_ROOT/wt-$id"
+  data=$(harvest_case "$id" pi "$wt" default high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  d1="$FM_USAGE_PI_DIR/--encoded-prefilter--"
+  mkdir -p "$d1"
+  cat > "$d1/session-match.jsonl" <<JSON
+{"type":"session","version":3,"id":"sess-pf","cwd":"$wt"}
+{"type":"message","id":"pf1","message":{"role":"assistant","provider":"zai","model":"glm-5.3-flash","usage":{"input":30,"output":4,"reasoning":1,"totalTokens":35}}}
+JSON
+  printf '{"type":"session","version":3,"id":"sess-other","cwd":"/elsewhere"}\n' \
+    > "$d1/session-sibling.jsonl"
+  for i in $(seq 1 2000); do
+    printf '{"type":"message","id":"s%s","message":{"role":"assistant","usage":{"input":%s,"output":1}}}\n' "$i" "$i"
+  done >> "$d1/session-sibling.jsonl"
+  touch -m -r "$d1/session-match.jsonl" "$d1/session-sibling.jsonl"
+  touch -m -r "$d1/session-match.jsonl" "$home/state/$id.status"
+
+  trace="$TMP_ROOT/prefilter-pi-trace"
+  : > "$trace"
+  jq_trace_bin "$fb" "$trace"
+  out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "pi prefilter harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"input_tokens":30' "the matching pi session is still summed"
+  assert_contains "$row" '"source":"pi-sessions"' "the matching pi session still names its source"
+  assert_contains "$(cat "$trace")" "session-match.jsonl" \
+    "the matching pi session is parsed in full"
+  assert_not_contains "$(cat "$trace")" "session-sibling.jsonl" \
+    "a sibling pi session from another worktree is rejected without being parsed"
+  pass "usage harvest: a non-matching sibling log is rejected before the full parse"
 }
 
 # --- spawn_gen: the task start survives a meta rewritten after the fact ------
@@ -368,11 +542,11 @@ cursor_case() {
   pass "cursor harvest: unavailable source renders null token fields"
 }
 
-# --- claude: window survives a host without usable birth time ---------------
+# --- claude: the start chain on a host without usable birth time ------------
 
 # A stat shim that reports no birth time (GNU statx unsupported returns 0 for
-# %W) while still answering mtime, so the harvest must fall back to the meta
-# mtime for the window start instead of collapsing to the status mtime.
+# %W) while still answering mtime, so the harvest has to resolve its start
+# from the remaining chain rather than from the status file's birth.
 # stat_shim_bin <dir> [<status-file> <birth-epoch>] : put a stat shim on PATH
 # that answers mtime truthfully while controlling what the harvester reads for
 # a birth time. With no birth argument every file reports no usable birth time
@@ -431,14 +605,21 @@ claude_nobirth_case() {
   cat > "$logdir/session.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgN","model":"claude-test","usage":{"input_tokens":12,"output_tokens":8}}}
 JSON
+  cat > "$logdir/session-before-meta.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgP","model":"claude-test","usage":{"input_tokens":555,"output_tokens":555}}}
+JSON
 
-  # Pin an explicit window: status finishes at T, meta was spawned 100s earlier,
-  # and the session log lands mid-window. Without the meta-mtime start fallback
-  # the birthless window collapses to [T, T] and drops the earlier log.
+  # No spawn_gen token and no usable birth time leaves the status mtime as the
+  # only immutable start, so the window is the single instant [T, T]. The meta
+  # is aged 100s to prove it is not a start source on any path: a window opened
+  # from that mutable timestamp would swallow the pre-meta log below, and a
+  # meta rewritten to AFTER the last status append would instead collapse the
+  # window forward and drop the real one.
   base=$(file_mtime_epoch "$state/$id.status")
   touch -t "$(touch_stamp "$base")" "$state/$id.status"
   touch -t "$(touch_stamp $((base - 100)))" "$state/$id.meta"
-  touch -t "$(touch_stamp $((base - 50)))" "$logdir/session.jsonl"
+  touch -t "$(touch_stamp "$base")" "$logdir/session.jsonl"
+  touch -t "$(touch_stamp $((base - 50)))" "$logdir/session-before-meta.jsonl"
 
   fb="$TMP_ROOT/nobirth-fakebin"
   stat_shim_bin "$fb"
@@ -447,11 +628,16 @@ JSON
   ledger="$data/usage-ledger.jsonl"
   row=$(cat "$ledger")
   assert_contains "$row" '"source":"claude-projects"' \
-    "birthless harvest still finds the in-window log via the meta-mtime start"
-  assert_contains "$row" '"input_tokens":12' "birthless harvest sums the in-window usage"
-  assert_contains "$row" '"wall_secs":100' \
-    "birthless window spans meta -> status instead of collapsing to zero"
-  pass "claude harvest: window survives a host without usable birth time"
+    "the birthless window still matches the log written at the status instant"
+  assert_contains "$row" '"input_tokens":12' \
+    "only the in-window request is summed, not the one predating the status mtime"
+  assert_contains "$row" '"wall_secs":0' \
+    "a birthless start rests on the status mtime, never on the mutable meta mtime"
+  assert_contains "$row" "\"spawned_at\":\"$(iso_utc "$base")\"" \
+    "spawned_at is the status mtime, not the older meta mtime"
+  assert_contains "$row" "\"completed_at\":\"$(iso_utc "$base")\"" \
+    "completed_at is the last status append"
+  pass "claude harvest: a birthless host never falls back to the mutable meta mtime"
 }
 
 # --- remote secondmate: local logs are never harvested for remote work ------
@@ -588,6 +774,39 @@ report_case() {
   expect_code 0 "$?" "report without a ledger should exit 0"
   assert_contains "$out" "no usage ledger" "report names the missing ledger"
   pass "usage report: per-model totals, per-task rows, missing-ledger tolerance"
+}
+
+# The per-model section groups on the model and sums each token column, so the
+# numbers themselves are the contract. A ledger written here by hand pins them
+# exactly: two tasks share one model across two different harnesses, a third
+# task carries another model, and a fourth is source-unavailable.
+report_model_totals_case() {
+  local home ledger out fields
+  home="$TMP_ROOT/home-usagetotals"
+  mkdir -p "$home/data"
+  ledger="$home/data/usage-ledger.jsonl"
+  cat > "$ledger" <<'JSON'
+{"task":"agg1","harness":"claude","model":"agg-model","effort":null,"spawned_at":null,"completed_at":null,"wall_secs":100,"turns":2,"input_tokens":10,"cached_input_tokens":20,"output_tokens":30,"reasoning_tokens":4,"source":"claude-projects"}
+{"task":"agg2","harness":"codex","model":"agg-model","effort":"high","spawned_at":null,"completed_at":null,"wall_secs":200,"turns":1,"input_tokens":1,"cached_input_tokens":2,"output_tokens":3,"reasoning_tokens":1,"source":"codex-sessions"}
+{"task":"agg3","harness":"claude","model":"other-model","effort":null,"spawned_at":null,"completed_at":null,"wall_secs":7,"turns":1,"input_tokens":5,"cached_input_tokens":6,"output_tokens":7,"reasoning_tokens":8,"source":"claude-projects"}
+{"task":"agg4","harness":"cursor","model":"agg-model","effort":null,"spawned_at":null,"completed_at":null,"wall_secs":900,"turns":1,"input_tokens":null,"cached_input_tokens":null,"output_tokens":null,"reasoning_tokens":null,"source":"unavailable"}
+JSON
+  out=$(FM_DATA_OVERRIDE="$home/data" "$REPORT" 2>&1)
+  expect_code 0 "$?" "report of the totals ledger should succeed"$'\n'"$out"
+
+  # model tasks input cached output reasoning wall_secs, in that order.
+  fields=$(printf '%s\n' "$out" | awk '$1 == "agg-model" {print $2"|"$3"|"$4"|"$5"|"$6"|"$7}')
+  [ "$fields" = "2|11|22|33|5|300" ] \
+    || fail "per-model totals for agg-model are wrong: [$fields]"
+  fields=$(printf '%s\n' "$out" | awk '$1 == "other-model" {print $2"|"$3"|"$4"|"$5"|"$6"|"$7}')
+  [ "$fields" = "1|5|6|7|8|7" ] \
+    || fail "per-model totals for other-model are wrong: [$fields]"
+  # Both agg-model rows still appear per task, so the grouping folded them
+  # rather than the report dropping one.
+  assert_contains "$out" "agg1" "the per-task section still lists the first task"
+  assert_contains "$out" "agg2" "the per-task section still lists the second task"
+  assert_contains "$out" "agg4" "the per-task section still lists the unavailable task"
+  pass "usage report: per-model rows group on the model and sum each column"
 }
 
 # A ledger line that jq cannot parse must fail the report loudly. Reporting
@@ -929,6 +1148,8 @@ claude_nobirth_case
 codex_case
 pi_case usagepi1 pi
 pi_case usagepisigned1 pi-signed
+token_convention_case
+prefilter_case
 spawn_gen_case
 spawn_gen_malformed_case
 spawn_gen_future_case
@@ -943,6 +1164,7 @@ remote_case
 race_case
 lock_bound_case
 report_case
+report_model_totals_case
 report_no_harness_case
 report_malformed_case
 teardown_status_case

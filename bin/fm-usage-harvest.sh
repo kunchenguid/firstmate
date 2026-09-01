@@ -19,6 +19,14 @@
 #    "output_tokens":<int|null>,"reasoning_tokens":<int|null>,
 #    "source":<claude-projects|codex-sessions|pi-sessions|unavailable>}
 #
+# Token invariant, identical for every source: input_tokens counts FRESH,
+# uncached input only, and cached_input_tokens counts every input token served
+# from or written to a prompt cache, so the two fields are disjoint and their
+# sum is the row's whole input side. reasoning_tokens is a subset of
+# output_tokens. Each parser below normalizes its harness's own spelling onto
+# that one meaning, so a column means the same thing across harnesses and the
+# report can sum it over models that were served by different ones.
+#
 # Row scope: a row describes the WHOLE task, spanning every relaunch, and
 # wall_secs, the session-log window and turns all report that one span. The
 # turn count dictates the scope because it can only be read from
@@ -47,12 +55,15 @@
 # whose filesystem reports no usable birth time; because a relaunch replaces
 # it with the relaunch epoch, the status birth is what holds the window open
 # over the whole task, which is the narrowing condition stated above.
-# The meta file's own mtime is NOT a start source in its own right: later
-# meta writes (PR registration, busy-state updates) move it forward to near
-# the end of the task and collapse the window.
+# The meta file's own mtime is NOT a start source on any path: later meta
+# writes (PR registration, busy-state updates) move it forward to near the end
+# of the task, which collapses wall_secs and inverts the log-matching window.
 # Only when neither durable source is available (a task spawned before the
 # token existed, on a birthless filesystem) does the start fall back to the
-# meta mtime, then the status mtime.
+# status file's mtime, which collapses the window to the task's last instant
+# rather than resting it on a mutable timestamp; with no status file at all
+# the start is the end, so the row reports a zero-length window rather than a
+# fabricated one.
 # A start later than the end (a spawn with no status append after it) is
 # pinned to the end so spawned_at never postdates completed_at.
 # Turn estimate: count of "^working:" lines in the status file.
@@ -64,17 +75,24 @@
 #     request's usage at .message.usage (input_tokens,
 #     cache_read_input_tokens, cache_creation_input_tokens, output_tokens) and
 #     Claude logs one entry per content block, so requests are deduped by
-#     .message.id before summing. cached_input_tokens folds cache_read +
-#     cache_creation (both billed on top of input_tokens); reasoning_tokens
-#     captures output_tokens_details.thinking_tokens when present (a subset
-#     of output_tokens).
+#     .message.id before summing. Claude's own input_tokens already excludes
+#     both cache counts, so it carries the invariant's fresh input as logged,
+#     and cached_input_tokens folds cache_read + cache_creation, which are
+#     billed on top of it; reasoning_tokens captures
+#     output_tokens_details.thinking_tokens when present.
 #   harness=codex: <codex-sessions>/**/*.jsonl in the task window whose
 #     session_meta cwd equals the meta worktree. Per-turn token_count events
 #     carry one request's delta at .payload.info.last_token_usage
 #     (input_tokens, cached_input_tokens, cache_write_input_tokens,
 #     output_tokens, reasoning_output_tokens); summing those deltas equals the
-#     final cumulative total. cached_input_tokens folds cached + cache_write
-#     (subsets of input_tokens); the model comes from the turn_context.
+#     final cumulative total. Codex is the one source whose own input_tokens
+#     COUNTS the cached portion inside itself, which real logs establish
+#     because total_tokens equals input_tokens + output_tokens on every event
+#     they record. The ledger therefore folds cached + cache_write into
+#     cached_input_tokens and subtracts that same sum from the event's
+#     input_tokens, clamped at zero, so a codex row reports fresh input like
+#     every other source instead of counting its cached tokens twice. The
+#     model comes from the turn_context.
 #   harness=pi, harness=pi-signed: <pi-sessions>/**/*.jsonl in the task window
 #     whose "session" record's cwd equals the meta worktree. Both adapters run
 #     the same Pi application and share one ~/.pi/agent state tree, so one
@@ -82,11 +100,14 @@
 #     request's usage at .message.usage (input, cacheRead, cacheWrite, output,
 #     reasoning) and Pi writes one record per message rather than one per
 #     content block; records are still deduped by the record's own .id where
-#     present so a replayed line cannot double-count. cached_input_tokens
-#     folds cacheRead + cacheWrite; reasoning_tokens captures .reasoning (a
-#     subset of output). The model is reported provider-qualified as
-#     "<provider>/<model>" to match the model spelling fm-spawn records in the
-#     meta, and bare when the record carries no provider.
+#     present so a replayed line cannot double-count. Pi's own input is
+#     already disjoint from its cache counts, verified on real logs where
+#     input + output + cacheRead equals Pi's own totalTokens, so it carries
+#     the invariant's fresh input as logged and cached_input_tokens folds
+#     cacheRead + cacheWrite; reasoning_tokens captures .reasoning. The model
+#     is reported provider-qualified as "<provider>/<model>" to match the
+#     model spelling fm-spawn records in the meta, and bare when the record
+#     carries no provider.
 #   harness=cursor, a task with a recorded remote_host (its worker ran on
 #     another machine, so its logs are not on this filesystem), an absent log
 #     tree, or no in-window log that yields this task's assistant usage: token
@@ -95,6 +116,14 @@
 #     mere presence of an in-window file.
 # A corrupt log line is skipped best-effort by the parser, which reads each
 # line on its own and keeps the rest of that file's usage.
+# The two cwd-bound scans (codex, pi) run inside a synchronous teardown over a
+# session tree holding thousands of unrelated sibling logs, so a candidate
+# that survives the mtime window is first probed for the cwd on its FIRST
+# line, which is where both harnesses write the record carrying it, and is
+# skipped without a full parse when that cwd names another worktree. The probe
+# only ever REJECTS: a first line that is corrupt or carries no cwd falls
+# through to the full parse, and the full parse still admits a file only when
+# the cwd it reports equals the meta worktree.
 #
 # Idempotent: if the ledger already contains a line whose "task" is
 # <task-id>, the command exits 0 without appending.
@@ -204,8 +233,11 @@ for start_candidate in "$START_GEN" "$START_BIRTH"; do
     START_EPOCH=$start_candidate
   fi
 done
+# The meta's mtime is deliberately absent from this chain: it moves forward on
+# every later meta write, so resting the start on it collapses wall_secs and
+# inverts the log-matching window.
 [ -n "$START_EPOCH" ] \
-  || START_EPOCH=$(file_mtime_epoch "$META" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
+  || START_EPOCH=$(file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
 # Pin an impossible start to the end rather than inverting the window, which
 # would both report a negative duration and drop every session log.
 [ "$START_EPOCH" -le "$END_EPOCH" ] 2>/dev/null || START_EPOCH=$END_EPOCH
@@ -257,7 +289,7 @@ matched_files() {  # <dir> <maxdepth-or-empty> : print in-window *.jsonl paths
 
 IT=null; CT=null; OT=null; RT=null
 
-# accumulate_usage <dir> <maxdepth-or-empty> <source-label> <jq-program>
+# accumulate_usage <dir> <maxdepth-or-empty> <source-label> <cwd-probe> <jq-program>
 #
 # The three harness parsers differ only in their jq program; everything around
 # it lives here once. Each program reduces one session log to at most one
@@ -268,14 +300,29 @@ IT=null; CT=null; OT=null; RT=null
 # line rather than the whole file's usage. This loop then binds the row to
 # this task by the cwd it reports, sums the counts and remembers the first
 # model seen.
+#
+# <cwd-probe> is a jq program run against the file's FIRST LINE only, printing
+# the cwd that line records or nothing. A candidate whose probe names a
+# different worktree is skipped before the full parse, which keeps a teardown
+# from parsing thousands of unrelated sibling sessions in a shared tree.
+# The probe can only reject: a first line that is corrupt, is not the session
+# record or carries no cwd prints nothing and falls through to the full parse,
+# and the full parse below still binds on the cwd the whole file reports.
+# An empty probe (claude, whose logs carry no cwd at all) skips the step.
 accumulate_usage() {
-  local dir=$1 depth=$2 label=$3 prog=$4
-  local files f row cwd m it ct ot rt
+  local dir=$1 depth=$2 label=$3 probe=$4 prog=$5
+  local files f row cwd m it ct ot rt head_cwd
   files=$(matched_files "$dir" "$depth")
   [ -n "$files" ] || return 0
   IT=0; CT=0; OT=0; RT=0
   while IFS= read -r f; do
     [ -n "$f" ] || continue
+    if [ -n "$probe" ]; then
+      head_cwd=$(head -n 1 -- "$f" 2>/dev/null | jq -Rr "$probe" 2>/dev/null) || head_cwd=
+      if [ -n "$head_cwd" ] && [ "$head_cwd" != "$WORKTREE" ]; then
+        continue
+      fi
+    fi
     # @tsv renders a null field as an empty one, and "IFS=$'\t' read" would
     # drop those empty fields because tab is an IFS whitespace character,
     # shifting every later field into the wrong variable. Translating the
@@ -306,7 +353,7 @@ case "$HARNESS" in
       # Claude's logs carry no cwd, so the encoded directory is the binding and
       # the row reports the worktree it was resolved from.
       # shellcheck disable=SC2016  # jq owns every $ expression in these literal programs.
-      accumulate_usage "$CLAUDE_DIR/$encoded" 1 claude-projects '
+      accumulate_usage "$CLAUDE_DIR/$encoded" 1 claude-projects '' '
         reduce (inputs | try (fromjson | objects) catch empty) as $l
           ({seen:{},n:0,m:null,it:0,ct:0,ot:0,rt:0};
             if $l.type == "assistant" and ($l.message.usage // null) != null then
@@ -330,7 +377,8 @@ case "$HARNESS" in
   codex)
     if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
       # shellcheck disable=SC2016  # jq owns every $ expression in these literal programs.
-      accumulate_usage "$CODEX_DIR" "" codex-sessions '
+      accumulate_usage "$CODEX_DIR" "" codex-sessions \
+        'fromjson? | objects | select(.type == "session_meta") | .payload.cwd // empty' '
         reduce (inputs | try (fromjson | objects) catch empty) as $l
           ({cwd:null,n:0,m:null,it:0,ct:0,ot:0,rt:0};
             if $l.type == "session_meta" then
@@ -339,12 +387,17 @@ case "$HARNESS" in
               .m = $l.payload.model
             elif $l.type == "event_msg" and $l.payload.type == "token_count"
                  and ($l.payload.info.last_token_usage // null) != null then
-              .n += 1
-              | .it += ($l.payload.info.last_token_usage.input_tokens // 0)
-              | .ct += (($l.payload.info.last_token_usage.cached_input_tokens // 0)
-                        + ($l.payload.info.last_token_usage.cache_write_input_tokens // 0))
-              | .ot += ($l.payload.info.last_token_usage.output_tokens // 0)
-              | .rt += ($l.payload.info.last_token_usage.reasoning_output_tokens // 0)
+              ($l.payload.info.last_token_usage) as $u
+              | (($u.cached_input_tokens // 0)
+                 + ($u.cache_write_input_tokens // 0)) as $cached
+              | .n += 1
+              # Codex counts the cached tokens inside its own input_tokens, so
+              # the fresh input the ledger reports is the remainder, clamped at
+              # zero rather than going negative on a log that breaks that.
+              | .it += ([(($u.input_tokens // 0) - $cached), 0] | max)
+              | .ct += $cached
+              | .ot += ($u.output_tokens // 0)
+              | .rt += ($u.reasoning_output_tokens // 0)
             else . end)
         | if .n > 0 then [.cwd, .m, .it, .ct, .ot, .rt] | @tsv else empty end'
     fi
@@ -352,7 +405,8 @@ case "$HARNESS" in
   pi|pi-signed)
     if [ -z "$REMOTE_HOST" ] && [ -n "$WORKTREE" ]; then
       # shellcheck disable=SC2016  # jq owns every $ expression in these literal programs.
-      accumulate_usage "$PI_DIR" "" pi-sessions '
+      accumulate_usage "$PI_DIR" "" pi-sessions \
+        'fromjson? | objects | select(.type == "session") | .cwd // empty' '
         reduce (inputs | try (fromjson | objects) catch empty) as $l
           ({cwd:null,seen:{},n:0,m:null,it:0,ct:0,ot:0,rt:0};
             if $l.type == "session" then
