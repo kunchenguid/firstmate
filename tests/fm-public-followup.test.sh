@@ -2459,6 +2459,91 @@ test_remote_retire_force_semantics_unchanged() {
   pass "--force still covers only the unresolved obligation, not the link clear"
 }
 
+test_remote_retire_refuses_reassigned_route() {
+  local home original replacement log
+  remote_fixture_prepare
+  home=$(make_home remote-reassigned)
+  original=$(make_remote_route "$home" mate)
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" pf-remote-reassigned req-remote-original secondmate:mate work-reused
+  fm_write_meta "$original/state/work-reused.meta" \
+    "x_request=req-remote-original" "x_request_ts=1700000000" "x_followups=1"
+  "$EMIT" --home "$home" --obligation pf-remote-reassigned --relation rel-code \
+    --source-home secondmate:mate --work-id work-reused --generation 1 \
+    --outcome report-ready --deliverable report_path=data/work-reused/report.md \
+    --outcome-text 'The original remote route finished its work.' >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf_remote "$home" deliver pf-remote-reassigned >/dev/null \
+    || fail "delivery through the original remote route must succeed"
+
+  replacement="$TMP_ROOT/remote-replacement-mate"
+  mkdir -p "$replacement/state" "$replacement/data"
+  replacement=$(cd "$replacement" && pwd -P)
+  cat > "$home/data/secondmates.md" <<EOF
+- mate - replacement lane (host: remote-mac; root: $REMOTE_FIXTURE_ROOT; home: $replacement; scope: relay work; projects: firstmate; added 2026-08-03)
+EOF
+  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$replacement" \
+    "remote_host=remote-mac" "remote_root=$REMOTE_FIXTURE_ROOT"
+  fm_write_meta "$replacement/state/work-reused.meta" \
+    "status=working" "x_request=req-remote-replacement" "x_request_ts=1700000000" "x_followups=1"
+
+  expect_failure "retire must not clear a reassigned remote route" \
+    run_pf_remote "$home" retire pf-remote-reassigned --reason "original route retired"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "a mismatched remote identity must use the retained reconciliation refusal"
+  assert_present "$home/state/public-followup/registry/pf-remote-reassigned" \
+    "a mismatched remote identity must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-reassigned" \
+    "a mismatched remote identity must not write a retirement receipt"
+  assert_grep 'x_request=req-remote-replacement' "$replacement/state/work-reused.meta" \
+    "a mismatched remote identity must leave the replacement link untouched"
+  pass "retire fails closed when a remote route is reassigned"
+}
+
+test_remote_retire_refuses_unreadable_link_identity() {
+  local home remote meta
+  remote_fixture_prepare
+  home=$(make_home remote-unreadable)
+  remote=$(make_remote_route "$home" mate)
+  seed_repro_commitment "$home" pf-remote-unreadable req-remote-unreadable secondmate:mate work-unreadable
+  meta="$remote/state/work-unreadable.meta"
+  fm_write_meta "$meta" \
+    "status=working" "x_request=req-remote-unreadable" "x_request_ts=1700000000" "x_followups=1"
+  chmod 000 "$meta"
+
+  expect_failure "retire must refuse an unreadable remote link identity" \
+    run_pf_remote "$home" retire pf-remote-unreadable --reason "cannot verify" --force
+  chmod 600 "$meta"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "an unreadable remote identity must use the retained reconciliation refusal"
+  assert_present "$home/state/public-followup/registry/pf-remote-unreadable" \
+    "an unreadable remote identity must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-unreadable" \
+    "an unreadable remote identity must not write a retirement receipt"
+  assert_grep 'x_request=req-remote-unreadable' "$meta" \
+    "an unreadable remote identity must leave the link untouched"
+  pass "retire fails closed when a remote link identity is unreadable"
+}
+
+test_remote_retire_succeeds_without_link() {
+  local home remote
+  remote_fixture_prepare
+  home=$(make_home remote-no-link)
+  remote=$(make_remote_route "$home" mate)
+  seed_repro_commitment "$home" pf-remote-no-link req-remote-no-link secondmate:mate work-no-link
+  fm_write_meta "$remote/state/work-no-link.meta" "status=done"
+
+  run_pf_remote "$home" retire pf-remote-no-link --reason "already cleared" --force >/dev/null \
+    || fail "retire must remain idempotent when the remote link is already absent"
+  assert_present "$home/state/public-followup/retired/pf-remote-no-link" \
+    "an already-cleared remote link must permit a retirement receipt"
+  assert_absent "$home/state/public-followup/registry/pf-remote-no-link" \
+    "an already-cleared remote link must permit registration removal"
+  assert_no_grep 'x_request=' "$remote/state/work-no-link.meta" \
+    "an already-cleared remote task must remain unlinked"
+  pass "retire completes when a remote link is already absent"
+}
+
 # fm-on.sh passes ssh's status through, so 255 is unknown remote completion, not
 # proof the clear failed. The close must refuse and retain rather than either
 # claiming the link is gone or reporting a definite failure, so reconciliation
@@ -2550,4 +2635,7 @@ test_x_request_teardown_warns_when_final_unposted
 test_secondmate_promotion_uses_teardown_parent_resolution
 test_remote_secondmate_loop_delivers_and_retires
 test_remote_retire_force_semantics_unchanged
+test_remote_retire_refuses_reassigned_route
+test_remote_retire_refuses_unreadable_link_identity
+test_remote_retire_succeeds_without_link
 test_remote_unconfirmed_clear_is_unknown_completion

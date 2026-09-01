@@ -976,18 +976,35 @@ fmx_meta_followups_set() {
   fm_lock_release "$lock"
 }
 
-# fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
-# x_followups and reply-platform lines while preserving every other meta line. Idempotent:
-# succeeds whether or not a link is present, and is a no-op when <meta> is
-# missing.
+# fmx_meta_link_clear <meta> [expected-request]: atomically remove the
+# x_request/x_request_ts/x_followups and reply-platform lines while preserving
+# every other meta line. With expected-request, a present link is cleared only
+# when its request identity matches. Idempotently succeeds when no link is
+# present, and is a no-op when <meta> is missing.
 fmx_meta_link_clear() {
-  local meta=$1 tmp lock
+  local meta=$1 expected_set=0 expected='' tmp lock line rid='' link_present=0
+  if [ "$#" -ge 2 ]; then
+    expected_set=1
+    expected=$2
+  fi
   [ ! -L "$meta" ] || return 1
   [ -f "$meta" ] || return 0
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock"
   [ ! -L "$meta" ] || { fm_lock_release "$lock"; return 1; }
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }
+  if [ "$expected_set" -eq 1 ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        x_request=*) link_present=1; rid=${line#*=} ;;
+      esac
+    done < "$meta" || { fm_lock_release "$lock"; return 1; }
+    [ "$link_present" -eq 0 ] || {
+      [ -n "$expected" ] && [ -n "$rid" ] && [ "$rid" = "$expected" ] \
+        || { fm_lock_release "$lock"; return 1; }
+    }
+    [ "$link_present" -eq 1 ] || { fm_lock_release "$lock"; return 0; }
+  fi
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
   if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1

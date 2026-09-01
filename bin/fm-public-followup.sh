@@ -719,18 +719,20 @@ public_followup_route_is_remote() {
   [ "$remote" = 1 ]
 }
 
-# clear_public_followup_link_remote <secondmate-id> <work-id>: clear the bound
-# legacy X link inside a REMOTE secondmate home over that route's transport,
+# clear_public_followup_link_remote <secondmate-id> <work-id> <request-id>:
+# clear the bound legacy X link inside a REMOTE secondmate home over that route's transport,
 # because the link lives in the remote home's state and no local path reaches it.
 # fm-on.sh returns ssh's status unchanged, so 255 is the established "delivered
 # but completion unknown" status this codebase already reconciles rather than
 # reads as done or refused (bin/fm-on.sh, bin/fm-remote-readiness-lib.sh,
 # bin/fm-teardown.sh). It is passed through so a caller can say the remote never
-# confirmed instead of claiming the clear definitely failed. `--clear` is
-# idempotent on the remote side, so a reconciling retry is safe.
+# confirmed instead of claiming the clear definitely failed. The remote clear
+# is guarded by the registration's Relay request identity and remains idempotent
+# when the target has no link, so a reconciling retry is safe.
 clear_public_followup_link_remote() {
-  local id=$1 work_id=$2 rc=0
-  "$FM_ROOT/bin/fm-on.sh" "$id" fm-x-followup.sh --clear "$work_id" </dev/null >/dev/null || rc=$?
+  local id=$1 work_id=$2 request_id=$3 rc=0
+  "$FM_ROOT/bin/fm-on.sh" "$id" fm-x-followup.sh --clear "$work_id" \
+    --expect-request "$request_id" </dev/null >/dev/null || rc=$?
   [ "$rc" -ne 255 ] || return 255
   [ "$rc" -eq 0 ] || return 1
   return 0
@@ -739,10 +741,11 @@ clear_public_followup_link_remote() {
 # Returns 0 when the link is cleared, 255 when a remote home never confirmed the
 # clear (completion unknown), and 1 for any other refusal.
 clear_public_followup_link() {
-  local id=$1 work_home work_home_path work_id home state rc
+  local id=$1 work_home work_home_path work_id request_id home state rc
   public_followup_registration_valid "$id" || return 1
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
+  request_id=$(fm_pf_registry_get "$STATE" "$id" request_id)
   [ -n "$work_home" ] && [ -n "$work_id" ] || return 1
   case "$work_home" in
     main)
@@ -754,7 +757,7 @@ clear_public_followup_link() {
       # consulted: the recorded remote home path is meaningful only on its own
       # host, so a same-named local directory must never stand in for it.
       if public_followup_route_is_remote "${work_home#secondmate:}"; then
-        clear_public_followup_link_remote "${work_home#secondmate:}" "$work_id"
+        clear_public_followup_link_remote "${work_home#secondmate:}" "$work_id" "$request_id"
         return $?
       fi
       work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
