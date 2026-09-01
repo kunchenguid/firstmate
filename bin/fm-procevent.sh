@@ -497,7 +497,7 @@ adapter_receipt() {  # <adapter> <source-id> <sequence> <result-file> <outcome-f
   local adapter=$1 script
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 0
-  "$script" receipt "$2" "$3" "$4" "$5" >/dev/null 2>>"${FM_PROCEVENT_SEAM_DEBUG:-/dev/null}"
+  "$script" receipt "$2" "$3" "$4" "$5" >/dev/null 2>&1
 }
 
 read_adapter() {  # <source-id>

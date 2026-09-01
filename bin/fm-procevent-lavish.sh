@@ -548,17 +548,19 @@ receipt_build_text() {  # <source-id>
       # A round that carried no answers has no answer count to state - a
       # comment-only submission, and equally a board holding only pure
       # annotations. The acknowledgement is the point, and it must never
-      # claim a zero count for answers that were never asked of it.
-      out+="Round $n: received your written comment at $(fmt_utc "$epoch")"$'\n'
-      continue
+      # claim a zero count for answers that were never asked of it. Its own
+      # progress states are still its own, so this states the acknowledgement
+      # and joins the rendering below rather than short-circuiting past it.
+      out+="Round $n: received your written comment at $(fmt_utc "$epoch")"
+    else
+      answers_word="$choices answer"
+      [ "$choices" = 1 ] || answers_word="$choices answers"
+      out+="Round $n: received $answers_word"
+      if [ "$messages" -gt 0 ]; then
+        [ "$messages" = 1 ] && out+=' and a message' || out+=" and $messages messages"
+      fi
+      out+=" at $(fmt_utc "$epoch")"
     fi
-    answers_word="$choices answer"
-    [ "$choices" = 1 ] || answers_word="$choices answers"
-    out+="Round $n: received $answers_word"
-    if [ "$messages" -gt 0 ]; then
-      [ "$messages" = 1 ] && out+=' and a message' || out+=" and $messages messages"
-    fi
-    out+=" at $(fmt_utc "$epoch")"
     saved_line=$(journal_events "$id" saved | awk -F '\t' -v s="$seq" '$2 == s { print; exit }')
     if [ -n "$saved_line" ] && [ "$choices" -gt 0 ]; then
       IFS=$'\t' read -r _ _ s_epoch s_closed s_skipped s_quality <<< "$saved_line"

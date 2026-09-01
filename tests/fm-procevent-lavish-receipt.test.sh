@@ -743,6 +743,24 @@ assert_contains "$text" "Round 3: received your written comment at" \
   "a comment-only submission was not acknowledged as a written comment"
 assert_not_contains "$text" "received 0 answers" \
   "the comment-only acknowledgement claimed a zero answer count"
+# A comment-only round is a round like any other: the handler records applying
+# and complete against its generation, and the receipt states both. Only the
+# save clause is absent, because there are no answers to have saved.
+mkdir -p "$H13/state/procevent-inbox"
+cp "$R17" "$H13/state/procevent-inbox/$SID13.3.result"
+chmod 0600 "$H13/state/procevent-inbox/$SID13.3.result"
+run_lavish "$H13" applying "$SID13" 3 >/dev/null \
+  || fail "the handler could not record applying for a comment-only round"
+round3=$(run_lavish "$H13" receipt-text "$SID13" | grep '^Round 3:')
+assert_contains "$round3" "firstmate is applying them" \
+  "a comment-only round hid the applying state the handler recorded"
+run_lavish "$H13" complete "$SID13" 3 >/dev/null \
+  || fail "the handler could not record complete for a comment-only round"
+round3=$(run_lavish "$H13" receipt-text "$SID13" | grep '^Round 3:')
+assert_contains "$round3" "complete at" \
+  "a comment-only round hid the complete state the handler recorded"
+assert_not_contains "$round3" "saved" \
+  "the comment-only round claimed a save over answers it never carried"
 # A parse the adapter refused is no verdict at all, so it journals nothing.
 R15="$TMP_ROOT/r15.result"
 write_result "$R15" false 3 "$(choice_row 4 deck-alpha go 'Alpha')"
