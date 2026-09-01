@@ -989,8 +989,8 @@ fmx_meta_link_clear() {
     expected=$2
     parent=${meta%/*}
     [ "$parent" != "$meta" ] || parent=.
-    [ -d "$parent" ] && [ ! -L "$parent" ] && [ -r "$parent" ] && [ -x "$parent" ] \
-      || return 1
+    [ -d "$parent" ] && [ ! -L "$parent" ] && [ -r "$parent" ] \
+      && [ -w "$parent" ] && [ -x "$parent" ] || return 1
     fm_backlog_record_parent_authorized "$meta" "task record" "$STATE" || return 1
   fi
   [ ! -L "$meta" ] || return 1

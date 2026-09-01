@@ -8,7 +8,7 @@ This record supports four active guarantees for promised public replies made thr
 2. A home that never opted into the relay pays nothing for any of it.
 3. Delivering a final does not close the public loop: the registration is retained as `state=delivered` until `retire --reason`, session start surfaces an `open-loop` line, and `rechain` can bind follow-on work to the same thread.
 4. A first registration with no registry lock already held succeeds under stock macOS Bash 3.2 with `set -u`.
-5. A public loop whose work lives in a REMOTE secondmate home delivers and retires only after readable remote state proves either that no link exists or that the bound legacy Relay link matches the registration and was cleared; unreadable state, an identity mismatch, or unconfirmed completion retains the loop, and `--force` still covers only the unresolved obligation.
+5. A public loop whose work lives in a REMOTE secondmate home delivers and retires only after readable and writable remote state proves either that no link exists or that the bound legacy Relay link matches the registration and was cleared; unreadable or non-writable state, an identity mismatch, or unconfirmed completion retains the loop, and `--force` still covers only the unresolved obligation.
 
 [`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
@@ -84,6 +84,7 @@ ok - a public loop bound to a remote secondmate home delivers and retires
 ok - --force still covers only the unresolved obligation, not the link clear
 ok - retire fails closed when a remote route is reassigned
 ok - retire fails closed when remote state is unreadable
+ok - retire fails closed when remote state is non-writable
 ok - retire completes when a remote link is already absent
 ok - an unconfirmed remote clear is unknown completion, never a silent close
 ```
@@ -99,12 +100,13 @@ The concurrency and interrupted-bind cases verify that one delivered source cann
 A pre-change on-disk record (no `state=`, no `request_context_b64`) is an open loop and un-rechainable rather than a crash.
 The stock macOS Bash lane in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) sets `FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32` and runs `tests/fm-public-followup.test.sh` through real `/bin/bash` 3.2, proving the first `register` path is safe when its registry lock list starts empty.
 
-The six remote-route cases are the proof of guarantee 5.
+The seven remote-route cases are the proof of guarantee 5.
 A remote secondmate home exists only on its own machine, so its registration records no local path, and every close that must first clear the bound legacy Relay link had nothing local to act on.
 The first case pins that empty recorded path so it cannot go vacuous, then drives `deliver` and `retire` end to end and asserts the matching link inside the remote home is actually gone and the retirement receipt is written.
 The second case shows `--force` still governs only the unresolved-obligation refusal: a plain `retire` of an unresolved remote loop is still refused with the remote link untouched, while a forced one closes and clears it.
 The reassignment case replaces a delivered loop's route with a remote home whose reused work ID carries another Relay request and asserts that retirement retains the registration and leaves the replacement link untouched.
-The unreadable-state case makes the remote state directory non-searchable while it still contains a matching link and proves that an unconfirmable path fails closed without mutation, while the readable no-link case proves an already-cleared remote task still retires idempotently.
+The unreadable-state case makes the remote state directory non-searchable while it still contains a matching link and proves that an unconfirmable path fails closed without mutation.
+The non-writable-state case proves the guarded clear refuses before lock acquisition rather than waiting indefinitely, while the readable no-link case proves an already-cleared remote task still retires idempotently.
 The final case makes the transport unreachable and asserts the close is refused with the registration retained, the remote link untouched, and unknown completion named rather than reported as a definite failure.
 A remote home running an older Firstmate copy does not recognize the guarded clear flag and therefore fails closed through the same retained-for-reconciliation message; operators must update that home before retrying, and there is deliberately no unguarded fallback.
 

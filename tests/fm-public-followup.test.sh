@@ -2527,6 +2527,32 @@ test_remote_retire_refuses_unreadable_state() {
   pass "retire fails closed when remote state is unreadable"
 }
 
+test_remote_retire_refuses_nonwritable_state() {
+  local home remote meta rc
+  remote_fixture_prepare
+  home=$(make_home remote-nonwritable)
+  remote=$(make_remote_route "$home" mate)
+  seed_repro_commitment "$home" pf-remote-nonwritable req-remote-nonwritable secondmate:mate work-nonwritable
+  meta="$remote/state/work-nonwritable.meta"
+  fm_write_meta "$meta" \
+    "status=working" "x_request=req-remote-nonwritable" "x_request_ts=1700000000" "x_followups=1"
+  chmod 500 "$remote/state"
+
+  rc=0
+  EXPECT_OUT=$(run_pf_remote "$home" retire pf-remote-nonwritable --reason "cannot mutate" --force 2>&1) || rc=$?
+  chmod 700 "$remote/state"
+  [ "$rc" -ne 0 ] || fail "retire must refuse a non-writable remote state (unexpectedly succeeded)"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "a non-writable remote state must use the retained reconciliation refusal"
+  assert_present "$home/state/public-followup/registry/pf-remote-nonwritable" \
+    "a non-writable remote state must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-nonwritable" \
+    "a non-writable remote state must not write a retirement receipt"
+  assert_grep 'x_request=req-remote-nonwritable' "$meta" \
+    "a non-writable remote state must leave the link untouched"
+  pass "retire fails closed when remote state is non-writable"
+}
+
 test_remote_retire_succeeds_without_link() {
   local home remote
   remote_fixture_prepare
@@ -2639,5 +2665,6 @@ test_remote_secondmate_loop_delivers_and_retires
 test_remote_retire_force_semantics_unchanged
 test_remote_retire_refuses_reassigned_route
 test_remote_retire_refuses_unreadable_state
+test_remote_retire_refuses_nonwritable_state
 test_remote_retire_succeeds_without_link
 test_remote_unconfirmed_clear_is_unknown_completion
