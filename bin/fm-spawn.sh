@@ -431,9 +431,9 @@ else
 fi
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home projects harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent
+  local remote_traceparent remote_recorded_traceparent meta_present=0 meta_signature current_signature
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -443,6 +443,30 @@ spawn_remote_secondmate() {
     echo "error: another spawn is already creating task $id" >&2
     return 1
   fi
+  SPAWN_TASK_LOCK_HELD=1
+  SPAWN_CONTROL_LOCK="$STATE/.control-$id.lock"
+  if ! fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: another lifecycle action is already running for task $id" >&2
+    return 1
+  fi
+  SPAWN_CONTROL_LOCK_HELD=1
+  meta="$STATE/$id.meta"
+  if ! SPAWN_META_LOCK=$(fm_meta_lock_path "$meta"); then
+    SPAWN_CONTROL_LOCK_HELD=0
+    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+    SPAWN_TASK_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  fi
+  if ! fm_meta_lock_acquire_bounded "$meta" fm-spawn.sh; then
+    SPAWN_CONTROL_LOCK_HELD=0
+    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+    SPAWN_TASK_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  fi
+  SPAWN_META_LOCK_HELD=1
   registry_lock=$(secondmate_registry_lock_path "$STATE")
   if ! fm_lock_acquire_wait "$registry_lock"; then
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -452,12 +476,18 @@ spawn_remote_secondmate() {
   remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
   if [ "$remote" != 1 ]; then
     fm_lock_release "$registry_lock" || true
+    SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+    SPAWN_META_LOCK_HELD=0
+    fm_lock_release "$SPAWN_META_LOCK" || true
+    SPAWN_CONTROL_LOCK_HELD=0
+    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
     return 3
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
+  projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)
   positional=${POS[1]:-}
   if [ "${#POS[@]}" -gt 2 ]; then
     fm_lock_release "$registry_lock" || true
@@ -515,7 +545,6 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
-  meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if ! fm_backlog_record_present "$meta" "task record" "$STATE" \
       || [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
@@ -525,6 +554,13 @@ spawn_remote_secondmate() {
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
+      return 1
+    fi
+    meta_present=1
+    if ! meta_signature=$(cksum < "$meta" | awk '{ print $1 ":" $2 }'); then
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: existing metadata for $id could not be bound to this remote launch" >&2
       return 1
     fi
   fi
@@ -632,6 +668,33 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
+  if [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)" != 1 ] \
+    || [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" host 2>/dev/null || true)" != "$host" ] \
+    || [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" root 2>/dev/null || true)" != "$root" ] \
+    || [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" home 2>/dev/null || true)" != "$home" ] \
+    || [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects 2>/dev/null || true)" != "$projects" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id route changed during launch; preserving the endpoint for reconciliation" >&2
+    return 1
+  fi
+  if [ "$meta_present" -eq 1 ]; then
+    current_signature=$(cksum < "$meta" | awk '{ print $1 ":" $2 }') || current_signature=
+    if [ "$current_signature" != "$meta_signature" ]; then
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id task incarnation changed during launch; preserving the endpoint for reconciliation" >&2
+      return 1
+    fi
+  elif [ -e "$meta" ] || [ -L "$meta" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id task incarnation appeared during launch; preserving the endpoint for reconciliation" >&2
+    return 1
+  fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -654,7 +717,7 @@ spawn_remote_secondmate() {
     echo "model=${model#-}"
     echo "effort=${effort#-}"
     echo "home=$home"
-    echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
+    echo "projects=$projects"
     echo "remote_host=$host"
     echo "remote_root=$root"
     echo "remote_backend=$remote_backend"
@@ -679,7 +742,12 @@ spawn_remote_secondmate() {
   fi
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
+  SPAWN_TASK_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_LOCK" || true
+  SPAWN_META_LOCK_HELD=0
+  fm_lock_release "$SPAWN_META_LOCK" || true
+  SPAWN_CONTROL_LOCK_HELD=0
+  fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2

@@ -148,6 +148,7 @@ $command_fields
 EOF
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   inherit-partial:fm-remote-inherit.sh:config/crew-harness) exit 255 ;;
+  spawn-lock:fm-remote-inherit.sh:*) exit 0 ;;
   inherit-block:fm-remote-inherit.sh:data/captain-shared.md)
     cat > "$FM_FAKE_INHERIT_PAYLOAD"
     touch "$FM_FAKE_INHERIT_ENTERED"
@@ -233,6 +234,17 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     touch "$FM_FAKE_LAUNCH_ENTERED"
     while [ ! -f "$FM_FAKE_LAUNCH_RELEASE" ]; do sleep 0.02; done
     ;;
+  spawn-lock:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    touch "$FM_FAKE_LAUNCH_ENTERED"
+    while [ ! -f "$FM_FAKE_LAUNCH_RELEASE" ]; do sleep 0.02; done
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=herdr\n'
+    printf 'target=fm-remote:p-lock\n'
+    printf 'herdr_session=fm-remote\n'
+    printf 'harness=codex\n'
+    exit 0
+    ;;
 esac
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
@@ -309,6 +321,55 @@ seed_env() {
   FM_FAKE_DOCTOR_REPAIRED="$TMP_ROOT/doctor.repaired" \
   "$@"
 }
+
+if [ "${FM_TEST_SPAWN_LOCK_ONLY:-0}" = 1 ]; then
+  printf '%s\n' '- ios - remote domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote work; projects: alpha; added 2026-08-02)' \
+    > "$PARENT/data/secondmates.md"
+  cat > "$PARENT/state/ios.meta" <<'META'
+window=remote:ios
+endpoint_task_id=ios
+worktree=/remote/home
+project=/remote/root
+harness=codex
+kind=secondmate
+mode=secondmate
+yolo=off
+home=/remote/home
+projects=alpha
+remote_host=remote-mac
+remote_root=/remote/root
+remote_backend=herdr
+remote_herdr_session=fm-remote
+remote_target=fm-remote:p-old
+META
+  rm -f "$TMP_ROOT/launch.entered" "$TMP_ROOT/launch.release"
+  FM_FAKE_SSH_MODE=spawn-lock remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+    > "$TMP_ROOT/spawn-lock.out" 2>&1 &
+  spawn_lock_pid=$!
+  spawn_lock_wait=0
+  while [ ! -f "$TMP_ROOT/launch.entered" ]; do
+    kill -0 "$spawn_lock_pid" 2>/dev/null || fail "remote respawn exited before its blocked launch"
+    spawn_lock_wait=$((spawn_lock_wait + 1))
+    [ "$spawn_lock_wait" -le 500 ] || fail "remote respawn never reached its blocked launch"
+    sleep 0.02
+  done
+  assert_present "$PARENT/state/.meta-ios.lock" "remote respawn did not retain shared metadata ownership through launch"
+  assert_grep 'fm-spawn.sh' "$PARENT/state/.meta-ios.lock/expected-command" \
+    "remote respawn metadata ownership was not bound to its writer command"
+  if remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-lock.out" 2>&1; then
+    fail "remote retirement accepted a task with an active remote respawn"
+  fi
+  assert_grep 'another lifecycle action is already running for task ios' "$TMP_ROOT/teardown-lock.out" \
+    "remote retirement did not refuse the active respawn owner"
+  assert_present "$PARENT/state/ios.meta" "remote retirement removed parent metadata during an active remote respawn"
+  touch "$TMP_ROOT/launch.release"
+  wait "$spawn_lock_pid" || fail "serialized remote respawn failed: $(cat "$TMP_ROOT/spawn-lock.out")"
+  assert_grep 'remote_target=fm-remote:p-lock' "$PARENT/state/ios.meta" \
+    "remote respawn did not publish the locked route"
+  pass "remote respawn owns metadata before registry and refuses concurrent retirement"
+  echo "ALL TESTS PASSED"
+  exit 0
+fi
 
 REAL_GIT=$(command -v git)
 cat > "$FAKEBIN/git" <<SH
@@ -1222,20 +1283,25 @@ while [ ! -f "$TMP_ROOT/launch.entered" ]; do
 done
 remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-serialized.out" 2>&1 &
 teardown_pid=$!
-sleep 0.2
-kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active remote respawn"
+if wait "$teardown_pid"; then
+  fail "remote retirement accepted a task with an active remote respawn"
+fi
+assert_grep 'another lifecycle action is already running for task ios' "$TMP_ROOT/teardown-serialized.out" \
+  "remote retirement did not refuse the active respawn owner"
 assert_present "$REMOTE_HOME" "remote retirement removed the home during an active remote respawn"
+assert_present "$PARENT/state/ios.meta" "remote retirement removed parent metadata during an active remote respawn"
+assert_present "$PARENT/state/.meta-ios.lock" "remote respawn did not retain shared metadata ownership through launch"
+assert_grep 'fm-spawn.sh' "$PARENT/state/.meta-ios.lock/expected-command" \
+  "remote respawn metadata ownership was not bound to its writer command"
 touch "$TMP_ROOT/launch.release"
 if ! wait "$spawn_retirement_pid"; then
   printf 'serialized respawn output:\n%s\n' "$(cat "$TMP_ROOT/spawn-retirement.out")" >&2
   fail "serialized remote respawn failed"
 fi
-sleep 0.2
-kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
 touch "$TMP_ROOT/handoff.release"
 wait "$handoff_holder_pid" || fail "handoff lock holder failed to release"
-if ! wait "$teardown_pid"; then
-  printf 'serialized retirement output:\n%s\n' "$(cat "$TMP_ROOT/teardown-serialized.out")" >&2
+if ! remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-after-respawn.out" 2>&1; then
+  printf 'serialized retirement output:\n%s\n' "$(cat "$TMP_ROOT/teardown-after-respawn.out")" >&2
   fail "safe remote retirement failed after handoff serialization"
 fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
@@ -1251,6 +1317,6 @@ jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
   || fail "remote retirement removed the sibling secondmate workspace or pane from fm-remote"
 assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
 assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
-pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
+pass "remote respawn owns metadata before registry and refuses concurrent retirement"
 
 echo "ALL TESTS PASSED"
