@@ -321,6 +321,10 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Permanently embedded crewmate memory ban (binding in both ship and scout
+# scaffolds): workers must never activate optmem.
+OPTMEM_BAN='**HARD RULE — SKIP OPTMEM ENTIRELY:** Never run ~/.optmem/memo (wake/nap/note). You are a crewmate; AGENTS.md exempts you. Any memo call wastes budget — go straight to the task.'
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -329,6 +333,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 TESTS: {TESTS}
 VERIFY: every command runs once under \`timeout 60\`; running the full test suite is forbidden; the demo runs exactly once; any failure = needs-decision, never silent retries.
+
+$OPTMEM_BAN
 
 $HERDR_SECTION
 
@@ -404,6 +410,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 TESTS: {TESTS}
 VERIFY: every command runs once under \`timeout 60\`; running the full test suite is forbidden; the demo runs exactly once; any failure = needs-decision, never silent retries.
+
+$OPTMEM_BAN
 
 $HERDR_SECTION
 
