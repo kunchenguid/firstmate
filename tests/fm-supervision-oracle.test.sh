@@ -232,13 +232,26 @@ test_wake_queue_converged_passes_after_drain_and_ack() {
 }
 
 test_wake_queue_converged_fires_when_durable_rows_remain() {
-  local home state
+  local home state fake_drain
   home=$(make_synthetic_home wake-stuck)
   state="$home/state"
   append_wake "$state" signal task.status 'signal: stuck' || fail "wake append failed"
-  printf 'stuck-row\n' >> "$state/.wake-queue"
-  oracle_expect_violation 'wake_queue_converged: durable wake rows remain' "$home"
-  pass "wake_queue_converged fires when durable wake rows survive drain and ack"
+  fake_drain="$home/fake-wake-drain.sh"
+  cat >"$fake_drain" <<SH
+#!/usr/bin/env bash
+set -u
+"$ROOT/bin/fm-wake-drain.sh" "\$@"
+rc=\$?
+if [ "\${1:-}" = --ack-through ] && [ ! -e "\$FM_STATE_OVERRIDE/.oracle-late-wake" ]; then
+  : >"\$FM_STATE_OVERRIDE/.oracle-late-wake"
+  FM_STATE_OVERRIDE="\$FM_STATE_OVERRIDE" bash -c '. "\$1"; fm_wake_append signal task.status "signal: arrived-after-ack"' _ "$ROOT/bin/fm-wake-lib.sh"
+fi
+exit "\$rc"
+SH
+  chmod +x "$fake_drain"
+  oracle_expect_violation 'wake_queue_converged: durable wake rows remain' "$home" \
+    FM_ORACLE_WAKE_DRAIN="$fake_drain"
+  pass "wake_queue_converged fires when a valid durable wake arrives after ack"
 }
 
 test_state_matches_reality_passes_on_consistent_records() {

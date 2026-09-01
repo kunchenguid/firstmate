@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pedromuller-del/firstmate/schemas/canonical-guard-run-manifest-v1.json",
+  "title": "Canonical guard benchmark run manifest",
+  "type": "object",
+  "required": [
+    "schema_version", "run_id", "arm", "model", "harness", "harness_version",
+    "prompt_sha256", "base_sha", "detector_sha", "template_sha", "started_at",
+    "ended_at", "load_samples", "exit_code", "timeout", "transcript", "usage",
+    "git", "gate", "timing", "behavior_trace", "resolution", "helper_families",
+    "work", "attrition", "verdicts"
+  ],
+  "properties": {
+    "schema_version": {"const": "canonical-guard-run/v1"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"},
+    "arm": {"enum": ["guard-on", "guard-off"]},
+    "model": {"type": "string"},
+    "harness": {"enum": ["codex", "claude", "cursor-agent", "kimi", "pi"]},
+    "harness_version": {"type": ["string", "null"]},
+    "effort": {"type": ["string", "null"]},
+    "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "detector_sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "template_sha": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "started_at": {"type": "string"},
+    "ended_at": {"type": "string"},
+    "load_samples": {"type": "array"},
+    "exit_code": {"type": ["integer", "null"]},
+    "timeout": {"type": "boolean"},
+    "transcript": {"type": "object"},
+    "usage": {"type": "object"},
+    "git": {"type": "object"},
+    "gate": {"type": "object"},
+    "timing": {"type": "object"},
+    "behavior_trace": {"type": "object"},
+    "resolution": {"type": "object"},
+    "helper_families": {"type": "array"},
+    "work": {"type": "object"},
+    "attrition": {"type": "object"},
+    "verdicts": {"type": "object"}
+  },
+  "additionalProperties": true
+}
