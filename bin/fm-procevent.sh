@@ -145,18 +145,25 @@
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
 # Receipt state is adapter-owned through one more seam of the same kind, and
-# this runner presents nothing anywhere. The per-source boundary is held from
-# the durable capture through the seam, so a concurrent reconcile's publication
-# can never observe a capture before the adapter has acknowledged what it will
-# acknowledge. Within that hold, after any keyed-answer feed has returned, the
-# runner hands the adapter the outcome:
+# this runner presents nothing anywhere. The per-source boundary orders the
+# capture against publication: the runner holds it across the durable capture
+# and the staging of the receipt outcome and its generation note, releases it
+# for the potentially slow external keyed-answer feed, and re-acquires a fresh
+# hold for the seam, where it hands the adapter the outcome:
 # `bin/fm-procevent-<adapter>.sh receipt <source-id> <sequence> <result-file>
 # <outcome-file>`, where the outcome file states exactly what the intake
-# returned - `not-fed`, or `fed <exit>` plus its bounded output - so an adapter
-# that acknowledges a capture toward its own audience can record what was
-# received and what was saved, never more than that. A missing command, an
+# returned - `not-fed`, `fed <exit>` plus its bounded output, or that verdict
+# with an incomplete quality when the adapter's own extraction failed - so an
+# adapter that acknowledges a capture toward its own audience can record what
+# was received and what was saved, never more than that. A missing command, an
 # error, or any other exit changes nothing: publication and handling proceed
 # exactly as before. This runner never reads or presents a receipt.
+#
+# The unlocked feed never lets a capture publish early: while the outcome and
+# its generation note are staged, publish_result declines the generation, and
+# reconcile's recovery reclaims the seam once the runner's claim is gone, so a
+# concurrent reconcile can neither observe a capture before the adapter
+# acknowledged it nor run the seam twice.
 #
 # A runner killed between its durable capture and that seam leaves a generation
 # the adapter never saw, and reconcile would otherwise republish it with its

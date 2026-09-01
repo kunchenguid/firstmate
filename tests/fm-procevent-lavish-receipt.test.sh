@@ -54,6 +54,10 @@ EOF
 run_lavish() {  # <home> <args...>
   local home=$1
   shift
+  # The stub dir rides along in PATH so arm and managed-poll's presence check
+  # finds a lavish-axi on runners where the real one is not installed; the
+  # scenarios that script responses install the stub before their first poll.
+  PATH="${STUB_BIN_DIR:+$STUB_BIN_DIR:}$PATH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
