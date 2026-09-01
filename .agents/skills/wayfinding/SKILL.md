@@ -3,7 +3,7 @@ name: wayfinding
 description: >-
   Agent-only judgment for designing and sequencing multi-task work: a stage, a release, a migration, or any campaign larger than one task.
   Use before scoping such work, and before dispatching a task whose backlog dependency names a stage, a release, or a final acceptance.
-  Also use when the queue looks fully gated, to find the work that can still be pre-staged.
+  Also use when work is blocked only at its final step or the queue looks fully gated, to find the work that can still be pre-staged.
   Owns the destination and completion boundary, the unknown-classification split, the retained tracer, vertical outcomes, integration ownership, new-request classification, pre-staging around a blocked final step, the proof ladder, and the named-dependency reconciliation that must happen before dispatch.
 user-invocable: false
 metadata:
