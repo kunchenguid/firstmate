@@ -82,7 +82,7 @@ stand_down() {
   exit 0
 }
 
-# The same two eligibility owners the nudge wrapper uses, so a no-mistakes gate
+# The same two eligibility owners the nudge wrapper uses, so an inactive legacy no-mistakes gate
 # agent and an unmarked task worktree can never run a session start for a home
 # they do not own. Pi's preflight-only status preserves that intentional silence
 # without mistaking it for a failed eligible attempt that needs the manual nudge.

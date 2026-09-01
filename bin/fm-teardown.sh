@@ -112,7 +112,8 @@
 # refusal above has already passed, and BEFORE any worktree return, branch
 # delete, or backend kill below - a still-active run or a leaked process may
 # own live work in that worktree):
-#   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
+#   Fix 1 - when inactive migration compatibility is explicitly enabled, conclude
+#     the task's own already-running legacy no-mistakes run. A ship task's worktree can
 #     be torn down while its no-mistakes pipeline run is still PARKED at a gate
 #     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
 #     left to ever answer it - the run then sits there holding a fleet slot
@@ -262,7 +263,7 @@ fm_control_lock_acquire_bounded "$STATE" "$ID" fm-teardown.sh 1 0 || {
   exit 1
 }
 CONTROL_LOCK_HELD=1
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
+# Fail closed before any fleet mutation: an inactive legacy no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
@@ -1481,7 +1482,7 @@ validate_worktree_teardown_safety() {
   fi
 }
 
-# Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
+# Fix 1 (see script header): under explicit inactive migration compatibility, does the active-or-most-recent no-mistakes run in
 # worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
 # that is about to be removed? Prints nothing; returns 0 only on a genuine
 # match so the caller knows it is safe to abort - never a guess.
@@ -1541,9 +1542,9 @@ task_status_is_run_not_found() {  # <status-error> <run-id>
   [ "$actual" = "$expected" ]
 }
 
-# Abort THIS task's own parked no-mistakes run before the worker that would
+# Under explicit inactive migration compatibility, abort THIS task's own parked no-mistakes run before the worker that would
 # have answered its gate is removed, so no run is left orphaned holding a
-# fleet slot. Only KIND=ship drives a no-mistakes validation of its own
+# fleet slot. In that compatibility path, only KIND=ship drives a no-mistakes validation of its own
 # worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh);
 # a run not attributed to this exact branch+head is left completely alone.
 conclude_task_no_mistakes_run() {  # <worktree>

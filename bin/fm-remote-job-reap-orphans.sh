@@ -6,7 +6,7 @@
 #
 # A remote job worker (bin/fm-remote-job-worker.sh) is launched from a specific
 # Firstmate code root: the account's own checkout under the LaunchAgent, a
-# remote secondmate's checkout, a no-mistakes gate worktree, a pooled task
+# remote secondmate's checkout, an inactive legacy no-mistakes gate worktree, a pooled task
 # worktree, or a test fixture root. When that root is pruned while the worker is
 # running, the worker is reparented to init and, on older builds, keeps polling
 # and logging indefinitely. Current workers stop themselves once their root is

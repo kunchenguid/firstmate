@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# fm-gate-refuse-lib.sh - fail-closed refusal that keeps a no-mistakes GATE agent
-# out of firstmate's fleet lifecycle.
+# fm-gate-refuse-lib.sh - fail-closed inactive migration compatibility that keeps
+# a legacy no-mistakes GATE agent out of firstmate's fleet lifecycle.
 #
 # The hazard (data/nm-gate-ambient-authority-containment-c3/report.md): a
 # no-mistakes gate agent runs inside a firstmate checkout with a free shell, so
@@ -9,7 +9,7 @@
 # "delegate" and "reconcile" the shared worktree. It has real capability because
 # those entrypoints self-locate their home and never knew a gate context existed.
 #
-# no-mistakes owns the authority-removal half (it neutralizes the project
+# For an already-running legacy migration, no-mistakes owns the authority-removal half (it neutralizes the project
 # instructions and stamps NO_MISTAKES_GATE into the gate agent's environment).
 # THIS is the firstmate capability-removal half: an enforceable script refusal,
 # not a prose rule the neutralized agent would never read. It is sourced at the

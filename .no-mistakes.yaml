@@ -1,5 +1,5 @@
 # Inactive migration compatibility only.
-# This file supports already-running legacy migrations and the final migration validation run.
+# This file supports already-running legacy migrations only.
 # It is not an active delivery mode, bootstrap dependency, CI signature, or merge prerequisite.
 
 # firstmate is an agent-orchestration repo: its AGENTS.md installs a fleet-captain

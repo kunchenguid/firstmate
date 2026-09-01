@@ -1,68 +1,50 @@
 # Codex Desktop host lifecycle
 
-Codex Desktop can run Firstmate-managed ship and scout tasks natively when the
-primary is itself a Desktop task and uses the app host tools for task lifecycle.
+Codex Desktop can run Firstmate-managed ship and scout tasks natively when the primary is itself a Desktop task and uses the app host tools for task lifecycle.
 This is recorded as `backend=codex-app-host` in task metadata.
 
-`codex-app-host` is deliberately not a value for `FM_BACKEND`,
-`config/backend`, or `fm-spawn.sh --backend`. The Desktop host creates, sends,
-reads, waits for, and archives the visible task; Firstmate's shell helpers own
-the durable identity and reconciled state. The unsupported value `codex-app`
-continues to be refused by the normal spawn dispatcher.
+`codex-app-host` is deliberately not a value for `FM_BACKEND`, `config/backend`, or `fm-spawn.sh --backend`.
+The Desktop host creates, sends, reads, waits for, and archives the visible task; Firstmate's shell helpers own the durable identity and reconciled state.
+The unsupported value `codex-app` continues to be refused by the normal spawn dispatcher.
 
 ## Ownership split
 
 The Desktop host owns:
 
-1. creating a task in an exact saved project and isolated Desktop worktree;
-2. returning the task's durable `threadId`, `hostId`, and worktree path;
-3. sending initial and follow-up turns;
-4. reading bounded transcript/state and waiting for attention or completion;
-5. archiving the exact task only after Firstmate's archive preflight succeeds.
+1. It creates a task in an exact saved project and isolated Desktop worktree.
+2. It returns the task's durable `threadId`, `hostId`, and worktree path.
+3. It sends initial and follow-up turns.
+4. It reads bounded transcript/state and waits for attention or completion.
+5. It archives the exact task only after Firstmate's archive preflight succeeds.
 
 Firstmate owns:
 
-1. the task id and exact task/worktree metadata binding;
-2. `state/<id>.status` as the append-only return/wake event log;
-3. `state/<id>.codex-app-current` as the current-state record;
-4. translating host observations into Firstmate lifecycle events;
-5. refusing mutations outside the live session lock.
+1. Firstmate owns the task id and exact task/worktree metadata binding.
+2. Firstmate owns `state/<id>.status` as the append-only return/wake event log.
+3. Firstmate owns `state/<id>.codex-app-current` as the current-state record.
+4. Firstmate translates host observations into lifecycle events.
+5. Firstmate refuses mutations outside the live session lock.
 
-The event log and current state are intentionally separate. A last status line
-can remain historical after a task resumes; `fm-crew-state.sh` reads the exact
-current-state record for `codex-app-host` and never infers current state from
-the log tail.
+The event log and current state are intentionally separate.
+A last status line can remain historical after a task resumes; `fm-crew-state.sh` reads the exact current-state record for `codex-app-host` and never infers current state from the log tail.
 
 ## Cross-project permission boundary
 
-Codex Desktop derives a repository task's writable filesystem scope from the
-saved project that created the task.
-Discovering a global skill through a readable symlink does not add the skill's
-source repository as another writable project.
-An external repository task that starts the installed
-`bin/fm-session-start.sh` directly therefore reaches the Firstmate lock path in
-a read-only permission context, even when Unix mode bits show that the account
-owns the directory.
+Codex Desktop derives a repository task's writable filesystem scope from the saved project that created the task.
+Discovering a global skill through a readable symlink does not add the skill's source repository as another writable project.
+An external repository task that starts the installed `bin/fm-session-start.sh` directly therefore reaches the Firstmate lock path in a read-only permission context, even when Unix mode bits show that the account owns the directory.
 
 `bin/fm-desktop-entry.sh` is the read-only routing boundary.
-It compares Git common-directory identity and reports `mode=direct` only for a
-task already running in the Firstmate repository or one of its worktrees.
-Every other repository gets `mode=coordinator`: the source task creates one
-visible Desktop-owned Firstmate worktree, passes the complete request and exact
-source project to it, then waits for and relays that coordinator's result.
-The coordinator uses its own writable top level as `FM_HOME`, starts the
-session exactly once, and owns every target ship or scout through the host
-lifecycle below.
-The source task never substitutes ordinary subagents or project work of its
-own.
+It compares Git common-directory identity and reports `mode=direct` only for a task already running in the Firstmate repository or one of its worktrees.
+Every other repository gets `mode=coordinator`: the source task creates one visible Desktop-owned Firstmate worktree, passes the complete request and exact source project to it, then waits for and relays that coordinator's result.
+The coordinator uses its own writable top level as `FM_HOME`, starts the session exactly once, and owns every target ship or scout through the host lifecycle below.
+The source task never substitutes ordinary subagents or project work of its own.
 
 ## Desktop workflow
 
-Preflight must prove that the current primary is Codex Desktop and the task host
-tools are exposed. If an exact known local checkout is absent from Desktop's
-project list, the primary opens that path with Codex Desktop and refreshes the
-list; project registration is not a routine captain step. Start the Firstmate
-session in a tracked PTY so the thread-bound lease remains live.
+Preflight must prove that the current primary is Codex Desktop and the task host tools are exposed.
+If an exact known local checkout is absent from Desktop's project list, the primary opens that path with Codex Desktop and refreshes the list; project registration is not a routine captain step.
+Start the Firstmate session in a tracked PTY so the thread-bound lease remains live.
 
 For each task:
 
@@ -81,10 +63,9 @@ For each task:
      --mode <direct-PR|local-only> --yolo <on|off>
    ```
 
-5. Verify `state/<id>.meta`, the writable status file, and
-   `bin/fm-crew-state.sh <id>` before treating the task as supervised.
-6. Use the Desktop wait/read tools for host truth. Reconcile every meaningful
-   state transition and optionally append its verified lifecycle event:
+5. Verify `state/<id>.meta`, the writable status file, and `bin/fm-crew-state.sh <id>` before treating the task as supervised.
+6. Use the Desktop wait/read tools for host truth.
+   Reconcile every meaningful state transition and optionally append its verified lifecycle event:
 
    ```sh
    bin/fm-codex-app-task.sh reconcile <id> \
@@ -95,18 +76,17 @@ For each task:
    ```
 
    Pass the thread, host, generation, and observation epoch attached to the observed result so a delayed result from a stopped or superseded endpoint cannot mutate the current task.
-7. Use the Desktop send tool for follow-ups. Never imitate a send by editing a
-   transcript or local ledger.
+7. Use the Desktop send tool for follow-ups.
+   Never imitate a send by editing a transcript or local ledger.
 8. Reconcile the final state, then run `bin/fm-codex-app-task.sh archive-preflight <id> --report <absolute-firstmate-home>/data/<id>/report.md`.
    Desktop archive removes its app-owned worktree.
    The preflight allows a completed scout only when its non-empty canonical task report is retained at `data/<id>/report.md` outside that worktree, and refuses ship tasks until their implementation is independently landed or explicit discard is authorized.
    Call the Desktop archive tool only after a successful preflight.
    Generic `fm-teardown.sh` still refuses host-owned tasks and preserves their Firstmate records.
 
-Worker-written status lines are valid when Desktop permissions allow the exact
-Firstmate state path. When they do not, the primary records only transitions it
-has actually observed through the host wait/read tools. It must never invent a
-worker event from an old status tail.
+Worker-written status lines are valid when Desktop permissions allow the exact Firstmate state path.
+When they do not, the primary records only transitions it has actually observed through the host wait/read tools.
+It must never invent a worker event from an old status tail.
 
 ## Durable metadata
 
@@ -157,19 +137,14 @@ Reconciled `working` state is authoritative only for a bounded age, after which 
 
 ## Standalone shell boundary
 
-The documented Codex App Server exposes thread and turn lifecycle methods, but
-Firstmate does not yet ship a standalone `bin/backends/codex-app.sh` client.
-A primary outside Codex Desktop therefore cannot select this host lifecycle,
-and `fm-spawn.sh --backend codex-app` remains blocked. Implementing that later
-requires one maintained App Server process plus proven create/resume/read/wait/
-archive semantics; it must not be approximated with raw Desktop sockets.
+The documented Codex App Server exposes thread and turn lifecycle methods, but Firstmate does not yet ship a standalone `bin/backends/codex-app.sh` client.
+A primary outside Codex Desktop therefore cannot select this host lifecycle, and `fm-spawn.sh --backend codex-app` remains blocked.
+Implementing that later requires one maintained App Server process plus proven create/resume/read/wait/archive semantics; it must not be approximated with raw Desktop sockets.
 
 ## Rollout limits
 
-Ship and scout tasks are supported through a live Desktop primary. Secondmate
-support remains out of scope until its home provisioning, nested ownership,
-and recovery semantics are designed for the host lifecycle.
+Ship and scout tasks are supported through a live Desktop primary.
+Secondmate support remains out of scope until its home provisioning, nested ownership, and recovery semantics are designed for the host lifecycle.
 
-[`verification/runtime-backends.md`](verification/runtime-backends.md#codex-app-host-tools)
-owns the active host-tool evidence. The `firstmate-codexapp` skill owns the
-operator sequence.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#codex-app-host-tools) owns the active host-tool evidence.
+The `firstmate-codexapp` skill owns the operator sequence.

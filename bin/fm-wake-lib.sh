@@ -1140,7 +1140,6 @@ fm_control_lock_path() {
   case "$id" in
     ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
-  [ "${#id}" -le 64 ] || return 1
   printf '%s/.control-%s.lock\n' "$state" "$id"
 }
 

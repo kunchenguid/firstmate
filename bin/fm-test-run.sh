@@ -1170,7 +1170,7 @@ families_for_changed_path() {
       printf '%s\n' pr-forge
       ;;
     bin/fm-nm-run-lib.sh)
-      # Shared no-mistakes run-attribution primitives, sourced by both
+      # Shared inactive legacy no-mistakes run-attribution primitives, sourced by both
       # bin/fm-crew-state.sh (pure-contract-unit) and bin/fm-teardown.sh's
       # pre-teardown run abort (pr-forge).
       printf '%s\n' pure-contract-unit

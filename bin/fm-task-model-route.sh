@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Deterministically route a Codex worker from exactly five scored factors.
 #
-# Scores are 0-2 for ambiguity, boundary clarity, risk, diagnosis need, and
-# verification quality.
+# Scores are 0-2 for ambiguity, boundary clarity, risk, diagnosis need, and verification quality.
+# Higher scores always mean that the task needs stronger reasoning: 0 is clear, low-risk, non-diagnostic, and directly verifiable, while 2 is ambiguous, boundary-unclear, risky, diagnosis-heavy, or weakly verifiable.
+# Totals 0-2 select Luna, 3-6 select Terra, and 7-10 select Sol.
+# The supported Desktop slugs are gpt-5.6-luna, gpt-5.6-terra, and gpt-5.6-sol.
+# Luna supports low, medium, high, xhigh, and max; Terra and Sol also support ultra.
+# The default effort is medium for Luna and high for Terra or Sol.
 # An explicit captain model/effort override has highest precedence.
-# Otherwise a declared hard floor raises, but never lowers, the scored tier.
+# Otherwise a declared hard floor raises, but never lowers, the scored tier: user-behavior and multi-module floor at Terra, while architecture, security, data-migration, and unknown-production-incident floor at Sol.
+# Quota reconciliation records every candidate independently and may select only an eligible candidate at or above the minimum tier, or the exact overridden model/effort pair.
 # The inspectable record is written to data/<task-id>/model-routing.tsv.
 # Usage: fm-task-model-route.sh <task-id> <five score/evidence pairs> [routing options]
 set -u

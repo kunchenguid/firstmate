@@ -350,7 +350,7 @@
     },
     {
       "path": "docs/gitlab-merge-watch.md",
-      "audience": "maintainer-verification"
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/herdr-backend.md",

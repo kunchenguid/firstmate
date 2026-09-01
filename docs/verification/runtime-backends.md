@@ -810,8 +810,10 @@ The host-tool sequence was:
 8. read the archived transcript with state `notLoaded`.
 
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
-The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
-App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+The 2026-08 Desktop integration adds a host-managed Firstmate lifecycle around those proven tools: a live Desktop primary owns a thread-bound Firstmate lease, registers exact `threadId`/`hostId`/worktree identity as `backend=codex-app-host`, and reconciles host-observed current state separately from the append-only status event log.
+The behavior suite is `tests/fm-codex-desktop-session.test.sh`.
+The remaining boundary is standalone shell spawning.
+The documented App Server exposes thread and turn lifecycle methods, but Firstmate does not ship a maintained standalone client or `bin/backends/codex-app.sh`; raw Desktop socket experiments still do not satisfy that contract.
 
 ## Cursor Agent CLI
 
@@ -915,7 +917,7 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 | Effort | no effort flag exists; requested effort stays in task metadata |
 | Interrupt | single Escape; the pane showed `Cancelled` and the composer returned to its placeholder, so no clear key is needed |
 | Exit | `/exit` |
-| Skill invocation | `/<skill>`; cursor discovers firstmate's user-level skills, and `/no-mistakes` autocompleted with firstmate's own description and invoked the skill |
+| Skill invocation | `/<skill>`; cursor discovers firstmate's user-level skills, and the inactive compatibility example `/no-mistakes` autocompleted with firstmate's own description and invoked the skill |
 | Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
 
 ### End-to-end
@@ -1020,15 +1022,3 @@ The focused extension suite also exercised the installed Pi 0.84.4 picker and ou
 
 Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running the live guard, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
-
-The 2026-08 Desktop integration adds a host-managed Firstmate lifecycle around
-those proven tools: a live Desktop primary owns a thread-bound Firstmate lease,
-registers exact `threadId`/`hostId`/worktree identity as
-`backend=codex-app-host`, and reconciles host-observed current state separately
-from the append-only status event log. The behavior suite is
-`tests/fm-codex-desktop-session.test.sh`.
-
-The remaining boundary is standalone shell spawning. The documented App Server
-now exposes thread and turn lifecycle methods, but Firstmate does not ship a
-maintained standalone client or `bin/backends/codex-app.sh`; raw Desktop socket
-experiments still do not satisfy that contract.

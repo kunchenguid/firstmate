@@ -23,7 +23,7 @@
 # worker's orphan recovery.
 #
 # The worker is abandoned when its configured FM_ROOT stops being a genuine
-# Firstmate checkout - the state a pruned no-mistakes gate worktree, a returned
+# Firstmate checkout - the state a pruned inactive legacy no-mistakes gate worktree, a returned
 # pooled worktree, or a removed test fixture root leaves behind. It can never
 # validate or execute another job from a root that is gone, so both the serving
 # loop and the Linux restart supervisor stop instead of polling forever

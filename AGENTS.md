@@ -100,7 +100,7 @@ state/               runtime records and signals; gitignored
   <id>.reconcile-nudged  epoch second of the last inventory-reconcile nudge sent to this secondmate; bin/fm-secondmate-reconcile.sh owns its per-home cooldown window
   <id>.backlog-close  the exact backlog close a teardown recorded before removing the task's record, so an interrupted cleanup can still be finished at the next session start; bin/fm-backlog-transition-lib.sh owns its format and replay, and a landed close removes it
   <id>.inbox/          durable steering inbox: sequenced firstmate instruction records the worker acknowledges by moving them into its handled/ subdirectory; written by fm-send, with ordinary records re-rung and escalated by the watcher while explicit fire-and-forget records are excluded from that ladder, and removed by teardown (bin/fm-task-inbox-lib.sh)
-  <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, with docs/configuration.md routing operator-facing backend and trace-context details; Codex Desktop tasks record the deterministic route, session envelope, generation, observation epoch, unsupported telemetry, and checkpoint/handoff state; PR tooling records exact pr_head= and matching pr_green_head=
+  <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, while docs/configuration.md routes operator-facing settings, docs/codex-app-backend.md covers host-managed metadata, and bin/fm-pr-lib.sh owns PR identity fields
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -138,7 +138,7 @@ state/               runtime records and signals; gitignored
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
-.no-mistakes/        local validation state and evidence; gitignored
+.no-mistakes/        inactive legacy validation state and evidence; gitignored
 ```
 
 A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
@@ -201,10 +201,7 @@ If static `config/crew-harness` or `config/secondmate-harness` names an unverifi
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
 When dispatch profiles exist, consult them at every crewmate or scout intake and pass the resolved concrete profile required by `fm-spawn`.
 Routing precedence is an explicit per-task captain override, then the best-fit configured rule, then the configured default, then the static crewmate harness.
-For Codex Desktop workers, `bin/fm-task-model-route.sh` is the deterministic owner of Sol/Terra/Luna selection from exactly five recorded 0-2 factors: ambiguity, boundary clarity, risk, diagnosis need, and verification quality.
-Its explicit user override wins, then a recorded hard floor, then the score tier; supported values are `gpt-5.6-sol` and `gpt-5.6-terra` at low/medium/high/xhigh/max/ultra, and `gpt-5.6-luna` at low/medium/high/xhigh/max.
-Configured dispatch profiles and current quota evidence may select among candidates at or above that result, but may never lower its recorded minimum reasoning tier.
-Every Desktop task registration requires the route record produced by that script.
+For Codex Desktop workers, load `firstmate-codexapp` before creation; that skill owns the routing procedure, while `bin/fm-task-model-route.sh`'s header owns the exact factors, scoring, floors, supported model/effort pairs, precedence, and quota reconciliation.
 Firstmate alone resolves a matched profile array: begin with `quota-axi`'s default TOON at that intake, using the skill's narrow TOON-then-`--json` fallback only for genuine ambiguity, evaluate every configured candidate against that current output, and choose with inspectable `spendPriority` as the one quota-perspective ranker after the skill's eligibility, reasoning-class, and runway-feasibility gates.
 Account for every candidate with the catalog evidence, provider relationship, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, and the spendPriority and runway evidence used in selection; never omit a candidate, guess, fall back silently, or call the result quota-informed without them.
 Establish model support and provider family from that harness's own authoritative catalog, then read `quota-axi` at the granularity the vendor actually supplies: provider-level or all-model evidence applies to every model established in that family, and a named-model window bounds only that model.
@@ -222,7 +219,10 @@ Do not add model-specific versions of that policy.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable; pass an explicit per-spawn `--backend` only under that exact task's own authority, never as later-task precedent (selection contract: [`docs/configuration.md`](docs/configuration.md) "Runtime backend").
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
 
-When the primary is running inside Codex Desktop and the required host task tools are exposed, load `firstmate-codexapp` and use its host-managed lifecycle automatically for new visible ship and scout tasks instead of asking the captain to choose or configure a shell backend. The primary owns project discovery, routing evidence, session-envelope selection, task creation, FirstMate registration, supervision, checkpoint handoff, reconciliation, and archive preflight. Ask the captain only for an actual missing project/login/permission or an authority decision that cannot be completed safely from the app. Codex Desktop archive deletes its app-owned worktree, so never archive a host-managed task merely because it is terminal: run the FirstMate archive preflight and retain refused ship artifacts.
+When the primary is running inside Codex Desktop and the required host task tools are exposed, load `firstmate-codexapp` and use its host-managed lifecycle automatically for new visible ship and scout tasks instead of asking the captain to choose or configure a shell backend.
+The primary owns project discovery, routing evidence, session-envelope selection, task creation, Firstmate registration, supervision, checkpoint handoff, reconciliation, and archive preflight.
+Ask the captain only for an actual missing project/login/permission or an authority decision that cannot be completed safely from the app.
+Codex Desktop archive deletes its app-owned worktree, so never archive a host-managed task merely because it is terminal: run the Firstmate archive preflight and retain refused ship artifacts.
 
 ## 5. Recovery
 
@@ -338,7 +338,7 @@ Delivery mode and `yolo` are orthogonal.
 `yolo` governs merge authority only: with it off, the captain approves every PR merge and every local-only landing; with it on, firstmate merges green, in-scope work itself.
 Never merge a red PR under either setting; destructive, irreversible, and security-sensitive merges still escalate.
 Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
-Load `ask-user-authority` before deciding any ask-user finding; the implementation worker never answers its own finding.
+For an explicitly invoked inactive legacy no-mistakes validation, load `ask-user-authority` before deciding any ask-user finding; the implementation worker never answers its own finding.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
@@ -466,7 +466,7 @@ Reach the captain immediately for:
 
 - Work ready for their review, with the full PR URL.
 - Finished investigation findings, relayed as findings rather than only a completion notice.
-- Gate findings that `ask-user-authority` escalates.
+- Inactive legacy gate findings that `ask-user-authority` escalates.
 - A real blocker or failure after the relevant playbook is exhausted.
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
@@ -526,7 +526,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
-- `ask-user-authority` - load before deciding any ask-user finding.
+- `ask-user-authority` - load before deciding an ask-user finding from an explicitly invoked inactive legacy no-mistakes validation.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
 - `firstmate-development-loop` - load before commissioning or acting on a non-trivial implementation plan, before dispatching any ship task, before responding to implementation review feedback, and before reporting non-trivial implementation complete.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.

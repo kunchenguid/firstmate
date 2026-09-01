@@ -43,7 +43,7 @@ Read `docs/documentation-audiences.md` before changing documentation or adding a
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
-  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and `bin/fm-verify.sh` invokes its no-argument full-analysis path locally and in the exact-head PR workflow.
+  `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, and pinned actionlint workflow lint), and `bin/fm-verify.sh` invokes its `--full` analysis path locally and in the exact-head PR workflow.
   Its header and `--help` output own the exact local lint modes and flags.
   A malformed `.github/workflows/*.yml`, including a self-broken `ci.yml`, fails that local lint path before merge because a broken workflow cannot report its own breakage.
   It pins one exact shellcheck version and one exact actionlint version and refuses to run under any other.
@@ -114,5 +114,5 @@ The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the
 
 ## Inactive migration compatibility
 
-The tracked `.no-mistakes.yaml` and gate-context refusal helper remain only to support already-running legacy migrations and the final migration validation run.
+The tracked `.no-mistakes.yaml` and gate-context refusal helper remain only to support already-running legacy migrations.
 They do not define an active delivery mode, bootstrap dependency, task brief, spawn mode, CI signature requirement, or merge prerequisite.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Shared no-mistakes axi run attribution primitives.
+# Shared inactive migration compatibility for legacy no-mistakes run attribution.
 #
-# ONE owner for the no-mistakes run-attribution primitives used by
+# ONE owner for the legacy no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
 # (pre-teardown run abort, see its "Fix 1" header comment). Teardown uses only
 # strict branch-and-head identity; crew-state additionally permits the active

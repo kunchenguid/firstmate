@@ -1,4 +1,4 @@
-# GitLab delivery retirement verification
+# GitLab delivery retirement
 
 GitLab PR checking, polling, and merging are explicitly inactive migration compatibility.
 Bounded direct-PR delivery supports GitHub only because its authorization contract requires terminal checks green for the recorded exact GitHub PR head SHA.
@@ -11,7 +11,7 @@ The parser does not authorize a new poll, check, or merge.
 `bin/fm-pr-poll.sh` stays silent for a GitLab sidecar or validated invocation and never calls `glab`.
 `bin/fm-pr-check.sh` and `bin/fm-pr-merge.sh` return non-zero with an inactive-migration-compatibility diagnostic before invoking a forge CLI or publishing active GitLab delivery state.
 
-## Maintainer verification
+## Regression entry points
 
 Run the focused behavioral owners after changing the provider boundary:
 

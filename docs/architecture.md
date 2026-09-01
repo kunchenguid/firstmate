@@ -188,7 +188,8 @@ Orca is experimental and selected only explicitly: Orca owns both worktree and t
 [`orca-backend.md`](orca-backend.md) owns current behavior and limitations, while [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) owns active smoke evidence.
 cmux is experimental, GUI-first, macOS-only, and can be selected explicitly or by runtime auto-detection from its primary `CMUX_WORKSPACE_ID` marker plus documented fallback signals: Treehouse remains its worktree provider, [`cmux-backend.md`](cmux-backend.md) owns current setup and limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#cmux) owns active source and live evidence.
 cmux's container shape is one workspace per task with one surface, no per-home container split; workspace titles are scoped by the active home label plus a short hash of the resolved `FM_ROOT` path, and `--secondmate` spawns are refused, mirroring Orca.
-Codex Desktop host-managed tasks are recorded as `backend=codex-app-host`; the Desktop primary owns their create/send/read/wait/archive lifecycle and Firstmate owns exact metadata plus reconciled state. This host lifecycle is not selectable as a shell runtime backend; `docs/codex-app-backend.md` owns the boundary.
+Codex Desktop host-managed tasks are recorded as `backend=codex-app-host`; the Desktop primary owns their create/send/read/wait/archive lifecycle and Firstmate owns exact metadata plus reconciled state.
+This host lifecycle is not selectable as a shell runtime backend; `docs/codex-app-backend.md` owns the boundary.
 
 ## Worktrees, not branches in your checkout
 

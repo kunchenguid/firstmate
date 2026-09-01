@@ -200,7 +200,7 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 ## Inactive migration compatibility (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` exists only for already-running legacy migrations and the final migration validation run.
+The tracked `.no-mistakes.yaml` exists only for already-running legacy migrations.
 It is not an active delivery mode, bootstrap dependency, CI signature, or merge prerequisite.
 `bin/fm-verify.sh` is the active canonical local and GitHub Actions gate.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for targeted and full behavioral validation entry points.
@@ -370,12 +370,7 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
-For Codex Desktop workers, `bin/fm-task-model-route.sh` deterministically records exactly five 0-2 factors: ambiguity, boundary clarity, risk, diagnosis need, and verification quality.
-An explicit user override has highest precedence, then a hard floor, then the score tier.
-Quota-aware profile selection remains useful above that minimum but never lowers the recorded Sol/Terra/Luna tier.
-Every Desktop registration records the route file and one `small`, `normal`, or `research` session envelope.
-Codex Desktop does not expose reliable exact per-task cost, remaining-context, compaction-count, or output-token telemetry, so metadata records each as `unsupported`.
-Envelope soft warnings are qualitative, and a hard boundary requires a staged-only checkpoint commit, a structured external handoff, and a fresh Desktop task resumed from that exact SHA.
+For Codex Desktop workers selected from these profiles, [`docs/codex-app-backend.md`](codex-app-backend.md) owns current host behavior, `firstmate-codexapp` owns the agent procedure, and `bin/fm-task-model-route.sh`'s header owns the exact deterministic route inputs and precedence.
 
 ## Toolchain
 
@@ -459,7 +454,7 @@ This section is the single owner of the canonical schema.
 
 Each entry needs a `name` and at least one of `command` or `git`; an entry may carry both.
 A `command` entry gives the `PATH` comparison above, and adding `announce_pattern` also reports the tool's own update announcement, which is how a tool that already reports its own updates is read rather than reimplemented.
-A tool does not always announce a new release on the command that prints its version: `no-mistakes --version` prints only the version, while its other commands carry the announcement.
+For retained inactive compatibility, `no-mistakes` does not announce a new release on the command that prints its version: `no-mistakes --version` prints only the version, while its other commands carry the announcement.
 `announce_args` names the command to search for the announcement in that case, and it is asked only of the copy `PATH` resolves; without it the version probe's own output is searched.
 An `announce_pattern` that is not a usable extended regular expression stops `arm`, and during a sweep it is reported as that one tool's own check failure so one broken pattern never stops the other watched tools from being checked.
 A `git` entry reports how many commits the local clone is behind its remote branch, and stays silent when the clone is current or ahead.
