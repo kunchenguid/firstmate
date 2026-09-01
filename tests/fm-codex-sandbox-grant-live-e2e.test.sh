@@ -346,6 +346,9 @@ printf '%s\n' "$out" | grep -qx 'sibling:denied' \
 # is the surface a release that started validating --add-dir as a directory would
 # break, and no config-form measurement can stand in for it.
 : > "$SHIP_STATUS"
+# The sibling is non-empty by now (sections 1-2 wrote it), so its absence cannot
+# be the confinement check the scout half uses. Pin its exact bytes instead.
+sibling_before=$(shasum "$SIBLING_STATUS" | awk '{print $1}')
 ship_transcript="$LAB/exec-ship.log"
 (
   cd "$SHIP_WT" || exit 1
@@ -358,5 +361,11 @@ ship_transcript="$LAB/exec-ship.log"
 
 [ -s "$SHIP_STATUS" ] \
   || fail "$CODEX_VERSION: --add-dir with a FILE argument did not make the ship status file writable through the launch flags: $(tail -20 "$ship_transcript")"
+# The confinement half, through the real flag rather than the config form: a
+# release where --add-dir <FILE> silently widened to the containing directory
+# would make every ship root reach every other task's records in state/, and this
+# is the assertion that catches it.
+[ "$(shasum "$SIBLING_STATUS" | awk '{print $1}')" = "$sibling_before" ] \
+  || fail "$CODEX_VERSION: the FILE-form --add-dir flags let the turn write a SIBLING task's status file: $(tail -20 "$ship_transcript")"
 
 printf 'ok - %s accepts and enforces the FILE form of --add-dir: the ship keeps its own two state files while a sibling task record stays denied\n' "$CODEX_VERSION"

@@ -208,12 +208,30 @@ EOF
     "$home_real:the firstmate home itself must never be granted" \
     "$home_real/config:config/ must never be granted" \
     "$home_real/projects:projects/ must never be granted" \
-    "$state_real/sibling-task.status:a ship root reaches a SIBLING task's status file" \
-    "$state_real/sibling-task.inbox:a ship root reaches a SIBLING task's steering inbox"
+    "$state_real/$CASE_ID:a ship root names the task id as a DIRECTORY, which would contain every per-task record"
   do
     printf '%s\n' "$roots" | grep -qxF "${forbidden%%:*}" \
       && fail "${forbidden#*:}: $roots"
   done
+  # The isolation claim as a property of the emitted set rather than a literal
+  # name: every root that lives under state/ must belong to THIS task. That fires
+  # on a whole class the fixed list above cannot catch - a root built from the
+  # wrong id, a parent's id, or an id prefix - which is the realistic way this
+  # function regresses, since every root it emits is derived from the id it was
+  # handed. Roots outside state/ (the git common dir) are not this rule's subject.
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    case "$r" in
+      "$state_real"/*)
+        case "${r#"$state_real"/}" in
+          "$CASE_ID".*) ;;
+          *) fail "granted root $r lives in state/ but does not belong to task $CASE_ID: $roots" ;;
+        esac
+        ;;
+    esac
+  done <<EOF
+$roots
+EOF
   grep -q '__CODEXADDDIRS__' "$LAUNCH_LOG" \
     && fail "the placeholder leaked into the launch command"
 
@@ -293,16 +311,57 @@ test_precreated_state_files_are_not_read_as_new_activity() {
   pass "both pre-created state files are marked as already reported, and real later activity on each still reports"
 }
 
+# A state record that has become a SYMLINK is corruption, and the pre-creation
+# must never create or write through it. `[ -e ]` is FALSE for a dangling link, so
+# an unguarded append follows it and creates its target anywhere on disk - which a
+# scout, holding state/ wholesale, can set up for the next ship spawn of another
+# task. The rest of the fleet declines to act on a symlinked state record and
+# leaves it for the watcher to surface, so this pins the same stance here.
+test_precreation_never_follows_a_symlinked_state_record() {
+  local rec out outside link
+  rec=$(make_case symlink-precreate); read_case "$rec"
+  outside="$HOME_DIR/config/escaped.txt"
+  link="$HOME_DIR/state/$CASE_ID.status"
+  ln -s "$outside" "$link"
+  [ -L "$link" ] && [ ! -e "$link" ] \
+    || fail "the fixture is wrong: the status path must be a DANGLING symlink for this to prove anything"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off) \
+    || fail "codex ship spawn failed: $out"
+
+  [ ! -e "$outside" ] \
+    || fail "the spawn followed the dangling symlink and created its target outside the granted tree: $outside"
+  [ -L "$link" ] \
+    || fail "the spawn replaced the symlink instead of leaving it for the watcher to surface"
+  printf '%s\n' "$out" | grep -q 'is a symlink' \
+    || fail "a symlinked state record must be reported at dispatch, not passed over silently: $out"
+  # The turn-ended marker beside it is an ordinary file and must still be created,
+  # so the refusal is scoped to the link rather than aborting the whole grant.
+  [ -f "$HOME_DIR/state/$CASE_ID.turn-ended" ] \
+    || fail "declining the symlink must not stop the other pre-created roots from resolving"
+  pass "pre-creation declines a symlinked state record, creates nothing through it, and says so at dispatch"
+}
+
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir() {
-  local rec out roots data_real state_real
+  local rec out roots data_real state_real gitdir
   rec=$(make_case scout); read_case "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --scout) || fail "codex scout spawn failed: $out"
   roots=$(granted_roots "$LAUNCH_LOG")
   data_real=$(cd "$HOME_DIR/data" && pwd -P)
   state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  gitdir=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
   printf '%s\n' "$roots" | grep -qxF "$data_real/$CASE_ID" \
     || fail "a scout cannot deliver data/<id>/report.md without its own data/<id>/ grant: $roots"
+  # A scout commits in the same LINKED worktree a ship does, so its git add needs
+  # the same out-of-tree common dir. Pinned here because nothing else proves the
+  # scout launch EMITS it: the sufficiency test never denies the git dir, and the
+  # load-bearing test proves the root is needed, not that it is granted.
+  printf '%s\n' "$roots" | grep -qxF "$gitdir" \
+    || fail "the linked worktree's git common dir was not granted to the scout: $roots"
+  [ "$(count_roots "$LAUNCH_LOG")" = 3 ] \
+    || fail "expected exactly 3 granted scout roots, got: $roots"
   # A scout runs the captain-hold completion gate, which creates a mktemp-named
   # lock owner directory and a lock symlink directly in state/, so it needs write
   # on the DIRECTORY - a per-file grant cannot serve those unnameable new entries.
@@ -609,6 +668,7 @@ test_ship_grant_covers_the_steering_inbox_acknowledgement() {
 test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir
 test_pipeline_notice_fires_only_for_the_mode_that_needs_the_pipeline
 test_precreated_state_files_are_not_read_as_new_activity
+test_precreation_never_follows_a_symlinked_state_record
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir
 test_secondmate_grants_only_the_parent_status_file
 test_other_adapters_are_untouched

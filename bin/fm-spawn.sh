@@ -1431,8 +1431,22 @@ codex_root_real() {  # <path>
 # activity changes the signature and surfaces normally. A file that already
 # exists is left untouched, marker included: its unreported signature may be real
 # activity nobody has surfaced yet.
+# A SYMLINK is never created through and never written through. `[ -e ]` alone is
+# false for a DANGLING link, so an unguarded append would follow it and create its
+# target anywhere on disk - the same reach outside the granted tree this per-kind
+# narrowing exists to prevent, and reachable because a scout holds state/
+# wholesale. Declining matches how the rest of the fleet treats a symlinked state
+# record: bin/fm-classify-lib.sh models kind=symlink with its target,
+# bin/fm-watch.sh scan_signals deliberately keeps a symlinked .status VISIBLE
+# rather than skipping it, and bin/fm-inactive-reconcile.sh refuses to act on one.
+# Say so out loud rather than passing over it silently: a state record that became
+# a link is a corruption the captain should see at dispatch.
 codex_precreate_root_file() {  # <file>
   local file=$1
+  if [ -L "$file" ]; then
+    echo "notice: $file is a symlink; firstmate never creates or writes a state record through a link, so this spawn left it untouched - the watcher surfaces the link itself and this grant does not vouch for where it points" >&2
+    return 0
+  fi
   [ -e "$file" ] && return 0
   : >> "$file" 2>/dev/null || return 0
   fm_wake_signal_mark_current "$STATE" "$file" 2>/dev/null || true
