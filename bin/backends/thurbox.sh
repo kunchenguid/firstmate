@@ -265,20 +265,51 @@ fm_backend_thurbox_session_row() {  # <session-uuid>
 }
 
 # fm_backend_thurbox_target_ready: cheap liveness - the session exists, is not
-# soft-deleted, and is not PARKED. A stopped session (`session stop`) keeps
-# its row, checkout and conversation but has no pane, so no send, key, or
-# capture can land on it; treating it as ready would make every write silently
-# address nothing.
+# soft-deleted, and actually HAS a pane a write can land on.
+#
+# The pane check cannot come from the session row. A PARKED session (`session
+# stop`) keeps its row, checkout and conversation but loses its pane, and
+# thurbox 2.11.0 reports a parked session through `session get`/`session list`
+# IDENTICALLY to a running one - same `state`, same `backend_id` naming the
+# window that no longer exists, and no `stopped` field on either read (verified
+# 2026-09-01; docs/thurbox-backend.md "Parked sessions are not visible to the
+# read verbs"). Gating on the row would therefore call every parked session
+# ready and let every write silently address nothing.
+#
+# `session capture` is the probe instead: it fails on a parked session, because
+# the underlying window is genuinely gone. It is one extra call, and it is the
+# only cheap read whose answer actually changes when the pane does.
 #
 # It also PARSES the target in the caller's scope, so a caller that gates a
 # write on this call can use FM_BACKEND_THURBOX_SESSION on the next line.
 fm_backend_thurbox_target_ready() {  # <target>
   fm_backend_thurbox_parse_target "$1" || return 1
-  local raw stopped
-  raw=$(fm_backend_thurbox_session_row "$FM_BACKEND_THURBOX_SESSION") || return 1
-  stopped=$(printf '%s' "$raw" | jq -r '.stopped // empty' 2>/dev/null)
-  [ "$stopped" != true ] || return 1
-  return 0
+  fm_backend_thurbox_session_row "$FM_BACKEND_THURBOX_SESSION" >/dev/null || return 1
+  fm_backend_thurbox_json session capture "$FM_BACKEND_THURBOX_SESSION" --lines 0 >/dev/null
+}
+
+# fm_backend_thurbox_is_parked: the AUTHORITATIVE parked read, for the recovery
+# path that must not confuse a parked session with a transient failure.
+#
+# `watch --initial --session <uuid>` is the only read in 2.11.0 that reports the
+# parked flag at all; it emits one `present` row carrying `stopped` and then
+# exits on its own budget. That costs about a second, which is why the hot
+# readiness path above uses the capture probe and only this recovery-grade
+# caller pays for certainty.
+#
+# Returns 0 parked, 1 running, 2 when the read could not answer - the caller
+# must not treat 2 as either.
+fm_backend_thurbox_is_parked() {  # <session-uuid>
+  local uuid=$1 line stopped
+  [ -n "$uuid" ] || return 2
+  line=$(thurbox-cli watch --initial --session "$uuid" --for-secs 1 --json 2>/dev/null | head -1) || return 2
+  [ -n "$line" ] || return 2
+  stopped=$(printf '%s' "$line" | jq -r '.stopped // empty' 2>/dev/null) || return 2
+  case "$stopped" in
+    true) return 0 ;;
+    false) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # --- container and task creation ---------------------------------------------
@@ -620,15 +651,20 @@ fm_backend_thurbox_busy_state() {  # <target> -> busy|idle|unknown
 #                or it is neither shell nor agent.
 #   unreadable - a read failed or contradicted itself.
 #
-# A PARKED session (stopped) is `dead`, not `missing`: the row, checkout and
-# conversation are all still there, so recovery must relaunch into it rather
-# than treat the task's endpoint as gone.
+# A PARKED session is `dead`, not `missing`: the row, checkout and conversation
+# are all still there, so recovery must relaunch into it rather than treat the
+# task's endpoint as gone. That verdict comes from
+# fm_backend_thurbox_is_parked, NOT from the session row - the row cannot tell
+# a parked session from a running one at all (see target_ready's header). A
+# parked session's `session capture` fails, so without that check a park would
+# read `unreadable` and recovery would stall on a session it could simply
+# restart.
 fm_backend_thurbox_agent_state() {  # <target>
   if ! fm_backend_thurbox_parse_target "$1"; then
     printf 'unreadable'
     return 0
   fi
-  local inventory row stopped raw proc cmd kind
+  local inventory row raw proc cmd kind
   inventory=$(fm_backend_thurbox_json session list) || { printf 'unreadable'; return 0; }
   row=$(printf '%s' "$inventory" | jq -c --arg id "$FM_BACKEND_THURBOX_SESSION" \
     'map(select(.id == $id)) | first // empty' 2>/dev/null) || { printf 'unreadable'; return 0; }
@@ -636,8 +672,7 @@ fm_backend_thurbox_agent_state() {  # <target>
     printf 'missing'
     return 0
   fi
-  stopped=$(printf '%s' "$row" | jq -r '.stopped // empty' 2>/dev/null)
-  if [ "$stopped" = true ]; then
+  if fm_backend_thurbox_is_parked "$FM_BACKEND_THURBOX_SESSION"; then
     printf 'dead'
     return 0
   fi
@@ -697,7 +732,10 @@ fm_backend_thurbox_endpoint_confirmed_gone() {  # <target>
 fm_backend_thurbox_list_live() {
   local inventory
   inventory=$(fm_backend_thurbox_json session list) || return 1
-  printf '%s' "$inventory" | jq -r '.[] | select(.stopped != true) | "thurbox:" + .id + "\t" + (.name // "")' 2>/dev/null
+  # No parked filter: `session list` does not report the parked flag, so there
+  # is nothing here to filter on. A parked session is still a real endpoint
+  # this home may own, and every caller re-checks readiness before writing.
+  printf '%s' "$inventory" | jq -r '.[] | "thurbox:" + .id + "\t" + (.name // "")' 2>/dev/null
 }
 
 # fm_backend_thurbox_resolve_bare_selector: thurbox sessions are addressed by
@@ -714,12 +752,12 @@ fm_backend_thurbox_resolve_bare_selector() {  # <name>
   esac
   inventory=$(fm_backend_thurbox_json session list) || return 1
   ids=$(printf '%s' "$inventory" | jq -r --arg n "$name" \
-    '.[] | select(.stopped != true) | select(.name == $n) | .id' 2>/dev/null)
+    '.[] | select(.name == $n) | .id' 2>/dev/null)
   count=$(printf '%s' "$ids" | grep -c . 2>/dev/null || true)
   case "$count" in
     1) fm_backend_thurbox_target "$(printf '%s' "$ids" | head -1)" ;;
-    0) echo "error: no live thurbox session named '$name'" >&2; return 1 ;;
-    *) echo "error: thurbox session name '$name' matches $count live sessions; address it by uuid (thurbox:<uuid>)" >&2; return 1 ;;
+    0) echo "error: no thurbox session named '$name'" >&2; return 1 ;;
+    *) echo "error: thurbox session name '$name' matches $count sessions; address it by uuid (thurbox:<uuid>)" >&2; return 1 ;;
   esac
 }
 

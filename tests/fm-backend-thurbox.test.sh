@@ -96,7 +96,11 @@ assert_log_args() {  # <msg> <arg>...
   grep -F -- "$needle" "$FM_THURBOX_LOG" >/dev/null || fail "$msg"
 }
 
-SESSION_ROW='{"id":"11111111-2222-3333-4444-555555555555","name":"fm-firstmate-abcd1234-t1","state":"working","state_source":"hook","hook_state_contradicted":false,"stopped":false,"cwd":"/tmp/wt"}'
+# A REAL 2.11.0 session row. Deliberately carries no `stopped` field, because
+# neither `session get` nor `session list` emits one - the parked flag is
+# reachable only through `watch`. A fixture that invented it would let the
+# adapter's parked handling pass against a field that does not exist.
+SESSION_ROW='{"id":"11111111-2222-3333-4444-555555555555","name":"fm-firstmate-abcd1234-t1","state":"working","state_source":"hook","hook_state_contradicted":false,"cwd":"/tmp/wt"}'
 TARGET='thurbox:11111111-2222-3333-4444-555555555555'
 
 # adapter: run <body> in a subshell with the adapter sourced fresh. Every <body>
@@ -222,13 +226,13 @@ out=$(adapter "$d" "fm_backend_thurbox_busy_state '$TARGET'")
 pass "a hook-reported working state is trusted as busy"
 
 new_case busy-non-hook-source; d=$CASE_DIR
-respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","state":"idle","state_source":"name","stopped":false}'
+respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","state":"idle","state_source":"name"}'
 out=$(adapter "$d" "fm_backend_thurbox_busy_state '$TARGET'")
 [ "$out" = unknown ] || fail "a non-hook state source must not be trusted (got: $out)"
 pass "a state thurbox did not get from an agent hook reads unknown, never a stale idle"
 
 new_case busy-contradicted; d=$CASE_DIR
-respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","state":"idle","state_source":"hook","hook_state_contradicted":true,"stopped":false}'
+respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","state":"idle","state_source":"hook","hook_state_contradicted":true}'
 out=$(adapter "$d" "fm_backend_thurbox_busy_state '$TARGET'")
 [ "$out" = unknown ] || fail "a contradicted hook state must not be trusted (got: $out)"
 pass "a hook state thurbox itself marks contradicted reads unknown"
@@ -247,7 +251,7 @@ pass "a failed session read reports unknown rather than guessing a busy verdict"
 # live agent.
 
 new_case agent-missing; d=$CASE_DIR
-respond "$d" 1 '[{"id":"other-session","stopped":false}]'
+respond "$d" 1 '[{"id":"other-session"}]'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = missing ] || fail "a successful inventory omitting the session must read missing (got: $out)"
 pass "a successful inventory that omits the session reports missing"
@@ -259,37 +263,53 @@ out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 pass "a failed inventory read reports unreadable, so a CLI error can never license recovery"
 
 new_case agent-alive; d=$CASE_DIR
-respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555","stopped":false}]'
-respond "$d" 2 '{"foreground_process":"claude","foreground_command":"claude --resume x","output":""}'
+respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555"}]'
+respond "$d" 2 '{"at":1,"event":"present","session":"11111111-2222-3333-4444-555555555555","state":"working","stopped":false}'
+respond "$d" 3 '{"foreground_process":"claude","foreground_command":"claude --resume x","output":""}'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = alive ] || fail "an agent foreground process must read alive (got: $out)"
 pass "a live agent in the pane's foreground reports alive"
 
 new_case agent-dead-shell; d=$CASE_DIR
-respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555","stopped":false}]'
-respond "$d" 2 '{"foreground_process":"bash","foreground_command":"/bin/bash -i","output":""}'
+respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555"}]'
+respond "$d" 2 '{"at":1,"event":"present","session":"11111111-2222-3333-4444-555555555555","state":null,"stopped":false}'
+respond "$d" 3 '{"foreground_process":"bash","foreground_command":"/bin/bash -i","output":""}'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = dead ] || fail "a bare shell foreground must read dead (got: $out)"
 pass "a pane that fell back to its shell reports dead"
 
 new_case agent-ambiguous; d=$CASE_DIR
-respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555","stopped":false}]'
-respond "$d" 2 '{"foreground_process":null,"foreground_command":null,"output":""}'
+respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555"}]'
+respond "$d" 2 '{"at":1,"event":"present","session":"11111111-2222-3333-4444-555555555555","state":null,"stopped":false}'
+respond "$d" 3 '{"foreground_process":null,"foreground_command":null,"output":""}'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = ambiguous ] || fail "an unattributable foreground must read ambiguous (got: $out)"
 pass "a pane whose foreground process cannot be attributed reports ambiguous, not dead"
 
 new_case agent-parked; d=$CASE_DIR
-respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555","stopped":true}]'
+respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555"}]'
+respond "$d" 2 '{"at":1,"event":"present","session":"11111111-2222-3333-4444-555555555555","state":null,"stopped":true}'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = dead ] || fail "a parked session must read dead, not missing (got: $out)"
 pass "a parked session reports dead, keeping its row and checkout out of missing-endpoint recovery"
 
+# thurbox 2.11.0 reports a parked session through `session get` IDENTICALLY to a
+# running one, so this case gives the adapter exactly what the real CLI gives it:
+# a perfectly ordinary row, followed by the capture failure that is the only
+# observable difference. An adapter that trusts the row calls this ready.
 new_case target-ready-parked; d=$CASE_DIR
-respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","stopped":true}'
+respond "$d" 1 "$SESSION_ROW"
+respond_exit "$d" 2 1 '{"error":"capture_pane_text: ... can'"'"'t find window: tb-fm-x"}'
 out=$(adapter "$d" "fm_backend_thurbox_target_ready '$TARGET'; echo rc=\$?")
 assert_contains "$out" 'rc=1' "a parked session has no pane and must not be ready"
-pass "a parked session is not a ready target, so no write can silently address nothing"
+pass "a parked session is not ready, even though its session row is indistinguishable from a running one"
+
+new_case target-ready-running; d=$CASE_DIR
+respond "$d" 1 "$SESSION_ROW"
+respond "$d" 2 '{"output":"","cursor_row":0}'
+out=$(adapter "$d" "fm_backend_thurbox_target_ready '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=0' "a session with a readable pane must be ready"
+pass "a session whose pane reads is ready"
 
 # --- the readiness gate leaves the caller able to address the session --------
 #
@@ -301,14 +321,16 @@ pass "a parked session is not a ready target, so no write can silently address n
 # on the ARGUMENTS thurbox actually received, not on an internal.
 
 new_case ready-then-write; d=$CASE_DIR
-respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","stopped":false}'
+respond "$d" 1 "$SESSION_ROW"
+respond "$d" 2 '{"output":"","cursor_row":0}'
 adapter "$d" "fm_backend_thurbox_send_literal '$TARGET' hello" >/dev/null 2>&1
 assert_log_args "a write gated on the readiness check must address the session the target names" \
   session send 11111111-2222-3333-4444-555555555555 hello
 pass "a write gated on the readiness check still addresses the target's own session"
 
 new_case ready-then-key; d=$CASE_DIR
-respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","stopped":false}'
+respond "$d" 1 "$SESSION_ROW"
+respond "$d" 2 '{"output":"","cursor_row":0}'
 adapter "$d" "fm_backend_thurbox_send_key '$TARGET' Enter" >/dev/null 2>&1
 assert_log_args "a key gated on the readiness check must address the session the target names" \
   session key 11111111-2222-3333-4444-555555555555 enter
@@ -353,14 +375,14 @@ pass "a session name thurbox would reject is refused before the create call"
 # --- bare-selector resolution ------------------------------------------------
 
 new_case bare-selector-ambiguous; d=$CASE_DIR
-respond "$d" 1 '[{"id":"a","name":"other","stopped":false},{"id":"b","name":"other","stopped":false}]'
+respond "$d" 1 '[{"id":"a","name":"other"},{"id":"b","name":"other"}]'
 out=$(adapter "$d" 'fm_backend_thurbox_resolve_bare_selector other 2>&1; echo rc=$?')
 assert_contains "$out" 'rc=1' "an ambiguous name must be refused, not guessed"
 assert_contains "$out" 'uuid' "the refusal must point at the unambiguous address"
 pass "a name matching several live sessions is refused rather than resolved by guessing"
 
 new_case bare-selector-unique; d=$CASE_DIR
-respond "$d" 1 '[{"id":"only-one","name":"solo","stopped":false},{"id":"x","name":"other","stopped":false}]'
+respond "$d" 1 '[{"id":"only-one","name":"solo"},{"id":"x","name":"other"}]'
 out=$(adapter "$d" 'fm_backend_thurbox_resolve_bare_selector solo')
 [ "$out" = 'thurbox:only-one' ] || fail "a unique name must resolve to its target (got: $out)"
 pass "a name matching exactly one live session resolves to its thurbox target"

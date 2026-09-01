@@ -1178,6 +1178,41 @@ THURBOX_SESSION=<calling session uuid>
 `session exec` therefore sets the cwd and host but not the session's environment.
 The adapter does not use it.
 
+### Parked sessions
+
+`session stop` removes a session's pane but leaves its row. The ordinary read
+verbs do not report that.
+
+```sh
+thurbox-cli session get <probe> --json   # before and after `session stop`
+```
+
+```text
+before:  {"state":"uncovered","state_source":null,"backend_id":"%70"}
+after:   {"state":"uncovered","state_source":null,"backend_id":"%70"}
+```
+
+Identical, including a `backend_id` naming a window that no longer exists.
+Neither read emits a `stopped` field at all; the session also remains in
+`session list`. Only `watch` reports the flag:
+
+```sh
+thurbox-cli watch --initial --session <probe> --for-secs 1 --json
+```
+
+```text
+running: {"backend_id":"%72","event":"present","session":"…","state":null,"stopped":false}
+parked:  {"backend_id":"%72","event":"present","session":"…","state":null,"stopped":true}
+```
+
+The observable difference on the ordinary verbs is that a parked session's
+`session capture` fails:
+
+```text
+{"error":"capture_pane_text: tmux capture-pane exited with status exit status: 1: can't find window: tb-fm-park-probe2"}
+exit 1
+```
+
 ### Metadata output shape
 
 `session meta get` prints the record, not the bare value, unless output is forced.
