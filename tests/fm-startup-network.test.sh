@@ -460,6 +460,35 @@ EOF
   pass "fm-startup-network: an abandoned run reports as needing a rerun, never as in progress forever"
 }
 
+test_locked_start_is_not_satisfied_by_an_inflight_probe() {
+  local rec home root log waited=0
+  rec=$(new_world probe-then-locked)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  printf '../other-home\n' > "$home/.fm-secondmate-home"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=6 \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid $$
+  while ! grep -Fq 'detect_only=1' "$log" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  assert_grep 'network=only detect_only=1' "$log" \
+    "the probe-only worker was not in flight before the locked request"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" wait 30 >/dev/null \
+    || fail "the locked request never published"
+  assert_grep 'network=only detect_only=0' "$log" \
+    "the in-flight probe-only worker suppressed the locked sweeps"
+  assert_grep $'check\tinactive-reconcile:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+    "the in-flight probe-only worker suppressed the locked inactive scan"
+  pass "fm-startup-network: locked requests supersede in-flight probe-only workers"
+}
+
 # Two session opens in quick succession must not run the same mutating sweeps
 # concurrently against each other.
 test_start_is_single_flight() {
@@ -728,6 +757,7 @@ test_deferred_invalid_secondmate_markers_queue_durable_findings
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun
+test_locked_start_is_not_satisfied_by_an_inflight_probe
 test_start_is_single_flight
 test_start_reserves_its_generation_before_returning
 test_new_lock_owner_does_not_reuse_the_previous_owners_worker

@@ -201,6 +201,13 @@ phase_label() {  # <phases>
 
 # --- start -------------------------------------------------------------------
 
+worker_covers_request() {  # <locked> <lock-pid>
+  local locked=$1 lock_pid=$2
+  [ "$locked" != 1 ] && return 0
+  [ "$(status_get lock_pid)" = "$lock_pid" ] \
+    && [ "$(status_get phases)" = probe,sweeps ]
+}
+
 cmd_start() {  # <locked> <harvest-pid>
   local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started
   mkdir -p "$STATE" 2>/dev/null || return 1
@@ -214,7 +221,7 @@ cmd_start() {  # <locked> <harvest-pid>
 
   fm_lock_acquire_wait "$PUBLISH_LOCK"
   if [ "$(status_get state)" = running ] && worker_alive \
-    && { [ "$locked" != 1 ] || [ "$(status_get lock_pid)" = "$lock_pid" ]; }; then
+    && worker_covers_request "$locked" "$lock_pid"; then
     # A worker from this or a previous session is still going. Starting a second
     # one would run the same mutating sweeps concurrently, so leave it alone and
     # let the harvest report its real state.
