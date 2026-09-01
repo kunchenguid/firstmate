@@ -7,10 +7,13 @@
 # the command substitution textually and tracks quote state through the heredoc
 # body, so a single apostrophe, unbalanced quote, or unbalanced paren anywhere
 # in that body breaks parsing of the *entire rest of the script* - `bash -n`
-# fails, not just the generated brief. The DOD and Herdr-section builders now
-# use `IFS= read -r -d '' VAR <<EOF || true` instead, which removes the `$(...)`
-# wrapper and eliminates the whole defect class regardless of future prose.
-# test_no_heredoc_in_command_substitution guards that structure directly.
+# fails, not just the generated brief. The Herdr and inbox section builders use
+# `IFS= read -r -d '' VAR <<EOF || true` instead, and the Definition of done
+# heredocs live in bin/fm-dod-lib.sh as plain `cat <<EOF` blocks that
+# bin/fm-brief.sh and bin/fm-promote.sh render through fm_dod_block; both shapes
+# remove the `$(...)` wrapper and eliminate the whole defect class regardless of
+# future prose. test_no_heredoc_in_command_substitution guards that structure
+# directly in every file that renders a brief.
 # Ambient `bash -n` here is Bash 5 and cannot see the bug, so the real
 # cross-version enforcement lives in the macos-stock-bash CI job.
 set -u
@@ -41,7 +44,7 @@ test_script_parses() {
 # guards the *shape* directly against the whole file, so any future DOD or
 # section builder that reintroduces the class fails here regardless of prose.
 test_no_heredoc_in_command_substitution() {
-  local unsafe safe
+  local unsafe safe script
   unsafe="$TMP_ROOT/heredoc-in-substitution.sh"
   safe="$TMP_ROOT/plain-heredoc.sh"
   # shellcheck disable=SC2016 # Literal shell fixtures must remain unexpanded.
@@ -53,9 +56,14 @@ test_no_heredoc_in_command_substitution() {
   fi
   no_heredoc_in_command_substitution "$safe" \
     || fail "structural guard treated heredoc body prose as shell structure"
-  no_heredoc_in_command_substitution "$ROOT/bin/fm-brief.sh" \
-    || fail "fm-brief.sh wraps a heredoc in a command substitution (breaks Bash 3.2 parsing)"
-  pass "fm-brief.sh: no heredoc is nested inside a command substitution (Bash 3.2 parse-safe)"
+  # The Definition of done heredocs live in bin/fm-dod-lib.sh, sourced by both
+  # bin/fm-brief.sh and bin/fm-promote.sh, so the guard follows every file that
+  # renders a brief rather than only the scaffold entry point.
+  for script in fm-brief.sh fm-dod-lib.sh fm-promote.sh; do
+    no_heredoc_in_command_substitution "$ROOT/bin/$script" \
+      || fail "$script wraps a heredoc in a command substitution (breaks Bash 3.2 parsing)"
+  done
+  pass "fm-brief.sh, fm-dod-lib.sh, fm-promote.sh: no heredoc is nested inside a command substitution (Bash 3.2 parse-safe)"
 }
 
 no_heredoc_in_command_substitution() {
