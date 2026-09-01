@@ -635,24 +635,71 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-09-01 on Herdr 0.8.2, and first measured 2026-08-02 on Herdr 0.7.5:
 
 ```sh
 tests/fm-control-herdr-smoke.test.sh
 ```
 
-Observed output:
+Observed output on Herdr 0.8.2:
 
 ```text
 ok - real herdr: exit on a pane with no registered agent is idempotent success
 ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
+ok - real herdr: a reported registration the pane's own process inventory contradicts reads agent-free
+ok - real herdr: an exited worker's pane is positively eligible for its replacement instead of being typed into
+ok - real herdr: interrupt still refuses on a pane whose registration outlived its agent
+ok - real herdr: the same registration over a running foreground process stays alive
 ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
-ok - real herdr: no control verb removed the endpoint or the task's local copy
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
+ok - real herdr: no control verb removed the endpoint, the task's local copy, or its branch
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
-That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+The registry written through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so the case drives the registry and the pane's processes apart deliberately and runs the identical registered reading twice: once over a plain shell and once over a real foreground process, with no real agent launched.
+
+Herdr 0.8.2 keeps such a report registered even though the pane runs nothing but its shell, measured in an isolated `fm-lab-` session:
+
+```text
+herdr pane report-agent <pane> --source fm-control-smoke --agent fm-control-smoke-agent --state idle
+herdr agent get <pane>   -> {"agent_status":"idle"}
+herdr pane process-info  -> foreground_processes [{"name":"zsh","argv0":"zsh"}]
+```
+
+That is why the classifier corroborates the registry against the pane's own inventory rather than trusting a reported registration alone.
+Herdr does validate a report claiming a source it owns itself: an otherwise identical `--source herdr:pi --agent pi` report on the same shell-only pane was rejected and `agent get` still answered `agent_not_found`.
+
+`tests/fm-control-herdr-smoke.test.sh` is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+
+### Agent-free proof across installed harnesses
+
+The classifier's negative verdict rests on `pane process-info` naming a lone bare idle shell, and both that name and its argv0 come from the harness vendor, so the proof is measured against every installed harness rather than a stub.
+Measured 2026-09-01 on Herdr 0.8.2, macOS aarch64, in an isolated `fm-lab-` session:
+
+```sh
+FM_HERDR_AGENT_FREE_PROOF=1 tests/fm-herdr-agent-free-proof-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+# herdr: herdr 0.8.2
+# claude 2.1.252 (Claude Code): foreground=[2.1.252/claude] state=alive
+ok - herdr agent-free proof: claude 2.1.252 (Claude Code) running in a Herdr pane never proves a bare idle shell
+# codex codex-cli 0.150.1: foreground=[codex/codex] state=alive
+ok - herdr agent-free proof: codex codex-cli 0.150.1 running in a Herdr pane never proves a bare idle shell
+# opencode 1.17.11: foreground=[opencode/opencode] state=alive
+ok - herdr agent-free proof: opencode 1.17.11 running in a Herdr pane never proves a bare idle shell
+# pi 0.84.4: foreground=[node/pi] state=alive
+ok - herdr agent-free proof: pi 0.84.4 running in a Herdr pane never proves a bare idle shell
+# cursor 2026.08.31-4057e58: foreground=[node/cursor-agent] state=alive
+ok - herdr agent-free proof: cursor 2026.08.31-4057e58 running in a Herdr pane never proves a bare idle shell
+# unverified on this machine (not installed): pi-signed grok kimi muse
+# checked 5 installed harness(es) on herdr herdr 0.8.2 in workspace w1
+```
+
+Every installed harness owns the pane's foreground under its own argv0, so none can satisfy the shell-only proof, and Herdr registered each of them within the guard's wait.
+`pi-signed`, `grok`, `kimi`, and `muse` were not installed on that machine and remain unverified here; the guard reports them explicitly and refuses a pass that checked nothing.
+This is the command that refreshes this record; run it after every harness upgrade.
 
 ### Away-mode transport
 

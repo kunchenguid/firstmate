@@ -269,8 +269,18 @@ Create replaces only a confidently dead or no-agent husk, creates the replacemen
 This prevents closing the workspace's last tab before a replacement exists.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
-A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.
-Unlike tmux process-name inspection, native registration can classify Pi without guessing from a generic interpreter name.
+A structurally gone pane becomes `missing`, an agent-free shell becomes `dead`, a registration the pane's processes do not contradict becomes `alive`, and an unexpected read becomes `unreadable`.
+Native registration classifies a harness without guessing from a generic interpreter name, which tmux process-name inspection cannot do.
+
+A reported registration is not evidence on its own.
+Herdr's agent registry is written by whatever reports into it, and a report is not withdrawn when the process that made it goes away, so a registration can outlive the agent it describes.
+The classifier therefore corroborates a reported registration against the pane's own `pane process-info` inventory and treats the registration as stale when that inventory positively proves a lone bare idle shell.
+This is the same rule the tmux classifier already applies from the foreground process group, expressed through Herdr's own inventory.
+
+The corroboration is positive-only and reads one strict instantaneous sample, so it can only move a verdict from `alive` toward `dead`, never the other way.
+A live harness process, an extra foreground process, a shell with a child of its own, an unreadable inventory, and an inventory answering about a different pane all leave the registration standing.
+An idle shell transiently hosting a prompt helper therefore stays `alive` for that sample, and the next poll settles it.
+A pane whose registration outlived its agent is a husk on the same terms as a restored one, so create-time replacement and presentation reclaim treat both identically.
 
 The session-start sweep uses this probe.
 Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
@@ -344,7 +354,11 @@ tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-herdr-agent-free-proof-live-e2e.test.sh
 ```
+
+`tests/fm-herdr-agent-free-proof-live-e2e.test.sh` is the opt-in drift guard for the agent-free proof: it launches every installed harness for real and fails naming the harness and version if a running one ever proves a bare idle shell.
+Run it after any harness upgrade and refresh the per-harness evidence it prints.
 
 Real Herdr tests use the named lab helper and default-session tripwire.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) records the active version, CLI, projection, event, and lifecycle evidence without task-specific chronology.

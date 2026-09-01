@@ -1874,25 +1874,55 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              reaped it - verified empirically: killing a pane's shell pid
 #              on a live server makes herdr immediately drop both the pane
 #              and its tab from `pane get`/`tab list`).
-#   no-agent - `pane get` succeeds (the pane structurally exists) but `agent
-#              get` responds with error code agent_not_found: nothing is
-#              registered in it - exactly what a herdr session-layout restore
-#              produces (verified empirically: `session stop` + fresh `herdr
-#              server` restart leaves the pane alive, agent_status "unknown",
-#              agent get -> agent_not_found - docs/herdr-backend.md "ID
-#              stability across a server restart"), and what a future
-#              `resume_agents_on_restore = false` restore would produce too
-#              (a plain shell, never an agent).
-#   live     - `agent get` succeeds and reports a real agent_status (working,
-#              idle, done, or blocked - any registered value). An idle or
-#              blocked agent is still a genuine, still-registered agent, not
-#              a restored husk, so it is never a close-and-replace candidate.
+#   no-agent - the pane structurally exists but confidently hosts no agent.
+#              Two independent positive grounds reach this verdict:
+#              (a) `agent get` responds with error code agent_not_found:
+#              nothing is registered in it - exactly what a herdr
+#              session-layout restore produces (verified empirically:
+#              `session stop` + fresh `herdr server` restart leaves the pane
+#              alive, agent_status "unknown", agent get -> agent_not_found -
+#              docs/herdr-backend.md "ID stability across a server restart"),
+#              and what a future `resume_agents_on_restore = false` restore
+#              would produce too (a plain shell, never an agent);
+#              (b) a registration IS reported, but the pane's own process
+#              inventory positively proves a lone bare idle shell, so the
+#              registration outlived the process it describes.
+#   live     - `agent get` reports a real agent_status (working, idle, done,
+#              or blocked - any registered value) and the pane's process
+#              inventory does not contradict it. An idle or blocked agent is
+#              still a genuine, still-registered agent, not a restored husk,
+#              so it is never a close-and-replace candidate.
 #   unknown  - anything else: an unparseable/unexpected response from either
 #              call, or a `pane get` success whose own echoed pane_id does not
 #              round-trip (guards against misreading a herdr response shape
 #              change as "the pane exists"). The caller must fail safe toward
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
+#
+# Why a reported registration is corroborated at all. Herdr's agent registry
+# is written by whatever reports into it - each harness's herdr integration
+# extension, or any other source - and a report is not withdrawn when the
+# process that made it goes away. Verified empirically on herdr 0.8.2: a
+# `pane report-agent` from a source herdr does not itself own stays registered
+# on a pane running nothing but its shell, so `agent get` keeps answering
+# `idle` with no agent alive anywhere. Trusting that alone made a task whose
+# worker had already exited to its shell read `alive` forever: every lifecycle
+# verb then typed the harness's exit command into a shell and refused to
+# relaunch, with no state that could ever clear it. The tmux classifier never
+# had this hole because it reads the foreground process group and lets a
+# group that is nothing but shells settle the negative verdict; this is the
+# same rule expressed through herdr's own `pane process-info` inventory.
+#
+# The corroboration is positive-only and one strict instantaneous sample, so
+# it is the cheapest possible addition to a read that runs in poll loops and
+# can only ever move a verdict from `live` toward `no-agent`, never the other
+# way. Anything short of proof - a live harness process in the foreground, an
+# extra foreground process, a shell with a child, an unreadable inventory, or
+# a response about a different pane - leaves `live` exactly as before, so a
+# genuinely live, ambiguous, unreadable, or contradicting endpoint is never
+# reclassified as recoverable. An idle shell transiently hosting a prompt
+# helper therefore keeps `live` for that sample; every caller that acts on the
+# negative verdict polls, so the next sample settles it.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -1911,7 +1941,13 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
-    working|idle|done|blocked) printf 'live' ;;
+    working|idle|done|blocked)
+      if fm_backend_herdr_pane_idle_shell_sample "$session" "$pane_id" >/dev/null 2>&1; then
+        printf 'no-agent'
+      else
+        printf 'live'
+      fi
+      ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1920,7 +1956,9 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
 # states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
 # confirm; live and unknown both refuse (1), so an inconclusive read never
 # licenses closing anything. Restored-layout recovery depends on this
-# fail-safe-toward-refusal behavior.
+# fail-safe-toward-refusal behavior. A husk is defined by what the pane IS -
+# gone, or a plain shell - so a pane whose registration outlived its agent is
+# a husk on the same terms as a restored one; the classifier owns that proof.
 fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
   case "$(fm_backend_herdr_pane_agent_state "$1" "$2")" in
     dead|no-agent) return 0 ;;
@@ -1931,8 +1969,10 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
-# a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
-# unexpected or failed API read is `unreadable`.
+# a confirmed agent-less pane is `dead` - including one whose reported
+# registration its own process inventory proves stale - a registered agent
+# that inventory does not contradict is `alive`, and an unexpected or failed
+# API read is `unreadable`.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
