@@ -17,7 +17,9 @@
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
 #
 # Registered modes:
-#   no-mistakes            full pipeline -> PR -> configured merge authority (default)
+#   no-mistakes            ordinary full pipeline -> PR -> configured merge authority (default);
+#                          deployable ByteDance BITS/PPE work resolves to this task mode
+#                          and follows the lifecycle routed by AGENTS.md and owned by bits-development
 #   direct-PR              push + PR via gh-axi, no pipeline
 #   local-only             local branch, no remote/PR, guarded local merge
 #   no-mistakes-prod-only  a conditional policy, not a task mode: firstmate

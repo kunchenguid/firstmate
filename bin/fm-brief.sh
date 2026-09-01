@@ -30,7 +30,9 @@
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
+#   no-mistakes  ordinary: implement -> /no-mistakes pipeline -> PR -> configured merge authority;
+#                deployable ByteDance BITS/PPE: use the accepted task's bits-development
+#                sequence before its final limited /no-mistakes pass
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
@@ -409,7 +411,10 @@ EOF
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you on the next delivery phase.
+For an ordinary no-mistakes task, that next phase is /no-mistakes validation and PR delivery.
+For deployable ByteDance-internal code with a BITS/PPE delivery surface, do not start no-mistakes until Firstmate has loaded \`bits-development\` and that lifecycle has delivered the exact candidate through the BITS-owned source branch, deployed it to a fresh dedicated PPE, and passed E2E against that deployment.
+On that BITS/PPE path, the final no-mistakes pass is limited to review, tests, documentation, and lint; it must not own rebase, push, PR, or CI, and a code-changing fix creates a new candidate that repeats BITS PPE deployment and E2E before another final pass.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -422,7 +427,8 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+On the ordinary path, after /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+On the BITS/PPE path, follow \`bits-development\` for the ready signal because BITS owns the MR and CI while no-mistakes validates only the already PPE-proven candidate.
 EOF
     ;;
 esac
