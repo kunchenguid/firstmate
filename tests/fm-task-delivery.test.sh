@@ -297,7 +297,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod
+  local home meta meta_real out sendroot payload mode id brief_dod delivered_dod
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -312,6 +312,7 @@ STUB
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+    meta_real="$(CDPATH='' cd -- "$(dirname "$meta")" && pwd -P)/$(basename "$meta")"
     out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: promotion should succeed"
 
@@ -336,6 +337,14 @@ STUB
       "$mode: promoted worker was not told to stop for any wrong worktree"
     assert_grep "git checkout -b fm/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
+    assert_grep "task record \`$meta_real\`" "$payload" \
+      "$mode: promoted worker's preflight was not bound to its task record"
+    assert_grep "delivery_ref=refs/heads/fm/$id" "$payload" \
+      "$mode: promoted worker's preflight was not bound to its exact delivery ref"
+    assert_grep 'git -C "$task_root" status --porcelain=v1 --untracked-files=all' "$payload" \
+      "$mode: promoted worker's clean check was not bound to its recorded task root"
+    assert_grep "git -C \"\$task_root\" grep -n -F 'FINALIZE-AFTER(' \"\$delivery_ref\" -- ." "$payload" \
+      "$mode: promoted worker's sentinel scan was not bound to its verified delivery ref"
     grep -Fqx "8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find." "$payload" \
       || fail "$mode: promoted worker did not receive the batched-findings contract as rule 8"
     assert_grep "Enumerate the COMPLETE finding set first" "$payload" \

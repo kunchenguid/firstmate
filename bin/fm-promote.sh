@@ -127,6 +127,13 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+META_PARENT=${META%/*}
+[ "$META_PARENT" != "$META" ] || META_PARENT=.
+META_PARENT_REAL=$(CDPATH='' cd -- "$META_PARENT" 2>/dev/null && pwd -P) || {
+  echo "error: task record directory cannot be resolved: $META_PARENT" >&2
+  exit 1
+}
+META_REAL="$META_PARENT_REAL/${META##*/}"
 
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
@@ -151,7 +158,7 @@ Your scout task has been promoted to a ship task, mode=$MODE. Your window, workt
 EOF
   fm_ship_batch_rule_block
   printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "$META_REAL"
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"
 TMP=
