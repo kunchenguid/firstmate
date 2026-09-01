@@ -1580,9 +1580,38 @@ status_span_has_actionable() {  # <status-file> <start-offset>
   status_span_first_actionable_record "$1" "${2:-0}" > /dev/null
 }
 
+# Read bin/fm-crew-state.sh's authoritative current-state line once. Keeping the
+# read separate from its pure parsers lets a caller make more than one policy
+# decision from one bounded command without racing two snapshots.
+crew_state_line() {  # <id>
+  local id=$1 line
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in state:*) printf '%s' "$line" ;; *) return 1 ;; esac
+}
+
+# Print the state token from one valid crew_state_line result, or `unknown` for
+# malformed input. This is deliberately narrower than interpreting free-text
+# detail: only fm-crew-state.sh's structured leading field is policy evidence.
+crew_state_name() {  # <crew-state-line>
+  local line=$1 state
+  case "$line" in state:*) ;; *) printf 'unknown'; return ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ -n "$state" ] && printf '%s' "$state" || printf 'unknown'
+}
+
+# 0 only for the one done outcome that remains intentionally live: CI checks are
+# green and no-mistakes is still monitoring the open PR for merge or close. Other
+# done details include the merge/close event itself and must remain actionable.
+# Match fm-crew-state.sh's complete structured output so free-text lookalikes do
+# not widen this exception to generic completed work.
+crew_state_is_done_monitoring() {  # <crew-state-line>
+  [ "$1" = 'state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)' ]
+}
+
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
-# from bin/fm-crew-state.sh's one authoritative current-state line
-# ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
+# from one crew_state_line result ("state: <s> · source: <src> · <detail>").
+# Prints exactly one token:
 #   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
@@ -1590,24 +1619,33 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 #             pause (paused:), which is EXPECTED to idle;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
-# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
-# FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+# The parser itself is pure. crew_absorb_class below owns the bounded state read
+# for ordinary callers, while policy that also needs the structured state token
+# can reuse this parser with the same captured line.
+crew_absorb_class_from_line() {  # <crew-state-line>
+  local line=$1 state src
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  state=${line#state: }; state=${state%% *}
+  state=$(crew_state_name "$line")
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
+}
+
+# One fm-crew-state.sh read serves BOTH ordinary absorb reasons at once. Reading
+# the state authoritatively (not the status log) keeps run-step precedence for an
+# actually active run. A watcher reconciling a separate current `paused:` line may
+# additionally recognize the exact checks-green monitoring outcome as a declared
+# finished wait; other done outcomes remain actionable.
+# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
+# run it only on no-verb signal and first-sighting stale paths, never every wake.
+# FM_CREW_STATE_BIN lets tests stub the verdict.
+crew_absorb_class() {  # <id>
+  local line
+  line=$(crew_state_line "$1" 2>/dev/null) || true
+  crew_absorb_class_from_line "$line"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
