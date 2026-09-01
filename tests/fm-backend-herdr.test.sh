@@ -2862,6 +2862,14 @@ test_workspace_find_matches_only_this_homes_own_label() {
 
 # --- list_live: scoped to this home's own workspace only ---------------------
 
+test_task_label_is_human_readable_and_id_bound() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_label "NeoMD I/F/A instant" fm-css' "$ROOT")
+  [ "$out" = 'NeoMD I/F/A instant (fm-css)' ] \
+    || fail "new task labels should contain the short title and id in parentheses, got '$out'"
+  pass "fm_backend_herdr_task_label: formats a human-readable title with the task id"
+}
+
 test_list_live_scoped_to_this_homes_workspace_only() {
   local dir log resp fb out home
   dir="$TMP_ROOT/list-live-scoped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2881,6 +2889,22 @@ test_list_live_scoped_to_this_homes_workspace_only() {
   assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w1' \
     "list_live must never query the primary's (or a sibling secondmate's) workspace"
   pass "fm_backend_herdr_list_live: scoped to this home's own workspace, never a sibling home's"
+}
+
+test_list_live_discovers_new_human_readable_task_labels() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/list-live-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"NeoMD I/F/A instant (fm-css)","workspace_id":"w1"},{"tab_id":"w1:t2","label":"Captain notes","workspace_id":"w1"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
+  assert_contains "$out" $'fmtest:w1:p1\tNeoMD I/F/A instant (fm-css)' \
+    "list_live did not discover a new human-readable task label"
+  assert_not_contains "$out" "Captain notes" \
+    "list_live treated an unrelated tab as a task"
+  pass "fm_backend_herdr_list_live: discovers new human-readable task labels and ignores unrelated tabs"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -4586,7 +4610,9 @@ test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
+test_task_label_is_human_readable_and_id_bound
 test_list_live_scoped_to_this_homes_workspace_only
+test_list_live_discovers_new_human_readable_task_labels
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read

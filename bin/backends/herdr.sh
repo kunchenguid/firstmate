@@ -52,8 +52,9 @@
 #
 # Authoritative task recovery/orphan discovery (ids may not deterministically match live state
 # after a server restart in a differently-configured session; see the
-# verification doc) uses LABEL matching (fm-<id> tab labels), never trusts a
-# stored pane id blindly: fm_backend_herdr_list_live. The presentation journal
+# verification doc) uses LABEL matching (legacy fm-<id> or new
+# <short-title> (<id>) tab labels), never trusts a stored pane id blindly:
+# fm_backend_herdr_list_live. The presentation journal
 # is deliberately excluded from that path.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
@@ -627,8 +628,8 @@ fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> 
 # fm_backend_herdr_projection_concise_task_label: strip redundant owner
 # prefixes from a task id used only in the presentation workspace label.
 # Removes firstmate/, 2ndmate-<id>/, and a presentation-level fm- owner
-# prefix when present. The ordinary task tab remains fm-<id> and is not
-# built by this helper.
+# prefix when present. The ordinary task tab label is built separately and is
+# not built by this helper.
 fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   local task=$1
   case "$task" in
@@ -1954,6 +1955,16 @@ fm_backend_herdr_agent_alive() {  # <target>
   esac
 }
 
+# fm_backend_herdr_task_label: format a new worker's human-readable tab label.
+# Existing tabs keep their recorded labels; this is only called while creating
+# a new worker endpoint.
+fm_backend_herdr_task_label() {  # <short-title> <task-id>
+  local title=$1 id=$2
+  title=$(printf '%s' "$title" | tr '\r\n\t' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  [ -n "$title" ] || title=Task
+  printf '%s (%s)' "$title" "$id"
+}
+
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
 # <container> ("session:workspace_id"). Herdr does NOT enforce label
 # uniqueness itself (verified: two tabs can share a label), so the duplicate
@@ -2055,7 +2066,7 @@ EOF
 }
 
 # fm_backend_herdr_projection_create_task: create one disposable presentation
-# workspace and its normal fm-<id> task tab without looking up, adopting, or
+# workspace and its normal human-readable task tab without looking up, adopting, or
 # reusing any existing workspace.
 # The caller must atomically publish the projection journal first.
 # This function sets exact response-derived globals and prints nothing:
@@ -3113,7 +3124,8 @@ EOF
 }
 
 # fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label looks like a firstmate task window (fm-<id>) in <session>'s, THIS
+# label looks like a firstmate task window (legacy fm-<id>, or the new
+# human-readable `<short title> (<id>)` form) in <session>'s, THIS
 # HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
 # home's), by LABEL - never by trusting a stored pane id, since ids are not
 # guaranteed stable across every server lifecycle (see herdr-verification-p2.md
@@ -3133,7 +3145,12 @@ fm_backend_herdr_list_live() {  # <session>
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
     [ -n "$pane_id" ] || continue
     printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done < <(printf '%s' "$tabs" | jq -r '
+    .result.tabs[]?
+    | select((.label | type) == "string")
+    | select((.label | startswith("fm-")) or (.label | test("\\([A-Za-z0-9._-]+\\)$")))
+    | "\(.tab_id)\t\(.label)"
+  ' 2>/dev/null)
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

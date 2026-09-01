@@ -98,7 +98,8 @@ The token is visible in the workspace title because Herdr exposes no verified hi
 
 The owning parent is the launcher's own exact workspace, resolved from the same identity the flat path uses, and falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent; it is the placement and ordering reference the projection is bound under.
-The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
+The normal task tab for a new worker is labeled `<short title> (<id>)` and is created in the exact new workspace returned by Herdr.
+Historical `fm-<id>` task tabs remain valid and discoverable, and existing task operations never rename them.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.

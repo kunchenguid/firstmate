@@ -2193,6 +2193,21 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
+HERDR_TASK_LABEL=$W
+if [ "$BACKEND" = herdr ]; then
+  HERDR_TASK_TITLE=${FM_BACKLOG_ROW_TITLE:-}
+  if [ -z "$HERDR_TASK_TITLE" ]; then
+    HERDR_TASK_TITLE=$(awk '
+      /^# Task[[:space:]]*$/ { in_task=1; next }
+      in_task && /^#/ { exit }
+      in_task && NF { print; exit }
+    ' "$BRIEF")
+  fi
+  if [ -z "$HERDR_TASK_TITLE" ]; then
+    HERDR_TASK_TITLE=$(awk '!/^#/ && NF { print; exit }' "$BRIEF")
+  fi
+  HERDR_TASK_LABEL=$(fm_backend_herdr_task_label "$HERDR_TASK_TITLE" "$ID")
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
@@ -2267,7 +2282,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$HERDR_TASK_LABEL" "$PROJ_ABS"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -2321,7 +2336,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$HERDR_TASK_LABEL"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -2347,11 +2362,11 @@ case "$BACKEND" in
                && fm_backend_herdr_projection_live_binding_matches \
                  "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
                  "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
-                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
+                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$HERDR_TASK_LABEL" \
                && fm_backend_herdr_projection_journal_bind \
                  "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
                  "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
+                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$HERDR_TASK_LABEL"; then
               :
             else
               echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
@@ -2374,7 +2389,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$HERDR_TASK_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
