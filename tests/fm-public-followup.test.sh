@@ -2554,22 +2554,25 @@ test_remote_retire_refuses_nonwritable_state() {
 }
 
 test_remote_retire_succeeds_without_link() {
-  local home remote
+  local home remote rc
   remote_fixture_prepare
   home=$(make_home remote-no-link)
   remote=$(make_remote_route "$home" mate)
   seed_repro_commitment "$home" pf-remote-no-link req-remote-no-link secondmate:mate work-no-link
   fm_write_meta "$remote/state/work-no-link.meta" "status=done"
+  chmod 555 "$remote/state"
 
-  run_pf_remote "$home" retire pf-remote-no-link --reason "already cleared" --force >/dev/null \
-    || fail "retire must remain idempotent when the remote link is already absent"
+  rc=0
+  run_pf_remote "$home" retire pf-remote-no-link --reason "already cleared" --force >/dev/null || rc=$?
+  chmod 700 "$remote/state"
+  [ "$rc" -eq 0 ] || fail "retire must remain idempotent when the non-writable remote link is absent"
   assert_present "$home/state/public-followup/retired/pf-remote-no-link" \
     "an already-cleared remote link must permit a retirement receipt"
   assert_absent "$home/state/public-followup/registry/pf-remote-no-link" \
     "an already-cleared remote link must permit registration removal"
   assert_no_grep 'x_request=' "$remote/state/work-no-link.meta" \
     "an already-cleared remote task must remain unlinked"
-  pass "retire completes when a remote link is already absent"
+  pass "retire completes without a link in non-writable remote state"
 }
 
 # fm-on.sh passes ssh's status through, so 255 is unknown remote completion, not

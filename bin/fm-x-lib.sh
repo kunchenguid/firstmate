@@ -989,17 +989,31 @@ fmx_meta_link_clear() {
     expected=$2
     parent=${meta%/*}
     [ "$parent" != "$meta" ] || parent=.
-    [ -d "$parent" ] && [ ! -L "$parent" ] && [ -r "$parent" ] \
-      && [ -w "$parent" ] && [ -x "$parent" ] || return 1
+    [ -d "$parent" ] && [ ! -L "$parent" ] && [ -r "$parent" ] && [ -x "$parent" ] \
+      || return 1
     fm_backlog_record_parent_authorized "$meta" "task record" "$STATE" || return 1
   fi
   [ ! -L "$meta" ] || return 1
   [ -f "$meta" ] || return 0
+  if [ "$expected_set" -eq 1 ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        x_request=*) link_present=1; rid=${line#*=} ;;
+      esac
+    done < "$meta" || return 1
+    [ "$link_present" -eq 0 ] || {
+      [ -n "$expected" ] && [ -n "$rid" ] && [ "$rid" = "$expected" ] || return 1
+    }
+    [ "$link_present" -eq 1 ] || return 0
+    [ -w "$parent" ] || return 1
+  fi
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock"
   [ ! -L "$meta" ] || { fm_lock_release "$lock"; return 1; }
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }
   if [ "$expected_set" -eq 1 ]; then
+    link_present=0
+    rid=
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
         x_request=*) link_present=1; rid=${line#*=} ;;
