@@ -1956,14 +1956,16 @@ fm_backend_herdr_tab_is_husk() {  # <session> <pane_id>
 # fm_backend_herdr_agent_state: recovery-grade state for the same session-start
 # sweep as the tmux classifier. It reuses the husk classifier rather than
 # creating a second Herdr state machine: a structurally gone pane is `missing`,
-# a confirmed agent-less pane is `dead`, a registered agent is `alive`, and an
-# unexpected or failed API read is `unreadable`.
+# a confirmed agent-less pane is `dead`, a strictly proved stale `done`
+# registration is `stale-done`, a registered agent is `alive`, and an unexpected
+# or failed API read is `unreadable`.
 fm_backend_herdr_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
     dead) printf 'missing' ;;
-    no-agent|stale-done) printf 'dead' ;;
+    no-agent) printf 'dead' ;;
+    stale-done) printf 'stale-done' ;;
     live) printf 'alive' ;;
     *) printf 'unreadable' ;;
   esac
@@ -2349,7 +2351,11 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   fi
   state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")
   case "$state" in
-    no-agent|stale-done) required_agent_state=$state ;;
+    no-agent) required_agent_state=$state ;;
+    stale-done)
+      echo "error: exact herdr presentation pane for $id has a stale done registration; refusing replacement that could signal its process group" >&2
+      return 1
+      ;;
     dead)
       echo "warning: exact herdr presentation pane for $id is gone; spawning flat" >&2
       return 2
@@ -2507,7 +2513,11 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
       [ -n "$pane" ] || continue
       state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
       case "$state" in
-        dead|no-agent|stale-done) : ;;
+        dead|no-agent) : ;;
+        stale-done)
+          echo "error: quarantined herdr presentation for $id has a stale done registration; refusing flat fallback without a fresh launch-boundary proof" >&2
+          return 1
+          ;;
         live|unknown)
           echo "error: quarantined herdr presentation for $id has a $state pane; refusing duplicate launch" >&2
           return 1

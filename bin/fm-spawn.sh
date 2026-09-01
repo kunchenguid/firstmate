@@ -1961,6 +1961,8 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 # A stale presentation journal never grants launch authority.
 # Under the session lock, authoritative metadata must identify one positively
 # dead or agent-free endpoint before token inspection may allow flat fallback.
+# A stale done registration remains reserved for a dedicated replacement flow
+# that revalidates it immediately before the first launch input.
 # Exact Herdr fields are retained for the narrower version 2 reclaim path.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
@@ -2009,7 +2011,11 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
     }
     old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
     case "$old_state" in
-      dead|no-agent|stale-done) return 0 ;;
+      dead|no-agent) return 0 ;;
+      stale-done)
+        echo "error: existing herdr endpoint for $ID has a stale done registration; refusing flat fallback without a fresh launch-boundary proof" >&2
+        return 1
+        ;;
       live|unknown)
         echo "error: existing herdr endpoint for $ID is $old_state; refusing duplicate launch" >&2
         return 1

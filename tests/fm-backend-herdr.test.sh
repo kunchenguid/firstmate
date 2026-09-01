@@ -1606,13 +1606,13 @@ test_agent_state_accepts_only_a_stale_done_registration() {
     FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_agent_state fmtest:w2:p2' "$ROOT" 2>&1)
   status=$?
-  [ "$status" -eq 0 ] && [ "$out" = dead ] \
-    || fail "a stale done registration over a proved bare shell should classify dead, got '$out'"
+  [ "$status" -eq 0 ] && [ "$out" = stale-done ] \
+    || fail "a stale done registration over a proved bare shell should classify stale-done, got '$out'"
   [ "$(grep -c $'agent\x1fget\x1fw2:p2' "$log")" -eq 2 ] \
     || fail "stale done recovery did not re-read the agent registration after proving the shell"
   assert_contains "$(cat "$log")" $'pane\x1fprocess-info\x1f--pane\x1fw2:p2' \
     "stale done recovery did not prove the pane had returned to its bare shell"
-  pass "fm_backend_herdr_agent_state: a stale done registration over a proved bare shell is agent-free"
+  pass "fm_backend_herdr_agent_state: a stale done registration remains distinct from generic dead state"
 }
 
 test_agent_state_refuses_done_without_a_bare_shell() {
@@ -2958,6 +2958,7 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
           case "$mode" in
             live) printf live ;;
             unknown) printf unknown ;;
+            stale-done) printf stale-done ;;
             *) printf no-agent ;;
           esac
         }
@@ -2978,15 +2979,16 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
       run_case ambiguous "$JOURNAL" "$HOME_A"
       run_case live "$JOURNAL" "$HOME_A"
       run_case unknown "$JOURNAL" "$HOME_A"
+      run_case stale-done "$JOURNAL" "$HOME_A"
       run_case focus-unknown "$JOURNAL" "$HOME_A"
     ')
-  [ "$out" = $'legacy:2\ncross-home:2\nambiguous:2\nlive:1\nunknown:1\nfocus-unknown:2' ] \
+  [ "$out" = $'legacy:2\ncross-home:2\nambiguous:2\nlive:1\nunknown:1\nstale-done:1\nfocus-unknown:2' ] \
     || fail "reclaim refusal matrix returned wrong decisions: $out"
   [ ! -s "$mutation_log" ] \
-    || fail "legacy, cross-home, ambiguous, live/unknown, or focus-unknown refusal mutated Herdr: $(cat "$mutation_log")"
+    || fail "legacy, cross-home, ambiguous, live/unknown, stale-done, or focus-unknown refusal mutated Herdr: $(cat "$mutation_log")"
   [ "$(sed -n 's/^workspace_label=//p' "$journal")" = "$label" ] \
     || fail "reclaim refusal matrix rewrote the bound workspace label"
-  pass "herdr presentation reclaim: legacy, cross-home, ambiguous, live/unknown, and focus-unknown cases refuse without mutation"
+  pass "herdr presentation reclaim: stale-done and every ambiguous case refuse without mutation"
 }
 
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
@@ -3102,7 +3104,22 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   [ "$status" -ne 0 ] || fail "a token match with a live registered agent must refuse duplicate launch"
   assert_contains "$out" "has a live pane" "live duplicate refusal did not explain the risk"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' "live duplicate refusal closed a pane"
-  pass "herdr presentation recovery: duplicate-token inspection is read-only and live-agent risk refuses fallback"
+
+  : > "$log"; rm -f "$resp"/*.out "$resp"/*.exit "$resp/.count"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate/task-p3 · p:%s"}]}}\n' "$token" > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/2.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_pane_agent_state() { printf stale-done; }
+      fm_backend_herdr_projection_recovery_allows_flat fmtest "$1" task-p3
+    ' "$ROOT" "$journal" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a stale done token match must refuse flat fallback without a launch-boundary proof"
+  assert_contains "$out" "stale done registration" "stale done fallback refusal did not explain the proof boundary"
+  assert_not_contains "$(cat "$log")" $'tab\x1fcreate' "stale done fallback created a tab"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "stale done fallback closed a pane"
+  pass "herdr presentation recovery: duplicate-token inspection is read-only and live or stale-done risk refuses fallback"
 }
 
 # --- workspace_find: scoped to THIS home's own label, not just any match ----
