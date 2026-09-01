@@ -85,7 +85,7 @@ test_the_full_board_renders_every_section() {
     || fail "the board rendered its fail-closed error instead of the fleet: $out"
   printf '%s' "$out" | jq -e '
     ([.stats[] | {key:.label, value:.n}] | from_entries) as $s
-    | $s["workstreams"] == 1 and $s["tasks on the board"] == 5
+    | $s["workstreams"] == 1 and $s["tasks on the board"] == 8
       and $s["agents live"] == 1 and $s["waiting on you"] == 1
       and $s["board ≠ reality"] == 1
   ' >/dev/null || fail "the stat tiles do not carry the board tallies: $out"
@@ -216,6 +216,47 @@ test_every_task_row_exposes_its_full_title() {
   pass "every task row exposes its full title, expandable or not"
 }
 
+test_the_board_total_counts_whole_lanes_not_visible_rows() {
+  local home out payload expected visible
+  home=$(make_home boardtotal)
+  # A second capped lane, so the tile has more than one lane total to sum.
+  payload=$(base_payload | jq '
+    .workstreams += [{ id: "ontology", name: "Chat Ontology",
+      tasks: [{ id: "ontology-rows", title: "Ontology rows", state: "queued" }],
+      counts: { done: 4, review: 0, active: 0, held: 0, decision: 0, queued: 3 },
+      more_tasks: 6 }]')
+  expected=$(printf '%s' "$payload" | jq '[.workstreams[] | (.tasks | length) + (.more_tasks // 0)] | add')
+  out=$(render "$home" "$payload")
+  # The relationship, not a fixed number: the tile is the sum of the lane
+  # totals, which validation pins to rows plus more_tasks for every lane.
+  printf '%s' "$out" | jq -e --argjson want "$expected" '
+    (.stats[] | select(.label == "tasks on the board") | .n) == $want
+  ' >/dev/null || fail "the board total is not the sum of the lane totals ($expected): $out"
+  # And the fixture is genuinely capped, so the relationship is not a
+  # coincidence of the tile still counting visible rows.
+  visible=$(printf '%s' "$out" | jq '[.streams[].rows | length] | add')
+  [ "$expected" -gt "$visible" ] \
+    || fail "the fixture is not capped ($expected vs $visible rows), so it proves nothing"
+  pass "the board total counts whole lanes, not the rows the cap left visible"
+}
+
+test_a_lane_reports_empty_only_when_its_whole_lane_is_empty() {
+  local home out payload
+  home=$(make_home emptylane)
+  # A lane that ships no rows but omits some still has work in it.
+  payload=$(base_payload | jq '
+    .workstreams += [{ id: "ontology", name: "Chat Ontology", tasks: [],
+      counts: { done: 0, review: 0, active: 0, held: 0, decision: 0, queued: 4 },
+      more_tasks: 4 },
+    { id: "fallow", name: "Fallow", tasks: [] }]')
+  out=$(render "$home" "$payload")
+  printf '%s' "$out" | jq -e '
+    ((.streams[] | select(.id == "ws-ontology") | .empty) == false)
+      and ((.streams[] | select(.id == "ws-fallow") | .empty) == true)
+  ' >/dev/null || fail "a capped lane was reported as having no work in it: $out"
+  pass "a lane reads as empty only when its whole lane is empty"
+}
+
 test_a_board_without_edges_or_divergence_stays_quiet() {
   local home out payload
   home=$(make_home quiet)
@@ -251,6 +292,8 @@ test_the_dependency_graph_draws_only_edge_touched_local_nodes
 test_a_cross_workstream_edge_is_drawn_on_both_cards
 test_a_same_lane_graph_marks_no_foreign_node
 test_the_progress_bar_reports_the_whole_lane
+test_the_board_total_counts_whole_lanes_not_visible_rows
+test_a_lane_reports_empty_only_when_its_whole_lane_is_empty
 test_every_task_row_exposes_its_full_title
 test_a_board_without_edges_or_divergence_stays_quiet
 test_unreadable_data_fails_closed

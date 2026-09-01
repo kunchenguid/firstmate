@@ -155,6 +155,7 @@ const streams = streamsCol.children.map((card) => {
     crossKey: deep(card, "ws-key--cross").flatMap((k) => k.children.map((i) => i.textContent)),
     rows,
     more: deep(card, "wb-morechip").map((c) => c.textContent),
+    empty: deep(card, "wb-empty").length > 0,
     graph,
   };
 });

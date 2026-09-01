@@ -360,7 +360,23 @@ __FM_WORKSTREAM_BOARD_DATA__
   document.getElementById("wb-home").textContent = data.home;
   document.getElementById("wb-provenance").textContent = data.schema + " · " + data.generated;
 
-  var allTasks = data.workstreams.reduce(function (acc, ws) { return acc.concat(ws.tasks); }, []);
+  var STATES = ["done", "review", "active", "held", "decision", "queued"];
+  /* One owner for a lane's tallies: the composer's validated counts, which are
+     guaranteed to total the rows the lane ships plus the rows it omitted, and
+     the shipped rows only when a lane omits nothing and sent no counts. Row
+     capping is a display bound and never moves these numbers. */
+  function laneTally(ws) {
+    var visible = { done: 0, review: 0, active: 0, held: 0, decision: 0, queued: 0 };
+    ws.tasks.forEach(function (t) { visible[t.state] += 1; });
+    var declared = (ws.counts && typeof ws.counts === "object") ? ws.counts : null;
+    var counts = {};
+    STATES.forEach(function (k) {
+      counts[k] = declared ? (typeof declared[k] === "number" ? declared[k] : 0) : visible[k];
+    });
+    return { counts: counts, total: STATES.reduce(function (acc, k) { return acc + counts[k]; }, 0) };
+  }
+
+  var boardTasks = data.workstreams.reduce(function (acc, ws) { return acc + laneTally(ws).total; }, 0);
   var taskIndex = {};
   data.workstreams.forEach(function (ws) {
     ws.tasks.forEach(function (t) {
@@ -372,7 +388,7 @@ __FM_WORKSTREAM_BOARD_DATA__
   /* stat strip: clickable anchors into the board */
   var stats = [
     { n: data.workstreams.length, l: "workstreams", href: "#wb-streams" },
-    { n: allTasks.length, l: "tasks on the board", href: "#wb-streams" },
+    { n: boardTasks, l: "tasks on the board", href: "#wb-streams" },
     { n: liveAgents, l: "agents live", href: "#wb-agents" },
     { n: data.waiting.length, l: "waiting on you", href: "#wb-waiting", attn: data.waiting.length > 0 }
   ];
@@ -535,17 +551,8 @@ __FM_WORKSTREAM_BOARD_DATA__
     var head = el("div", "ws-head");
     var top = el("div", "ws-head-top");
     top.appendChild(el("h2", null, ws.name));
-    /* Row capping is a display bound: the bar, key, and badges report the
-       lane's declared totals, falling back to the visible rows only when the
-       composer sent no counts. */
-    var STATES = ["done", "review", "active", "held", "decision", "queued"];
-    var visible = { done: 0, review: 0, active: 0, held: 0, decision: 0, queued: 0 };
-    ws.tasks.forEach(function (t) { visible[t.state] += 1; });
-    var declared = (ws.counts && typeof ws.counts === "object") ? ws.counts : null;
-    var counts = {};
-    STATES.forEach(function (k) {
-      counts[k] = declared ? (typeof declared[k] === "number" ? declared[k] : 0) : visible[k];
-    });
+    var tally = laneTally(ws);
+    var counts = tally.counts;
     var held = counts.held;
     var decisions = counts.decision;
     var review = counts.review;
@@ -555,7 +562,7 @@ __FM_WORKSTREAM_BOARD_DATA__
     head.appendChild(top);
     if (ws.outcome) head.appendChild(el("p", "ws-outcome", ws.outcome));
 
-    var total = STATES.reduce(function (acc, k) { return acc + counts[k]; }, 0);
+    var total = tally.total;
     if (total > 0) {
       var bar = el("div", "ws-progress");
       /* held rides the active (gold) segment; decision gets its own rust pop */
@@ -661,7 +668,7 @@ __FM_WORKSTREAM_BOARD_DATA__
       body.appendChild(el("h3", null, "Done"));
       doneRows.forEach(function (t) { body.appendChild(taskRow(t)); });
     }
-    if (!ws.tasks.length) body.appendChild(el("p", "wb-empty", "No tasks are grouped here yet."));
+    if (!total) body.appendChild(el("p", "wb-empty", "No tasks are grouped here yet."));
     if (ws.more_tasks) body.appendChild(el("span", "wb-morechip", "+" + ws.more_tasks + " more - ask firstmate for the full list"));
     card.appendChild(body);
     streamsCol.appendChild(card);
