@@ -896,7 +896,11 @@ task_json_lines() {
       [ "$remaining" -ge "$probe_cost" ] || budget_exhausted=1
     fi
     if [ "$budget_exhausted" -eq 1 ]; then
-      unknown_metas+=("$meta")
+      if [ -f "$STATE/$(basename "$meta" .meta).status" ]; then
+        FM_SNAPSHOT_TASK_STATE_UNKNOWN=1 task_json_one "$meta" > "$out" || rc=1
+      else
+        unknown_metas+=("$meta")
+      fi
     else
       ( task_json_one "$meta" > "$out" ) &
       batch_pids+=("$!")
@@ -1113,7 +1117,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
-          endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
+          endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}]),
         counts:{
           active_children:($active_all | length),
           decisions_open:($decisions_all | length),
@@ -1126,7 +1130,6 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
-          (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
           (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
         ]
       }'

@@ -1004,6 +1004,8 @@ for i in $(seq -f '%04g' 1 1240); do
     "mode=no-mistakes" \
     "spawn_gen=fm.dead$i"
 done
+printf 'needs-decision [key=budget]: choose follow-up from https://github.com/kynjal26/firstmate/pull/123\n' \
+  > "$LARGE_HOME/state/02-dead-0001.status"
 cat > "$LARGE_BIN/tmux" <<'SH'
 #!/usr/bin/env bash
 trap 'exit 124' TERM
@@ -1030,7 +1032,6 @@ large_started=$(date +%s)
 PATH="$LARGE_BIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
   FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
   FM_SNAPSHOT_TASK_STATE_JOBS=32 \
-  FM_SNAPSHOT_SECONDMATE_CHILDREN=1500 \
   "$WRITER" || fail "large mixed fleet did not publish within its existing bounded path: $(cat "$LARGE_HOME/state/.home-summary-refresh.log" 2>/dev/null)"
 large_elapsed=$(( $(date +%s) - large_started ))
 [ "$large_elapsed" -lt 60 ] \
@@ -1048,6 +1049,7 @@ jq -e --arg home "$LARGE_HOME" '
   and any(.endpoints[]; .id == "00-paused-0001" and .state == "paused" and .endpoint.exists == true)
   and any(.endpoints[]; .id == "01-slow-0001" and .state == "unknown" and .endpoint.exists == null)
   and any(.endpoints[]; .id == "02-dead-0001" and .state == "unknown" and .endpoint.exists == null and .endpoint.target == "fmtest:02-dead-0001")
+  and any(.decisions_open[]; .id == "02-dead-0001" and .key == "budget" and .verb == "needs-decision")
 ' "$LARGE_HOME/state/home-summary.json" >/dev/null \
   || fail "large mixed fleet publication lost deterministic bounded endpoint evidence"
 pass "large mixed fleet home-summary publication bounds slow and dead endpoint probes"
