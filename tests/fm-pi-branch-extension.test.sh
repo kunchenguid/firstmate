@@ -654,6 +654,10 @@ const r4 = await report.execute(
 );
 if (r4.isError) throw new Error(`terminal-noop receipt failed: ${JSON.stringify(r4)}`);
 if (sentToMain.length !== 3) throw new Error("store-only terminal receipt rendered a merge note");
+// Reproduce a crash after store+receipt but before cursor advancement: the
+// repeated completion notification must coalesce to the existing receipt and
+// silently reconcile the cursor instead of leaving an unread no-op row behind.
+writeFileSync(`${home}/state/.branch-outcomes-cursor`, "3\n");
 const r5 = await report.execute(
   "call-5",
   { task: "task-9", verdict: "routine", summary: "the completed worker is still stopped; no action is needed", wake: terminalWake, receipt: "terminal-noop" },
@@ -665,6 +669,7 @@ if (r5.isError || !String(r5.content[0].text).includes("already recorded")) {
   throw new Error(`duplicate terminal-noop receipt did not deduplicate: ${JSON.stringify(r5)}`);
 }
 if (sentToMain.length !== 3) throw new Error("duplicate terminal receipt rendered a merge note");
+if (outcomeScript(["unread"]) !== "") throw new Error("duplicate terminal receipt did not reconcile the unread store-only row");
 writeFileSync(`${home}/state/.lock`, `1\n`);
 const r5LostOwner = await report.execute(
   "call-5-lost-owner",

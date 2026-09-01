@@ -813,6 +813,14 @@ export default function (pi: ExtensionAPI) {
               isError: true,
             };
           }
+          const marked = runOutcomeScript(["mark-read", "--through", existingSeq]);
+          if (!marked.ok) {
+            return {
+              content: [{ type: "text", text: `terminal-noop receipt already recorded seq ${existingSeq}, but could not be marked read: ${marked.detail}` }],
+              details: undefined,
+              isError: true,
+            };
+          }
           return {
             content: [{ type: "text", text: `terminal-noop receipt already recorded seq ${existingSeq}; no merge needed` }],
             details: undefined,
