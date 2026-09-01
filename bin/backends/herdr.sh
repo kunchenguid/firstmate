@@ -3201,7 +3201,7 @@ fm_backend_herdr_list_live() {  # <session>
   done < <(printf '%s' "$tabs" | jq -r '
     .result.tabs[]?
     | select((.label | type) == "string")
-    | select(.label | startswith("fm-"))
+    | select(.label | test("^fm-[A-Za-z0-9._-]+$"))
     | "\(.tab_id)\t\(.label)"
   ' 2>/dev/null)
 }

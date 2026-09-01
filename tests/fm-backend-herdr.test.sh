@@ -2993,8 +2993,8 @@ test_list_live_ignores_unowned_human_readable_task_labels() {
   local dir log resp fb out
   dir="$TMP_ROOT/list-live-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"NeoMD I/F/A instant (fm-css)","workspace_id":"w1"},{"tab_id":"w1:t2","label":"Meeting (draft)","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-legacy","workspace_id":"w1"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"NeoMD I/F/A instant (fm-css)","workspace_id":"w1"},{"tab_id":"w1:t2","label":"Meeting (draft)","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-legacy","workspace_id":"w1"},{"tab_id":"w1:t4","label":"fm-followup (draft)","workspace_id":"w1"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"},{"pane_id":"w1:p4","tab_id":"w1:t4"}]}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
