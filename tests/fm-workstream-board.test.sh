@@ -155,6 +155,17 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   [ "$rc" -ne 0 ] || fail "a negative omitted-task count was accepted"
 
   write_valid_payload "$data"
+  jq '.workstreams[0].counts = { done: 1, review: 0, active: -2, held: 0, decision: 0, queued: 0 }' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a negative lane count was accepted"
+
+  write_valid_payload "$data"
+  jq '.workstreams[0].counts = { done: 1, sailing: 2 }' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a lane count keyed by an unknown state was accepted"
+
+  write_valid_payload "$data"
   jq '.waiting[0].key = (reduce range(129) as $i (""; . + "x"))' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a 129-char waiting key was accepted"

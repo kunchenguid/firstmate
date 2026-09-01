@@ -120,12 +120,75 @@ test_the_dependency_graph_draws_only_edge_touched_local_nodes() {
   local home out
   home=$(make_home graph)
   out=$(render "$home" "$(base_payload)")
-  # One local edge (g6-define -> build-g6); the edge to a task outside the
-  # workstream is dropped, and the untouched rows stay out of the drawing.
+  # One local edge (g6-define -> build-g6); the edge whose other endpoint is on
+  # no card is dropped, and the untouched rows stay out of the drawing.
   printf '%s' "$out" | jq -e '
-    .streams[0].graph == {"nodes": 2, "edges": 1}
+    .streams[0].graph.nodes == 2 and .streams[0].graph.edges == 1
+      and (.streams[0].graph.labels == ["build-g6", "g6-define"])
   ' >/dev/null || fail "the dependency graph did not draw the local edge set: $out"
   pass "the dependency graph draws exactly the edge-touched local nodes"
+}
+
+test_a_cross_workstream_edge_is_drawn_on_both_cards() {
+  local home out payload
+  home=$(make_home crossedge)
+  payload=$(base_payload | jq '
+    .workstreams += [{ id: "ontology", name: "Chat Ontology",
+      tasks: [{ id: "ontology-rows", title: "Ontology rows", state: "queued" }] }]
+    | .edges = [{ from: "g6-define", to: "ontology-rows" }]')
+  out=$(render "$home" "$payload")
+  # The one edge crosses two workstreams, so both cards draw it with the
+  # foreign endpoint named, and the foreign node says which lane it lives in.
+  printf '%s' "$out" | jq -e '
+    ([.streams[] | .graph.edges] == [1, 1])
+      and ([.streams[] | .graph.labels] == [["g6-define", "ontology-rows"], ["g6-define", "ontology-rows"]])
+      and (.streams[0].graph.nodeTitles | any(test("ontology-rows.*Chat Ontology")))
+      and (.streams[1].graph.nodeTitles | any(test("g6-define.*Quote Flow")))
+  ' >/dev/null || fail "the cross-workstream edge was not drawn: $out"
+  pass "a cross-workstream dependency edge is drawn on both workstream cards"
+}
+
+test_the_progress_bar_reports_the_whole_lane() {
+  local home out payload
+  home=$(make_home progress)
+  # 30 rows visible out of 60; the tail the cap dropped is all done work.
+  payload=$(base_payload | jq '
+    .workstreams[0].more_tasks = 30
+    | .workstreams[0].counts = { done: 55, review: 0, active: 5, held: 0, decision: 0, queued: 0 }')
+  out=$(render "$home" "$payload")
+  printf '%s' "$out" | jq -e '
+    (.streams[0].segments | map(select(.cls == "ws-seg--done")) | first | .width)
+      == ((55 * 100 / 60 | tostring) + "%")
+      and (.streams[0].key | any(test("^55 done$")))
+  ' >/dev/null || fail "the progress bar did not report the lane totals: $out"
+
+  # Without declared counts the bar stays consistent with the rows it drew.
+  out=$(render "$home" "$(base_payload)")
+  printf '%s' "$out" | jq -e '
+    (.streams[0].segments | map(select(.cls == "ws-seg--done")) | first | .width)
+      == ((1 * 100 / 5 | tostring) + "%")
+  ' >/dev/null || fail "an uncounted lane did not fall back to its visible rows: $out"
+  pass "the progress bar reports the lane totals, not the capped row subset"
+}
+
+test_every_task_row_exposes_its_full_title() {
+  local home out payload
+  home=$(make_home titles)
+  payload=$(base_payload | jq '
+    .workstreams[0].tasks += [{ id: "long-queued", state: "queued",
+      title: "A queued backlog row whose title is far too long to fit on one line of the board" }]')
+  out=$(render "$home" "$payload")
+  # The plain row has no disclosure control, so its full title has to be
+  # reachable from the summary itself.
+  printf '%s' "$out" | jq -e '
+    (.streams[0].rows[] | select(.id == "long-queued"))
+    | .expandable == false
+      and .titleAttr == "A queued backlog row whose title is far too long to fit on one line of the board"
+  ' >/dev/null || fail "a plain task row hides its full title: $out"
+  printf '%s' "$out" | jq -e '
+    [.streams[0].rows[] | select(.titleAttr == "" or .titleAttr != .title)] == []
+  ' >/dev/null || fail "some task row does not carry its full title: $out"
+  pass "every task row exposes its full title, expandable or not"
 }
 
 test_a_board_without_edges_or_divergence_stays_quiet() {
@@ -160,5 +223,8 @@ test_unreadable_data_fails_closed() {
 
 test_the_full_board_renders_every_section
 test_the_dependency_graph_draws_only_edge_touched_local_nodes
+test_a_cross_workstream_edge_is_drawn_on_both_cards
+test_the_progress_bar_reports_the_whole_lane
+test_every_task_row_exposes_its_full_title
 test_a_board_without_edges_or_divergence_stays_quiet
 test_unreadable_data_fails_closed

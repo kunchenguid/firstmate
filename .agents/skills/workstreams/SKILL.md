@@ -30,6 +30,7 @@ The board is a sibling of the bearings board and shares its build mechanics thro
    - Compose exactly one waiting item per captain-held task id; when one task carries multiple questions, consolidate them into that item (`captain-hold-lifecycle` owns this rule).
    - Set `close: "release"` when the answer should free a captain-gated WORK item to proceed; question-shaped items omit it.
    - Pass the snapshot's workstreams through, including the explicit `unassigned` lane, and keep each lane's `more` count as the payload's `more_tasks`.
+   - Carry each lane's whole-lane state tallies through as its `counts` object (`done`, `review`, `active`, `held`, `decision`, `queued`), so the progress bar reports the lane rather than the rows the cap left visible.
    - Pass the snapshot's `edges` and `divergence` rows through; the divergence callout is how the captain learns the backlog and the live fleet disagree.
    - Map each agent's state to a chip tone: `working` for a working agent, `decision` for one waiting on the captain, `paused` otherwise.
 

@@ -16,7 +16,9 @@
 #
 # WORKSTREAM DERIVATION (the backlog has no workstream field; the convention is
 # umbrella tasks plus edges, and this header is its one owner):
-#   - An umbrella task is a structured, not-done backlog row with kind=program.
+#   - An umbrella task is a structured backlog row with kind=program, done or
+#     not: a finished umbrella keeps its workstream, so its members stay
+#     anchored to it instead of scattering into the unassigned lane.
 #     Its id is the workstream id, its title the workstream name, and its body
 #     (first indented lines under the row) the intended-outcome line.
 #   - Members are claimed in three deterministic passes, first claim wins, with
@@ -27,8 +29,10 @@
 #          direction) to an already-claimed task joins that task's workstream;
 #          when neighbors disagree, the workstream whose umbrella comes first
 #          in the backlog wins.
-#   - Tasks claimed by no workstream land in the explicit "unassigned" lane
-#     (done tasks outside every workstream are dropped, with disclosure).
+#   - Tasks claimed by no workstream land in the explicit "unassigned" lane,
+#     which is a real workstreams[] entry with its own counts and `more` and is
+#     never subject to the FM_WS_STREAMS cap (done tasks outside every
+#     workstream are dropped, with disclosure).
 #
 # TASK STATE (one value per board task, first match wins):
 #   done      backlog Done.
@@ -144,7 +148,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([.tasks[]? | select(.kind != "secondmate")]) as $live
   | ($live | map({key:.id, value:.}) | from_entries) as $live_map
   | ($recs | map({key:.id, value:.}) | from_entries) as $by_id
-  | ([$recs[] | select(.kind == "program" and .state != "done")]) as $umbrellas
+  | ([$recs[] | select(.kind == "program")]) as $umbrellas
   | ($umbrellas | to_entries | map({key:.value.id, value:.key}) | from_entries) as $uidx
   # Grouping candidates: every structured non-umbrella row, in backlog order.
   | ([$recs[] | select(.kind != "program" and ($uidx[.id] == null)) | .id]) as $cands
@@ -216,6 +220,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ $recs[]
        | select(.kind != "program" and ($uidx[.id] == null) and ($assign[.id] // null) == null and .state != "done") ]) as $unassigned_recs
   | ($unassigned_recs | map(task_row(.; "unassigned")) | sort_by([(.state | state_rank)])) as $unassigned_rows_all
+  | ($unassigned_rows_all | {done: (map(select(.state == "done")) | length),
+                             review: (map(select(.state == "review")) | length),
+                             active: (map(select(.state == "active")) | length),
+                             held: (map(select(.state == "held")) | length),
+                             decision: (map(select(.state == "decision")) | length),
+                             queued: (map(select(.state == "queued")) | length)}) as $un_counts
   | ([ $recs[] | select(.kind != "program" and ($uidx[.id] == null) and ($assign[.id] // null) == null and .state == "done") ] | length) as $dropped_done
   | (if $all_tasks == 1 then $unassigned_rows_all else $unassigned_rows_all[:$unassigned_n] end) as $unassigned_rows
   | (if ($streams_all | length) > $streams_n then $streams_all[:$streams_n] else $streams_all end) as $streams
@@ -254,10 +264,20 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       schema: "fm-workstream.v1",
       home: $home,
       generated: $now,
-      workstreams: ($streams | map({id, name, outcome, actionable,
+      workstreams: (($streams | map({id, name, outcome, actionable,
         total: (.counts | add), done: .counts.done, review: .counts.review,
         active: .counts.active, held: .counts.held, decision: .counts.decision,
-        queued: .counts.queued, more: .more})),
+        queued: .counts.queued, more: .more}))
+        + (if ($unassigned_rows_all | length) > 0 then
+             [{id: "unassigned", name: "Unassigned",
+               outcome: "Tasks claimed by no workstream.",
+               actionable: false,
+               total: ($un_counts | add), done: $un_counts.done,
+               review: $un_counts.review, active: $un_counts.active,
+               held: $un_counts.held, decision: $un_counts.decision,
+               queued: $un_counts.queued,
+               more: (($unassigned_rows_all | length) - ($unassigned_rows | length))}]
+           else [] end)),
       tasks: $rows_included,
       edges: (if $all_edges == 1 then $edges_all else $edges_all[:$edges_n] end),
       decisions: ($decisions_all[:$decisions_n]),

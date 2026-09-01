@@ -105,7 +105,7 @@ test_grouping_states_edges_and_divergence() {
 
   # Umbrellas become workstreams; prefix and blocked-by members are claimed.
   printf '%s' "$model" | jq -e '
-    ([.workstreams[].id] == ["quote", "ontology"])
+    ([.workstreams[].id] == ["quote", "ontology", "unassigned"])
       and ([.tasks[] | select(.ws == "quote") | .id] | sort == ["quote-define", "quote-fixes"])
   ' >/dev/null || fail "prefix members did not reach their umbrella workstream: $model"
 
@@ -119,6 +119,14 @@ test_grouping_states_edges_and_divergence() {
   printf '%s' "$model" | jq -e '
     [.tasks[] | select(.ws == "unassigned") | .id] | sort == ["census", "loner", "review-me", "spend-call"]
   ' >/dev/null || fail "unclaimed tasks did not land in the unassigned lane: $model"
+
+  # The unassigned lane is a real workstreams[] entry carrying its own totals,
+  # so a composer that reads workstreams[] can never hide ungrouped work.
+  printf '%s' "$model" | jq -e '
+    (.workstreams[] | select(.id == "unassigned"))
+    | .total == 4 and .more == 0 and .held == 1 and .review == 1
+      and .decision == 1 and .queued == 1 and (.name | length) > 0
+  ' >/dev/null || fail "the unassigned lane is not a real workstream entry: $model"
 
   # Task-state classification, one of each.
   printf '%s' "$model" | jq -e '
@@ -185,11 +193,21 @@ test_bounds_are_disclosed_and_liftable() {
   fb=$(make_fakebin "$home")
   write_fixture "$home"
 
+  # The umbrella cap drops umbrella lanes and discloses it; the unassigned lane
+  # is the catch-all and is never dropped by that cap.
   model=$(FM_WS_STREAMS=1 run_ws "$home" "$fb" --json) || fail "the bounded projection did not run"
   printf '%s' "$model" | jq -e '
-    (.workstreams | length) == 1
+    ([.workstreams[].id] == ["quote", "unassigned"])
       and ([.omitted[].surface] | any(test("workstreams showing 1 of 2")))
   ' >/dev/null || fail "the workstream cap is not disclosed: $model"
+
+  model=$(FM_WS_UNASSIGNED=1 run_ws "$home" "$fb" --json) || fail "the unassigned-capped run failed"
+  printf '%s' "$model" | jq -e '
+    (.workstreams[] | select(.id == "unassigned")) as $u
+    | $u.more == 3 and $u.total == 4
+      and ([.tasks[] | select(.ws == "unassigned")] | length) == 1
+      and ([.omitted[].surface] | any(test("unassigned tasks showing 1 of 4")))
+  ' >/dev/null || fail "the unassigned lane does not carry a machine-readable more: $model"
 
   model=$(FM_WS_TASKS=1 run_ws "$home" "$fb" --json) || fail "the task-capped projection did not run"
   printf '%s' "$model" | jq -e '
@@ -208,6 +226,32 @@ test_bounds_are_disclosed_and_liftable() {
   pass "caps are disclosed in omitted[] and lifted by --all-tasks"
 }
 
+test_a_done_umbrella_keeps_its_workstream() {
+  local home fb model
+  home=$(make_home doneumbrella)
+  fb=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+- [ ] quote-fixes - G9 loud failure and friends
+
+## Queued
+
+- [ ] loner - Completely ungrouped work
+
+## Done
+
+- [x] quote - Quote Flow (kind: program) (done: 2026-08-30)
+EOF
+  model=$(run_ws "$home" "$fb" --json) || fail "the projection did not run"
+  printf '%s' "$model" | jq -e '
+    ([.workstreams[].id] == ["quote", "unassigned"])
+      and ([.tasks[] | select(.ws == "quote") | .id] == ["quote-fixes"])
+      and ([.tasks[] | select(.ws == "unassigned") | .id] == ["loner"])
+  ' >/dev/null || fail "a finished umbrella lost its workstream and scattered its members: $model"
+  pass "a finished umbrella keeps its workstream with its members anchored"
+}
+
 test_toon_and_json_are_parity_forms() {
   local home fb toon
   home=$(make_home parity)
@@ -217,7 +261,7 @@ test_toon_and_json_are_parity_forms() {
   toon=$(run_ws "$home" "$fb") || fail "the TOON projection did not run"
   printf '%s' "$toon" | grep -q '^schema: fm-workstream.v1$' \
     || fail "TOON output does not open with the schema line: $toon"
-  printf '%s' "$toon" | grep -q '^workstreams\[2\]{' \
+  printf '%s' "$toon" | grep -q '^workstreams\[3\]{' \
     || fail "TOON output does not carry the workstreams table: $toon"
   printf '%s' "$toon" | grep -q '^tasks\[' \
     || fail "TOON output does not carry the tasks table: $toon"
@@ -229,4 +273,5 @@ test_toon_and_json_are_parity_forms() {
 test_grouping_states_edges_and_divergence
 test_in_flight_without_worker_is_divergence
 test_bounds_are_disclosed_and_liftable
+test_a_done_umbrella_keeps_its_workstream
 test_toon_and_json_are_parity_forms

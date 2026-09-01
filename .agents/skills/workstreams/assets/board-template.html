@@ -359,6 +359,12 @@ __FM_WORKSTREAM_BOARD_DATA__
   document.getElementById("wb-provenance").textContent = data.schema + " · " + data.generated;
 
   var allTasks = data.workstreams.reduce(function (acc, ws) { return acc.concat(ws.tasks); }, []);
+  var taskIndex = {};
+  data.workstreams.forEach(function (ws) {
+    ws.tasks.forEach(function (t) {
+      if (!taskIndex[t.id]) taskIndex[t.id] = { task: t, wsName: ws.name };
+    });
+  });
   var liveAgents = data.agents.length;
 
   /* stat strip: clickable anchors into the board */
@@ -417,18 +423,28 @@ __FM_WORKSTREAM_BOARD_DATA__
     decision: { fill: "#fbece3", stroke: "#a93a1f", text: "#8f2f17", dash: "" },
     queued:   { fill: "#fbf4e2", stroke: "#9c8a6c", text: "#3f3224", dash: "4 3" }
   };
-  function depGraph(tasks, edges, markerId) {
+  function depGraph(tasks, edges, markerId, index) {
     var ids = {};
     tasks.forEach(function (t) { ids[t.id] = t; });
-    var local = edges.filter(function (e) { return ids[e.from] && ids[e.to]; });
+    /* An edge is drawn when at least one endpoint sits in this card and the
+       other is a task the board knows, so a dependency that crosses two
+       workstreams stays visible from both of them. */
+    var local = edges.filter(function (e) {
+      return index[e.from] && index[e.to] && (ids[e.from] || ids[e.to]);
+    });
     if (!local.length) return null;
+    var nodes = [];
+    var seen = {};
+    function addNode(id) { if (!seen[id]) { seen[id] = true; nodes.push(index[id]); } }
+    tasks.forEach(function (t) { addNode(t.id); });
+    local.forEach(function (e) { addNode(e.from); addNode(e.to); });
     /* longest-path layering, bounded by node count so a cycle cannot spin */
     var layer = {};
-    tasks.forEach(function (t) { layer[t.id] = 0; });
-    for (var pass = 0; pass < tasks.length; pass++) {
+    nodes.forEach(function (n) { layer[n.task.id] = 0; });
+    for (var pass = 0; pass < nodes.length; pass++) {
       var changed = false;
       local.forEach(function (e) {
-        var want = Math.min(layer[e.from] + 1, tasks.length);
+        var want = Math.min(layer[e.from] + 1, nodes.length);
         if (layer[e.to] < want) { layer[e.to] = want; changed = true; }
       });
       if (!changed) break;
@@ -438,11 +454,11 @@ __FM_WORKSTREAM_BOARD_DATA__
     local.forEach(function (e) { touched[e.from] = true; touched[e.to] = true; });
     var cols = {};
     var maxLayer = 0;
-    tasks.forEach(function (t) {
-      if (!touched[t.id]) return;
-      var L = layer[t.id];
+    nodes.forEach(function (n) {
+      if (!touched[n.task.id]) return;
+      var L = layer[n.task.id];
       maxLayer = Math.max(maxLayer, L);
-      (cols[L] = cols[L] || []).push(t.id);
+      (cols[L] = cols[L] || []).push(n.task.id);
     });
     var W = 170, H = 26, GX = 70, GY = 10, PAD = 14;
     var pos = {};
@@ -471,10 +487,17 @@ __FM_WORKSTREAM_BOARD_DATA__
     });
     Object.keys(pos).forEach(function (id) {
       var p = pos[id];
-      var style = NODE_FILL[ids[id].state] || NODE_FILL.queued;
+      var node = index[id];
+      var style = NODE_FILL[node.task.state] || NODE_FILL.queued;
       var attrs = { x: p.x, y: p.y, width: W, height: H, rx: 7, fill: style.fill, stroke: style.stroke, "stroke-width": "1.5" };
       if (style.dash) attrs["stroke-dasharray"] = style.dash;
-      svg.appendChild(svgEl("rect", attrs));
+      var rect = svgEl("rect", attrs);
+      var rectTitle = svgEl("title", {});
+      rectTitle.textContent = ids[id]
+        ? id + " · " + node.task.state
+        : id + " · " + node.task.state + " · in " + node.wsName;
+      rect.appendChild(rectTitle);
+      svg.appendChild(rect);
       var label = id.length > 22 ? id.slice(0, 21) + "…" : id;
       var text = svgEl("text", {
         x: p.x + W / 2, y: p.y + H / 2 + 4, "text-anchor": "middle",
@@ -501,18 +524,27 @@ __FM_WORKSTREAM_BOARD_DATA__
     var head = el("div", "ws-head");
     var top = el("div", "ws-head-top");
     top.appendChild(el("h2", null, ws.name));
-    var held = ws.tasks.filter(function (t) { return t.state === "held"; }).length;
-    var decisions = ws.tasks.filter(function (t) { return t.state === "decision"; }).length;
-    var review = ws.tasks.filter(function (t) { return t.state === "review"; }).length;
+    /* Row capping is a display bound: the bar, key, and badges report the
+       lane's declared totals, falling back to the visible rows only when the
+       composer sent no counts. */
+    var STATES = ["done", "review", "active", "held", "decision", "queued"];
+    var visible = { done: 0, review: 0, active: 0, held: 0, decision: 0, queued: 0 };
+    ws.tasks.forEach(function (t) { visible[t.state] += 1; });
+    var declared = (ws.counts && typeof ws.counts === "object") ? ws.counts : null;
+    var counts = {};
+    STATES.forEach(function (k) {
+      counts[k] = declared ? (typeof declared[k] === "number" ? declared[k] : 0) : visible[k];
+    });
+    var held = counts.held;
+    var decisions = counts.decision;
+    var review = counts.review;
     if (decisions) top.appendChild(badge("danger", decisions + " need" + (decisions === 1 ? "s" : "") + " your decision"));
     if (held) top.appendChild(badge("warn", held + " held"));
     if (review) top.appendChild(badge("info", review + " in review"));
     head.appendChild(top);
     if (ws.outcome) head.appendChild(el("p", "ws-outcome", ws.outcome));
 
-    var counts = { done: 0, review: 0, active: 0, held: 0, decision: 0, queued: 0 };
-    ws.tasks.forEach(function (t) { counts[t.state] += 1; });
-    var total = ws.tasks.length + (ws.more_tasks || 0);
+    var total = STATES.reduce(function (acc, k) { return acc + counts[k]; }, 0);
     if (total > 0) {
       var bar = el("div", "ws-progress");
       /* held rides the active (gold) segment; decision gets its own rust pop */
@@ -542,7 +574,7 @@ __FM_WORKSTREAM_BOARD_DATA__
     card.appendChild(head);
 
     var body = el("div", "ws-body");
-    var graph = depGraph(ws.tasks, data.edges, "wb-arr-" + ws.id);
+    var graph = depGraph(ws.tasks, data.edges, "wb-arr-" + ws.id, taskIndex);
     if (graph) {
       body.appendChild(el("h3", null, "Dependency graph"));
       var fig = el("div", "ws-fig");
@@ -560,7 +592,9 @@ __FM_WORKSTREAM_BOARD_DATA__
         "wb-trow" + (t.state === "held" ? " wb-trow--held" : "") + (t.state === "decision" ? " wb-trow--decision" : ""));
       var sum = el(expandable ? "summary" : "div", "wb-trow__sum");
       sum.appendChild(el("span", "wb-trow__id", t.id));
-      sum.appendChild(el("span", "wb-trow__t", t.title));
+      var titleSpan = el("span", "wb-trow__t", t.title);
+      titleSpan.setAttribute("title", t.title);
+      sum.appendChild(titleSpan);
       if (t.agent) sum.appendChild(agentChip(t.agent, t.agent_tone || "paused"));
       row.appendChild(sum);
       if (expandable) {

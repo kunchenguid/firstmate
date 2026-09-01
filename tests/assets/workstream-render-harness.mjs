@@ -118,6 +118,7 @@ const streams = streamsCol.children.map((card) => {
     return {
       id: sum ? firstClass(sum, "wb-trow__id")?.textContent : "",
       title: sum ? firstClass(sum, "wb-trow__t")?.textContent : "",
+      titleAttr: sum ? (firstClass(sum, "wb-trow__t")?.attributes.title ?? "") : "",
       held: row.className.includes("wb-trow--held"),
       decision: row.className.includes("wb-trow--decision"),
       expandable: row.tagName === "details",
@@ -129,6 +130,11 @@ const streams = streamsCol.children.map((card) => {
     ? {
         nodes: svg[0].children.filter((c) => c.tagName === "rect").length,
         edges: svg[0].children.filter((c) => c.tagName === "line").length,
+        labels: svg[0].children.filter((c) => c.tagName === "text").map((t) => t.textContent).sort(),
+        nodeTitles: svg[0].children
+          .filter((c) => c.tagName === "rect")
+          .map((r) => r.children.find((c) => c.tagName === "title")?.textContent ?? "")
+          .sort(),
       }
     : null;
   return {
@@ -136,7 +142,11 @@ const streams = streamsCol.children.map((card) => {
     title: head ? firstClass(head, "ws-head-top")?.children.find((c) => c.tagName === "h2")?.textContent : "",
     badges: head ? deep(head, "fm-badge").map((b) => b.textContent) : [],
     outcome: head ? (firstClass(head, "ws-outcome")?.textContent ?? "") : "",
-    segments: head ? deep(head, "ws-progress").flatMap((p) => p.children.map((s) => s.className)) : [],
+    segments: head
+      ? deep(head, "ws-progress").flatMap((p) =>
+          p.children.map((s) => ({ cls: s.className, width: s.style.width })))
+      : [],
+    key: head ? deep(head, "ws-key").flatMap((k) => k.children.map((i) => i.textContent)) : [],
     rows,
     more: deep(card, "wb-morechip").map((c) => c.textContent),
     graph,
