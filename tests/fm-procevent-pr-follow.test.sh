@@ -22,6 +22,13 @@ set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP_ROOT=$(fm_test_tmproot fm-procevent-pr-follow-tests)
+# Claim ownership records a home's physically resolved state root and refuses
+# any home whose path reaches it through a symlink, so a TMPDIR that is itself
+# a link (macOS resolves /var to /private/var) would make every reconcile fail
+# to claim and no child would ever poll. Resolve the suite's root once so the
+# homes built under it are the same path the runner canonicalizes.
+TMP_ROOT=$(cd -P -- "$TMP_ROOT" && pwd -P) \
+  || fail "could not physically resolve the test temp root"
 export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims"
 # Every reconcile-spawned child inherits these cadences, so polls are bounded
 # to the test's timescale instead of the production defaults: one rotation
