@@ -470,10 +470,21 @@ fm_procevent_claim_acquire_locked() {
           if [ -L "$old_reg_dir" ] || { [ -e "$old_reg_dir" ] && [ ! -d "$old_reg_dir" ]; }; then
             status=1
           else
-            stage="$old_reg_dir/.$id.$old_token.output"
-            if { [ -e "$stage" ] || [ -L "$stage" ]; } && ! rm -f -- "$stage"; then
-              status=1
-            fi
+            # The whole staging set one claim generation can leave behind:
+            # the capture's own bounded output, the receipt outcome, the
+            # generation note that pins that outcome to one sequence, the
+            # intake body staged beside it, and the outcome's atomic-rename
+            # staging name. Reclaiming a gone claim drops all of them, so a
+            # crashed generation leaks none of its private rows.
+            for stage in "$old_reg_dir/.$id.$old_token.output" \
+              "$old_reg_dir/.$id.$old_token.rcpt.output" \
+              "$old_reg_dir/.$id.$old_token.rcpt.output.gen" \
+              "$old_reg_dir/.$id.$old_token.rcpt.output.body" \
+              "$old_reg_dir/.$id.$old_token.rcpt.output.tmp"; do
+              if { [ -e "$stage" ] || [ -L "$stage" ]; } && ! rm -f -- "$stage"; then
+                status=1
+              fi
+            done
           fi
           if [ "$status" -eq 0 ]; then
             fm_procevent_claim_capture_reservation_remove_locked || status=1

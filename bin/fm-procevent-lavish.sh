@@ -544,13 +544,12 @@ receipt_build_text() {  # <source-id>
       out+="Round $n: already received at $(fmt_utc "$epoch") (identical to round $replay); no new action."$'\n'
       continue
     fi
-    if [ "$choices" = 0 ] && [ "$messages" = 0 ]; then
-      # A round journaled with no answers and no message carries no content
-      # this record can describe - a comment-only board, or one holding only
-      # pure annotations the captain never typed into. The acknowledgement is
-      # the point, and the wording must claim neither answers nor prose that
-      # were not there.
-      out+="Round $n: received your submission at $(fmt_utc "$epoch")"$'\n'
+    if [ "$choices" = 0 ]; then
+      # A round that carried no answers has no answer count to state - a
+      # comment-only submission, and equally a board holding only pure
+      # annotations. The acknowledgement is the point, and it must never
+      # claim a zero count for answers that were never asked of it.
+      out+="Round $n: received your written comment at $(fmt_utc "$epoch")"$'\n'
       continue
     fi
     answers_word="$choices answer"

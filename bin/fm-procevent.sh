@@ -447,7 +447,7 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file> <outcome-file>
   # caller's umask for its privacy, and neither may be written through anything
   # already standing at its path.
   [ ! -e "$body" ] && [ ! -L "$body" ] || { printf 'not-fed\n' > "$outcome"; return 1; }
-  (umask 077; : > "$body") || return 1
+  (umask 077; : > "$body") || { printf 'not-fed\n' > "$outcome"; return 1; }
   "$script" answers "$result" 2>/dev/null \
     | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
         --source "the captured result $id sequence $seq" 2>/dev/null \
@@ -834,9 +834,10 @@ cmd_start() {
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
-    [ -z "$RECEIPT_OUTCOME" ] \
-      || rm -f -- "$RECEIPT_OUTCOME" "$RECEIPT_OUTCOME.gen" "$RECEIPT_OUTCOME.body" \
-        "$RECEIPT_OUTCOME.tmp"
+    # The receipt staging is deliberately left where it lies. An abnormal exit
+    # is exactly when the generation note has to keep publication waiting and
+    # the staged verdict has to survive for the seam recovery owes this round;
+    # the reaping paths that drop a claim's staging set own its cleanup.
     fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
@@ -992,7 +993,8 @@ EOF
   # the seam already saw (see recover_receipt_seams).
   fm_procevent_mark_receipt_seam "$STATE" "$id" "$durable_seq" >/dev/null 2>&1 || true
   fm_procevent_source_lock_release "$id"
-  rm -f -- "$RECEIPT_OUTCOME" "$RECEIPT_OUTCOME.gen" "$RECEIPT_OUTCOME.body"
+  rm -f -- "$RECEIPT_OUTCOME" "$RECEIPT_OUTCOME.gen" "$RECEIPT_OUTCOME.body" \
+    "$RECEIPT_OUTCOME.tmp"
   RECEIPT_OUTCOME=
 
   # A self-announcing adapter's autohandle announces through its own durable
@@ -1155,9 +1157,11 @@ recover_receipt_seams() {
         1|3) ;;
         *) fm_procevent_source_lock_release "$id"; continue ;;
       esac
-      # The dead generation's own outcome is left where it lies: it belongs to
-      # that claim's staging set and is dropped with the rest of it when the
-      # claim is reaped. Only an outcome staged here is cleaned up here.
+      # The dead generation's own outcome belongs to that claim's staging set
+      # and is dropped with the rest of it when the claim is reaped. A runner
+      # that released its own claim on the way out left no claim to reap, so
+      # once the seam it owed has spoken this drops that set itself rather
+      # than leaking a private verdict nothing else will ever clean.
       outcome=$(staged_receipt_outcome "$id" "$seq") || outcome=
       staged=
       if [ -z "$outcome" ]; then
@@ -1172,6 +1176,10 @@ recover_receipt_seams() {
         FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD=1 \
           adapter_receipt "$adapter" "$id" "$seq" "$result" "$outcome" || true
         fm_procevent_mark_receipt_seam "$STATE" "$id" "$seq" >/dev/null 2>&1 || true
+        if [ -z "$staged" ] && [ ! -e "$(fm_procevent_claim_path "$id")" ] \
+          && [ ! -L "$(fm_procevent_claim_path "$id")" ]; then
+          rm -f -- "$outcome" "$outcome.gen" "$outcome.body" "$outcome.tmp"
+        fi
       fi
       [ -z "$staged" ] || rm -f -- "$staged"
     fi

@@ -730,16 +730,24 @@ write_result "$R14" false 1 '  "9","","section > p",annotation,"the footer is of
 printf 'not-fed\n' > "$O14"
 run_lavish "$H13" receipt "$SID13" 2 "$R14" "$O14" >/dev/null
 text=$(run_lavish "$H13" receipt-text "$SID13")
-assert_contains "$text" "Round 2: received your submission at" \
-  "a zero-answer zero-message round was not acknowledged"
-assert_not_contains "$text" "written comment" \
-  "a round of pure annotations claimed the captain typed a comment"
+assert_contains "$text" "Round 2: received your written comment at" \
+  "a zero-answer round was not acknowledged as a written comment"
 assert_not_contains "$text" "0 answers" "the acknowledgement counted answers that were not there"
+# A comment-only submission - a freeform message and no answer at all - is
+# acknowledged with the same wording, and equally never claims a zero count.
+R17="$TMP_ROOT/r17.result"
+write_result "$R17" false 1 "$(message_row 'the footer is still off')"
+run_lavish "$H13" receipt "$SID13" 3 "$R17" "$O14" >/dev/null
+text=$(run_lavish "$H13" receipt-text "$SID13")
+assert_contains "$text" "Round 3: received your written comment at" \
+  "a comment-only submission was not acknowledged as a written comment"
+assert_not_contains "$text" "received 0 answers" \
+  "the comment-only acknowledgement claimed a zero answer count"
 # A parse the adapter refused is no verdict at all, so it journals nothing.
 R15="$TMP_ROOT/r15.result"
 write_result "$R15" false 3 "$(choice_row 4 deck-alpha go 'Alpha')"
-run_lavish "$H13" receipt "$SID13" 3 "$R15" "$O14" >/dev/null
-[ "$(grep -c '^received' "$J13")" = 2 ] \
+run_lavish "$H13" receipt "$SID13" 4 "$R15" "$O14" >/dev/null
+[ "$(grep -c '^received' "$J13")" = 3 ] \
   || fail "a truncated block was journaled as a received round by the seam"
 pass "the seam's outcome contract drives the incomplete, bare, and refused receipts"
 
