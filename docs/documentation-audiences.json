@@ -225,6 +225,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/slack-react-only/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/stow/SKILL.md",
       "audience": "agent-runtime"
     },
