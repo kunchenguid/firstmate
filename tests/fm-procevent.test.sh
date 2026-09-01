@@ -1208,6 +1208,54 @@ wait_for "$DEAD_LOG" || fail "the replacement source never started for a truly d
 pe "$HG2" retire dead-gen-src >/dev/null
 pass "a truly dead generation with no surviving group is still safely reclaimed"
 
+# --- a runner killed inside the intake keeps its claim with its staged set ---
+# The receipt staging an abnormal exit leaves behind is reaped only through the
+# claim record that names its generation, and the staged verdict can carry the
+# intake's own task-id rows. A runner that released that claim on its way out
+# would strand both: nothing would ever drop the private verdict, and
+# publish_result would decline the captured generation for as long as it lay
+# there. The signal here is the real one a stop sends, delivered while the
+# runner sits in the keyed-answer intake that deliberately holds no source lock.
+HFEED="$TMP_ROOT/hfeed"; new_home "$HFEED"
+cat > "$ADAPTER_ROOT/bin/fm-procevent-slowfeed.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture adapter whose answer extraction blocks, so the runner can be signalled
+# inside the unlocked intake window rather than around it.
+case "${1-}" in
+  answers) while [ ! -e "$FM_HOME/state/feed-go" ]; do sleep 0.05; done ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$ADAPTER_ROOT/bin/fm-procevent-slowfeed.sh"
+FEED_TRIGGER="$TMP_ROOT/feed-trigger"
+PE_TRACKED+=("$HFEED|feed-src")
+pe_adapter "$HFEED" register slowfeed feed-src -- "$BLOCKER" "$FEED_TRIGGER" "feed payload" >/dev/null
+FM_HOME="$HFEED" "$ROOT/bin/fm-captain-hold.sh" bind feed-src >/dev/null \
+  || fail "could not bind the intake's destination"
+pe_adapter "$HFEED" start feed-src > "$TMP_ROOT/feed-start.out" 2>&1 &
+feed_runner=$!
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim" || fail "the intake fixture never claimed its source"
+feed_leader=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim")
+feed_token=$(sed -n '3p' "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim")
+case "$feed_leader" in ''|*[!0-9]*) fail "could not read the intake runner's leader pid: $feed_leader" ;; esac
+[ -n "$feed_token" ] || fail "could not read the intake runner's claim token"
+FEED_OUTCOME="$HFEED/state/procevent/.feed-src.$feed_token.rcpt.output"
+: > "$FEED_TRIGGER"
+wait_for "$FEED_OUTCOME.gen" || fail "the runner never staged its generation note before the intake"
+kill -TERM -"$feed_leader" 2>/dev/null || fail "could not signal the intake runner's group"
+wait "$feed_runner" 2>/dev/null || true
+for _ in $(seq 1 50); do kill -0 -"$feed_leader" 2>/dev/null || break; sleep 0.1; done
+kill -0 "$feed_leader" 2>/dev/null && fail "the signalled intake runner survived"
+assert_present "$FEED_OUTCOME.gen" "the killed runner dropped the generation note recovery reads"
+assert_present "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim" \
+  "the killed runner released the claim that owns its staged verdict"
+pe_adapter "$HFEED" retire feed-src >/dev/null
+assert_absent "$FEED_OUTCOME.gen" "retirement left the staged generation note behind"
+assert_absent "$FEED_OUTCOME" "retirement left the staged intake verdict behind"
+assert_absent "$FEED_OUTCOME.body" "retirement left the staged intake body behind"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/feed-src.claim" "retirement left the reaped claim behind"
+pass "a runner killed inside the intake leaves its claim and staged set to the reaper"
+
 HJ="$TMP_ROOT/hj"; new_home "$HJ"
 TORN_TRIGGER="$TMP_ROOT/torn-trigger"
 pe_register "$HJ" lavish torn-src -- "$BLOCKER" "$TORN_TRIGGER" "torn" >/dev/null

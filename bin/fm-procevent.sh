@@ -837,7 +837,14 @@ cmd_start() {
     # The receipt staging is deliberately left where it lies. An abnormal exit
     # is exactly when the generation note has to keep publication waiting and
     # the staged verdict has to survive for the seam recovery owes this round;
-    # the reaping paths that drop a claim's staging set own its cleanup.
+    # the reaping paths that drop a claim's staging set own its cleanup. The
+    # claim is deliberately left with it, for that same reason: every one of
+    # those paths is keyed on the claim record, so releasing it here would
+    # orphan the staged set from the only owner that can reap it. A generation
+    # still mid-flight keeps both, and the stale-claim recovery takes them
+    # together. Only an exit with nothing staged - before the capture, or after
+    # the normal cleanup - releases the claim.
+    [ -z "$RECEIPT_OUTCOME" ] || return 0
     fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
