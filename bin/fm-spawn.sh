@@ -1409,21 +1409,33 @@ pi_supports_tui_mode() {
 # their own guards, so a fourth call site added later inherits both invariants by
 # construction instead of having to remember them.
 #
-# Invariant 1: the FINAL component is never a symlink, and is never resolved
-# through. A codex SCOUT holds state/ wholesale, so one mistaken command there can
-# leave state/<other-id>.status or state/<other-id>.inbox as a link; without this,
-# the NEXT ship or secondmate spawn of that id would resolve the link and hand its
-# worker the TARGET as a writable root, and would create through it. Observed:
-# with state/<id>.inbox linked to the home, the composed launch granted $FM_HOME
-# itself. That is exactly what the per-kind scoping exists to prevent.
+# Two DIFFERENT things can be a symlink here, and they are not the same threat.
+# Do not collapse them.
+#   A link planted INSIDE a task's own state or data path, pointing outward, is
+#   HOSTILE and is refused. A codex SCOUT holds state/ wholesale, so one mistaken
+#   command there can leave state/<other-id>.status or state/<other-id>.inbox as a
+#   link; without invariant 1 the NEXT ship or secondmate spawn of that id would
+#   resolve the link and hand its worker the TARGET as a writable root, and would
+#   create through it. Observed: with state/<id>.inbox linked to the home, the
+#   composed launch granted $FM_HOME itself.
+#   The CONTAINER itself being reached through a link is ordinary operator layout,
+#   NOT an attack, so it is canonicalized and allowed exactly as the worktree and
+#   git common dir already are. A scout's own root IS the state directory, so
+#   refusing the container would refuse the scout kind alone for a directory the
+#   operator deliberately created. That asymmetry is not reachable for $STATE
+#   today - fm_backlog_directory_present already refuses a symlinked state
+#   directory for EVERY spawn, kind and harness alike, long before this function
+#   runs - so this exemption is about keeping the stance coherent rather than
+#   fixing a live break. No grant makes $FM_HOME writable, so no worker can
+#   replace a container; only the entries under it are reachable, and those are
+#   what invariant 1 guards.
+# Invariant 1: the final component is never a symlink and is never resolved
+# through, EXCEPT when the path is the container itself.
 # Invariant 2: the resolved root stays inside <container>, so no symlinked
 # component anywhere in the path can walk the grant out of the state or data tree
-# the root belongs to. This one is defence in depth behind invariant 1 rather than
-# a separately reachable guard - with the final component refused and the
-# container resolved the same way, no deterministic case reaches it - so removing
-# it breaks no test. It is kept because it bounds the whole class by construction:
-# any future caller, or any path shape reached another way, still cannot emit a
-# root outside its container.
+# the root belongs to. It is defence in depth behind invariant 1 and does catch
+# the directory-link shapes on its own if invariant 1 is removed, so it bounds the
+# class for any future caller or path shape reached another way.
 # PARENT components are still resolved, because that canonicalization is what
 # makes a granted root the same physical path the sandbox and the notify hook use
 # (a /tmp home on macOS, where /tmp is /private/tmp).
@@ -1432,7 +1444,7 @@ pi_supports_tui_mode() {
 # exists to prevent, so the captain is told which path to repair.
 codex_root_real() {  # <container> <path>; prints the canonical root, or fails
   local container=$1 path=$2 parent base real container_real
-  if [ -L "$path" ]; then
+  if [ "$path" != "$container" ] && [ -L "$path" ]; then
     echo "error: $path is a symlink; firstmate never resolves, creates, or grants a codex writable root through a link - repair or remove that record before spawning" >&2
     return 1
   fi
