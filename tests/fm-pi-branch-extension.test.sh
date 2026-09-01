@@ -360,6 +360,8 @@ const { pathToFileURL } = await import("node:url");
 
 const home = process.env.FM_HOME;
 const realRoot = process.env.FM_ROOT_OVERRIDE;
+process.env.FM_STATE_OVERRIDE = `${home}/state`;
+process.env.FM_CONFIG_OVERRIDE = `${home}/config`;
 const approvedProject = `${home}/projects/approved`;
 mkdirSync(`${home}/state`, { recursive: true });
 mkdirSync(`${home}/config`, { recursive: true });
