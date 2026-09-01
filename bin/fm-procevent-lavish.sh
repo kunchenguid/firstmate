@@ -42,10 +42,12 @@
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
 #            calls, and the only place Lavish's notion of "ended" is decided.
-#            One guard is added to the plain session facts: a review whose latest
-#            received submission still owes its receipt is not terminal, so an
-#            ended review is never retired before its final receipt was displayed
-#            or became impossible to display.
+#            Two guards are added to the plain session facts: a review whose
+#            latest received submission still owes its receipt is not terminal,
+#            so an ended review is never retired before its final receipt was
+#            displayed or became impossible to display; and a result this
+#            adapter cannot completely parse is indeterminate rather than empty,
+#            so it keeps the source armed instead of retiring it unacknowledged.
 # silent     Exit 0 when the captured result is a routine no-op the runner should
 #            record and never announce; any other exit publishes the wake. This
 #            is the generic no-op contract bin/fm-procevent.sh calls, and the
@@ -77,7 +79,10 @@
 # and every visible state is printed only after its fact exists:
 #
 #   Received   the runner's durable capture, journaled by the `receipt` seam
-#              after the capture exists in `state/procevent-inbox/`.
+#              after the capture exists in `state/procevent-inbox/`. A round
+#              that carried no answers - a comment-only submission - is
+#              acknowledged as the written comment it was, never as a count of
+#              answers nobody asked for.
 #   Saved      what the one keyed-answer intake returned for that generation,
 #              journaled only after that intake has run; partial and rejected
 #              rows are reported as counts, never presented as saved.
@@ -86,7 +91,11 @@
 #   Complete   only `complete <source-id> <sequence>`, run by the handler when
 #              that routing is done; it refuses without a recorded Applying.
 #   Already received  a captured submission whose content digest matches an
-#              earlier generation; reported as a replay, never as new work.
+#              earlier generation and whose own outcome proves no new effect;
+#              reported as a replay, never as new work. A resubmission that
+#              really did save something - an answer skipped the first time
+#              because its task was not held yet - is presented and journaled
+#              as the new action it was, never hidden behind that replay.
 #
 # `arm` registers the source with `managed-poll` as its child instead of the
 # bare poll. managed-poll is still exactly the published blocking poll shape -
@@ -98,7 +107,9 @@
 # for the last round of an ended review are stated durably in the record even
 # though the ended page keeps the last displayed receipt. `arm` resets the
 # record, so re-hosting the same artifact never inherits an earlier session's
-# rounds.
+# rounds, and it refuses to arm while any captured result of that artifact is
+# still unhandled, so that reset can never orphan a still-live round from the
+# Applying and Complete it has yet to record.
 #
 # `receipt` is this adapter's half of the runner's generic receipt seam. It
 # journals delivery (a completed poll that armed a receipt proves it displayed,
@@ -171,7 +182,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,158p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,169p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 RECEIPT_SCHEMA=fm-lavish-receipt.v1
 RECEIPT_MAX_ROUNDS=8

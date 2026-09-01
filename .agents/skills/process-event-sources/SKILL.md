@@ -99,7 +99,7 @@ Two rules the commands cannot enforce for you:
   bin/fm-procevent-lavish.sh applying <source-id> <sequence>   # routing begins
   bin/fm-procevent-lavish.sh complete <source-id> <sequence>   # routing done
   ```
-  Then acknowledge through the generic `handled` command above. Never claim receipt, saving, applying, or completion to the captain in chat on your own authority beyond what these records state: the page shows Received and Saved only after capture and the guarded intake, shows Already received for an exact replay, and an ended review retires only once its final receipt was displayed or became impossible to display.
+  Then acknowledge through the generic `handled` command above. Never claim receipt, saving, applying, or completion to the captain in chat on your own authority beyond what these records state: the page shows Received and Saved only after capture and the guarded intake, shows Already received for a replay that changed nothing, and an ended review retires only once its final receipt was displayed or became impossible to display.
 : Ask the adapter what the result means rather than parsing it yourself.
   `bin/fm-procevent.sh classify <result-file>` routes through the immutable built-in or extension identity captured with that result; for Lavish, its existing direct command returns `feedback`, `ended`, `waiting`, `missing`, or `unknown`.
   Consume a Lavish capture with `bin/fm-procevent-lavish.sh read <result-file>` rather than grepping the raw file: that command reports declared and presented item counts plus a completeness verdict, enumerates every captured queued item while retaining supplied element identity, and surfaces a `tag=message` session-ending message as its own field.
