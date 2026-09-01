@@ -5,7 +5,7 @@
 // `fm attach` replays the log and bridges stdio to the live child.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { promises as fs, createWriteStream } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type {
@@ -53,7 +53,15 @@ export class StdioBackend implements AttachableBackend {
     const isWin = process.platform === 'win32';
     const isCmdShim = /\.(cmd|bat)$/i.test(opts.command);
 
-    const logStream = createWriteStream(logPath, { flags: 'a' });
+    // Redirect stdout/stderr straight to a real file descriptor rather than
+    // piping through this process: a piped Node stream is a live socket the
+    // parent holds open, so it (a) keeps the event loop alive, blocking
+    // `fm spawn` until the harness exits instead of returning immediately,
+    // and (b) breaks (EPIPE) once this CLI process exits and closes its end,
+    // which defeats the "session survives the CLI process" design. A real fd
+    // has no such dependency on this process staying alive.
+    const logHandle = await fs.open(logPath, 'a');
+    const logFd = logHandle.fd;
     // Windows .cmd/.bat shims (npm globals, fake harnesses) are not directly
     // spawnable by node. `shell: true` mangles their args, so launch them via
     // cmd.exe /d /s /c with the full command line instead.
@@ -61,18 +69,17 @@ export class StdioBackend implements AttachableBackend {
       ? spawn('cmd.exe', ['/d', '/s', '/c', buildCmdLine(opts.command, opts.args)], {
           cwd: opts.cwd,
           env: { ...process.env, ...opts.env },
-          stdio: ['pipe', 'pipe', 'pipe'],
+          stdio: ['pipe', logFd, logFd],
           detached: true,
           windowsVerbatimArguments: true,
         })
       : spawn(opts.command, opts.args, {
           cwd: opts.cwd,
           env: { ...process.env, ...opts.env },
-          stdio: ['pipe', 'pipe', 'pipe'],
+          stdio: ['pipe', logFd, logFd],
           detached: true,
         });
-    child.stdout?.pipe(logStream);
-    child.stderr?.pipe(logStream);
+    await logHandle.close();
 
     const record: SessionRecord = {
       pid: child.pid ?? -1,
@@ -85,9 +92,11 @@ export class StdioBackend implements AttachableBackend {
     await fs.writeFile(this.recordPath(opts.taskId), JSON.stringify(record, null, 2), 'utf8');
 
     this.live.set(opts.taskId, { child, record });
-    // Detach so the CLI process exits while the child keeps running.
+    // Detach so the CLI process exits while the child keeps running. The
+    // process handle and the stdin pipe socket are each their own libuv
+    // handle and each independently keeps the event loop alive; unref both.
     child.unref();
-    (logStream as unknown as { unref?: () => void }).unref?.();
+    (child.stdin as unknown as { unref?: () => void } | null)?.unref?.();
 
     return opts.taskId;
   }

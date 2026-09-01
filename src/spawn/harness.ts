@@ -23,7 +23,9 @@ export interface HarnessResolver {
 }
 
 const LAUNCH_ARGS: Record<HarnessName, (promptFile: string) => string[]> = {
-  claude: (p) => ['--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--append-system-prompt', `Execute the task in ${p}`],
+  // --verbose is required by claude whenever --print is combined with
+  // --output-format stream-json (rejected otherwise: "requires --verbose").
+  claude: (p) => ['--dangerously-skip-permissions', '--print', '--output-format', 'stream-json', '--verbose', `Execute the task in ${p}`],
   codex: (p) => ['exec', '--dangerously-bypass-approvals-and-sandbox', `Run the task described in ${p}`],
   opencode: (p) => ['--prompt', `Execute the task in ${p}`],
   pi: (p) => ['-e', p],
