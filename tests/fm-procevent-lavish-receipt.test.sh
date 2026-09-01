@@ -498,4 +498,55 @@ reconcile_until [ -e "$H9/state/procevent-inbox/$RECEIPT_SID.1.result" ] \
   || fail "the armed source could never poll after the planted record was reset"
 pass "arm resets a planted record or refuses to register the source"
 
+# --- a runner that died before the receipt seam is recovered by reconcile ----
+# A runner killed between its durable capture and the receipt seam leaves the
+# capture, its registration, and its fed answers behind, and none of the receipt
+# facts. Reconcile republishes that capture, so unless it also gives the seam
+# the chance the dead runner owed it, the round is announced to the handler with
+# no acknowledgement and the review can retire before the captain ever sees one.
+H10=$(make_home h10)
+RECEIPT_HOME=$H10
+ART10="$TMP_ROOT/deck10.html"
+printf '<h1>deck</h1>\n' > "$ART10"
+RECEIPT_SID=$(run_lavish "$H10" source-id "$ART10")
+tasks_in "$H10" add deck-alpha "Alpha call" --kind ship --repo sample --body 'Alpha plan.' >/dev/null
+run_captain "$H10" hold deck-alpha --reason "alpha choice pending" >/dev/null
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+stub_ended_empty
+run_captain "$H10" bind "$RECEIPT_SID" >/dev/null
+run_lavish "$H10" arm "$ART10" >/dev/null
+journal="$H10/state/procevent/$RECEIPT_SID.receipts"
+result="$H10/state/procevent-inbox/$RECEIPT_SID.1.result"
+# Exactly one reconcile, so the round is captured and no replacement has armed.
+reconcile_once
+wait_i=0
+while [ ! -e "$result" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+wait_claim_free
+[ -e "$result" ] || fail "the submitted round was never captured"
+[ "$(grep -c '^saved' "$journal")" = 1 ] || fail "the live capture never journaled its own save"
+# Roll the durable state back to the instant before that runner reached the
+# seam: a killed runner leaves the capture and the fed answers, but writes
+# neither a receipt fact nor its note that the seam had its chance.
+rm -f "$journal" "$H10/state/procevent-inbox/$RECEIPT_SID.1.receipted"
+reconcile_until grep -qs '^received' "$journal" \
+  || fail "reconcile never recovered the receipt seam the dead runner owed"
+[ "$(awk -F '\t' '$1 == "received" { print $4 }' "$journal")" = 1 ] \
+  || fail "the recovered receipt lost the round's answer count"
+[ "$(grep -c '^saved' "$journal")" = 0 ] \
+  || fail "recovery presented a save it could not prove from the crashed generation"
+answer_lines=$(tasks_in "$H10" show deck-alpha --full | grep -c 'Answer: go' || true)
+[ "$answer_lines" = 1 ] || fail "recovery applied the answer again: recorded $answer_lines times"
+# The recovered round reaches the captain: the next armed poll presents it, and
+# only then may the ended review retire.
+reconcile_until [ ! -e "$H10/state/procevent/$RECEIPT_SID.source" ] \
+  || fail "the recovered review never retired"
+[ "$(awk -F '\t' '$1 == "delivered" { print $3 }' "$journal")" = 1 ] \
+  || fail "the recovered round retired without its receipt being displayed"
+presented=$(grep -c -- "--agent-reply" "$STUB_LOG")
+[ "$presented" = 1 ] || fail "the recovered receipt was presented $presented times"
+assert_contains "$(sed -n '2p' "$STUB_LOG")" "received 1 answer" \
+  "the presented receipt lost the recovered round"
+pass "reconcile recovers the receipt seam a runner died before reaching"
+
 printf '\nall Lavish receipt tests passed\n'

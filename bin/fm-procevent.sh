@@ -158,6 +158,16 @@
 # error, or any other exit changes nothing: publication and handling proceed
 # exactly as before. This runner never reads or presents a receipt.
 #
+# A runner killed between its durable capture and that seam leaves a generation
+# the adapter never saw, and reconcile would otherwise republish it with its
+# acknowledgement silently skipped. So the runner records, under the same hold,
+# that the seam had its one chance at a generation, and reconcile gives that
+# chance to any captured generation still missing it - before it publishes
+# anything or starts a replacement - handing over an empty intake outcome,
+# because a crashed generation can prove its capture and not what the intake
+# returned. The recorded note is what keeps a seam that already ran from
+# running twice.
+#
 # Ownership is machine-wide per canonical source, because separate Firstmate
 # homes can share one underlying source store. A live owner is never displaced;
 # only a claim whose whole generation is gone is reclaimed. A runner leads its
@@ -905,9 +915,16 @@ EOF
   # taking the boundary itself; the runner holds it across capture, feed, and
   # seam, so a concurrent reconcile can never publish a capture the seam is
   # about to acknowledge.
+  local durable_seq
+  durable_seq=$(fm_procevent_result_sequence "$durable")
   FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD=1 \
-    adapter_receipt "$adapter" "$id" "$(fm_procevent_result_sequence "$durable")" \
+    adapter_receipt "$adapter" "$id" "$durable_seq" \
       "$durable" "$RECEIPT_OUTCOME" || true
+  # Still under the same hold: the seam has had its one chance at this
+  # generation, whatever it did with it. Recording that is what lets reconcile
+  # tell a generation captured by a runner that died before the seam from one
+  # the seam already saw (see recover_receipt_seams).
+  fm_procevent_mark_receipt_seam "$STATE" "$id" "$durable_seq" >/dev/null 2>&1 || true
   fm_procevent_source_lock_release "$id"
   rm -f -- "$RECEIPT_OUTCOME" "$RECEIPT_OUTCOME.body"
   RECEIPT_OUTCOME=
@@ -1000,8 +1017,52 @@ detach_runner() {  # <source-id>
   isolate_runner detach "$1"
 }
 
+# Give the receipt seam the one chance a dead runner owed it. A runner killed
+# after its durable capture but before the seam ran leaves a captured generation
+# its adapter never saw: reconcile republishes that capture, so without this the
+# handler would be woken for a submission whose acknowledgement lifecycle
+# silently skipped a round, and a later terminal capture could retire the source
+# before that round was ever acknowledged. Recovery reruns the same seam the
+# same way - under the same per-source hold, taken in the same order, before
+# publication - with an empty intake outcome, because the durable capture is a
+# fact this can prove and what the keyed-answer intake returned in a generation
+# that died is not; the intake is never re-fed here, so nothing can be applied
+# twice. A generation whose seam already ran is left alone, re-checked under the
+# hold so a live runner mid-seam is never doubled, and a source whose
+# registration is gone has no record left to acknowledge into. It runs before
+# this cycle publishes anything or starts any replacement runner, so the seam
+# still speaks for the poll that produced the capture, never for one a
+# replacement has since armed.
+recover_receipt_seams() {
+  local result id adapter seq outcome
+  while IFS= read -r result; do
+    [ -n "$result" ] || continue
+    id=$(fm_procevent_result_source_id "$result")
+    fm_procevent_source_id_valid "$id" || continue
+    seq=$(fm_procevent_result_sequence "$result")
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    fm_procevent_receipt_seam_ran "$STATE" "$id" "$seq" && continue
+    [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ] || continue
+    adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+    [ -n "$adapter" ] || continue
+    outcome=$(staging_file "$id" "reconcile.$$.rcpt")
+    [ ! -e "$outcome" ] && [ ! -L "$outcome" ] || continue
+    (umask 077; : > "$outcome") || continue
+    if fm_procevent_source_lock_acquire "$id"; then
+      if ! fm_procevent_receipt_seam_ran "$STATE" "$id" "$seq"; then
+        FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD=1 \
+          adapter_receipt "$adapter" "$id" "$seq" "$result" "$outcome" || true
+        fm_procevent_mark_receipt_seam "$STATE" "$id" "$seq" >/dev/null 2>&1 || true
+      fi
+      fm_procevent_source_lock_release "$id"
+    fi
+    rm -f -- "$outcome"
+  done < <(fm_procevent_pending "$STATE")
+}
+
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 claim owner pid token identity claim_state stop_state
+  recover_receipt_seams
   published=$(publish_pending)
 
   # Stop a runner this home owns whose source is no longer registered. Without
