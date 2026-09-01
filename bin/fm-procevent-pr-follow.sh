@@ -72,6 +72,27 @@
 #   so nothing is lost and nothing already announced is re-announced; a
 #   document whose cursor merge was interrupted stays announced until a
 #   successful handle, which the monotonic merge makes safe to repeat.
+# Vocabulary contract: one shared word list per mapped field owns both halves
+#   of every writer-versus-reader pair. The poll projections normalize unknown
+#   forge words to a safe explicit catch-all ("unknown" status or review
+#   state, "none" absent conclusion) BEFORE composing a stored token, and the
+#   cursor and document validators accept exactly what those same lists plus
+#   the catch-alls can compose, so an ordinary forge vocabulary change can
+#   never emit a token the reader refuses, silently drop an event, or make a
+#   tracked PR unreadable. A mapped value that is not in the shared vocabulary
+#   after normalization means the stored record was tampered with, not that
+#   the forge evolved.
+# Monitoring-loss contract: a captured document that claims this adapter's
+#   schema and source but fails its own validation is an adapter defect, not
+#   tampering, and is refused with a distinct diagnostic naming that class.
+#   After FM_PR_FOLLOW_APPLY_BOUND such refusals the source is quarantined: the
+#   failing capture is acknowledged so re-announcement stops, a private
+#   quarantine record pauses polling, and exactly one bounded monitoring-loss
+#   error document (fixed text, no forge bytes) surfaces the pause until it is
+#   applied. A document that does not claim this schema and source is tampered
+#   or foreign input and is refused loudly every time without a latch, because
+#   only an operator can resolve it; re-arm with arm clears a quarantine and
+#   resumes tracking once the adapter is repaired.
 # Baseline contract: arm writes a pending-baseline seed; the first poll stores
 #   the PR's current maxima and maps silently and emits nothing, so registering
 #   a brand-new PR replays no creation noise. --backfill instead surfaces each
@@ -106,6 +127,22 @@
 #   last-100 query, so more than 100 reviews between two polls can only be
 #   partially observed; the announced-only maximum keeps the remainder bounded
 #   to that same shape.
+# Aggregate bound (rotation): tracked PRs poll through a deterministic modular
+#   rotation, never one hot loop per PR. Time is divided into
+#   FM_PR_FOLLOW_ROTATION_SLOT-second slots; the sorted roster of registered
+#   pr-follow sources assigns slot t to roster index (t mod N), so at most one
+#   source polls per slot regardless of how many PRs are tracked and no source
+#   can be starved: every source owns exactly one slot per N-slot cycle.
+#   Worst case at the defaults (slot 300 s, a full 13-fetch burst): 156 forge
+#   requests per hour for the whole home, independent of the tracked count;
+#   per-PR poll interval is at most N x slot while open and N x slot x
+#   FM_PR_FOLLOW_SETTLED_EVERY once merged or closed, because settled sources
+#   poll only every SETTLED_EVERY-th visit of their slot. The first poll after
+#   a child starts is immediate (baseline and post-restart verification), and
+#   roster churn re-derives every duty assignment from the current roster on
+#   each wake, costing at most one extra cycle. Registration is never capped:
+#   every open, closed-unmerged, merged, and post-merge PR stays tracked until
+#   the explicit retire.
 #
 # Result document (the captured result named by the wake):
 #   schema: fm-pr-follow-event-v1
@@ -122,12 +159,17 @@
 #   cursor:                    (absent on error documents)
 #   <key>=<value> lines the handle step merges into the durable cursor
 #
-# Environment: FM_PR_FOLLOW_INTERVAL (poll cadence seconds, default 300),
+# Environment: FM_PR_FOLLOW_INTERVAL (minimum pause in seconds between
+#   diagnostic documents and quarantine re-checks, default 300),
 #   FM_PR_FOLLOW_FETCH_TIMEOUT (per-fetch bound, default 60),
 #   FM_PR_FOLLOW_ERROR_BUDGET (consecutive failed fetches before an error
 #   document, default 3), FM_PR_FOLLOW_MAX_PAGES (per-collection page bound,
 #   default 5), FM_PR_FOLLOW_MAX_EVENTS (per-document event bound, default 60),
-#   FM_PR_FOLLOW_MAP_LIMIT (bounded review/check/thread map size, default 40).
+#   FM_PR_FOLLOW_MAP_LIMIT (bounded review/check/thread map size, default 40),
+#   FM_PR_FOLLOW_ROTATION_SLOT (rotation slot seconds, default 300),
+#   FM_PR_FOLLOW_SETTLED_EVERY (settled sources poll every N-th duty visit,
+#   default 3), FM_PR_FOLLOW_APPLY_BOUND (adapter-validation failures before
+#   quarantine, default 2).
 # Ownership, durable capture, publication, restart recovery, and the handled
 # acknowledgement all belong to bin/fm-procevent.sh; this adapter owns only the
 # PR lifecycle semantics above. docs/configuration.md "Process-to-event
@@ -149,6 +191,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 FOLLOW_DIR="$STATE/pr-follow"
+REG_DIR=$(fm_procevent_registry_dir "$STATE")
 CURSOR_SCHEMA=fm-pr-follow-cursor-v1
 DOC_SCHEMA=fm-pr-follow-event-v1
 
@@ -158,6 +201,9 @@ ERROR_BUDGET=${FM_PR_FOLLOW_ERROR_BUDGET:-3}
 MAX_PAGES=${FM_PR_FOLLOW_MAX_PAGES:-5}
 MAX_EVENTS=${FM_PR_FOLLOW_MAX_EVENTS:-60}
 MAP_LIMIT=${FM_PR_FOLLOW_MAP_LIMIT:-40}
+ROTATION_SLOT=${FM_PR_FOLLOW_ROTATION_SLOT:-300}
+SETTLED_EVERY=${FM_PR_FOLLOW_SETTLED_EVERY:-3}
+APPLY_FAIL_BOUND=${FM_PR_FOLLOW_APPLY_BOUND:-2}
 GL_HOST=
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
@@ -183,8 +229,57 @@ env_bounds_valid() {
   positive_int "$ERROR_BUDGET" || return 1
   positive_int "$MAX_PAGES" || return 1
   positive_int "$MAX_EVENTS" || return 1
-  positive_int "$MAP_LIMIT"
+  positive_int "$MAP_LIMIT" || return 1
+  positive_int "$ROTATION_SLOT" || return 1
+  positive_int "$SETTLED_EVERY" || return 1
+  positive_int "$APPLY_FAIL_BOUND"
 }
+
+# --- forge status vocabulary (single owner) ----------------------------------
+# These lists are the one owner of every word a stored check, review, or
+# thread token may contain. The poll projections normalize forge words into
+# these lists (with "unknown" as the universal catch-all) before composing a
+# stored token, and the validators below accept exactly these lists plus the
+# catch-all, so the write side and the read side cannot drift apart. Adding a
+# forge word means adding it here and only here.
+PRF_GH_STATUS_WORDS='queued in_progress waiting requested pending completed'
+PRF_GH_CONCLUSION_WORDS='none success failure neutral cancelled skipped timed_out action_required stale'
+PRF_GH_REVIEW_STATES='APPROVED CHANGES_REQUESTED COMMENTED DISMISSED PENDING'
+PRF_GL_PIPELINE_WORDS='created waiting_for_resource preparing pending running success failed canceled skipped'
+PRF_GL_THREAD_STATES='resolved unresolved'
+
+prf_word_in_list() {  # <word> <space-separated list>
+  local w
+  for w in $2; do
+    [ "$w" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# "unknown" is the catch-all every normalizer maps unrecognized words onto, so
+# it is valid everywhere without being a member of any list.
+prf_status_word_valid()    { [ "${1-}" = unknown ] || prf_word_in_list "${1-}" "$PRF_GH_STATUS_WORDS"; }
+prf_conclusion_word_valid() { [ "${1-}" = unknown ] || prf_word_in_list "${1-}" "$PRF_GH_CONCLUSION_WORDS"; }
+prf_pipeline_word_valid()  { [ "${1-}" = unknown ] || prf_word_in_list "${1-}" "$PRF_GL_PIPELINE_WORDS"; }
+prf_review_state_word_valid() { [ "${1-}" = unknown ] || prf_word_in_list "${1-}" "$PRF_GH_REVIEW_STATES"; }
+prf_thread_state_word_valid() { [ "${1-}" = unknown ] || prf_word_in_list "${1-}" "$PRF_GL_THREAD_STATES"; }
+
+# prf_jq_membership <list>: the jq boolean expression ". == "w1" or . ==
+# "w2" ..." over the lists above, so the forge-side normalization filter and
+# the validators read the same vocabulary.
+prf_jq_membership() {
+  local w first=1 expr=
+  for w in $1; do
+    if [ "$first" -eq 1 ]; then first=0; else expr+=' or '; fi
+    expr+=". == \"$w\""
+  done
+  printf '%s' "$expr"
+}
+
+# The GitLab pipeline normalizer reads the same shared list through this
+# environment binding; "unknown" is appended as the catch-all there too.
+GL_PIPELINE_RE="$(printf '%s' "$PRF_GL_PIPELINE_WORDS" | tr ' ' '|')|unknown"
+export GL_PIPELINE_RE
 
 # --- identity ----------------------------------------------------------------
 
@@ -254,8 +349,25 @@ prf_state_valid() {
 
 prf_head_valid() { fm_pr_head_valid "${1-}"; }
 
+# prf_check_token_valid <token>: one stored check token is either a bare
+# GitLab pipeline word or the composite "<gh-status>:<gh-conclusion>", each
+# half from the shared vocabulary (with "unknown" as the catch-all). This is
+# the reader half of the single-owner vocabulary contract.
+prf_check_token_valid() {
+  local token=${1-} status conclusion
+  [ "${#token}" -le 40 ] || return 1
+  case "$token" in *[!a-z_:]*) return 1 ;; esac
+  status=${token%%:*}
+  if [ "$status" = "$token" ]; then
+    prf_pipeline_word_valid "$token"
+    return $?
+  fi
+  conclusion=${token#*:}
+  prf_status_word_valid "$status" && prf_conclusion_word_valid "$conclusion"
+}
+
 prf_map_valid() {
-  local map=${1-} rest entry id status
+  local map=${1-} rest entry id token
   [ -n "$map" ] || return 0
   [ "${#map}" -le 8192 ] || return 1
   rest=$map
@@ -266,16 +378,10 @@ prf_map_valid() {
       *) rest= ;;
     esac
     id=${entry%%:*}
-    status=${entry#*:}
-    [ "$status" != "$entry" ] || return 1
+    token=${entry#*:}
+    [ "$token" != "$entry" ] || return 1
     nonnegative_int "$id" || return 1
-    case "$status" in
-      queued|in_progress|pending|running|created|waiting_for_resource|preparing|unknown|\
-completed:none|completed:success|completed:failure|completed:cancelled|completed:skipped|\
-completed:neutral|completed:timed_out|completed:action_required|completed:stale|\
-success|failed|canceled|skipped|resolved|unresolved) ;;
-      *) return 1 ;;
-    esac
+    prf_check_token_valid "$token" || return 1
   done
   return 0
 }
@@ -295,10 +401,7 @@ prf_review_map_valid() {
     state=${entry#*:}
     [ "$state" != "$entry" ] || return 1
     nonnegative_int "$id" || return 1
-    case "$state" in
-      APPROVED|CHANGES_REQUESTED|COMMENTED|DISMISSED|PENDING) ;;
-      *) return 1 ;;
-    esac
+    prf_review_state_word_valid "$state" || return 1
   done
   return 0
 }
@@ -322,10 +425,7 @@ prf_thread_map_valid() {
       ''|*[!A-Za-z0-9_-]*) return 1 ;;
     esac
     [ "${#id}" -le 64 ] || return 1
-    case "$state" in
-      resolved|unresolved) ;;
-      *) return 1 ;;
-    esac
+    prf_thread_state_word_valid "$state" || return 1
   done
   return 0
 }
@@ -460,8 +560,12 @@ gh_descending_pages() {
 
 poll_github() {
   local url=$1 owner=$2 repo=$3 number=$4
-  local out rc state head author login
+  local out rc state head author login filter
+  local gh_status_test gh_conclusion_test gh_review_test
   sn_reset
+  gh_status_test=$(prf_jq_membership "$PRF_GH_STATUS_WORDS")
+  gh_conclusion_test=$(prf_jq_membership "$PRF_GH_CONCLUSION_WORDS")
+  gh_review_test=$(prf_jq_membership "$PRF_GH_REVIEW_STATES")
   out=$(fm_run_timed "$FETCH_TIMEOUT" gh pr view "$url" --json state,headRefOid,author \
         -q '[.state, (.headRefOid // ""), (.author.login // "ghost")] | @tsv' 2>/dev/null)
   rc=$?
@@ -469,11 +573,14 @@ poll_github() {
   state=$(printf '%s' "$out" | cut -f1)
   head=$(printf '%s' "$out" | cut -f2)
   author=$(printf '%s' "$out" | cut -f3)
+  # An unrecognized lifecycle word is ordinary forge evolution, not a fetch
+  # failure: it normalizes to the "unknown" catch-all and round-trips through
+  # the whole production path (vocabulary contract).
   case "$state" in
     OPEN) SN_STATE=open ;;
     CLOSED) SN_STATE=closed ;;
     MERGED) SN_STATE=merged ;;
-    *) fetch_fail "gh pr view state" 1; return 1 ;;
+    *) SN_STATE=unknown ;;
   esac
   prf_head_valid "$head" || { fetch_fail "gh pr view head" 1; return 1; }
   SN_HEAD=$head
@@ -481,21 +588,26 @@ poll_github() {
   prf_login_valid "$login" || login=invalid
   SN_AUTHOR=$login
 
-  gh_descending_pages '[.id, (.user.login // "ghost")] | @tsv' \
+  gh_descending_pages '.[] | [.id, (.user.login // "ghost")] | @tsv' \
     "repos/$owner/$repo/issues/$number/comments" "$CUR_MAX_ISSUE_COMMENT" SN_ROWS || return 1
 
   gh_descending_pages \
-    '[.id, (.in_reply_to_id // 0), (.user.login // "ghost"), (.path // ""), ((.line // .original_line) // 0)] | @tsv' \
+    '.[] | [.id, (.in_reply_to_id // 0), (.user.login // "ghost"), (.path // ""), ((.line // .original_line) // 0)] | @tsv' \
     "repos/$owner/$repo/pulls/$number/comments" "$CUR_MAX_REVIEW_COMMENT" SN_RC_ROWS || return 1
 
+  # The normalization tests below are generated from the same shared lists the
+  # validators read (vocabulary contract), so only a token the cursor accepts
+  # can ever be stored.
+  filter=".data.repository.pullRequest.reviews.nodes[] | [.databaseId, ((.state // \"unknown\") | if $gh_review_test then . else \"unknown\" end), (.author.login // \"ghost\")] | @tsv"
   # shellcheck disable=SC2016 # The GraphQL query is fixed text; its $ arguments are gh variables.
-  gh_rows '[.data.repository.pullRequest.reviews.nodes[] | [.databaseId, .state, (.author.login // "ghost")] | @tsv]' \
+  gh_rows "$filter" \
     api graphql \
     -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviews(last:100){nodes{databaseId state author{login}}}}}}' \
     -F "owner=$owner" -F "name=$repo" -F "number=$number" || return 1
   SN_REVIEW_ROWS=$GH_OUT
 
-  gh_rows '[.check_runs[] | [.id, ((.status // "unknown") + ":" + (.conclusion // "none")), (.name // "check")] | @tsv]' \
+  filter=".check_runs[] | [.id, (((.status // \"unknown\") | if $gh_status_test then . else \"unknown\" end) + \":\" + ((.conclusion // \"none\") | if $gh_conclusion_test then . else \"unknown\" end)), (.name // \"check\")] | @tsv"
+  gh_rows "$filter" \
     api "repos/$owner/$repo/commits/$SN_HEAD/check-runs?per_page=100" || return 1
   SN_CHECK_ROWS=$GH_OUT
   return 0
@@ -560,12 +672,14 @@ poll_gitlab() {
     my $d = eval { local $/; decode_json(scalar <STDIN>) };
     exit 3 unless $d && ref $d eq "HASH";
     my $state = $d->{state} // ""; my $sha = $d->{sha} // ""; my $author = $d->{author}{username} // "ghost";
-    exit 3 unless $state =~ /^(opened|closed|locked|merged)\z/;
     exit 3 unless $sha =~ /^[0-9a-f]{40,64}\z/;
     $author = "invalid" unless $author =~ /^[A-Za-z0-9._-]{1,60}\z/;
-    $state = "open"   if $state eq "opened" || $state eq "locked";
-    $state = "closed" if $state eq "closed";
-    $state = "merged" if $state eq "merged";
+    # An unrecognized lifecycle word normalizes to the "unknown" catch-all so
+    # it round-trips through the whole production path (vocabulary contract).
+    if    ($state eq "opened" || $state eq "locked") { $state = "open" }
+    elsif ($state eq "closed") { $state = "closed" }
+    elsif ($state eq "merged") { $state = "merged" }
+    else   { $state = "unknown" }
     print join("\t", $state, $sha, $author), "\n";
   ' || return 1
   state=$(printf '%s' "$GH_OUT" | cut -f1)
@@ -599,11 +713,14 @@ poll_gitlab() {
     use strict; use warnings;
     my $d = eval { local $/; decode_json(scalar <STDIN>) };
     exit 3 unless $d && ref $d eq "ARRAY";
+    # GL_PIPELINE_RE is generated from the same shared list the validators
+    # read, with "unknown" as the catch-all (vocabulary contract).
+    my $re = qr/^(?:$ENV{GL_PIPELINE_RE})\z/;
     for my $p (@$d) {
       next unless ref $p eq "HASH";
       my $id = $p->{id} // ""; my $status = $p->{status} // ""; my $sha = $p->{sha} // "";
       next unless $id =~ /^[0-9]+\z/ && $sha =~ /^[0-9a-f]{40,64}\z/;
-      $status = "unknown" unless $status =~ /^(pending|running|success|failed|canceled|skipped|created|waiting_for_resource|preparing)\z/;
+      $status = "unknown" unless $status =~ $re;
       print join("\t", $id, $sha, $status), "\n";
     }
   ' || return 1
@@ -683,7 +800,7 @@ ev_sort_and_cap() {
 check_key() {  # <stored status> -> green|red|pending|skipped
   case "$1" in
     completed:success|completed:neutral|completed:skipped|success) printf 'green' ;;
-    completed:failure|completed:timed_out|completed:action_required|completed:stale|failed) printf 'red' ;;
+    completed:failure|completed:timed_out|completed:action_required|completed:stale|completed:unknown|failed) printf 'red' ;;
     completed:cancelled|completed:none|canceled|skipped) printf 'skipped' ;;
     *) printf 'pending' ;;
   esac
@@ -876,15 +993,14 @@ compute_delta_github() {
     done <<< "$SN_CHECK_ROWS"
   fi
 
-  # Reviews: new submissions and state changes.
+  # Reviews: new submissions and state changes. The projection normalizes
+  # unrecognized states to "unknown", which round-trips through the map and
+  # announces instead of silently dropping the event (vocabulary contract).
   local review_id review_state review_author old
   while IFS=$'\t' read -r review_id review_state review_author; do
     [ -n "$review_id" ] || continue
     nonnegative_int "$review_id" || continue
-    case "$review_state" in
-      APPROVED|CHANGES_REQUESTED|COMMENTED|DISMISSED|PENDING) ;;
-      *) continue ;;
-    esac
+    prf_review_state_word_valid "$review_state" || review_state=unknown
     review_author=$(printf '%s' "$review_author" | prf_sanitize 60)
     prf_login_valid "$review_author" || review_author=invalid
     old=$(map_get "$CUR_REVIEWS" "$review_id")
@@ -1315,6 +1431,123 @@ follow_dir_ready() {
   [ "$(fm_pr_file_device "$FOLLOW_DIR")" = "$(fm_pr_file_device "$STATE")" ] || return 1
 }
 
+# --- quarantine (bounded monitoring loss) ------------------------------------
+# A quarantined source is paused, not retired: its registration and cursor
+# stay, the run child emits no event documents, and one bounded monitoring-
+# loss error document surfaces the pause. Re-arming clears the record and
+# resumes tracking (monitoring-loss contract).
+
+quarantine_file() { printf '%s/%s.quarantine\n' "$FOLLOW_DIR" "$1"; }
+QUARANTINE_SCHEMA=fm-pr-follow-quarantine-v1
+QUAR_COUNT=0
+QUAR_SURFACED=0
+
+quarantine_read() {  # <sid>: QUAR_COUNT / QUAR_SURFACED; 1 when absent or invalid
+  local file=$1 line key value
+  QUAR_COUNT=0
+  QUAR_SURFACED=0
+  file=$(quarantine_file "$1")
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      schema)   [ "$value" = "$QUARANTINE_SCHEMA" ] || return 1 ;;
+      count)    nonnegative_int "$value" || return 1; QUAR_COUNT=$value ;;
+      surfaced) case "$value" in 0|1) QUAR_SURFACED=$value ;; *) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac
+  done < "$file"
+  return 0
+}
+
+quarantine_write() {  # <sid> <count> <surfaced>: caller holds the lifecycle lock
+  local file tmp
+  file=$(quarantine_file "$1")
+  tmp=$(mktemp "$FOLLOW_DIR/.quar.XXXXXX") || return 1
+  {
+    printf 'schema=%s\n' "$QUARANTINE_SCHEMA"
+    printf 'count=%s\n' "$2"
+    printf 'surfaced=%s\n' "$3"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
+}
+
+# prf_quarantine_gate: the run child's pause point. Returns 0 to proceed with
+# polling, returns 1 after one pause sleep while quarantined, and exits after
+# emitting the one monitoring-loss document that is still unsurfaced. The
+# surfaced latch flips only when that document is applied, so a lost capture
+# re-emits it (at least once, never indefinitely).
+prf_quarantine_gate() {
+  while :; do
+    fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
+    if quarantine_read "$SID"; then
+      if [ "$QUAR_SURFACED" -eq 0 ]; then
+        fm_lock_release "$(lifecycle_lock_path "$SID")"
+        emit_error_doc "monitoring loss: source $SID paused after $QUAR_COUNT unapplicable captures; inspect the captured result and state/pr-follow/$SID.quarantine; rerun arm to resume after the adapter is repaired"
+        sleep "$INTERVAL"
+        exit 0
+      fi
+      fm_lock_release "$(lifecycle_lock_path "$SID")"
+      sleep "$INTERVAL"
+      continue
+    fi
+    fm_lock_release "$(lifecycle_lock_path "$SID")"
+    return 0
+  done
+}
+
+# --- deterministic rotation (aggregate bound) --------------------------------
+
+rotation_roster() {
+  local f id
+  for f in "$REG_DIR"/prf-gh-????????????.source "$REG_DIR"/prf-gl-????????????.source; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    id=${f##*/}
+    printf '%s\n' "${id%.source}"
+  done | LC_ALL=C sort
+}
+
+# rotation_eval <sid> <cursor-state>: ROT_ON_DUTY=1 when this source owns the
+# current slot; ROT_WAIT is the seconds until the next slot boundary. Roster
+# membership is re-derived on every call, so arms and retires take effect on
+# the next wake (aggregate-bound contract in the header).
+rotation_eval() {
+  local self=$1 cur_state=$2 now slot idx=-1 total=0 s cycle
+  ROT_ON_DUTY=0
+  ROT_WAIT=$INTERVAL
+  now=$(date +%s) || { ROT_ON_DUTY=1; return 0; }
+  slot=$(( now / ROTATION_SLOT ))
+  ROT_WAIT=$(( (slot + 1) * ROTATION_SLOT - now + 1 ))
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    total=$((total + 1))
+    [ "$s" = "$self" ] && idx=$((total - 1))
+  done < <(rotation_roster)
+  if [ "$total" -eq 0 ] || [ "$idx" -lt 0 ]; then
+    # Not in the roster: the registration check at run startup owns refusal;
+    # polling keeps this source observable rather than silently idle.
+    ROT_ON_DUTY=1
+    return 0
+  fi
+  [ $(( slot % total )) -eq "$idx" ] || return 0
+  case "$cur_state" in
+    merged|closed)
+      cycle=$(( slot / total ))
+      [ $(( cycle % SETTLED_EVERY )) -eq 0 ] || return 0
+      ;;
+  esac
+  ROT_ON_DUTY=1
+}
+
+rotation_sleep_to_next_slot() {
+  local now
+  now=$(date +%s) || { sleep "$ROTATION_SLOT"; return 0; }
+  ROT_WAIT=$(( ((now / ROTATION_SLOT) + 1) * ROTATION_SLOT - now + 1 ))
+  sleep "$ROT_WAIT"
+}
+
 # --- the child ---------------------------------------------------------------
 
 # poll_once: fill SN_* from the forge for the cursor's identity.
@@ -1416,7 +1649,7 @@ baseline_write() {
 }
 
 cmd_run() {
-  local sid=${1-} gen_seen gen_now events
+  local sid=${1-} gen_seen gen_now events first_poll=1
   prf_source_id_valid "$sid" || die "invalid source id: $sid"
   SID=$sid
   env_bounds_valid || die "FM_PR_FOLLOW_* environment bounds are invalid"
@@ -1424,10 +1657,22 @@ cmd_run() {
   cursor_load "$SID" || die "cursor is unreadable or tampered: $SID"
   [ "$CURSOR_PRESENT" -eq 1 ] || die "cursor seed is missing: $SID (arm first)"
   [ -n "$CUR_PROVIDER" ] || die "cursor identity is incomplete: $SID"
-  [ -f "$(fm_procevent_registry_dir "$STATE")/$SID.source" ] \
+  [ -f "$REG_DIR/$SID.source" ] \
     || die "source is not registered: $SID"
 
   while :; do
+    prf_quarantine_gate || continue
+    # The first poll after a child starts is immediate (baseline and
+    # post-restart verification); every later poll waits for this source's
+    # rotation slot, which bounds the aggregate request rate (header).
+    if [ "$first_poll" -eq 0 ]; then
+      rotation_eval "$SID" "$CUR_STATE"
+      if [ "$ROT_ON_DUTY" -ne 1 ]; then
+        sleep "$ROT_WAIT"
+        continue
+      fi
+    fi
+    first_poll=0
     gen_seen=$CUR_GENERATION
     if [ "$CUR_BASELINE" != "done" ]; then
       if poll_once; then
@@ -1510,7 +1755,7 @@ cmd_run() {
         exit 0
       fi
     fi
-    sleep "$INTERVAL"
+    rotation_sleep_to_next_slot
   done
 }
 
@@ -1617,9 +1862,14 @@ map_merge_entries() {  # <target> <doc-map>: doc entries win per entry
 # Maxima merge monotonically. A document from the cursor's current generation
 # or newer is authoritative for head, state, and the state maps - this is what
 # lets a head move advance the cursor - while a document older than the last
-# applied generation contributes its maxima only.
+# applied generation contributes its maxima only. An error document carries
+# no cursor section and merges nothing; applying it only commits its receipt.
 apply_doc_cursor() {
   local fresh=1
+  if [ "$DOC_STATUS" = error ]; then
+    CUR_GENERATION=$(( CUR_GENERATION + 1 ))
+    return 0
+  fi
   [ "$DOC_C_GENERATION" -ge "$CUR_GENERATION" ] || fresh=0
   if [ "$fresh" -eq 1 ]; then
     if [ -n "$DOC_C_HEAD" ]; then
@@ -1690,9 +1940,16 @@ cmd_apply() {  # <source-id> <sequence> <result-file>
           fm_lock_release "$(lifecycle_lock_path "$sid")"
           die "cannot store the cursor: $sid"
         fi
+        # Applying a quarantined source's monitoring-loss document is what
+        # latches it surfaced, so the bounded surface cannot repeat.
+        if [ "$DOC_STATUS" = error ] \
+           && quarantine_read "$sid" 2>/dev/null \
+           && [ "$QUAR_SURFACED" -eq 0 ]; then
+          quarantine_write "$sid" "$QUAR_COUNT" 1 || true
+        fi
       else
         fm_lock_release "$(lifecycle_lock_path "$sid")"
-        die "captured document is malformed or unsafe to apply: $sid $seq"
+        prf_apply_refusal "$sid" "$seq" "$result"
       fi
     fi
   else
@@ -1712,6 +1969,40 @@ cmd_apply() {  # <source-id> <sequence> <result-file>
   fi
 }
 
+# prf_apply_refusal <sid> <seq> <result>: classify a failed validation and
+# keep the failure bounded (monitoring-loss contract in the header). Never
+# returns on the tampered path; exits 0 after acknowledging at the bound.
+prf_apply_refusal() {
+  local sid=$1 seq=$2 result=$3 claims_schema claims_source count
+  claims_schema=$(doc_header_field "$result" 'schema:' 2>/dev/null || true)
+  claims_source=$(doc_header_field "$result" 'source:' 2>/dev/null || true)
+  if [ "$claims_schema" != "$DOC_SCHEMA" ] || [ "$claims_source" != "$sid" ]; then
+    die "captured document is tampered or foreign: refusing to apply: $sid $seq"
+  fi
+  # The document claims this adapter's schema and source, so this adapter
+  # produced bytes its own validator refuses: an adapter defect, not tampering.
+  fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || die "cannot lock the cursor"
+  if ! quarantine_read "$sid" 2>/dev/null; then
+    QUAR_COUNT=0
+  fi
+  count=$(( QUAR_COUNT + 1 ))
+  if ! quarantine_write "$sid" "$count" "${QUAR_SURFACED:-0}"; then
+    fm_lock_release "$(lifecycle_lock_path "$sid")"
+    die "cannot record the apply-failure count: $sid"
+  fi
+  fm_lock_release "$(lifecycle_lock_path "$sid")"
+  if [ "$count" -lt "$APPLY_FAIL_BOUND" ]; then
+    die "adapter-produced document failed its own validation contract (attempt $count of $APPLY_FAIL_BOUND): $sid $seq"
+  fi
+  # At the bound the re-announcement loop stops: acknowledge the capture,
+  # leave the quarantine latch pausing the source, and surface the loss once.
+  "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" >/dev/null 2>&1 \
+    || die "cannot record the handled acknowledgement: $sid $seq"
+  printf 'monitoring-loss: %s paused after %s unapplicable captures; inspect the captured result and state/pr-follow/%s.quarantine; rerun arm to resume after the adapter is repaired\n' \
+    "$sid" "$count" "$sid"
+  exit 0
+}
+
 # --- arm, backfill, retire ---------------------------------------------------
 
 cmd_arm() {  # <task-id> <pr-url> [--backfill]
@@ -1724,9 +2015,19 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
     || die "cannot derive the source id"
   follow_dir_ready || die "follow directory is unavailable"
   fm_procevent_source_lock_acquire "$sid" || die "cannot lock the source"
-  reg_file="$(fm_procevent_registry_dir "$STATE")/$sid.source"
+  reg_file="$REG_DIR/$sid.source"
   if [ -f "$reg_file" ] && [ ! -L "$reg_file" ]; then
     if cursor_load "$sid" && [ "$CURSOR_PRESENT" -eq 1 ]; then
+      # Re-arming is the documented resume after a quarantine: clear the
+      # latch so the run child polls again once the adapter is repaired.
+      fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || die "cannot lock the cursor"
+      if cursor_load "$sid" \
+         && { ! [ -e "$(quarantine_file "$sid")" ] || rm -f -- "$(quarantine_file "$sid")"; }; then
+        fm_lock_release "$(lifecycle_lock_path "$sid")"
+      else
+        fm_lock_release "$(lifecycle_lock_path "$sid")"
+        die "cannot clear the quarantine record: $sid"
+      fi
       if [ "$backfill" = on ] && [ "$CUR_BACKFILL" = off ]; then
         SID=$sid
         fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || die "cannot lock the cursor"
@@ -1807,8 +2108,8 @@ cmd_backfill() {
     fi
     sid=$(prf_source_id "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER") \
       || { skipped=$((skipped + 1)); continue; }
-    if [ -f "$(fm_procevent_registry_dir "$STATE")/$sid.source" ] \
-      && [ ! -L "$(fm_procevent_registry_dir "$STATE")/$sid.source" ]; then
+    if [ -f "$REG_DIR/$sid.source" ] \
+      && [ ! -L "$REG_DIR/$sid.source" ]; then
       already=$((already + 1))
       continue
     fi
@@ -1836,6 +2137,7 @@ cmd_retire() {  # <source-id> [--force]
     die "$sid has $pending unhandled captured result(s); resolve or acknowledge them, or retire again with --force"
   fi
   rm -f -- "$(cursor_file "$sid")"
+  rm -f -- "$(quarantine_file "$sid")"
   for receipt in "$FOLLOW_DIR/$sid".*.applied; do
     [ -e "$receipt" ] || continue
     rm -f -- "$receipt" || die "cannot remove applied receipt: $receipt"

@@ -489,6 +489,8 @@ test_valid_recording_and_merge_derivation() {
   expected=0123456789abcdef0123456789abcdef01234567
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
+  [ "$(cat "$dir/stdout")" = 'armed: state/task-a.check.sh' ] \
+    || fail "fm-pr-check.sh must keep its exact single-line success output while arming lifecycle follow-through"
 
   grep -qxF 'pr=https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/task-a.meta" \
     || fail "canonical pr metadata was not exact"
