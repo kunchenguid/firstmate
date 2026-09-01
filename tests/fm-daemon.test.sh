@@ -93,6 +93,483 @@ test_daemon_state_root_uses_fm_home() {
   pass "supervise daemon state root is scoped by FM_HOME"
 }
 
+# Byte size of a status log: the daemon records escalation progress as a
+# position in the append-only stream, so a fixture that means "already escalated
+# through here" writes that position.
+log_size() { LC_ALL=C wc -c < "$1" | tr -d '[:space:]'; }
+
+seen_through() {  # <state> <task>
+  local state=$1 task=$2 key ident
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  ident=$(_fm_open_decisions_file_ident "$state/$task.status")
+  printf '%s@%s' "$(log_size "$state/$task.status")" "$ident" > "$state/.subsuper-seen-status-$key"
+}
+
+# The reported bug in away mode: the captain is away, a worker reports something
+# the captain must hear, then keeps appending routine progress. Classifying only
+# the last line self-handles the wake and the work stalls silently until the
+# captain returns.
+test_classify_signal_skips_turn_end_markers() {
+  local dir state reader turn status out
+  dir=$(make_supercase signal-turn-end); state="$dir/state"
+  reader="$dir/identity-reader"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"; chmod +x "$reader"
+  turn="$state/task.turn-ended"; : > "$turn"
+  out=$(FM_STATUS_IDENTITY_READER="$reader" classify_signal "$turn" "$state")
+  case "$out" in self\|routine\ signal:*) ;;
+    *) fail "an empty turn-end marker was not routine under unavailable identity: $out" ;;
+  esac
+  status="$state/task.status"
+  printf 'blocked: release approval required\nworking: preparing notes\n' > "$status"
+  out=$(classify_signal "$turn $status" "$state")
+  case "$out" in escalate\|*"blocked: release approval required"*) ;;
+    *) fail "a mixed turn-end and actionable status batch did not name the status event: $out" ;;
+  esac
+  pass "turn-end markers stay routine while mixed actionable status batches escalate"
+}
+
+test_classify_signal_survives_a_later_routine_append() {
+  local dir state out
+  dir=$(make_supercase classify-masked)
+  state="$dir/state"
+
+  printf 'working: setup\nblocked [key=release]: cannot reach the release host\nfailed: release verification broke\nworking: retrying the upload\n' \
+    > "$state/mask-b1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/mask-b1.status" "$state")
+  case "$out" in
+    escalate\|*) ;;
+    *) fail "a blocker hidden behind a later working: line was self-handled: $out" ;;
+  esac
+  case "$out" in
+    *"blocked [key=release]: cannot reach the release host"*"failed: release verification broke"*) ;;
+    *) fail "the escalation did not report every actionable event before its endpoint: $out" ;;
+  esac
+
+  # The captain-reported shape: a finished release/install followed by routine
+  # cleanup chatter must still reach an away captain.
+  printf 'working: publishing\ndone: release 1.4.0 published and installed\nworking: cleaning the build dir\n' \
+    > "$state/mask-r1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/mask-r1.status" "$state")
+  case "$out" in
+    escalate\|*) ;;
+    *) fail "a release/install completion hidden behind later routine appends was self-handled: $out" ;;
+  esac
+  case "$out" in
+    *"done: release 1.4.0 published and installed"*) ;;
+    *) fail "the escalation named the routine line instead of the completion: $out" ;;
+  esac
+
+  # Once escalated through the end of the log, a further routine append is
+  # routine again: the fix must not turn every later signal into a re-escalation.
+  seen_through "$state" "mask-b1"
+  printf 'working: still retrying\n' >> "$state/mask-b1.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/mask-b1.status" "$state")
+  case "$out" in
+    self\|*) ;;
+    *) fail "a routine append after the blocker was escalated re-escalated it: $out" ;;
+  esac
+  pass "an actionable event is escalated to an away captain despite later routine appends"
+}
+
+# The away-mode backstop must reach the same event when the per-wake path never
+# ran, which is exactly what it exists for.
+test_classification_commits_its_captured_endpoint() {
+  local dir state capture out captured
+  dir=$(make_supercase captured-endpoint); state="$dir/state"
+  capture="$dir/endpoints"
+  printf 'done: first release complete\n' > "$state/race-r1.status"
+  out=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" \
+    classify_signal "$state/race-r1.status" "$state")
+  case "$out" in escalate\|*) ;; *) fail "the first event did not classify actionable: $out" ;; esac
+  captured=$(log_size "$state/race-r1.status")
+  printf 'failed: second release verification failed\n' >> "$state/race-r1.status"
+  mark_escalated_seen "$state" "$capture"
+  [ "$(status_seen_offset "$state" race-r1)" = "$captured" ] \
+    || fail "the daemon advanced past bytes appended after classification"
+  out=$(classify_signal "$state/race-r1.status" "$state")
+  case "$out" in
+    escalate\|*"failed: second release verification failed"*) ;;
+    *) fail "an event appended between classification and commit was lost: $out" ;;
+  esac
+  pass "the daemon commits exactly the endpoint captured by classification"
+}
+
+test_stale_masked_event_escalates_at_captured_endpoint() {
+  local dir state key out
+  dir=$(make_supercase stale-masked); state="$dir/state"
+  printf 'blocked: release host unavailable\nworking: retrying upload\n' > "$state/stale-r2.status"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: sess:fm-stale-r2" "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked: release host unavailable"*) ;; *) fail "a stale wake hid the blocker behind routine progress: $out" ;; esac
+  key=$(printf '%s' stale-r2 | tr ':/.' '___')
+  [ "$(status_seen_offset "$state" stale-r2)" = "$(log_size "$state/stale-r2.status")" ] \
+    || fail "the stale escalation did not commit its captured endpoint"
+  pass "a stale wake escalates a blocker hidden by later progress"
+}
+
+test_stale_read_failure_surfaces_without_advancing_seen() {
+  local dir state key out
+  dir=$(make_supercase stale-unreadable); state="$dir/state"
+  printf 'working: retrying upload\n' > "$state/stale-r3.status"
+  key=$(printf '%s' stale-r3 | tr ':/.' '___')
+  printf '3@%s' "$(_fm_open_decisions_file_ident "$state/stale-r3.status")" \
+    > "$state/.subsuper-seen-status-$key"
+  (
+    # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
+    _fm_status_read_span() { return 1; }
+    FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: sess:fm-stale-r3" "$state"
+  )
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;; *) fail "a stale span read failure was silently absorbed" ;; esac
+  [ "$(status_seen_offset "$state" stale-r3)" = 3 ] \
+    || fail "a stale span read failure advanced the daemon seen marker"
+  pass "a stale span read failure surfaces without advancing its marker"
+}
+
+test_recreated_status_rejects_captured_identity() {
+  local dir state reader record rest endpoint ident out
+  dir=$(make_supercase recreated-identity); state="$dir/state"
+  reader="$dir/identity-reader"
+  cat > "$reader" <<EOF
+#!/usr/bin/env bash
+cat "$dir/identity-value"
+EOF
+  chmod +x "$reader"
+  printf '1:2:old-birth' > "$dir/identity-value"
+  printf 'done: old task complete\n' > "$state/reused-r4.status"
+  record=$(FM_STATUS_IDENTITY_READER="$reader" \
+    status_span_first_actionable_record "$state/reused-r4.status" 0)
+  endpoint=${record%%$'\t'*}; rest=${record#*$'\t'}; ident=${rest%%$'\t'*}
+  rm -f "$state/reused-r4.status"
+  printf 'blocked: replacement task needs captain\nworking: routine padding after replacement\n' \
+    > "$state/reused-r4.status"
+  printf '1:2:new-birth' > "$dir/identity-value"
+  FM_STATUS_IDENTITY_READER="$reader" mark_status_seen "$state" reused-r4 "$endpoint" "$ident"
+  [ ! -e "$state/.subsuper-seen-status-reused-r4" ] \
+    || fail "a stale captured identity advanced the replacement task marker"
+  out=$(FM_STATUS_IDENTITY_READER="$reader" classify_signal "$state/reused-r4.status" "$state")
+  case "$out" in escalate\|*"blocked: replacement task needs captain"*) ;;
+    *) fail "the replacement task blocker did not surface after identity rejection: $out" ;;
+  esac
+  pass "a recreated status rejects the old captured identity"
+}
+
+test_unverifiable_identity_surfaces_without_marker() {
+  local dir state reader key out
+  dir=$(make_supercase unverifiable-identity); state="$dir/state"
+  reader="$dir/identity-reader"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"; chmod +x "$reader"
+  printf 'working: routine progress\n' > "$state/unknown-r5.status"
+  key=$(printf '%s' unknown-r5 | tr ':/.' '___')
+  (
+    FM_STATUS_IDENTITY_READER="$reader" FM_ESCALATE_BATCH_SECS=999 \
+      handle_wake "signal: $state/unknown-r5.status" "$state"
+  )
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;; *) fail "an unverifiable identity was silently absorbed" ;; esac
+  [ "$(status_seen_offset "$state" unknown-r5)" = 0 ] \
+    || fail "an unverifiable identity advanced the daemon classification position"
+  pass "an unverifiable status identity surfaces without advancing markers"
+}
+
+test_status_read_failure_surfaces_without_advancing_seen() {
+  local dir state key out
+  dir=$(make_supercase unreadable-span); state="$dir/state"
+  printf 'done: release complete\n' > "$state/read-r1.status"
+  key=$(printf '%s' read-r1 | tr ':/.' '___')
+  printf '3@%s' "$(_fm_open_decisions_file_ident "$state/read-r1.status")" \
+    > "$state/.subsuper-seen-status-$key"
+  (
+    # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
+    last_status_line() { return 0; }
+    # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
+    _fm_status_read_span() { return 1; }
+    FM_ESCALATE_BATCH_SECS=999 handle_wake "signal: $state/read-r1.status" "$state"
+  )
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;; *) fail "a status span read failure was silently absorbed" ;; esac
+  [ "$(status_seen_offset "$state" read-r1)" = 3 ] \
+    || fail "a status span read failure advanced the daemon seen marker"
+  pass "a status read failure surfaces without advancing the daemon suppressor"
+}
+
+test_catchall_advances_routine_then_surfaces_append() {
+  local dir state out
+  dir=$(make_supercase catchall-routine); state="$dir/state"
+  printf 'working: routine history\nworking: still routine\n' > "$state/routine-r6.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ "$(status_seen_offset "$state" routine-r6)" = "$(log_size "$state/routine-r6.status")" ] \
+    || fail "routine catch-all classification did not advance its captured endpoint"
+  printf 'blocked: appended after routine endpoint\n' >> "$state/routine-r6.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked: appended after routine endpoint"*) ;;
+    *) fail "an actionable append after the routine endpoint did not surface: $out" ;;
+  esac
+  pass "catch-all routine scans advance before later actionable appends"
+}
+
+test_escalation_buffer_failure_retains_wake_and_position() {
+  local dir state fakebin buffer out
+  dir=$(make_supercase escalation-write-failure); state="$dir/state"; fakebin="$dir/daemon-bin"
+  buffer="$state/.subsuper-escalations"
+  printf 'blocked: release approval required\nworking: preparing notes\n' > "$state/write-r1.status"
+  mkdir -p "$fakebin" "$buffer"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\twrite-r1.status\tsignal: $state/write-r1.status\n'
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+
+  ! FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" 2>/dev/null \
+    || fail "an unwritable escalation buffer acknowledged the wake"
+  [ ! -e "$dir/acked" ] || fail "a wake was acknowledged before its escalation was buffered"
+  [ "$(status_seen_offset "$state" write-r1)" = 0 ] \
+    || fail "a failed escalation append advanced the classification position"
+
+  rmdir "$buffer"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "the wake did not recover after the escalation buffer became writable"
+  out=$(cat "$buffer" 2>/dev/null || true)
+  case "$out" in *"blocked: release approval required"*) ;;
+    *) fail "the recovered wake did not buffer its actionable event: $out" ;;
+  esac
+  [ "$(status_seen_offset "$state" write-r1)" = "$(log_size "$state/write-r1.status")" ] \
+    || fail "successful buffering did not advance the classification position"
+  [ "$(wc -l < "$dir/acked" | tr -d ' ')" = 1 ] \
+    || fail "the recovered durable wake was not acknowledged exactly once"
+  pass "failed escalation writes retain durable wakes and classification positions"
+}
+
+test_catchall_buffer_failure_preserves_position() {
+  local dir state buffer out
+  dir=$(make_supercase catchall-write-failure); state="$dir/state"
+  buffer="$state/.subsuper-escalations"
+  printf 'failed: release verification broke\nworking: collecting logs\n' > "$state/catch-write-r2.status"
+  mkdir "$buffer"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state" 2>/dev/null || true
+  [ "$(status_seen_offset "$state" catch-write-r2)" = 0 ] \
+    || fail "a failed catch-all append advanced the classification position"
+
+  rmdir "$buffer"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  out=$(cat "$buffer" 2>/dev/null || true)
+  case "$out" in *"failed: release verification broke"*) ;;
+    *) fail "the catch-all did not retry its actionable event after recovery: $out" ;;
+  esac
+  [ "$(status_seen_offset "$state" catch-write-r2)" = "$(log_size "$state/catch-write-r2.status")" ] \
+    || fail "the recovered catch-all did not advance its classification position"
+  pass "catch-all markers advance only after escalation buffering succeeds"
+}
+
+test_durable_wake_failure_retains_entire_batch() {
+  local dir state fakebin attempts
+  dir=$(make_supercase durable-failure); state="$dir/state"; fakebin="$dir/daemon-bin"; attempts="$dir/attempts"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf ack > "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\ttask.status\tsignal: first\n1\t2\theartbeat\theartbeat\theartbeat\n'
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 2 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  (
+    FM_DAEMON_DIR="$fakebin"
+    handle_wake() { printf '%s\n' "$1" >> "$attempts"; [ "$1" != 'signal: first' ]; }
+    ! handle_durable_wakes fallback "$state"
+  ) || fail "a failed wake classification was acknowledged"
+  [ "$(wc -l < "$attempts" | tr -d ' ')" = 2 ] \
+    || fail "a failed wake prevented later batch entries from being accounted"
+  [ ! -e "$dir/acked" ] || fail "a partially handled durable batch was acknowledged"
+  pass "classification failure retains the complete durable wake batch"
+}
+
+test_missing_status_stale_is_acknowledged_without_diagnostic() {
+  local dir state fakebin
+  dir=$(make_supercase durable-no-status); state="$dir/state"; fakebin="$dir/daemon-bin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+printf '1\t1\tstale\tmissing-r8\tstale: sess:fm-missing-r8\n'
+printf 'WAKE_ACK_REQUIRED: ordinary --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "a stale wake without a status file was retained for retry"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "repeated missing-status handling became a classification failure"
+  [ "$(wc -l < "$dir/acked" | tr -d ' ')" = 2 ] \
+    || fail "a missing-status stale wake was not acknowledged"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a missing status file produced an unreadable-span escalation"
+  pass "missing-status stale wakes remain ordinary and acknowledgeable"
+}
+
+test_transient_unreadable_signal_recovers_without_advancing() {
+  local dir state fakebin out key
+  dir=$(make_supercase durable-unreadable); state="$dir/state"; fakebin="$dir/daemon-bin"
+  printf 'blocked: status cannot be classified\n' > "$state/unreadable-r7.status"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\tunreadable-r7.status\tsignal: $state/unreadable-r7.status\n'
+printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  (
+    FM_DAEMON_DIR="$fakebin"
+    # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
+    _fm_status_read_span() { return 1; }
+    handle_durable_wakes fallback "$state"
+  ) || fail "an unreadable signal did not acknowledge its wake after reporting"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;;
+    *) fail "an unreadable durable signal did not surface its diagnostic: $out" ;;
+  esac
+  key=$(printf '%s' unreadable-r7 | tr ':/.' '___')
+  [ "$(status_seen_offset "$state" unreadable-r7)" = 0 ] \
+    || fail "an unreadable signal advanced its classification position"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "a readable status did not recover after a transient failure"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked: status cannot be classified"*) ;;
+    *) fail "the recovered status was not classified from its original position: $out" ;;
+  esac
+  pass "transient unreadable signals recover without advancing their position"
+}
+
+test_permission_recovery_reclassifies_catchall_status() {
+  local dir state status before_ident after_ident out
+  dir=$(make_supercase catchall-permission-recovery); state="$dir/state"
+  status="$state/permission-r8.status"
+  printf 'blocked: release approval required\nworking: preserving context\n' > "$status"
+  before_ident=$(_fm_open_decisions_file_ident "$status")
+  chmod 000 "$status"
+  if [ -r "$status" ]; then
+    chmod 600 "$status"
+    pass "daemon permission recovery skipped because permissions cannot deny reads"
+    return
+  fi
+
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ "$(status_seen_offset "$state" permission-r8)" = 0 ] \
+    || { chmod 600 "$status"; fail "an unreadable catch-all status advanced its classification position"; }
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ "$(grep -c 'unreadable status span' "$state/.subsuper-escalations")" = 1 ] \
+    || { chmod 600 "$status"; fail "an unchanged unreadable catch-all status reported repeatedly"; }
+
+  chmod 600 "$status"
+  after_ident=$(_fm_open_decisions_file_ident "$status")
+  [ "$after_ident" = "$before_ident" ] || fail "permission recovery changed the catch-all file identity"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked: release approval required"*) ;;
+    *) fail "the catch-all did not surface preserved content after readability recovery: $out" ;;
+  esac
+  [ "$(status_seen_offset "$state" permission-r8)" = "$(log_size "$status")" ] \
+    || fail "the catch-all did not classify from the unadvanced position"
+  pass "daemon catch-all reclassifies permission-recovered status content"
+}
+
+# A permanently unclassifiable status must not wedge supervision. The accepted
+# contract is deliberately simple: report it, acknowledge the wake so an unchanged
+# permanent failure cannot re-alarm on every pass, and never advance the
+# classification position, so the log is classified from where it stopped once it
+# becomes readable. The residual risk - no guaranteed automatic retry inside a
+# crash-mid-read window - is accepted and covered by the locked startup replay.
+test_permanent_classification_failure_is_reported_and_acknowledged() {
+  local dir state fakebin out
+  dir=$(make_supercase durable-symlink); state="$dir/state"; fakebin="$dir/daemon-bin"
+  printf 'blocked: first target\n' > "$dir/target-one"
+  ln -s "$dir/target-one" "$state/symlink-r9.status"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\tsymlink-r9.status\tsignal: $state/symlink-r9.status\n'
+printf 'WAKE_ACK_REQUIRED: bounded --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "a permanent classification failure left its wake unacknowledged"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"unreadable status span"*) ;;
+    *) fail "a permanent classification failure did not surface its diagnostic: $out" ;;
+  esac
+  [ "$(status_seen_offset "$state" symlink-r9)" = 0 ] \
+    || fail "a classification failure advanced its position"
+
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "a repeated permanent failure retained its wake"
+  [ "$(grep -c 'unreadable status span' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an unchanged failure was reported more than once across daemon paths"
+  [ "$(status_seen_offset "$state" symlink-r9)" = 0 ] \
+    || fail "a repeated classification failure advanced its position"
+
+  printf 'blocked: changed target state with a longer path\n' > "$dir/target-two-longer"
+  ln -snf "$dir/target-two-longer" "$state/symlink-r9.status"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "a changed permanent failure retained its wake"
+  [ "$(grep -c 'unreadable status span' "$state/.subsuper-escalations")" = 2 ] \
+    || fail "a changed failure state did not report again exactly once"
+  [ "$(status_seen_offset "$state" symlink-r9)" = 0 ] \
+    || fail "a changed classification failure advanced its position"
+
+  # Once the log is readable, its content is classified from the position that
+  # was never advanced, so nothing written before the failure is lost.
+  rm -f "$state/symlink-r9.status"
+  printf 'blocked: readable replacement\nworking: cleanup\n' > "$state/symlink-r9.status"
+  : > "$state/.subsuper-escalations"
+  FM_DAEMON_DIR="$fakebin" handle_durable_wakes fallback "$state" \
+    || fail "a readable replacement did not classify normally"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked: readable replacement"*) ;;
+    *) fail "the readable replacement was not classified from the unadvanced position: $out" ;;
+  esac
+  [ "$(status_seen_offset "$state" symlink-r9)" = "$(log_size "$state/symlink-r9.status")" ] \
+    || fail "successful recovery did not advance through the readable replacement"
+  [ "$(wc -l < "$dir/acked" | tr -d ' ')" = 4 ] \
+    || fail "every durable wake should be acknowledged, including the failures"
+  pass "a permanent classification failure is reported, acknowledged, and never advances its position"
+}
+
+test_catchall_scan_surfaces_a_masked_event() {
+  local dir state
+  dir=$(make_supercase catchall-masked)
+  state="$dir/state"
+  printf 'working: setup\nneeds-decision [key=release]: pick A or B\nfailed: release build broke\nworking: tidying the branch\n' \
+    > "$state/catch-m1.status"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "the catch-all scan missed a decision hidden behind a later working: line"
+  grep -F "needs-decision [key=release]: pick A or B" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the catch-all scan omitted the decision it found"
+  grep -F "failed: release build broke" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the catch-all scan committed past a failure it did not report"
+  # And it records progress, so the next scan does not re-fire the same event.
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "the catch-all scan re-fired an event it had already escalated"
+  pass "the away-mode catch-all scan surfaces a masked event once"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -162,7 +639,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     key=$(printf '%s' "$task" | tr ':/.' '___')
     echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
     [ "$case_name" = prior-terminal ] \
-      && printf '%s' "$status_line" > "$state/.subsuper-seen-status-$key"
+      && seen_through "$state" "$task"
     [ "$case_name" = paused ] \
       && echo $(( $(date +%s) - 500 )) > "$state/.subsuper-paused-$key"
 
@@ -293,6 +770,39 @@ test_stale_terminal_escalates() {
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "default:w1:p2" "$state")
   case "$out" in escalate\|*) ;; *) fail "terminal herdr stale did not escalate through metadata: $out" ;; esac
   pass "stale + terminal status escalates immediately"
+}
+
+test_stale_actionable_wait_escalates_and_keeps_pause_cadence() {
+  local dir state win key out reason resumed_win resumed_key
+  dir=$(make_supercase stale-actionable-wait); state="$dir/state"
+  win="sess:fm-waiting-r10"; key=$(printf '%s' waiting-r10 | tr ':/.' '___')
+  printf 'blocked [key=release]: need captain approval\npaused: waiting for release access\n' \
+    > "$state/waiting-r10.status"
+
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in escalate\|*"blocked [key=release]: need captain approval"*) ;;
+    *) fail "a current wait hid an unreported blocker from stale classification: $out" ;;
+  esac
+  reason="stale: $win (idle 250s, possible wedge, escalation 3, demand-deep-inspection: inspect the repeated wedge)"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "$reason" "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in *"blocked [key=release]: need captain approval"*) ;;
+    *) fail "the stale escalation did not name the blocker behind the current wait: $out" ;;
+  esac
+  [ -e "$state/.subsuper-paused-$key" ] \
+    || fail "an actionable current wait did not retain its pause cadence"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "an actionable current wait was also aged as a wedge"
+
+  resumed_win="sess:fm-resumed-r10"; resumed_key=$(printf '%s' resumed-r10 | tr ':/.' '___')
+  printf 'paused: old wait\nworking: resumed after access arrived\n' > "$state/resumed-r10.status"
+  printf '1' > "$state/.subsuper-paused-$resumed_key"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: $resumed_win" "$state"
+  [ ! -e "$state/.subsuper-paused-$resumed_key" ] \
+    || fail "an older pause declaration kept a resumed crew on pause cadence"
+  [ -e "$state/.subsuper-stale-$resumed_key" ] \
+    || fail "a resumed crew did not return to ordinary stale aging"
+  pass "stale escalation and current wait cadence remain independent"
 }
 
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
@@ -969,8 +1479,8 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/sig-t8.status" "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "captain signal was not escalated"
   key=$(printf '%s' "sig-t8" | tr ':/.' '___')
-  [ "$(cat "$state/.subsuper-seen-status-$key" 2>/dev/null || true)" = "done: PR https://x/y/pull/8" ] \
-    || fail "captain signal escalate did not write the seen-status marker"
+  [ "$(status_seen_offset "$state" sig-t8)" = "$(log_size "$state/sig-t8.status")" ] \
+    || fail "captain signal escalate did not record the escalated-through offset"
   : > "$state/.subsuper-escalations"
   rm -f "$state/.subsuper-last-scan"
   FM_STATE_OVERRIDE="$state" housekeeping "$state"
@@ -1239,7 +1749,7 @@ test_classify_signal_dedup_against_scan() {
   printf 'done: PR https://x/y/pull/9\n' > "$state/dup-s9.status"
   # Simulate the catch-all scan having already escalated this status.
   key=$(printf '%s' "dup-s9" | tr ':/.' '___')
-  printf 'done: PR https://x/y/pull/9' > "$state/.subsuper-seen-status-$key"
+  seen_through "$state" "dup-s9"
   out=$(FM_STATE_OVERRIDE="$state" classify_signal "$state/dup-s9.status" "$state")
   case "$out" in self\|*) ;; *) fail "signal not deduped against scan: $out" ;; esac
   # Without the seen marker, it should escalate.
@@ -1257,7 +1767,7 @@ test_classify_stale_dedup_against_signal() {
   state="$dir/state"
   printf 'done: PR https://x/y/pull/10\n' > "$state/dup-s10.status"
   key=$(printf '%s' "dup-s10" | tr ':/.' '___')
-  printf 'done: PR https://x/y/pull/10' > "$state/.subsuper-seen-status-$key"
+  seen_through "$state" "dup-s10"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-dup-s10" "$state")
   case "$out" in self\|*) ;; *) fail "stale not deduped against signal: $out" ;; esac
   # Without the seen marker, it should escalate.
@@ -1283,7 +1793,7 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
   printf 'idle prompt $\n' > "$pane"
   key=$(printf '%s' "wishlist-w1" | tr ':/.' '___')
   # Simulate an earlier false-positive escalate that wrote the seen marker.
-  printf '%s' "$incident" > "$state/.subsuper-seen-status-$key"
+  seen_through "$state" "wishlist-w1"
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
   case "$out" in
     self\|*transient*) ;;
@@ -2116,6 +2626,7 @@ test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
+test_stale_actionable_wait_escalates_and_keeps_pause_cadence
 test_stale_paused_classifies_pause
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
@@ -2162,6 +2673,23 @@ test_tmux_composer_state_bordered_and_agent_rows_are_empty
 test_tmux_composer_state_requires_matching_box_borders
 test_pane_input_pending_preserves_bright_placeholder_like_draft
 test_classify_signal_dedup_against_scan
+test_classify_signal_skips_turn_end_markers
+test_classify_signal_survives_a_later_routine_append
+test_classification_commits_its_captured_endpoint
+test_stale_masked_event_escalates_at_captured_endpoint
+test_stale_read_failure_surfaces_without_advancing_seen
+test_recreated_status_rejects_captured_identity
+test_unverifiable_identity_surfaces_without_marker
+test_status_read_failure_surfaces_without_advancing_seen
+test_catchall_advances_routine_then_surfaces_append
+test_escalation_buffer_failure_retains_wake_and_position
+test_catchall_buffer_failure_preserves_position
+test_durable_wake_failure_retains_entire_batch
+test_missing_status_stale_is_acknowledged_without_diagnostic
+test_transient_unreadable_signal_recovers_without_advancing
+test_permission_recovery_reclassifies_catchall_status
+test_permanent_classification_failure_is_reported_and_acknowledged
+test_catchall_scan_surfaces_a_masked_event
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale

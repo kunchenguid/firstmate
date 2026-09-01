@@ -21,16 +21,32 @@ fm_git_identity fmtest fmtest@example.invalid
 
 LIB="$ROOT/bin/fm-session-lock-lib.sh"
 
+BASH_ALIAS=
+install_bash_alias() {
+  local destination=$1
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      cat > "$destination" <<'SH'
+#!/usr/bin/env bash
+exec -a "$0" /bin/bash "$@"
+SH
+      chmod +x "$destination"
+      ;;
+    *) ln -s /bin/bash "$destination" ;;
+  esac
+  BASH_ALIAS=$destination
+}
+
 # Claude Code's native installer names the per-session executable by its version,
 # so the harness identity has to survive a basename that says nothing.
 CLAUDE_VERSION_DIR="$TMP_ROOT/claude-install/share/claude/versions"
 mkdir -p "$CLAUDE_VERSION_DIR"
-ln -s /bin/bash "$CLAUDE_VERSION_DIR/2.1.220"
-VERSIONED_CLAUDE="$CLAUDE_VERSION_DIR/2.1.220"
+install_bash_alias "$CLAUDE_VERSION_DIR/2.1.220"
+VERSIONED_CLAUDE=$BASH_ALIAS
 
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-bin")
-ln -s /bin/bash "$FAKEBIN/claude"
-NAMED_CLAUDE="$FAKEBIN/claude"
+install_bash_alias "$FAKEBIN/claude"
+NAMED_CLAUDE=$BASH_ALIAS
 
 # --- unit layer: identity behind a deterministic process table ---------------
 
@@ -38,7 +54,7 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # liveness questions are decided by the process table alone.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
-  PATH="$fakebin:$PATH" bash -c "
+  FM_PROC_ROOT_OVERRIDE="$fakebin/no-proc" PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return 0; }
     $expr
@@ -272,13 +288,15 @@ printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
-i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
-  sleep 0.05
-  i=$((i + 1))
-done
+if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
+  i=0
+  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+fi
 printf '%s\n' "$$" > "$FM_HOME/state/daemon-pid"
-"$FM_SESSION_BIN" "$FM_HOME/session.sh"
+FM_FIXTURE_ORPHAN_HERE=0 "$FM_SESSION_BIN" "$FM_HOME/session.sh"
 exit 0
 SH
   chmod +x "$dir/session.sh" "$dir/daemon.sh"
@@ -289,12 +307,15 @@ SH
 # walk terminates inside the fixture. Returns once the hook has recorded its exit
 # code.
 run_fixture_tree() {  # <dir> <session-bin> [<daemon-bin>]
-  local dir=$1 session_bin=$2 daemon_bin=${3:-} i
+  local dir=$1 session_bin=$2 daemon_bin=${3:-} i orphan_here=1
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) orphan_here=0 ;;
+  esac
   if [ -n "$daemon_bin" ]; then
-    FM_HOME="$dir" FM_SESSION_BIN="$session_bin" FM_FIXTURE_ORPHAN_HERE=0 \
+    FM_HOME="$dir" FM_SESSION_BIN="$session_bin" FM_FIXTURE_ORPHAN_HERE="$orphan_here" \
       bash -c '"$0" "$1" &' "$daemon_bin" "$dir/daemon.sh"
   else
-    FM_HOME="$dir" FM_FIXTURE_ORPHAN_HERE=1 \
+    FM_HOME="$dir" FM_FIXTURE_ORPHAN_HERE="$orphan_here" \
       bash -c '"$0" "$1" &' "$session_bin" "$dir/session.sh"
   fi
   i=0

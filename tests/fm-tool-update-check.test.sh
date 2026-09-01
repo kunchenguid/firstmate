@@ -20,6 +20,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CHECK="$ROOT/bin/fm-tool-update-check.sh"
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
@@ -176,7 +178,7 @@ test_one_copy_reached_twice_is_probed_once() {
   link="$TMP_ROOT/one-copy/linked-bin"
   log="$TMP_ROOT/one-copy/probes.log"
   make_counting_copy "$dir" "$TOOL" 'herdr 0.8.2' "$log"
-  ln -s "$dir" "$link"
+  fm_test_make_symlink "$dir" "$link"
   write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
   out="$home/out.txt"
   : > "$log"
@@ -336,7 +338,16 @@ SH
   chmod 0755 "$dir/no-mistakes-fixture"
   write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
+  # The deadline is whole-second granular (real_epoch is `date +%s`), so a
+  # budget of 1 leaves headroom anywhere in (0, 1] seconds: when the sweep
+  # starts near the end of a second the very first budget check already reads
+  # as exhausted and the sweep reports "before every copy answered" instead of
+  # reaching the announcement step this case is about. Use the same generous
+  # bound for the sweep and its stalled probe so slower Windows process startup
+  # still reaches the copy, while the probe consumes all remaining time before
+  # the separate announcement command can be asked.
+  run_check "$home" "$(fixture_path "$dir")" "$out" \
+    FM_TOOL_UPDATE_BUDGET_SECS=8 FM_TOOL_UPDATE_PROBE_SECS=8
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
   pass "an announcement source the budget could not reach is reported, not read as current"
@@ -841,8 +852,9 @@ test_arm_registers_the_check_and_disarm_removes_it() {
   expect_code 0 "$status" "arm exit"
   assert_present "$home/state/tool-updates.check.sh" "arm did not write the check shim"
   assert_present "$home/state/tool-updates.check-trust" "arm did not register the check's bytes"
-  [ "$(stat -c %a "$home/state/tool-updates.check.sh" 2>/dev/null || stat -f %Lp "$home/state/tool-updates.check.sh")" = 700 ] \
-    || fail "the check shim is not mode 700"
+  fm_pr_private_file_valid "$home/state/tool-updates.check.sh" 700 \
+    "$(fm_pr_file_device "$home/state")" \
+    || fail "the check shim is not private"
   assert_grep 'fm-custom-check-v1' "$home/state/tool-updates.check-trust" "the trust binding has the wrong schema"
 
   # Arming twice must stay valid rather than invalidating its own binding.
@@ -868,7 +880,7 @@ test_arm_refuses_a_symlink_at_the_shim_path() {
   target="$TMP_ROOT/arm-symlink/not-the-shim.txt"
   printf 'a file the shim must not touch\n' > "$target"
   mode=$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target")
-  ln -s "$target" "$home/state/tool-updates.check.sh"
+  fm_test_make_symlink "$target" "$home/state/tool-updates.check.sh"
 
   status=0
   FM_HOME="$home" "$CHECK" arm >/dev/null 2>&1 || status=$?
@@ -893,7 +905,7 @@ test_a_failed_registration_leaves_no_unregistered_shim() {
   # register failure has from arm's side.
   target="$TMP_ROOT/arm-register-fail/not-the-trust.txt"
   printf 'a file the trust binding must not touch\n' > "$target"
-  ln -s "$target" "$home/state/tool-updates.check-trust"
+  fm_test_make_symlink "$target" "$home/state/tool-updates.check-trust"
 
   status=0
   FM_HOME="$home" "$CHECK" arm >/dev/null 2>&1 || status=$?
@@ -974,7 +986,7 @@ test_arm_resolves_a_relative_home_into_the_shim() {
 }
 
 test_armed_check_wakes_the_watcher_with_the_skew_report() {
-  local home stale fresh out err status
+  local home stale fresh out err status checkpoint_seconds=10
   # End to end through the real watcher: the armed check must reach it as a
   # `check:` wake carrying the same PATH skew line, with no new machinery.
   home=$(make_home wake)
@@ -983,17 +995,17 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
   make_copy "$stale" "$TOOL" 'herdr 0.8.0'
   make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
   write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$home/state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
-  chmod 0600 "$home/state/.pr-check-migration-scan-v1" "$home/state/.pr-check-migration-v1"
   FM_HOME="$home" "$CHECK" arm >/dev/null || fail "could not arm the watched tool check"
 
   out="$home/out.txt"
   err="$home/err.txt"
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*) checkpoint_seconds=45 ;;
+  esac
   status=0
   env FM_HOME="$home" PATH="$(fixture_path "$stale:$fresh")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=0 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 \
-    "$CHECKPOINT" --seconds 10 >"$out" 2>"$err" || status=$?
+    "$CHECKPOINT" --seconds "$checkpoint_seconds" >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "watcher checkpoint exit"
   assert_contains "$(cat "$out")" "check:" "the armed check did not reach the watcher as a check wake"
   assert_contains "$(cat "$out")" "tool updates: herdr update not in effect" "the wake did not carry the PATH skew report"

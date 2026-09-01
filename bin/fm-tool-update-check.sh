@@ -369,7 +369,7 @@ config_records() {
       (.git.remote // "origin"),
       (.git.branch // "")
     ] | join("\u001f")
-  ' "$CONFIG" 2>/dev/null
+  ' "$CONFIG" 2>/dev/null | tr -d '\r'
 }
 
 # --- PATH probes ------------------------------------------------------------
@@ -764,7 +764,7 @@ shim_write() {
   device=$(fm_pr_file_device "$STATE") || return 1
   [ -n "$device" ] || return 1
   fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" || return 1
-  if [ -e "$CHECK_SHIM" ] && [ "$(fm_pr_file_mode "$CHECK_SHIM")" = 700 ] \
+  if [ -e "$CHECK_SHIM" ] && fm_pr_private_file_valid "$CHECK_SHIM" 700 "$device" \
     && [ "$(cat "$CHECK_SHIM" 2>/dev/null)" = "$want" ]; then
     return 0
   fi

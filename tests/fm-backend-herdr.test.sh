@@ -1089,7 +1089,7 @@ test_presentation_floor_warning_marker_is_atomic_and_symlink_safe() {
   mkdir -p "$state"
   marker="$state/.herdr-presentation-floor-version-0-7-5--protocol-17-"
   outside="$dir/symlink-target"
-  ln -s "$outside" "$marker"
+  fm_test_make_symlink "$outside" "$marker"
   symlink_warning=$(presentation_enabled_verdict "$config" "$fb" "$state" 2>&1 >/dev/null)
   [ -z "$symlink_warning" ] \
     || fail "an existing dangling marker symlink must be treated as already claimed: $symlink_warning"

@@ -72,11 +72,11 @@ ensure_maintenance_section() {
     return 0
   fi
   local eol=$'\n' sep=''
-  if LC_ALL=C grep -q $'\r$' "$AGENTS"; then
+  if LC_ALL=C od -An -t x1 "$AGENTS" | grep -q ' 0d'; then
     eol=$'\r\n'
   fi
   if [ -s "$AGENTS" ]; then
-    if [ -n "$(tail -c 1 "$AGENTS")" ]; then
+    if ! tail -c 1 "$AGENTS" | grep -q '^$'; then
       sep="${eol}${eol}"
     else
       sep=$eol
@@ -100,8 +100,8 @@ EOF
   ensure_maintenance_section
 }
 
-# Canonical CLAUDE.md pointer: a real file, never a symlink. Byte-identical
-# two-line form so a stray write clobbers only this recoverable pointer.
+# Canonical CLAUDE.md pointer: a real file, never a symlink.
+# Accept LF or CRLF so Windows checkout conversion does not create a false conflict.
 claude_pointer_content() {
   cat <<'EOF'
 <!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
@@ -111,7 +111,7 @@ EOF
 
 is_canonical_claude_pointer() {
   [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
-  claude_pointer_content | cmp -s - "$CLAUDE"
+  claude_pointer_content | cmp -s - <(LC_ALL=C sed 's/\r$//' "$CLAUDE")
 }
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the

@@ -25,6 +25,33 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^copilot(\.exe)?$|^pi$|^pi-signed
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi copilot copilot.exe pi-signed pi)
 
+fm_session_process_comm() {  # <pid>
+  local pid=$1 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/status" ]; then
+    sed -n 's/^Name:[[:space:]]*//p' "$proc_root/$pid/status" | head -1
+    return
+  fi
+  ps -o comm= -p "$pid" 2>/dev/null
+}
+
+fm_session_process_args() {  # <pid>
+  local pid=$1 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/cmdline" ]; then
+    tr '\0' ' ' < "$proc_root/$pid/cmdline"
+    return
+  fi
+  ps -o args= -p "$pid" 2>/dev/null
+}
+
+fm_session_process_ppid() {  # <pid>
+  local pid=$1 proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/status" ]; then
+    sed -n 's/^PPid:[[:space:]]*//p' "$proc_root/$pid/status" | head -1
+    return
+  fi
+  ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '
+}
+
 # Git for Windows crosses from the native copilot.exe process into an MSYS
 # shell with PPID=1, so ordinary POSIX ancestry cannot see the owner. Copilot
 # publishes the native loader PID and a session id to every child tool. Accept
@@ -49,8 +76,8 @@ fm_copilot_loader_pid() {
   case "$session" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   if kill -0 "$pid" 2>/dev/null; then
     local comm args argv0 name
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    comm=$(fm_session_process_comm "$pid") || return 1
+    args=$(fm_session_process_args "$pid")
     argv0=${args%% *}
     name=
     case "$(basename -- "$comm")" in
@@ -156,8 +183,8 @@ fm_harness_ancestry_pids() {
   fi
   pid=$$
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    comm=$(fm_session_process_comm "$pid") || break
+    args=$(fm_session_process_args "$pid")
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
@@ -166,7 +193,7 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pid=$(fm_session_process_ppid "$pid")
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
   done
   [ "$printed" -eq 1 ]
@@ -197,8 +224,8 @@ fm_harness_pid_alive() {
     fm_copilot_windows_pid_matches "$pid"
     return
   fi
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  comm=$(fm_session_process_comm "$pid") || return 1
+  args=$(fm_session_process_args "$pid")
   fm_harness_process_matches "$comm" "$args"
 }
 

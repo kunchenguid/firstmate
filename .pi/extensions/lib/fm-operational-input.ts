@@ -25,11 +25,15 @@ function runOperationalInputCommand(
   kind?: FirstmateCurrentOperationalKind,
 ): string | undefined {
   const args = command === "encode" ? [command, kind ?? ""] : [command];
-  const result = spawnSync(operationalInputScript, args, {
-    encoding: "utf8",
-    input: content,
-    maxBuffer: 1024 * 1024,
-  });
+  const result = spawnSync(
+    process.platform === "win32" ? "bash" : operationalInputScript,
+    [...(process.platform === "win32" ? [operationalInputScript] : []), ...args],
+    {
+      encoding: "utf8",
+      input: content,
+      maxBuffer: 1024 * 1024,
+    },
+  );
   if (result.status !== 0) return undefined;
   return command === "classify" ? result.stdout.replace(/\n$/, "") : result.stdout;
 }

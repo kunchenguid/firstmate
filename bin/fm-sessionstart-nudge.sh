@@ -20,6 +20,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+parent_pid() {
+  local pid=$1
+  if [ -r "/proc/$pid/status" ]; then
+    awk '/^PPid:/ { print $2; exit }' "/proc/$pid/status" 2>/dev/null
+  else
+    ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]'
+  fi
+}
+
 lock_is_in_ancestry() {
   local lock_pid pid=$$ _
   [ -f "$STATE/.lock" ] || return 1
@@ -30,7 +39,7 @@ lock_is_in_ancestry() {
   kill -0 "$lock_pid" 2>/dev/null || return 1
   for _ in 1 2 3 4 5 6 7 8; do
     [ "$pid" = "$lock_pid" ] && return 0
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pid=$(parent_pid "$pid")
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
   return 1

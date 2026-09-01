@@ -14,14 +14,9 @@ fm_custom_check_sha256() {
   fi
 }
 
-fm_custom_check_trust_read() {
-  local state=$1 id=$2 trust state_device version hash
+fm_custom_check_trust_parse() {
+  local trust=$1 version hash
   FM_CUSTOM_CHECK_HASH=
-  fm_pr_task_id_valid "$id" || return 1
-  [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  state_device=$(fm_pr_file_device "$state") || return 1
-  trust="$state/$id.check-trust"
-  fm_pr_private_file_valid "$trust" 600 "$state_device" || return 1
   exec 9< "$trust" || return 1
   IFS= read -r version <&9 || { exec 9<&-; return 1; }
   IFS= read -r hash <&9 || { exec 9<&-; return 1; }
@@ -35,34 +30,47 @@ fm_custom_check_trust_read() {
   FM_CUSTOM_CHECK_HASH=$hash
 }
 
-fm_custom_check_registered() {
-  local state=$1 id=$2 check hash state_device
-  check="$state/$id.check.sh"
-  fm_custom_check_trust_read "$state" "$id" || return 1
+fm_custom_check_trust_read() {
+  local state=$1 id=$2 trust state_device
+  FM_CUSTOM_CHECK_HASH=
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
-  fm_pr_private_file_valid "$check" 700 "$state_device" || return 1
+  trust="$state/$id.check-trust"
+  fm_pr_private_file_valid "$trust" 600 "$state_device" || return 1
+  fm_custom_check_trust_parse "$trust"
+}
+
+fm_custom_check_registered() {
+  local state=$1 id=$2 check trust hash state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  check="$state/$id.check.sh"
+  trust="$state/$id.check-trust"
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_private_files_valid "$state_device" "$trust" 600 "$check" 700 || return 1
+  fm_custom_check_trust_parse "$trust" || return 1
   hash=$(fm_custom_check_sha256 "$check") || return 1
   [ "$hash" = "$FM_CUSTOM_CHECK_HASH" ]
 }
 
 fm_custom_check_snapshot_prepare() {
-  local state=$1 id=$2 check hash state_device
+  local state=$1 id=$2 check trust hash state_device
   fm_custom_check_snapshot_cleanup
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
   check="$state/$id.check.sh"
-  fm_custom_check_trust_read "$state" "$id" || return 1
+  trust="$state/$id.check-trust"
   state_device=$(fm_pr_file_device "$state") || return 1
-  fm_pr_private_file_valid "$check" 700 "$state_device" || return 1
+  [ -f "$check" ] && [ ! -L "$check" ] && [ "$(fm_pr_file_link_count "$check")" = 1 ] \
+    && [ "$(fm_pr_file_device "$check")" = "$state_device" ] || return 1
   FM_CUSTOM_CHECK_SNAPSHOT=$(mktemp "$state/.fm-custom-check.XXXXXX") || return 1
   cp "$check" "$FM_CUSTOM_CHECK_SNAPSHOT" || { fm_custom_check_snapshot_cleanup; return 1; }
   chmod 0600 "$FM_CUSTOM_CHECK_SNAPSHOT" || { fm_custom_check_snapshot_cleanup; return 1; }
-  [ -f "$FM_CUSTOM_CHECK_SNAPSHOT" ] && [ ! -L "$FM_CUSTOM_CHECK_SNAPSHOT" ] \
+  fm_pr_private_files_valid "$state_device" \
+    "$trust" 600 "$check" 700 "$FM_CUSTOM_CHECK_SNAPSHOT" 600 \
     || { fm_custom_check_snapshot_cleanup; return 1; }
-  [ "$(fm_pr_file_mode "$FM_CUSTOM_CHECK_SNAPSHOT")" = 600 ] \
-    || { fm_custom_check_snapshot_cleanup; return 1; }
-  [ "$(fm_pr_file_device "$FM_CUSTOM_CHECK_SNAPSHOT")" = "$state_device" ] \
-    || { fm_custom_check_snapshot_cleanup; return 1; }
-  [ "$(fm_pr_file_link_count "$FM_CUSTOM_CHECK_SNAPSHOT")" = 1 ] \
-    || { fm_custom_check_snapshot_cleanup; return 1; }
+  fm_custom_check_trust_parse "$trust" || { fm_custom_check_snapshot_cleanup; return 1; }
   hash=$(fm_custom_check_sha256 "$FM_CUSTOM_CHECK_SNAPSHOT") \
     || { fm_custom_check_snapshot_cleanup; return 1; }
   [ "$hash" = "$FM_CUSTOM_CHECK_HASH" ] || { fm_custom_check_snapshot_cleanup; return 1; }

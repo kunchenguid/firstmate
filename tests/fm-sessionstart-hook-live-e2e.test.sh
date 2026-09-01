@@ -33,11 +33,16 @@
 #
 #   FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
 #
-# It costs real model turns on every installed adapter in this suite.
+# That mode costs real model turns on every installed adapter in this suite.
+# The Pi `/new` provider-prerequisite regression has a separate offline mode
+# using a deterministic local provider and no user credentials:
+#
+#   FM_PI_SESSIONSTART_RACE_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
 set -u
 
-if [ "${FM_SESSIONSTART_HOOK_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_SESSIONSTART_HOOK_LIVE_E2E=1 to run the live session-open hook regression"
+if [ "${FM_SESSIONSTART_HOOK_LIVE_E2E:-0}" != 1 ] && \
+   [ "${FM_PI_SESSIONSTART_RACE_LIVE_E2E:-0}" != 1 ]; then
+  echo "skip: set FM_SESSIONSTART_HOOK_LIVE_E2E=1 for the cross-harness guard or FM_PI_SESSIONSTART_RACE_LIVE_E2E=1 for the offline Pi /new race regression"
   exit 0
 fi
 
@@ -171,7 +176,8 @@ SH
     pi)
       mkdir -p "$lab/.pi/extensions/lib"
       cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$lab/.pi/extensions/"
-      cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$lab/.pi/extensions/lib/"
+      cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+        "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$lab/.pi/extensions/lib/"
       cp "$ROOT/bin/fm-operational-input.sh" "$lab/bin/"
       printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$lab/.pi/settings.json"
       ;;
@@ -319,6 +325,267 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
 
   tmux -L "$SOCKET" kill-session -t "$session" >/dev/null 2>&1 || true
 }
+
+# --- real Pi provider prerequisite -------------------------------------------
+#
+# This is the end-user `/new` path, not an SDK simulation. A barrier holds the
+# native clear digest open while the first prompt is submitted. The local
+# provider would deterministically request the manual startup command if that
+# first payload lacked native context, reproducing the historical duplicate.
+# The fixed path must make no provider call before release and must expose one
+# native message on the first call. A second case proves the already-complete
+# path reaches the same result.
+probe_pi_sessionstart_prerequisite() {
+  local version lab project home config sessions session=pi-race
+  local pane i session_file first_line second_line
+  command -v pi >/dev/null 2>&1 || fail "pi not found for the offline /new provider-prerequisite regression"
+  version=$(pi --version 2>/dev/null | head -n 1)
+  [ -n "$version" ] || version=unknown
+  lab="$LAB/pi-race"
+  project="$lab/project"
+  home="$lab/home"
+  config="$lab/config"
+  sessions="$lab/sessions"
+  mkdir -p "$project/.pi/extensions/lib" "$project/bin" "$home/state" "$config" "$sessions"
+  git init -q -b main "$project"
+  git -C "$project" config user.email fmtest@example.invalid
+  git -C "$project" config user.name fmtest
+  printf '# Offline Pi startup-prerequisite lab\n' > "$project/AGENTS.md"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$project/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$project/bin/"
+  cat > "$project/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$project/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_HOME:?}/state
+source_name=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source) source_name=${2:-}; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$source_name" != clear ]; then
+  printf 'INITIAL_STARTUP source=%s\n' "$source_name"
+  exit 0
+fi
+count=$(( $(grep -c '^clear-start:' "$state/events" 2>/dev/null || true) + 1 ))
+printf 'clear-start:%s:%s\n' "$count" "$$" >> "$state/events"
+: > "$state/native-started-$count"
+while [ ! -f "$state/release-native-$count" ]; do sleep 0.02; done
+printf 'RACE_NATIVE generation=%s\n' "$count"
+: > "$state/native-completed-$count"
+printf 'clear-complete:%s:%s\n' "$count" "$$" >> "$state/events"
+SH
+  cat > "$project/bin/fm-session-start.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_HOME:?}/state
+: > "$state/manual-started"
+printf 'RACE_MANUAL\n'
+SH
+  cat > "$project/.pi/extensions/race-local-provider.ts" <<'TS'
+import { appendFileSync } from "node:fs";
+import {
+  type AssistantMessage,
+  createAssistantMessageEventStream,
+} from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+function textOf(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((item): item is { type: "text"; text: string } =>
+      typeof item === "object" && item !== null &&
+      (item as { type?: unknown }).type === "text" &&
+      typeof (item as { text?: unknown }).text === "string")
+    .map((item) => item.text)
+    .join("\n");
+}
+
+function assistant(model: { api: string; provider: string; id: string }): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+}
+
+export default function (pi: ExtensionAPI): void {
+  pi.registerProvider("race-local", {
+    baseUrl: "http://127.0.0.1/unused",
+    apiKey: "offline-test-only",
+    api: "race-local-api",
+    models: [{
+      id: "deterministic",
+      name: "Deterministic startup prerequisite provider",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 16384,
+      maxTokens: 128,
+    }],
+    streamSimple(model, context) {
+      const stream = createAssistantMessageEventStream();
+      const texts = context.messages.map((message) => textOf(message.content));
+      const all = texts.join("\n");
+      const prompt = all.includes("IMMEDIATE_RACE_PROMPT")
+        ? "immediate"
+        : all.includes("PROVEN_RACE_PROMPT")
+          ? "proven"
+          : "other";
+      const nativeCount = texts.filter((text) => text.includes("RACE_NATIVE generation=")).length;
+      const manual = all.includes("RACE_MANUAL");
+      if (prompt !== "other") {
+        appendFileSync(
+          `${process.env.FM_HOME}/state/provider-calls`,
+          `prompt=${prompt} native_count=${nativeCount} manual=${manual}\n`,
+        );
+      }
+      const output = assistant(model);
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: output });
+        if (prompt !== "other" && nativeCount === 0 && !manual) {
+          output.stopReason = "toolUse";
+          const toolCall = {
+            type: "toolCall" as const,
+            id: `manual-${Date.now()}`,
+            name: "bash",
+            arguments: { command: "bin/fm-session-start.sh" },
+          };
+          output.content.push(toolCall);
+          stream.push({ type: "toolcall_start", contentIndex: 0, partial: output });
+          stream.push({
+            type: "toolcall_delta",
+            contentIndex: 0,
+            delta: JSON.stringify(toolCall.arguments),
+            partial: output,
+          });
+          stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: output });
+          stream.push({ type: "done", reason: "toolUse", message: output });
+          stream.end();
+          return;
+        }
+        const responseText = `RACE_RESULT prompt=${prompt} native_count=${nativeCount} manual=${manual}`;
+        const block = { type: "text" as const, text: responseText };
+        output.content.push(block);
+        stream.push({ type: "text_start", contentIndex: 0, partial: output });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: responseText, partial: output });
+        stream.push({ type: "text_end", contentIndex: 0, content: responseText, partial: output });
+        stream.push({ type: "done", reason: "stop", message: output });
+        stream.end();
+      });
+      return stream;
+    },
+  });
+}
+TS
+  chmod +x "$project/bin/"*.sh
+  git -C "$project" add -A
+  git -C "$project" commit -q -m init
+
+  tmux -L "$SOCKET" new-session -d -s "$session" -c "$project" -x 180 -y 50 \
+    "env FM_HOME='$home' FM_ROOT_OVERRIDE='$project' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --session-dir '$sessions' --no-context-files --no-skills --no-prompt-templates --tools bash --model race-local/deterministic; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 60" \
+    || fail "Pi $version: could not start the offline /new lab"
+  i=0
+  while [ "$i" -lt 200 ]; do
+    pane=$(capture "$session")
+    printf '%s\n' "$pane" | grep -Fq 'race-local-provider.ts' && \
+      printf '%s\n' "$pane" | grep -Fq 'deterministic' && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  printf '%s\n' "$pane" | grep -Fq 'deterministic' \
+    || { printf '%s\n' "$pane" >&2; fail "Pi $version: offline local provider did not reach the ready composer"; }
+
+  tmux -L "$SOCKET" send-keys -t "$session" -l /new
+  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  i=0
+  while [ "$i" -lt 500 ] && [ ! -f "$home/state/native-started-1" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -f "$home/state/native-started-1" ] \
+    || { capture "$session" >&2; fail "Pi $version: immediate /new native generation never started"; }
+  tmux -L "$SOCKET" send-keys -t "$session" -l IMMEDIATE_RACE_PROMPT
+  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  sleep 0.5
+  [ ! -s "$home/state/provider-calls" ] \
+    || fail "Pi $version: the immediate first provider call escaped before native startup settled"
+  [ ! -f "$home/state/manual-started" ] \
+    || fail "Pi $version: manual startup ran concurrently with the native generation"
+  : > "$home/state/release-native-1"
+  i=0
+  while [ "$i" -lt 1000 ] && ! grep -Fq 'prompt=immediate native_count=1 manual=false' "$home/state/provider-calls" 2>/dev/null; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  grep -Fqx 'prompt=immediate native_count=1 manual=false' "$home/state/provider-calls" \
+    || { capture "$session" >&2; fail "Pi $version: immediate first payload lacked exactly one native startup context"; }
+  wait_for_text "$session" 'RACE_RESULT prompt=immediate native_count=1 manual=false' 60 \
+    || fail "Pi $version: immediate local-provider turn did not settle"
+  session_file=$(find "$sessions" -type f -name '*.jsonl' -exec grep -l IMMEDIATE_RACE_PROMPT {} + 2>/dev/null | head -1 || true)
+  [ -n "$session_file" ] || fail "Pi $version: immediate /new session file was not found"
+  [ "$(grep -Fc 'RACE_NATIVE generation=1' "$session_file")" -eq 1 ] \
+    || fail "Pi $version: immediate generation persisted other than one native startup context"
+  [ "$(grep -c '^clear-start:1:' "$home/state/events")" -eq 1 ] \
+    || fail "Pi $version: immediate generation executed native startup other than once"
+  [ ! -f "$home/state/manual-started" ] \
+    || fail "Pi $version: immediate fixed path still executed manual startup"
+
+  tmux -L "$SOCKET" send-keys -t "$session" -l /new
+  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  i=0
+  while [ "$i" -lt 500 ] && [ ! -f "$home/state/native-started-2" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -f "$home/state/native-started-2" ] \
+    || { capture "$session" >&2; fail "Pi $version: proven /new native generation never started"; }
+  : > "$home/state/release-native-2"
+  i=0
+  while [ "$i" -lt 500 ] && [ ! -f "$home/state/native-completed-2" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -f "$home/state/native-completed-2" ] || fail "Pi $version: proven native generation did not complete"
+  tmux -L "$SOCKET" send-keys -t "$session" -l PROVEN_RACE_PROMPT
+  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  wait_for_text "$session" 'RACE_RESULT prompt=proven native_count=1 manual=false' 60 \
+    || fail "Pi $version: proven completed-before-prompt path lacked exactly one native context"
+  first_line=$(sed -n '1p' "$home/state/provider-calls")
+  second_line=$(sed -n '2p' "$home/state/provider-calls")
+  [ "$first_line" = 'prompt=immediate native_count=1 manual=false' ] \
+    || fail "Pi $version: immediate provider evidence changed unexpectedly: $first_line"
+  [ "$second_line" = 'prompt=proven native_count=1 manual=false' ] \
+    || fail "Pi $version: proven provider evidence changed unexpectedly: $second_line"
+  [ "$(grep -c '^clear-start:' "$home/state/events")" -eq 2 ] \
+    || fail "Pi $version: two /new generations did not execute native startup exactly once each"
+  [ ! -f "$home/state/manual-started" ] \
+    || fail "Pi $version: proven fixed path executed manual startup"
+
+  tmux -L "$SOCKET" send-keys -t "$session" -l /quit
+  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  wait_for_text "$session" 'PI_EXIT=0' 30 || fail "Pi $version: offline /new lab did not exit cleanly"
+  pass "Pi $version: immediate and completed-before-prompt /new paths each made one first provider call with exactly one native startup context and no manual execution"
+}
+
+if [ "${FM_PI_SESSIONSTART_RACE_LIVE_E2E:-0}" = 1 ]; then
+  probe_pi_sessionstart_prerequisite
+  if [ "${FM_SESSIONSTART_HOOK_LIVE_E2E:-0}" != 1 ]; then
+    echo "# fm-sessionstart-hook-live-e2e.test.sh: offline Pi /new race assertions passed"
+    exit 0
+  fi
+fi
 
 # --- per-harness drivers ------------------------------------------------------
 

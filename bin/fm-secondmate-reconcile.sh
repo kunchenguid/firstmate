@@ -6,6 +6,13 @@
 #   fm-secondmate-reconcile.sh notify [--snapshot <file>|-]
 #   fm-secondmate-reconcile.sh nudged <mate-id>
 #
+# This is a BACKSTOP, not the primary mechanism. Dispatch and completion pair
+# the backlog row with the task's record inside the one script that moves the
+# record, and each home reconciles its own books at session start
+# (bin/fm-backlog-transition-lib.sh), so what reaches here is what neither could
+# see: a home that has not restarted since it drifted, or one still running
+# older code.
+#
 # A backlog-vs-metadata inventory mismatch inside a secondmate home
 # (orphan_in_flight, unowned_current, terminal_in_flight) no longer makes that
 # home unreadable: bin/fm-fleet-snapshot.sh keeps its decisions, queued, landed,

@@ -102,7 +102,7 @@ test_existing_agents_md_with_symlink_gains_self_governance() {
   repo="$TMP_ROOT/existing-symlinked-project"
   mkdir -p "$repo"
   printf '# Existing agent memory\n\nBuild with make.\n' > "$repo/AGENTS.md"
-  ln -s AGENTS.md "$repo/CLAUDE.md"
+  fm_test_make_symlink AGENTS.md "$repo/CLAUDE.md"
   agents="$repo/AGENTS.md"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed for existing AGENTS.md with symlink"
@@ -130,7 +130,7 @@ test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
   repo="$TMP_ROOT/symlink-migrate-project"
   mkdir -p "$repo"
   printf '# Unique agent memory\n\nDo not clobber this payload.\n\n## Maintaining this file\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
-  ln -s AGENTS.md "$repo/CLAUDE.md"
+  fm_test_make_symlink AGENTS.md "$repo/CLAUDE.md"
   agents="$repo/AGENTS.md"
   cp "$agents" "$repo/.before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
@@ -227,7 +227,7 @@ test_existing_crlf_agents_md_without_section_preserves_crlf() {
     '# Existing agent memory' \
     '' \
     'Run tests with make test.' > "$repo/AGENTS.md"
-  ln -s AGENTS.md "$repo/CLAUDE.md"
+  fm_test_make_symlink AGENTS.md "$repo/CLAUDE.md"
   agents="$repo/AGENTS.md"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed injecting into CRLF AGENTS.md"
@@ -270,6 +270,23 @@ test_canonical_pointer_is_accepted_when_both_are_real_files() {
   pass "fm-ensure-agents-md.sh: canonical real CLAUDE.md pointer is not a conflict"
 }
 
+test_crlf_canonical_pointer_is_accepted_unchanged() {
+  local repo out
+  repo="$TMP_ROOT/crlf-pointer-project"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\n## Maintaining this file\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
+  printf '%s\r\n' \
+    '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
+    '@AGENTS.md' > "$repo/CLAUDE.md"
+  cp "$repo/CLAUDE.md" "$repo/.claude-before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh refused a canonical CRLF CLAUDE.md pointer"
+  assert_contains "$out" "unchanged:" "canonical CRLF pointer plus AGENTS.md was not reported unchanged"
+  cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" \
+    || fail "canonical CRLF CLAUDE.md pointer was rewritten"
+  pass "fm-ensure-agents-md.sh: canonical CRLF CLAUDE.md pointer stays unchanged"
+}
+
 test_distinct_real_files_are_refused() {
   local repo out rc
   repo="$TMP_ROOT/distinct-real-files-project"
@@ -295,7 +312,7 @@ test_agents_md_symlink_is_refused() {
   repo="$TMP_ROOT/agents-symlink-project"
   mkdir -p "$repo"
   printf '# payload\n' > "$repo/payload.md"
-  ln -s payload.md "$repo/AGENTS.md"
+  fm_test_make_symlink payload.md "$repo/AGENTS.md"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "expected a non-zero exit when AGENTS.md is a symlink"
@@ -311,7 +328,7 @@ test_wrong_target_symlink_is_refused() {
   mkdir -p "$repo"
   printf '# Agents memory\n' > "$repo/AGENTS.md"
   printf '# other\n' > "$repo/OTHER.md"
-  ln -s OTHER.md "$repo/CLAUDE.md"
+  fm_test_make_symlink OTHER.md "$repo/CLAUDE.md"
   cp "$repo/AGENTS.md" "$repo/.agents-before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
   rc=$?
@@ -364,6 +381,7 @@ test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf
 test_canonical_pointer_is_accepted_when_both_are_real_files
+test_crlf_canonical_pointer_is_accepted_unchanged
 test_distinct_real_files_are_refused
 test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused

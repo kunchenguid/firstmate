@@ -119,7 +119,8 @@ fm_on() {
 
 # The pre-feature user path had no executable transport at all. The regression
 # exercises the adopted public surface end to end through a deterministic SSH
-# process boundary rather than checking script source.
+# process boundary rather than checking script source. A payload caller passes
+# --stdin explicitly; without it the remote command's stdin is /dev/null.
 ARGV_ACTUAL="$REMOTE_HOME/argv.bin"
 ARGV_EXPECTED="$TMP_ROOT/argv-expected.bin"
 # shellcheck disable=SC2016 # Literal shell-looking argv is the injection probe.
@@ -127,7 +128,7 @@ printf '%s\0' 'plain' 'two words' '$(touch /tmp/fm-on-injected)' '' $'line one\n
 printf 'payload one\npayload two\n' > "$TMP_ROOT/stdin"
 set +e
 # shellcheck disable=SC2016 # Literal shell-looking argv is the injection probe.
-fm_on ios fm-probe-one.sh "$ARGV_ACTUAL" 23 \
+fm_on --stdin ios fm-probe-one.sh "$ARGV_ACTUAL" 23 \
   'plain' 'two words' '$(touch /tmp/fm-on-injected)' '' $'line one\nline two' \
   < "$TMP_ROOT/stdin" > "$TMP_ROOT/stdout" 2> "$TMP_ROOT/stderr"
 rc=$?
@@ -139,7 +140,21 @@ assert_grep 'stdin: payload one' "$TMP_ROOT/stdout" "remote stdin was not preser
 assert_grep 'stdin: payload two' "$TMP_ROOT/stdout" "remote stdin lost its second line"
 assert_grep 'stderr: separate' "$TMP_ROOT/stderr" "remote stderr was not preserved separately"
 assert_absent /tmp/fm-on-injected "shell-looking argv was interpreted"
-pass "fm-on preserves argv, stdin, stdout, stderr, and exit status without shell interpretation"
+pass "fm-on --stdin preserves argv, stdin, stdout, stderr, and exit status without shell interpretation"
+
+# Without --stdin the remote command must see EOF even when the caller's own
+# stdin holds bytes: staging captures stdin to EOF, so an open caller stream
+# must never reach it by default.
+set +e
+fm_on ios fm-probe-one.sh "$REMOTE_HOME/argv-default.bin" 0 'default-closed' \
+  < "$TMP_ROOT/stdin" > "$TMP_ROOT/stdout-default" 2> "$TMP_ROOT/stderr-default"
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "the default-closed invocation did not preserve exit status (got $rc)"
+if grep -q 'stdin:' "$TMP_ROOT/stdout-default"; then
+  fail "caller stdin crossed the transport without --stdin: $(cat "$TMP_ROOT/stdout-default")"
+fi
+pass "fm-on defaults the remote command's stdin to /dev/null"
 
 # A vanished remote peer must become a bounded ssh failure instead of an
 # indefinite hang on a half-open TCP connection, so the existing no-result ->

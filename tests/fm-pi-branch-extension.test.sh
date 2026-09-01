@@ -47,6 +47,21 @@ export function getMarkdownTheme() {
   return {};
 }
 
+export function keyHint(_keybinding, description) {
+  return `ctrl+o ${description}`;
+}
+
+export class ToolExecutionComponent {
+  updateResult(result) {
+    this.result = result;
+  }
+  render() {
+    return (this.result?.content ?? [])
+      .filter((item) => item.type === "text")
+      .flatMap((item) => item.text.split("\n"));
+  }
+}
+
 export class UserMessageComponent {}
 
 export class DynamicBorder {
@@ -124,7 +139,12 @@ export function createBashToolDefinition(cwd, options) {
     parameters: { type: "object" },
     __cwd: cwd,
     __options: options,
-    execute: async () => ({ content: [], details: undefined }),
+    execute: async (_toolCallId, params) => {
+      if (!globalThis.__fmExecuteBranchBash) return { content: [], details: undefined };
+      const initial = { command: String(params.command ?? ""), cwd, env: { ...process.env } };
+      const context = options.spawnHook ? options.spawnHook(initial) : initial;
+      return globalThis.__fmExecuteBranchBash(context);
+    },
   };
 }
 
@@ -146,6 +166,7 @@ export async function createAgentSession(options) {
       }
       session.ops.push({ kind: "prompt", text });
       (globalThis.__fmPrompts ??= []).push(text);
+      await globalThis.__fmOnBranchPrompt?.({ session, text });
     },
     async sendCustomMessage(message, opts) {
       if (globalThis.__fmMirrorGate) {
@@ -685,6 +706,23 @@ if (calmOffCall.constructor.name !== "Box" || calmOffCall.paddingX !== 1 || calm
 if (calmOffResult.constructor.name !== "Container" || calmOffCall.children[0]?.text !== "fm_branch_outcomes" || calmOffCall.children[1]?.text !== "OUTCOME_DUMP") {
   throw new Error("fm_branch_outcomes changed its ordinary call or result rendering");
 }
+const legacyStockResult = {
+  content: [{
+    type: "text",
+    text: Array.from({ length: 12 }, (_, index) => `LEGACY_OUTCOME_${String(index + 1).padStart(2, "0")}`).join("\n"),
+  }],
+};
+const legacyRenderContext = { state: {}, isError: false, isPartial: false };
+const legacyCall = outcomesTool.renderCall({}, renderTheme, legacyRenderContext);
+outcomesTool.renderResult(legacyStockResult, { expanded: false, isPartial: false }, renderTheme, legacyRenderContext);
+const collapsedLegacyText = legacyCall.children[1]?.text;
+if (!collapsedLegacyText?.includes("LEGACY_OUTCOME_12") || collapsedLegacyText.includes("more lines")) {
+  throw new Error("legacy all-line stock capability did not preserve collapsed Calm-off output");
+}
+outcomesTool.renderResult(legacyStockResult, { expanded: true, isPartial: false }, renderTheme, legacyRenderContext);
+if (legacyCall.children[1]?.text !== collapsedLegacyText) {
+  throw new Error("legacy all-line stock capability changed expanded Calm-off output");
+}
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 const calmOnCall = outcomesTool.renderCall({}, renderTheme, renderContext);
 const calmOnResult = outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext);
@@ -774,12 +812,23 @@ EOF
   body=$(./bin/fm-operational-input.sh body < "$home/state/delivered-captain-note") \
     || fail "captain outcome envelope carries no readable body"
   case "$body" in
-    *"task-9: PR https://example.com/pr/9"*) ;;
-    *) fail "captain outcome body lost the outcome itself: $body" ;;
+    *"This is a supervision outcome delivered automatically by the supervision branch."*"It was not typed by the captain."*"task-9: PR https://example.com/pr/9"*) ;;
+    *) fail "captain outcome body lost its self-description or the outcome itself: $body" ;;
+  esac
+  # Event ownership and conversational judgment are separate contracts. The
+  # delivered instruction forbids reprocessing the fleet event but leaves main
+  # free to decide how the outcome belongs in the captain conversation.
+  case "$body" in
+    *"The fleet event is already handled: do not re-drain, re-run, or acknowledge it."*) ;;
+    *) fail "captain outcome body lost the event-ownership boundary: $body" ;;
   esac
   case "$body" in
-    *"Relay only this outcome"*"Do not restate or repeat any earlier answer"*) ;;
-    *) fail "captain outcome body never tells main to relay it instead of repeating: $body" ;;
+    *"This outcome is captain-facing: give the captain a visible response now."*"Use your judgment over the wording and how to incorporate it, not whether to surface it."*) ;;
+    *) fail "captain outcome body made visibility optional or removed wording judgment: $body" ;;
+  esac
+  case "$body" in
+    *"An outcome that directly answers an explicit captain request is captain-facing"*"regardless of whether it is healthy, routine, measured, actionable, or requires a decision."*) ;;
+    *) fail "captain outcome body lost the unconditional explicit-request rule: $body" ;;
   esac
   # The routine note is rendered in the TUI, and its renderer reads the glyph off
   # the front of this same string, so it must stay plain text.
@@ -787,6 +836,203 @@ EOF
     fail "routine note must stay plain rendered text, not typed operational input"
   fi
   pass "a captain outcome reaches main's model as typed, self-describing input while routine notes stay plain"
+}
+
+test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
+  local repo home out status
+  repo="$TMP_ROOT/requested-outcome-root"
+  home="$TMP_ROOT/requested-outcome-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, outcomeScript, mainTools, home, realRoot }; })()`);
+const { fire, dispatch, settle, sentToMain, outcomeScript, mainTools, home, realRoot } = globalThis.__t;
+import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const fleetOperations = [];
+globalThis.__fmExecuteBranchBash = async (context) => {
+  const actor = spawnSync(
+    "bash",
+    ["-c", '. "$1"; fm_lease_actor', "_", `${realRoot}/bin/fm-lease-lib.sh`],
+    { encoding: "utf8", cwd: context.cwd, env: context.env },
+  );
+  if (actor.status !== 0) throw new Error(`branch bash actor resolution failed: ${actor.stderr}`);
+  const result = spawnSync("bash", ["-c", context.command], {
+    encoding: "utf8",
+    cwd: context.cwd,
+    env: context.env,
+  });
+  fleetOperations.push({ command: context.command, actor: actor.stdout.trim(), status: result.status });
+  return {
+    content: [{ type: "text", text: `${result.stdout}${result.stderr}` }],
+    details: { stdout: result.stdout, stderr: result.stderr, exitCode: result.status, actor: actor.stdout.trim() },
+    isError: result.status !== 0,
+  };
+};
+
+async function runFleetCommand(session, args) {
+  const bash = session.options.customTools.find((tool) => tool.name === "bash");
+  const command = ["bin/fm-wake-drain.sh", ...args].join(" ");
+  const result = await bash.execute(`fleet-${fleetOperations.length}`, { command }, undefined, undefined, {});
+  if (result.isError) throw new Error(`fleet command failed: ${JSON.stringify(result)}`);
+  return result.details;
+}
+
+function directlyRequestsResourceReport(mirror) {
+  const latestCaptain = mirror.at(-1) ?? "";
+  const words = new Set(latestCaptain.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const requestsDelivery = ["give", "provide", "send", "show"].some((word) => words.has(word));
+  const namesReport = ["report", "status", "measurement"].some((word) => words.has(word));
+  const namesResources = ["resource", "resources", "cpu", "memory"].some((word) => words.has(word));
+  return requestsDelivery && namesReport && namesResources;
+}
+
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const mirror = session.ops
+    .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+    .map((op) => op.message.content);
+  const directlyRequested = directlyRequestsResourceReport(mirror);
+  const drained = await runFleetCommand(session, []);
+  const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
+  if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const verdictDescription = report.parameters.properties.verdict.description;
+  if (!verdictDescription.includes("unconditionally") ||
+      !verdictDescription.includes("directly answers an explicit captain request") ||
+      !verdictDescription.includes("regardless of whether it is healthy, routine, measured, actionable, or requires a decision")) {
+    throw new Error(`branch provider received conflicting verdict semantics: ${verdictDescription}`);
+  }
+  const result = await report.execute(
+    `resource-result-${fleetOperations.length}`,
+    {
+      task: "task-resource",
+      verdict: directlyRequested ? "captain" : "routine",
+      summary: "healthy resource report: CPU 12%, memory 41%",
+      wake: "signal: healthy resource result",
+    },
+    undefined,
+    undefined,
+    {},
+  );
+  if (result.isError) throw new Error(`branch report failed: ${JSON.stringify(result)}`);
+  await runFleetCommand(session, ["--ack-through", ack[1], "--recovery-generation", ack[2]]);
+};
+
+const explicitRequest = "Please give me a fresh mini system-resource report.";
+const longRequests = [
+  `${explicitRequest}${" head context".repeat(500)}`,
+  `${"middle context ".repeat(250)}${explicitRequest}${" middle context".repeat(250)}`,
+  `${"tail context ".repeat(500)}${explicitRequest}`,
+];
+const requestedPrompts = [...longRequests, "FIRSTMATE give me a fresh system-resource report."];
+// Match Pi's real AgentSession.prompt ordering: before_agent_start receives
+// the expanded prompt before _runAgentPrompt appends its user message to the
+// SessionManager. Keeping entries stale at the hook boundary is the regression.
+const entries = [];
+const mainCtx = {
+  model: { provider: "anthropic", id: "main-model" },
+  sessionManager: {
+    getSessionFile: () => `${home}/main.jsonl`,
+    getEntries: () => entries,
+  },
+};
+const operational = spawnSync(
+  "bash",
+  [`${realRoot}/bin/fm-operational-input.sh`, "encode", "watcher"],
+  { encoding: "utf8", input: "operational watcher injection" },
+);
+if (operational.status !== 0) throw new Error(`could not create operational input: ${operational.stderr}`);
+fire("before_agent_start", { prompt: operational.stdout }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: operational.stdout } });
+const unsolicitedPrompt = "Please keep responses concise while monitoring the fleet.";
+fire("before_agent_start", { prompt: unsolicitedPrompt }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
+fire("agent_start", {}, mainCtx);
+fire("agent_end", {}, mainCtx);
+const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
+fire("before_agent_start", { prompt: legacyOperational }, mainCtx);
+entries.push({ type: "message", message: { role: "user", content: legacyOperational } });
+fire("agent_start", {}, mainCtx);
+const unsolicited = dispatch("signal: healthy resource result");
+if (!unsolicited.accepted) throw new Error("branch did not accept the unsolicited result");
+await settle(() => fleetOperations.length === 2, "unsolicited result acknowledgement");
+if (sentToMain.length !== 1 || sentToMain[0].options.triggerTurn) {
+  throw new Error(`unsolicited healthy result opened a main turn: ${JSON.stringify(sentToMain)}`);
+}
+const sailboat = sentToMain[0];
+if (sailboat.message.display !== true || !sailboat.message.content.startsWith("⛵ task-resource:")) {
+  throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sailboat)}`);
+}
+
+const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
+if (!outcomes) throw new Error("main did not receive its outcome-reading permission surface");
+const visibleToMain = await outcomes.execute("main-reads-sailboat", { recent: 1 }, undefined, undefined, {});
+const mainOutcomeText = visibleToMain.content.map((item) => item.text ?? "").join("\n");
+if (visibleToMain.isError || !mainOutcomeText.includes("healthy resource report: CPU 12%, memory 41%")) {
+  throw new Error(`main could not use the sailboat content through its existing permission path: ${JSON.stringify(visibleToMain)}`);
+}
+if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocessed the fleet event");
+
+for (let index = 0; index < requestedPrompts.length; index += 1) {
+  const content = requestedPrompts[index];
+  if (index < longRequests.length && content.length <= 4000) {
+    throw new Error(`request fixture ${index} did not exceed the mirror bound`);
+  }
+  fire("before_agent_start", { prompt: content }, mainCtx);
+  // Pi persists this only after every before_agent_start handler has returned.
+  entries.push({ type: "message", message: { role: "user", content } });
+  fire("agent_start", {}, mainCtx);
+  const requested = dispatch("signal: healthy resource result");
+  if (!requested.accepted) throw new Error(`branch did not accept requested result ${index}`);
+  await settle(() => fleetOperations.length === 4 + (index * 2), `requested result ${index} acknowledgement`);
+  const deliveredRequestMirror = globalThis.__fmSessions[0].ops
+    .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+    .at(-1)?.message.content;
+  if (deliveredRequestMirror !== `[captain] ${content}`) {
+    throw new Error(`pre-turn-end mirror changed long captain request ${index}`);
+  }
+  const turns = sentToMain.filter((sent) => sent.options.triggerTurn === true);
+  if (turns.length !== index + 1 || turns.at(-1).options.deliverAs !== "followUp") {
+    throw new Error(`requested result ${index} did not open exactly one main turn: ${JSON.stringify(sentToMain)}`);
+  }
+}
+const mirroredCaptainText = globalThis.__fmSessions[0].ops
+  .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
+  .map((op) => op.message.content);
+for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
+  const copies = mirroredCaptainText.filter((text) => text === `[captain] ${content}`).length;
+  if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
+}
+if (mirroredCaptainText.some((text) =>
+  text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
+)) {
+  throw new Error("canonical current or legacy operational input entered captain mirror context");
+}
+if ((globalThis.__fmPrompts ?? []).length !== 5) throw new Error("a handled fleet wake was rerun");
+if (sentToMain.length !== 5) throw new Error(`one result was reprocessed into ${sentToMain.length} main messages`);
+if (fleetOperations.length !== 10 || fleetOperations.some((operation) => operation.status !== 0)) {
+  throw new Error(`fleet event ownership repeated or failed work: ${JSON.stringify(fleetOperations)}`);
+}
+if (fleetOperations.some((operation) => operation.actor !== "branch")) {
+  throw new Error(`main took fleet-event ownership: ${JSON.stringify(fleetOperations)}`);
+}
+if (existsSync(`${home}/state/.wake-queue`) && readFileSync(`${home}/state/.wake-queue`, "utf8") !== "") {
+  throw new Error("acknowledged fleet wake remained queued for another owner");
+}
+const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+if (rows.length !== 5 || rows[0].verdict !== "routine" || rows.slice(1).some((row) => row.verdict !== "captain")) {
+  throw new Error(`provider classifications were not recorded once in order: ${JSON.stringify(rows)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes remained unread for redelivery");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "requested and unsolicited healthy outcomes must follow their distinct public delivery paths: $out"
+  pass "requested and unsolicited healthy outcomes keep distinct delivery and event ownership"
 }
 
 test_captain_outcome_encoding_failure_delivers_plain_instruction() {
@@ -825,8 +1071,9 @@ if (delivered.options.triggerTurn !== true || delivered.options.deliverAs !== "f
 if (delivered.message.content.includes("FIRSTMATE_OP:")) {
   throw new Error(`fallback unexpectedly carried an envelope: ${delivered.message.content}`);
 }
-if (!delivered.message.content.includes("Relay only this outcome") ||
-    !delivered.message.content.includes("Do not restate or repeat any earlier answer") ||
+if (!delivered.message.content.includes("The fleet event is already handled: do not re-drain, re-run, or acknowledge it.") ||
+    !delivered.message.content.includes("This outcome is captain-facing: give the captain a visible response now.") ||
+    !delivered.message.content.includes("Use your judgment over the wording and how to incorporate it, not whether to surface it.") ||
     !delivered.message.content.includes("task-fallback: PR https://example.com/pr/fallback is ready")) {
   throw new Error(`fallback lost its instruction or outcome: ${delivered.message.content}`);
 }
@@ -1267,13 +1514,13 @@ const { fire, dispatch, settle, home } = globalThis.__t;
 import { existsSync, readFileSync } from "node:fs";
 
 const entries = [
-  { type: "message", message: { role: "user", content: "never merge task-7 without my word" } },
+  { type: "message", message: { role: "user", content: `never merge task-7 without my word ${"h".repeat(5000)} old-history-tail` } },
   { type: "message", message: { role: "assistant", content: [{ type: "text", text: "aye, holding task-7" }, { type: "toolCall", id: "t1" }] } },
   { type: "message", message: { role: "user", content: "⁣FIRSTMATE_OP: v1 watcher: operational injection" } },
   { type: "message", message: { role: "toolResult", content: "tool output stays in main" } },
   { type: "custom", message: { role: "custom", customType: "fm-branch-merge", content: "merged note" } },
   { type: "compaction", summary: "compacted" },
-  { type: "message", message: { role: "user", content: `pad ${"x".repeat(5000)}` } },
+  { type: "message", message: { role: "user", content: `pad ${"x".repeat(5000)}\ntail: retain this request` } },
 ];
 const ctx = {
   sessionManager: {
@@ -1296,9 +1543,15 @@ if (JSON.stringify(kinds) !== JSON.stringify(["custom", "custom", "custom", "pro
 const mirrored = session.ops.filter((op) => op.kind === "custom").map((op) => op.message);
 if (mirrored.some((m) => m.customType !== "fm-main-mirror")) throw new Error("mirror used the wrong custom type");
 if (mirrored.some((m) => m.display !== false)) throw new Error("mirrored context must be silent");
-if (mirrored[0].content !== "[captain] never merge task-7 without my word") throw new Error(`bad captain mirror: ${mirrored[0].content}`);
+if (!mirrored[0].content.startsWith("[captain] never merge task-7 without my word") ||
+    !mirrored[0].content.includes("[mirror truncated:") ||
+    !mirrored[0].content.endsWith("old-history-tail")) {
+  throw new Error(`older captain history was not bounded: ${mirrored[0].content}`);
+}
 if (mirrored[1].content !== "[main] aye, holding task-7") throw new Error(`bad main mirror: ${mirrored[1].content}`);
-if (!mirrored[2].content.includes("[mirror truncated at 4000 characters]")) throw new Error("long dialog was not capped");
+if (mirrored[2].content !== `[captain] ${entries[6].message.content}`) {
+  throw new Error("current captain dialog was not preserved completely");
+}
 if (mirrored.some((m) => m.content.includes("operational injection") || m.content.includes("tool output") || m.content.includes("merged note"))) {
   throw new Error("mirror leaked operational, tool, or merge-note traffic");
 }
@@ -2821,7 +3074,23 @@ delete stockDefinition.renderResult;
 
 const args = { recent: 2 };
 const result = {
-  content: [{ type: "text", text: "\x1b[31mOUTCOME_ONE\x1b[0m\r\nOUT\u0000COME_TWO\uFFF9" }],
+  content: [{
+    type: "text",
+    text: [
+      "\x1b[31mOUTCOME_ONE\x1b[0m",
+      "OUT\u0000COME_TWO\uFFF9",
+      "OUTCOME_THREE",
+      "OUTCOME_FOUR",
+      "OUTCOME_FIVE",
+      "OUTCOME_SIX",
+      "OUTCOME_SEVEN",
+      "OUTCOME_EIGHT",
+      "OUTCOME_NINE",
+      "OUTCOME_TEN",
+      "OUTCOME_ELEVEN",
+      "OUTCOME_TWELVE",
+    ].join("\r\n"),
+  }],
   details: { ok: true },
   isError: false,
 };
@@ -2833,8 +3102,24 @@ for (const row of [stockRow, actualRow]) {
   row.setArgsComplete();
   row.updateResult(result);
 }
-if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+const collapsedStock = stockRow.render(100);
+const collapsedActual = actualRow.render(100);
+if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedStock)) {
   throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
+}
+const collapsedText = collapsedStock.join("\n");
+if (collapsedText.includes("OUTCOME_TWELVE") || !collapsedText.includes("more lines") || !collapsedText.includes("to expand")) {
+  throw new Error("stock rendering fixture did not exercise its collapsed preview and expansion hint");
+}
+stockRow.setExpanded(true);
+actualRow.setExpanded(true);
+const expandedStock = stockRow.render(100);
+const expandedActual = actualRow.render(100);
+if (JSON.stringify(expandedActual) !== JSON.stringify(expandedStock)) {
+  throw new Error("expanded Calm-off ToolExecutionComponent rendering differs from Pi stock");
+}
+if (!expandedStock.join("\n").includes("OUTCOME_TWELVE") || JSON.stringify(expandedStock) === JSON.stringify(collapsedStock)) {
+  throw new Error("stock rendering fixture did not exercise expanded output");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
 actualRow.invalidate();
@@ -2868,6 +3153,7 @@ JS
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
+test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_encoding_failure_delivers_plain_instruction
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
