@@ -959,11 +959,19 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     WEDGE_ALARM_LAST_EPOCH=$now
     log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   fi
-  {
-    printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
-    cat "$state/.subsuper-escalations" 2>/dev/null
-  } 2>/dev/null > "$marker" || true
+  # Owner-only marker: it embeds the buffered escalation digests, which can
+  # carry captured captain-pane text. Create under umask 077 so a permissive
+  # inherited umask never exposes it, and chmod any pre-existing marker whose
+  # mode predates this guarantee (redirection alone never tightens an old one).
+  (
+    umask 077
+    {
+      printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+      printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
+      cat "$state/.subsuper-escalations" 2>/dev/null
+    } 2>/dev/null > "$marker"
+  ) || true
+  chmod 600 "$marker" 2>/dev/null || true
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
   # Best-effort status-line flash. tmux's display-message is a client-side OSD

@@ -2342,6 +2342,44 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   pass "in-process wedge throttle prevents alert spam when the marker cannot persist"
 }
 
+_wedge_marker_mode() {
+  if [ "$(command uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
+test_inject_wedge_alarm_marker_is_owner_only() {
+  # The marker embeds the buffered escalation digests, which can carry captured
+  # captain-pane text (including credentials a human was mid-typing). It must be
+  # owner-only even when the daemon inherited a permissive umask, and a
+  # pre-existing permissive marker must be tightened on rewrite, not trusted.
+  local dir state marker mode
+  dir=$(make_wedge_case wedge-marker-private); state="$dir/state"
+  marker="$state/.subsuper-inject-wedged"
+  escalate_add "$state" "needs-decision: pick A"
+  (
+    umask 022
+    WEDGE_ALARM_LAST_EPOCH=0
+    FM_STATE_OVERRIDE="$state" FM_WEDGE_ALARM_CHANNEL=off FM_SUPERVISOR_BACKEND=herdr \
+      inject_wedge_alarm "$state" 30600
+  )
+  [ -s "$marker" ] || fail "inject_wedge_alarm did not write the durable marker"
+  mode=$(_wedge_marker_mode "$marker")
+  [ "$mode" = 600 ] || fail "wedge marker readable beyond the owner under a permissive umask (mode $mode)"
+  chmod 644 "$marker"
+  (
+    umask 022
+    WEDGE_ALARM_LAST_EPOCH=0
+    FM_STATE_OVERRIDE="$state" FM_WEDGE_ALARM_CHANNEL=off FM_SUPERVISOR_BACKEND=herdr \
+      FM_MAX_DEFER_SECS=0 inject_wedge_alarm "$state" 30615
+  )
+  mode=$(_wedge_marker_mode "$marker")
+  [ "$mode" = 600 ] || fail "pre-existing permissive wedge marker was not tightened on rewrite (mode $mode)"
+  pass "wedge marker stays owner-only under a permissive umask, including on rewrite of a permissive leftover"
+}
+
 test_fm_send_reports_delivered_unconfirmed_submit() {
   # When typed-plane text was typed and Enter sent but the submit read-back
   # remains pending, fm-send must return its documented delivered-unconfirmed status and prevent
@@ -2723,6 +2761,7 @@ test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
+test_inject_wedge_alarm_marker_is_owner_only
 test_fm_send_reports_delivered_unconfirmed_submit
 test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
