@@ -498,8 +498,8 @@ assert_contains "$out" "already-applied: $sid 2" "a byte-identical replay is rec
 before=$(result_count "$H" "$sid")
 pe "$H" reconcile >/dev/null
 sleep 1
-assert_contains "$(result_count "$H" "$sid")" "$before" \
-  "an applied live-states document never re-announces on reconcile"
+[ "$(result_count "$H" "$sid")" = "$before" ] \
+  || fail "an applied live-states document re-announced on reconcile"
 pass "queued, in_progress, waiting, requested, and pending checks apply, advance, and stay bounded"
 
 # --- unknown conclusion words normalize to a safe explicit value -------------
@@ -638,7 +638,8 @@ before=$(result_count "$H" "$sid")
 out=$(FM_HOME="$H" perl -e 'alarm 1; exec @ARGV' \
   "$ROOT/bin/fm-procevent-pr-follow.sh" run "$sid" 2>/dev/null || true)
 after=$(result_count "$H" "$sid")
-assert_contains "$after" "$before" "a recomputed poll after an unapplied capture adds no second document while the cursor holds"
+[ "$after" = "$before" ] \
+  || fail "a recomputed poll after an unapplied capture added a second document while the cursor held"
 # The applied cursor advance makes the same poll silent.
 FM_HOME="$H" "$ROOT/bin/fm-procevent-pr-follow.sh" autohandle "$sid" 1 "$first" >/dev/null
 out=$(FM_HOME="$H" perl -e 'alarm 1; exec @ARGV' \
@@ -817,8 +818,8 @@ out=$(FM_HOME="$H" perl -e 'alarm 1; exec @ARGV' \
 before=$(result_count "$H" "$sid")
 pe "$H" reconcile >/dev/null
 sleep 1
-assert_contains "$(result_count "$H" "$sid")" "$before" \
-  "a quarantined source produces no further results on reconcile"
+[ "$(result_count "$H" "$sid")" = "$before" ] \
+  || fail "a quarantined source produced further results on reconcile"
 # Re-arming clears the quarantine and resumes tracking.
 out=$(arm_gh "$H")
 assert_contains "$out" "already armed: $sid" "re-arming reports the tracked identity"
@@ -881,7 +882,7 @@ out=$(prf "$H" retire "$sid" --force)
 assert_contains "$out" "retired: $sid" "retirement is idempotent"
 pe "$H" reconcile >/dev/null
 sleep 0.3
-assert_contains "$(result_count "$H" "$sid")" 1 "a retired source produces no further results"
+[ "$(result_count "$H" "$sid")" = 1 ] || fail "a retired source produced further results"
 pass "explicit retirement is the one auditable off switch"
 
 # --- backfill surfaces currently unanswered threads ---------------------------
@@ -905,7 +906,8 @@ assert_contains "$(cursor_field "$H" "$sid" backfill)" "done" "the applied backf
 before=$(result_count "$H" "$sid")
 pe "$H" reconcile >/dev/null
 sleep 0.5
-assert_contains "$(result_count "$H" "$sid")" "$before" "the backfill never re-announces after it is applied"
+[ "$(result_count "$H" "$sid")" = "$before" ] \
+  || fail "the backfill re-announced after it was applied"
 pass "existing-PR backfill surfaces unanswered threads exactly once"
 
 # --- the guarded migration sweep arms every recorded PR once ------------------
@@ -1119,8 +1121,8 @@ ack "$H" "$sid" 1 "$RESULT"
 # The evicted id must stay silent on every later poll, not just the first.
 restart_runner "$H"
 sleep 2
-assert_contains "$(result_count "$H" "$sid")" 1 \
-  "the evicted check keeps producing a fresh document on every poll"
+[ "$(result_count "$H" "$sid")" = 1 ] \
+  || fail "the evicted check kept producing a fresh document on later polls"
 unset FM_PR_FOLLOW_MAP_LIMIT
 pass "a bounded check map never re-announces what the bound evicted"
 
@@ -1142,6 +1144,42 @@ assert_grep 'event: review-state id=100 state=DISMISSED' "$RESULT" \
   "the dismissal of a review that predates the baseline is announced"
 ack "$H" "$sid" 1 "$RESULT"
 pass "reviews that predate the baseline keep their state tracked"
+
+# --- a bounded approval set never repeats what it cannot record --------------
+new_section approvalbound
+gh_fix_default
+mkdir -p "$GL_FIX"
+printf '{"state":"opened","sha":"2222222222222222222222222222222222222222","author":{"username":"alice"}}' > "$GL_FIX/mr"
+printf '[]' > "$GL_FIX/discussions"
+printf '[{"id":7,"sha":"2222222222222222222222222222222222222222","status":"running"}]' > "$GL_FIX/pipelines"
+# More maximum-length approvers than the durable approval set can hold: the
+# ones the bound refuses must not be announced as a fresh grant on every poll.
+{
+  printf '{"approved_by":['
+  for i in $(seq 1 80); do
+    [ "$i" -gt 1 ] && printf ','
+    printf '{"user":{"username":"approver%03d%s"}}' "$i" "$(printf 'x%.0s' $(seq 1 49))"
+  done
+  printf ']}'
+} > "$GL_FIX/approvals"
+prf "$H" arm task-ab "$GL_URL" >/dev/null
+pe "$H" reconcile >/dev/null
+wait_for_baseline "$H" "$glsid" || fail "the bounded-approval baseline never completed"
+printf '[{"id":7,"sha":"2222222222222222222222222222222222222222","status":"success"}]' > "$GL_FIX/pipelines"
+wait_for_result "$H" "$glsid" || fail "the pipeline transition produced no result"
+RESULT=$(first_result "$H" "$glsid")
+assert_grep 'event: check id=7 change=pending->green status=success' "$RESULT" \
+  "the poll that could not record every approver still announced its other events"
+assert_no_grep 'state=APPROVED' "$RESULT" \
+  "an approver the set bound refused was announced as a fresh grant"
+assert_grep 'dropped: 1' "$RESULT" \
+  "the document does not mark that a bound truncated this poll"
+ack "$H" "$glsid" 1 "$RESULT"
+restart_runner "$H"
+sleep 2
+[ "$(result_count "$H" "$glsid")" = 1 ] \
+  || fail "the refused approvers kept producing a fresh document on later polls"
+pass "a bounded approval set never repeats what it cannot record"
 
 # --- deterministic rotation bounds aggregate load without starvation ----------
 new_section rotation

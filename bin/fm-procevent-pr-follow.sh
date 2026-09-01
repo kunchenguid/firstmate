@@ -156,7 +156,7 @@
 #   status: events|backfill|error
 #   head: <sha>                (absent on error documents)
 #   state: <open|closed|merged>
-#   dropped: <0|1>             (1 = the event bound truncated the delta)
+#   dropped: <0|1>             (1 = a bound truncated this poll's delta)
 #   events: <count>
 #   event: <type> <key>=<value>...
 #   cursor:                    (absent on error documents)
@@ -935,13 +935,16 @@ delta_head_and_state() {
 
 # Post-cap announced-only map and maximum rebuild: every collection's stored
 # state advances only to what the surviving event lines announce.
-approval_set_insert() {  # <set-variable-name> <user>
+# approval_set_insert <set-variable-name> <user>: 1 when the reader's set
+# limit refuses the user, so a grant this cursor cannot record is never
+# announced as one nobody has seen yet.
+approval_set_insert() {
   local current=${!1} candidate
   case ",$current," in
     *",$2,"*) return 0 ;;
   esac
   candidate="${current:+$current,}$2"
-  [ "${#candidate}" -le "$APPROVAL_SET_CHARS_LIMIT" ] || return 0
+  [ "${#candidate}" -le "$APPROVAL_SET_CHARS_LIMIT" ] || return 1
   printf -v "$1" '%s' "$candidate"
 }
 
@@ -1227,8 +1230,11 @@ compute_delta_gitlab() {
   done <<< "$SN_THREAD_ROWS"
 
   # Approvals: grants and revocations against the durable set, compared only
-  # against an approval list this poll actually read.
-  local user found u
+  # against an approval list this poll actually read, and only for grants the
+  # bounded set can still record.
+  local user found u approvals_truncated=0
+  # shellcheck disable=SC2034 # Written through the approval_set_insert indirection.
+  local projected=$CUR_APPROVALS
   local -a users_now=()
   local rest
   if [ "$SN_APPROVALS_OK" -eq 1 ]; then
@@ -1238,7 +1244,13 @@ compute_delta_gitlab() {
       users_now+=("$user")
       case ",$CUR_APPROVALS," in
         *",$user,"*) ;;
-        *) ev_add "0	event: review id=approval-$user state=APPROVED author=$user" ;;
+        *)
+          if approval_set_insert projected "$user"; then
+            ev_add "0	event: review id=approval-$user state=APPROVED author=$user"
+          else
+            approvals_truncated=1
+          fi
+          ;;
       esac
     done <<< "$SN_APPROVAL_ROWS"
     rest=$CUR_APPROVALS
@@ -1280,6 +1292,9 @@ compute_delta_gitlab() {
   done <<< "$SN_NOTE_ROWS"
 
   ev_sort_and_cap
+  if [ "$approvals_truncated" -eq 1 ] && [ -n "$EV_LINES" ]; then
+    EVENTS_DROPPED=1
+  fi
   advance_from_surviving
   while IFS=$'\t' read -r thread_id thread_state; do
     [ -n "$thread_id" ] || continue
