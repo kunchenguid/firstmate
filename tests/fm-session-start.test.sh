@@ -6,7 +6,7 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's five mutating sweeps, verified by their
+#     skipped (including bootstrap's seven mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: the safety preamble leads unchanged, live fleet
 #     state precedes the curated memory a truncated tail may take, and the

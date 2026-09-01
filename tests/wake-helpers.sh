@@ -62,12 +62,31 @@ make_case() {
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = "list-windows" ]; then
-  if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
+  if [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ]; then
+    printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
+  elif [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
     printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
   fi
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
+  if [ -n "${FM_FAKE_TMUX_CAPTURE_COUNT_FILE:-}" ]; then
+    _capture_count=$(cat "$FM_FAKE_TMUX_CAPTURE_COUNT_FILE" 2>/dev/null || echo 0)
+    printf '%s\n' "$((_capture_count + 1))" > "$FM_FAKE_TMUX_CAPTURE_COUNT_FILE"
+    if [ -n "${FM_FAKE_TMUX_CAPTURE_FAIL_AFTER:-}" ] \
+      && [ "$_capture_count" -ge "$FM_FAKE_TMUX_CAPTURE_FAIL_AFTER" ]; then
+      exit 1
+    fi
+  fi
+  if [ -n "${FM_FAKE_TMUX_FORBIDDEN_TARGET:-}" ]; then
+    _prev=
+    for _arg in "$@"; do
+      if [ "$_prev" = -t ] && [ "$_arg" = "$FM_FAKE_TMUX_FORBIDDEN_TARGET" ]; then
+        exit 1
+      fi
+      _prev=$_arg
+    done
+  fi
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi

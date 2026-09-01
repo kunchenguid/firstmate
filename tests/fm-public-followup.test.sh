@@ -102,6 +102,18 @@ run_pf() {  # <home> <args...>
     FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" "$PF" "$@"
 }
 
+# Drive the real script through macOS system bash (3.2.x). /usr/bin/env bash
+# often resolves to a newer bash where empty-array "${arr[@]}" under set -u is
+# a no-op, so this path is what actually guards the 3.2 unbound-variable crash.
+run_pf_sysbash() {  # <home> <args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FAKE_CURL_LOG="${FAKE_CURL_LOG:-}" \
+    FAKE_FOLLOWUP_CODE="${FAKE_FOLLOWUP_CODE:-200}" \
+    FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" /bin/bash "$PF" "$@"
+}
+
 tasks_in() {  # <home> <tasks-axi args...>
   local home=$1
   shift
@@ -624,7 +636,7 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -648,7 +660,7 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   assert_absent "$child/.fm-secondmate-parent" \
     "the legacy env-only binding case must not gain a durable parent record"
 
@@ -757,7 +769,7 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   # No FM_PUBLIC_FOLLOWUP_PRIMARY_HOME at all here: a restart of the secondmate
   # agent that drops the launch-time prefix must still find the real parent
@@ -790,7 +802,7 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   # No parent/state/mate.meta at all: the parent never recorded this secondmate's
   # own agent, so its side of the binding is genuinely missing. A durable LOCAL
   # record naming the real parent path must not be enough on its own to bypass
@@ -828,7 +840,7 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   fm_write_meta "$child/state/work-clean.meta" \
     "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -860,7 +872,7 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   fm_write_meta "$child/state/work-conflict.meta" \
     "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -887,7 +899,7 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
     fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
     fm_write_meta "$child/state/work-child.meta" \
       "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-      "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+      "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
     parent_record="$child/.fm-secondmate-parent"
     case "$case_name" in
       symlink)
@@ -954,7 +966,7 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   pre=${parent_resolved%??????}
   suf=${parent_resolved#"$pre"}
   record="$child/.fm-secondmate-parent"
@@ -992,7 +1004,7 @@ SH
   fm_write_meta "$home/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   rc=0
   out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -1028,7 +1040,7 @@ SH
   fm_write_meta "$child/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -1056,7 +1068,7 @@ test_secondmate_parent_binding_matches_literal_id() {
   fm_write_meta "$parent/state/mate.id.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-literal.meta" \
     "window=firstmate:fm-work-literal" "endpoint_task_id=work-literal" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -1141,13 +1153,18 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
   local home rc
   home=$(make_home cleanup-guard)
   seed_commitment "$home" pf-guard req-guard discord main ship-task
+  tasks_in "$home" add ship-task "ship guarded by its public follow-up" --kind ship >/dev/null \
+    || fail "could not add the guarded ship to its home's backlog"
+  tasks_in "$home" start ship-task >/dev/null \
+    || fail "could not mark the guarded ship In flight"
   fm_write_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/gone" \
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "spawn_gen=public-followup-guard"
 
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -1392,7 +1409,7 @@ test_dropped_baton_now_surfaces_open_loop() {
 
   fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
     "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   PATH="$parent/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$parent" \
     FM_STATE_OVERRIDE="$parent/state" "$PF" guard-work secondmate:mate pi-rearm-loop-fix-r1 \
@@ -1428,7 +1445,7 @@ test_control_registered_followon_is_guarded() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
     "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     expect_failure "registered follow-on must be guarded" "$TEARDOWN" pi-rearm-loop-fix-r1
@@ -1635,6 +1652,48 @@ EOF
   assert_present "$home/state/public-followup/registry/public-final-retire-b" \
     "successful retry must retain the one claimed destination"
   pass "failed rechain retirement keeps the source claimed by one resumable destination"
+}
+
+test_first_register_succeeds_with_empty_lock_list_under_bash32() {
+  local home err rc
+  [ -x /bin/bash ] || { pass "first register under /bin/bash skipped without /bin/bash"; return 0; }
+  home=$(make_home first-register-empty-locks)
+  jq -n '{request_id:"req-empty-locks", platform:"discord",
+      context_binding:{version:"ctx1", value:"ctx1_req-empty-locks"},
+      public_safe_summary:"first register with an empty lock list",
+      received_at:"2026-07-30T10:00:00Z",
+      followup_expires_at:"2026-08-06T10:00:00Z",
+      reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+  jq -n '{type:"pr-merged", project:"firstmate",
+          required_deliverables:["pr_url"], completion_policy:"all-required"}' \
+    > "$home/expected.json"
+  jq -n '{relation_id:"rel-code", work_ref:{home_id:"main", task_id:"work-empty-locks"},
+      role:"fulfills", required:true, generation:1}' > "$home/relation.json"
+  tasks_in "$home" public-followup add pf-empty-locks \
+    --request-context-file "$home/request.json" --purpose promised-final \
+    --expected-final-file "$home/expected.json" --expires-at 2026-10-01T00:00:00Z >/dev/null \
+    || fail "could not create the public commitment"
+  tasks_in "$home" public-followup bind-work pf-empty-locks \
+    --relation-file "$home/relation.json" >/dev/null \
+    || fail "could not bind work to the public commitment"
+  FM_HOME="$home" FMX_NOW_OVERRIDE="$PF_TEST_NOW" bash -c \
+    ". '$ROOT/bin/fm-x-lib.sh'; fmx_context_registry_set '$home/state' req-empty-locks discord 1900" \
+    || fail "could not retain the private request context"
+
+  err=$(mktemp "$home/register-err.XXXXXX")
+  set +e
+  run_pf_sysbash "$home" register pf-empty-locks --relation rel-code \
+    --work-home main --work-id work-empty-locks --generation 1 >"$home/register.out" 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first register under /bin/bash with an empty lock list failed (exit $rc): $(cat "$err" "$home/register.out")"
+  grep -q 'unbound variable' "$err" \
+    && fail "first register hit an unbound-variable crash under /bin/bash: $(cat "$err")"
+  assert_grep "registered pf-empty-locks main/work-empty-locks" "$home/register.out" \
+    "first register must print the registered line"
+  assert_present "$home/state/public-followup/registry/pf-empty-locks" \
+    "first register must write the registration record"
+  pass "first register succeeds with an empty lock list under /bin/bash"
 }
 
 test_registration_replay_preserves_delivery_and_retirement() {
@@ -1966,13 +2025,18 @@ test_retention_creates_no_false_teardown_refusal() {
   local home home2 rc out registry tmp
   home=$(make_home retain-teardown)
   seed_commitment "$home" pf-retain req-retain discord main ship-retain
+  tasks_in "$home" add ship-retain "ship with a retained delivered registration" --kind ship >/dev/null \
+    || fail "could not add the retained-registration ship to its home's backlog"
+  tasks_in "$home" start ship-retain >/dev/null \
+    || fail "could not mark the retained-registration ship In flight"
   fm_write_meta "$home/state/ship-retain.meta" \
     "window=firstmate:fm-ship-retain" \
     "worktree=$home/projects/gone" \
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "spawn_gen=public-followup-retain"
   emit_terminal "$home" "$home" pf-retain main ship-retain >/dev/null || fail "emit failed"
   run_pf "$home" consume >/dev/null || fail "consume failed"
   FAKE_CURL_LOG="$home/curl.log" run_pf "$home" deliver pf-retain >/dev/null || fail "delivery failed"
@@ -2121,12 +2185,17 @@ test_prechange_registration_is_open_and_unrechainable() {
 test_x_request_teardown_warns_when_final_unposted() {
   local home rc
   home=$(make_home xreq-warn)
+  tasks_in "$home" add linked-task "ship with a legacy Relay request link" --kind ship >/dev/null \
+    || fail "could not add the legacy-link ship to its home's backlog"
+  tasks_in "$home" start linked-task >/dev/null \
+    || fail "could not mark the legacy-link ship In flight"
   fm_write_meta "$home/state/linked-task.meta" \
     "window=firstmate:fm-linked-task" \
     "worktree=$home/projects/gone" \
     "project=$home/projects/sample" \
     "kind=ship" \
     "mode=local-only" \
+    "spawn_gen=public-followup-legacy-link" \
     "x_request=req-legacy-final"
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -2203,6 +2272,13 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   pass "secondmate promotion matches teardown parent resolution"
 }
 
+# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
+# register regression. The rest of this file is not a 3.2 snapshot suite.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_outcome_text_is_bounded_without_corrupting_characters
 test_restart_e2e_delivers_exactly_once
 test_duplicate_event_and_replay_are_noops
@@ -2241,6 +2317,7 @@ test_rechain_delivers_second_post_on_same_thread
 test_rechain_resumes_after_partial_add
 test_rechain_claims_delivered_source_once
 test_failed_rechain_retirement_keeps_source_claimed
+test_first_register_succeeds_with_empty_lock_list_under_bash32
 test_registration_replay_preserves_delivery_and_retirement
 test_redelivery_does_not_report_retired_loop_open
 test_retire_after_secondmate_home_removal

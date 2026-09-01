@@ -262,6 +262,34 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+# A symlink at state/<id>.meta is the containment hazard the shared publisher
+# refuses: promotion must not rewrite the symlink target in place.
+test_promote_refuses_a_symlinked_task_record() {
+  local home meta target original out status leftover
+  home="$TMP_ROOT/promote-symlink/home"
+  mkdir -p "$home/state"
+  meta="$home/state/promote-sym.meta"
+  target="$TMP_ROOT/promote-symlink/foreign-task-record"
+  original="$TMP_ROOT/promote-symlink/foreign-task-record.expected"
+  printf '%s\n' 'window=fm-promote-sym' 'kind=scout' 'worktree=/tmp/wt' > "$target"
+  cp "$target" "$original"
+  ln -s "$target" "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-sym --mode direct-PR --yolo on 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion through a symlink record should refuse"
+  assert_contains "$out" "task record" "promotion did not identify the unpublished task record"
+  [ -L "$meta" ] || fail "promotion replaced or removed the symlink record"
+  cmp -s "$target" "$original" \
+    || fail "promotion rewrote the symlink target in place"
+  assert_absent "$home/data/promote-sym/ship-instructions.md" \
+    "refused promotion published ship instructions"
+  leftover=$(find "$home/state" -maxdepth 1 -name '.*.meta.promote.*' -print 2>/dev/null || true)
+  [ -z "$leftover" ] || fail "promotion left a staging file after a refused publish: $leftover"
+  pass "fm-promote: a symlinked task record is refused and its target is left untouched"
+}
+
 # The delivery contract only protects a worker that actually receives it. A promoted
 # scout used to get a free-form hint instead of the mode-specific Definition of done,
 # so it never saw the ask-user escalation rule or the --yes ban that every briefed
@@ -386,6 +414,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

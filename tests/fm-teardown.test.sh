@@ -76,7 +76,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -175,29 +175,6 @@ SH
   printf '%s\n' "$case_dir"
 }
 
-add_compatible_tasks_axi() {
-  local case_dir=$1
-  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.2.4'
-  exit 0
-fi
-if [ "${1:-}" = update ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
-  printf '%s\n' '  --body-file <path>'
-  printf '%s\n' '  --archive-body'
-  exit 0
-fi
-if [ "${1:-}" = mv ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/tasks-axi"
-}
-
 # Write a meta file for the task. Args: case_dir mode kind
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
@@ -207,7 +184,8 @@ write_meta() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
-    "mode=$mode"
+    "mode=$mode" \
+    "spawn_gen=teardown-test-task-x1"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -273,7 +251,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
-      *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -542,11 +520,34 @@ SH
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
+  # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
+  # home's backlog item itself; without it $DATA would resolve to the real
+  # repo's own home and a test could mutate live records.
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+# Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
+# has a row to close. Uses the real tasks-axi (the fixture's default fakebin has
+# no tasks-axi stub, so PATH resolves the installed one).
+seed_backlog_in_flight() {
+  local case_dir=$1 kind=${2:-ship}
+  mkdir -p "$case_dir/data"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$case_dir/data/backlog.md"
+  tasks-axi add task-x1 "teardown fixture task" --kind "$kind" \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  tasks-axi start task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+}
+
+backlog_row_state() {
+  local case_dir=$1
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" 2>/dev/null |
+    sed -n 's/^  state: *//p' | head -1
 }
 
 # Build the teardown test's executable search path without lsof, regardless of
@@ -584,39 +585,44 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
-test_teardown_prompts_tasks_axi_done_when_compatible() {
+test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
-  case_dir=$(make_case tasks-axi-reminder)
+  case_dir=$(make_case tasks-axi-close)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
-  add_compatible_tasks_axi "$case_dir"
+  seed_backlog_in_flight "$case_dir"
 
-  out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
-    || fail "teardown did not prompt tasks-axi done: $out"
+  out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
+    "closed backlog item did not record the task's PR"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a landed close left its pending-close record behind"
   printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
-    || fail "teardown did not prompt tasks-axi ready: $out"
+    || fail "teardown dropped the dependency-cleared follow-up: $out"
   printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
     || fail "teardown did not preserve date-gate check: $out"
-  printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
-    && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
-  pass "teardown prompts tasks-axi backlog refresh when compatible"
+  printf '%s\n' "$out" | grep -F 'Run tasks-axi done' >/dev/null \
+    && fail "teardown still asked a later turn to close the item it already closed: $out"
+  pass "teardown closes its own backlog item before reporting success"
 }
 
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
-  local case_dir out
+test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
+  local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
-  add_compatible_tasks_axi "$case_dir"
+  seed_backlog_in_flight "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
-  printf '%s\n' "$out" | grep -F 'Update data/backlog.md - move task-x1 to Done' >/dev/null \
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "manual backlog backend was mutated by teardown anyway"
+  backlog_path=$(cd "$case_dir/data" && pwd -P)/backlog.md
+  printf '%s\n' "$out" | grep -F "Update $backlog_path - move task-x1 to Done" >/dev/null \
     || fail "teardown did not prompt manual backlog update under opt-out: $out"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done' >/dev/null \
-    && fail "teardown prompted tasks-axi despite manual backend opt-out: $out"
-  pass "teardown honors config/backlog-backend=manual even when tasks-axi is compatible"
+  pass "teardown honors config/backlog-backend=manual and still finishes cleanly"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -757,6 +763,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
   land_on_origin_main "$case_dir" feature.txt hello
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  seed_backlog_in_flight "$case_dir"
   # No append_pr_meta_* call: state/task-x1.meta has no pr= or pr_head= line.
 
   ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
@@ -769,6 +776,8 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 
   expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
+  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
+    "no-pr-branch-discovery: resolved PR URL was not recorded on completion"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
@@ -1563,8 +1572,8 @@ SH
       ;;
   esac
   rc=0
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
-    FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -2597,8 +2606,8 @@ EOF
 }
 
 test_local_only_fork_remote_allows
-test_teardown_prompts_tasks_axi_done_when_compatible
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
+test_teardown_closes_the_backlog_item_itself
+test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows

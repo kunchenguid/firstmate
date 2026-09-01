@@ -109,6 +109,8 @@ init_changed_fixture_repo() {
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
+    fm-procevent-quota.test.sh \
+    fm-quota-choose.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
@@ -122,6 +124,11 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-control-lib.sh"
+  : >"$repo/bin/fm-timeout-lib.sh"
+  : >"$repo/bin/fm-procevent-quota.sh"
+  : >"$repo/bin/fm-quota-axi-lib.sh"
+  : >"$repo/bin/fm-quota-choose.sh"
   : >"$repo/bin/unmapped-source.sh"
   # A shared helper with no curated family of its own, named by exactly ONE
   # script of the expensive real-Herdr family and consumed by one curated
@@ -251,6 +258,43 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-harness-adapter-instructions-live-e2e.test.sh" "harness adapter router selects opt-in instruction coverage"
   git -C "$repo" add .agents/skills/harness-adapters/SKILL.md
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm harness-adapter-router-change
+
+  printf '\n' >>"$repo/bin/fm-procevent-quota.sh"
+  printf '\n' >>"$repo/bin/fm-quota-choose.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-procevent-quota.test.sh" \
+    "quota process-event source selects its focused test"
+  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
+    "quota chooser source selects its focused test"
+  git -C "$repo" add bin/fm-procevent-quota.sh bin/fm-quota-choose.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm quota-source-change
+
+  printf '\n' >>"$repo/bin/fm-quota-axi-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-procevent-quota.test.sh" \
+    "shared quota validator selects process-event coverage"
+  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
+    "shared quota validator selects chooser coverage"
+  git -C "$repo" add bin/fm-quota-axi-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm quota-validator-change
+
+  printf '\n' >>"$repo/bin/fm-control-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend.test.sh" \
+    "control library keeps backend coverage"
+  assert_contains "$listed" "tests/fm-session-start.test.sh" \
+    "control library keeps session coverage"
+  assert_contains "$listed" "tests/fm-quota-choose.test.sh" \
+    "control library selects chooser coverage"
+  git -C "$repo" add bin/fm-control-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm control-lib-change
+
+  printf '\n' >>"$repo/bin/fm-timeout-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-procevent-quota.test.sh" \
+    "timeout library selects quota polling coverage"
+  git -C "$repo" add bin/fm-timeout-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm timeout-lib-change
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e

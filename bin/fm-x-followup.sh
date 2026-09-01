@@ -157,6 +157,10 @@ case "$ID" in
 esac
 
 META="$STATE/$ID.meta"
+if [ -e "$META" ] || [ -L "$META" ]; then
+  fm_backlog_record_present "$META" "task record" "$STATE" \
+    || { echo "fm-x-followup: unsafe task record in state/$ID.meta" >&2; exit 1; }
+fi
 if [ "$MODE" = clear ]; then
   fmx_meta_link_clear "$META" \
     || { echo "fm-x-followup: could not clear the link in state/$ID.meta" >&2; exit 1; }

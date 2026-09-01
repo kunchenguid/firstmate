@@ -90,7 +90,8 @@ write_origin_meta() {  # <home> <id> [kind]
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=$kind" \
-    "mode=$kind"
+    "mode=$kind" \
+    "spawn_gen=fixture-$id"
 }
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
