@@ -22,6 +22,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-startup-network-tests)
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
 
@@ -344,7 +345,7 @@ EOF
 }
 
 test_deferred_invalid_secondmate_markers_queue_durable_findings() {
-  local kind rec home root log target report
+  local kind rec home root log target report err seq generation
   for kind in malformed symlink; do
     rec=$(new_world "deferred-invalid-marker-$kind")
     IFS='|' read -r home root log <<EOF
@@ -360,11 +361,22 @@ EOF
     fi
 
     FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 1
-    assert_grep $'check\tinactive-reconcile:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+    assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/.wake-queue" \
       "$kind marker finding was swallowed by the deferred startup stage"
     report=$(run_stage "$home" "$root" report)
     assert_contains "$report" "(silent - no problems found)" \
       "$kind marker fixture unexpectedly depended on the network report"
+
+    err="$home/drain.err"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" >/dev/null 2> "$err"
+    seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+    generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+    [ -n "$seq" ] && [ -n "$generation" ] \
+      || fail "$kind marker wake did not issue a durable acknowledgement"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" \
+      --ack-through "$seq" --recovery-generation "$generation" >/dev/null
+    assert_no_grep 'inactive-reconcile-diagnostic:invalid-secondmate-home' "$home/state/.wake-queue" \
+      "$kind marker wake could not be acknowledged"
   done
   pass "fm-startup-network: deferred invalid secondmate markers produce durable wakes"
 }
@@ -484,7 +496,7 @@ EOF
     || fail "the locked request never published"
   assert_grep 'network=only detect_only=0' "$log" \
     "the in-flight probe-only worker suppressed the locked sweeps"
-  assert_grep $'check\tinactive-reconcile:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+  assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/.wake-queue" \
     "the in-flight probe-only worker suppressed the locked inactive scan"
   pass "fm-startup-network: locked requests supersede in-flight probe-only workers"
 }

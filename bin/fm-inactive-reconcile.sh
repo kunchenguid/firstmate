@@ -443,7 +443,7 @@ scan() {
     marker_rc=$?
     self=''
     if [ "$marker_rc" -ne 1 ]; then
-      publish_actionable "inactive-reconcile:invalid-secondmate-home" \
+      publish_actionable "inactive-reconcile-diagnostic:invalid-secondmate-home" \
         "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
       return 0
     fi
