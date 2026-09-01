@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Workstreams - captain's board</title>
+<style>
+/* ============================================================
+   Workstream board - Firstmate Design System, inlined for portability.
+   Tokens copied verbatim from myfirstmate priv/static/assets/app.css
+   (the compiled adoption of .agents/skills/firstmate-design), matching the
+   bearings board template and the captain-approved mockup.
+   ============================================================ */
+@import url("https://fonts.googleapis.com/css2?family=Chango&family=Jost:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+
+:root {
+  --rust-700: #8f2f17; --rust-600: #a93a1f; --rust-500: #c0452a;
+  --rust-400: #d35f3f; --rust-300: #e08365; --rust-100: #f4d8c9; --rust-050: #fbece3;
+  --navy-700: #1a2238; --navy-600: #222c49; --navy-500: #2a3656;
+  --navy-300: #6c7796; --navy-100: #d9deea;
+  --gold-600: #b5791c; --gold-500: #e0a52e; --gold-300: #f0d38c; --gold-100: #f8ecc9;
+  --ocean-600: #2f6688; --ocean-500: #3c7ea6; --ocean-200: #b6d4e2; --ocean-050: #e8f1f5;
+  --sea-700: #234e3a; --sea-500: #2f6b4f; --sea-200: #b9d4c5; --sea-050: #e9f2ec;
+  --paper-000: #fbf4e2; --paper-100: #f6ecd3; --paper-200: #f0e3c4; --paper-300: #e7d6ae;
+  --cream-line: #ddc89c;
+  --ink-900: #241c14; --ink-700: #3f3224; --ink-500: #6f5e46; --ink-300: #9c8a6c;
+  --white: #fffdf7;
+  --bg-page: var(--paper-100);
+  --surface-card: var(--white);
+  --surface-card-warm: var(--paper-000);
+  --text-strong: var(--ink-900); --text-body: var(--ink-700);
+  --text-muted: var(--ink-500); --text-faint: var(--ink-300);
+  --border-default: var(--cream-line); --border-soft: var(--paper-300);
+  --status-online: var(--sea-500); --status-online-soft: var(--sea-050);
+  --status-warn: var(--gold-600); --status-warn-soft: var(--gold-100);
+  --status-danger: var(--rust-600); --status-danger-soft: var(--rust-050);
+  --status-info: var(--ocean-500); --status-info-soft: var(--ocean-050);
+  --font-display: "Chango", "Cooper Black", Rockwell, Georgia, serif;
+  --font-sans: "Jost", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --fs-h3: 1.4rem; --fs-h4: 1.15rem; --fs-base: 1rem; --fs-sm: 0.9375rem;
+  --fs-xs: 0.8125rem; --fs-2xs: 0.6875rem;
+  --ls-caps: 0.16em;
+  --radius-xs: 6px; --radius-sm: 9px; --radius-md: 12px; --radius-banner: 7px;
+  --radius-lg: 18px; --radius-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(36, 28, 20, 0.06), 0 4px 10px rgba(36, 28, 20, 0.06);
+  --shadow-hard: 4px 4px 0 var(--ink-900);
+  --shadow-hard-sm: 3px 3px 0 var(--ink-900);
+  --texture-paper: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.045'/%3E%3C/svg%3E");
+  --focus-ring: 0 0 0 3px var(--gold-300);
+  --container-app: 1180px;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  color: var(--text-body);
+  background: var(--bg-page);
+  background-image: var(--texture-paper);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: none; }
+
+/* ---- fm primitives (verbatim contracts) ---- */
+.fm-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--fs-2xs); font-weight: 800; line-height: 1;
+  padding: 5px 9px 4px; text-transform: uppercase; letter-spacing: 0.07em;
+  border-radius: var(--radius-xs); border: 1.5px solid var(--ink-900);
+  box-shadow: 2px 2px 0 var(--ink-900); white-space: nowrap;
+}
+.fm-badge--online  { background: var(--sea-500);  color: var(--paper-000); }
+.fm-badge--warn    { background: var(--gold-500); color: var(--navy-700); }
+.fm-badge--danger  { background: var(--rust-600); color: var(--paper-000); }
+.fm-badge--info    { background: var(--ocean-500); color: var(--paper-000); }
+.fm-badge--neutral { background: var(--paper-000); color: var(--ink-900); }
+
+.fm-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  font-family: var(--font-sans); font-weight: 800; line-height: 1; white-space: nowrap;
+  border: 2px solid transparent; border-radius: var(--radius-banner); cursor: pointer;
+  text-decoration: none; transition: background 120ms, border-color 120ms, transform 120ms, box-shadow 120ms;
+}
+.fm-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.fm-btn:active { transform: translateY(1px); }
+.fm-btn--sm { font-size: var(--fs-xs); padding: 8px 16px; }
+.fm-btn--gold { background: var(--gold-500); color: var(--navy-700); border-color: var(--ink-900); box-shadow: var(--shadow-hard-sm); }
+.fm-btn--gold:hover { background: var(--gold-600); color: var(--white); }
+.fm-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+.fm-card {
+  background: var(--surface-card); border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); overflow: hidden;
+  min-width: 0;
+}
+
+/* ---- page chrome (wb-*) ---- */
+.wb-nav {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--paper-100) 86%, transparent);
+  backdrop-filter: saturate(150%) blur(10px);
+  border-bottom: 1px solid var(--border-default);
+}
+.wb-nav__inner {
+  max-width: var(--container-app); margin: 0 auto; padding: 0 28px; height: 64px;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+}
+.wb-brand { display: inline-flex; align-items: center; gap: 12px; }
+.wb-brand__disc {
+  display: grid; place-items: center; width: 34px; height: 34px; flex: none;
+  border-radius: 999px; background: var(--rust-500); color: var(--paper-000);
+  border: 2px solid var(--ink-900); box-shadow: var(--shadow-hard-sm);
+}
+.wb-brand__disc svg { width: 60%; height: 60%; }
+.wb-brand__wm { font-family: var(--font-display); font-size: 23px; color: var(--text-strong); line-height: 1; }
+.wb-meta-mono { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-faint); white-space: nowrap; }
+
+.wb-main {
+  max-width: var(--container-app); margin: 0 auto;
+  padding: 26px 28px 72px; display: flex; flex-direction: column; gap: 22px;
+}
+
+/* stat strip: clickable anchor tiles */
+.wb-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.wb-stat {
+  display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; min-width: 0;
+  background: var(--surface-card-warm); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+  cursor: pointer; transition: transform 120ms, box-shadow 120ms;
+}
+.wb-stat:hover { transform: translateY(-2px); box-shadow: var(--shadow-hard-sm); }
+.wb-stat--attn { background: var(--rust-050); border: 2px solid var(--rust-500); }
+.wb-stat--warn { background: var(--status-warn-soft); border: 2px solid var(--gold-500); }
+.wb-stat__num { font-family: var(--font-mono); font-size: var(--fs-h3); font-weight: 600; line-height: 1; color: var(--text-strong); }
+.wb-stat--attn .wb-stat__num { color: var(--rust-600); }
+.wb-stat__label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+
+/* board ≠ reality callout */
+.wb-callout {
+  background: var(--status-danger-soft); border: 1.5px solid var(--rust-300);
+  border-radius: var(--radius-md); padding: 12px 16px; font-size: var(--fs-sm);
+}
+.wb-callout b { color: var(--rust-600); }
+.wb-callout__row { margin: 4px 0 0; }
+.wb-callout__id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-muted); margin-right: 6px; }
+
+/* two-column layout */
+.wb-cols { display: grid; grid-template-columns: minmax(0, 2.2fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+@media (max-width: 900px) { .wb-cols { grid-template-columns: minmax(0, 1fr); } }
+.wb-col { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
+
+/* workstream card */
+.ws-head { padding: 16px 20px 12px; border-bottom: 1px solid var(--border-soft); background: var(--surface-card-warm); }
+.ws-head-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ws-head h2 { font-family: var(--font-display); font-size: var(--fs-h4); color: var(--text-strong); margin: 0; }
+.ws-outcome { font-size: var(--fs-sm); color: var(--text-muted); margin: 4px 0 10px; }
+.ws-progress { display: flex; height: 14px; border-radius: var(--radius-pill); overflow: hidden; border: 1.5px solid var(--ink-900); background: var(--paper-200); }
+.ws-progress span { display: block; height: 100%; }
+.ws-seg--done { background: var(--sea-500); }
+.ws-seg--review { background: var(--ocean-500); }
+.ws-seg--active { background: var(--gold-500); }
+.ws-seg--decision { background: var(--rust-500); }
+.ws-key { display: flex; gap: 14px; flex-wrap: wrap; font-size: var(--fs-2xs); color: var(--text-muted); margin-top: 6px; font-weight: 600; }
+.ws-key i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--ink-900); margin-right: 5px; vertical-align: -1px; }
+.ws-key i.ws-seg--queued { background: var(--paper-200); }
+.ws-body { padding: 16px 20px 20px; }
+.ws-body h3 { font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: var(--ls-caps); color: var(--text-faint); margin: 18px 0 8px; }
+.ws-body h3:first-child { margin-top: 0; }
+
+/* dependency graph */
+.ws-fig { width: 100%; overflow-x: auto; }
+.ws-fig svg { display: block; height: auto; min-width: 480px; max-width: 100%; }
+
+/* task rows */
+.wb-trow { display: block; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); margin-bottom: 6px; background: var(--surface-card); min-width: 0; }
+.wb-trow__sum { display: flex; align-items: center; gap: 10px; padding: 8px 10px; min-width: 0; list-style: none; }
+details.wb-trow > summary { cursor: pointer; }
+details.wb-trow > summary::-webkit-details-marker { display: none; }
+details.wb-trow > summary::after { content: "▸"; color: var(--text-faint); flex: none; font-size: var(--fs-xs); }
+details.wb-trow[open] > summary::after { content: "▾"; }
+.wb-trow__id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-muted); flex: none; }
+.wb-trow__t { font-size: var(--fs-sm); color: var(--text-body); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+.wb-trow--held { background: var(--status-warn-soft); border-color: var(--gold-300); }
+.wb-trow--decision { background: var(--status-danger-soft); border-color: var(--rust-300); }
+.wb-trow__detail { padding: 2px 14px 12px; border-top: 1px dashed var(--border-soft); font-size: var(--fs-xs); }
+.wb-fld { margin-top: 8px; }
+.wb-fld b { display: block; font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: var(--ls-caps); color: var(--text-faint); }
+.wb-fld span, .wb-fld a { color: var(--text-body); overflow-wrap: anywhere; }
+.wb-fld a { color: var(--ocean-600); font-family: var(--font-mono); font-size: var(--fs-2xs); }
+.wb-fld a:hover { text-decoration: underline; }
+.wb-morechip {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 4px;
+  font-size: var(--fs-xs); font-weight: 800; color: var(--text-muted);
+  border: 1.5px dashed var(--ink-300); border-radius: var(--radius-pill); padding: 5px 12px; width: fit-content;
+}
+.wb-empty { font-size: var(--fs-sm); color: var(--text-muted); }
+
+/* agent chip */
+.wb-agent {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  font-family: var(--font-mono); font-size: var(--fs-2xs); font-weight: 700;
+  border: 1.5px solid var(--ink-900); border-radius: var(--radius-pill);
+  padding: 3px 9px 3px 5px; background: var(--white); box-shadow: 2px 2px 0 var(--ink-900);
+  max-width: 100%; min-width: 0;
+}
+.wb-agent__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-dot { width: 8px; height: 8px; border-radius: 50%; border: 1px solid var(--ink-900); flex: none; }
+.wb-dot--working { background: var(--sea-500); animation: wb-pulse 1.6s infinite; }
+.wb-dot--paused { background: var(--gold-500); }
+.wb-dot--decision { background: var(--rust-600); animation: wb-pulse 1.6s infinite; }
+@keyframes wb-pulse { 50% { opacity: 0.35; } }
+
+/* right rail */
+.wb-rail-item { padding: 12px 16px; border-bottom: 1px solid var(--border-soft); font-size: var(--fs-sm); }
+.wb-rail-item:last-child { border-bottom: none; }
+.wb-rail-item .wb-k { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-muted); }
+.wb-rail-item p { margin: 4px 0 0; color: var(--text-body); }
+
+/* waiting-on-you answer forms */
+.wb-qform { margin-top: 8px; }
+.wb-qform label { display: flex; gap: 8px; align-items: flex-start; font-size: var(--fs-xs); margin: 4px 0; color: var(--text-body); cursor: pointer; }
+.wb-qform input[type="radio"] { accent-color: var(--rust-500); margin-top: 2px; flex: none; }
+.wb-opt__hint { display: block; color: var(--text-muted); }
+.wb-opt__rec { font-weight: 800; color: var(--gold-600); }
+.wb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-xs); color: var(--text-strong);
+  background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 7px 10px; margin-top: 4px; }
+.wb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
+.wb-qfoot { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.wb-queued {
+  display: none; align-items: center; gap: 6px;
+  font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--sea-700); background: var(--sea-050); border: 1.5px solid var(--sea-200);
+  border-radius: var(--radius-xs); padding: 5px 9px 4px;
+}
+.is-queued .wb-queued { display: inline-flex; }
+.wb-limit { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--status-danger); }
+.wb-limit.is-visible { display: inline; }
+.wb-rail-note { font-size: var(--fs-2xs); color: var(--text-muted); }
+
+.wb-foot { display: flex; justify-content: flex-end; border-top: 1px solid var(--border-default); padding-top: 14px; }
+</style>
+</head>
+<body>
+
+<header class="wb-nav">
+  <div class="wb-nav__inner">
+    <span class="wb-brand">
+      <span class="wb-brand__disc">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 12h4l3-8 4 16 3-8h4"/>
+        </svg>
+      </span>
+      <span class="wb-brand__wm">workstreams</span>
+    </span>
+    <span class="wb-meta-mono" id="wb-home">-</span>
+  </div>
+</header>
+
+<main class="wb-main">
+
+  <div class="wb-stats" id="wb-stats"></div>
+
+  <div class="wb-callout" id="wb-divergence" hidden></div>
+
+  <div class="wb-cols">
+    <div class="wb-col" id="wb-streams"></div>
+    <div class="wb-col">
+      <section class="fm-card" id="wb-waiting">
+        <div class="ws-head"><div class="ws-head-top"><h2>Waiting on you</h2><span class="fm-badge fm-badge--danger" id="wb-waiting-count">0</span></div></div>
+        <div id="wb-waiting-items"></div>
+      </section>
+      <section class="fm-card" id="wb-agents">
+        <div class="ws-head"><div class="ws-head-top"><h2>Agents right now</h2><span class="fm-badge fm-badge--online" id="wb-agents-count">0</span></div></div>
+        <div id="wb-agents-items"></div>
+      </section>
+    </div>
+  </div>
+
+  <footer class="wb-foot">
+    <span class="wb-meta-mono" id="wb-provenance">-</span>
+  </footer>
+
+</main>
+
+<!-- ONE SLOT. bin/fm-workstream-board.sh build injects the fresh
+     fm-workstream-board.v1 payload in place of the placeholder below;
+     everything above and below is the shipped template and is never
+     regenerated per run. -->
+<script id="workstream-data" type="application/json">
+__FM_WORKSTREAM_BOARD_DATA__
+</script>
+
+<script>
+(function () {
+  "use strict";
+
+  /* Fail closed: a board with unreadable or wrong-schema data says so plainly
+     instead of rendering an empty page that looks like an empty fleet. */
+  function renderBoardError(msg) {
+    var main = document.querySelector(".wb-main");
+    main.innerHTML = "";
+    var card = document.createElement("div");
+    card.className = "fm-card";
+    var pad = document.createElement("div");
+    pad.className = "ws-head";
+    var h = document.createElement("h2");
+    h.textContent = "This board could not load";
+    var d = document.createElement("p");
+    d.className = "ws-outcome";
+    d.textContent = msg + " - ask firstmate to rebuild the board.";
+    pad.appendChild(h);
+    pad.appendChild(d);
+    card.appendChild(pad);
+    main.appendChild(card);
+  }
+
+  var data;
+  try {
+    data = JSON.parse(document.getElementById("workstream-data").textContent);
+  } catch (e) {
+    renderBoardError("The board data is not valid JSON");
+    return;
+  }
+  if (!data || data.schema !== "fm-workstream-board.v1") {
+    renderBoardError("Unsupported board data schema: " + (data && data.schema ? data.schema : "(none)"));
+    return;
+  }
+  var lists = [data.workstreams, data.edges, data.waiting, data.agents, data.divergence];
+  var streamsValid = Array.isArray(data.workstreams) && data.workstreams.every(function (ws) {
+    return ws && typeof ws === "object" &&
+      typeof ws.id === "string" && ws.id.length > 0 &&
+      typeof ws.name === "string" && ws.name.length > 0 &&
+      Array.isArray(ws.tasks);
+  });
+  var waitingValid = Array.isArray(data.waiting) && data.waiting.every(function (item) {
+    return item && typeof item === "object" &&
+      typeof item.key === "string" && item.key.length > 0 &&
+      typeof item.title === "string" && item.title.length > 0 &&
+      Array.isArray(item.options);
+  });
+  if (!lists.every(Array.isArray) || !streamsValid || !waitingValid) {
+    renderBoardError("The board data does not have the required structure");
+    return;
+  }
+
+  try {
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
+  function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
+  var CHECK_SVG = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+
+  document.getElementById("wb-home").textContent = data.home;
+  document.getElementById("wb-provenance").textContent = data.schema + " · " + data.generated;
+
+  var allTasks = data.workstreams.reduce(function (acc, ws) { return acc.concat(ws.tasks); }, []);
+  var liveAgents = data.agents.length;
+
+  /* stat strip: clickable anchors into the board */
+  var stats = [
+    { n: data.workstreams.length, l: "workstreams", href: "#wb-streams" },
+    { n: allTasks.length, l: "tasks on the board", href: "#wb-streams" },
+    { n: liveAgents, l: "agents live", href: "#wb-agents" },
+    { n: data.waiting.length, l: "waiting on you", href: "#wb-waiting", attn: data.waiting.length > 0 }
+  ];
+  if (data.divergence.length) {
+    stats.push({ n: data.divergence.length, l: "board ≠ reality", href: "#wb-divergence", warn: true });
+  }
+  var strip = document.getElementById("wb-stats");
+  stats.forEach(function (s) {
+    var t = el("a", "wb-stat" + (s.attn ? " wb-stat--attn" : "") + (s.warn ? " wb-stat--warn" : ""));
+    t.setAttribute("href", s.href);
+    t.appendChild(el("span", "wb-stat__num", String(s.n)));
+    t.appendChild(el("span", "wb-stat__label", s.l));
+    strip.appendChild(t);
+  });
+
+  /* board ≠ reality callout */
+  var dv = document.getElementById("wb-divergence");
+  dv.hidden = !data.divergence.length;
+  if (data.divergence.length) {
+    dv.appendChild(el("b", null, "Board ≠ reality: "));
+    dv.appendChild(el("span", null, "the backlog and the live fleet disagree on " + data.divergence.length + " task" + (data.divergence.length === 1 ? "" : "s") + "."));
+    data.divergence.forEach(function (d) {
+      var row = el("div", "wb-callout__row");
+      row.appendChild(el("span", "wb-callout__id", d.id));
+      row.appendChild(el("span", null, d.note));
+      dv.appendChild(row);
+    });
+  }
+
+  /* agent chip: dot tone from the composer-declared tone */
+  function agentChip(label, tone) {
+    var chip = el("span", "wb-agent");
+    chip.appendChild(el("span", "wb-dot wb-dot--" + tone));
+    chip.appendChild(el("span", "wb-agent__label", label));
+    return chip;
+  }
+
+  /* ---- dependency graph: layered inline SVG from blocked-by edges ---- */
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function svgEl(tag, attrs) {
+    var n = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+    return n;
+  }
+  var NODE_FILL = {
+    done:     { fill: "#e9f2ec", stroke: "#2f6b4f", text: "#234e3a", dash: "" },
+    review:   { fill: "#e8f1f5", stroke: "#3c7ea6", text: "#2f6688", dash: "" },
+    active:   { fill: "#f8ecc9", stroke: "#b5791c", text: "#3f3224", dash: "" },
+    held:     { fill: "#f8ecc9", stroke: "#b5791c", text: "#3f3224", dash: "4 3" },
+    decision: { fill: "#fbece3", stroke: "#a93a1f", text: "#8f2f17", dash: "" },
+    queued:   { fill: "#fbf4e2", stroke: "#9c8a6c", text: "#3f3224", dash: "4 3" }
+  };
+  function depGraph(tasks, edges, markerId) {
+    var ids = {};
+    tasks.forEach(function (t) { ids[t.id] = t; });
+    var local = edges.filter(function (e) { return ids[e.from] && ids[e.to]; });
+    if (!local.length) return null;
+    /* longest-path layering, bounded by node count so a cycle cannot spin */
+    var layer = {};
+    tasks.forEach(function (t) { layer[t.id] = 0; });
+    for (var pass = 0; pass < tasks.length; pass++) {
+      var changed = false;
+      local.forEach(function (e) {
+        var want = Math.min(layer[e.from] + 1, tasks.length);
+        if (layer[e.to] < want) { layer[e.to] = want; changed = true; }
+      });
+      if (!changed) break;
+    }
+    /* only nodes that touch an edge are drawn; isolated rows stay list-only */
+    var touched = {};
+    local.forEach(function (e) { touched[e.from] = true; touched[e.to] = true; });
+    var cols = {};
+    var maxLayer = 0;
+    tasks.forEach(function (t) {
+      if (!touched[t.id]) return;
+      var L = layer[t.id];
+      maxLayer = Math.max(maxLayer, L);
+      (cols[L] = cols[L] || []).push(t.id);
+    });
+    var W = 170, H = 26, GX = 70, GY = 10, PAD = 14;
+    var pos = {};
+    var maxRows = 0;
+    Object.keys(cols).forEach(function (L) {
+      cols[L].forEach(function (id, i) {
+        pos[id] = { x: PAD + L * (W + GX), y: PAD + i * (H + GY) };
+      });
+      maxRows = Math.max(maxRows, cols[L].length);
+    });
+    var width = PAD * 2 + (maxLayer + 1) * W + maxLayer * GX;
+    var height = PAD * 2 + maxRows * H + (maxRows - 1) * GY;
+    var svg = svgEl("svg", { viewBox: "0 0 " + width + " " + height, role: "img" });
+    svg.setAttribute("aria-label", "Dependency graph");
+    var defs = svgEl("defs", {});
+    var marker = svgEl("marker", { id: markerId, viewBox: "0 0 8 8", refX: "7", refY: "4", markerWidth: "7", markerHeight: "7", orient: "auto" });
+    marker.appendChild(svgEl("path", { d: "M0,0 L8,4 L0,8 z", fill: "#9c8a6c" }));
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+    local.forEach(function (e) {
+      var a = pos[e.from], b = pos[e.to];
+      svg.appendChild(svgEl("line", {
+        x1: a.x + W, y1: a.y + H / 2, x2: b.x - 4, y2: b.y + H / 2,
+        stroke: "#9c8a6c", "stroke-width": "1.5", "marker-end": "url(#" + markerId + ")"
+      }));
+    });
+    Object.keys(pos).forEach(function (id) {
+      var p = pos[id];
+      var style = NODE_FILL[ids[id].state] || NODE_FILL.queued;
+      var attrs = { x: p.x, y: p.y, width: W, height: H, rx: 7, fill: style.fill, stroke: style.stroke, "stroke-width": "1.5" };
+      if (style.dash) attrs["stroke-dasharray"] = style.dash;
+      svg.appendChild(svgEl("rect", attrs));
+      var label = id.length > 22 ? id.slice(0, 21) + "…" : id;
+      var text = svgEl("text", {
+        x: p.x + W / 2, y: p.y + H / 2 + 4, "text-anchor": "middle",
+        "font-family": "JetBrains Mono,monospace", "font-size": "11", fill: style.text
+      });
+      text.textContent = label;
+      svg.appendChild(text);
+    });
+    return svg;
+  }
+
+  /* ---- workstream cards ---- */
+  var streamsCol = document.getElementById("wb-streams");
+  if (!data.workstreams.length) {
+    var emptyCard = el("section", "fm-card");
+    var emptyPad = el("div", "ws-head");
+    emptyPad.appendChild(el("p", "wb-empty", "No workstreams are on the board, captain - nothing is grouped yet."));
+    emptyCard.appendChild(emptyPad);
+    streamsCol.appendChild(emptyCard);
+  }
+  data.workstreams.forEach(function (ws) {
+    var card = el("section", "fm-card");
+    card.id = "ws-" + ws.id;
+    var head = el("div", "ws-head");
+    var top = el("div", "ws-head-top");
+    top.appendChild(el("h2", null, ws.name));
+    var held = ws.tasks.filter(function (t) { return t.state === "held"; }).length;
+    var decisions = ws.tasks.filter(function (t) { return t.state === "decision"; }).length;
+    var review = ws.tasks.filter(function (t) { return t.state === "review"; }).length;
+    if (decisions) top.appendChild(badge("danger", decisions + " need" + (decisions === 1 ? "s" : "") + " your decision"));
+    if (held) top.appendChild(badge("warn", held + " held"));
+    if (review) top.appendChild(badge("info", review + " in review"));
+    head.appendChild(top);
+    if (ws.outcome) head.appendChild(el("p", "ws-outcome", ws.outcome));
+
+    var counts = { done: 0, review: 0, active: 0, held: 0, decision: 0, queued: 0 };
+    ws.tasks.forEach(function (t) { counts[t.state] += 1; });
+    var total = ws.tasks.length + (ws.more_tasks || 0);
+    if (total > 0) {
+      var bar = el("div", "ws-progress");
+      /* held rides the active (gold) segment; decision gets its own rust pop */
+      var segCounts = { done: counts.done, review: counts.review,
+                        active: counts.active + counts.held, decision: counts.decision };
+      [["done", "ws-seg--done"], ["review", "ws-seg--review"],
+       ["active", "ws-seg--active"], ["decision", "ws-seg--decision"]].forEach(function (seg) {
+        var n = segCounts[seg[0]];
+        if (!n) return;
+        var span = el("span", seg[1]);
+        span.style.width = (n * 100 / total) + "%";
+        bar.appendChild(span);
+      });
+      head.appendChild(bar);
+      var key = el("div", "ws-key");
+      [["done", "ws-seg--done"], ["review", "ws-seg--review"], ["active", "ws-seg--active"],
+       ["held", "ws-seg--active"], ["decision", "ws-seg--decision"], ["queued", "ws-seg--queued"]].forEach(function (seg) {
+        var n = counts[seg[0]];
+        if (!n) return;
+        var item = el("span");
+        item.appendChild(el("i", seg[1]));
+        item.appendChild(document.createTextNode(n + " " + seg[0]));
+        key.appendChild(item);
+      });
+      head.appendChild(key);
+    }
+    card.appendChild(head);
+
+    var body = el("div", "ws-body");
+    var graph = depGraph(ws.tasks, data.edges, "wb-arr-" + ws.id);
+    if (graph) {
+      body.appendChild(el("h3", null, "Dependency graph"));
+      var fig = el("div", "ws-fig");
+      fig.appendChild(graph);
+      body.appendChild(fig);
+    }
+
+    var moving = ws.tasks.filter(function (t) { return t.state !== "queued" && t.state !== "done"; });
+    var queued = ws.tasks.filter(function (t) { return t.state === "queued"; });
+    var doneRows = ws.tasks.filter(function (t) { return t.state === "done"; });
+
+    function taskRow(t) {
+      var expandable = !!(t.doing || t.contract || t.pr_url);
+      var row = el(expandable ? "details" : "div",
+        "wb-trow" + (t.state === "held" ? " wb-trow--held" : "") + (t.state === "decision" ? " wb-trow--decision" : ""));
+      var sum = el(expandable ? "summary" : "div", "wb-trow__sum");
+      sum.appendChild(el("span", "wb-trow__id", t.id));
+      sum.appendChild(el("span", "wb-trow__t", t.title));
+      if (t.agent) sum.appendChild(agentChip(t.agent, t.agent_tone || "paused"));
+      row.appendChild(sum);
+      if (expandable) {
+        var detail = el("div", "wb-trow__detail");
+        var f = el("div", "wb-fld");
+        f.appendChild(el("b", null, "Full title"));
+        f.appendChild(el("span", null, t.title));
+        detail.appendChild(f);
+        if (t.contract) {
+          var c = el("div", "wb-fld");
+          c.appendChild(el("b", null, "Contract"));
+          c.appendChild(el("span", null, t.contract));
+          detail.appendChild(c);
+        }
+        if (t.doing) {
+          var g = el("div", "wb-fld");
+          g.appendChild(el("b", null, "Doing right now"));
+          g.appendChild(el("span", null, t.doing));
+          detail.appendChild(g);
+        }
+        if (t.pr_url) {
+          var pfld = el("div", "wb-fld");
+          pfld.appendChild(el("b", null, "PR"));
+          var a = el("a", null, t.pr_url);
+          a.href = t.pr_url; a.target = "_blank"; a.rel = "noopener";
+          pfld.appendChild(a);
+          detail.appendChild(pfld);
+        }
+        row.appendChild(detail);
+      }
+      return row;
+    }
+
+    if (moving.length) {
+      body.appendChild(el("h3", null, "In flight - agents pinned"));
+      moving.forEach(function (t) { body.appendChild(taskRow(t)); });
+    }
+    if (queued.length) {
+      body.appendChild(el("h3", null, "Queued in this workstream"));
+      queued.forEach(function (t) { body.appendChild(taskRow(t)); });
+    }
+    if (doneRows.length) {
+      body.appendChild(el("h3", null, "Done"));
+      doneRows.forEach(function (t) { body.appendChild(taskRow(t)); });
+    }
+    if (!ws.tasks.length) body.appendChild(el("p", "wb-empty", "No tasks are grouped here yet."));
+    if (ws.more_tasks) body.appendChild(el("span", "wb-morechip", "+" + ws.more_tasks + " more - ask firstmate for the full list"));
+    card.appendChild(body);
+    streamsCol.appendChild(card);
+  });
+
+  /* ---- waiting on you: queue-answer forms ---- */
+  var waitingItems = document.getElementById("wb-waiting-items");
+  document.getElementById("wb-waiting-count").textContent = String(data.waiting.length);
+  if (!data.waiting.length) {
+    var none = el("div", "wb-rail-item");
+    none.appendChild(el("p", null, "Nothing needs your action right now, captain."));
+    waitingItems.appendChild(none);
+  }
+  data.waiting.forEach(function (item) {
+    var wrap = el("div", "wb-rail-item");
+    wrap.appendChild(el("span", "wb-k", item.key));
+    wrap.appendChild(el("p", null, item.title));
+    if (item.question) wrap.appendChild(el("p", "wb-rail-note", item.question));
+
+    var form = document.createElement("form");
+    form.className = "wb-qform";
+    form.setAttribute("data-lavish-question", item.key);
+    item.options.forEach(function (o) {
+      var lab = el("label");
+      var input = document.createElement("input");
+      input.type = "radio"; input.name = "answer"; input.value = o.value;
+      lab.appendChild(input);
+      var body = el("span");
+      body.appendChild(document.createTextNode(o.label));
+      if (item.recommend_value && o.value === item.recommend_value) {
+        body.appendChild(document.createTextNode(" "));
+        body.appendChild(el("span", "wb-opt__rec", "(recommended)"));
+      }
+      if (o.hint) body.appendChild(el("span", "wb-opt__hint", o.hint));
+      lab.appendChild(body);
+      form.appendChild(lab);
+    });
+    if (item.allow_freeform) {
+      var ff = document.createElement("input");
+      ff.type = "text"; ff.name = "note"; ff.className = "wb-freeform";
+      ff.placeholder = item.freeform_hint || "or answer in your own words…";
+      form.appendChild(ff);
+    }
+    var foot = el("div", "wb-qfoot");
+    var btn = el("button", "fm-btn fm-btn--sm fm-btn--gold", "Queue answer");
+    btn.type = "submit";
+    foot.appendChild(btn);
+    var q = el("span", "wb-queued");
+    q.innerHTML = CHECK_SVG + " queued";
+    foot.appendChild(q);
+    var answerLimit = el("span", "wb-limit");
+    answerLimit.setAttribute("role", "alert");
+    foot.appendChild(answerLimit);
+    form.appendChild(foot);
+
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      answerLimit.classList.remove("is-visible");
+      var fd = new FormData(form);
+      var value = fd.get("answer");
+      var note = (fd.get("note") || "").trim();
+      /* picked option, optionally annotated; a bare note is itself the answer */
+      var answer = value ? (note ? value + " - " + note : value) : note;
+      if (!answer) return;
+      if (utf8ByteLength(answer) > 512) {
+        answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
+        answerLimit.classList.add("is-visible");
+        return;
+      }
+      if (window.lavish && window.lavish.queuePrompt) {
+        /* close carries the composer-declared close mode: "release" frees a
+           captain-gated work item instead of completing a question task */
+        var ctxData = { question: item.key, answer: answer };
+        if (item.close) ctxData.close = item.close;
+        window.lavish.queuePrompt(
+          "Workstream answer - " + item.title + ": " + answer,
+          { tag: "choice", text: item.title + " -> " + answer, element: form,
+            data: ctxData }
+        );
+      }
+      wrap.classList.add("is-queued");
+    });
+    wrap.appendChild(form);
+    waitingItems.appendChild(wrap);
+  });
+  if (data.waiting.length) {
+    var hint = el("div", "wb-rail-item");
+    hint.appendChild(el("p", "wb-rail-note", "Pick an option, queue it, then press Send to Agent - nothing happens until you send."));
+    waitingItems.appendChild(hint);
+  }
+
+  /* ---- agent roster ---- */
+  var agentsItems = document.getElementById("wb-agents-items");
+  document.getElementById("wb-agents-count").textContent = data.agents.length + " live";
+  if (!data.agents.length) {
+    var idle = el("div", "wb-rail-item");
+    idle.appendChild(el("p", null, "No agents are live."));
+    agentsItems.appendChild(idle);
+  }
+  data.agents.forEach(function (a) {
+    var row = el("div", "wb-rail-item");
+    row.appendChild(agentChip(a.id, a.tone || "paused"));
+    if (a.doing) row.appendChild(el("p", null, a.doing));
+    agentsItems.appendChild(row);
+  });
+  } catch (e) {
+    renderBoardError("The board data could not be rendered");
+  }
+})();
+</script>
+</body>
+</html>
