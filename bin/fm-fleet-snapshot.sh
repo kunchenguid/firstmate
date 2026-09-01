@@ -784,15 +784,15 @@ task_json_one() {  # <meta-file>
 
 task_json_budget_unknown_lines() {  # <meta-file>...
   local meta id kind harness mode yolo project worktree home projects spawn_gen
-  local backend=tmux target= remote_host= remote_root= pr= agent_alive=not_checked
+  local backend=tmux target='' remote_host='' remote_root='' pr='' agent_alive=not_checked
   local meta_present=false status_present=false report_present=false worktree_present=false home_present=false
-  local terminal= window= remote_backend= remote_target= key value
+  local terminal='' window='' remote_backend='' remote_target='' key value
   for meta in "$@"; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
-    kind=ship harness= mode= yolo= project= worktree= home= projects= spawn_gen=
-    backend=tmux target= remote_host= remote_root= pr= agent_alive=not_checked
-    terminal= window= remote_backend= remote_target=
+    kind=ship harness='' mode='' yolo='' project='' worktree='' home='' projects='' spawn_gen=''
+    backend=tmux target='' remote_host='' remote_root='' pr='' agent_alive=not_checked
+    terminal='' window='' remote_backend='' remote_target=''
     meta_present=false status_present=false report_present=false worktree_present=false home_present=false
     while IFS='=' read -r key value || [ -n "$key" ]; do
       case "$key" in
