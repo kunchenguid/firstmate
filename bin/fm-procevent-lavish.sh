@@ -222,17 +222,22 @@ receipts_path() { fm_procevent_receipts_path "$STATE" "$1"; }
 receipts_lock_path() { fm_procevent_receipts_lock_path "$STATE" "$1"; }
 
 # 0 when the record is absent (nothing journaled yet) or carries our schema.
+# Anything else at that path - a symlink, a directory, a foreign schema - is
+# unreadable rather than empty, so no state is ever presented from, and no event
+# ever written through, a record this adapter does not own.
 journal_readable() {  # <source-id>
   local f
   f=$(receipts_path "$1")
-  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  [ -e "$f" ] || [ -L "$f" ] || return 0
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
   [ "$(sed -n '1p' "$f" 2>/dev/null)" = "$RECEIPT_SCHEMA" ]
 }
 
 journal_events() {  # <source-id> <type>: print one type's event lines, oldest first
   local f
   f=$(receipts_path "$1")
-  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  [ ! -L "$f" ] || return 1
+  [ -f "$f" ] || return 0
   awk -F '\t' -v t="$2" '$1 == t { print }' "$f"
 }
 
@@ -249,6 +254,7 @@ journal_last_field() {  # <source-id> <type> <field-number>
 journal_append() {  # <source-id> <event-line>
   local f
   f=$(receipts_path "$1")
+  [ ! -L "$f" ] || return 1
   if [ ! -e "$f" ]; then
     (umask 077; mkdir -p "$(dirname "$f")") || return 1
     printf '%s\n' "$RECEIPT_SCHEMA" > "$f" || return 1

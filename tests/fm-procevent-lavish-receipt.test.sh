@@ -416,4 +416,24 @@ bad_lines=$(awk -F '\t' 'NR > 1 && NF < 3 { c++ } END { print c + 0 }' "$journal
 [ "$bad_lines" = 0 ] || fail "concurrent receipt writes tore $bad_lines journal lines"
 pass "duplicate and concurrent notifications converge on one journaled fact each"
 
+# --- a planted record this adapter does not own is refused, never written to --
+# The record path is private per-source state. A symlink standing in its place
+# must fail closed on both sides of the seam: nothing may be presented from it,
+# and no journaled event may be written through it into the link's target.
+mv "$journal" "$TMP_ROOT/h7-record"
+planted="$TMP_ROOT/planted-target"
+: > "$planted"
+ln -s "$planted" "$journal"
+status=0
+out=$(run_lavish "$H7" receipt "$RECEIPT_SID" 1 "$result" "$H7/dup-outcome" 2>&1) || status=$?
+[ "$status" -ne 0 ] || fail "the receipt seam accepted a symlinked receipts record"
+assert_contains "$out" "receipts record is unreadable" "the refusal names the unreadable record"
+[ ! -s "$planted" ] || fail "an event was journaled through the symlinked record"
+status=0
+out=$(run_lavish "$H7" receipt-text "$RECEIPT_SID" 2>&1) || status=$?
+[ "$status" -ne 0 ] || fail "receipt text was presented from a symlinked receipts record"
+rm -f "$journal"
+mv "$TMP_ROOT/h7-record" "$journal"
+pass "a symlinked receipts record is refused rather than read or written through"
+
 printf '\nall Lavish receipt tests passed\n'

@@ -602,7 +602,7 @@ done
 [ "$(wake_payloads "$HLT" | sort -u | grep -c .)" = 1 ] \
   || fail "one Send & End produced more than one distinct event: $(wake_payloads "$HLT" | sort -u)"
 assert_contains "$(wake_payloads "$HLT")" "procevent lavish $lavish_id 1" "the human's final feedback is announced"
-assert_absent "$(wake_payloads "$HLT" | grep "lavish $lavish_id 2")" "the pure receipt-delivery capture wakes no handler"
+assert_not_contains "$(wake_payloads "$HLT")" "lavish $lavish_id 2" "the pure receipt-delivery capture wakes no handler"
 assert_absent "$HLT/state/procevent/$lavish_id.source" "the ended review source retires only after its receipt was displayed"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$lavish_id.claim" "the ended review releases its owned claim"
 LAVISH_RESULT=$(first_result "$HLT" "$lavish_id" || true)
@@ -615,9 +615,15 @@ assert_grep "UTC" "$LAVISH_ARGV_LOG" "the presented receipt states a timestamp"
 assert_not_contains "$receipt_argv" 'ship it' "the presented receipt exposes no decision payload"
 assert_not_contains "$receipt_argv" 'sample-ship-call' "the presented receipt exposes no decision key"
 journal=$HLT/state/procevent/$lavish_id.receipts
-grep -q "^received" "$journal" || fail "the receipts record journaled the received submission"
-grep -q "^delivered" "$journal" || fail "the receipts record journaled the displayed receipt"
+grep -q "^received" "$journal" || fail "the receipts record never journaled the received submission"
+grep -q "^delivered" "$journal" || fail "the receipts record never journaled the displayed receipt"
 assert_present "$HLT/state/procevent-inbox/$lavish_id.2.handled" "the pure delivery capture was acknowledged, never announced"
+# The record deliberately outlives the automatic retirement above, so the last
+# round of an ended review can still state Applying and Complete durably. This
+# home's teardown is the boundary that retires it.
+out=$(pe "$HLT" sweep-home)
+assert_contains "$out" "swept: attempted=1" "home sweep never reached the auto-retired source's receipts record"
+assert_absent "$journal" "home sweep left the receipts record of an auto-retired source behind"
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End captures the feedback, displays its receipt, then retires without recurring polls"
