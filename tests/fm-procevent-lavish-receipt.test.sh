@@ -837,11 +837,22 @@ wait_claim_free
 # The next runner blocks inside its poll, so killing its leader leaves that
 # generation's own child alive - the crash cut, not a gone claim.
 : > "$STUB_HOLD"
+held_calls_before=$(stub_calls)
 reconcile_once
 claim="$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
 wait_i=0
 while [ ! -e "$claim" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
 [ -e "$claim" ] || fail "the replacement runner never claimed the source"
+# The claim is recorded before the poll is executed, so the owned child this
+# scenario needs alive is waited for rather than assumed: the stub logs its
+# argv and only then blocks on the hold.
+wait_i=0
+while [ "$(stub_calls)" -le "$held_calls_before" ] && [ "$wait_i" -lt 100 ]; do
+  sleep 0.1
+  wait_i=$((wait_i + 1))
+done
+[ "$(stub_calls)" -gt "$held_calls_before" ] \
+  || fail "the replacement runner never started the held poll its group needs"
 crash_leader=$(sed -n '2p' "$claim")
 crash_token=$(sed -n '3p' "$claim")
 case "$crash_leader" in ''|*[!0-9]*) fail "could not read the runner leader pid: $crash_leader" ;; esac
@@ -868,5 +879,66 @@ text=$(run_lavish "$H16" receipt-text "$RECEIPT_SID")
 assert_contains "$text" "saved 1 of 1" "the recovered round never reached the visible receipt"
 rm -f "$STUB_HOLD" "$staged" "$staged.gen"
 pass "a crashed leader's staged verdict is recovered before its group is reaped"
+
+# --- reclaiming a gone claim keeps the verdict its seam never consumed -------
+# The ordinary recovery route for a crashed generation is a replacement runner
+# whose own claim acquisition reclaims the dead claim. That reclaim owns the
+# staging set, but the receipt outcome and the note pinning it to one sequence
+# are still owed to a seam that never ran: dropping them there loses the round's
+# Saved state for good and lets the capture be published with no acknowledgement
+# at all. Everything else the dead generation staged is still reaped.
+H17=$(make_home h17)
+RECEIPT_HOME=$H17
+ART17="$TMP_ROOT/deck17.html"
+printf '<h1>deck</h1>\n' > "$ART17"
+RECEIPT_SID=$(run_lavish "$H17" source-id "$ART17")
+tasks_in "$H17" add deck-alpha "Alpha call" --kind ship --repo sample --body 'Alpha plan.' >/dev/null
+run_captain "$H17" hold deck-alpha --reason "alpha choice pending" >/dev/null
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+run_captain "$H17" bind "$RECEIPT_SID" >/dev/null
+run_lavish "$H17" arm "$ART17" >/dev/null
+journal="$H17/state/procevent/$RECEIPT_SID.receipts"
+result="$H17/state/procevent-inbox/$RECEIPT_SID.1.result"
+reconcile_once
+wait_i=0
+while [ ! -e "$result" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+wait_claim_free
+[ -e "$result" ] || fail "the submitted round was never captured"
+# Roll back to a generation whose runner died after its intake returned and
+# before its seam ran, with the dead claim still standing as the reclaim finds
+# it, and the rest of that generation's staging beside the verdict.
+rm -f "$journal" "$H17/state/procevent-inbox/$RECEIPT_SID.1.receipted"
+staged="$H17/state/procevent/.$RECEIPT_SID.dead-token.rcpt.output"
+printf 'fed 0\nclosed: deck-alpha\n' > "$staged"
+printf '%s\t%s\n' "$RECEIPT_SID" 1 > "$staged.gen"
+printf 'partial intake body\n' > "$staged.body"
+printf 'half-written verdict\n' > "$staged.tmp"
+printf 'stale capture\n' > "$H17/state/procevent/.$RECEIPT_SID.dead-token.output"
+chmod 0600 "$staged" "$staged.gen" "$staged.body" "$staged.tmp" \
+  "$H17/state/procevent/.$RECEIPT_SID.dead-token.output"
+printf '%s\n%s\ndead-token\ndead-identity\n%s\n' \
+  "$H17" 999999 "$H17/state/procevent" > "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+# The replacement runner reclaims that dead claim. Its own poll finds nothing
+# left in the queue, so it captures nothing and only the reclaim is observed.
+PATH="$STUB_BIN_DIR:$PATH" pe "$H17" start "$RECEIPT_SID" >/dev/null 2>&1 || true
+assert_absent "$H17/state/procevent/.$RECEIPT_SID.dead-token.output" \
+  "the reclaim left the dead generation's captured output staged"
+assert_absent "$staged.body" "the reclaim left the dead generation's intake body staged"
+assert_absent "$staged.tmp" "the reclaim left the dead generation's half-written verdict staged"
+assert_present "$staged" "the reclaim destroyed a verdict whose receipt seam never ran"
+assert_present "$staged.gen" "the reclaim destroyed the note pinning that verdict to its round"
+# The verdict the reclaim preserved is exactly what the recovered seam journals.
+reconcile_until grep -qs '^saved' "$journal" \
+  || fail "recovery never journaled the verdict the reclaim preserved"
+[ "$(awk -F '\t' '$1 == "received" { print $4 }' "$journal")" = 1 ] \
+  || fail "the recovered round lost its answer count"
+[ "$(awk -F '\t' '$1 == "saved" && $2 == 1 { print $4 }' "$journal")" = 1 ] \
+  || fail "recovery lost the save the preserved verdict recorded"
+text=$(run_lavish "$H17" receipt-text "$RECEIPT_SID")
+assert_contains "$text" "saved 1 of 1" "the preserved verdict never reached the visible receipt"
+rm -f "$staged" "$staged.gen"
+pass "a gone-claim reclaim keeps the staged verdict its seam still owes"
 
 printf '\nall Lavish receipt tests passed\n'

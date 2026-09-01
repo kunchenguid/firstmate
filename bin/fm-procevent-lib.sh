@@ -440,7 +440,7 @@ fm_procevent_claim_state_locked() {
 # fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration> <state-root>
 # 0 acquired, 1 error, 2 held by a live owner (possibly another home).
 fm_procevent_claim_acquire_locked() {
-  local id=$1 home=$2 pid=$3 registration=$4 state=$5 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage state_root state_device state_inode state_owner state_mode
+  local id=$1 home=$2 pid=$3 registration=$4 state=$5 root claim tmp identity token status claim_state old_home old_token old_reg_dir old_state old_seq gen_id reg_dir reg_identity stage state_root state_device state_inode state_owner state_mode
   fm_procevent_source_id_valid "$id" || return 1
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
   reg_dir=${registration%/*}
@@ -470,21 +470,40 @@ fm_procevent_claim_acquire_locked() {
           if [ -L "$old_reg_dir" ] || { [ -e "$old_reg_dir" ] && [ ! -d "$old_reg_dir" ]; }; then
             status=1
           else
-            # The whole staging set one claim generation can leave behind:
-            # the capture's own bounded output, the receipt outcome, the
-            # generation note that pins that outcome to one sequence, the
-            # intake body staged beside it, and the outcome's atomic-rename
-            # staging name. Reclaiming a gone claim drops all of them, so a
-            # crashed generation leaks none of its private rows.
+            # What a gone claim staged that nothing can still read: the
+            # capture's own bounded output, the intake body, and the outcome's
+            # atomic-rename staging name. A crashed generation leaks none of
+            # those private rows.
             for stage in "$old_reg_dir/.$id.$old_token.output" \
-              "$old_reg_dir/.$id.$old_token.rcpt.output" \
-              "$old_reg_dir/.$id.$old_token.rcpt.output.gen" \
               "$old_reg_dir/.$id.$old_token.rcpt.output.body" \
               "$old_reg_dir/.$id.$old_token.rcpt.output.tmp"; do
               if { [ -e "$stage" ] || [ -L "$stage" ]; } && ! rm -f -- "$stage"; then
                 status=1
               fi
             done
+            # The receipt outcome and the generation note pinning it to one
+            # sequence are the pair the dead generation's seam recovery still
+            # reads, and the pair publication reads to decline a generation
+            # whose seam is still owed. They are dropped here only once that
+            # seam has had its chance; while it is still owed, the pair stays
+            # exactly where recovery expects it. A pair whose note names no
+            # readable generation of this source can prove nothing and goes
+            # with the rest.
+            stage="$old_reg_dir/.$id.$old_token.rcpt.output"
+            if [ -e "$stage" ] || [ -L "$stage" ] \
+              || [ -e "$stage.gen" ] || [ -L "$stage.gen" ]; then
+              old_state=${old_reg_dir%/*}
+              old_seq=
+              if [ -f "$stage.gen" ] && [ ! -L "$stage.gen" ]; then
+                IFS=$'\t' read -r gen_id old_seq < "$stage.gen" || old_seq=
+                [ "$gen_id" = "$id" ] || old_seq=
+                case "$old_seq" in ''|*[!0-9]*) old_seq= ;; esac
+              fi
+              if [ -z "$old_seq" ] \
+                || fm_procevent_receipt_seam_ran "$old_state" "$id" "$old_seq"; then
+                rm -f -- "$stage" "$stage.gen" || status=1
+              fi
+            fi
           fi
           if [ "$status" -eq 0 ]; then
             fm_procevent_claim_capture_reservation_remove_locked || status=1

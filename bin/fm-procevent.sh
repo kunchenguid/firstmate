@@ -1134,7 +1134,7 @@ staged_receipt_outcome() {  # <source-id> <sequence>
 # replacement runner, so the seam still speaks for the poll that produced the
 # capture, never for one a replacement has since armed.
 recover_receipt_seams() {
-  local result id adapter seq outcome staged claim_state
+  local result id adapter seq outcome staged claim_state live_token
   while IFS= read -r result; do
     [ -n "$result" ] || continue
     id=$(fm_procevent_result_source_id "$result")
@@ -1165,10 +1165,11 @@ recover_receipt_seams() {
         *) fm_procevent_source_lock_release "$id"; continue ;;
       esac
       # The dead generation's own outcome belongs to that claim's staging set
-      # and is dropped with the rest of it when the claim is reaped. A runner
-      # that released its own claim on the way out left no claim to reap, so
-      # once the seam it owed has spoken this drops that set itself rather
-      # than leaking a private verdict nothing else will ever clean.
+      # and is dropped with the rest of it when the claim is reaped. A set the
+      # live claim no longer names - a runner that released its own claim on
+      # the way out, or a generation a reclaim has already replaced - has no
+      # reaper left, so once the seam it owed has spoken this drops that set
+      # itself rather than leaking a private verdict nothing will ever clean.
       outcome=$(staged_receipt_outcome "$id" "$seq") || outcome=
       staged=
       if [ -z "$outcome" ]; then
@@ -1183,9 +1184,15 @@ recover_receipt_seams() {
         FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD=1 \
           adapter_receipt "$adapter" "$id" "$seq" "$result" "$outcome" || true
         fm_procevent_mark_receipt_seam "$STATE" "$id" "$seq" >/dev/null 2>&1 || true
-        if [ -z "$staged" ] && [ ! -e "$(fm_procevent_claim_path "$id")" ] \
-          && [ ! -L "$(fm_procevent_claim_path "$id")" ]; then
-          rm -f -- "$outcome" "$outcome.gen" "$outcome.body" "$outcome.tmp"
+        if [ -z "$staged" ]; then
+          live_token=
+          if { [ -e "$(fm_procevent_claim_path "$id")" ] || [ -L "$(fm_procevent_claim_path "$id")" ]; } \
+            && fm_procevent_claim_load_locked "$id" 2>/dev/null; then
+            live_token=$FM_PROCEVENT_CLAIM_TOKEN
+          fi
+          if [ -z "$live_token" ] || [ "$outcome" != "$(staging_file "$id" "$live_token.rcpt")" ]; then
+            rm -f -- "$outcome" "$outcome.gen" "$outcome.body" "$outcome.tmp"
+          fi
         fi
       fi
       [ -z "$staged" ] || rm -f -- "$staged"

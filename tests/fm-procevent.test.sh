@@ -1560,6 +1560,15 @@ printf 'garbage that is not a session block\n' > "$TRM"
 printf 'session:\n  file: /a.html\n  status: feedback\nfeedback[1]{text}:\n  session_ended: true\n' > "$TRM"
 "$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
   && fail "prompt payload text was read as a session-level terminal marker"
+# A completely parsed block that declares no rows is positive evidence of
+# nothing said, not indeterminate content: an ended session carrying one, with
+# no round journaled for it, retires rather than being polled again forever.
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[0]{tag,text}:\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  || fail "an ended session carrying a declared-empty block was kept armed forever"
+printf 'session:\n  file: /a.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nprompts[0]{tag,text}:\n' > "$TRM"
+"$ROOT/bin/fm-procevent-lavish.sh" terminal "$TRM" \
+  || fail "a Send & End close carrying a declared-empty block was kept armed forever"
 pass "the adapter owns which Lavish results end a source, and payload text cannot forge one"
 
 # The adapter, not the runner, decides which Lavish results are routine no-ops

@@ -820,8 +820,8 @@ cmd_terminal() {
     [ "$delivered" -ge "$latest" ] && return 0
     return 1
   fi
-  [ -n "$submission" ] || return 0
-  return 1
+  [ "$rows" -eq 0 ] || return 1
+  return 0
 }
 
 # Whether a completed result carries any queued content block at all. The
