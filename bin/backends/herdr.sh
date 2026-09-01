@@ -2047,14 +2047,13 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
   dup_tabs=$(printf '%s' "$list" | jq -r \
     --arg want "$label" --arg task_id "$task_id" \
-    --arg legacy "fm-$task_id" --arg suffix " ($task_id)" '
+    --arg legacy "fm-$task_id" '
       if (.result.tabs | type) == "array" then
         .result.tabs[]
         | select((.label | type) == "string")
         | select(
             .label == $want
             or ($task_id != "" and .label == $legacy)
-            or ($task_id != "" and (.label | endswith($suffix)) and (.label | length > ($suffix | length)))
           )
         | .tab_id
       else error("missing result.tabs") end
@@ -2101,14 +2100,13 @@ EOF
     fi
     remaining_dup_tabs=$(printf '%s' "$list" | jq -r \
       --arg want "$label" --arg task_id "$task_id" \
-      --arg legacy "fm-$task_id" --arg suffix " ($task_id)" \
+      --arg legacy "fm-$task_id" \
       --arg replacement "$tab_id" '
         .result.tabs[]?
         | select((.label | type) == "string")
         | select(
             .label == $want
             or ($task_id != "" and .label == $legacy)
-            or ($task_id != "" and (.label | endswith($suffix)) and (.label | length > ($suffix | length)))
           )
         | select(.tab_id != $replacement)
         | .tab_id
