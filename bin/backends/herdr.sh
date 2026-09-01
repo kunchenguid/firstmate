@@ -491,11 +491,40 @@ fm_backend_herdr_projection_journal_field() {  # <journal> <key>
   grep "^${key}=" "$journal" 2>/dev/null | cut -d= -f2-
 }
 
+# fm_backend_herdr_task_label_matches_id: accept the legacy task label or a
+# human-readable task label carrying the exact task id suffix.
+fm_backend_herdr_task_label_matches_id() {  # <task-label> <task-id>
+  local label=$1 id=$2 suffix
+  [ -n "$id" ] || return 1
+  [ "$label" = "fm-$id" ] && return 0
+  suffix=" ($id)"
+  case "$label" in
+    *"$suffix") [ -n "${label%"$suffix"}" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_herdr_task_id_from_label: recover the task id from a supported
+# task label when a legacy direct caller does not pass it separately.
+fm_backend_herdr_task_id_from_label() {  # <task-label>
+  local label=$1 id
+  case "$label" in
+    *' ('*')')
+      id=${label##*' ('}
+      id=${id%')'}
+      ;;
+    fm-*) id=${label#fm-} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$id" ] || return 1
+  printf '%s' "$id"
+}
+
 # fm_backend_herdr_projection_journal_snapshot: validate a version 1 attempt
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines expected_label expected_task_label exact
+  local journal=$1 id=$2 lines expected_label exact
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
@@ -550,9 +579,8 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
   expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
-  expected_task_label="fm-$id"
   [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
+    && fm_backend_herdr_task_label_matches_id "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" "$id"
 }
 
 # fm_backend_herdr_projection_journal_token: validate and read either journal
@@ -2008,12 +2036,29 @@ fm_backend_herdr_task_label() {  # <short-title> <task-id>
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id> [<task-id>]
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} task_id=${5:-}
+  local session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
+  if [ -z "$task_id" ]; then
+    task_id=$(fm_backend_herdr_task_id_from_label "$label" 2>/dev/null || true)
+  fi
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
+  dup_tabs=$(printf '%s' "$list" | jq -r \
+    --arg want "$label" --arg task_id "$task_id" \
+    --arg legacy "fm-$task_id" --arg suffix " ($task_id)" '
+      if (.result.tabs | type) == "array" then
+        .result.tabs[]
+        | select((.label | type) == "string")
+        | select(
+            .label == $want
+            or ($task_id != "" and .label == $legacy)
+            or ($task_id != "" and .label != $suffix and (.label | endswith($suffix)))
+          )
+        | .tab_id
+      else error("missing result.tabs") end
+    ' 2>/dev/null) || {
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   }
@@ -2054,8 +2099,20 @@ EOF
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
       return 1
     fi
-    remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
-      '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
+    remaining_dup_tabs=$(printf '%s' "$list" | jq -r \
+      --arg want "$label" --arg task_id "$task_id" \
+      --arg legacy "fm-$task_id" --arg suffix " ($task_id)" \
+      --arg replacement "$tab_id" '
+        .result.tabs[]?
+        | select((.label | type) == "string")
+        | select(
+            .label == $want
+            or ($task_id != "" and .label == $legacy)
+            or ($task_id != "" and .label != $suffix and (.label | endswith($suffix)))
+          )
+        | select(.tab_id != $replacement)
+        | .tab_id
+      ' 2>/dev/null)
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2

@@ -612,6 +612,86 @@ test_create_task_refuses_duplicate_label() {
   pass "fm_backend_herdr_create_task: refuses a duplicate tab label (herdr's own tab create has no uniqueness check)"
 }
 
+# --- historical label duplicate guard ---------------------------------------
+
+test_create_task_refuses_historical_task_labels_when_live() {
+  local dir case_dir log resp fb out status kind duplicate_label current_label
+  dir="$TMP_ROOT/dup-historical-live"; current_label='NeoMD I/F/A instant (fm-css)'
+  for kind in legacy human; do
+    case_dir="$dir/$kind"; log="$case_dir/log"; resp="$case_dir/responses"
+    mkdir -p "$resp"; : > "$log"
+    if [ "$kind" = legacy ]; then
+      duplicate_label='fm-fm-css'
+    else
+      duplicate_label='Old title (fm-css)'
+    fi
+    printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"%s","workspace_id":"w1"}]}}\n' \
+      "$duplicate_label" > "$resp/1.out"
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/2.out"
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/3.out"
+    printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/4.out"
+    fb=$(make_herdr_fakebin "$case_dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css' \
+      "$ROOT" "$current_label" 2>&1 )
+    status=$?
+    [ "$status" -ne 0 ] || fail "$kind historical task label with a live agent must refuse a duplicate launch"
+    assert_contains "$out" "already exists" "$kind historical task label live duplicate refusal was not reported"
+    assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
+      "$kind historical task label live duplicate triggered a second tab"
+  done
+  pass "fm_backend_herdr_create_task: refuses live legacy and prior human-readable labels for the same task id"
+}
+
+test_create_task_replaces_historical_task_label_husks() {
+  local dir log resp fb out current_label
+  dir="$TMP_ROOT/dup-historical-husks"; log="$dir/log"; resp="$dir/responses"
+  current_label='NeoMD I/F/A instant (fm-css)'
+  mkdir -p "$resp"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-fm-css","workspace_id":"w1"},{"tab_id":"w1:t3","label":"Old title (fm-css)","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3"}}}' > "$resp/5.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t4"},"root_pane":{"pane_id":"w1:p4"}}}' > "$resp/7.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"%s","workspace_id":"w1"}]}}\n' \
+    "$current_label" > "$resp/10.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css' \
+    "$ROOT" "$current_label" ) \
+    || fail "agent-free historical task labels should be replaced by the current human-readable label"
+  [ "$out" = 'w1:t4 w1:p4' ] || fail "historical task-label husks returned the wrong replacement ids: $out"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' \
+    "the legacy task-label husk was not closed"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t3' \
+    "the prior human-readable task-label husk was not closed"
+  pass "fm_backend_herdr_create_task: replaces only proven husks across legacy and human-readable labels"
+}
+
+test_create_task_refuses_when_historical_husk_remains() {
+  local dir log resp fb out status current_label
+  dir="$TMP_ROOT/dup-historical-remains"; log="$dir/log"; resp="$dir/responses"
+  current_label='NeoMD I/F/A instant (fm-css)'
+  mkdir -p "$resp"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-fm-css","workspace_id":"w1"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}' > "$resp/4.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-fm-css","workspace_id":"w1"},{"tab_id":"w1:t3","label":"%s","workspace_id":"w1"}]}}\n' \
+    "$current_label" > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css' \
+    "$ROOT" "$current_label" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "a historical task-label husk left after replacement must refuse success"
+  assert_contains "$out" "failed to remove preexisting herdr tab" \
+    "a remaining historical task-label husk was not reported"
+  pass "fm_backend_herdr_create_task: verifies historical task-label husks are gone after replacement"
+}
+
 # --- restored-layout husk close-and-replace (herdr session.json restore) -----
 #
 # herdr persists and restores its whole session layout (workspaces/tabs/
@@ -1262,10 +1342,11 @@ test_projection_journal_is_atomic_and_uses_128_bit_token() {
 }
 
 test_projection_journal_v2_binds_and_advances_exact_endpoint() {
-  local dir state home home_real out token
+  local dir state home home_real out token task_label
   dir="$TMP_ROOT/projection-journal-v2"; state="$dir/state"; home="$dir/home"
   mkdir -p "$state" "$home"
   home_real=$(cd "$home" && pwd -P)
+  task_label='NeoMD I/F/A instant (fm-hibit-r1)'
   out=$(bash -c '
     . "$0/bin/backends/herdr.sh"
     token=$(fm_backend_herdr_projection_journal_create "$1" fm-hibit-r1) || exit 1
@@ -1273,23 +1354,24 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
     home=$(fm_backend_herdr_projection_home_identity "$2") || exit 1
     label=$(fm_backend_herdr_projection_workspace_label fm-hibit-r1 "$token")
     fm_backend_herdr_projection_journal_bind \
-      "$journal" fm-hibit-r1 "$home" lab-session w2 w2:t2 w2:p2 w1 firstmate "$label" fm-fm-hibit-r1 || exit 1
+      "$journal" fm-hibit-r1 "$home" lab-session w2 w2:t2 w2:p2 w1 firstmate "$label" "$3" || exit 1
     fm_backend_herdr_projection_journal_snapshot "$journal" fm-hibit-r1 || exit 1
-    printf "%s|%s|%s|%s|%s|%s|%s\n" \
+    printf "%s|%s|%s|%s|%s|%s|%s|%s\n" \
       "$FM_BACKEND_HERDR_JOURNAL_VERSION" \
       "$FM_BACKEND_HERDR_JOURNAL_HOME" \
       "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
-      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL"
+      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" \
+      "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
     fm_backend_herdr_projection_journal_replace_endpoint \
       "$journal" fm-hibit-r1 w2:t2 w2:p2 w2:t3 w2:p3 || exit 1
     fm_backend_herdr_projection_journal_snapshot "$journal" fm-hibit-r1 || exit 1
     printf "%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
-  ' "$ROOT" "$state" "$home") || fail "version 2 projection journal binding failed"
+  ' "$ROOT" "$state" "$home" "$task_label") || fail "version 2 projection journal binding failed"
   token=$(sed -n 's/^projection_id=//p' "$state/fm-hibit-r1.herdr-presentation")
-  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|└ hibit-r1 · p:$token" ] \
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|└ hibit-r1 · p:$token|$task_label" ] \
     || fail "version 2 projection journal did not retain exact home/endpoint/parent binding: $out"
   [ "$(printf '%s\n' "$out" | sed -n '2p')" = "w2:t3|w2:p3" ] \
     || fail "version 2 projection journal did not advance the exact replacement endpoint: $out"
@@ -4541,6 +4623,9 @@ test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
+test_create_task_refuses_historical_task_labels_when_live
+test_create_task_replaces_historical_task_label_husks
+test_create_task_refuses_when_historical_husk_remains
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
