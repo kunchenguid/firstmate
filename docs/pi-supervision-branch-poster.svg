@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 860" width="1200" height="860" role="img" aria-labelledby="poster-title poster-desc">
   <title id="poster-title">Multi-brain agent architecture</title>
-  <desc id="poster-desc">One agent. Two branches of attention. Events are commits. A git-graph poster of one fix: silent notes merge with zero turns; only the merge that matters wakes the main brain.</desc>
+  <desc id="poster-desc">One agent. Two branches of attention. Events are commits. A git-graph poster of one fix: routine notes land with zero turns; only the merge that matters wakes the main brain.</desc>
   <defs>
     <pattern id="poster-grid" width="36" height="36" patternUnits="userSpaceOnUse">
       <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#8CAAE6" stroke-opacity="0.06" stroke-width="1"/>
@@ -16,7 +16,7 @@
     <text x="1152" y="56" text-anchor="end" fill="#8CA3C7" fill-opacity="0.7" font-size="14">fig. 1 - firstmate</text>
   </g>
   <g transform="translate(0 100)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
-<title id="mb-title">Multi-brain agent architecture drawn as a git graph: one fix's lifecycle. The worker finishes and CI runs (silent note), the captain's merge-when-green instruction is cherry-picked down, a flaky test is rerun (silent note), and when CI goes green the supervision brain merges and one note wakes the main brain.</title>
+<title id="mb-title">Multi-brain agent architecture drawn as a git graph: one fix's lifecycle. The worker finishes and CI runs (routine note), the captain's merge-when-green instruction is cherry-picked down, a flaky test is rerun (routine note), and when CI goes green the supervision brain merges and one note wakes the main brain.</title>
         <defs>
           <marker id="ah-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#56C8FF"></path>
@@ -53,7 +53,7 @@
 
         <!-- ================= EXAMPLE CHIPS ON THE ARCS ================= -->
         <g id="chip-quiet-1">
-          <title>A silent note: nothing needs the captain yet</title>
+          <title>A routine note: nothing needs the captain yet</title>
           <rect x="385" y="312" width="230" height="36" rx="6" fill="#0D1321" stroke="#56C8FF" stroke-width="1.5" opacity="0.95"></rect>
           <text x="500" y="336" text-anchor="middle" fill="#B9E5FF" font-size="16">&#8220;PR opened, CI running&#8221;</text>
         </g>
@@ -63,7 +63,7 @@
           <text x="660" y="401" text-anchor="middle" fill="#FFD9A0" font-size="16">you: &#8220;merge when CI green&#8221;</text>
         </g>
         <g id="chip-quiet-2">
-          <title>A silent note: the supervision brain already fixed it</title>
+          <title>A routine note: the supervision brain already fixed it</title>
           <rect x="665" y="272" width="270" height="36" rx="6" fill="#0D1321" stroke="#56C8FF" stroke-width="1.5" opacity="0.95"></rect>
           <text x="800" y="296" text-anchor="middle" fill="#B9E5FF" font-size="16">&#8220;flaky test: reran, passed&#8221;</text>
         </g>
@@ -80,14 +80,14 @@
           <circle cx="620" cy="210" r="11" fill="#0D1321" stroke="#FFB454" stroke-width="3.5"></circle>
           <circle cx="1120" cy="210" r="11" fill="#0D1321" stroke="#FFB454" stroke-width="3.5"></circle>
         </g>
-        <!-- silent-note landings -->
-        <g id="silent-landings">
-          <title>Notes merged silently into the conversation: no one is woken</title>
+        <!-- routine-note landings -->
+        <g id="routine-landings">
+          <title>Routine notes merged into the conversation: no turn is opened</title>
           <circle cx="545" cy="210" r="7" fill="#0D1321" stroke="#56C8FF" stroke-width="3" opacity="0.85"></circle>
           <circle cx="830" cy="210" r="7" fill="#0D1321" stroke="#56C8FF" stroke-width="3" opacity="0.85"></circle>
         </g>
-        <text x="545" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">silent merge. zero turns</text>
-        <text x="830" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">silent merge. zero turns</text>
+        <text x="545" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">routine note. zero turns</text>
+        <text x="830" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">routine note. zero turns</text>
         <!-- the merge commit that wakes the main brain -->
         <g id="merge-commit">
           <title>Merged and surfaced: the main brain is woken exactly once</title>
@@ -120,6 +120,6 @@
         <text x="1128" y="665" fill="#8CA3C7" font-size="15">time</text>
 
         <!-- ================= MORAL ================= -->
-        <text x="560" y="700" text-anchor="middle" fill="#E6EDF3" opacity="0.6" font-size="18">Routine merges back silently. Only what needs you wakes the main brain.</text>
+        <text x="560" y="700" text-anchor="middle" fill="#E6EDF3" opacity="0.6" font-size="18">Routine notes land without a turn. Only what needs you wakes the main brain.</text>
   </g>
 </svg>

@@ -1637,8 +1637,8 @@ ${context.command}
   });
 
   // Pi only calls this renderer for a message with display: true, which
-  // mergeIntoMain sets for every routine note except an explicitly silent
-  // fleet heartbeat; captain-facing notes are never printed or rendered here.
+  // mergeIntoMain sets for every visible routine note; store-only routine
+  // outcomes and captain-facing notes are never printed or rendered here.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
