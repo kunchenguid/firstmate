@@ -2500,8 +2500,8 @@ EOF
   pass "retire fails closed when a remote route is reassigned"
 }
 
-test_remote_retire_refuses_unreadable_link_identity() {
-  local home remote meta
+test_remote_retire_refuses_unreadable_state() {
+  local home remote meta rc
   remote_fixture_prepare
   home=$(make_home remote-unreadable)
   remote=$(make_remote_route "$home" mate)
@@ -2509,20 +2509,22 @@ test_remote_retire_refuses_unreadable_link_identity() {
   meta="$remote/state/work-unreadable.meta"
   fm_write_meta "$meta" \
     "status=working" "x_request=req-remote-unreadable" "x_request_ts=1700000000" "x_followups=1"
-  chmod 000 "$meta"
+  chmod 700 "$remote/state"
+  chmod 000 "$remote/state"
 
-  expect_failure "retire must refuse an unreadable remote link identity" \
-    run_pf_remote "$home" retire pf-remote-unreadable --reason "cannot verify" --force
-  chmod 600 "$meta"
+  rc=0
+  EXPECT_OUT=$(run_pf_remote "$home" retire pf-remote-unreadable --reason "cannot verify" --force 2>&1) || rc=$?
+  chmod 700 "$remote/state"
+  [ "$rc" -ne 0 ] || fail "retire must refuse an unreadable remote state (unexpectedly succeeded)"
   assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
-    "an unreadable remote identity must use the retained reconciliation refusal"
+    "an unreadable remote state must use the retained reconciliation refusal"
   assert_present "$home/state/public-followup/registry/pf-remote-unreadable" \
-    "an unreadable remote identity must retain the registration"
+    "an unreadable remote state must retain the registration"
   assert_absent "$home/state/public-followup/retired/pf-remote-unreadable" \
-    "an unreadable remote identity must not write a retirement receipt"
+    "an unreadable remote state must not write a retirement receipt"
   assert_grep 'x_request=req-remote-unreadable' "$meta" \
-    "an unreadable remote identity must leave the link untouched"
-  pass "retire fails closed when a remote link identity is unreadable"
+    "an unreadable remote state must leave the link untouched"
+  pass "retire fails closed when remote state is unreadable"
 }
 
 test_remote_retire_succeeds_without_link() {
@@ -2636,6 +2638,6 @@ test_secondmate_promotion_uses_teardown_parent_resolution
 test_remote_secondmate_loop_delivers_and_retires
 test_remote_retire_force_semantics_unchanged
 test_remote_retire_refuses_reassigned_route
-test_remote_retire_refuses_unreadable_link_identity
+test_remote_retire_refuses_unreadable_state
 test_remote_retire_succeeds_without_link
 test_remote_unconfirmed_clear_is_unknown_completion

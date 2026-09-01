@@ -979,13 +979,19 @@ fmx_meta_followups_set() {
 # fmx_meta_link_clear <meta> [expected-request]: atomically remove the
 # x_request/x_request_ts/x_followups and reply-platform lines while preserving
 # every other meta line. With expected-request, a present link is cleared only
-# when its request identity matches. Idempotently succeeds when no link is
-# present, and is a no-op when <meta> is missing.
+# when its request identity matches, and absence succeeds only when the
+# authorized parent directory can be inspected safely. Unguarded calls remain
+# idempotent when <meta> is missing.
 fmx_meta_link_clear() {
-  local meta=$1 expected_set=0 expected='' tmp lock line rid='' link_present=0
+  local meta=$1 expected_set=0 expected='' tmp lock line rid='' link_present=0 parent
   if [ "$#" -ge 2 ]; then
     expected_set=1
     expected=$2
+    parent=${meta%/*}
+    [ "$parent" != "$meta" ] || parent=.
+    [ -d "$parent" ] && [ ! -L "$parent" ] && [ -r "$parent" ] && [ -x "$parent" ] \
+      || return 1
+    fm_backlog_record_parent_authorized "$meta" "task record" "$STATE" || return 1
   fi
   [ ! -L "$meta" ] || return 1
   [ -f "$meta" ] || return 0
