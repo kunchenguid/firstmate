@@ -25,7 +25,6 @@ make_home() { # <name> -> echoes the home dir
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin=$(fm_fakebin "$dir")
-  mkdir -p "$dir/state"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -59,18 +58,21 @@ test_unrecognized_argument_refuses_and_leaves_the_lock_unclaimed() {
   for arg in --help-me -x status-please --lock; do
     out=$(run_lock "$home" "$arg" 2>&1)
     rc=$?
-    [ "$rc" -ne 0 ] || fail "'$arg' was accepted (exit 0) instead of refused"
+    expect_code 2 "$rc" "'$arg' must be refused as a usage error, not accepted or confused with a held lock"
     assert_contains "$out" "unrecognized argument" "'$arg' was refused without saying which argument was wrong"
     assert_contains "$out" "fm-lock.sh status" "'$arg' was refused without printing the usage that names the real forms"
-    assert_absent "$home/state/.lock" "'$arg' claimed the home's session lock while being refused"
+    assert_absent "$home/state" "'$arg' created the home's session-lock state directory while being refused"
   done
-  # The same must hold for an extra argument trailing a form that IS recognized.
-  out=$(run_lock "$home" status extra 2>&1)
-  rc=$?
-  [ "$rc" -ne 0 ] || fail "a trailing extra argument after 'status' was accepted instead of refused"
-  assert_contains "$out" "unexpected extra argument" "the trailing argument was refused without naming it"
-  assert_absent "$home/state/.lock" "a trailing extra argument claimed the home's session lock"
-  pass "fm-lock: an unrecognized argument is refused nonzero and leaves the session lock unclaimed"
+  # The same must hold for an extra argument trailing either form that IS
+  # recognized: it is still an argument the script does not recognize.
+  for arg in status --help; do
+    out=$(run_lock "$home" "$arg" extra 2>&1)
+    rc=$?
+    expect_code 2 "$rc" "a trailing extra argument after '$arg' must be refused as a usage error"
+    assert_contains "$out" "unexpected extra argument" "the argument trailing '$arg' was refused without naming it"
+    assert_absent "$home/state" "a trailing extra argument after '$arg' created the session-lock state directory"
+  done
+  pass "fm-lock: an unrecognized argument is refused with exit 2 and leaves the session lock unclaimed"
 }
 
 test_help_prints_usage_without_touching_the_lock() {
@@ -81,7 +83,7 @@ test_help_prints_usage_without_touching_the_lock() {
     expect_code 0 "$?" "'$flag' must be answered with usage, not an error"
     assert_contains "$out" "fm-lock.sh status" "'$flag' did not print the documented status form"
     assert_contains "$out" "acquire the session lock" "'$flag' did not print the documented acquire form"
-    assert_absent "$home/state/.lock" "'$flag' claimed the home's session lock"
+    assert_absent "$home/state" "'$flag' created the home's session-lock state directory"
   done
   pass "fm-lock: --help and -h print usage on exit 0 and never claim the lock"
 }
@@ -94,6 +96,7 @@ test_status_still_reports_the_holder() {
   assert_contains "$out" "lock: free" "status did not report an unheld lock as free"
   assert_absent "$home/state/.lock" "status created the lock it was only asked to inspect"
 
+  mkdir -p "$home/state"
   printf '%s\n' "$$" > "$home/state/.lock"
   out=$(run_lock "$home" status)
   expect_code 0 "$?" "status on a held home must still exit 0"

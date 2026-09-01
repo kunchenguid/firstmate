@@ -24,10 +24,7 @@ MODE=acquire
 if [ "$#" -gt 0 ]; then
   case "$1" in
     status) MODE=status ;;
-    -h | --help)
-      usage
-      exit 0
-      ;;
+    -h | --help) MODE=help ;;
     *)
       echo "error: unrecognized argument '$1'" >&2
       usage >&2
@@ -38,6 +35,10 @@ if [ "$#" -gt 0 ]; then
     echo "error: unexpected extra argument '$2'" >&2
     usage >&2
     exit 2
+  fi
+  if [ "$MODE" = help ]; then
+    usage
+    exit 0
   fi
 fi
 
