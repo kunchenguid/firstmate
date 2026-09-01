@@ -271,6 +271,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, and registered `working`, `idle`, and `blocked` agents remain `alive`.
 A registered `done` entry becomes `dead` only after the exact pane independently proves it holds one bare idle shell with no child process or foreground command, then a second registry read still reports `done`.
+Every replacement boundary repeats that exact stale-done classification and refuses if it changed before an old-tab close or relaunch input.
 A `done` entry with any changed, unreadable, or non-idle process evidence becomes `unreadable` and refuses recovery.
 Unlike tmux process-name inspection, this combines native registration with a structural shell proof rather than guessing from a generic interpreter name.
 
