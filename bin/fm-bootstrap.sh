@@ -1609,13 +1609,20 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   if network_phase && network_sweep_authorized 'project clone refresh'; then
     fleet_sync_out=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-fleet.XXXXXX") || fleet_sync_out=
     if [ -n "$fleet_sync_out" ]; then
+      # Resolve the timeout before starting the worker. The project-count scan
+      # is part of the launch decision and must not overlap fleet sync.
+      fleet_sync_timeout=$(fleet_sync_bootstrap_timeout)
       (
+        FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=$fleet_sync_timeout
+        export FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT
         __fm_timing_stamp=$(fm_timing_now_ms)
         fleet_sync
         fm_timing_record phase fleet-sync "$__fm_timing_stamp"
       ) >"$fleet_sync_out" 2>&1 &
       fleet_sync_pid=$!
     else
+      fleet_sync_timeout=$(fleet_sync_bootstrap_timeout)
+      FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=$fleet_sync_timeout
       __fm_timing_stamp=$(fm_timing_now_ms)
       fleet_sync
       fm_timing_record phase fleet-sync "$__fm_timing_stamp"

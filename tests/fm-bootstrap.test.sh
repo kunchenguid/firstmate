@@ -206,14 +206,19 @@ run_bootstrap_timeout_case() {
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     git() {
       local tries
-      if [ "${FM_FAKE_GIT_WAIT_FOR_FLEET_START:-}" = 1 ] && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ]; then
+      if [ "${FM_FAKE_GIT_WAIT_FOR_FLEET_START:-}" = 1 ] \
+        && [ "${1:-}" = -C ] && [[ "${2:-}" == "${FM_HOME:-}/projects/"* ]] \
+        && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ]; then
         tries=0
         while [ "$tries" -lt 5 ] && [ ! -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; do
           command sleep 0.01
           tries=$((tries + 1))
         done
       fi
-      if [ -n "${FM_FAKE_GIT_SYNC_STARTED_RECORD:-}" ] && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] && [ -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; then
+      if [ "${1:-}" = -C ] && [[ "${2:-}" == "${FM_HOME:-}/projects/"* ]] \
+        && [ -n "${FM_FAKE_GIT_SYNC_STARTED_RECORD:-}" ] \
+        && [ -n "${FM_FAKE_FLEET_SYNC_STARTED_MARKER:-}" ] \
+        && [ -e "$FM_FAKE_FLEET_SYNC_STARTED_MARKER" ]; then
         printf '%s\n' "$*" >> "$FM_FAKE_GIT_SYNC_STARTED_RECORD"
       fi
       command git "$@"
