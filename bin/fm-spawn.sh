@@ -1868,6 +1868,11 @@ real_path_or_raw() {  # <path>
 # freshen_spawn_worktree_base resets that worktree to origin's default-branch
 # tip, losing any uncommitted work in it.
 #
+# A present worktree= value that cannot resolve to a real path refuses because
+# it cannot prove a candidate is free, while an absent worktree= remains
+# skipped. Failing closed on every unreadable record was rejected because one
+# corrupt or half-written record would wedge every spawn in this home.
+#
 # Widening the scan across sibling homes is tracked separately and is
 # deliberately out of scope here: it would add a cross-home read, and a new
 # failure mode, to the spawn path.
@@ -1881,7 +1886,13 @@ assert_spawn_worktree_unclaimed() {
     [ "$owner" != "$ID" ] || continue
     recorded=$(fm_meta_get "$meta" worktree)
     [ -n "$recorded" ] || continue
-    recorded_real=$(real_path_or_raw "$recorded")
+    if ! recorded_real=$(cd "$recorded" 2>/dev/null && pwd -P); then
+      if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+        SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=1
+      fi
+      echo "error: task $owner record $meta has worktree='$recorded', but that recorded path could not be resolved; refusing to launch task $ID because an unresolvable claim is not evidence of a free worktree." >&2
+      return 1
+    fi
     [ "$recorded_real" != "$wt_real" ] || {
       if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
         SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=1

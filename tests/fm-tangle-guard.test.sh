@@ -190,7 +190,7 @@ test_spawn_isolation_abort() {
 # --- GUARD 1c: fm-spawn durable worktree claims ----------------------------
 
 test_spawn_durable_worktree_claims() {
-  local home proj claimed free own alias fakebin rec out status
+  local home proj claimed free own alias broken fakebin rec out status
   home="$TMP_ROOT/spawn-claim-home"
   mkdir -p "$home/data" "$home/state"
   proj=$(make_repo "$TMP_ROOT/spawn-claim-proj")
@@ -198,10 +198,12 @@ test_spawn_durable_worktree_claims() {
   free="$TMP_ROOT/spawn-free-wt"
   own="$TMP_ROOT/spawn-own-wt"
   alias="$TMP_ROOT/spawn-claim-alias"
+  broken="$TMP_ROOT/spawn-claim-broken"
   git -C "$proj" worktree add -q --detach "$claimed" >/dev/null 2>&1
   git -C "$proj" worktree add -q --detach "$free" >/dev/null 2>&1
   git -C "$proj" worktree add -q --detach "$own" >/dev/null 2>&1
   ln -s "$claimed" "$alias"
+  ln -s "$TMP_ROOT/spawn-claim-removed" "$broken"
   fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/spawn-claim-fake")
   rec="$TMP_ROOT/spawn-claim.log"
   : > "$rec"
@@ -272,10 +274,39 @@ test_spawn_durable_worktree_claims() {
   expect_code 0 "$status" "the same spawn should be retryable after the durable claim retires"
   assert_contains "$out" 'spawned collision-gg7' "the retry did not launch after the claim retired"
 
+  {
+    echo 'window=firstmate:fm-broken-claim'
+    echo "worktree=$broken"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+  } > "$home/state/broken-claim.meta"
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" \
+    run_spawn "$home" unresolvable-kk1 "$proj" "$free" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "an unresolvable foreign worktree claim should refuse"
+  assert_contains "$out" "task broken-claim record $home/state/broken-claim.meta" \
+    "the unresolvable-claim refusal did not name the owning record"
+  assert_contains "$out" "worktree='$broken'" \
+    "the unresolvable-claim refusal did not report the recorded path"
+  assert_contains "$out" "could not be resolved; refusing to launch task unresolvable-kk1" \
+    "the unresolvable-claim refusal did not explain why it stopped the spawn"
+  assert_grep 'kill-window -t =firstmate:=fm-unresolvable-kk1' "$rec" \
+    "an unresolvable claim refusal must retire the endpoint it created"
+  rm "$home/state/broken-claim.meta"
+
+  {
+    echo 'window=firstmate:fm-missing-claim'
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+  } > "$home/state/missing-claim.meta"
   out=$(FM_TMUX_REC="$rec" run_spawn "$home" free-hh8 "$proj" "$free" "$fakebin")
   status=$?
   expect_code 0 "$status" "a different, genuinely free worktree should remain launchable"
   assert_contains "$out" 'spawned free-hh8' "the free-worktree spawn did not report success"
+  rm "$home/state/missing-claim.meta"
 
   fm_test_spawn_brief "$home" own-ii9 brief
   {
