@@ -56,9 +56,10 @@
 # stored pane id blindly: fm_backend_herdr_list_live. The presentation journal
 # is deliberately excluded from that path.
 #
-# Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
-# through fm_backend_required_tools only when herdr is the resolved backend;
-# this adapter also gates them again before spawning.
+# Requires: herdr (CLI + socket), jq (JSON parsing; part of the universal
+# toolchain bootstrap always detects). Bootstrap detects the herdr CLI through
+# fm_backend_required_tools only when herdr is the resolved backend; this
+# adapter also gates both again before spawning.
 
 # FM_HOME fallback: every real caller (fm-spawn.sh, fm-peek.sh, fm-send.sh,
 # fm-teardown.sh, fm-watch.sh, fm-crew-state.sh) already sets FM_HOME as a

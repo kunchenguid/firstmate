@@ -101,9 +101,10 @@
 #     `close-tab-by-id`, which verified cleanly removes a live tab (pane and
 #     all) in one call - never a separate close-pane first.
 #
-# Requires: zellij (CLI), jq (JSON parsing). Bootstrap detects these through
+# Requires: zellij (CLI), jq (JSON parsing; part of the universal toolchain
+# bootstrap always detects). Bootstrap detects the zellij CLI through
 # fm_backend_required_tools only when zellij is the resolved backend; this
-# adapter also gates them again before spawning.
+# adapter also gates both again before spawning.
 
 # FM_HOME fallback: every real caller already sets FM_HOME as a global before
 # sourcing fm-backend.sh (which sources this file); this exists only so this

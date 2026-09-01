@@ -73,7 +73,24 @@ case "$command_name" in
 esac
 if [ "$slow" -eq 1 ]; then
   printf 'START %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
-  sleep "$sleep_s"
+  if [ "$subcommand" = sync ]; then
+    # Hold the sync probe in flight until the fleet clone refresh has logged
+    # its fetch START, so the fetch/sweep overlap this suite asserts is
+    # event-ordered from this side too: a loaded host can delay the
+    # backgrounded fm-fleet-sync.sh until after the whole sync sweep would
+    # have finished, which is concurrency observed too late, not a
+    # serialization regression. Bounded below fleet_sync's 20s bootstrap
+    # timeout so a genuine serialized-after-sweeps regression still finishes
+    # the sweep and fails the overlap assertion instead of hanging.
+    tries=0
+    until grep -q '^START fleet-fetch ' "$log"; do
+      tries=$((tries + 1))
+      [ "$tries" -lt 200 ] || break
+      sleep 0.05
+    done
+  else
+    sleep "$sleep_s"
+  fi
   printf 'END %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
 else
   printf 'QUICK %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
@@ -137,7 +154,19 @@ for arg in "\$@"; do
 done
 if [ "\$slow" -eq 1 ]; then
   printf 'START fleet-fetch git fetch\n' >> '$log'
-  sleep "\${FM_FAKE_GIT_FETCH_SLEEP:-0.4}"
+  # Hold the fetch in flight until the secondmate sync sweep has started, so
+  # the overlap this suite asserts is event-ordered instead of a wall-clock
+  # race a loaded host can lose (the fetch used to sleep a fixed 0.4s and
+  # could start and finish inside the gap between the two sweeps). The wait
+  # is bounded below fleet_sync's 20s bootstrap timeout so a regression that
+  # serializes the sweeps after the fetch still logs END and fails the
+  # overlap assertion instead of hanging or being killed mid-log.
+  tries=0
+  until grep -q '^START host-.* sync\$' '$log'; do
+    tries=\$((tries + 1))
+    [ "\$tries" -lt 200 ] || break
+    sleep 0.05
+  done
   printf 'END fleet-fetch git fetch\n' >> '$log'
 fi
 exec '$real_git' "\$@"
@@ -219,7 +248,6 @@ SH
     FM_FAKE_SSH_UNREACHABLE_HOST=host-bravo \
     FM_FAKE_SSH_FAIL_HOST=host-alpha \
     FM_FAKE_SSH_DIRTY_HOST=host-charlie \
-    FM_FAKE_GIT_FETCH_SLEEP=0.4 \
     FM_INHERITABLE_CONFIG='' \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$ROOT/bin/fm-bootstrap.sh" 2>&1
