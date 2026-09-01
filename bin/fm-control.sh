@@ -614,6 +614,19 @@ relaunch_rollback() {
 resolve_relaunch_profile() {
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
+  # $HARNESS is the control FAMILY, which is what the interrupt/exit tables and
+  # wiring retirement are keyed by. For the relaunch PROFILE we want the exact
+  # adapter instead, whenever the recorded value is itself a verified adapter:
+  # such a value can be reconstructed exactly, so the alias guard below must not
+  # fire for it and the model/effort carry-over must compare like with like.
+  # Only a raw-command basename - which resolves to a family but is not itself
+  # an adapter - is genuinely unreconstructable. claude-local is what makes this
+  # visible: its family is claude, but it is a real adapter with its own launch
+  # template and its own model axis, so canonicalizing it to claude would both
+  # refuse an ordinary relaunch and reset the recorded model to default.
+  if fm_control_harness_supported "$PRIOR_RECORDED_HARNESS"; then
+    PRIOR_HARNESS=$PRIOR_RECORDED_HARNESS
+  fi
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default

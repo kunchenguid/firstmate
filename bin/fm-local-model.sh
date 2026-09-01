@@ -3,6 +3,7 @@
 # endpoint facts for the claude-local adapter (an LM Studio server by default).
 #
 # Usage: fm-local-model.sh probe
+#        fm-local-model.sh list
 #        fm-local-model.sh model-state <model>
 #        fm-local-model.sh context-budget <model>
 #        fm-local-model.sh headroom <model>
@@ -64,7 +65,7 @@ set -u
 ENDPOINT=${FM_LOCAL_MODEL_ENDPOINT:-http://127.0.0.1:1234}
 DEFAULT_CEILING=131072
 
-die_usage() { echo "usage: fm-local-model.sh probe|model-state|context-budget|headroom|preflight|check|brief-fits [args]" >&2; exit 2; }
+die_usage() { echo "usage: fm-local-model.sh probe|list|model-state|context-budget|headroom|preflight|check|brief-fits [args]" >&2; exit 2; }
 
 # Print the configured ceiling, refusing a value that is not a positive integer
 # so a typo can never read as "no limit".
@@ -101,6 +102,13 @@ try:
     entries = doc["data"]
 except Exception:
     sys.exit(5)
+# A body that parses but is not shaped like a catalog must take the unreadable
+# path, NOT the absent-model path. Without this, {"data":{}} iterates an empty
+# dict, returns "absent", and check reports "no longer loaded" - a confidently
+# wrong diagnosis that sends the operator to reload a model when the real fault
+# is that something other than the model server is answering on that port.
+if not isinstance(entries, list):
+    sys.exit(5)
 for e in entries:
     if not isinstance(e, dict) or e.get("id") != want:
         continue
@@ -121,6 +129,32 @@ EOF
 cmd_probe() {
   catalog >/dev/null
   printf 'ok: %s is answering\n' "$ENDPOINT"
+}
+
+# Print every model id the endpoint serves, one per line, each with its load
+# state. This exists because `probe` only proves the endpoint answers and emits
+# no ids, so a refusal that points an operator at `probe` to find a model id is
+# not actionable. Keeping the listing here keeps this script the single owner of
+# endpoint facts.
+cmd_list() {
+  local body
+  body=$(catalog) || exit $?
+  command -v python3 >/dev/null 2>&1 || { echo "error: python3 is required to read the endpoint catalog" >&2; exit 5; }
+  python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    entries = doc["data"]
+except Exception:
+    sys.exit(5)
+if not isinstance(entries, list):
+    sys.exit(5)
+for e in entries:
+    if isinstance(e, dict) and e.get("id"):
+        print("%s\t%s" % (e["id"], e.get("state") or "unknown"))
+' <<EOF
+$body
+EOF
 }
 
 cmd_model_state() {  # <model>
@@ -164,7 +198,7 @@ EOF
     loaded) : ;;
     absent)
       echo "error: the local model endpoint at $ENDPOINT does not list a model named '$1'." >&2
-      echo "       Load it first ('lms load $1'), or pass the exact id the endpoint reports." >&2
+      echo "       Load it first ('lms load $1'), or pass an id from: fm-local-model.sh list" >&2
       exit 4 ;;
     *)
       cat >&2 <<EOF
@@ -265,6 +299,7 @@ EOF
 CMD=$1; shift
 case "$CMD" in
   probe)          [ "$#" -eq 0 ] || die_usage; cmd_probe ;;
+  list)           [ "$#" -eq 0 ] || die_usage; cmd_list ;;
   model-state)    [ "$#" -eq 1 ] || die_usage; cmd_model_state "$1" ;;
   context-budget) [ "$#" -eq 1 ] || die_usage; cmd_context_budget "$1" ;;
   headroom)       [ "$#" -eq 1 ] || die_usage; cmd_headroom "$1" ;;

@@ -270,6 +270,46 @@ test_no_headroom_is_refused_with_the_fix() {
   pass "a window the harness prompt alone fills is refused with the action that fixes it"
 }
 
+# A body that PARSES but is not shaped like a catalog must take the unreadable
+# path, never the eviction path. This is the other half of the unreadable-catalog
+# distinction: the earlier case covers bodies that fail to parse, and without
+# this one a wrong-shaped body still yields a confident "no longer loaded",
+# sending an operator to reload a model when the real fault is that something
+# other than the model server is answering on that port.
+test_wrong_shaped_catalog_is_not_reported_as_eviction() {
+  local dir url out status shape
+  for shape in '{"data":{}}' '{"data":"nope"}' '{"data":null}'; do
+    dir="$TMP_ROOT/shaped$RANDOM/api/v0"
+    mkdir -p "$dir"
+    printf '%s' "$shape" > "$dir/models"
+    url="file://$(dirname "$(dirname "$dir")")"
+
+    out=$(FM_LOCAL_MODEL_ENDPOINT="$url" "$LOCAL_MODEL" check local-coder)
+    case "$out" in
+      *"no longer loaded"*) fail "shape $shape was reported as an eviction: '$out'" ;;
+    esac
+    case "$out" in
+      blocked:*"unreadable catalog"*) : ;;
+      *) fail "shape $shape did not produce the unreadable-catalog line: '$out'" ;;
+    esac
+    [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] \
+      || fail "the watcher check must print exactly one line for shape $shape"
+
+    FM_LOCAL_MODEL_ENDPOINT="$url" "$LOCAL_MODEL" model-state local-coder >/dev/null 2>&1
+    status=$?
+    [ "$status" -eq 5 ] || fail "shape $shape must exit 5 (unreadable), got $status"
+  done
+
+  # The contrast that keeps this from going vacuous: a well-formed catalog that
+  # genuinely lacks the model still reports absent, not unreadable.
+  url=$(endpoint shaped-contrast loaded 65536)
+  out=$(FM_LOCAL_MODEL_ENDPOINT="$url" "$LOCAL_MODEL" model-state no-such-model) \
+    || fail "a well-formed catalog missing the model must not be unreadable"
+  [ "$out" = absent ] || fail "expected 'absent' for a missing model, got '$out'"
+
+  pass "a parseable but wrong-shaped catalog reports unreadable, never a false eviction"
+}
+
 # A ceiling that is present but not a positive integer is an operator mistake
 # that must never read as "no limit". An EMPTY value is deliberately not in that
 # set: it carries no number, so it means "unset" under ordinary environment
@@ -287,7 +327,7 @@ test_bad_ceiling_is_refused() {
     [ "$status" -eq 2 ] || fail "ceiling '$v' must be refused with exit 2, got $status"
   done
 
-  out=$(FM_LOCAL_MODEL_ENDPOINT="$url" FM_LOCAL_MODEL_MAX_CONTEXT= \
+  out=$(FM_LOCAL_MODEL_ENDPOINT="$url" FM_LOCAL_MODEL_MAX_CONTEXT='' \
     "$LOCAL_MODEL" context-budget local-coder) \
     || fail "an empty ceiling must fall back to the default, not refuse"
   [ "$out" = 65536 ] || fail "an empty ceiling must land on a real bound, got '$out'"
@@ -303,4 +343,5 @@ test_loaded_model_without_loaded_window_is_refused
 test_unreadable_catalog_wakes_once
 test_oversized_brief_is_refused
 test_no_headroom_is_refused_with_the_fix
+test_wrong_shaped_catalog_is_not_reported_as_eviction
 test_bad_ceiling_is_refused

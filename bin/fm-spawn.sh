@@ -1992,7 +1992,7 @@ if [ "$HARNESS" = claude-local ]; then
     [ -z "$RELAUNCH_MODEL" ] || [ "$RELAUNCH_MODEL" = default ] || MODEL=$RELAUNCH_MODEL
   fi
   if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
-    echo "error: claude-local requires an explicit --model naming the exact model id the local endpoint serves (list them with: bin/fm-local-model.sh probe)." >&2
+    echo "error: claude-local requires an explicit --model naming the exact model id the local endpoint serves (list them with: bin/fm-local-model.sh list)." >&2
     exit 1
   fi
   # 5. The endpoint must be answering and the model actually loaded.

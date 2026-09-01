@@ -1540,8 +1540,49 @@ test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
+# claude-local records an adapter whose control FAMILY is claude. That split is
+# deliberate - the interrupt/exit tables and wiring retirement are keyed by the
+# family - but the relaunch PROFILE must keep the exact recorded adapter, or an
+# ordinary relaunch is refused as an unreconstructable alias and an explicit
+# --harness silently resets the recorded model to default. Both failures land on
+# the wrong side of the transaction: fm-control stops the running agent before
+# fm-spawn refuses, so the operator loses a live worker and only then sees an
+# error.
+test_relaunch_keeps_the_exact_recorded_claude_local_profile() {
+  local dir out
+  dir=$(new_case claude-local rl40)
+  add_ship_task "$dir" rl40 claude-local
+  # The recorded model is the endpoint's own catalog id; claude-local never
+  # guesses it, so losing it on relaunch is a hard failure rather than a default.
+  sed -i.bak 's/^model=default$/model=local-coder/' "$dir/home/state/rl40.meta"
+  rm -f "$dir/home/state/rl40.meta.bak"
+
+  # No explicit axes: this is the ordinary relaunch that must not be refused as
+  # an alias. The launch itself is expected to fail in this fixture; the
+  # assertion is that the ALIAS refusal is gone and the recorded profile stands.
+  out=$(run_control "$dir" rl40 relaunch --note "resume after restart" 2>&1) || true
+  case "$out" in
+    *"cannot be reconstructed from its recorded basename"*)
+      fail "an ordinary claude-local relaunch was refused as an unreconstructable alias: $out" ;;
+  esac
+  [ "$(meta_field "$dir" rl40 harness)" = claude-local ] \
+    || fail "the recorded harness must stay claude-local, got '$(meta_field "$dir" rl40 harness)'"
+  [ "$(meta_field "$dir" rl40 model)" = local-coder ] \
+    || fail "the recorded model must survive a relaunch, got '$(meta_field "$dir" rl40 model)'"
+
+  # The family split must still hold: control mechanics resolve to claude.
+  [ "$(fm_control_harness_family claude-local)" = claude ] \
+    || fail "claude-local must still resolve to the claude control family"
+  # And the pre-stop capability refusal must still be exact, not widened.
+  fm_control_harness_supports_kind claude-local secondmate \
+    && fail "claude-local must still be refused for a secondmate before anything is stopped"
+
+  pass "a recorded claude-local task relaunches on its exact adapter and keeps its model"
+}
+
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_keeps_the_exact_recorded_claude_local_profile

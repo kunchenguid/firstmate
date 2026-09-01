@@ -37,7 +37,7 @@ Offer it for short, attended, local work the captain has asked to keep on his ow
 | Exit | **UNESTABLISHED.** `fm-control exit` did not return within two minutes. |
 | Resume | **UNESTABLISHED.** Not exercised. |
 | Skill | **UNESTABLISHED.** Not exercised. |
-| Model | `ANTHROPIC_MODEL`, not `--model`: the endpoint's catalog id selects the served model. Discover with `bin/fm-local-model.sh probe`. |
+| Model | `ANTHROPIC_MODEL`, not `--model`: the endpoint's catalog id selects the served model. Discover with `bin/fm-local-model.sh list`, which prints each served id and its load state; `probe` only confirms the endpoint answers. |
 | Effort | None. The record-and-omit contract in `../common/model-and-effort.md` applies: effort is recorded in task metadata and no flag is emitted. |
 
 ## The endpoint

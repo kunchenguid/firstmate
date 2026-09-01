@@ -59,3 +59,26 @@ commands:
 test:
   evidence:
     store_in_repo: true
+
+# Raise the Review-stage agent bound from its 30m default.
+#
+# Measured on this branch, 2026-09-01. The Review step for run
+# 01M1E1CQ2S1PYQKGVMKZ35QVJP recorded 2,236,972 ms total (37.3 min): the initial
+# review completed and gated in roughly 7.3 min, and the review-fix turn then
+# consumed the entire remaining 30m0s bound and was KILLED while still producing
+# output 1 second earlier ("agent fix timed out after 30m0s ... agent last
+# produced output 1s ago (122 observed)"). So the fix turn dominates this stage,
+# and 30m is a hard cut through live work rather than a stalled-agent backstop.
+# For contrast, a healthy fix turn on the preceding run was still progressing at
+# 630,675 ms (10.5 min) and did complete, so the default is adequate on a
+# responsive machine and only fails when the machine degrades.
+#
+# 60m is twice the observed hard cut and roughly six times a healthy fix turn.
+# The true requirement of the killed turn is UNMEASURED - it was cut off, not
+# finished - so this is sized against the cut, not against a completion.
+#
+# Repo-local and deliberately not global: this compensates for slow local
+# hardware on this repository's runs, and the stalled-agent protection the
+# default provides is preserved, just at a bound that does not sever work in
+# progress.
+review_agent_timeout: "60m"
