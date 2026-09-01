@@ -131,7 +131,11 @@
 # FM_PENDING_REPLY_EXISTING_CORR=<id> resend command that preserves the body
 # and makes a later remote enqueue deduplicate onto that same record. An
 # unconfirmed fire-and-forget request exits 3 and names the same delivery id to
-# retry. The remote host runs no re-ring ladder of its own: a swallowed ordinary
+# retry. Every remote transport attempt is bounded by FM_SEND_REMOTE_BUDGET
+# seconds (default 30, and any override must be a positive integer): a bound
+# hit is completion-unknown and exits through this same unconfirmed contract
+# instead of waiting out a busy remote queue.
+# The remote host runs no re-ring ladder of its own: a swallowed ordinary
 # doorbell surfaces through the parent's pending-reply recovery and escalation,
 # whose recovery request re-rings the remote doorbell when it is enqueued;
 # fire-and-forget delivery deliberately arms neither mechanism. Internal
@@ -228,6 +232,8 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -648,7 +654,15 @@ if [ "${1:-}" = "--key" ]; then
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
   if [ "$TARGET_BACKEND" = remote ]; then
-    if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
+    FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
+    case "$FM_SEND_REMOTE_BUDGET" in
+      ''|*[!0-9]*|0)
+        echo "error: FM_SEND_REMOTE_BUDGET must be a positive integer: $FM_SEND_REMOTE_BUDGET" >&2
+        exit 1
+        ;;
+    esac
+    if ! fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
+      fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
@@ -660,6 +674,15 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
+  if [ "$TARGET_BACKEND" = remote ]; then
+    FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
+    case "$FM_SEND_REMOTE_BUDGET" in
+      ''|*[!0-9]*|0)
+        echo "error: FM_SEND_REMOTE_BUDGET must be a positive integer: $FM_SEND_REMOTE_BUDGET" >&2
+        exit 1
+        ;;
+    esac
+  fi
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
@@ -747,6 +770,10 @@ else
     # 255 is safe by that idempotence; a still-lost transport preserves a
     # reply-bearing request's expectation, while fire-and-forget reports the
     # delivery id that must be reused, because the record may have landed.
+    # Every transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds
+    # (default 30, overridable) so a busy remote queue cannot hold this send
+    # open indefinitely; a bound hit exits through the same
+    # unconfirmed-delivery contract.
     REMOTE_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
     if ! fm_task_inbox_lock_acquire "$REMOTE_META_LOCK"; then
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -781,13 +808,22 @@ else
     remote_completion_unknown=0
     REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE")
     [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS+=(fire-and-forget)
-    "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
-      "${REMOTE_SEND_ARGS[@]}" < /dev/null || remote_rc=$?
-    if [ "$remote_rc" -eq 255 ]; then
+    # Each transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds.
+    # fm_run_timed's 124 means the attempt was killed at the bound with remote
+    # completion unknown - the enqueue may have landed - so it exits through
+    # the same unconfirmed-delivery contract as a lost transport, without a
+    # retry that would only wait out the same busy remote queue again. (A
+    # remote job's own timeout also relays as 124; treating it as unconfirmed
+    # stays safe because the remote enqueue deduplicates.)
+    fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
+      fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" < /dev/null || remote_rc=$?
+    if [ "$remote_rc" -eq 124 ]; then
+      remote_completion_unknown=1
+    elif [ "$remote_rc" -eq 255 ]; then
       remote_completion_unknown=1
       remote_rc=0
-      "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
-        "${REMOTE_SEND_ARGS[@]}" < /dev/null || remote_rc=$?
+      fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
+        fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" < /dev/null || remote_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
@@ -800,6 +836,8 @@ else
       fi
       if [ "$remote_rc" -eq 255 ]; then
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+      elif [ "$remote_rc" -eq 124 ]; then
+        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the remote transport did not complete within its ${FM_SEND_REMOTE_BUDGET}s budget; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       else
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       fi

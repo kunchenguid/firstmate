@@ -102,6 +102,7 @@ esac
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
+FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -132,6 +133,7 @@ case "$FM_SNAPSHOT_SECONDMATES" in
     ;;
 esac
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
@@ -171,7 +173,8 @@ JSON is the stable machine-readable output contract.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
-aggregation, and marks inventory contradictions or unavailable child state invalid.
+aggregation, includes generated_epoch for freshness arithmetic, and marks
+inventory contradictions or unavailable child state invalid.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until, deferred_marker, and plural
@@ -179,6 +182,9 @@ blocker fields for downstream projections. A captain hold is actionable only
 when every blocker is Done and any hold-until date has arrived.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
+Each per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
+(default 10 seconds), so one unreachable remote secondmate host cannot extend
+the snapshot without limit; a read that hits the bound reports state unknown.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -221,10 +227,18 @@ last_nonempty_line() {  # <file>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
+# A crew-state read is bounded like every other cross-home read here. For a
+# remote secondmate fm-crew-state.sh reaches its host over ssh, and ssh's own
+# dead-peer detection deliberately never kills a slow-but-alive remote command,
+# so without this bound one unreachable or slow host extends the whole snapshot
+# without limit - and this snapshot is also the producer behind the repeatedly
+# published home ledger. A read that hits the bound is indistinguishable from
+# the already-handled unreadable case: empty output folds to state unknown.
 crew_state_json() {  # <id>
   local id=$1 raw rest state source detail sep
   raw=$(
-    FM_ROOT_OVERRIDE="$FM_ROOT" \
+    fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" \
+      env FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
       FM_STATE_OVERRIDE="$STATE" \
       FM_DATA_OVERRIDE="$DATA" \
@@ -670,6 +684,7 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
   jq -n \
     --arg generated "$SNAPSHOT_NOW" \
+    --argjson generated_epoch "$SNAPSHOT_EPOCH" \
     --arg home "$FM_HOME" \
     --argjson child_n "$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
@@ -780,6 +795,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | {
         schema:"fm-secondmate-home-summary.v1",
         generated:$generated,
+        generated_epoch:$generated_epoch,
         home:$home,
         valid:$valid,
         reason:$reason,
