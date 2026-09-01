@@ -150,6 +150,8 @@ assert_contains_local "$CM1_CAPTURE" "primary-crew-ok" "cm1's raw launch command
 
 CM1_WSID=$(herdr pane get "$CM1_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ -n "$CM1_WSID" ] || fail "could not read cm1's pane workspace_id"
+CM1_TAB=$(grep '^herdr_tab_id=' "$CM1_META" | cut -d= -f2-)
+[ -n "$CM1_TAB" ] || fail "cm1 meta missing herdr_tab_id"
 CM1_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$CM1_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
 [ "$CM1_WS_LABEL" = "firstmate" ] || fail "a primary-shaped home's crewmate should land in the 'firstmate' workspace, got '$CM1_WS_LABEL'"
 pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmate' workspace"
@@ -172,6 +174,8 @@ assert_contains_local "$(cat "$SM_META")" "backend=herdr" "e2esm1 meta missing b
 assert_contains_local "$(cat "$SM_META")" "home=$SM_HOME" "e2esm1 meta does not record its own home"
 SM_PANE=$(grep '^herdr_pane_id=' "$SM_META" | cut -d= -f2-)
 [ -n "$SM_PANE" ] || fail "e2esm1 meta missing herdr_pane_id"
+SM_TAB=$(grep '^herdr_tab_id=' "$SM_META" | cut -d= -f2-)
+[ -n "$SM_TAB" ] || fail "e2esm1 meta missing herdr_tab_id"
 pass "real herdr E2E: the primary spawns a --secondmate task on the herdr backend"
 
 SM_WSID=$(herdr pane get "$SM_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
@@ -195,6 +199,8 @@ CM2_META="$SM_HOME/state/cm2.meta"
 [ -f "$CM2_META" ] || fail "no meta written for cm2 (recorded in the SECONDMATE's own state dir - it did its own spawning)"
 assert_contains_local "$(cat "$CM2_META")" "backend=herdr" "cm2 meta missing backend=herdr"
 WT2=$(grep '^worktree=' "$CM2_META" | cut -d= -f2-)
+CM2_TAB=$(grep '^herdr_tab_id=' "$CM2_META" | cut -d= -f2-)
+[ -n "$CM2_TAB" ] || fail "cm2 meta missing herdr_tab_id"
 CM2_PANE=$(grep '^herdr_pane_id=' "$CM2_META" | cut -d= -f2-)
 [ -n "$CM2_PANE" ] || fail "cm2 meta missing herdr_pane_id"
 pass "real herdr E2E: a crewmate spawns successfully FROM a secondmate-shaped home's own fm-spawn.sh process"
@@ -208,7 +214,34 @@ CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '
 [ "$CM2_WSID" != "$CM1_WSID" ] || fail "a crewmate spawned FROM the secondmate home must NOT land in the primary's workspace"
 pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in the secondmate's OWN workspace - falls out of per-home resolution, no glue needed"
 
+# New workers keep their human-readable labels, while bulk recovery remains
+# conservative about arbitrary human tabs. Verify the real labels before adding
+# explicit legacy-label fixtures for the list_live compatibility checks below.
+CM1_LABEL=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM1_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+SM_LABEL=$(herdr tab list --workspace "$SM_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$SM_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+CM2_LABEL=$(herdr tab list --workspace "$CM2_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM2_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+assert_contains_local "$CM1_LABEL" " (cm1)" "the primary worker did not receive a human-readable task label"
+assert_contains_local "$SM_LABEL" " (e2esm1)" "the secondmate worker did not receive a human-readable task label"
+assert_contains_local "$CM2_LABEL" " (cm2)" "the secondmate-owned crewmate did not receive a human-readable task label"
+assert_not_contains_local "$CM1_LABEL" "fm-cm1" "the new primary worker kept the legacy task label"
+assert_not_contains_local "$SM_LABEL" "fm-e2esm1" "the new secondmate worker kept the legacy task label"
+assert_not_contains_local "$CM2_LABEL" "fm-cm2" "the new secondmate-owned crewmate kept the legacy task label"
+pass "real herdr E2E: new workers use human-readable labels with their exact task ids and existing labels are not rewritten"
+
 # --- 4. list-live recovery: each home sees only its own tabs ---------------
+
+# list_live intentionally discovers legacy fm-<id> labels only: a bulk sweep has
+# no task id in hand to distinguish a human tab from a task safely. Add separate
+# legacy fixtures here without renaming any newly-created worker pane.
+herdr tab create --workspace "$CM1_WSID" --cwd "$TMP_ROOT" --label fm-cm1 --no-focus --session "$SESSION" >/dev/null \
+  || fail "could not create the primary home's legacy list_live fixture"
+herdr tab create --workspace "$SM_WSID" --cwd "$TMP_ROOT" --label fm-e2esm1 --no-focus --session "$SESSION" >/dev/null \
+  || fail "could not create the secondmate home's first legacy list_live fixture"
+herdr tab create --workspace "$SM_WSID" --cwd "$TMP_ROOT" --label fm-cm2 --no-focus --session "$SESSION" >/dev/null \
+  || fail "could not create the secondmate home's second legacy list_live fixture"
 
 PRIMARY_LIVE=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_list_live "$SESSION")
 assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not see its own task"

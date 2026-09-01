@@ -617,13 +617,15 @@ test_create_task_refuses_duplicate_label() {
 test_create_task_refuses_exact_task_labels_when_live() {
   local dir case_dir log resp fb out status kind duplicate_label current_label
   dir="$TMP_ROOT/dup-exact-live"; current_label='NeoMD I/F/A instant (fm-css)'
-  for kind in legacy current; do
+  for kind in legacy current historical; do
     case_dir="$dir/$kind"; log="$case_dir/log"; resp="$case_dir/responses"
     mkdir -p "$resp"; : > "$log"
     if [ "$kind" = legacy ]; then
       duplicate_label='fm-fm-css'
-    else
+    elif [ "$kind" = current ]; then
       duplicate_label="$current_label"
+    else
+      duplicate_label='Old title (fm-css)'
     fi
     printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"%s","workspace_id":"w1"}]}}\n' \
       "$duplicate_label" > "$resp/1.out"
@@ -640,7 +642,7 @@ test_create_task_refuses_exact_task_labels_when_live() {
     assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
       "$kind exact task label live duplicate triggered a second tab"
   done
-  pass "fm_backend_herdr_create_task: refuses live current and legacy task labels"
+  pass "fm_backend_herdr_create_task: refuses live current, historical, and legacy task labels"
 }
 
 test_create_task_replaces_legacy_task_label_husk() {
@@ -665,17 +667,17 @@ test_create_task_replaces_legacy_task_label_husk() {
   pass "fm_backend_herdr_create_task: replaces only a proven legacy task-label husk"
 }
 
-test_create_task_ignores_unrelated_human_label_with_same_id() {
+test_create_task_ignores_unrelated_human_label() {
   local dir log resp fb out
   dir="$TMP_ROOT/dup-unrelated-human"; log="$dir/log"; resp="$dir/responses"
   mkdir -p "$resp"; : > "$log"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","label":"Meeting (draft)","workspace_id":"w1"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","label":"Meeting (notes)","workspace_id":"w1"}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" draft' \
     "$ROOT" 'Neo (draft)' ) \
-    || fail "an unrelated human label with the same id should not block task creation"
+    || fail "an unrelated human label with a different id should not block task creation"
   [ "$out" = 'w1:t2 w1:p2' ] || fail "unrelated human label caused the wrong task ids: $out"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''Neo (draft)' \
     "the current human-readable task tab was not created"
@@ -683,7 +685,7 @@ test_create_task_ignores_unrelated_human_label_with_same_id() {
     "an unrelated human label was treated as a husk and closed"
   assert_not_contains "$(cat "$log")" $'\x1f''pane' \
     "an unrelated human label was inspected as a duplicate"
-  pass "fm_backend_herdr_create_task: ignores an unrelated human label sharing the task id"
+  pass "fm_backend_herdr_create_task: ignores an unrelated human label with a different task id"
 }
 
 test_create_task_refuses_when_historical_husk_remains() {
@@ -4641,7 +4643,7 @@ test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_exact_task_labels_when_live
 test_create_task_replaces_legacy_task_label_husk
-test_create_task_ignores_unrelated_human_label_with_same_id
+test_create_task_ignores_unrelated_human_label
 test_create_task_refuses_when_historical_husk_remains
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
