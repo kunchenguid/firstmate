@@ -230,8 +230,12 @@ test_ship_modes_generate_clean_briefs() {
       "$id: delivery preflight must prove the delivery ref resolves to a commit"
     assert_grep 'git -C "$task_root" status --porcelain=v1 --untracked-files=all' "$brief" \
       "$id: delivery preflight must inspect cleanliness at the recorded task root"
-    assert_grep "git -C \"\$task_root\" grep -n -F 'FINALIZE-AFTER(' \"\$delivery_ref\" -- ." "$brief" \
-      "$id: delivery preflight must scan the verified committed delivery ref"
+    assert_grep 'git -C "$task_root" submodule status --recursive' "$brief" \
+      "$id: delivery preflight must verify every recursively referenced submodule commit"
+    assert_grep "every output line must begin with a space" "$brief" \
+      "$id: delivery preflight must reject uninitialized or mismatched submodules"
+    assert_grep "git -C \"\$task_root\" grep --recurse-submodules -n -F 'FINALIZE-AFTER(' \"\$delivery_ref\" -- ." "$brief" \
+      "$id: delivery preflight must scan the verified superproject and submodule commits"
     assert_no_grep 'git -C "$(git rev-parse --show-toplevel)"' "$brief" \
       "$id: delivery preflight must not derive its target from the current directory"
     assert_grep "Exit 1 with no output means no sentinel occurrence" "$brief" \

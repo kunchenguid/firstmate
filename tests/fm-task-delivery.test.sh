@@ -376,8 +376,12 @@ STUB
       "$mode: promoted worker's preflight was not bound to its exact delivery ref"
     assert_grep 'git -C "$task_root" status --porcelain=v1 --untracked-files=all' "$payload" \
       "$mode: promoted worker's clean check was not bound to its recorded task root"
-    assert_grep "git -C \"\$task_root\" grep -n -F 'FINALIZE-AFTER(' \"\$delivery_ref\" -- ." "$payload" \
-      "$mode: promoted worker's sentinel scan was not bound to its verified delivery ref"
+    assert_grep 'git -C "$task_root" submodule status --recursive' "$payload" \
+      "$mode: promoted worker was not required to verify recursively referenced submodule commits"
+    assert_grep "every output line must begin with a space" "$payload" \
+      "$mode: promoted worker was not required to reject uninspectable submodules"
+    assert_grep "git -C \"\$task_root\" grep --recurse-submodules -n -F 'FINALIZE-AFTER(' \"\$delivery_ref\" -- ." "$payload" \
+      "$mode: promoted worker's sentinel scan did not cover its verified submodule commits"
     assert_grep 'run `cd -- "$task_root"` and require physical `pwd -P` to equal `task_root`' "$payload" \
       "$mode: promoted worker's delivery actions were not bound to its verified task root"
     assert_grep "a later \`/no-mistakes\` invocation, a push, a PR command, or the local-only ready report" "$payload" \
@@ -439,6 +443,88 @@ STUB
   pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
 }
 
+test_generated_delivery_preflight_scans_real_submodule_commits() {
+  local case_dir sub task_root uninitialized ordinary_home promote_home id ref ordinary promoted contract meta
+  local plain_out plain_status recursive_out recursive_status ready_out ready_status missing_ready_out missing_ready_status missing_scan_out missing_scan_status
+  case_dir="$TMP_ROOT/submodule-delivery"
+  sub="$case_dir/submodule"
+  task_root="$case_dir/task-root"
+  uninitialized="$case_dir/uninitialized"
+  ordinary_home="$case_dir/ordinary-home"
+  promote_home="$case_dir/promote-home"
+  id=delivery-submodule-scan
+  ref="refs/heads/fm/$id"
+
+  git init --quiet -b main "$sub"
+  printf 'FINALIZE-AFTER(upstream): replace me\n' > "$sub/placeholder.txt"
+  git -C "$sub" add placeholder.txt
+  git -C "$sub" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm sentinel
+
+  git init --quiet -b main "$task_root"
+  printf 'clean superproject\n' > "$task_root/README.md"
+  git -C "$task_root" add README.md
+  git -C "$task_root" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm base
+  git -C "$task_root" -c protocol.file.allow=always submodule --quiet add "file://$sub" deps/fixture
+  git -C "$task_root" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qam submodule
+  git -C "$task_root" checkout --quiet -b "fm/$id"
+
+  plain_out=$(git -C "$task_root" grep -n -F 'FINALIZE-AFTER(' "$ref" -- . 2>&1)
+  plain_status=$?
+  expect_code 1 "$plain_status" "a superproject-only scan must reproduce the hidden-sentinel miss"
+  [ -z "$plain_out" ] || fail "the superproject-only scan unexpectedly exposed the submodule sentinel"
+
+  ready_out=$(git -C "$task_root" submodule status --recursive 2>&1)
+  ready_status=$?
+  expect_code 0 "$ready_status" "the initialized submodule readiness check must succeed"
+  case "$ready_out" in
+    " "*) ;;
+    *) fail "the initialized submodule was not reported at its recorded commit: $ready_out" ;;
+  esac
+
+  recursive_out=$(git -C "$task_root" grep --recurse-submodules -n -F 'FINALIZE-AFTER(' "$ref" -- . 2>&1)
+  recursive_status=$?
+  expect_code 0 "$recursive_status" "the recursive committed-tree scan must find a submodule sentinel"
+  assert_contains "$recursive_out" "deps/fixture/placeholder.txt:1:FINALIZE-AFTER(upstream): replace me" \
+    "the recursive committed-tree scan did not report the submodule placeholder"
+
+  git clone --quiet "$task_root" "$uninitialized"
+  missing_ready_out=$(git -C "$uninitialized" submodule status --recursive 2>&1)
+  missing_ready_status=$?
+  expect_code 0 "$missing_ready_status" "Git must expose an uninitialized submodule through readiness output"
+  case "$missing_ready_out" in
+    -*) ;;
+    *) fail "the uninitialized fixture did not expose a blocking submodule prefix: $missing_ready_out" ;;
+  esac
+  missing_scan_out=$(git -C "$uninitialized" grep --recurse-submodules -n -F 'FINALIZE-AFTER(' "$ref" -- . 2>&1)
+  missing_scan_status=$?
+  expect_code 1 "$missing_scan_status" "recursive grep alone must reproduce the uninspectable-submodule false no-match"
+  [ -z "$missing_scan_out" ] || fail "the uninitialized submodule scan unexpectedly produced output"
+
+  mkdir -p "$ordinary_home/data" "$ordinary_home/state" "$promote_home/state"
+  printf 'window=fm-%s\nkind=ship\nworktree=%s\n' "$id" "$task_root" > "$ordinary_home/state/$id.meta"
+  FM_HOME="$ordinary_home" "$BRIEF" "$id" fixture-project --mode no-mistakes >/dev/null 2>&1 \
+    || fail "ordinary brief generation for the submodule fixture should succeed"
+  ordinary="$ordinary_home/data/$id/brief.md"
+
+  meta="$promote_home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\n' "$id" "$task_root" > "$meta"
+  FM_HOME="$promote_home" FM_STATE_OVERRIDE="$promote_home/state" \
+    "$PROMOTE" "$id" --mode no-mistakes --yolo off >/dev/null 2>&1 \
+    || fail "promotion generation for the submodule fixture should succeed"
+  promoted="$promote_home/data/$id/ship-instructions.md"
+
+  for contract in "$ordinary" "$promoted"; do
+    assert_present "$contract" "a submodule delivery contract was not generated"
+    assert_grep 'git -C "$task_root" submodule status --recursive' "$contract" \
+      "a generated delivery contract omitted recursive submodule readiness"
+    assert_grep "A leading \`-\`, \`+\`, or \`U\`" "$contract" \
+      "a generated delivery contract did not fail closed on an uninspectable submodule"
+    assert_grep "git -C \"\$task_root\" grep --recurse-submodules -n -F 'FINALIZE-AFTER(' \"\$delivery_ref\" -- ." "$contract" \
+      "a generated delivery contract omitted the recursive committed-tree scan"
+  done
+  pass "generated ordinary and promoted delivery contracts cover real submodule commits"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -481,5 +567,6 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
+test_generated_delivery_preflight_scans_real_submodule_commits
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"
