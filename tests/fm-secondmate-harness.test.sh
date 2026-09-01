@@ -41,6 +41,15 @@
 #      spawn only when the harness also resolves from that file, so the pin is
 #      durable across every respawn while explicit per-spawn harness/model/effort
 #      flags still win.
+#   D) Per-mate Claude account binding. A local route in data/secondmates.md may
+#      carry an optional claude-config-dir: field. fm-spawn.sh re-resolves it on
+#      every --secondmate launch and uses it instead of the launching process's
+#      ambient CLAUDE_CONFIG_DIR, so the account a second mate and its own
+#      workers bill against is durable rather than inherited from whoever
+#      relaunched it. Unlike (A) and (C) this is PER second mate, never global.
+#      It fails closed: a store that is not an existing directory, a harness
+#      other than claude, and a remote route each refuse the launch instead of
+#      falling back to the ambient store. An entry with no field is unchanged.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2547,6 +2556,190 @@ SH
   pass "B25 spawn quarantines stale rereads without blocking relaunch"
 }
 
+
+# ===========================================================================
+# D) Per-secondmate Claude account binding (data/secondmates.md
+#    claude-config-dir:)
+# ===========================================================================
+# Same durability shape as the harness/model/effort pin in (A) and (C), but
+# PER second mate rather than global: the store is recorded in that mate's own
+# registry entry and re-resolved on every spawn, so the account it and its own
+# workers authenticate and bill against cannot follow whichever CLAUDE_CONFIG_DIR
+# the launching process happened to carry. It fails closed on a missing store, a
+# non-claude harness, and a remote route.
+
+# write_registry_entry <world> <id> <home> [store]
+# One local route line, with the optional claude-config-dir: field only when a
+# store is supplied. The home is resolved so the spawn's own binding check (which
+# compares resolved paths) matches the home it is handed.
+write_registry_entry() {
+  local world=$1 id=$2 home=$3 store=${4:-} reg abs
+  reg="$world/home/data/secondmates.md"
+  mkdir -p "$world/home/data"
+  abs=$(cd "$home" && pwd -P)
+  if [ -n "$store" ]; then
+    printf -- '- %s - %s domain (home: %s; scope: %s work; projects: alpha; claude-config-dir: %s; added 2026-08-23)\n' \
+      "$id" "$id" "$abs" "$id" "$store" >> "$reg"
+  else
+    printf -- '- %s - %s domain (home: %s; scope: %s work; projects: alpha; added 2026-08-23)\n' \
+      "$id" "$id" "$abs" "$id" >> "$reg"
+  fi
+}
+
+# A recorded store wins over the launching process's own CLAUDE_CONFIG_DIR. This
+# is the whole point: the primary here is authenticated against one account and
+# the second mate must still come up on its own.
+test_spawn_registry_claude_config_dir_wins_over_ambient() {
+  local w sm store launchlog launch out status
+  w="$TMP_ROOT/ccd-registry-wins"
+  sm="$w/sm"
+  store="$w/claude-client"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$store" "$w/ambient"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  write_registry_entry "$w" sm "$sm" "$store"
+
+  out=$(CLAUDE_CONFIG_DIR="$w/ambient" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "a secondmate spawn with a recorded store should succeed"$'\n'"$out"
+
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store'" \
+    "the launch must carry the second mate's own recorded Claude store"
+  assert_not_contains "$launch" "$w/ambient" \
+    "the launching process's ambient store must not reach a bound second mate"
+  pass "D1 spawn: a recorded claude-config-dir binds the launch, overriding the launcher's ambient store"
+}
+
+# Backward compatibility: an entry with no field behaves exactly as before,
+# inheriting the ambient store, and an unset ambient store still adds no prefix.
+test_spawn_registry_without_claude_config_dir_inherits_ambient() {
+  local w sm launchlog launch out status
+  w="$TMP_ROOT/ccd-absent-field"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$w/ambient"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  write_registry_entry "$w" sm "$sm"
+
+  out=$(CLAUDE_CONFIG_DIR="$w/ambient" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "a fieldless registry entry must still spawn"$'\n'"$out"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$w/ambient'" \
+    "a fieldless entry must keep inheriting the launcher's ambient store"
+
+  out=$(CLAUDE_CONFIG_DIR='' \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "a fieldless entry with no ambient store must still spawn"$'\n'"$out"
+  launch=$(cat "$launchlog")
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "a fieldless entry with no ambient store must add no config-dir prefix at all"
+  pass "D2 spawn: an entry with no claude-config-dir behaves exactly as before (ambient inheritance)"
+}
+
+# Fail closed: a recorded store that is not an existing directory refuses the
+# launch naming the path, and never silently falls back to the ambient store -
+# silent fallback is the exact defect the binding exists to prevent.
+test_spawn_missing_claude_config_dir_refuses_without_fallback() {
+  local w sm store launchlog out status
+  w="$TMP_ROOT/ccd-missing-store"
+  sm="$w/sm"
+  store="$w/claude-gone"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$w/ambient"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  write_registry_entry "$w" sm "$sm" "$store"
+
+  out=$(CLAUDE_CONFIG_DIR="$w/ambient" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a recorded store that does not exist must refuse the launch"
+  assert_contains "$out" "$store" "the refusal must name the missing store path"
+  [ ! -s "$launchlog" ] || fail "a refused spawn must not launch anything: $(cat "$launchlog")"
+  [ ! -f "$w/home/state/sm.meta" ] || fail "a refused spawn must not publish a task record"
+  pass "D3 spawn: a nonexistent recorded store refuses the launch by name instead of falling back"
+}
+
+# Fail closed on the other axis: the binding names a CLAUDE store, so a launch
+# that resolves any other harness has nothing to bind and must refuse rather
+# than start the mate with the account silently unbound.
+test_spawn_claude_config_dir_refuses_non_claude_harness() {
+  local w sm store launchlog out status
+  w="$TMP_ROOT/ccd-wrong-harness"
+  sm="$w/sm"
+  store="$w/claude-client"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$store"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  write_registry_entry "$w" sm "$sm" "$store"
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a bound second mate must not launch on a harness with no Claude store"
+  assert_contains "$out" "codex" "the refusal must name the harness that resolved"
+  [ ! -s "$launchlog" ] || fail "a refused spawn must not launch anything: $(cat "$launchlog")"
+  pass "D4 spawn: a recorded store refuses a non-claude harness rather than leaving the account unbound"
+}
+
+# Per-mate, not global: two second mates with two recorded stores each launch on
+# their own, and neither sees the other's or the launcher's.
+test_spawn_two_secondmates_keep_separate_stores() {
+  local w one two store_one store_two log_one log_two launch out status
+  w="$TMP_ROOT/ccd-two-mates"
+  one="$w/sm-one"
+  two="$w/sm-two"
+  store_one="$w/claude-personal"
+  store_two="$w/claude-client"
+  log_one="$w/one.log"
+  log_two="$w/two.log"
+  mkdir -p "$w/home/config" "$store_one" "$store_two" "$w/ambient"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$one" sm-one
+  make_seeded_home "$two" sm-two
+  write_registry_entry "$w" sm-one "$one" "$store_one"
+  write_registry_entry "$w" sm-two "$two" "$store_two"
+
+  out=$(CLAUDE_CONFIG_DIR="$w/ambient" \
+    spawn_secondmate_capture "$w" sm-one "$one" "$log_one" 2>&1); status=$?
+  expect_code 0 "$status" "first bound secondmate should spawn"$'\n'"$out"
+  out=$(CLAUDE_CONFIG_DIR="$w/ambient" \
+    spawn_secondmate_capture "$w" sm-two "$two" "$log_two" 2>&1); status=$?
+  expect_code 0 "$status" "second bound secondmate should spawn"$'\n'"$out"
+
+  launch=$(cat "$log_one")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store_one'" "sm-one did not get its own store"
+  assert_not_contains "$launch" "$store_two" "sm-one leaked sm-two's store"
+  launch=$(cat "$log_two")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store_two'" "sm-two did not get its own store"
+  assert_not_contains "$launch" "$store_one" "sm-two leaked sm-one's store"
+  pass "D5 spawn: two second mates with two recorded stores stay on their own accounts"
+}
+
+# A remote route's account store lives on its own host, where this launch prefix
+# never reaches, so the field is refused rather than half-applied.
+test_spawn_remote_route_refuses_claude_config_dir() {
+  local w sm launchlog out status reg
+  w="$TMP_ROOT/ccd-remote-refused"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$w/home/data" "$w/claude-client"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  reg="$w/home/data/secondmates.md"
+  printf -- '- sm - remote domain (host: box; root: /srv/firstmate; home: /srv/sm; scope: remote work; projects: alpha; claude-config-dir: %s; added 2026-08-23)\n' \
+    "$w/claude-client" > "$reg"
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a remote route carrying claude-config-dir must refuse the launch"
+  assert_contains "$out" "claude-config-dir" "the refusal must name the unsupported field"
+  assert_contains "$out" "local routes" "the refusal must explain that the field is local-route only"
+  [ ! -s "$launchlog" ] || fail "a refused remote spawn must not launch anything: $(cat "$launchlog")"
+  pass "D6 spawn: a remote route refuses claude-config-dir instead of recording a binding it cannot honor"
+}
+
 test_harness_resolution
 test_cursor_marker_detection
 test_secondmate_model_effort_tokens
@@ -2596,5 +2789,11 @@ test_config_reread_bootstrap_path_and_spawn_flexibility
 test_bootstrap_respawns_before_config_reread
 test_spawn_quarantines_pending_rereads_on_cleanup_failure
 test_bootstrap_detect_only_does_not_create_state
+test_spawn_registry_claude_config_dir_wins_over_ambient
+test_spawn_registry_without_claude_config_dir_inherits_ambient
+test_spawn_missing_claude_config_dir_refuses_without_fallback
+test_spawn_claude_config_dir_refuses_non_claude_harness
+test_spawn_two_secondmates_keep_separate_stores
+test_spawn_remote_route_refuses_claude_config_dir
 
 echo "# all fm-secondmate-harness tests passed"

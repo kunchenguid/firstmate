@@ -767,6 +767,170 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   pass "fm-control relaunch: an adapter unverified for this task kind refuses before the agent is stopped"
 }
 
+# --- 2b. a bound second mate's account survives a refused relaunch -----------
+#
+# A second mate whose registry entry records a claude-config-dir is bound to one
+# Claude account. bin/fm-spawn.sh refuses to launch it on a harness with no
+# Claude store to bind, and refuses a store that is not there - both correct,
+# both fail-closed, and both reached only AFTER the old agent has been stopped.
+# On a relaunch that ordering is the whole defect: the healthy agent is killed
+# for a launch that must be refused, the exited|launching rollback leaves the
+# mate down, and automated recovery re-runs the identical refusal forever. The
+# control plane therefore asks both questions before it touches anything.
+#
+# write_bound_secondmate <case-dir> <id> [store]
+# A secondmate task recorded in this home, plus its registry entry, carrying the
+# optional store binding only when one is supplied.
+write_bound_secondmate() {
+  local dir=$1 id=$2 store=${3:-} abs reg
+  local home="$dir/home"
+  mkdir -p "$home/config" "$home/data/$id"
+  printf '# secondmate brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf '%s\n' "$id" > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  abs=$(cd "$dir/smhome" && pwd -P)
+  reg="$home/data/secondmates.md"
+  if [ -n "$store" ]; then
+    printf -- '- %s - %s domain (home: %s; scope: %s work; projects: alpha; claude-config-dir: %s; added 2026-08-23)\n' \
+      "$id" "$id" "$abs" "$id" "$store" > "$reg"
+  else
+    printf -- '- %s - %s domain (home: %s; scope: %s work; projects: alpha; added 2026-08-23)\n' \
+      "$id" "$id" "$abs" "$id" > "$reg"
+  fi
+}
+
+# Same line, appended instead of written, so a case can register one id twice.
+write_bound_secondmate_append() {
+  local dir=$1 id=$2 store=$3 abs
+  abs=$(cd "$dir/smhome" && pwd -P)
+  printf -- '- %s - %s domain (home: %s; scope: %s work; projects: alpha; claude-config-dir: %s; added 2026-08-23)\n' \
+    "$id" "$id" "$abs" "$id" "$store" >> "$dir/home/data/secondmates.md"
+}
+
+test_bound_secondmate_relaunch_onto_a_non_claude_harness_refuses_before_stop() {
+  local dir store out rc
+  dir=$(new_case smbound sm8)
+  store="$dir/claude-client"
+  mkdir -p "$store"
+  write_bound_secondmate "$dir" sm8 "$store"
+  out=$(run_control "$dir" sm8 relaunch --harness codex); rc=$?
+  expect_code 1 "$rc" "a bound second mate should refuse a harness with no Claude store"
+  assert_contains "$out" "records claude-config-dir $store" \
+    "the refusal should name the recorded store"
+  assert_contains "$out" "codex" "the refusal should name the harness that cannot carry it"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the bound second mate's agent must still be running after the refusal"
+  [ ! -e "$dir/home/state/sm8.control-relaunch" ] \
+    || fail "a refusal on this side of the transaction must not open one"
+  [ "$(meta_field "$dir" sm8 harness)" = claude ] \
+    || fail "a refused relaunch must leave the durable record on the recorded harness"
+  pass "fm-control relaunch: an incompatible harness for a bound second mate refuses before the agent is stopped"
+}
+
+test_bound_secondmate_relaunch_with_a_missing_store_refuses_before_stop() {
+  local dir store out rc
+  dir=$(new_case smgone sm9)
+  store="$dir/claude-client-gone"
+  write_bound_secondmate "$dir" sm9 "$store"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
+  out=$(run_control "$dir" sm9 relaunch); rc=$?
+  expect_code 1 "$rc" "a recorded store that is not there should refuse the relaunch"
+  assert_contains "$out" "$store" "the refusal should name the missing store"
+  assert_contains "$out" "not an existing directory" "the refusal should say what is wrong with it"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a missing store must not cost the second mate its running agent"
+  [ ! -e "$dir/home/state/sm9.control-relaunch" ] \
+    || fail "a refusal on this side of the transaction must not open one"
+  [ "$(meta_field "$dir" sm9 harness)" = claude ] \
+    || fail "a refused relaunch must leave the durable record on the recorded harness"
+  pass "fm-control relaunch: a missing bound store refuses before the agent is stopped"
+}
+
+# A registry the launch owner would refuse must be refused HERE, not waved past
+# the stop. A bare field lookup cannot tell "records no store" from "this
+# registry is unusable", and the launch owner refuses every unusable form - so
+# degrading one to the other would stop a healthy agent for a launch destined to
+# fail. These drive the two unusable shapes an operator actually produces.
+test_bound_secondmate_relaunch_refuses_a_malformed_registry_before_stop() {
+  local dir store out rc
+  dir=$(new_case smbad sm11)
+  store="$dir/claude-client"
+  mkdir -p "$store"
+  write_bound_secondmate "$dir" sm11 "$store"
+  # A second entry whose suffix the parser cannot resolve at all.
+  printf -- '- other - other domain (home: not-absolute; scope: x; added 2026-08-23)\n' \
+    >> "$dir/home/data/secondmates.md"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
+  out=$(run_control "$dir" sm11 relaunch); rc=$?
+  expect_code 1 "$rc" "an unusable registry should refuse the relaunch"
+  assert_contains "$out" "registry cannot be resolved" \
+    "the refusal should say the registry could not be resolved"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a registry the launch owner would refuse must not cost the mate its agent"
+  [ ! -e "$dir/home/state/sm11.control-relaunch" ] \
+    || fail "a refusal on this side of the transaction must not open one"
+  [ "$(meta_field "$dir" sm11 harness)" = claude ] \
+    || fail "a refused relaunch must leave the durable record on the recorded harness"
+  pass "fm-control relaunch: a malformed registry refuses before the agent is stopped"
+}
+
+test_bound_secondmate_relaunch_refuses_a_duplicate_registry_entry_before_stop() {
+  local dir store out rc
+  dir=$(new_case smdup sm12)
+  store="$dir/claude-client"
+  mkdir -p "$store"
+  write_bound_secondmate "$dir" sm12 "$store"
+  # The same id twice: which entry binds this mate's account is unresolvable.
+  write_bound_secondmate_append "$dir" sm12 "$store"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
+  out=$(run_control "$dir" sm12 relaunch); rc=$?
+  expect_code 1 "$rc" "a duplicated registry id should refuse the relaunch"
+  assert_contains "$out" "registry cannot be resolved" \
+    "the refusal should say the registry could not be resolved"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an ambiguous binding must not cost the mate its agent"
+  [ ! -e "$dir/home/state/sm12.control-relaunch" ] \
+    || fail "a refusal on this side of the transaction must not open one"
+  pass "fm-control relaunch: a duplicated registry entry refuses before the agent is stopped"
+}
+
+# The preflight must refuse only the two cases fm-spawn refuses. A bound second
+# mate relaunching onto claude with its store present is the ordinary path and
+# must still go all the way through.
+test_bound_secondmate_relaunches_normally_on_claude() {
+  local dir store out rc
+  dir=$(new_case smok sm10)
+  store="$dir/claude-client"
+  mkdir -p "$store"
+  write_bound_secondmate "$dir" sm10 "$store"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm10 relaunch); rc=$?
+  expect_code 0 "$rc" "a bound second mate on claude should relaunch"$'\n'"$out"
+  assert_not_contains "$out" "claude-config-dir" \
+    "a satisfied binding should not surface a refusal"
+  [ "$(journal_field "$dir" sm10 to_harness)" = claude ] \
+    || fail "the replacement should stay on claude"
+  pass "fm-control relaunch: a bound second mate whose store is present relaunches normally"
+}
+
 test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   local dir home out rc
   dir=$(new_case smexplicit sm4)
@@ -1496,6 +1660,11 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
+test_bound_secondmate_relaunch_onto_a_non_claude_harness_refuses_before_stop
+test_bound_secondmate_relaunch_with_a_missing_store_refuses_before_stop
+test_bound_secondmate_relaunch_refuses_a_malformed_registry_before_stop
+test_bound_secondmate_relaunch_refuses_a_duplicate_registry_entry_before_stop
+test_bound_secondmate_relaunches_normally_on_claude
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one

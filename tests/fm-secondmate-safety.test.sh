@@ -135,6 +135,151 @@ EOF
   pass "seed allows overlapping project clone lists and drops the owns/owner routing"
 }
 
+# The optional per-mate Claude account binding, as a SEED input. A supplied
+# store is recorded as the claude-config-dir: field, and the resulting registry
+# still satisfies the full operational contract.
+test_home_seed_records_claude_config_dir_binding() {
+  local home sub store
+  home="$TMP_ROOT/ccd-seed-main"
+  sub="$TMP_ROOT/ccd-seed-sub"
+  store="$TMP_ROOT/ccd-seed-store"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$store"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/ccd-alpha.git"
+  printf -- '- alpha [direct-PR] - alpha project (added 2026-08-23)\n' > "$home/data/projects.md"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='client domain' \
+    FM_SECONDMATE_SCOPE='client work' \
+    FM_SECONDMATE_CLAUDE_CONFIG_DIR="$store" \
+    "$ROOT/bin/fm-home-seed.sh" client "$sub" alpha >/dev/null \
+    || fail "seed refused a valid claude-config-dir binding"
+  assert_grep "claude-config-dir: $store; added " "$home/data/secondmates.md" \
+    "the seeded registry line did not record the Claude store binding"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
+    || fail "registry validation rejected a seeded claude-config-dir binding"
+  pass "home seeding records the per-mate Claude store binding and validates it"
+}
+
+# An unset binding must leave the record exactly as it was before the field
+# existed, so no existing seed changes shape.
+test_home_seed_without_claude_config_dir_records_no_field() {
+  local home sub
+  home="$TMP_ROOT/ccd-seed-absent-main"
+  sub="$TMP_ROOT/ccd-seed-absent-sub"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/ccd-absent-alpha.git"
+  printf -- '- alpha [direct-PR] - alpha project (added 2026-08-23)\n' > "$home/data/projects.md"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='plain domain' \
+    FM_SECONDMATE_SCOPE='plain work' \
+    "$ROOT/bin/fm-home-seed.sh" plain "$sub" alpha >/dev/null \
+    || fail "an ordinary seed should still succeed"
+  assert_no_grep 'claude-config-dir' "$home/data/secondmates.md" \
+    "an unset binding must add no field to the registry record"
+  pass "home seeding without a binding writes the record exactly as before"
+}
+
+# Fail closed at seed time, and roll the whole seed back: a store that is not an
+# absolute, existing directory must never become a registered route.
+test_home_seed_refuses_invalid_claude_config_dir() {
+  local home sub err label bad
+  home="$TMP_ROOT/ccd-seed-bad-main"
+  err="$TMP_ROOT/ccd-seed-bad.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/ccd-bad-alpha.git"
+  printf -- '- alpha [direct-PR] - alpha project (added 2026-08-23)\n' > "$home/data/projects.md"
+
+  while IFS='^' read -r label bad; do
+    [ -n "$label" ] || continue
+    sub="$TMP_ROOT/ccd-seed-bad-sub-$label"
+    if FM_HOME="$home" FM_SECONDMATE_CHARTER='client domain' \
+      FM_SECONDMATE_SCOPE='client work' \
+      FM_SECONDMATE_CLAUDE_CONFIG_DIR="$bad" \
+      "$ROOT/bin/fm-home-seed.sh" "client$label" "$sub" alpha >/dev/null 2>"$err"; then
+      fail "seed accepted an invalid claude-config-dir ($label): $bad"
+    fi
+    grep -F 'FM_SECONDMATE_CLAUDE_CONFIG_DIR' "$err" >/dev/null \
+      || fail "seed did not explain the invalid claude-config-dir ($label): $(cat "$err")"
+    [ ! -e "$sub" ] || fail "seed provisioned a home before refusing an invalid claude-config-dir ($label)"
+    [ ! -e "$home/data/secondmates.md" ] \
+      || fail "seed registered a route before refusing an invalid claude-config-dir ($label)"
+    [ ! -e "$home/data/client$label" ] \
+      || fail "seed left a brief behind after refusing an invalid claude-config-dir ($label)"
+  done <<ROWS
+relative^some/relative/store
+missing^$TMP_ROOT/ccd-seed-nonexistent-store
+ROWS
+  pass "home seeding refuses a relative or nonexistent Claude store and rolls the seed back"
+}
+
+# `validate` owns the structural half of the contract on hand-edited records.
+test_home_seed_validate_rejects_bad_claude_config_dir() {
+  local home err sub_abs
+  home="$TMP_ROOT/ccd-validate-home"
+  err="$TMP_ROOT/ccd-validate.err"
+  mkdir -p "$home/data" "$TMP_ROOT/ccd-validate-sub"
+  sub_abs=$(cd "$TMP_ROOT/ccd-validate-sub" && pwd -P)
+
+  printf -- '- client - client domain (home: %s; scope: client work; projects: alpha; claude-config-dir: %s; added 2026-08-23)\n' \
+    "$sub_abs" "$TMP_ROOT" > "$home/data/secondmates.md"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err" \
+    || fail "registry validation rejected a well-formed claude-config-dir: $(cat "$err")"
+
+  printf -- '- client - client domain (home: %s; scope: client work; projects: alpha; claude-config-dir: relative/store; added 2026-08-23)\n' \
+    "$sub_abs" > "$home/data/secondmates.md"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "registry validation accepted a non-absolute claude-config-dir"
+  fi
+  grep -F 'unsafe non-absolute claude-config-dir' "$err" >/dev/null \
+    || fail "registry validation did not explain the non-absolute claude-config-dir: $(cat "$err")"
+
+  printf -- '- client - client domain (home: %s; scope: client work; projects: alpha; claude-config-dir: /store/../escape; added 2026-08-23)\n' \
+    "$sub_abs" > "$home/data/secondmates.md"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "registry validation accepted a traversing claude-config-dir"
+  fi
+  grep -F 'claude-config-dir contains traversal components' "$err" >/dev/null \
+    || fail "registry validation did not explain the traversing claude-config-dir: $(cat "$err")"
+  pass "home seed validation accepts a well-formed Claude store binding and refuses malformed ones"
+}
+
+# The binding is local-route only: a remote record naming a store is refused
+# rather than accepted as a route whose account nothing here can bind.
+test_home_seed_validate_rejects_remote_claude_config_dir() {
+  local home err
+  home="$TMP_ROOT/ccd-remote-validate-home"
+  err="$TMP_ROOT/ccd-remote-validate.err"
+  mkdir -p "$home/data"
+  printf -- '- client - client domain (host: box; root: /srv/firstmate; home: /srv/client; scope: client work; projects: alpha; claude-config-dir: /srv/.claude-client; added 2026-08-23)\n' \
+    > "$home/data/secondmates.md"
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null 2>"$err"; then
+    fail "registry validation accepted claude-config-dir on a remote route"
+  fi
+  grep -F 'claude-config-dir is not supported on a remote secondmate route' "$err" >/dev/null \
+    || fail "registry validation did not explain the remote claude-config-dir: $(cat "$err")"
+  pass "home seed validation refuses a Claude store binding on a remote route"
+}
+
+# The remote seed refuses the variable outright rather than dropping it silently.
+test_remote_home_seed_refuses_claude_config_dir_env() {
+  local home err
+  home="$TMP_ROOT/ccd-remote-seed-home"
+  err="$TMP_ROOT/ccd-remote-seed.err"
+  mkdir -p "$home/data" "$home/state" "$home/projects" "$TMP_ROOT/ccd-remote-seed-store"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='client domain' \
+    FM_SECONDMATE_CLAUDE_CONFIG_DIR="$TMP_ROOT/ccd-remote-seed-store" \
+    "$ROOT/bin/fm-remote-home-seed.sh" client box /srv/firstmate /srv/client alpha \
+    >/dev/null 2>"$err"; then
+    fail "remote seeding accepted a local-only Claude store binding"
+  fi
+  grep -F 'applies only to local secondmate routes' "$err" >/dev/null \
+    || fail "remote seeding did not explain the refused binding: $(cat "$err")"
+  [ ! -e "$home/data/secondmates.md" ] || fail "remote seeding registered a route before refusing"
+  pass "remote home seeding refuses the local-only Claude store binding"
+}
+
 test_home_seed_validate_rejects_unparseable_registry_entry() {
   local home err
   home="$TMP_ROOT/unparseable-registry-home"
@@ -2898,6 +3043,12 @@ test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
 test_home_seed_validate_rejects_unparseable_registry_entry
+test_home_seed_records_claude_config_dir_binding
+test_home_seed_without_claude_config_dir_records_no_field
+test_home_seed_refuses_invalid_claude_config_dir
+test_home_seed_validate_rejects_bad_claude_config_dir
+test_home_seed_validate_rejects_remote_claude_config_dir
+test_remote_home_seed_refuses_claude_config_dir_env
 test_home_seed_refuses_broken_registry_symlink
 test_home_seed_refuses_unreadable_registry
 test_home_seed_validate_rejects_duplicate_homes

@@ -122,6 +122,16 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
+#   A local --secondmate spawn also re-resolves the optional per-mate
+#   claude-config-dir: field from that second mate's data/secondmates.md entry
+#   and launches under that Claude config store instead of this process's ambient
+#   CLAUDE_CONFIG_DIR, so the account it and its own workers authenticate and bill
+#   against is DURABLE across every respawn rather than inherited from whoever
+#   relaunched it. It fails closed: a recorded store that is not an existing
+#   directory, a resolved harness other than claude, or a remote route refuses the
+#   launch rather than falling back to the ambient store. With no such field, the
+#   ambient CLAUDE_CONFIG_DIR is inherited exactly as before, which stays the
+#   behavior for every crewmate and scout spawn.
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
@@ -440,7 +450,7 @@ else
 fi
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home claude_config_dir harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
@@ -467,6 +477,17 @@ spawn_remote_secondmate() {
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
+  # The per-mate Claude config-store binding is a LOCAL-route capability. A
+  # remote second mate's account store lives on its own host, where this launch
+  # prefix never reaches, so honoring the field here would bind nothing while
+  # reading as if it had. Refuse instead of half-applying it.
+  claude_config_dir=$(secondmate_registry_field "$DATA/secondmates.md" "$id" claude-config-dir)
+  if [ -n "$claude_config_dir" ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: secondmate $id is a remote route, and claude-config-dir is supported only on local routes; its Claude account store must be selected on $host, so remove that field from the registry entry" >&2
+    return 1
+  fi
   positional=${POS[1]:-}
   if [ "${#POS[@]}" -gt 2 ]; then
     fm_lock_release "$registry_lock" || true
@@ -1691,6 +1712,12 @@ validate_firstmate_operational_dirs() {
   done
 }
 
+# The Claude config store this launch will carry. It starts as firstmate's own
+# ambient store (today's inheritance, unchanged for every kind) and is replaced
+# below only by a local secondmate's durable registry binding.
+SPAWN_CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}
+SPAWN_CLAUDE_CONFIG_DIR_SOURCE=
+
 if [ "$KIND" = secondmate ]; then
   if [ -z "$FIRSTMATE_HOME" ] && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
     fm_backlog_record_present "$STATE/$ID.meta" "task record" "$STATE" || {
@@ -1713,6 +1740,26 @@ if [ "$KIND" = secondmate ]; then
       exit 1
     fi
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
+    SPAWN_CLAUDE_CONFIG_DIR_SOURCE=$SECONDMATE_REGISTRY_MATCH_CLAUDE_CONFIG_DIR
+  fi
+  # Per-mate Claude account binding. The registry entry is the durable record,
+  # so re-resolving it here means EVERY launch and relaunch - including the
+  # session-start liveness respawn, which runs from the primary's own session
+  # with the primary's own ambient store - lands on this second mate's recorded
+  # account instead of whichever store the launching process happened to carry.
+  # Fail closed on both axes: an absent store directory and a harness that has
+  # no Claude store to bind are refusals, never a quiet fall back to ambient,
+  # because a silent fallback is the exact drift this binding exists to stop.
+  if [ -n "$SPAWN_CLAUDE_CONFIG_DIR_SOURCE" ]; then
+    if [ "$HARNESS" != claude ]; then
+      echo "error: secondmate $ID records claude-config-dir $SPAWN_CLAUDE_CONFIG_DIR_SOURCE, but this launch resolves harness '$HARNESS', which has no Claude config store to bind; select the claude harness for this secondmate or remove that field from its registry entry" >&2
+      exit 1
+    fi
+    if [ ! -d "$SPAWN_CLAUDE_CONFIG_DIR_SOURCE" ]; then
+      echo "error: secondmate $ID records claude-config-dir $SPAWN_CLAUDE_CONFIG_DIR_SOURCE, which is not an existing directory; refusing to launch it against a different account. Restore that store or correct the registry entry." >&2
+      exit 1
+    fi
+    SPAWN_CLAUDE_CONFIG_DIR=$SPAWN_CLAUDE_CONFIG_DIR_SOURCE
   fi
   WT="$PROJ_ABS"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
@@ -2979,11 +3026,17 @@ esac
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# Forward the resolved store onto the claude launch so the launched agent uses
+# the credential/config it is meant to. Only when set; an unset value is the
+# single-store default and needs no prefix.
+#
+# SPAWN_CLAUDE_CONFIG_DIR is firstmate's own ambient store for every kind, which
+# is the right inheritance for a crewmate or scout: it works alongside firstmate
+# on firstmate's account. A secondmate is an independent firstmate that may
+# belong to a different account entirely, so its registry binding replaces the
+# ambient value above rather than inheriting it.
+if [ "$HARNESS" = claude ] && [ -n "$SPAWN_CLAUDE_CONFIG_DIR" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$SPAWN_CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

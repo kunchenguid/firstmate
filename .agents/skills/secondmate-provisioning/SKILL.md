@@ -30,10 +30,22 @@ A whole-home remote route uses:
 - <id> - <one-sentence charter summary> (host: <ssh-alias>; root: <absolute-remote-code-root>; home: <absolute-remote-home>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
 ```
 
+A local route may also carry one OPTIONAL field, `claude-config-dir:`, placed immediately before `added`:
+
+```markdown
+- <id> - <one-sentence charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>; claude-config-dir: <absolute-claude-store-path>; added <date>)
+```
+
+It binds that ONE second mate to a durable Claude config store, so the account it and its own workers authenticate and bill against is a recorded fact rather than whatever store the launching process happened to carry.
+Use it for a domain that must run on a different Claude account from this home's - a client's team account beside a personal one - and leave it out entirely for the ordinary single-account case.
+It is per second mate on purpose, and there is no fleet-wide equivalent, because one global setting cannot express two mates on two accounts.
+An entry without the field parses and behaves exactly as it always has, inheriting the ambient store, so no existing line needs rewriting.
+
 Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive clone list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that secondmate.
 Natural-language summary and `scope:` text may contain parentheses and semicolons; keep the generated `(home: ...; scope: ...; projects: ...; added ...)` suffix intact so operational consumers resolve its explicit field markers.
 The `home:` path points to the seeded home containing `data/charter.md`; no extra registry pointer field is needed.
 For a remote route, `host:` is an OpenSSH config alias and `root:` is that host's separate tracked Firstmate code root.
+A remote route accepts no `claude-config-dir:`: that second mate's account store lives on its own host, beyond the reach of this home's launch, so the field is refused rather than recorded and silently ignored.
 A remote second-mate agent always runs on the Herdr backend and every seed, launch, and liveness relaunch first gates its host on `bin/fm-remote-doctor.sh` readiness, so an unready host refuses with that doctor's own gap text rather than half-creating a route; the workers that second mate supervises keep the home's ordinary backend selection.
 This release places whole secondmate homes remotely and never individual workers.
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md) owns current operator setup and transport behavior.
@@ -82,6 +94,11 @@ It may only seed a home with no project clones or project-registry entries, and 
 The lease survives with no live process and is never recycled by later `treehouse get` or `prune`.
 The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
+
+Set `FM_SECONDMATE_CLAUDE_CONFIG_DIR='<absolute-store-path>'` on the `bin/fm-home-seed.sh` call to record the `claude-config-dir:` binding described above.
+The seed refuses a relative path, a path carrying registry delimiters or traversal components, and a path that is not already an existing directory, rolling the whole seed back under its ordinary transactional contract rather than registering a route no launch could honor.
+`bin/fm-remote-home-seed.sh` refuses the variable outright, and `bin/fm-home-seed.sh validate` refuses a structurally invalid or remote-route binding alongside the rest of the registry contract.
+To add or change the binding on an already-seeded second mate, edit its registry line, run `bin/fm-home-seed.sh validate`, then relaunch that mate so the new account takes effect.
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
@@ -219,9 +236,13 @@ For a remote route, the same command probes and relaunches only on the configure
 An SSH transport failure or unreadable remote endpoint remains unknown and must be reconciled on that host; never launch a local replacement.
 `stuck-crewmate-recovery`'s remote-secondmate note owns why the endpoint-dead and send-failed verdicts that seem to justify this are themselves unreliable.
 Respawn re-resolves the secondmate harness from current config, uses the same guarded pre-launch sync, and re-propagates inherited local material, so recovered secondmates converge inherited config items and shared captain preferences whenever their home validates; tracked-file sync remains guarded separately.
+It also re-resolves any recorded `claude-config-dir:` binding from the registry, so a mate recovered from a primary session running on a different Claude account still comes back on its own account instead of the relauncher's.
+That resolution fails closed: a recorded store that is no longer an existing directory, or a spawn whose harness resolves to anything but claude, refuses the launch naming the path or harness rather than quietly starting the mate on the ambient account.
+Treat such a refusal as an account-configuration problem to fix, never as a reason to strip the field to get the mate running.
 If the secondmate is already running and only inherited local material changed, prefer `bin/fm-config-push.sh` over respawning.
 To move a live LOCAL secondmate onto a newly pinned harness, model, or effort without a full recovery, set `config/secondmate-harness` and then relaunch it with `bin/fm-control.sh <id> relaunch`, which re-resolves that pin, stops the agent, and launches the replacement in the same home ([`docs/agent-control.md`](../../../docs/agent-control.md)).
 That plane refuses a remotely placed secondmate by name, because its agent runs on another host where none of the plane's postconditions can be read; use the remote route's own relaunch path for those.
+For a mate carrying a `claude-config-dir:` binding, that relaunch resolves the binding through the same registry validation the launch owner uses before it stops anything, so an incompatible harness, a missing store, or a registry that cannot be resolved refuses while the mate is still running instead of costing it its agent.
 
 Do not reconstruct a secondmate's whole tree from the main home.
 The main firstmate reconciles only direct reports.

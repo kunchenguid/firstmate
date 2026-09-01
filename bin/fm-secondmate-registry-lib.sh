@@ -6,6 +6,14 @@
 #   (home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
 # A remote record adds its host placement before the existing fields:
 #   (host: ...; root: ...; home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
+# An OPTIONAL claude-config-dir: field may precede `added` in either form:
+#   (home: ...; scope: ...; projects: ...; claude-config-dir: ...; added YYYY-MM-DD)
+# It binds that one second mate to a durable Claude config store so a relaunch
+# cannot silently inherit whichever store the launching process happened to
+# carry. A record without the field parses and behaves exactly as before, so no
+# existing line needs rewriting. This parser validates only its structure
+# (absolute, delimiter-free, local routes only); store existence is a launch-
+# and seed-time check owned by bin/fm-spawn.sh and bin/fm-home-seed.sh.
 # Summary text and scope text are natural language and may contain parentheses
 # and semicolons, so field boundaries are anchored to the suffix markers rather
 # than to the first incidental punctuation.
@@ -17,6 +25,7 @@ SECONDMATE_REGISTRY_ROOT=
 SECONDMATE_REGISTRY_HOME=
 SECONDMATE_REGISTRY_SCOPE=
 SECONDMATE_REGISTRY_PROJECTS=
+SECONDMATE_REGISTRY_CLAUDE_CONFIG_DIR=
 SECONDMATE_REGISTRY_ADDED=
 SECONDMATE_REGISTRY_REMOTE=0
 SECONDMATE_REGISTRY_LINE=
@@ -25,6 +34,7 @@ SECONDMATE_REGISTRY_MATCH_ROOT=
 SECONDMATE_REGISTRY_MATCH_HOME=
 SECONDMATE_REGISTRY_MATCH_HOME_KEY=
 SECONDMATE_REGISTRY_MATCH_PROJECTS=
+SECONDMATE_REGISTRY_MATCH_CLAUDE_CONFIG_DIR=
 SECONDMATE_REGISTRY_MATCH_REMOTE=0
 SECONDMATE_REGISTRY_ERROR=
 
@@ -33,8 +43,12 @@ secondmate_reply_lifecycle_lock_path() { printf '%s/.remote-reply-lifecycle-%s.l
 
 secondmate_registry_parse_line() {
   local line=$1
-  local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
-  local remote_re='^- ([A-Za-z0-9._-]+) - (.+) \(host:[[:space:]]*([^;)]*);[[:space:]]*root:[[:space:]]*([^;)]*);[[:space:]]*home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
+  # The claude-config-dir group is optional in BOTH forms. A non-participating
+  # optional group still occupies its BASH_REMATCH index and yields an empty
+  # string, so the surrounding indices stay fixed whether or not it matched.
+  local ccd_re='(claude-config-dir:[[:space:]]*([^;)]*);[[:space:]]*)?'
+  local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*'"$ccd_re"'added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
+  local remote_re='^- ([A-Za-z0-9._-]+) - (.+) \(host:[[:space:]]*([^;)]*);[[:space:]]*root:[[:space:]]*([^;)]*);[[:space:]]*home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*'"$ccd_re"'added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
   SECONDMATE_REGISTRY_ID=
   SECONDMATE_REGISTRY_SUMMARY=
   SECONDMATE_REGISTRY_HOST=
@@ -42,6 +56,7 @@ secondmate_registry_parse_line() {
   SECONDMATE_REGISTRY_HOME=
   SECONDMATE_REGISTRY_SCOPE=
   SECONDMATE_REGISTRY_PROJECTS=
+  SECONDMATE_REGISTRY_CLAUDE_CONFIG_DIR=
   SECONDMATE_REGISTRY_ADDED=
   SECONDMATE_REGISTRY_REMOTE=0
   # Parse the legacy local form first so summary prose that happens to mention
@@ -52,7 +67,8 @@ secondmate_registry_parse_line() {
     SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[3]}
     SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[4]}
     SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[5]}
-    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[6]}
+    SECONDMATE_REGISTRY_CLAUDE_CONFIG_DIR=${BASH_REMATCH[7]}
+    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[8]}
   elif [[ "$line" =~ $remote_re ]]; then
     SECONDMATE_REGISTRY_ID=${BASH_REMATCH[1]}
     SECONDMATE_REGISTRY_SUMMARY=${BASH_REMATCH[2]}
@@ -61,7 +77,8 @@ secondmate_registry_parse_line() {
     SECONDMATE_REGISTRY_HOME=${BASH_REMATCH[5]}
     SECONDMATE_REGISTRY_SCOPE=${BASH_REMATCH[6]}
     SECONDMATE_REGISTRY_PROJECTS=${BASH_REMATCH[7]}
-    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[8]}
+    SECONDMATE_REGISTRY_CLAUDE_CONFIG_DIR=${BASH_REMATCH[9]}
+    SECONDMATE_REGISTRY_ADDED=${BASH_REMATCH[10]}
     SECONDMATE_REGISTRY_REMOTE=1
   else
     return 1
@@ -98,6 +115,7 @@ secondmate_registry_field() {
     home) printf '%s\n' "$SECONDMATE_REGISTRY_HOME" ;;
     scope) printf '%s\n' "$SECONDMATE_REGISTRY_SCOPE" ;;
     projects) printf '%s\n' "$SECONDMATE_REGISTRY_PROJECTS" ;;
+    claude-config-dir) printf '%s\n' "$SECONDMATE_REGISTRY_CLAUDE_CONFIG_DIR" ;;
     remote) printf '%s\n' "$SECONDMATE_REGISTRY_REMOTE" ;;
     *) return 1 ;;
   esac
@@ -117,12 +135,13 @@ secondmate_registry_path_key() {
 
 secondmate_registry_validate_bindings() {
   local reg=$1 resolver=$2 expected_id=${3:-} expected_home=${4:-}
-  local tmp snapshot bindings line id host root home home_key duplicate_homes duplicate_ids overlaps expected_home_key
+  local tmp snapshot bindings line id host root home ccd home_key duplicate_homes duplicate_ids overlaps expected_home_key
   SECONDMATE_REGISTRY_MATCH_HOST=
   SECONDMATE_REGISTRY_MATCH_ROOT=
   SECONDMATE_REGISTRY_MATCH_HOME=
   SECONDMATE_REGISTRY_MATCH_HOME_KEY=
   SECONDMATE_REGISTRY_MATCH_PROJECTS=
+  SECONDMATE_REGISTRY_MATCH_CLAUDE_CONFIG_DIR=
   SECONDMATE_REGISTRY_MATCH_REMOTE=0
   SECONDMATE_REGISTRY_ERROR=
   case "$expected_id" in *[!A-Za-z0-9._-]*) SECONDMATE_REGISTRY_ERROR="invalid secondmate id: $expected_id"; return 1 ;; esac
@@ -153,6 +172,7 @@ secondmate_registry_validate_bindings() {
         host=$SECONDMATE_REGISTRY_HOST
         root=$SECONDMATE_REGISTRY_ROOT
         home=$SECONDMATE_REGISTRY_HOME
+        ccd=$SECONDMATE_REGISTRY_CLAUDE_CONFIG_DIR
         case "$home" in
           /*) ;;
           *)
@@ -161,13 +181,40 @@ secondmate_registry_validate_bindings() {
             return 1
             ;;
         esac
-        case "$home$host$root" in
+        case "$home$host$root$ccd" in
           *$'\t'*|*$'\n'*|*$'\r'*)
             rm -rf -- "$tmp"
             SECONDMATE_REGISTRY_ERROR="unsafe secondmate route for $id"
             return 1
             ;;
         esac
+        # Structural validation of the optional per-mate Claude config-store
+        # binding. Whether the store actually exists is deliberately NOT checked
+        # here: this parser also runs on hosts and in sweeps that never launch
+        # that second mate, so an absent store must refuse the launch, not every
+        # read of the registry.
+        if [ -n "$ccd" ]; then
+          if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
+            rm -rf -- "$tmp"
+            SECONDMATE_REGISTRY_ERROR="claude-config-dir is not supported on a remote secondmate route for $id: the account store lives on $host and is bound there, not from this home"
+            return 1
+          fi
+          case "$ccd" in
+            /*) ;;
+            *)
+              rm -rf -- "$tmp"
+              SECONDMATE_REGISTRY_ERROR="unsafe non-absolute claude-config-dir for $id: $ccd"
+              return 1
+              ;;
+          esac
+          case "/$ccd/" in
+            */../*|*/./*)
+              rm -rf -- "$tmp"
+              SECONDMATE_REGISTRY_ERROR="claude-config-dir contains traversal components for $id: $ccd"
+              return 1
+              ;;
+          esac
+        fi
         if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
           case "$host" in ''|-*|*[!A-Za-z0-9._-]*)
             rm -rf -- "$tmp"
@@ -233,6 +280,7 @@ secondmate_registry_validate_bindings() {
           SECONDMATE_REGISTRY_MATCH_HOME=$home
           SECONDMATE_REGISTRY_MATCH_HOME_KEY=$home_key
           SECONDMATE_REGISTRY_MATCH_PROJECTS=$SECONDMATE_REGISTRY_PROJECTS
+          SECONDMATE_REGISTRY_MATCH_CLAUDE_CONFIG_DIR=$ccd
           SECONDMATE_REGISTRY_MATCH_REMOTE=$SECONDMATE_REGISTRY_REMOTE
         fi
         ;;
