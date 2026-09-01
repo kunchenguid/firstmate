@@ -1202,7 +1202,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
+    ''|claude|claude-local|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse)
+      # claude-local is listed even though a secondmate on it is refused below:
+      # without it, a bare `claude-local` positional is read as a FIRSTMATE HOME
+      # path and the caller gets "home does not exist" instead of the refusal
+      # that actually explains the boundary.
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1278,6 +1282,19 @@ launch_template() {
     # leaves the other in force. Both are per-launch, scoped to this invocation only,
     # and never touch the captain's global ~/.claude/settings.json.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # claude-local: the verified `claude` CLI pinned to a local
+    # OpenAI/Anthropic-compatible endpoint (an LM Studio server by default),
+    # NOT a second harness implementation. It deliberately reuses claude's
+    # binary, composer shape, trust dialog, and lifecycle hooks so the shared
+    # classifier keeps its single owner; the `claude*` prefix rule stated in
+    # bin/fm-control-lib.sh is what routes it to those verified tables.
+    # ANTHROPIC_MODEL rather than --model is the model axis here, because the
+    # endpoint's own catalog id is what selects the served model.
+    # CLAUDE_CODE_MAX_CONTEXT_TOKENS is the short-context enforcement point:
+    # Claude Code names it as the control for an unrecognized model's real
+    # window, and without it Claude Code assumes 200k and auto-compacts against
+    # a window the local server does not have (verified 2026-09-01).
+    claude-local) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false ANTHROPIC_BASE_URL=__LOCALENDPOINT__ ANTHROPIC_AUTH_TOKEN=__LOCALTOKEN__ ANTHROPIC_MODEL=__LOCALMODEL__ ANTHROPIC_SMALL_FAST_MODEL=__LOCALMODEL__ CLAUDE_CODE_MAX_CONTEXT_TOKENS=__LOCALCTX__ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --dangerously-skip-permissions "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1381,6 +1398,11 @@ launch_template() {
   esac
 }
 
+# Whether this spawn's harness came from an EXPLICIT per-spawn argument (a
+# positional name, --harness, or a raw launch command) rather than from
+# config resolution. The claude-local opt-in gate below is the only consumer:
+# that adapter must never be reachable by a home-wide default.
+HARNESS_EXPLICIT=1
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     RAW_LAUNCH=1
@@ -1391,6 +1413,7 @@ case "$ARG3" in
     done
     ;;
   '')
+    HARNESS_EXPLICIT=0
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
     # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
     # every other kind uses the crew harness only when no dispatch profile file is
@@ -1418,12 +1441,42 @@ case "$ARG3" in
     ;;
 esac
 
+# claude-local runs on the captain's own machine against a model sized for
+# short-context work, so it is opt-in only and is refused for the uses its
+# verification does not support. Each refusal is a hard gate rather than a
+# warning, because the failure it prevents is silent: a task routed here by a
+# home-wide default would simply be slow and worse, not visibly broken.
+# These three run BEFORE home, project, and brief resolution, so the caller gets
+# the refusal that explains the boundary rather than an unrelated earlier error.
+if [ "$HARNESS" = claude-local ]; then
+  # 1. Reachable only through an explicit per-spawn harness argument. A dispatch
+  #    profile always supplies one (fm-spawn requires an explicit harness whenever
+  #    config/crew-dispatch.json exists), and so does a per-task captain
+  #    instruction; config/crew-harness and config/secondmate-harness must not.
+  if [ "$HARNESS_EXPLICIT" -ne 1 ]; then
+    echo "error: claude-local is opt-in only and cannot be selected by a home-wide default ($harness_src). Pass it explicitly for one task, or select it from a config/crew-dispatch.json profile." >&2
+    exit 1
+  fi
+  # 2. Crewmate/scout only. A secondmate is a firstmate instance needing a primary
+  #    supervision protocol; claude-local has no verified primary evidence and is
+  #    not sized for one.
+  if [ "$KIND" = secondmate ]; then
+    echo "error: claude-local is a verified crewmate/scout adapter only and cannot run a secondmate. Select a harness verified for secondmates." >&2
+    exit 1
+  fi
+  # 3. Never the no-mistakes pipeline. That path is firstmate's highest-rigor
+  #    shipping route and runs long, repeated, large-context review and fix turns -
+  #    exactly the shape this runtime is bounded away from.
+  if [ "$MODE" = no-mistakes ]; then
+    echo "error: claude-local is not verified for no-mistakes shipping work; that pipeline needs long-context review and fix turns this runtime is bounded away from. Ship this task on a hosted runtime, or select --mode direct-PR/local-only if the captain has approved the lower rigor." >&2
+    exit 1
+  fi
+fi
+
 # muse and gemini are verified as CREWMATE/SCOUT adapters only. A secondmate is
-# a firstmate instance, so it needs a primary supervision protocol.
-# gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
-# and this task verified only crewmate-side launch, busy state, interrupt, and
-# exit, so a gemini secondmate is refused rather than stood up on an unverified
-# supervision path. muse has none either, and its
+# a firstmate instance, so it needs a primary supervision protocol. Gemini has
+# none: its verification covers crewmate-side launch, busy state, interrupt, and
+# exit only. Muse has none either, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
@@ -1892,6 +1945,33 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     fi
   fi
 fi
+
+# claude-local's remaining gates need the resolved brief, so they run here rather
+# than with the scope refusals above. This is still before any endpoint,
+# worktree, or record exists, so a refusal leaves nothing behind to clean up.
+if [ "$HARNESS" = claude-local ]; then
+  # 4. The model id is the endpoint's own catalog id and is never guessed. A
+  #    relaunch reuses the id already recorded for the task, the same way it
+  #    reuses the recorded harness, so recovering a worker never needs the caller
+  #    to remember which local model it was launched on.
+  if [ "$RELAUNCH" -eq 1 ] && [ "$MODEL_SET" -eq 0 ]; then
+    RELAUNCH_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+    [ -z "$RELAUNCH_MODEL" ] || [ "$RELAUNCH_MODEL" = default ] || MODEL=$RELAUNCH_MODEL
+  fi
+  if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    echo "error: claude-local requires an explicit --model naming the exact model id the local endpoint serves (list them with: bin/fm-local-model.sh probe)." >&2
+    exit 1
+  fi
+  # 5. The endpoint must be answering and the model actually loaded.
+  #    fm-local-model.sh owns the verdict and prints the actionable refusal.
+  "$SCRIPT_DIR/fm-local-model.sh" preflight "$MODEL" >/dev/null || exit 1
+  LOCAL_CTX=$("$SCRIPT_DIR/fm-local-model.sh" context-budget "$MODEL") || exit 1
+  # 6. A brief that obviously exceeds the usable headroom is refused loudly here
+  #    rather than silently degrading into auto-compaction against a window the
+  #    server does not have.
+  "$SCRIPT_DIR/fm-local-model.sh" brief-fits "$MODEL" "$BRIEF" >/dev/null || exit 1
+fi
+
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
@@ -3161,10 +3241,21 @@ case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
+  # The endpoint, model, and context bound are baked into the launch rather than
+  # inherited, because the pane is created by a long-lived backend daemon that
+  # does not carry firstmate's environment. LOCAL_CTX was resolved from the live
+  # endpoint above, so the bound the worker runs under is the one the server
+  # actually loaded, capped by the firstmate ceiling.
+  claude-local)
+    LAUNCH=${LAUNCH//__LOCALENDPOINT__/"$(shell_quote "${FM_LOCAL_MODEL_ENDPOINT:-http://127.0.0.1:1234}")"}
+    LAUNCH=${LAUNCH//__LOCALTOKEN__/"$(shell_quote "${FM_LOCAL_MODEL_TOKEN:-local}")"}
+    LAUNCH=${LAUNCH//__LOCALMODEL__/"$(shell_quote "$MODEL")"}
+    LAUNCH=${LAUNCH//__LOCALCTX__/"$(shell_quote "$LOCAL_CTX")"}
+    ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse)
+  claude|claude-local|codex|opencode|pi|pi-signed|grok|kimi|gemini|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
     ;;
 esac
@@ -3175,7 +3266,11 @@ esac
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
 # an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+# claude-local shares this: it is the same binary reading the same store, and
+# only its endpoint differs, so a captain running a non-default config directory
+# gets the same settings in a local worker as in a hosted one.
+case "$HARNESS" in claude|claude-local) FM_FORWARD_CLAUDE_CONFIG=1 ;; *) FM_FORWARD_CLAUDE_CONFIG=0 ;; esac
+if [ "$FM_FORWARD_CLAUDE_CONFIG" = 1 ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
