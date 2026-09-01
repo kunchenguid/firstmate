@@ -663,6 +663,18 @@ if (r5.isError || !String(r5.content[0].text).includes("already recorded")) {
   throw new Error(`duplicate terminal-noop receipt did not deduplicate: ${JSON.stringify(r5)}`);
 }
 if (sentToMain.length !== 3) throw new Error("duplicate terminal receipt rendered a merge note");
+writeFileSync(`${home}/state/.lock`, `1\n`);
+const r5LostOwner = await report.execute(
+  "call-5-lost-owner",
+  { task: "task-9", verdict: "routine", summary: "the completed worker is still stopped; no action is needed", wake: terminalWake, receipt: "terminal-noop" },
+  undefined,
+  undefined,
+  {},
+);
+if (!r5LostOwner.isError || !String(r5LostOwner.content[0].text).includes("lost lock ownership")) {
+  throw new Error(`duplicate terminal-noop receipt bypassed ownership: ${JSON.stringify(r5LostOwner)}`);
+}
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
 const invalidReceipt = await report.execute(
   "call-bad-receipt",
   { task: "task-9", verdict: "captain", summary: "captain-facing work must not be hidden", wake: terminalWake, receipt: "terminal-noop" },

@@ -794,6 +794,13 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
+        if (!actingAsOwner(toolGeneration)) {
+          return {
+            content: [{ type: "text", text: "report refused: supervision session was replaced or lost lock ownership" }],
+            details: undefined,
+            isError: true,
+          };
+        }
         if (terminalReceipt && existsSync(terminalReceipt.path)) {
           const existingSeq = receiptSeq(terminalReceipt.path);
           if (!existingSeq) {
@@ -810,13 +817,6 @@ export default function (pi: ExtensionAPI) {
         }
         const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
         if (wake) appendArgs.push("--wake", wake);
-        if (!actingAsOwner(toolGeneration)) {
-          return {
-            content: [{ type: "text", text: "report refused: supervision session was replaced or lost lock ownership" }],
-            details: undefined,
-            isError: true,
-          };
-        }
         const appended = runOutcomeScript(appendArgs);
         if (!appended.ok) {
           return {
