@@ -87,6 +87,10 @@ SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+case " \$* " in
+  *"/check-runs?"*) printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' '$head'; exit 0 ;;
+  *"/status?"*) exit 0 ;;
+esac
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
@@ -124,7 +128,11 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
-printf '%s\n' '$head'
+case " \$* " in
+  *"/check-runs?"*) printf 'check\t%s\tVerify exact PR head\tin_progress\t\n' '$head' ;;
+  *"/status?"*) ;;
+  *" headRefOid "*) printf '%s\n' '$head' ;;
+esac
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
@@ -162,6 +170,10 @@ SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case " $* " in
+  *"/check-runs?"*) printf '%s\n' $'check\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tVerify exact PR head\tcompleted\tsuccess'; exit 0 ;;
+  *"/status?"*) exit 0 ;;
+esac
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
@@ -191,6 +203,10 @@ add_gh_mock_outcome_read_fails() {
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+case " \$* " in
+  *"/check-runs?"*) printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' '$head'; exit 0 ;;
+  *"/status?"*) exit 0 ;;
+esac
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
@@ -317,7 +333,7 @@ test_pending_checks_refuse_merge() {
   set -e
 
   expect_code 1 "$rc" "pending-checks: merge must refuse a non-terminal exact head"
-  assert_grep 'pending' "$case_dir/stderr" \
+  assert_grep 'not terminal-successful' "$case_dir/stderr" \
     "pending-checks: refusal did not explain the non-terminal check"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "pending-checks: gh-axi merge ran without exact-head green checks"
@@ -684,6 +700,10 @@ test_github_unreadable_queue_rules_are_not_reported_as_no_queue() {
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case " $* " in
+  *"/check-runs?"*) printf '%s\n' $'check\t8484848484848484848484848484848484848484\tVerify exact PR head\tcompleted\tsuccess'; exit 0 ;;
+  *"/status?"*) exit 0 ;;
+esac
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in

@@ -76,6 +76,13 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
+  *"/check-runs?"*)
+    [ -z "${FM_TEST_GH_CHECK_STARTED:-}" ] || : > "$FM_TEST_GH_CHECK_STARTED"
+    [ "${FM_TEST_GH_CHECK_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_CHECK_SLEEP"
+    printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' \
+      "${FM_TEST_GH_CHECK_HEAD:-${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}}"
+    ;;
+  *"/status?"*) ;;
   *" state,headRefOid "*)
     printf '%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     ;;
@@ -125,6 +132,7 @@ write_poll_meta() {
   local state=$1 id=$2 url=$3 head=${4:-0123456789abcdef0123456789abcdef01234567}
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
+    "mode=direct-PR" \
     "pr=$url" \
     "pr_head=$head" \
     "pr_green_head=$head"
@@ -285,11 +293,20 @@ case "${1:-} ${2:-}" in
       'state=MERGED' \
       'merged=true' \
       'queued=false' \
-      'base=main'
+      'base=main' \
+      'auto=false' \
+      "head=${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     exit 0
     ;;
 esac
 case " $* " in
+  *"/check-runs?"*)
+    [ -z "${FM_TEST_GH_CHECK_STARTED:-}" ] || : > "$FM_TEST_GH_CHECK_STARTED"
+    [ "${FM_TEST_GH_CHECK_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_CHECK_SLEEP"
+    printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' \
+      "${FM_TEST_GH_CHECK_HEAD:-${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}}"
+    ;;
+  *"/status?"*) ;;
   *" state,headRefOid "*)
     printf '%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
     ;;
@@ -348,6 +365,7 @@ write_poll_meta() {
   local state=$1 id=$2 url=$3 head=${4:-0123456789abcdef0123456789abcdef01234567}
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
+    "mode=direct-PR" \
     "pr=$url" \
     "pr_head=$head" \
     "pr_green_head=$head"
@@ -740,7 +758,7 @@ SH
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
-      'mode=local-only'
+      'mode=direct-PR'
     cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -975,6 +993,106 @@ SH
     n=$((n + 1))
   done
   pass "concurrent watchers observe only complete private poll publications"
+}
+
+test_concurrent_pr_checks_preserve_newer_poll() {
+  local dir state head_a head_b pid_a pid_b i
+  dir=$(make_case concurrent-pr-checks)
+  state="$dir/home/state"
+  head_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  head_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  write_task_meta "$dir"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+previous=
+last=
+for argument in "$@"; do
+  previous=$last
+  last=$argument
+done
+if [ "$last" = "$FM_TEST_PR_A_DEST" ] \
+  && grep -qxF "$FM_TEST_PR_A_HEAD" "$previous" 2>/dev/null; then
+  : > "$FM_TEST_PR_A_BLOCK"
+  sleep 1
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_PR_A_DEST="$state/task-a.pr-poll" \
+    FM_TEST_PR_A_HEAD="$head_a" FM_TEST_PR_A_BLOCK="$dir/a-blocked" \
+    FM_TEST_GH_HEAD="$head_a" FM_TEST_GH_CHECK_HEAD="$head_a" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+      > "$dir/a.out" 2> "$dir/a.err" &
+  pid_a=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/a-blocked" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ "$i" -lt 200 ] || fail "older PR check did not reach its delayed publication"
+
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_PR_A_DEST="$state/task-a.pr-poll" \
+    FM_TEST_PR_A_HEAD="$head_a" FM_TEST_PR_A_BLOCK="$dir/a-blocked" \
+    FM_TEST_GH_HEAD="$head_b" FM_TEST_GH_CHECK_HEAD="$head_b" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+      > "$dir/b.out" 2> "$dir/b.err" &
+  pid_b=$!
+
+  wait "$pid_a" || fail "older concurrent PR check failed: $(cat "$dir/a.err")"
+  wait "$pid_b" || fail "newer concurrent PR check failed: $(cat "$dir/b.err")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "concurrent PR checks left invalid poll provenance"
+  fm_pr_poll_data_parse "$state/task-a.pr-poll" \
+    || fail "concurrent PR checks left unreadable poll data"
+  [ "$FM_PR_DATA_HEAD" = "$head_b" ] \
+    || fail "an older concurrent PR check replaced the newer exact-head poll"
+  grep -qxF "pr_green_head=$head_b" "$state/task-a.meta" \
+    || fail "an older concurrent PR check replaced newer green metadata"
+  pass "same-task PR checks serialize publication without revoking the newer poll"
+}
+
+test_pr_check_refuses_replaced_task_incarnation() {
+  local dir state head pid i rc replacement
+  dir=$(make_case replaced-task-incarnation)
+  state="$dir/home/state"
+  head=cccccccccccccccccccccccccccccccccccccccc
+  replacement="$state/replacement.meta"
+  write_task_meta "$dir"
+
+  FM_TEST_GH_CHECK_STARTED="$dir/check-started" FM_TEST_GH_CHECK_SLEEP=1 \
+    FM_TEST_GH_HEAD="$head" FM_TEST_GH_CHECK_HEAD="$head" \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+      > "$dir/check.out" 2> "$dir/check.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/check-started" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ "$i" -lt 200 ] || fail "PR check did not reach exact-head evidence collection"
+
+  fm_write_meta "$replacement" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=direct-PR' \
+    'session_generation=2'
+  chmod 0600 "$replacement"
+  "$REAL_MV" -f -- "$replacement" "$state/task-a.meta"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -ne 0 ] || fail "PR check accepted a replaced task incarnation"
+  assert_grep 'task metadata changed during exact-head verification' "$dir/check.err" \
+    "replaced task incarnation refusal was not explicit"
+  grep -qxF 'session_generation=2' "$state/task-a.meta" \
+    || fail "stale PR check replaced the newer task incarnation"
+  assert_absent "$state/task-a.check.sh" "stale PR check published a runnable poll"
+  assert_absent "$state/task-a.pr-poll" "stale PR check published poll data"
+  assert_absent "$state/task-a.pr-poll-registration" "stale PR check published poll registration"
+  pass "PR check publication stays bound to the observed task incarnation"
 }
 
 test_poll_publication_refuses_unsafe_destinations() {
@@ -2225,6 +2343,8 @@ test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
+test_concurrent_pr_checks_preserve_newer_poll
+test_pr_check_refuses_replaced_task_incarnation
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_postrename_poll_validation_revokes_and_retries

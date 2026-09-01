@@ -43,6 +43,39 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+# Bounded direct-PR currently has one exact-head check source: GitHub.
+# The legacy GitLab poll parser remains inactive migration compatibility, but a
+# provider with no exact head/check proof is ambiguous and cannot be armed.
+if [ "$PROVIDER" != github ]; then
+  echo "error: GitLab PR delivery is inactive migration compatibility; exact-head checking supports GitHub only" >&2
+  exit 1
+fi
+
+META_TMP=
+META_LOCK=
+META_LOCK_HELD=0
+PR_CHECK_LOCK="$STATE/.pr-check-$ID.lock"
+PR_CHECK_LOCK_HELD=0
+pr_check_cleanup() {
+  fm_pr_poll_cleanup
+  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
+  fi
+  if [ "$PR_CHECK_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$PR_CHECK_LOCK" || true
+    PR_CHECK_LOCK_HELD=0
+  fi
+}
+trap pr_check_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+[ -d "$STATE" ] && [ ! -L "$STATE" ] \
+  || { echo "error: task metadata is unavailable" >&2; exit 1; }
+fm_lock_acquire_wait "$PR_CHECK_LOCK"
+PR_CHECK_LOCK_HELD=1
+[ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
+  || { echo "error: task metadata is unavailable" >&2; exit 1; }
 TASK_MODE=$(fm_backend_meta_exact_value "$META" mode 2>/dev/null || true)
 case "$TASK_MODE" in
   direct-PR) ;;
@@ -55,14 +88,8 @@ case "$TASK_MODE" in
     exit 1
     ;;
 esac
-
-# Bounded direct-PR currently has one exact-head check source: GitHub.
-# The legacy GitLab poll parser remains inactive migration compatibility, but a
-# provider with no exact head/check proof is ambiguous and cannot be armed.
-if [ "$PROVIDER" != github ]; then
-  echo "error: GitLab PR delivery is inactive migration compatibility; exact-head checking supports GitHub only" >&2
-  exit 1
-fi
+META_PREIMAGE_HASH=$(fm_pr_sha256 "$META") || exit 1
+META_PREIMAGE_IDENTITY=$(fm_pr_file_identity "$META") || exit 1
 
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
@@ -91,19 +118,6 @@ fi
 "$SCRIPT_DIR/fm-pr-ci.sh" "$URL" "$PR_HEAD" \
   --attempts "${FM_PR_CI_ATTEMPTS:-30}" --interval "${FM_PR_CI_INTERVAL:-10}" || exit 1
 
-META_TMP=
-META_LOCK=
-META_LOCK_HELD=0
-pr_check_cleanup() {
-  fm_pr_poll_cleanup
-  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
-  if [ "$META_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$META_LOCK" || true
-    META_LOCK_HELD=0
-  fi
-}
-trap pr_check_cleanup EXIT
-trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$PR_HEAD" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
@@ -112,6 +126,9 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
+[ "$(fm_pr_sha256 "$META")" = "$META_PREIMAGE_HASH" ] \
+  && [ "$(fm_pr_file_identity "$META")" = "$META_PREIMAGE_IDENTITY" ] \
+  || { echo "error: task metadata changed during exact-head verification" >&2; exit 1; }
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
@@ -141,11 +158,10 @@ fm_pr_metadata_identity_parse "$META" || exit 1
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] && [ "$FM_PR_META_HEAD" = "$PR_HEAD" ] \
   && [ "$FM_PR_META_GREEN_HEAD" = "$PR_HEAD" ] || exit 1
-fm_lock_release "$META_LOCK"
-META_LOCK_HELD=0
-
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+fm_lock_release "$META_LOCK"
+META_LOCK_HELD=0
 printf 'armed: state/%s.check.sh\n' "$ID"

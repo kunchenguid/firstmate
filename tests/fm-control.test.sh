@@ -177,7 +177,7 @@ add_task() {
     echo "project=$proj"
     echo "harness=$harness"
     echo "kind=$kind"
-    echo "mode=no-mistakes"
+    echo "mode=direct-PR"
     echo "yolo=off"
     echo "model=default"
     echo "effort=default"

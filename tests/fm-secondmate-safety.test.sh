@@ -80,7 +80,12 @@ test_fm_home_parameterization() {
   mkdir -p "$fakebin"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%040d\n' 1
+head=0000000000000000000000000000000000000001
+case " $* " in
+  *"/check-runs?"*) printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' "$head" ;;
+  *"/status?"*) ;;
+  *" headRefOid "*) printf '%s\n' "$head" ;;
+esac
 SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash

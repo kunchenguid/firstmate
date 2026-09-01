@@ -59,47 +59,66 @@ test_canonical_verify_contract() {
 }
 
 make_pr_fixture() {
-  local dir=$1 head=$2 checks=$3
+  local dir=$1 head=$2 check_runs=$3 statuses=${4:-}
   mkdir -p "$dir/fakebin"
   printf '%s\n' "$head" > "$dir/head"
-  printf '%s\n' "$checks" > "$dir/checks"
+  printf '%s\n' "$check_runs" > "$dir/check-runs"
+  printf '%s\n' "$statuses" > "$dir/statuses"
+  : > "$dir/gh.log"
   cat > "$dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
-cat "$FM_TEST_HEAD"
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case " $* " in
+  *"/check-runs?"*)
+    [ -z "${FM_TEST_ABA_MID_HEAD:-}" ] || printf '%s\n' "$FM_TEST_ABA_MID_HEAD" > "$FM_TEST_HEAD"
+    cat "$FM_TEST_CHECK_RUNS"
+    ;;
+  *"/status?"*)
+    [ -z "${FM_TEST_ABA_FINAL_HEAD:-}" ] || printf '%s\n' "$FM_TEST_ABA_FINAL_HEAD" > "$FM_TEST_HEAD"
+    cat "$FM_TEST_STATUSES"
+    ;;
+  *" headRefOid "*) cat "$FM_TEST_HEAD" ;;
+  *) exit 2 ;;
+esac
 SH
-  cat > "$dir/fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-cat "$FM_TEST_CHECKS"
-SH
-  chmod +x "$dir/fakebin/gh" "$dir/fakebin/gh-axi"
+  chmod +x "$dir/fakebin/gh"
 }
 
 run_pr_ci() {
   local dir=$1 expected=$2
-  FM_TEST_HEAD="$dir/head" FM_TEST_CHECKS="$dir/checks" \
+  FM_TEST_HEAD="$dir/head" FM_TEST_CHECK_RUNS="$dir/check-runs" \
+    FM_TEST_STATUSES="$dir/statuses" FM_TEST_GH_LOG="$dir/gh.log" \
     PATH="$dir/fakebin:$PATH" \
     "$PR_CI" https://github.com/example/repo/pull/7 "$expected" \
       --attempts 1 --interval 0 2>&1
 }
 
 test_exact_head_green_contract() {
-  local dir out status sha
+  local dir other out status sha
   sha=1111111111111111111111111111111111111111
   dir="$TMP_ROOT/pr-green"
-  make_pr_fixture "$dir" "$sha" $'summary: 2 passed, 0 failed, 2 total\nchecks[2]{name,conclusion}:\n  Verify exact PR head,pass\n  policy,pass'
+  make_pr_fixture "$dir" "$sha" '' ''
+  printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' "$sha" > "$dir/check-runs"
+  printf 'status\t%s\tpolicy\tcompleted\tsuccess\n' "$sha" > "$dir/statuses"
   out=$(run_pr_ci "$dir" "$sha") \
     || fail "exact-head wait rejected terminal success: $out"
   assert_contains "$out" "green: https://github.com/example/repo/pull/7 head=$sha checks=2" \
     "exact-head wait did not report the verified identity"
+  assert_grep "repos/example/repo/commits/$sha/check-runs?filter=latest&per_page=100" "$dir/gh.log" \
+    "exact-head wait did not query check runs by commit SHA"
+  assert_grep "repos/example/repo/commits/$sha/status?per_page=100" "$dir/gh.log" \
+    "exact-head wait did not query commit statuses by commit SHA"
 
-  printf '%s\n' $'summary: 1 passed, 0 failed, 1 pending, 2 total\nchecks[2]{name,conclusion}:\n  Verify exact PR head,pending\n  policy,pass' > "$dir/checks"
+  printf 'check\t%s\tVerify exact PR head\tin_progress\t\n' "$sha" > "$dir/check-runs"
+  printf 'status\t%s\tpolicy\tcompleted\tsuccess\n' "$sha" > "$dir/statuses"
   status=0
   out=$(run_pr_ci "$dir" "$sha") || status=$?
   expect_code 1 "$status" "pending checks must not be green"
   assert_contains "$out" "canonical Verify exact PR head check is not terminal-successful" \
     "pending canonical-check refusal was not diagnostic"
 
-  printf '%s\n' $'summary: 2 passed, 0 failed, 2 total\nchecks[2]{name,conclusion}:\n  policy,pass\n  security,pass' > "$dir/checks"
+  printf 'check\t%s\tpolicy\tcompleted\tsuccess\n' "$sha" > "$dir/check-runs"
+  printf 'status\t%s\tsecurity\tcompleted\tsuccess\n' "$sha" > "$dir/statuses"
   status=0
   out=$(run_pr_ci "$dir" "$sha") || status=$?
   expect_code 1 "$status" "an all-pass summary without the canonical job must not be green"
@@ -113,19 +132,31 @@ test_exact_head_green_contract() {
   assert_contains "$out" "expected head $sha" "wrong-head refusal omitted the expected SHA"
 
   printf '%s\n' "$sha" > "$dir/head"
-  printf '%s\n' $'summary: 1 passed, 0 failed, 1 total\nsummary: 0 passed, 1 failed, 1 total' > "$dir/checks"
+  printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' "$sha" > "$dir/check-runs"
+  printf 'status\t%s\tVerify exact PR head\tcompleted\tsuccess\n' "$sha" > "$dir/statuses"
   status=0
   out=$(run_pr_ci "$dir" "$sha") || status=$?
-  expect_code 1 "$status" "duplicate check summaries must be ambiguous"
-  assert_contains "$out" "ambiguous check summary count=2" \
-    "duplicate-summary refusal did not identify ambiguity"
+  expect_code 1 "$status" "duplicate check identities must be ambiguous"
+  assert_contains "$out" "ambiguous exact-head check evidence" \
+    "duplicate-check refusal did not identify ambiguity"
 
-  printf '%s\n' 'checks: 0 passed, 0 failed - this PR has no CI checks configured' > "$dir/checks"
+  : > "$dir/check-runs"
+  : > "$dir/statuses"
   status=0
   out=$(run_pr_ci "$dir" "$sha") || status=$?
   expect_code 1 "$status" "missing checks must not be green"
-  assert_contains "$out" "no terminal successful checks" \
+  assert_contains "$out" "no exact-head checks or statuses were found" \
     "missing-check refusal was not diagnostic"
+
+  other=2222222222222222222222222222222222222222
+  printf '%s\n' "$sha" > "$dir/head"
+  printf 'check\t%s\tVerify exact PR head\tcompleted\tsuccess\n' "$other" > "$dir/check-runs"
+  : > "$dir/statuses"
+  status=0
+  out=$(FM_TEST_ABA_MID_HEAD="$other" FM_TEST_ABA_FINAL_HEAD="$sha" run_pr_ci "$dir" "$sha") || status=$?
+  expect_code 1 "$status" "an A-to-B-to-A PR race must not attach B checks to A"
+  assert_contains "$out" "different-head check evidence" \
+    "A-to-B-to-A refusal did not identify the different check head"
   pass "fm-pr-ci accepts only terminal success for the exact PR head"
 }
 
