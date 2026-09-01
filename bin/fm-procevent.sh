@@ -362,6 +362,16 @@ source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 
+# Every private file one claim generation can leave staged: the capture's own
+# bounded output, the receipt outcome, and the intake body staged beside it. A
+# runner killed mid-generation leaves any of them, so recovery drops the whole
+# set rather than the one name it happened to know about.
+remove_staged_generation() {  # <source-id> <claim-token>
+  rm -f -- "$(staging_file "$1" "$2")" \
+    "$(staging_file "$1" "$2.rcpt")" \
+    "$(staging_file "$1" "$2.rcpt").body"
+}
+
 # Let the source's own adapter apply and acknowledge one captured result. See
 # the header for why this exists and what each exit means. An already
 # acknowledged result is skipped, so this is safe to call more than once for the
@@ -764,7 +774,7 @@ cmd_start() {
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
-    [ -z "$RECEIPT_OUTCOME" ] || rm -f -- "$RECEIPT_OUTCOME"
+    [ -z "$RECEIPT_OUTCOME" ] || rm -f -- "$RECEIPT_OUTCOME" "$RECEIPT_OUTCOME.body"
     fm_procevent_source_lock_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
       && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
@@ -895,7 +905,7 @@ EOF
     adapter_receipt "$adapter" "$id" "$(fm_procevent_result_sequence "$durable")" \
       "$durable" "$RECEIPT_OUTCOME" || true
   fm_procevent_source_lock_release "$id"
-  rm -f -- "$RECEIPT_OUTCOME"
+  rm -f -- "$RECEIPT_OUTCOME" "$RECEIPT_OUTCOME.body"
   RECEIPT_OUTCOME=
 
   # A self-announcing adapter's autohandle announces through its own durable
@@ -1020,7 +1030,7 @@ cmd_reconcile() {
     case "$stop_state" in
       0|1)
         if fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
-          rm -f -- "$(staging_file "$id" "$token")"
+          remove_staged_generation "$id" "$token"
           rm -f -- "$(runner_file "$id")"
           stopped=$((stopped + 1))
         else
@@ -1082,7 +1092,7 @@ cmd_reconcile() {
           if [ "$stop_state" -eq 0 ] \
             && cleanup_extension_registration_invocations_locked "$id" \
             && fm_procevent_claim_release_locked "$id" "$owner" "$pid" "$token" 2>/dev/null; then
-            rm -f -- "$(staging_file "$id" "$token")"
+            remove_staged_generation "$id" "$token"
             rm -f -- "$(runner_file "$id")"
             fm_procevent_source_lock_release "$id"
             detach_runner "$id"
@@ -1274,7 +1284,7 @@ cmd_retire() {
         fm_procevent_source_lock_release "$id"
         die "cannot release source ownership: $id"
       fi
-      rm -f -- "$(staging_file "$id" "$token")"
+      remove_staged_generation "$id" "$token"
     fi
   elif [ -n "$extension_binding_digest" ] \
     && ! cleanup_extension_binding_invocations "$extension_binding_digest"; then
@@ -1307,7 +1317,7 @@ sweep_relevant_state() {
   for path in "$STATE/extension-invocations"/*.owner.json; do
     [ -e "$path" ] && return 0
   done
-  for path in "$REG"/*.source "$REG"/*.runner; do
+  for path in "$REG"/*.source "$REG"/*.runner "$REG"/*.receipts; do
     if [ -e "$path" ] || [ -L "$path" ]; then
       return 0
     fi
@@ -1406,6 +1416,21 @@ cmd_sweep_home() {
       sweep_add_id "$id"
     fi
     fm_procevent_source_lock_release "$id"
+  done
+  # A receipts record deliberately outlives the automatic retirement of its own
+  # source, so the last round of an ended review can still state Applying and
+  # Complete durably. This home's teardown is where that record is retired: it
+  # is the only enumeration that still sees a source with no registration and no
+  # claim, and retiring the id removes the record whether or not either remains.
+  for path in "$REG"/*.receipts; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      id=${path##*/}; id=${id%.receipts}
+      if fm_procevent_source_id_valid "$id"; then
+        sweep_add_id "$id"
+      else
+        failed=$((failed + 1))
+      fi
+    fi
   done
   for path in "$REG"/*.runner; do
     if [ -e "$path" ] || [ -L "$path" ]; then
