@@ -600,7 +600,17 @@ fm_afk_launch_stop() {
     # FM_POLL seconds plus the flush. This wait must stay strictly greater
     # than that budget or a watcher caught mid-sleep reports a false "did not
     # exit after SIGTERM" and leaves lifecycle state preserved for no reason.
-    stop_wait_iters=$(( (${FM_POLL:-15} + 10) * 4 ))
+    # FM_POLL is not always an integer (tests use fractional values like 0.1),
+    # and bash arithmetic expansion errors on those, so compute the iteration
+    # count (rounded up, at 0.25s per iteration) with awk instead.
+    stop_wait_iters=$(awk -v poll="${FM_POLL:-15}" 'BEGIN {
+      p = poll + 0
+      if (p < 0) p = 0
+      n = (p + 10) * 4
+      i = int(n)
+      if (i < n) i++
+      print i
+    }')
     for _ in $(seq 1 "$stop_wait_iters"); do
       fm_pid_alive "$pid" || break
       sleep 0.25
