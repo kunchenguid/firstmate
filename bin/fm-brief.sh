@@ -60,8 +60,9 @@
 # A secondmate charter is not a task brief and does not carry it.
 # Every ship path renders bin/fm-dod-lib.sh's batched-findings rule: enumerate the
 # complete finding set and check the surfaces sharing each defect's mechanism
-# before repairing or resubmitting, rather than looping one defect at a time. It
-# remains rule 8 because the delivery contract cross-references rule 6.
+# before repairing or resubmitting, rather than looping one defect at a time.
+# It remains rule 8 as the accepted generated contract, while the delivery block
+# identifies the decision-escalation rule by name and origin for both ship paths.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers

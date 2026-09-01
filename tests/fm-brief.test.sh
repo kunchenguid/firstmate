@@ -238,6 +238,12 @@ test_ship_modes_generate_clean_briefs() {
       "$id: delivery preflight must distinguish no matches from a scan error"
     assert_grep "any other exit means the scan failed and blocks delivery" "$brief" \
       "$id: delivery preflight must never treat a failed scan as green"
+    assert_grep 'run `cd -- "$task_root"` and require physical `pwd -P` to equal `task_root`' "$brief" \
+      "$id: every permitted delivery action must return to the verified task root"
+    assert_grep "a later \`/no-mistakes\` invocation, a push, a PR command, or the local-only ready report" "$brief" \
+      "$id: the root binding must cover every mode-specific delivery action"
+    assert_grep 'If `task_root` is unavailable, rerun this entire preflight from the task record' "$brief" \
+      "$id: a later delivery action must fail closed when its pinned root is unavailable"
     assert_no_grep "grep -rn 'FINALIZE-AFTER(' ." "$brief" \
       "$id: delivery preflight must not inspect the mutable current directory"
     assert_no_grep "bin/fm-dod-lib.sh" "$brief" \
@@ -846,11 +852,13 @@ test_ship_briefs_batch_findings_before_resubmitting() {
     "ship brief must require checking surfaces that share the defect mechanism"
   assert_grep "One-at-a-time stop-fix-rereview loops are forbidden." "$brief" \
     "ship brief must forbid one-at-a-time stop-fix-rereview loops"
-  # Renumbering the rules would break fm-dod-lib.sh's "(rule 6)" cross-reference.
-  grep -Fqx "6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings)," "$brief" \
-    || fail "numbered rule 6 must remain the ask-user escalation rule"
-  assert_grep "escalate to firstmate (rule 6) and stop" "$brief" \
-    "the ask-user escalation must still point at rule 6"
+  # The name-and-origin pointer must resolve to the generated brief's ask-user rule without depending on its number.
+  assert_grep "If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings)," "$brief" \
+    "the generated Rules section must retain the ask-user escalation rule"
+  assert_grep "follow the \`needs-decision\` escalation rule for human-owned decisions under \`# Rules\` in your original task brief and stop" "$brief" \
+    "the ask-user escalation must name its rule and originating section"
+  assert_no_grep "(rule 6)" "$brief" \
+    "the ask-user escalation must not depend on an ambiguous rule number"
   pass "fm-brief.sh: ship briefs require batching findings before repair or resubmission"
 }
 

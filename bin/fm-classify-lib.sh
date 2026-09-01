@@ -197,8 +197,9 @@ status_is_paused_or_captain_held() {  # <status-line>
 # terminal line never clears an open captain decision.
 # Who WRITES the closing line is owned elsewhere: the answering firstmate closes
 # at answer time through fm-send's --resolve-key (bin/fm-send.sh header), and a
-# worker self-closes only a blocker that cleared without an answer (bin/fm-brief.sh
-# rule 6), so closure never depends on a busy worker's discipline.
+# worker self-closes only a blocker that cleared without an answer (the decision-
+# escalation rule under # Rules in the generated brief), so closure never depends
+# on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
 # format): an OPTIONAL "[key=<slug>]" token names the decision. Its documented

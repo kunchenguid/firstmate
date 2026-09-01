@@ -378,6 +378,10 @@ STUB
       "$mode: promoted worker's clean check was not bound to its recorded task root"
     assert_grep "git -C \"\$task_root\" grep -n -F 'FINALIZE-AFTER(' \"\$delivery_ref\" -- ." "$payload" \
       "$mode: promoted worker's sentinel scan was not bound to its verified delivery ref"
+    assert_grep 'run `cd -- "$task_root"` and require physical `pwd -P` to equal `task_root`' "$payload" \
+      "$mode: promoted worker's delivery actions were not bound to its verified task root"
+    assert_grep "a later \`/no-mistakes\` invocation, a push, a PR command, or the local-only ready report" "$payload" \
+      "$mode: promoted worker's root binding did not cover every delivery action"
     grep -Fqx "8. When a review, verification run, or test pass fails, never fix and resubmit the first defect you find." "$payload" \
       || fail "$mode: promoted worker did not receive the batched-findings contract as rule 8"
     assert_grep "Enumerate the COMPLETE finding set first" "$payload" \
@@ -406,8 +410,14 @@ STUB
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
-  assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
-    "promoted no-mistakes worker did not receive the ask-user escalation rule"
+  assert_grep "6. These ship instructions supersede the scout delivery rules" "$payload" \
+    "promotion fixture must retain its competing numbered rule 6"
+  assert_grep "the escalation rules, including ask-user" "$payload" \
+    "promoted no-mistakes worker lost the original brief's ask-user escalation rule"
+  assert_grep "follow the \`needs-decision\` escalation rule for human-owned decisions under \`# Rules\` in your original task brief and stop" "$payload" \
+    "promoted no-mistakes worker did not receive an unambiguous ask-user escalation reference"
+  assert_no_grep "(rule 6)" "$payload" \
+    "promoted no-mistakes worker received an ambiguous numbered escalation reference"
   assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
     "promoted no-mistakes worker did not receive the --yes prohibition"
   assert_grep "It is banned fleet-wide" "$payload" \

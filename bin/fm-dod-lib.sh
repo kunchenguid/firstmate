@@ -10,9 +10,9 @@
 # the block on stdout with no trailing blank line. The caller validates the mode;
 # an unknown mode is refused rather than silently rendered as the pipeline contract.
 # Every mode's block binds one canonical task worktree and fm/<task-id> ref from
-# the task record, then requires a clean worktree and scans that committed ref for
-# unresolved FINALIZE-AFTER( sentinels. A scan error is a delivery failure, never
-# the same result as no matches.
+# the task record, requires a clean worktree, scans that committed ref for
+# unresolved FINALIZE-AFTER( sentinels, and binds later delivery actions to that
+# worktree. A scan error is a delivery failure, never the same result as no matches.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
@@ -37,6 +37,8 @@ Refuse and report the concrete missing requirement unless canonical \`git -C "\$
 Run \`git -C "\$task_root" status --porcelain=v1 --untracked-files=all\`; it must succeed and print nothing, and any output or command error blocks delivery.
 Then inspect that same committed delivery ref with \`git -C "\$task_root" grep -n -F 'FINALIZE-AFTER(' "\$delivery_ref" -- .\`, never a current-directory, nested-repository, submodule, unrelated-checkout, or mutable-file scan.
 Exit 1 with no output means no sentinel occurrence; exit 0 means inspect every match and resolve every open placeholder before delivery; any other exit means the scan failed and blocks delivery rather than counting as no matches.
+Immediately before each subsequent delivery action that this mode permits - a later \`/no-mistakes\` invocation, a push, a PR command, or the local-only ready report - run \`cd -- "\$task_root"\` and require physical \`pwd -P\` to equal \`task_root\`.
+If \`task_root\` is unavailable, rerun this entire preflight from the task record; if the directory change or equality check fails, refuse the action and report the concrete mismatch.
 EOF
 }
 
@@ -90,7 +92,7 @@ When starting no-mistakes, make \`--intent\` preserve all relevant content from 
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
+- ask-user findings are never yours to answer: follow the \`needs-decision\` escalation rule for human-owned decisions under \`# Rules\` in your original task brief and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
