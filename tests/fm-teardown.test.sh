@@ -1778,6 +1778,52 @@ SH
   pass "forced secondmate teardown holds every descendant lifecycle and metadata lock"
 }
 
+test_forced_secondmate_teardown_removes_child_task_temp_roots() {
+  # Forced retirement of a secondmate home retires every child task with it, and
+  # each child's record - the only thing that names that child's temp root - goes
+  # with the home. Since the TMPDIR pin that root holds the child agent's whole
+  # scratch tree, so leaving it behind orphans it permanently.
+  # A live sibling home holding a task with the SAME id must survive: /tmp is one
+  # namespace for every firstmate home, so the home tag is the only thing that
+  # separates the two, and removal must be by exact recorded path alone.
+  local case_dir home sibling_home rc child child_tmp sibling_tmp
+  case_dir=$(make_case forced-child-tasktmp)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  for child in child-a child-b; do
+    child_tmp=$(fm_test_task_tmp_root "$home" "$child" "$home")
+    mkdir -p "$child_tmp/claude-1000/-home-cap--treehouse-proj-1/session-$child/scratchpad"
+    printf '%s\n' "$child scratch" \
+      > "$child_tmp/claude-1000/-home-cap--treehouse-proj-1/session-$child/scratchpad/index.db"
+    printf '%s\n' "tasktmp=$child_tmp" >> "$home/state/$child.meta"
+  done
+
+  # An unrelated live home whose own in-flight task carries the id child-a.
+  sibling_home="$case_dir/live-sibling-home"
+  mkdir -p "$sibling_home/state"
+  printf '%s\n' live-sibling > "$sibling_home/.fm-secondmate-home"
+  sibling_tmp=$(fm_test_task_tmp_root "$sibling_home" child-a "$sibling_home")
+  mkdir -p "$sibling_tmp/claude-1000/-home-cap--treehouse-proj-1/session-live/scratchpad"
+  printf '%s\n' "live sibling scratch" \
+    > "$sibling_tmp/claude-1000/-home-cap--treehouse-proj-1/session-live/scratchpad/index.db"
+  [ "$sibling_tmp" != "$(fm_test_task_tmp_root "$home" child-a "$home")" ] \
+    || fail "forced-child-tasktmp: precondition - the two homes' child-a roots must differ"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "forced-child-tasktmp: forced secondmate teardown should complete"
+  [ ! -d "$home" ] || fail "forced-child-tasktmp: the secondmate home survived forced teardown"
+  for child in child-a child-b; do
+    child_tmp=$(fm_test_task_tmp_root "$home" "$child" "$home")
+    [ ! -e "$child_tmp" ] \
+      || fail "forced-child-tasktmp: retired child $child left its temp root behind"
+  done
+  [ -f "$sibling_tmp/claude-1000/-home-cap--treehouse-proj-1/session-live/scratchpad/index.db" ] \
+    || fail "forced-child-tasktmp: a live sibling home's identically-named task lost its scratch"
+  pass "forced secondmate teardown removes each retired child's own temp root and spares a live sibling home's"
+}
+
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   local case_dir home log closed rc
   case_dir=$(make_case herdr-child-unconfirmed-close)
@@ -2628,6 +2674,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
+test_forced_secondmate_teardown_removes_child_task_temp_roots
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

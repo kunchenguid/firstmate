@@ -24,7 +24,10 @@
 # exactly the path bin/fm-task-tmp-lib.sh derives for this task id. Nothing is
 # removed by worktree slot, by age, or by scanning for siblings, so a live task
 # sharing a reused slot is never touched. A refusal or failure there is reported
-# on stderr and never fails an otherwise-complete teardown.
+# on stderr and never fails an otherwise-complete teardown. Forced secondmate
+# retirement applies the same removal to each child task it retires, derived as
+# that child's own home, because those records disappear with the home and would
+# otherwise name nothing.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -2469,7 +2472,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_tasktmp
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2477,6 +2480,7 @@ cleanup_firstmate_home_children() {
     child_id=$(basename "$child_meta" .meta)
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
+    child_tasktmp=$(meta_value "$child_meta" tasktmp)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
@@ -2544,6 +2548,17 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
+    # This child's own temp root, removed while its record still names it: once
+    # the meta below is gone nothing names the path, and since the TMPDIR pin it
+    # holds the child agent's whole scratch tree rather than only Go build temp.
+    # The root is home-scoped, so it must be derived as the CHILD home the same
+    # way the zellij branch above verifies that home's tabs; deriving it from the
+    # parent's ambient FM_HOME/FM_ROOT would produce the parent's tag, fail the
+    # exact-match guard, and leak exactly as before while looking fixed. Only the
+    # recorded path is ever removed, and only when it is exactly what
+    # fm_task_tmp_root derives for that child - never by slot, age, or pattern.
+    # A refusal or failure reports on stderr and never fails forced retirement.
+    ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_task_tmp_remove "$child_id" "$child_tasktmp" ) || true
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1

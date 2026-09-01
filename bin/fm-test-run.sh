@@ -1176,6 +1176,7 @@ families_for_changed_path() {
       printf '%s\n' pr-forge
       printf '%s\n' session-bootstrap
       printf '%s\n' orca
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
@@ -1271,12 +1272,15 @@ families_for_changed_path() {
     bin/fm-task-tmp-lib.sh)
       # The per-task temp root: created by fm-spawn (backend-dispatch), removed
       # by fm-teardown (pr-forge), covered directly by fm-gotmp.test.sh
-      # (session-bootstrap), and spelled out in the Orca spawn's exact pane text
-      # (orca), which is the only suite outside this family that pins the path.
+      # (session-bootstrap), and spelled out verbatim by the two spawn suites
+      # that pin the exact path - the Orca spawn (orca) and the Kimi spawn
+      # (pure-contract-unit), which assert the launch's TMPDIR, the pane's
+      # GOTMPDIR export, and the recorded tasktmp=.
       printf '%s\n' backend-dispatch
       printf '%s\n' pr-forge
       printf '%s\n' session-bootstrap
       printf '%s\n' orca
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
