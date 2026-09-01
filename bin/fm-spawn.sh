@@ -1404,21 +1404,58 @@ pi_supports_tui_mode() {
 # launch's own network_access flag, not by any root), and
 # docs/verification/codex-sandbox.md owns the measurements.
 
-# The canonical spelling of <path>, resolving symlinked components of its parent,
-# creating nothing. A path whose parent does not exist is returned unchanged
-# rather than dropped, so a root is never silently lost.
-codex_root_real() {  # <path>
-  local path=$1 parent base
+# The ONE owner of every path this grant resolves, creates, or emits. Pre-creation
+# and directory creation below obtain their paths from here rather than carrying
+# their own guards, so a fourth call site added later inherits both invariants by
+# construction instead of having to remember them.
+#
+# Invariant 1: the FINAL component is never a symlink, and is never resolved
+# through. A codex SCOUT holds state/ wholesale, so one mistaken command there can
+# leave state/<other-id>.status or state/<other-id>.inbox as a link; without this,
+# the NEXT ship or secondmate spawn of that id would resolve the link and hand its
+# worker the TARGET as a writable root, and would create through it. Observed:
+# with state/<id>.inbox linked to the home, the composed launch granted $FM_HOME
+# itself. That is exactly what the per-kind scoping exists to prevent.
+# Invariant 2: the resolved root stays inside <container>, so no symlinked
+# component anywhere in the path can walk the grant out of the state or data tree
+# the root belongs to. This one is defence in depth behind invariant 1 rather than
+# a separately reachable guard - with the final component refused and the
+# container resolved the same way, no deterministic case reaches it - so removing
+# it breaks no test. It is kept because it bounds the whole class by construction:
+# any future caller, or any path shape reached another way, still cannot emit a
+# root outside its container.
+# PARENT components are still resolved, because that canonicalization is what
+# makes a granted root the same physical path the sandbox and the notify hook use
+# (a /tmp home on macOS, where /tmp is /private/tmp).
+# A violation REFUSES loudly and fails the spawn rather than dropping the root: a
+# silently missing root would strand the worker in exactly the way this grant
+# exists to prevent, so the captain is told which path to repair.
+codex_root_real() {  # <container> <path>; prints the canonical root, or fails
+  local container=$1 path=$2 parent base real container_real
+  if [ -L "$path" ]; then
+    echo "error: $path is a symlink; firstmate never resolves, creates, or grants a codex writable root through a link - repair or remove that record before spawning" >&2
+    return 1
+  fi
   if [ -d "$path" ]; then
-    (cd "$path" 2>/dev/null && pwd -P) && return 0
+    real=$(cd "$path" 2>/dev/null && pwd -P) || real=$path
+  else
+    parent=$(dirname "$path")
+    base=$(basename "$path")
+    if parent=$(cd "$parent" 2>/dev/null && pwd -P); then
+      real="${parent%/}/$base"
+    else
+      real=$path
+    fi
   fi
-  parent=$(dirname "$path")
-  base=$(basename "$path")
-  if parent=$(cd "$parent" 2>/dev/null && pwd -P); then
-    printf '%s/%s\n' "${parent%/}" "$base"
-    return 0
-  fi
-  printf '%s\n' "$path"
+  container_real=$(cd "$container" 2>/dev/null && pwd -P) || container_real=$container
+  case "$real" in
+    "$container_real"|"$container_real"/*) ;;
+    *)
+      echo "error: the codex writable root for $path resolves to $real, outside $container_real - refusing to grant a root beyond the task's own state and data paths" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$real"
 }
 
 # Pre-create one file so its single-file writable root resolves, and mark it as
@@ -1431,25 +1468,29 @@ codex_root_real() {  # <path>
 # activity changes the signature and surfaces normally. A file that already
 # exists is left untouched, marker included: its unreported signature may be real
 # activity nobody has surfaced yet.
-# A SYMLINK is never created through and never written through. `[ -e ]` alone is
-# false for a DANGLING link, so an unguarded append would follow it and create its
-# target anywhere on disk - the same reach outside the granted tree this per-kind
-# narrowing exists to prevent, and reachable because a scout holds state/
-# wholesale. Declining matches how the rest of the fleet treats a symlinked state
+# The symlink and containment invariants come from codex_root_real above, which
+# is consulted BEFORE anything is created: `[ -e ]` alone is false for a DANGLING
+# link, so an unguarded append would follow it and create its target anywhere on
+# disk. Declining matches how the rest of the fleet treats a symlinked state
 # record: bin/fm-classify-lib.sh models kind=symlink with its target,
 # bin/fm-watch.sh scan_signals deliberately keeps a symlinked .status VISIBLE
 # rather than skipping it, and bin/fm-inactive-reconcile.sh refuses to act on one.
-# Say so out loud rather than passing over it silently: a state record that became
-# a link is a corruption the captain should see at dispatch.
-codex_precreate_root_file() {  # <file>
-  local file=$1
-  if [ -L "$file" ]; then
-    echo "notice: $file is a symlink; firstmate never creates or writes a state record through a link, so this spawn left it untouched - the watcher surfaces the link itself and this grant does not vouch for where it points" >&2
-    return 0
-  fi
+codex_precreate_root_file() {  # <container> <file>
+  local container=$1 file=$2
+  codex_root_real "$container" "$file" >/dev/null || return 1
   [ -e "$file" ] && return 0
   : >> "$file" 2>/dev/null || return 0
   fm_wake_signal_mark_current "$STATE" "$file" 2>/dev/null || true
+}
+
+# Create a directory the grant depends on, under a root the owner above has
+# already cleared. <dir> is the root that will be granted; <create> is the path
+# beneath it to make, so the layout stays owned by bin/fm-task-inbox-lib.sh rather
+# than being rebuilt here.
+codex_precreate_root_dir() {  # <container> <dir> <create>
+  local container=$1 dir=$2 create=$3
+  codex_root_real "$container" "$dir" >/dev/null || return 1
+  mkdir -p "$create" 2>/dev/null || true
 }
 
 codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per line
@@ -1466,23 +1507,23 @@ codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per
   # state dir, data/, or git objects. Both are pre-created so the roots resolve
   # and the append never needs directory-create permission.
   if [ "$kind" = secondmate ]; then
-    codex_precreate_root_file "$status_file"
-    mkdir -p "$(fm_task_inbox_handled_dir "$STATE" "$id")" 2>/dev/null || true
-    codex_root_real "$status_file"
-    codex_root_real "$inbox_dir"
+    codex_precreate_root_file "$STATE" "$status_file" || return 1
+    codex_precreate_root_dir "$STATE" "$inbox_dir" "$(fm_task_inbox_handled_dir "$STATE" "$id")" || return 1
+    codex_root_real "$STATE" "$status_file" || return 1
+    codex_root_real "$STATE" "$inbox_dir" || return 1
     return 0
   fi
   if [ "$kind" = scout ]; then
-    codex_root_real "$STATE"
-    codex_root_real "$DATA/$id"
+    codex_root_real "$STATE" "$STATE" || return 1
+    codex_root_real "$DATA" "$DATA/$id" || return 1
   else
     turnend_file="$STATE/$id.turn-ended"
-    codex_precreate_root_file "$status_file"
-    codex_precreate_root_file "$turnend_file"
-    mkdir -p "$(fm_task_inbox_handled_dir "$STATE" "$id")" 2>/dev/null || true
-    codex_root_real "$status_file"
-    codex_root_real "$turnend_file"
-    codex_root_real "$inbox_dir"
+    codex_precreate_root_file "$STATE" "$status_file" || return 1
+    codex_precreate_root_file "$STATE" "$turnend_file" || return 1
+    codex_precreate_root_dir "$STATE" "$inbox_dir" "$(fm_task_inbox_handled_dir "$STATE" "$id")" || return 1
+    codex_root_real "$STATE" "$status_file" || return 1
+    codex_root_real "$STATE" "$turnend_file" || return 1
+    codex_root_real "$STATE" "$inbox_dir" || return 1
   fi
   wt_real=$(cd "$worktree" 2>/dev/null && pwd -P) || return 0
   gitdir=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 0
@@ -1501,11 +1542,17 @@ codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per
 }
 
 codex_add_dir_flags() {  # <kind> <worktree> <id>; prints the shell-quoted --add-dir flags
-  local kind=$1 worktree=$2 id=$3 root out=''
+  local kind=$1 worktree=$2 id=$3 root out='' roots
+  # Command substitution, not a process substitution: a refused root must be able
+  # to fail this function rather than composing a launch with the grant silently
+  # short of what the brief needs.
+  roots=$(codex_writable_roots "$kind" "$worktree" "$id") || return 1
   while IFS= read -r root; do
     [ -n "$root" ] || continue
     out="$out--add-dir $(shell_quote "$root") "
-  done < <(codex_writable_roots "$kind" "$worktree" "$id")
+  done <<EOF
+$roots
+EOF
   printf '%s' "$out"
 }
 
@@ -3415,7 +3462,13 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
-  codex) LAUNCH=${LAUNCH//__CODEXADDDIRS__/"$(codex_add_dir_flags "$KIND" "$WT" "$ID")"} ;;
+  codex)
+    CODEX_ADD_DIRS=$(codex_add_dir_flags "$KIND" "$WT" "$ID") || {
+      echo "error: refusing to launch $ID on codex: its writable-root grant could not be composed safely (see the refusal above); repair the named path, because launching without it would strand the worker outside the paths its brief requires" >&2
+      exit 1
+    }
+    LAUNCH=${LAUNCH//__CODEXADDDIRS__/"$CODEX_ADD_DIRS"}
+    ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in

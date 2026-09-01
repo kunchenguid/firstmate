@@ -311,36 +311,77 @@ test_precreated_state_files_are_not_read_as_new_activity() {
   pass "both pre-created state files are marked as already reported, and real later activity on each still reports"
 }
 
-# A state record that has become a SYMLINK is corruption, and the pre-creation
-# must never create or write through it. `[ -e ]` is FALSE for a dangling link, so
-# an unguarded append follows it and creates its target anywhere on disk - which a
-# scout, holding state/ wholesale, can set up for the next ship spawn of another
-# task. The rest of the fleet declines to act on a symlinked state record and
-# leaves it for the watcher to surface, so this pins the same stance here.
-test_precreation_never_follows_a_symlinked_state_record() {
-  local rec out outside link
-  rec=$(make_case symlink-precreate); read_case "$rec"
-  outside="$HOME_DIR/config/escaped.txt"
-  link="$HOME_DIR/state/$CASE_ID.status"
-  ln -s "$outside" "$link"
-  [ -L "$link" ] && [ ! -e "$link" ] \
-    || fail "the fixture is wrong: the status path must be a DANGLING symlink for this to prove anything"
+# A state record or inbox that has become a SYMLINK is corruption, and NOTHING
+# this grant does may follow it: not the pre-creation, not the directory creation,
+# and not the root emission. `[ -e ]` is FALSE for a dangling link, and resolving
+# a link that points at a real directory hands the worker the TARGET as a writable
+# root - with the inbox linked to the home, the composed launch granted $FM_HOME
+# itself, which is precisely what the per-kind scoping exists to prevent. A codex
+# scout holds state/ wholesale, so it can plant either shape for the next spawn of
+# another id. Refusal must be loud and must fail the spawn, because a silently
+# dropped root strands the worker the way this grant exists to prevent.
+# Every emitted root must live under state/, data/<id>/, or the git common dir.
+# Nothing may name the home, config/, or projects/, however it was reached.
+assert_no_root_outside_state() {  # <what>
+  local what=$1 home_real r
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    case "$r" in
+      "$home_real"|"$home_real"/config|"$home_real"/config/*|"$home_real"/projects|"$home_real"/projects/*)
+        fail "a symlinked $what produced a granted root outside the task's own paths: $r" ;;
+    esac
+  done <<EOF
+$(granted_roots "$LAUNCH_LOG")
+EOF
+}
 
+test_grant_never_follows_a_symlinked_state_record() {
+  local rec out status escaped
+
+  # 1. A DANGLING link on the status file: pre-creation must not create through it.
+  rec=$(make_case symlink-dangling); read_case "$rec"
+  escaped="$HOME_DIR/config/escaped.txt"
+  ln -s "$escaped" "$HOME_DIR/state/$CASE_ID.status"
+  [ -L "$HOME_DIR/state/$CASE_ID.status" ] && [ ! -e "$HOME_DIR/state/$CASE_ID.status" ] \
+    || fail "the fixture is wrong: the status path must be a DANGLING symlink"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off) \
-    || fail "codex ship spawn failed: $out"
-
-  [ ! -e "$outside" ] \
-    || fail "the spawn followed the dangling symlink and created its target outside the granted tree: $outside"
-  [ -L "$link" ] \
-    || fail "the spawn replaced the symlink instead of leaving it for the watcher to surface"
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a dangling symlinked status record must refuse the spawn"
+  [ ! -e "$escaped" ] \
+    || fail "the spawn followed the dangling symlink and created its target outside the granted tree: $escaped"
   printf '%s\n' "$out" | grep -q 'is a symlink' \
-    || fail "a symlinked state record must be reported at dispatch, not passed over silently: $out"
-  # The turn-ended marker beside it is an ordinary file and must still be created,
-  # so the refusal is scoped to the link rather than aborting the whole grant.
-  [ -f "$HOME_DIR/state/$CASE_ID.turn-ended" ] \
-    || fail "declining the symlink must not stop the other pre-created roots from resolving"
-  pass "pre-creation declines a symlinked state record, creates nothing through it, and says so at dispatch"
+    || fail "the refusal must name the symlink it declined: $out"
+  assert_no_root_outside_state "status record"
+
+  # 2. A link on the status file pointing at an EXISTING directory: emission must
+  # not resolve through it into a granted root.
+  rec=$(make_case symlink-status-dir); read_case "$rec"
+  ln -s "$HOME_DIR/config" "$HOME_DIR/state/$CASE_ID.status"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a status record linked to a real directory must refuse the spawn"
+  printf '%s\n' "$out" | grep -q 'is a symlink' \
+    || fail "the refusal must name the symlink it declined: $out"
+  assert_no_root_outside_state "status record"
+
+  # 3. A link on the INBOX pointing at the home: neither handled/ nor a root may
+  # be created or emitted through it. This is the shape that granted $FM_HOME.
+  rec=$(make_case symlink-inbox-home); read_case "$rec"
+  ln -s "$HOME_DIR" "$HOME_DIR/state/$CASE_ID.inbox"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "an inbox linked to the home must refuse the spawn"
+  [ ! -d "$HOME_DIR/handled" ] \
+    || fail "the spawn created handled/ through the inbox symlink, outside state/"
+  printf '%s\n' "$out" | grep -q 'is a symlink' \
+    || fail "the refusal must name the symlink it declined: $out"
+  assert_no_root_outside_state "inbox"
+
+  pass "the grant refuses a symlinked state record or inbox: nothing is created through it and no root outside the task's own paths is ever emitted"
 }
 
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir() {
@@ -668,7 +709,7 @@ test_ship_grant_covers_the_steering_inbox_acknowledgement() {
 test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir
 test_pipeline_notice_fires_only_for_the_mode_that_needs_the_pipeline
 test_precreated_state_files_are_not_read_as_new_activity
-test_precreation_never_follows_a_symlinked_state_record
+test_grant_never_follows_a_symlinked_state_record
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir
 test_secondmate_grants_only_the_parent_status_file
 test_other_adapters_are_untouched
