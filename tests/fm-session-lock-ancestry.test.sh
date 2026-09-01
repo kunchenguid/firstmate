@@ -225,12 +225,15 @@ SH
 }
 
 test_codex_writer_lock_supplies_identity_when_ancestry_is_hidden() {
-  local dir fakebin codex_home writer_lock writer_fd got out rc
+  local dir fakebin codex_home other_home writer_lock other_writer_lock
+  local writer_fd other_writer_fd identity other_identity got out rc
   dir="$TMP_ROOT/codex-hidden-ancestry"
   fakebin=$(fm_fakebin "$dir")
   codex_home="$dir/codex-state"
+  other_home="$dir/other-codex-state"
   writer_lock="$codex_home/thread-writer-locks/thread-123.lock"
-  mkdir -p "$dir/state" "${writer_lock%/*}"
+  other_writer_lock="$other_home/thread-writer-locks/thread-123.lock"
+  mkdir -p "$dir/state" "${writer_lock%/*}" "${other_writer_lock%/*}"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 exit 1
@@ -240,52 +243,117 @@ SH
   exec {writer_fd}>"$writer_lock" || fail "could not open the Codex writer-lock fixture"
   flock "$writer_fd" || fail "could not hold the Codex writer-lock fixture"
 
-  got=$(CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+  identity=$(CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
     bash -c '. "$1"; fm_session_identity' _ "$LIB") \
     || fail "a held Codex writer lock did not supply a session identity"
-  [ "$got" = codex:thread-123 ] \
-    || fail "Codex identity was '$got', expected codex:thread-123"
+  [ "$identity" = "codex:thread-123:$codex_home" ] \
+    || fail "Codex identity did not bind its thread and state root: $identity"
+  bash -c '. "$1"; fm_session_identity_valid "$2"' _ "$LIB" "$identity" \
+    || fail "the bound Codex identity was rejected as malformed"
+  if bash -c '. "$1"; fm_session_identity_valid "$2"' _ "$LIB" 'codex:thread-123'; then
+    fail "a rootless Codex identity remained valid"
+  fi
+  if bash -c '. "$1"; fm_session_identity_valid "$2"' _ "$LIB" "${identity}"$'\nforged'; then
+    fail "a multiline Codex identity passed strict validation"
+  fi
   got=$(CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
     FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-harness.sh") \
     || fail "the harness detector failed with hidden Codex ancestry"
   [ "$got" = codex ] || fail "the verified Codex writer marker detected '$got' instead of codex"
   CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
-    bash -c '. "$1"; fm_codex_writer_lock_state thread-123' _ "$LIB" \
+    bash -c '. "$1"; fm_codex_writer_lock_state thread-123 "$2"' _ "$LIB" "$codex_home" \
     || fail "a held Codex writer lock was not classified live"
 
   out=$(CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
     FM_HOME="$dir" "$ROOT/bin/fm-lock.sh" 2>&1) || fail "Codex could not acquire the home lock: $out"
-  [ "$out" = 'lock acquired: session codex:thread-123' ] \
+  [ "$out" = "lock acquired: session $identity" ] \
     || fail "Codex lock acquisition reported unexpected output: $out"
-  [ "$(cat "$dir/state/.lock")" = codex:thread-123 ] \
-    || fail "Codex lock acquisition did not publish the stable thread identity"
+  [ "$(cat "$dir/state/.lock")" = "$identity" ] \
+    || fail "Codex lock acquisition did not publish the bound identity"
   CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
     bash -c '. "$1"; fm_session_lock_owned_by_self "$2"' _ "$LIB" "$dir/state" \
     || fail "the Codex session did not recognize its own published lock"
 
+  exec {other_writer_fd}>"$other_writer_lock" || fail "could not open the second Codex writer-lock fixture"
+  flock "$other_writer_fd" || fail "could not hold the second Codex writer-lock fixture"
+  other_identity=$(CODEX_HOME="$other_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_session_identity' _ "$LIB") \
+    || fail "the same thread id under another state root had no identity"
+  [ "$other_identity" = "codex:thread-123:$other_home" ] \
+    || fail "the second Codex identity did not bind its own state root: $other_identity"
+  [ "$identity" != "$other_identity" ] \
+    || fail "the same thread id under different state roots collided"
+  CODEX_HOME="$other_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_session_identity_alive "$2"' _ "$LIB" "$identity" \
+    || fail "a checker under another root did not use the recorded identity root for liveness"
+  if CODEX_HOME="$other_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_session_lock_owned_by_self "$2"' _ "$LIB" "$dir/state"; then
+    fail "the same thread id under another state root claimed the first root's home lock"
+  fi
+
   flock -u "$writer_fd" || fail "could not release the Codex writer-lock fixture"
-  if CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
-    bash -c '. "$1"; fm_codex_writer_lock_state thread-123' _ "$LIB"; then
+  if CODEX_HOME="$other_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_session_identity_alive "$2"' _ "$LIB" "$identity"; then
     rc=0
   else
     rc=$?
   fi
-  [ "$rc" -eq 1 ] || fail "a free Codex writer lock returned $rc instead of stale state 1"
+  [ "$rc" -eq 1 ] || fail "the recorded root did not become stale when only its writer lock was released"
+  CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_session_identity_alive "$2"' _ "$LIB" "$other_identity" \
+    || fail "one root becoming stale affected the other root's same-named thread"
 
   rm -f "$writer_lock"
+  if CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_codex_writer_lock_state thread-123 "$2"' _ "$LIB" "$codex_home"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 1 ] || fail "a missing Codex writer lock returned $rc instead of stale state 1"
+
   ln -s /dev/null "$writer_lock"
   if CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
-    bash -c '. "$1"; fm_codex_writer_lock_state thread-123' _ "$LIB"; then
+    bash -c '. "$1"; fm_codex_writer_lock_state thread-123 "$2"' _ "$LIB" "$codex_home"; then
     rc=0
   else
     rc=$?
   fi
   [ "$rc" -eq 2 ] || fail "an unsafe Codex writer lock returned $rc instead of uncertain state 2"
   CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
-    bash -c '. "$1"; fm_session_identity_alive codex:thread-123' _ "$LIB" \
+    bash -c '. "$1"; fm_session_identity_alive "$2"' _ "$LIB" "$identity" \
     || fail "uncertain Codex liveness did not fail closed against lock theft"
 
-  pass "session-lock: a held Codex writer flock supplies identity when process ancestry is hidden"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=) printf '%s\n' claude ;;
+  args=) printf '%s\n' claude ;;
+  ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  got=$(CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_session_identity' _ "$LIB") \
+    || fail "uncertain Codex state did not fall back to harness ancestry"
+  case "$got" in
+    ''|*[!0-9]*) fail "uncertain Codex state returned '$got' instead of a numeric ancestry identity" ;;
+  esac
+  got=$(CODEX_HOME="$codex_home" CODEX_THREAD_ID=thread-123 CLAUDECODE=1 PATH="$fakebin:$PATH" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-harness.sh") \
+    || fail "harness detection failed under uncertain Codex state"
+  [ "$got" = claude ] || fail "uncertain Codex state outranked the verified Claude marker: $got"
+
+  flock -u "$other_writer_fd" || fail "could not release the second Codex writer-lock fixture"
+  pass "session-lock: Codex identity binds thread and root, keeps roots distinct, and falls back on uncertainty"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------

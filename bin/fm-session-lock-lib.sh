@@ -25,7 +25,7 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
-# Print Codex's state root, or fail when no absolute-enough root is available.
+# Print Codex's configured state root, or fail when no root is available.
 # CODEX_HOME is Codex's own override; otherwise its state lives below HOME.
 fm_codex_state_root() {
   if [ -n "${CODEX_HOME:-}" ]; then
@@ -37,16 +37,64 @@ fm_codex_state_root() {
   fi
 }
 
-# Classify Codex's thread-writer lock for $1.
+# True when $1 is safe to carry as the state-root field in one lock record.
+# The root is the remainder after the second colon, so colons inside a path are
+# unambiguous. A narrow path alphabet keeps control bytes and shell syntax out
+# of the persisted identity without changing how the path is resolved.
+fm_codex_state_root_valid() {  # <state-root>
+  local root=${1:-}
+  case "$root" in
+    ''|*[!A-Za-z0-9._/,:@%+=~-]*) return 1 ;;
+  esac
+}
+
+# Parse a Codex identity and publish its two validated fields in
+# FM_CODEX_IDENTITY_THREAD and FM_CODEX_IDENTITY_ROOT.
+FM_CODEX_IDENTITY_THREAD=
+FM_CODEX_IDENTITY_ROOT=
+fm_codex_identity_parse() {  # <identity>
+  local identity=${1:-} payload thread_id root
+  FM_CODEX_IDENTITY_THREAD=
+  FM_CODEX_IDENTITY_ROOT=
+  case "$identity" in codex:*:*) ;; *) return 1 ;; esac
+  payload=${identity#codex:}
+  thread_id=${payload%%:*}
+  root=${payload#*:}
+  case "$thread_id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  fm_codex_state_root_valid "$root" || return 1
+  FM_CODEX_IDENTITY_THREAD=$thread_id
+  FM_CODEX_IDENTITY_ROOT=$root
+}
+
+# Print the strict, unambiguous identity carried by state/.lock.
+fm_codex_identity() {  # <thread-id> <state-root>
+  local thread_id=${1:-} root=${2:-}
+  case "$thread_id" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  fm_codex_state_root_valid "$root" || return 1
+  printf 'codex:%s:%s\n' "$thread_id" "$root"
+}
+
+# Classify Codex's thread-writer lock for $1 under optional explicit root $2.
+# Recorded identities always pass their bound root; current-session probes may
+# omit it and resolve their own Codex root.
 #   0 = held, so that Codex thread is live
 #   1 = absent or free, so that thread is stale
 #   2 = uncertain, which callers must treat fail-closed
-fm_codex_writer_lock_state() {  # <thread-id>
+fm_codex_writer_lock_state() {  # <thread-id> [<state-root>]
   local thread_id=${1:-} root writer_lock rc
   case "$thread_id" in
     ''|*[!A-Za-z0-9._-]*) return 2 ;;
   esac
-  root=$(fm_codex_state_root) || return 2
+  if [ "$#" -ge 2 ]; then
+    root=$2
+  else
+    root=$(fm_codex_state_root) || return 2
+  fi
+  fm_codex_state_root_valid "$root" || return 2
   writer_lock="$root/thread-writer-locks/$thread_id.lock"
   [ -e "$writer_lock" ] || return 1
   [ -f "$writer_lock" ] && [ ! -L "$writer_lock" ] || return 2
@@ -78,10 +126,7 @@ fm_codex_thread_id() {
 fm_session_identity_valid() {  # <identity>
   local identity=${1:-}
   case "$identity" in
-    codex:*)
-      identity=${identity#codex:}
-      case "$identity" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-      ;;
+    codex:*) fm_codex_identity_parse "$identity" ;;
     ''|*[!0-9]*) return 1 ;;
   esac
 }
@@ -217,10 +262,12 @@ fm_harness_pid_alive() {
 # precedence because Codex's sandbox may hide the harness process ancestry.
 # Every other case falls through to the existing harness-PID ancestry path.
 fm_session_identity() {
-  local thread_id
+  local thread_id root identity
   if thread_id=$(fm_codex_thread_id) \
-    && fm_codex_writer_lock_state "$thread_id"; then
-    printf 'codex:%s\n' "$thread_id"
+    && root=$(fm_codex_state_root) \
+    && identity=$(fm_codex_identity "$thread_id" "$root") \
+    && fm_codex_writer_lock_state "$thread_id" "$root"; then
+    printf '%s\n' "$identity"
     return 0
   fi
   fm_harness_ancestry_pid
@@ -230,11 +277,13 @@ fm_session_identity() {
 # state is deliberately live for contention purposes, so ambiguity can never
 # authorize stealing a possibly active session's home lock.
 fm_session_identity_alive() {  # <identity>
-  local identity=${1:-} state
+  local identity=${1:-} state thread_id root
   case "$identity" in
     codex:*)
-      fm_session_identity_valid "$identity" || return 1
-      fm_codex_writer_lock_state "${identity#codex:}"
+      fm_codex_identity_parse "$identity" || return 1
+      thread_id=$FM_CODEX_IDENTITY_THREAD
+      root=$FM_CODEX_IDENTITY_ROOT
+      fm_codex_writer_lock_state "$thread_id" "$root"
       state=$?
       case "$state" in
         0) return 0 ;;
@@ -255,14 +304,15 @@ fm_session_identity_alive() {  # <identity>
 # lock, a malformed lock, a lock held by a harness outside this ancestry, or an
 # ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_identity pids pid thread_id
+  local state=$1 lock_identity pids pid thread_id root current_identity
   lock_identity=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_identity" in
     codex:*)
-      fm_session_identity_valid "$lock_identity" || return 1
       thread_id=$(fm_codex_thread_id) || return 1
-      [ "$lock_identity" = "codex:$thread_id" ] || return 1
-      fm_codex_writer_lock_state "$thread_id"
+      root=$(fm_codex_state_root) || return 1
+      current_identity=$(fm_codex_identity "$thread_id" "$root") || return 1
+      [ "$lock_identity" = "$current_identity" ] || return 1
+      fm_codex_writer_lock_state "$thread_id" "$root"
       return
       ;;
     ''|*[!0-9]*) return 1 ;;
