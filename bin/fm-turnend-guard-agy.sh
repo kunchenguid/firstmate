@@ -173,12 +173,7 @@ if ! fm_supervision_needed "$STATE" "$GRACE"; then
   exit 0
 fi
 
-if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
-  budget_reset
-  record_marker healthy
-  printf '{}\n'
-  exit 0
-fi
+
 
 # --- the arm -----------------------------------------------------------------
 # The arm runs as a tracked child of THIS hook process and stays alive for its
