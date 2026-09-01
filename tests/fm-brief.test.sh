@@ -222,30 +222,38 @@ test_ship_modes_generate_clean_briefs() {
       "$id: delivery preflight must reject a missing or ambiguous recorded task root"
     assert_grep "delivery_ref=refs/heads/fm/$id" "$brief" \
       "$id: delivery preflight must bind to this task's exact delivery ref"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'git -C "$task_root" rev-parse --show-toplevel' "$brief" \
       "$id: delivery preflight must prove the recorded root is the Git worktree root"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'git -C "$task_root" symbolic-ref --quiet HEAD' "$brief" \
       "$id: delivery preflight must prove the delivery ref is checked out"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'git -C "$task_root" rev-parse --verify "$delivery_ref^{commit}"' "$brief" \
       "$id: delivery preflight must prove the delivery ref resolves to a commit"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'git -C "$task_root" status --porcelain=v1 --untracked-files=all' "$brief" \
       "$id: delivery preflight must inspect cleanliness at the recorded task root"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'git -C "$task_root" submodule status --recursive' "$brief" \
       "$id: delivery preflight must verify every recursively referenced submodule commit"
     assert_grep "every output line must begin with a space" "$brief" \
       "$id: delivery preflight must reject uninitialized or mismatched submodules"
     assert_grep "git -C \"\$task_root\" grep --recurse-submodules -n -F 'FINALIZE-AFTER(' \"\$delivery_ref\" -- ." "$brief" \
       "$id: delivery preflight must scan the verified superproject and submodule commits"
+    # shellcheck disable=SC2016 # Generated shell substitution is literal assertion text.
     assert_no_grep 'git -C "$(git rev-parse --show-toplevel)"' "$brief" \
       "$id: delivery preflight must not derive its target from the current directory"
     assert_grep "Exit 1 with no output means no sentinel occurrence" "$brief" \
       "$id: delivery preflight must distinguish no matches from a scan error"
     assert_grep "any other exit means the scan failed and blocks delivery" "$brief" \
       "$id: delivery preflight must never treat a failed scan as green"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'run `cd -- "$task_root"` and require physical `pwd -P` to equal `task_root`' "$brief" \
       "$id: every permitted delivery action must return to the verified task root"
     assert_grep "a later \`/no-mistakes\` invocation, a push, a PR command, or the local-only ready report" "$brief" \
       "$id: the root binding must cover every mode-specific delivery action"
+    # shellcheck disable=SC2016 # Generated shell markup is literal assertion text.
     assert_grep 'If `task_root` is unavailable, rerun this entire preflight from the task record' "$brief" \
       "$id: a later delivery action must fail closed when its pinned root is unavailable"
     assert_no_grep "grep -rn 'FINALIZE-AFTER(' ." "$brief" \

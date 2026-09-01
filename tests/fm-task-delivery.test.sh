@@ -374,14 +374,17 @@ STUB
       "$mode: promoted worker did not preserve its accepted absolute task-record path"
     assert_grep "delivery_ref=refs/heads/fm/$id" "$payload" \
       "$mode: promoted worker's preflight was not bound to its exact delivery ref"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'git -C "$task_root" status --porcelain=v1 --untracked-files=all' "$payload" \
       "$mode: promoted worker's clean check was not bound to its recorded task root"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'git -C "$task_root" submodule status --recursive' "$payload" \
       "$mode: promoted worker was not required to verify recursively referenced submodule commits"
     assert_grep "every output line must begin with a space" "$payload" \
       "$mode: promoted worker was not required to reject uninspectable submodules"
     assert_grep "git -C \"\$task_root\" grep --recurse-submodules -n -F 'FINALIZE-AFTER(' \"\$delivery_ref\" -- ." "$payload" \
       "$mode: promoted worker's sentinel scan did not cover its verified submodule commits"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'run `cd -- "$task_root"` and require physical `pwd -P` to equal `task_root`' "$payload" \
       "$mode: promoted worker's delivery actions were not bound to its verified task root"
     assert_grep "a later \`/no-mistakes\` invocation, a push, a PR command, or the local-only ready report" "$payload" \
@@ -515,6 +518,7 @@ test_generated_delivery_preflight_scans_real_submodule_commits() {
 
   for contract in "$ordinary" "$promoted"; do
     assert_present "$contract" "a submodule delivery contract was not generated"
+    # shellcheck disable=SC2016 # Generated shell variables are literal assertion text.
     assert_grep 'git -C "$task_root" submodule status --recursive' "$contract" \
       "a generated delivery contract omitted recursive submodule readiness"
     assert_grep "A leading \`-\`, \`+\`, or \`U\`" "$contract" \
