@@ -23,6 +23,22 @@ PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
+normalize_generated_task_record_path() {  # <file> <emitted-path> <canonical-path>
+  awk -v from="$2" -v to="$3" '
+    {
+      if (from == to) {
+        print
+        next
+      }
+      line = $0
+      while ((at = index(line, from)) != 0) {
+        line = substr(line, 1, at - 1) to substr(line, at + length(from))
+      }
+      print line
+    }
+  ' "$1"
+}
+
 # A home with one registered project, one project directory, and a fake tmux that
 # refuses, so a spawn that clears the delivery checks still creates nothing.
 # Echoes "<home>|<project-dir>|<fakebin>".
@@ -202,7 +218,7 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status blocked_data instructions_path
+  local home meta out status blocked_data instructions_path relative_root relative_home relative_meta relative_instructions
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state"
   meta="$home/state/promote-d1.meta"
@@ -259,6 +275,20 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
+
+  relative_root="$TMP_ROOT/promote-relative"
+  mkdir -p "$relative_root/home/state" "$relative_root/home/data" "$relative_root/cdpath"
+  relative_home=$(CDPATH='' cd -- "$relative_root/home" && pwd -P)
+  relative_meta="$relative_home/state/promote-relative.meta"
+  printf 'window=fm-promote-relative\nkind=scout\nworktree=/tmp/wt\n' > "$relative_meta"
+  (
+    cd "$relative_root" || exit 1
+    CDPATH="$relative_root/cdpath" FM_HOME=home FM_STATE_OVERRIDE=home/state FM_DATA_OVERRIDE=home/data \
+      "$PROMOTE" promote-relative --mode local-only --yolo off >/dev/null 2>&1
+  ) || fail "promotion with resolvable relative directory inputs should succeed"
+  relative_instructions="$relative_home/data/promote-relative/ship-instructions.md"
+  assert_grep "task record \`$relative_meta\`" "$relative_instructions" \
+    "promotion did not resolve a relative task-record directory before emitting it"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
@@ -297,10 +327,13 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta meta_real out sendroot payload mode id brief_dod delivered_dod
+  local home physical_home meta meta_canonical brief_meta out sendroot payload mode id
+  local brief_dod delivered_dod brief_dod_canonical delivered_dod_canonical
+  physical_home="$TMP_ROOT/promote-dod/physical-home"
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
-  mkdir -p "$home/state" "$sendroot/bin"
+  mkdir -p "$physical_home/state" "$sendroot/bin"
+  ln -s "$physical_home" "$home"
   cat > "$sendroot/bin/fm-send.sh" <<'STUB'
 #!/usr/bin/env bash
 # Capture the message a promoted worker would receive, instead of steering one.
@@ -312,7 +345,7 @@ STUB
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
-    meta_real="$(CDPATH='' cd -- "$(dirname "$meta")" && pwd -P)/$(basename "$meta")"
+    meta_canonical="$(CDPATH='' cd -- "$(dirname "$meta")" && pwd -P)/$(basename "$meta")"
     out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: promotion should succeed"
 
@@ -337,8 +370,8 @@ STUB
       "$mode: promoted worker was not told to stop for any wrong worktree"
     assert_grep "git checkout -b fm/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
-    assert_grep "task record \`$meta_real\`" "$payload" \
-      "$mode: promoted worker's preflight was not bound to its task record"
+    assert_grep "task record \`$meta\`" "$payload" \
+      "$mode: promoted worker did not preserve its accepted absolute task-record path"
     assert_grep "delivery_ref=refs/heads/fm/$id" "$payload" \
       "$mode: promoted worker's preflight was not bound to its exact delivery ref"
     assert_grep 'git -C "$task_root" status --porcelain=v1 --untracked-files=all' "$payload" \
@@ -357,13 +390,18 @@ STUB
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
     # brief, so identical suffixes prove both workers receive the same contract.
-    FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
+    FM_HOME="$physical_home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode: ordinary ship brief generation should succeed"
+    brief_meta="$physical_home/state/$id.meta"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
+    brief_dod_canonical="$brief_dod.canonical"
+    delivered_dod_canonical="$delivered_dod.canonical"
+    awk '/^# Definition of done$/ { emit=1 } emit' "$physical_home/data/$id/brief.md" > "$brief_dod"
     awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
-    cmp -s "$brief_dod" "$delivered_dod" \
+    normalize_generated_task_record_path "$brief_dod" "$brief_meta" "$meta_canonical" > "$brief_dod_canonical"
+    normalize_generated_task_record_path "$delivered_dod" "$meta" "$meta_canonical" > "$delivered_dod_canonical"
+    cmp -s "$brief_dod_canonical" "$delivered_dod_canonical" \
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
   done
 

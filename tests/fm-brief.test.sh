@@ -195,10 +195,9 @@ EOF
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
 test_ship_modes_generate_clean_briefs() {
-  local home home_real id mode brief status task_record
+  local home id mode brief status task_record
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
-  home_real=$(CDPATH='' cd -- "$home" && pwd -P)
 
   for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
     id=${id_mode%%:*}
@@ -216,7 +215,7 @@ test_ship_modes_generate_clean_briefs() {
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
     assert_grep "no unresolved \`FINALIZE-AFTER(\` sentinel" "$brief" \
       "$id: every delivery mode must gate on zero unresolved FINALIZE-AFTER sentinels"
-    task_record="$home_real/state/$id.meta"
+    task_record="$home/state/$id.meta"
     assert_grep "task record \`$task_record\`" "$brief" \
       "$id: delivery preflight must bind to this task's durable worktree record"
     assert_grep "exactly one non-empty absolute \`worktree=\` value" "$brief" \

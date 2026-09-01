@@ -16,8 +16,9 @@ Load this when the work in front of you is larger than one task: a stage, a rele
 It is project-neutral judgment about where the work is going and in what order it should arrive.
 It is not a planning system: no tracker, scheduler, ledger, policy engine, or completion database comes out of it, and nothing here fixes which model or harness fills any role.
 
-Single-task work does not need this skill.
-`AGENTS.md` section 7 already owns per-task intake, delivery mode, dispatch, and merge authority, and section 8 owns supervision; this skill adds only what sequencing multiple tasks needs and never restates those.
+Ordinary single-task work does not need this skill when none of its explicit triggers applies: it has no stage, release, or final-acceptance dependency to reconcile and is not blocked only at its final step.
+When either trigger applies, load this skill for a single task and perform the named-dependency reconciliation or pre-staging judgment that triggered it.
+`AGENTS.md` section 7 already owns per-task intake, delivery mode, dispatch, and merge authority, and section 8 owns supervision; a triggered single task does not inherit tracer, vertical-outcome, or frontier-dispatch machinery, and this skill otherwise adds only what sequencing multiple tasks needs without restating those contracts.
 
 ## Name the destination before designing the route
 
