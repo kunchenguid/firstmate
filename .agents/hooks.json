@@ -30,5 +30,19 @@
         "timeout": 30
       }
     ]
+  },
+  "firstmate-subagent": {
+    "PreToolUse": [
+      {
+        "matcher": "invoke_subagent|define_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for d in \"$PWD/bin\" \"$PWD/../bin\" \"$PWD/.agents/bin\"; do [ -f \"$d/fm-subagent-pretool-check.sh\" ] && exec bash \"$d/fm-subagent-pretool-check.sh\"; done",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }

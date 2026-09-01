@@ -227,7 +227,7 @@ test_guard_arms_and_delivers_wake_as_continue() {
   pass "turnend guard: an actionable wake is one continue with the watcher wake in the reason"
 }
 
-test_guard_healthy_watcher_skips_arm() {
+test_guard_healthy_watcher_attaches_and_arms() {
   local dir out pid
   dir=$(make_primary_dir "$TMP_ROOT/t-healthy") || fail "could not build healthy fixture"
   install_turnend_scripts "$dir"
@@ -237,18 +237,19 @@ test_guard_healthy_watcher_skips_arm() {
   sleep 60 &
   pid=$!
   record_healthy_watcher "$dir" "$pid"
-  out=$(printf '%s' "$STOP_PAYLOAD" | env FM_HOME="$dir" AGY_TEST_ARM_LOG="$log" bash "$dir/bin/fm-turnend-guard-agy.sh") || {
+  out=$(printf '%s' "$STOP_PAYLOAD" | env FM_HOME="$dir" AGY_TEST_ARM_LOG="$log" AGY_TEST_ARM_MODE=wake bash "$dir/bin/fm-turnend-guard-agy.sh") || {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     fail "healthy-watcher guard must exit 0"
   }
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  [ "$out" = '{}' ] || fail "a live healthy watcher must not continue: $out"
-  [ ! -e "$log" ] || fail "a live healthy watcher must not be re-armed"
-  assert_contains "$(cat "$dir/state/.agy-turnend-epoch")" "outcome=healthy" "healthy watcher must record outcome=healthy"
-  kill "$pid" 2>/dev/null || true
-  pass "turnend guard: a live watcher with a fresh beacon is never re-armed"
+  case "$out" in
+    '{"decision":"continue","reason":"'*'"}') : ;;
+    *) fail "expected a continue decision object, got: $out" ;;
+  esac
+  assert_contains "$out" '"decision":"continue"' "wake delivery must continue the AGY loop even with healthy watcher attached"
+  pass "turnend guard: a live watcher attaches in foreground and continues on wake"
 }
 
 test_guard_afk_stands_down() {
@@ -622,7 +623,7 @@ test_guard_third_party_scope_is_inert
 test_guard_secondmate_home_is_a_primary
 test_guard_no_supervision_needed_skips_arm
 test_guard_arms_and_delivers_wake_as_continue
-test_guard_healthy_watcher_skips_arm
+test_guard_healthy_watcher_attaches_and_arms
 test_guard_afk_stands_down
 test_guard_foreign_live_lock_stands_down
 test_guard_dead_lock_does_not_block_arming
