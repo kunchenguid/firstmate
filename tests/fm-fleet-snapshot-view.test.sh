@@ -799,6 +799,474 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_compact_view_contract() {
+  local home fakebin help raw explicit_raw snapshot_json view_json compact repeated raw_error compact_error raw_rc compact_rc
+  local cmux_line decision_line scout_line secondmate_line ship_line recovery_line queued_line unstructured_line captain_line
+  home=$(make_home compact-contract)
+  write_fixture "$home"
+  mkdir -p "$home/projects/decision-worktree"
+  fm_write_meta "$home/state/decision-task.meta" \
+    "window=firstmate:fm-decision-task" \
+    "worktree=$home/projects/decision-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=scout"
+  record_claude_idle "$home/state" decision-task
+  printf 'needs-decision [key=route]: choose the release route\n' > "$home/state/decision-task.status"
+  awk '
+    /^## In flight/ {
+      print
+      print "unstructured in-flight recovery note"
+      next
+    }
+    /^## Done/ {
+      print "- [ ] captain-choice - Choose rollout (repo: alpha) (kind: captain) (hold: select blue or green) (hold-kind: captain)"
+      print ""
+    }
+    { print }
+  ' "$home/data/backlog.md" > "$home/data/backlog.next"
+  mv "$home/data/backlog.next" "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+
+  help=$("$VIEW" --help)
+  assert_contains "$help" "usage: fm-fleet-view.sh [--raw|--compact|--json]" \
+    "fleet view help did not publish the compact and full-detail modes"
+  raw=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  explicit_raw=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --raw)
+  [ "$raw" = "$explicit_raw" ] || fail "explicit --raw changed the default fleet view"
+  snapshot_json=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 \
+    "$SNAPSHOT" --json)
+  view_json=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 \
+    "$VIEW" --json)
+  [ "$snapshot_json" = "$view_json" ] || fail "fleet view --json changed the complete snapshot escape hatch"
+
+  compact=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --compact)
+  repeated=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --compact)
+  [ "$compact" = "$repeated" ] || fail "compact fleet view was not deterministic across identical reads"
+
+  assert_contains "$compact" "Rows shown/total: under-way=6/6; queued=3/3; done=0/1." \
+    "compact view did not retain every live and queued row or account for Done"
+  assert_contains "$compact" "Raw-view omissions: done detail rows=1; task path cells=5." \
+    "compact view did not count every detail row and path cell omitted from raw mode"
+  assert_contains "$compact" "Compact renderer truncation: none." "compact view did not make its no-truncation guarantee explicit"
+  assert_contains "$compact" "Full human detail: FM_HOME='$home' '$VIEW' --raw" \
+    "compact view omitted its exact raw-detail escape command"
+  assert_contains "$compact" "Complete raw snapshot: FM_HOME='$home' '$VIEW' --json" \
+    "compact view omitted its complete structured-detail escape command"
+  assert_contains "$compact" "Full queued hold detail: tasks-axi show <id> --full, or '$home/data/backlog.md'." \
+    "compact view omitted the full hold-detail escape hatch"
+  assert_contains "$compact" "! inventory error:" "compact view did not preserve the unstructured-row inventory error"
+  assert_contains "$compact" "! inventory item: unstructured in-flight: unstructured in-flight recovery note" \
+    "compact view did not retain an unstructured in-flight inventory item"
+  [ "$(printf '%s\n' "$compact" | grep -Fc '! inventory item: unstructured in-flight: unstructured in-flight recovery note')" -eq 1 ] \
+    || fail "compact view duplicated an unstructured in-flight inventory item"
+  assert_contains "$compact" "! cmux-task: unknown/none; ship alpha; cmux absent; detail=worktree gone (torn down?)" \
+    "compact view did not retain a task error and its detail"
+  assert_contains "$compact" "! decision decision-task[key=route]: needs-decision: choose the release route" \
+    "compact view did not retain an actionable keyed decision"
+  assert_contains "$compact" "! captain-choice: Choose rollout; alpha captain; hold=captain: select blue or green" \
+    "compact view did not retain the reason for a captain-actionable queued row"
+  assert_contains "$compact" "! unstructured: handoff note without canonical syntax" \
+    "compact view did not retain an unstructured queued row"
+  assert_not_contains "$compact" "done-task" "compact view leaked a Done detail row it says it omits"
+  assert_contains "$compact" "peek = bin/fm-peek.sh fm-<row-id>" \
+    "compact view dropped the exact ordinary-task action template"
+  assert_contains "$compact" "return = bin/fm-send.sh fm-<row-id> '<request>'" \
+    "compact view dropped the exact secondmate return action template"
+
+  cmux_line=$(printf '%s\n' "$compact" | grep -n '^! cmux-task:' | cut -d: -f1)
+  decision_line=$(printf '%s\n' "$compact" | grep -n '^! decision-task:' | cut -d: -f1)
+  scout_line=$(printf '%s\n' "$compact" | grep -n '^! scout-task:' | cut -d: -f1)
+  secondmate_line=$(printf '%s\n' "$compact" | grep -n '^- secondmate-task:' | cut -d: -f1)
+  ship_line=$(printf '%s\n' "$compact" | grep -n '^- ship-task:' | cut -d: -f1)
+  recovery_line=$(printf '%s\n' "$compact" | grep -n '^! inventory item: unstructured in-flight:' | cut -d: -f1)
+  [ "$cmux_line" -lt "$decision_line" ] && [ "$decision_line" -lt "$scout_line" ] \
+    && [ "$scout_line" -lt "$secondmate_line" ] && [ "$secondmate_line" -lt "$ship_line" ] \
+    && [ "$ship_line" -lt "$recovery_line" ] \
+    || fail "compact task rows did not preserve deterministic snapshot order"
+  queued_line=$(printf '%s\n' "$compact" | grep -n '^- queued-task:' | cut -d: -f1)
+  unstructured_line=$(printf '%s\n' "$compact" | grep -n '^! unstructured:' | cut -d: -f1)
+  captain_line=$(printf '%s\n' "$compact" | grep -n '^! captain-choice:' | cut -d: -f1)
+  [ "$queued_line" -lt "$unstructured_line" ] && [ "$unstructured_line" -lt "$captain_line" ] \
+    || fail "compact queued rows did not preserve backlog order"
+
+  raw_error=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_CREW_STATE_TIMEOUT=0 "$VIEW" --raw 2>&1)
+  raw_rc=$?
+  compact_error=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_CREW_STATE_TIMEOUT=0 "$VIEW" --compact 2>&1)
+  compact_rc=$?
+  [ "$raw_rc" -eq 2 ] && [ "$compact_rc" -eq "$raw_rc" ] \
+    || fail "compact mode changed a snapshot validation error exit status"
+  [ "$compact_error" = "$raw_error" ] \
+    || fail "compact mode changed or suppressed a snapshot validation error: $compact_error"
+  assert_contains "$compact_error" "FM_SNAPSHOT_CREW_STATE_TIMEOUT must be a positive integer" \
+    "compact mode did not preserve the underlying snapshot error"
+  pass "fleet view compact mode preserves raw output, rows, errors, ordering, omission counts, and escape hatches"
+}
+
+test_compact_view_relative_home_escape_hatches() {
+  local home relative_home canonical_home fakebin compact raw snapshot raw_command json_command escaped_raw escaped_json
+  home="$TMP_ROOT/relative-escape-home"
+  relative_home="relative-escape-home"
+  mkdir -p "$home/state" "$home/data" "$home/projects" "$home/config" "$TMP_ROOT/elsewhere"
+  canonical_home=$(cd "$home" && pwd -P)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  raw=$(cd "$TMP_ROOT" && PATH="$fakebin:$PATH" FM_HOME="$relative_home" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 "$VIEW" --raw)
+  snapshot=$(cd "$TMP_ROOT" && PATH="$fakebin:$PATH" FM_HOME="$relative_home" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 "$SNAPSHOT" --json)
+  compact=$(cd "$TMP_ROOT" && PATH="$fakebin:$PATH" FM_HOME="$relative_home" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 "$VIEW" --compact)
+  raw_command=$(printf '%s\n' "$compact" | sed -n 's/^Full human detail: //p')
+  json_command=$(printf '%s\n' "$compact" | sed -n 's/^Complete raw snapshot: //p')
+
+  escaped_raw=$(cd "$TMP_ROOT/elsewhere" && PATH="$fakebin:$PATH" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 sh -c "$raw_command")
+  escaped_json=$(cd "$TMP_ROOT/elsewhere" && PATH="$fakebin:$PATH" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 sh -c "$json_command")
+  [ "$escaped_raw" = "$raw" ] \
+    || fail "relative FM_HOME raw escape command did not recover the original complete fleet view"
+  [ "$escaped_json" = "$snapshot" ] \
+    || fail "relative FM_HOME JSON escape command did not recover the original complete snapshot"
+  assert_contains "$compact" "or '$canonical_home/data/backlog.md'." \
+    "relative FM_HOME queued-hold escape hatch was not canonicalized"
+  assert_compact_view_absolute_home_escape_hatches
+  pass "compact view preserves relative and absolute FM_HOME escape hatches"
+}
+
+test_compact_view_relative_root_override_escape_hatches() {
+  local home relative_root canonical_home fakebin compact raw snapshot raw_command json_command queued_hold_path escaped_raw escaped_json escaped_backlog
+  home="$TMP_ROOT/relative-root-override-home"
+  relative_root="relative-root-override-home"
+  mkdir -p "$home/state" "$home/data" "$home/projects" "$home/config" "$TMP_ROOT/elsewhere"
+  canonical_home=$(cd "$home" && pwd -P)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  raw=$(cd "$TMP_ROOT" && PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$relative_root" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 "$VIEW" --raw)
+  snapshot=$(cd "$TMP_ROOT" && PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$relative_root" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 "$SNAPSHOT" --json)
+  compact=$(cd "$TMP_ROOT" && PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$relative_root" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 "$VIEW" --compact)
+  raw_command=$(printf '%s\n' "$compact" | sed -n 's/^Full human detail: //p')
+  json_command=$(printf '%s\n' "$compact" | sed -n 's/^Complete raw snapshot: //p')
+  queued_hold_path=$(printf '%s\n' "$compact" | sed -n "s|^Full queued hold detail: tasks-axi show <id> --full, or '\(.*\)'\.$|\1|p")
+
+  escaped_raw=$(cd "$TMP_ROOT/elsewhere" && PATH="$fakebin:$PATH" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 sh -c "$raw_command")
+  escaped_json=$(cd "$TMP_ROOT/elsewhere" && PATH="$fakebin:$PATH" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 sh -c "$json_command")
+  escaped_backlog=$(cd "$TMP_ROOT/elsewhere" && sed -n '1p' "$queued_hold_path")
+  [ "$escaped_raw" = "$raw" ] \
+    || fail "relative FM_ROOT_OVERRIDE raw escape command did not recover the original complete fleet view"
+  [ "$escaped_json" = "$snapshot" ] \
+    || fail "relative FM_ROOT_OVERRIDE JSON escape command did not recover the original complete snapshot"
+  [ "$queued_hold_path" = "$canonical_home/data/backlog.md" ] && [ "$escaped_backlog" = "## In flight" ] \
+    || fail "relative FM_ROOT_OVERRIDE queued-hold escape path did not resolve to the fixture backlog from another directory"
+  pass "compact view preserves relative FM_ROOT_OVERRIDE escape hatches"
+}
+
+test_compact_view_combined_override_escape_hatches() {
+  local home root fakebin compact snapshot json_command escaped_json
+  home=$(make_home compact-combined-override-home)
+  root="$TMP_ROOT/compact-combined-override-root"
+  mkdir -p "$root" "$TMP_ROOT/elsewhere"
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+
+  snapshot=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 "$SNAPSHOT" --json)
+  compact=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 "$VIEW" --compact)
+  json_command=$(printf '%s\n' "$compact" | sed -n 's/^Complete raw snapshot: //p')
+  escaped_json=$(cd "$TMP_ROOT/elsewhere" && PATH="$fakebin:$PATH" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 sh -c "$json_command")
+
+  [ "$escaped_json" = "$snapshot" ] \
+    || fail "combined FM_HOME and FM_ROOT_OVERRIDE JSON escape command did not recover the original complete snapshot"
+  pass "compact view preserves combined FM_HOME and FM_ROOT_OVERRIDE escape hatches"
+}
+
+assert_compact_view_absolute_home_escape_hatches() {
+  local home alias_home fakebin compact
+  home=$(make_home compact-absolute-escape)
+  alias_home="$TMP_ROOT/compact-absolute-escape-alias"
+  write_fixture "$home"
+  ln -s "$home" "$alias_home"
+  fakebin=$(make_fakebin "$home")
+
+  compact=$(PATH="$fakebin:$PATH" FM_HOME="$alias_home" \
+    FM_SNAPSHOT_NOW=2026-08-30T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788091200 "$VIEW" --compact)
+
+  assert_contains "$compact" "Full human detail: FM_HOME='$alias_home' '$VIEW' --raw" \
+    "absolute FM_HOME raw escape command did not retain its supplied path"
+  assert_contains "$compact" "Complete raw snapshot: FM_HOME='$alias_home' '$VIEW' --json" \
+    "absolute FM_HOME JSON escape command did not retain its supplied path"
+  assert_contains "$compact" "or '$alias_home/data/backlog.md'." \
+    "absolute FM_HOME queued-hold escape path did not retain its supplied path"
+}
+
+test_compact_view_unmatched_in_flight_records() {
+  local home fakebin compact observation_line observation_rows worker_rows unstructured_rows busy_gen
+  home=$(make_home compact-unmatched-in-flight)
+  mkdir -p "$home/projects/observation" "$home/projects/worker"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] program - Aggregate program (repo: alpha) (kind: program)
+- [ ] observation - Watch production (repo: alpha) (kind: scout) (hold: wait for metrics) (hold-kind: external) (hold-until: 2026-09-01)
+- [ ] worker - Active worker (repo: alpha) (kind: ship)
+recovery note without canonical syntax
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/observation.meta" \
+    "window=firstmate:fm-observation" \
+    "worktree=$home/projects/observation" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=scout" \
+    "mode=scout"
+  printf 'working: watching metrics\n' > "$home/state/observation.status"
+  busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" observation)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" observation busy --gen "$busy_gen" \
+    --source codex-hook --event user-prompt-submit
+  fm_write_meta "$home/state/worker.meta" \
+    "window=firstmate:fm-worker" \
+    "worktree=$home/projects/worker" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: active\n' > "$home/state/worker.status"
+  fakebin=$(make_fakebin "$home")
+
+  compact=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --compact)
+  assert_contains "$compact" "Rows shown/total: under-way=4/4; queued=0/0; done=0/0." \
+    "compact view did not count every unmatched in-flight record"
+  assert_contains "$compact" "- program: Aggregate program; alpha program" \
+    "compact view omitted an unmatched program record"
+  observation_line=$(printf '%s\n' "$compact" | grep -E '^[-!] observation:')
+  assert_contains "$observation_line" "; hold=external: wait for metrics until 2026-09-01; action=peek" \
+    "compact view omitted a matched held record's identifying hold detail"
+  observation_rows=$(printf '%s\n' "$compact" | grep -Ec '^[-!] observation:')
+  [ "$observation_rows" -eq 1 ] || fail "compact view duplicated a task-backed held record"
+  worker_rows=$(printf '%s\n' "$compact" | grep -Ec '^[-!] worker:')
+  [ "$worker_rows" -eq 1 ] || fail "compact view duplicated a task-backed in-flight record"
+  assert_contains "$compact" "! inventory item: unstructured in-flight: recovery note without canonical syntax" \
+    "compact view omitted an unmatched unstructured in-flight record"
+  unstructured_rows=$(printf '%s\n' "$compact" | grep -Fc '! inventory item: unstructured in-flight: recovery note without canonical syntax')
+  [ "$unstructured_rows" -eq 1 ] || fail "compact view duplicated an unmatched unstructured in-flight record"
+  pass "compact view retains every unmatched in-flight record without duplicates"
+}
+
+test_compact_view_missing_backlog_error() {
+  local home compact
+  home=$(make_home compact-missing-backlog)
+
+  compact=$(FM_HOME="$home" "$VIEW" --compact)
+  assert_contains "$compact" "! inventory error: backlog missing: $home/data/backlog.md" \
+    "compact view did not surface a missing backlog inventory error"
+  pass "compact view surfaces a missing backlog inventory error"
+}
+
+test_compact_view_discloses_incomplete_secondmate_evidence() {
+  local home partial unavailable omitted fakebin compact
+  home=$(make_home compact-secondmate-evidence)
+  partial="$TMP_ROOT/compact-partial-home"
+  unavailable="$TMP_ROOT/compact-unavailable-home"
+  omitted="$TMP_ROOT/compact-omitted-home"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$partial/state" "$partial/data" "$partial/config" "$partial/projects" "$partial/bin"
+  printf '# Firstmate fixture\n' > "$partial/AGENTS.md"
+  printf 'a-partial\n' > "$partial/.fm-secondmate-home"
+  cat > "$partial/data/backlog.md" <<'EOF'
+## In flight
+- [ ] orphan-child - Missing child metadata (repo: alpha) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$omitted/state" "$omitted/data" "$omitted/config" "$omitted/projects" "$omitted/bin"
+  printf '# Firstmate fixture\n' > "$omitted/AGENTS.md"
+  printf 'c-omitted\n' > "$omitted/.fm-secondmate-home"
+  cat > "$omitted/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  cat > "$home/data/secondmates.md" <<EOF
+- a-partial - fixture (home: $partial; scope: fixture; projects: alpha; added 2026-08-30)
+- b-unavailable - fixture (home: $unavailable; scope: fixture; projects: alpha; added 2026-08-30)
+- c-omitted - fixture (home: $omitted; scope: fixture; projects: alpha; added 2026-08-30)
+EOF
+  fakebin=$(make_fakebin "$home")
+
+  compact=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SECONDMATES=2 "$VIEW" --compact)
+  assert_contains "$compact" "Compact renderer truncation: none." \
+    "compact view did not distinguish renderer completeness from snapshot bounds"
+  assert_contains "$compact" "! secondmate evidence: bounded records omitted=1; shown=2/3" \
+    "compact view hid a bounded secondmate record"
+  assert_contains "$compact" '! secondmate evidence a-partial: partial; home=' \
+    "compact view hid partial structured secondmate evidence"
+  assert_contains "$compact" 'reason=structured home state invalid: in-flight backlog item has no child metadata: orphan-child' \
+    "compact view hid the partial secondmate reason"
+  assert_contains "$compact" "! secondmate evidence b-unavailable: unavailable; home=$unavailable; reason=invalid home: not a directory" \
+    "compact view hid unavailable secondmate evidence"
+  pass "compact view discloses bounded, unavailable, and partial secondmate evidence"
+}
+
+test_compact_view_discloses_bounded_secondmate_holds() {
+  local home secondmate fakebin snapshot compact
+  home=$(make_home compact-bounded-secondmate-holds)
+  secondmate="$TMP_ROOT/compact-bounded-holds-home"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$secondmate/state" "$secondmate/data" "$secondmate/config" "$secondmate/projects" "$secondmate/bin"
+  printf '# Firstmate fixture\n' > "$secondmate/AGENTS.md"
+  printf 'bounded-holds\n' > "$secondmate/.fm-secondmate-home"
+  cat > "$secondmate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] orphan-child - Missing child metadata (repo: gamma) (kind: ship)
+
+## Queued
+- [ ] first-hold - Wait for first dependency (repo: alpha) (kind: ship) (hold: first external dependency) (hold-kind: external)
+- [ ] second-hold - Wait for second dependency (repo: beta) (kind: scout) (hold: second external dependency) (hold-kind: external)
+
+## Done
+EOF
+  cat > "$home/data/secondmates.md" <<EOF
+- bounded-holds - fixture (home: $secondmate; scope: fixture; projects: alpha; added 2026-08-30)
+EOF
+  fm_write_meta "$home/state/bounded-holds.meta" \
+    "window=firstmate:fm-bounded-holds" \
+    "worktree=$secondmate" \
+    "project=$secondmate" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$secondmate" \
+    "projects=alpha"
+  printf 'needs-decision [key=stale]: old parent question\n' > "$home/state/bounded-holds.status"
+  fakebin=$(make_fakebin "$home")
+
+  snapshot=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SECONDMATE_QUEUED=1 "$SNAPSHOT" --json)
+  printf '%s' "$snapshot" | jq -e '
+    .secondmate_current.records[] | select(.id == "bounded-holds")
+    | .provenance.trust == "partial-structured"
+      and .contradiction == true
+      and .counts.holds == 2
+      and (.holds | length) == 1
+      and any(.omitted[]; .surface == "holds" and .count == 1)
+  ' >/dev/null || fail "snapshot did not disclose contradictory evidence and the exact bounded hold count: $snapshot"
+
+  compact=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SECONDMATE_QUEUED=1 "$VIEW" --compact)
+  assert_contains "$compact" "! secondmate evidence bounded-holds: partial; home=" \
+    "compact view hid partial structured secondmate evidence"
+  assert_contains "$compact" "! secondmate evidence bounded-holds: contradictory; home=" \
+    "compact view hid contradictory parent evidence alongside partial structured evidence"
+  assert_contains "$compact" "! secondmate evidence bounded-holds: bounded holds omitted=1" \
+    "compact view hid a bounded secondmate hold"
+  assert_contains "$compact" "! secondmate evidence bounded-holds: bounded queued omitted=1" \
+    "compact view hid the corresponding bounded queued row"
+
+  awk '
+    /^## Done/ { print "unstructured queued recovery note"; print "" }
+    { print }
+  ' "$secondmate/data/backlog.md" > "$secondmate/data/backlog.next"
+  mv "$secondmate/data/backlog.next" "$secondmate/data/backlog.md"
+
+  snapshot=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SECONDMATE_QUEUED=1 "$SNAPSHOT" --json)
+  printf '%s' "$snapshot" | jq -e '
+    .secondmate_current.records[] | select(.id == "bounded-holds")
+    | .provenance.selected == "parent-event-fallback"
+      and .current.state == "unknown"
+      and any(.omitted[]; .surface == "holds" and .count == 1)
+      and any(.omitted[]; .surface == "queued" and .count == 1)
+  ' >/dev/null || fail "snapshot fallback did not preserve exact bounded hold and queued counts: $snapshot"
+
+  compact=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SECONDMATE_QUEUED=1 "$VIEW" --compact)
+  assert_contains "$compact" "! secondmate evidence bounded-holds: unavailable; home=" \
+    "compact view hid unavailable fallback secondmate evidence"
+  assert_contains "$compact" "! secondmate evidence bounded-holds: bounded holds omitted=1" \
+    "compact fallback hid a bounded secondmate hold"
+  assert_contains "$compact" "! secondmate evidence bounded-holds: bounded queued omitted=1" \
+    "compact fallback hid the corresponding bounded queued row"
+  pass "compact view discloses bounded secondmate rows through structured and fallback records"
+}
+
+test_compact_view_representative_reduction() {
+  local home fakebin raw compact raw_bytes compact_bytes raw_tokens compact_tokens i id busy_gen
+  home=$(make_home compact-measurement)
+  mkdir -p "$home/projects"
+  {
+    printf '## In flight\n'
+    i=1
+    while [ "$i" -le 12 ]; do
+      id=$(printf 'representative-worker-%02d-with-stable-identity' "$i")
+      mkdir -p "$home/projects/$id"
+      fm_write_meta "$home/state/$id.meta" \
+        "window=firstmate:fm-$id" \
+        "worktree=$home/projects/$id" \
+        "project=representative-project" \
+        "harness=claude" \
+        "kind=scout" \
+        "mode=scout"
+      printf 'working: representative supervision activity %02d\n' "$i" > "$home/state/$id.status"
+      busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" "$id")
+      "$ROOT/bin/fm-busy-event.sh" apply "$home/state" "$id" busy --gen "$busy_gen" \
+        --source claude-hook --event user-prompt-submit
+      printf -- '- [ ] %s - Representative active task %02d (repo: representative-project) (kind: scout)\n' "$id" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Queued\n'
+    i=1
+    while [ "$i" -le 24 ]; do
+      id=$(printf 'representative-queued-%02d-with-stable-identity' "$i")
+      printf -- '- [ ] %s - Representative queued task %02d with bounded acceptance criteria (repo: representative-project) (kind: ship)\n' "$id" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+    i=1
+    while [ "$i" -le 8 ]; do
+      id=$(printf 'representative-done-%02d-with-stable-identity' "$i")
+      printf -- '- [x] %s - Representative completed task %02d https://github.com/kunchenguid/firstmate/pull/%d (repo: representative-project) (kind: ship) (merged 2026-08-30)\n' "$id" "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+
+  raw=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --raw)
+  compact=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW" --compact)
+  raw_bytes=$(printf '%s' "$raw" | LC_ALL=C wc -c | tr -d ' ')
+  compact_bytes=$(printf '%s' "$compact" | LC_ALL=C wc -c | tr -d ' ')
+  [ $((compact_bytes * 100)) -le $((raw_bytes * 75)) ] \
+    || fail "representative compact view saved less than 25%: raw=$raw_bytes compact=$compact_bytes"
+  raw_tokens=$(((raw_bytes + 3) / 4))
+  compact_tokens=$(((compact_bytes + 3) / 4))
+  pass "compact fleet view representative fixture: $raw_bytes -> $compact_bytes bytes (~$raw_tokens -> ~$compact_tokens tokens at four bytes/token)"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -814,3 +1282,12 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_compact_view_contract
+test_compact_view_relative_home_escape_hatches
+test_compact_view_relative_root_override_escape_hatches
+test_compact_view_combined_override_escape_hatches
+test_compact_view_unmatched_in_flight_records
+test_compact_view_missing_backlog_error
+test_compact_view_discloses_incomplete_secondmate_evidence
+test_compact_view_discloses_bounded_secondmate_holds
+test_compact_view_representative_reduction

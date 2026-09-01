@@ -230,6 +230,46 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+## Compact fleet review
+
+The explicit compact fleet view was measured on 2026-08-31 at commit `166323975d44f84c6e8b7f1f855b336af7713445` through the public `bin/fm-fleet-view.sh` interface.
+The representative fixture carries 12 live rows, 24 queued rows, 8 retained Done rows, long stable identities, project paths, endpoint state, and repeated action guidance.
+The default and explicit raw invocations were byte-identical, while compact output retained every live and queued row, every state and endpoint error, deterministic ordering, exact omission counts, explicit no-truncation disclosure, and raw-detail escape commands.
+
+```sh
+bin/fm-test-run.sh tests/fm-fleet-snapshot-view.test.sh
+```
+
+Observed output:
+
+```text
+ok - fleet view compact mode preserves raw output, rows, errors, ordering, omission counts, and escape hatches
+ok - compact fleet view representative fixture: 9875 -> 6270 bytes (~2469 -> ~1568 tokens at four bytes/token)
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
+The measured reduction is 3,605 bytes, or 36.5%, and approximately 901 tokens per representative recurring fleet review under the stated four-bytes-per-token estimate.
+The compact renderer has no harness or model-provider branch.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Cursor primaries, plus Muse workers, all consume the same normalized snapshot fields, so no vendor or model call is applicable to this view.
+Tmux, Herdr, Zellij, Orca, and cmux remain normalized by `bin/fm-fleet-snapshot.sh`; their adapter-specific endpoint behavior stays owned by the runtime-backend verification and portable backend suites.
+
+```sh
+bin/fm-test-run.sh \
+  tests/fm-backend.test.sh \
+  tests/fm-backend-herdr.test.sh \
+  tests/fm-backend-zellij.test.sh \
+  tests/fm-backend-orca.test.sh
+```
+
+Observed backend-suite summary:
+
+```text
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=530342
+FM_TEST_SUMMARY_FAMILY family=backend-dispatch count=2 duration_ms=421294 failed=0
+FM_TEST_SUMMARY_FAMILY family=orca count=1 duration_ms=69970 failed=0
+FM_TEST_SUMMARY_FAMILY family=zellij count=1 duration_ms=38657 failed=0
+```
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Cursor's stop-hook park validated on 2026-08-13.

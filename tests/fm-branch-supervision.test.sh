@@ -52,6 +52,8 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"Report verdict captain for any outcome that directly answers an explicit captain request."*"This rule is unconditional"*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
     *) fail "branch prompt lost the unconditional requested-outcome or routine-silence rules" ;;
   esac
+  assert_contains "$out_a" "run \`bin/fm-fleet-view.sh --compact\`" \
+    "branch heartbeat prompt lost the compact fleet-view command"
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
