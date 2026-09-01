@@ -140,12 +140,14 @@
 #   requests per hour for the whole home, independent of the tracked count;
 #   per-PR poll interval is at most N x slot while open and N x slot x
 #   FM_PR_FOLLOW_SETTLED_EVERY once merged or closed, because settled sources
-#   poll only every SETTLED_EVERY-th visit of their slot. The first poll after
-#   a child starts is immediate (baseline and post-restart verification), and
-#   roster churn re-derives every duty assignment from the current roster on
-#   each wake, costing at most one extra cycle. Registration is never capped:
-#   every open, closed-unmerged, merged, and post-merge PR stays tracked until
-#   the explicit retire.
+#   poll only every SETTLED_EVERY-th visit of their slot. A child's first poll
+#   waits for its own slot too, so restarting or reconciling the whole roster
+#   at once cannot burst past the bound; it is exempt only from the settled
+#   throttle, so a baseline or a post-restart verification lands within one
+#   roster cycle. Roster churn re-derives every duty assignment from the
+#   current roster on each wake, costing at most one extra cycle.
+#   Registration is never capped: every open, closed-unmerged, merged, and
+#   post-merge PR stays tracked until the explicit retire.
 #
 # Result document (the captured result named by the wake):
 #   schema: fm-pr-follow-event-v1
@@ -1626,12 +1628,14 @@ rotation_roster() {
   done | LC_ALL=C sort
 }
 
-# rotation_eval <sid> <cursor-state>: ROT_ON_DUTY=1 when this source owns the
-# current slot; ROT_WAIT is the seconds until the next slot boundary. Roster
-# membership is re-derived on every call, so arms and retires take effect on
-# the next wake (aggregate-bound contract in the header).
+# rotation_eval <sid> <cursor-state> [startup]: ROT_ON_DUTY=1 when this source
+# owns the current slot; ROT_WAIT is the seconds until the next slot boundary.
+# Roster membership is re-derived on every call, so arms and retires take
+# effect on the next wake (aggregate-bound contract in the header). startup=1
+# waives only the settled throttle, never the slot itself, so a child's first
+# poll cannot burst alongside every other source a reconcile just started.
 rotation_eval() {
-  local self=$1 cur_state=$2 now slot idx=-1 total=0 s cycle
+  local self=$1 cur_state=$2 startup=${3-0} now slot idx=-1 total=0 s cycle
   ROT_ON_DUTY=0
   ROT_WAIT=$INTERVAL
   now=$(date +%s) || { ROT_ON_DUTY=1; return 0; }
@@ -1649,12 +1653,14 @@ rotation_eval() {
     return 0
   fi
   [ $(( slot % total )) -eq "$idx" ] || return 0
-  case "$cur_state" in
-    merged|closed)
-      cycle=$(( slot / total ))
-      [ $(( cycle % SETTLED_EVERY )) -eq 0 ] || return 0
-      ;;
-  esac
+  if [ "$startup" -ne 1 ]; then
+    case "$cur_state" in
+      merged|closed)
+        cycle=$(( slot / total ))
+        [ $(( cycle % SETTLED_EVERY )) -eq 0 ] || return 0
+        ;;
+    esac
+  fi
   ROT_ON_DUTY=1
 }
 
@@ -1784,15 +1790,15 @@ cmd_run() {
 
   while :; do
     prf_quarantine_gate || continue
-    # The first poll after a child starts is immediate (baseline and
-    # post-restart verification); every later poll waits for this source's
-    # rotation slot, which bounds the aggregate request rate (header).
-    if [ "$first_poll" -eq 0 ]; then
-      rotation_eval "$SID" "$CUR_STATE"
-      if [ "$ROT_ON_DUTY" -ne 1 ]; then
-        sleep "$ROT_WAIT"
-        continue
-      fi
+    # Every poll, the first one included, waits for this source's rotation
+    # slot, which bounds the aggregate request rate even when a reconcile
+    # starts the whole retained roster at once (header). A child's first poll
+    # is exempt only from the settled throttle, so a baseline or a
+    # post-restart verification still lands within one roster cycle.
+    rotation_eval "$SID" "$CUR_STATE" "$first_poll"
+    if [ "$ROT_ON_DUTY" -ne 1 ]; then
+      sleep "$ROT_WAIT"
+      continue
     fi
     first_poll=0
     gen_seen=$CUR_GENERATION

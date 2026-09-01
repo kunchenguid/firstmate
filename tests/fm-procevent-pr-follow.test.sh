@@ -1185,27 +1185,37 @@ pass "a bounded approval set never repeats what it cannot record"
 # --- deterministic rotation bounds aggregate load without starvation ----------
 new_section rotation
 gh_fix_default
-# Three tracked PRs share one home; with a two-second slot each source owns
-# one slot per three, so at most one poll burst happens per slot.
+# Five tracked PRs share one home; with a two-second slot each source owns one
+# slot per five, so at most one poll burst happens per slot.
 FM_PR_FOLLOW_ROTATION_SLOT=2
 export FM_PR_FOLLOW_ROTATION_SLOT
 sids=()
-urls=("https://github.com/octo/app/pull/941" "https://github.com/octo/app/pull/942" "https://github.com/octo/app/pull/943")
+urls=("https://github.com/octo/app/pull/941" "https://github.com/octo/app/pull/942" "https://github.com/octo/app/pull/943" "https://github.com/octo/app/pull/944" "https://github.com/octo/app/pull/945")
 for u in "${urls[@]}"; do
   s=$(prf "$H" source-id "$u")
   sids+=("$s")
   prf "$H" arm task-rot-"${u##*/}" "$u" >/dev/null
 done
 : > "$GH_TEST_POLL_LOG"
+# Reconciling the whole retained roster at once starts every source together:
+# the startup polls are rotated like any other poll, so the burst that lands
+# before the last baseline stays inside one per elapsed slot (plus one for the
+# boundary the window may straddle) instead of one per tracked PR.
+rot_start=$(date +%s)
 pe "$H" reconcile >/dev/null
 for s in "${sids[@]}"; do
-  wait_for_baseline "$H" "$s" 150 || fail "rotation starved $s of its baseline poll"
+  wait_for_baseline "$H" "$s" 200 || fail "rotation starved $s of its baseline poll"
 done
-# Measure a stable eight-slot window: with three sources every one of them
-# owns multiple slots, at most one poll burst may start per slot, and the
-# lower bound tolerates a bounded number of boundary misses under load
-# without allowing starvation (the deterministic starvation bound in the
-# adapter header: every source owns one slot per three).
+rot_elapsed=$(( $(date +%s) - rot_start ))
+startup_bursts=$(grep -c . "$GH_TEST_POLL_LOG" || true)
+startup_allowed=$(( rot_elapsed / 2 + 2 ))
+[ "$startup_bursts" -le "$startup_allowed" ] \
+  || fail "simultaneous startup burst: $startup_bursts poll bursts in ${rot_elapsed}s (bound $startup_allowed)"
+# Measure a stable eight-slot window: with five sources every one of them owns
+# at least one slot, at most one poll burst may start per slot, and the lower
+# bound tolerates a bounded number of boundary misses under load without
+# allowing starvation (the deterministic starvation bound in the adapter
+# header: every source owns one slot per five).
 : > "$GH_TEST_POLL_LOG"
 sleep 16
 bursts=$(grep -c . "$GH_TEST_POLL_LOG" || true)
