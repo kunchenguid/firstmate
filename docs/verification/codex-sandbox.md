@@ -91,10 +91,10 @@ So a ship crewmate gets its two `state/<id>.*` files, its own `state/<id>.inbox/
 Every root is emitted with its symlinks resolved.
 The launch's own `notify` hook path is built from a `pwd -P` state directory and codex resolves a granted root the same way, so a home reached through a symlink - a `/tmp` home on macOS, where `/tmp` is `/private/tmp` - would otherwise be granted a path the worker never writes.
 
-Pre-creating `state/<id>.turn-ended` does make it a new signal file for the watcher's own scan, which reports any turn-end marker whose signature differs from its persisted `state/.seen-*` one (`scan_signals` in `bin/fm-watch.sh`).
-`bin/fm-spawn.sh` therefore seeds that marker at creation time, using the same signature the scan compares against, so the pre-creation the file grant depends on is not surfaced to the captain as a turn nobody took.
-Codex has no verified semantic busy source that could absorb such a wake.
-An already-existing marker is left alone, because its unreported signature may be a real turn end nobody has surfaced yet.
+Pre-creating a file under `state/` does make it a new signal file for the watcher's own scan, which reports any status file or turn-end marker whose signature differs from its persisted `state/.seen-*` one (`scan_signals` in `bin/fm-watch.sh`).
+That applies to both files this grant pre-creates, `state/<id>.status` and `state/<id>.turn-ended`, so `bin/fm-spawn.sh` routes every pre-created root through one helper that marks it as already reported through `fm_wake_signal_mark_current` (`bin/fm-wake-lib.sh`), the inverse of the check the scan makes.
+Codex has no verified semantic busy source that could absorb such a wake, so a file the spawn conjured would otherwise cost the captain a turn for activity nobody produced.
+Later real activity changes the signature and surfaces normally, and a file that already exists is left untouched, because its unreported signature may be real activity nobody has surfaced yet.
 
 The captain-hold completion gate needs the whole `state/` grant a scout gets: `fm-captain-hold.sh complete` and `verify` both succeeded with `state/`, and both create the mktemp-named lock owner directory there. A ship crewmate never runs the gate, which is why its narrower per-path grant is sufficient.
 
@@ -148,12 +148,15 @@ Cursor's sandbox therefore does not confine writes to the workspace the way code
 | A ship crewmate can perform the steering-inbox acknowledgement move under its own grant, and cannot once the inbox root is removed | `tests/fm-codex-sandbox-grant.test.sh` |
 | No other adapter's launch acquired a grant | `tests/fm-codex-sandbox-grant.test.sh` |
 | The scout set is sufficient for a real status append, report, captain-hold completion gate, and commit, and each root is load-bearing; the ship set is sufficient for a status append, turn-ended touch, and commit while the shared `state/` stays unwritable so a sibling task's records cannot be reached | `tests/fm-codex-sandbox-grant.test.sh`, by making everything outside the emitted roots unwritable |
-| codex still denies those paths without the grant and allows exactly them with it | `tests/fm-codex-sandbox-grant-live-e2e.test.sh` (opt-in, real binary) |
-| firstmate's own `--add-dir` flags reach that policy through a real model turn | `tests/fm-codex-sandbox-grant-live-e2e.test.sh`, `codex exec` half |
+| Neither pre-created state file reads to the watcher as new activity, while a later real append still does | `tests/fm-codex-sandbox-grant.test.sh` |
+| codex still denies the SCOUT's paths without the grant and allows exactly them with it | `tests/fm-codex-sandbox-grant-live-e2e.test.sh` (opt-in, real binary), scout halves |
+| firstmate's own `--add-dir` flags reach that policy through a real model turn | `tests/fm-codex-sandbox-grant-live-e2e.test.sh`, `codex exec` halves |
+| codex accepts and enforces the FILE form of `--add-dir` that is the whole ship and secondmate grant: the ship's own two state files become writable and a sibling task's status file in the same `state/` stays denied | `tests/fm-codex-sandbox-grant-live-e2e.test.sh`, ship half |
 
 Not proven, stated plainly:
 
 - The **interactive TUI** path was not driven end to end. What is proven is that the interactive parser accepts the exact repeated flag, and that the same flag reaches the sandbox policy in `codex exec`. Both surfaces share one top-level flag parser, but no test drives a real interactive pane through the three writes.
+- The live guard composes a **scout** launch and a **ship** launch. The secondmate's grant is not composed against the real binary; it is the same single-file `state/<id>.status` form the ship half proves, plus its own inbox directory, so what the guard leaves unexercised is the secondmate spawn path rather than the mechanism its roots rely on.
 - A codex worker **completing a no-mistakes ship** is not covered, and by the measurements above cannot work: the pipeline needs network and `~/.no-mistakes`.
 - `bin/fm-captain-hold.sh` **registering** a new captain hold from a crewmate would take `data/backlog.md.lock` and so is not served by the task-scoped `data/<id>/` grant; this is deliberate, because registering a hold is the parent firstmate's job and no crewmate or scout contract does it. The portable suite exercises `complete` and `verify`, which need only `state/`.
 - The recursion `fm_lock_try_acquire` performs when `fm_lock_try_create` fails for a **permanent** reason (the observed `.lock.steal.steal...` until `File name too long`) is not fixed here. Removing the denial removes the trigger seen on 2026-08-26, but any other permanent write failure - a full or read-only filesystem - would still recurse.

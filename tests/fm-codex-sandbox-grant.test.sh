@@ -147,14 +147,16 @@ canonical_of() {  # <path>
 # --- 1. Composition ---------------------------------------------------------
 
 test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir() {
-  local rec out roots gitdir state_real r
+  local rec out roots gitdir state_real home_real data_real r forbidden
   rec=$(make_case ship); read_case "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off) \
     || fail "codex ship spawn failed: $out"
 
   gitdir=$(cd "$(git -C "$WT_DIR" rev-parse --git-common-dir)" && pwd -P)
-  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  home_real=$(cd "$HOME_DIR" && pwd -P)
+  state_real="$home_real/state"
+  data_real="$home_real/data"
   roots=$(granted_roots "$LAUNCH_LOG")
   # A ship crewmate never runs the completion gate and writes no report, so the
   # only paths it gets outside its worktree are its OWN two per-task state files,
@@ -191,19 +193,25 @@ EOF
     || fail "the granted turn-ended file was not pre-created, so its single-file root cannot resolve"
   [ -d "$HOME_DIR/state/$CASE_ID.inbox/handled" ] \
     || fail "the granted inbox and its handled/ were not pre-created, so the acknowledgement move has nowhere to land"
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/state" \
-    && fail "a ship crewmate must NOT receive the shared state directory; only its own two files: $roots"
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data/$CASE_ID" \
-    && fail "a ship crewmate writes no report, so it must not receive a data grant: $roots"
-
-  # The grant is those paths and nothing wider: $FM_HOME itself stays denied,
-  # which is what keeps .env, config/, and projects/ unwritable.
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR" \
-    && fail "the firstmate home itself must never be granted: $roots"
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/config" \
-    && fail "config/ must never be granted: $roots"
-  printf '%s\n' "$roots" | grep -qxF "$HOME_DIR/data" \
-    && fail "the shared data/ root must never be granted: $roots"
+  # The isolation half of the per-kind scoping, and the only assertions that
+  # prove it. Every forbidden path is spelled CANONICALLY, because the emitted
+  # roots are: comparing a $TMPDIR-spelled path against a /private-resolved root
+  # would make each of these guards unfireable on macOS, which is the platform of
+  # record in docs/verification/codex-sandbox.md, and they would pass while the
+  # grant leaked exactly what they forbid.
+  [ "$state_real" = "$(canonical_of "$HOME_DIR/state")" ] \
+    || fail "the forbidden-path spellings are not canonical, so the isolation guards below cannot fire"
+  for forbidden in \
+    "$state_real:a ship crewmate must NOT receive the shared state directory; only its own per-task paths" \
+    "$data_real/$CASE_ID:a ship crewmate writes no report, so it must not receive a data grant" \
+    "$data_real:the shared data/ root must never be granted" \
+    "$home_real:the firstmate home itself must never be granted" \
+    "$home_real/config:config/ must never be granted" \
+    "$home_real/projects:projects/ must never be granted"
+  do
+    printf '%s\n' "$roots" | grep -qxF "${forbidden%%:*}" \
+      && fail "${forbidden#*:}: $roots"
+  done
   grep -q '__CODEXADDDIRS__' "$LAUNCH_LOG" \
     && fail "the placeholder leaked into the launch command"
 
@@ -221,31 +229,38 @@ EOF
   pass "codex ship: grants only its own status + turn-ended files, its own steering inbox, and the out-of-tree git common dir, never the shared state directory"
 }
 
-# The turn-ended marker is pre-created so its single-file root resolves, which
-# makes it a brand-new signal file for the watcher's own scan: bin/fm-watch.sh
-# scan_signals reports any turn-end marker whose signature differs from its
+# EVERY file the grant pre-creates so a single-file root can resolve becomes a
+# brand-new signal file for the watcher's own scan: bin/fm-watch.sh scan_signals
+# reports any status file or turn-end marker whose signature differs from its
 # persisted state/.seen-* one, and codex has no verified semantic busy source that
-# could absorb the resulting wake. So the spawn must seed that marker, and seed it
-# narrowly enough that a REAL turn end still reports.
-test_precreated_turn_ended_marker_is_not_read_as_a_turn_end() {
-  local rec out marker
-  rec=$(make_case turnend-seed); read_case "$rec"
+# could absorb the resulting wake. So the spawn must mark each one as already
+# reported, narrowly enough that REAL later activity still reports. This covers
+# both pre-created files together, because the defect is a property of
+# pre-creation rather than of either file.
+test_precreated_state_files_are_not_read_as_new_activity() {
+  local rec out f label
+  rec=$(make_case precreate-seed); read_case "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$CASE_ID" "$PROJ_DIR" codex --mode no-mistakes --yolo off) \
     || fail "codex ship spawn failed: $out"
-  marker="$HOME_DIR/state/$CASE_ID.turn-ended"
-  [ -f "$marker" ] || fail "the turn-ended marker was not pre-created"
 
-  # A false here is exactly the row the watcher's scan would emit.
-  signal_reads_as_reported "$HOME_DIR/state" "$marker" \
-    || fail "the pre-created turn-ended marker reads as unreported, so the first watcher poll wakes the captain for a turn nobody took"
+  for label in status turn-ended; do
+    f="$HOME_DIR/state/$CASE_ID.$label"
+    [ -f "$f" ] || fail "the $label file was not pre-created, so its single-file root cannot resolve"
+    # A false here is exactly the row the watcher's scan would emit.
+    signal_reads_as_reported "$HOME_DIR/state" "$f" \
+      || fail "the pre-created $label file reads as unreported, so the first watcher poll wakes the captain for activity nobody produced"
+  done
 
-  # Not vacuous: the seed must record the marker as it was created, not suppress
-  # the file forever. A real turn end changes the signature and must report again.
-  printf 'x' >> "$marker"
-  signal_reads_as_reported "$HOME_DIR/state" "$marker" \
-    && fail "the seeded marker also suppresses a REAL turn end; the seed is too broad"
-  pass "the pre-created turn-ended marker is seeded as already reported, and a real turn end still reports"
+  # Not vacuous: marking must record each file AS CREATED, not suppress it
+  # forever. Real later activity changes the signature and must report again.
+  printf 'working: real line\n' >> "$HOME_DIR/state/$CASE_ID.status"
+  signal_reads_as_reported "$HOME_DIR/state" "$HOME_DIR/state/$CASE_ID.status" \
+    && fail "the seeded status marker also suppresses a REAL status append; the mark is too broad"
+  printf 'x' >> "$HOME_DIR/state/$CASE_ID.turn-ended"
+  signal_reads_as_reported "$HOME_DIR/state" "$HOME_DIR/state/$CASE_ID.turn-ended" \
+    && fail "the seeded turn-ended marker also suppresses a REAL turn end; the mark is too broad"
+  pass "both pre-created state files are marked as already reported, and real later activity on each still reports"
 }
 
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir() {
@@ -562,7 +577,7 @@ test_ship_grant_covers_the_steering_inbox_acknowledgement() {
 }
 
 test_ship_grants_only_its_own_state_files_and_out_of_tree_git_dir
-test_precreated_turn_ended_marker_is_not_read_as_a_turn_end
+test_precreated_state_files_are_not_read_as_new_activity
 test_scout_grants_state_dir_data_and_out_of_tree_git_dir
 test_secondmate_grants_only_the_parent_status_file
 test_other_adapters_are_untouched

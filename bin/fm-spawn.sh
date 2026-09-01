@@ -1358,11 +1358,13 @@ pi_supports_tui_mode() {
 #     neither the append nor the touch needs the directory-create permission a
 #     file grant withholds; touching an existing turn-ended marker only bumps its
 #     mtime, which is exactly what the watcher ages (bin/fm-watch.sh
-#     busy_turn_over_age). Pre-creating the turn-ended marker DOES make it a new
-#     signal file for bin/fm-watch.sh scan_signals, which reports any marker whose
-#     signature differs from its persisted state/.seen-* one, so this seeds that
-#     marker at creation time: codex has no semantic busy source that could absorb
-#     the wake, and a turn-end wake for a turn nobody took is a false report.
+#     busy_turn_over_age). Pre-creating a state/ file DOES make it a new signal
+#     file for bin/fm-watch.sh scan_signals, which reports any status file or
+#     turn-end marker whose signature differs from its persisted state/.seen-*
+#     one, so every file this grant pre-creates goes through
+#     codex_precreate_root_file below and is marked as already reported: codex has
+#     no semantic busy source that could absorb such a wake, and a wake for
+#     activity nobody produced is a false report.
 #   ship crewmate and secondmate also get the task's OWN steering inbox DIRECTORY,
 #     state/<id>.inbox (path owned by fm_task_inbox_dir in
 #     bin/fm-task-inbox-lib.sh). Every brief kind carries the inbox section
@@ -1419,9 +1421,26 @@ codex_root_real() {  # <path>
   printf '%s\n' "$path"
 }
 
+# Pre-create one file so its single-file writable root resolves, and mark it as
+# already reported to the watcher. EVERY file this grant pre-creates MUST go
+# through here, including any root added later. bin/fm-watch.sh scan_signals
+# surfaces any state/ signal file whose signature differs from its persisted
+# state/.seen-* one, so a file conjured by the spawn rather than written by a
+# worker would otherwise wake the captain for activity nobody produced, and codex
+# has no verified semantic busy source that could absorb such a wake. Real later
+# activity changes the signature and surfaces normally. A file that already
+# exists is left untouched, marker included: its unreported signature may be real
+# activity nobody has surfaced yet.
+codex_precreate_root_file() {  # <file>
+  local file=$1
+  [ -e "$file" ] && return 0
+  : >> "$file" 2>/dev/null || return 0
+  fm_wake_signal_mark_current "$STATE" "$file" 2>/dev/null || true
+}
+
 codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per line
   local kind=$1 worktree=$2 id=$3 wt_real gitdir status_file turnend_file
-  local inbox_dir seen_marker turnend_sig
+  local inbox_dir
   status_file="$STATE/$id.status"
   inbox_dir=$(fm_task_inbox_dir "$STATE" "$id")
   # A secondmate's own home IS its workspace, so its data/, state/, projects/ and
@@ -1433,7 +1452,7 @@ codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per
   # state dir, data/, or git objects. Both are pre-created so the roots resolve
   # and the append never needs directory-create permission.
   if [ "$kind" = secondmate ]; then
-    : >> "$status_file" 2>/dev/null || true
+    codex_precreate_root_file "$status_file"
     mkdir -p "$(fm_task_inbox_handled_dir "$STATE" "$id")" 2>/dev/null || true
     codex_root_real "$status_file"
     codex_root_real "$inbox_dir"
@@ -1444,18 +1463,8 @@ codex_writable_roots() {  # <kind> <worktree> <id>; prints one absolute root per
     codex_root_real "$DATA/$id"
   else
     turnend_file="$STATE/$id.turn-ended"
-    : >> "$status_file" 2>/dev/null || true
-    if [ ! -e "$turnend_file" ] && : >> "$turnend_file" 2>/dev/null; then
-      # Seed the watcher's reported-state marker for a marker this spawn just
-      # created, using the same signature scan_signals compares against, so the
-      # pre-creation the file grant depends on is not surfaced as a turn that
-      # never happened. An already-existing marker is left alone: its unreported
-      # signature may be a real turn end nobody has surfaced yet.
-      seen_marker=$(fm_wake_signal_seen_path "$STATE" "$turnend_file")
-      if turnend_sig=$(fm_wake_signal_sig "$turnend_file") && [ -n "$turnend_sig" ]; then
-        printf '%s' "$turnend_sig" > "$seen_marker" 2>/dev/null || true
-      fi
-    fi
+    codex_precreate_root_file "$status_file"
+    codex_precreate_root_file "$turnend_file"
     mkdir -p "$(fm_task_inbox_handled_dir "$STATE" "$id")" 2>/dev/null || true
     codex_root_real "$status_file"
     codex_root_real "$turnend_file"

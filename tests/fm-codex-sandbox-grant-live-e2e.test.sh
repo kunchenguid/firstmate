@@ -111,9 +111,14 @@ env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJECT" codex --scout > "$LAB/spawn.log" 2>&1 \
   || fail "fm-spawn could not compose a codex scout launch: $(tail -5 "$LAB/spawn.log")"
 
-ADD_DIR_FLAGS=$(grep -F -- '--add-dir' "$LAUNCH_LOG" | tail -1 \
-  | tr ' ' '\n' | grep -A1 -F -- '--add-dir' | grep -v -F -- '--add-dir' \
-  | grep -v '^--$' | sed "s/^'//; s/'\$//")
+# The roots a composed launch granted, read back the way the pane's shell would.
+granted_roots_of() {  # <launch log>
+  grep -F -- '--add-dir' "$1" | tail -1 \
+    | tr ' ' '\n' | grep -A1 -F -- '--add-dir' | grep -v -F -- '--add-dir' \
+    | grep -v '^--$' | sed "s/^'//; s/'\$//"
+}
+
+ADD_DIR_FLAGS=$(granted_roots_of "$LAUNCH_LOG")
 [ -n "$ADD_DIR_FLAGS" ] || fail "the composed codex launch granted no writable roots"
 
 ROOTS_TOML=$(printf '%s\n' "$ADD_DIR_FLAGS" | sed 's/.*/"&"/' | paste -sd, -)
@@ -243,3 +248,100 @@ case "$out" in
 esac
 
 printf 'ok - %s admits the captain-hold completion gate under the granted roots and denies it without them\n' "$CODEX_VERSION"
+
+# --- 4. The FILE form of a writable root, against the real binary -----------
+#
+# Sections 1-3 all ran on a SCOUT launch, whose three roots are directories. A
+# ship crewmate's grant differs in kind: its two state roots are single FILES,
+# and codex documents the flag as `--add-dir <DIR>`. That the vendor accepts a
+# non-directory argument AND confines the grant to that one file is the
+# load-bearing assumption under both the ship and the secondmate grant, so it is
+# proven here on the real binary rather than carried over from the directory
+# case. A release that started validating the argument as a directory would fail
+# this half while sections 1-3 stayed green.
+
+SHIP_ID=codex-grant-live-ship
+SHIP_WT="$LAB/wt-ship"
+mkdir -p "$HOME_DIR/data/$SHIP_ID"
+printf 'brief\n' > "$HOME_DIR/data/$SHIP_ID/brief.md"
+git -C "$PROJECT" worktree add -q -b "fm/$SHIP_ID" "$SHIP_WT"
+
+SHIP_LOG="$LAB/launch-ship.log"
+: > "$SHIP_LOG"
+env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+  FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+  FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$SHIP_WT" TMUX="fake,1,0" \
+  FM_FAKE_LAUNCH_LOG="$SHIP_LOG" PATH="$FAKEBIN:$PATH" \
+  "$ROOT/bin/fm-spawn.sh" "$SHIP_ID" "$PROJECT" codex --mode local-only --yolo off \
+  > "$LAB/spawn-ship.log" 2>&1 \
+  || fail "fm-spawn could not compose a codex ship launch: $(tail -5 "$LAB/spawn-ship.log")"
+
+SHIP_ROOTS=$(granted_roots_of "$SHIP_LOG")
+[ -n "$SHIP_ROOTS" ] || fail "the composed codex ship launch granted no writable roots"
+
+SHIP_STATUS="$HOME_DIR/state/$SHIP_ID.status"
+SHIP_TURNEND="$HOME_DIR/state/$SHIP_ID.turn-ended"
+# The scout's own status file, a SIBLING of the ship's inside the same state
+# directory and outside every ship root. If the file form silently behaved like a
+# directory grant, this is what would become writable.
+SIBLING_STATUS="$STATUS_FILE"
+
+printf '%s\n' "$SHIP_ROOTS" | grep -qxF "$(cd "$(dirname "$SHIP_STATUS")" && pwd -P)/$(basename "$SHIP_STATUS")" \
+  || fail "the ship launch did not grant its own status FILE, so this half would prove nothing: $SHIP_ROOTS"
+for r in $SHIP_ROOTS; do
+  case "$r" in "$SIBLING_STATUS"|"$(cd "$HOME_DIR/state" && pwd -P)") fail "a ship root reaches the sibling status file or the shared state dir: $SHIP_ROOTS" ;; esac
+done
+
+SHIP_ROOTS_TOML=$(printf '%s\n' "$SHIP_ROOTS" | sed 's/.*/"&"/' | paste -sd, -)
+SHIP_CLI_FLAGS=()
+while IFS= read -r r; do
+  [ -n "$r" ] || continue
+  SHIP_CLI_FLAGS+=(--add-dir "$r")
+done <<EOF
+$SHIP_ROOTS
+EOF
+
+file_probe="$LAB/fileprobe.sh"
+cat > "$file_probe" <<'SH'
+#!/bin/bash
+# <granted status file> <granted turn-ended file> <ungranted sibling status>
+printf 'own-status:%s\n' "$( (echo 'working: file-form guard' >> "$1") 2>/dev/null && echo allowed || echo denied)"
+printf 'own-turnend:%s\n' "$( (touch "$2") 2>/dev/null && echo allowed || echo denied)"
+printf 'sibling:%s\n' "$( (echo x >> "$3") 2>/dev/null && echo allowed || echo denied)"
+SH
+chmod +x "$file_probe"
+
+out=$(cd "$SHIP_WT" && codex sandbox -c sandbox_mode='"workspace-write"' \
+  -- "$file_probe" "$SHIP_STATUS" "$SHIP_TURNEND" "$SIBLING_STATUS" 2>/dev/null)
+printf '%s\n' "$out" | grep -qx 'own-status:denied' \
+  || fail "$CODEX_VERSION: an ungranted workspace-write sandbox already allows the ship status append; this half's premise is stale ($out)"
+
+out=$(cd "$SHIP_WT" && codex sandbox -c sandbox_mode='"workspace-write"' \
+  -c "sandbox_workspace_write.writable_roots=[$SHIP_ROOTS_TOML]" \
+  -- "$file_probe" "$SHIP_STATUS" "$SHIP_TURNEND" "$SIBLING_STATUS" 2>/dev/null)
+printf '%s\n' "$out" | grep -qx 'own-status:allowed' \
+  || fail "$CODEX_VERSION: a FILE-form writable root did not make the ship's own status file writable ($out)"
+printf '%s\n' "$out" | grep -qx 'own-turnend:allowed' \
+  || fail "$CODEX_VERSION: a FILE-form writable root did not make the ship's own turn-ended marker touchable ($out)"
+printf '%s\n' "$out" | grep -qx 'sibling:denied' \
+  || fail "$CODEX_VERSION: the FILE-form roots leaked to a SIBLING task's status file in the same state directory ($out)"
+
+# The flag itself, with a non-directory argument, through a real model turn: this
+# is the surface a release that started validating --add-dir as a directory would
+# break, and no config-form measurement can stand in for it.
+: > "$SHIP_STATUS"
+ship_transcript="$LAB/exec-ship.log"
+(
+  cd "$SHIP_WT" || exit 1
+  codex exec -s workspace-write "${SHIP_CLI_FLAGS[@]}" --skip-git-repo-check \
+    -c 'model_reasoning_effort="low"' \
+    "Run exactly these two shell commands, each separately, then stop: (1) echo 'working: file-form guard' >> $SHIP_STATUS (2) echo x >> $SIBLING_STATUS . Report for each whether it succeeded or was denied. Do nothing else and do not retry a denied command." \
+    < /dev/null
+) > "$ship_transcript" 2>&1 \
+  || fail "$CODEX_VERSION: codex exec rejected the FILE-form --add-dir flags firstmate ships: $(tail -20 "$ship_transcript")"
+
+[ -s "$SHIP_STATUS" ] \
+  || fail "$CODEX_VERSION: --add-dir with a FILE argument did not make the ship status file writable through the launch flags: $(tail -20 "$ship_transcript")"
+
+printf 'ok - %s accepts and enforces the FILE form of --add-dir: the ship keeps its own two state files while a sibling task record stays denied\n' "$CODEX_VERSION"
