@@ -1224,7 +1224,7 @@ SH
   pass "fm-control relaunch: unreadable and untraversable child state fails checkpoint"
 }
 
-test_control_lock_is_typed_and_recovers_a_reused_pid() {
+test_control_lock_is_typed_and_migrates_legacy_owners_safely() {
   local dir state id=rl46 lock typed holder_pid owner out rc=0
   dir=$(new_case typed-control "$id")
   state="$dir/home/state"
@@ -1266,7 +1266,46 @@ test_control_lock_is_typed_and_recovers_a_reused_pid() {
   expect_code 0 "$rc" "control should recover an identity-mismatched reused PID"$'\n'"$out"
   [ ! -e "$lock" ] && [ ! -L "$lock" ] \
     || fail "reused-PID recovery left the control lock held"
-  pass "control ownership is typed, reserved, and recoverable after PID reuse"
+
+  sleep 30 &
+  holder_pid=$!
+  owner="$lock.owner.legacy-reused"
+  mkdir "$owner"
+  printf '%s\n' "$holder_pid" > "$owner/pid"
+  chmod 0600 "$owner/pid"
+  ln -s "$owner" "$lock"
+
+  rc=0
+  out=$(run_control "$dir" "$id" interrupt) || rc=$?
+  kill -0 "$holder_pid" 2>/dev/null \
+    || fail "the legacy PID-reuse fixture process exited unexpectedly"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  expect_code 0 "$rc" "control should migrate a legacy lock whose live PID belongs to another command"$'\n'"$out"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] \
+    || fail "legacy PID-reuse recovery left the control lock held"
+
+  bash -c '/bin/sleep 30; :' fm-control.sh &
+  holder_pid=$!
+  owner="$lock.owner.legacy-control"
+  mkdir "$owner"
+  printf '%s\n' "$holder_pid" > "$owner/pid"
+  chmod 0600 "$owner/pid"
+  ln -s "$owner" "$lock"
+
+  rc=0
+  out=$(run_control "$dir" "$id" interrupt) || rc=$?
+  kill -0 "$holder_pid" 2>/dev/null \
+    || fail "the genuine legacy control owner exited unexpectedly"
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  expect_code 1 "$rc" "control should preserve a live legacy lifecycle owner"
+  assert_contains "$out" "another lifecycle action is already running" \
+    "the preserved legacy owner should produce the ordinary contention refusal"
+  [ -L "$lock" ] || fail "a live legacy lifecycle owner was reclaimed"
+  rm -f "$lock"
+  rm -rf "$owner"
+  pass "control ownership safely migrates typed and legacy PID-reuse records"
 }
 
 test_concurrent_relaunch_is_refused() {
@@ -1586,7 +1625,7 @@ test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
-test_control_lock_is_typed_and_recovers_a_reused_pid
+test_control_lock_is_typed_and_migrates_legacy_owners_safely
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution

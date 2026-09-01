@@ -532,6 +532,35 @@ fm_lock_typed_owner_proven_stale() {
   return 0
 }
 
+fm_control_legacy_owner_proven_stale() {
+  local lockdir=$1 pid=$2 args
+  fm_pid_alive "$pid" || return 0
+  if [ -e "$lockdir/expected-command" ] || [ -L "$lockdir/expected-command" ] \
+    || [ -e "$lockdir/pid-identity" ] || [ -L "$lockdir/pid-identity" ]; then
+    return 1
+  fi
+  args=$(ps -ww -o args= -p "$pid" 2>/dev/null || true)
+  if ! fm_pid_alive "$pid"; then
+    return 0
+  fi
+  [ -n "$args" ] || return 1
+  case "$args" in
+    *fm-control.sh*|*fm-spawn.sh*|*fm-teardown.sh*|*fm-promote.sh*|*fm-secondmate-reconcile.sh*)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+fm_lock_owner_proven_stale() {
+  local lockdir=$1 pid=$2 stale_policy=${3:-}
+  fm_lock_typed_owner_proven_stale "$lockdir" "$pid" && return 0
+  case "$stale_policy" in
+    control) fm_control_legacy_owner_proven_stale "$lockdir" "$pid" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_lock_typed_owner_matches() {
   local lockdir=$1 pid=$2 expected=$3 recorded observed lines
   fm_pid_alive "$pid" || return 1
@@ -579,7 +608,7 @@ fm_lock_mid_acquire_is_fresh() {
 }
 
 fm_lock_recheck_stale_owner() {
-  local lockdir=$1 expected_owner=$2 expected_pid=$3 actual_pid
+  local lockdir=$1 expected_owner=$2 expected_pid=$3 stale_policy=${4:-} actual_pid
   if [ -n "$expected_owner" ]; then
     fm_lock_points_to_owner "$lockdir" "$expected_owner" || return 1
   elif [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
@@ -588,7 +617,7 @@ fm_lock_recheck_stale_owner() {
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
   if fm_pid_alive "$actual_pid" \
-    && ! fm_lock_typed_owner_proven_stale "$lockdir" "$actual_pid"; then
+    && ! fm_lock_owner_proven_stale "$lockdir" "$actual_pid" "$stale_policy"; then
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
@@ -907,11 +936,13 @@ fm_recovery_marker_reopen_announced() {
 }
 
 _fm_lock_try_acquire() {
-  local lockdir=$1 expected=${2:-} pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 expected=${2:-} stale_policy=${3:-}
+  local pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
   [ -z "$expected" ] || fm_lock_expected_command_valid "$expected" || return 1
+  case "$stale_policy" in ''|control) ;; *) return 1 ;; esac
 
   if _fm_lock_try_create "$lockdir" "" "$expected"; then
     return 0
@@ -940,7 +971,7 @@ _fm_lock_try_acquire() {
     return 1
   fi
   if fm_pid_alive "$pid" \
-    && ! fm_lock_typed_owner_proven_stale "$lockdir" "$pid"; then
+    && ! fm_lock_owner_proven_stale "$lockdir" "$pid" "$stale_policy"; then
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
@@ -950,7 +981,7 @@ _fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! _fm_lock_try_acquire "$steal" "$expected"; then
+  if ! _fm_lock_try_acquire "$steal" "$expected" "$stale_policy"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
@@ -959,7 +990,7 @@ _fm_lock_try_acquire() {
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$cur" \
-    && ! fm_lock_typed_owner_proven_stale "$lockdir" "$cur"; then
+    && ! fm_lock_owner_proven_stale "$lockdir" "$cur" "$stale_policy"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
@@ -983,7 +1014,7 @@ _fm_lock_try_acquire() {
     primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
   fi
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur"; then
+  if ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur" "$stale_policy"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
@@ -1141,7 +1172,7 @@ fm_control_lock_acquire_bounded() {
     return 2
   fi
   while [ "$attempt" -le "$attempts" ]; do
-    if _fm_lock_try_acquire "$lock" "$expected"; then
+    if _fm_lock_try_acquire "$lock" "$expected" control; then
       return 0
     fi
     [ "$attempt" -ge "$attempts" ] || [ "$interval" = 0 ] || sleep "$interval"
