@@ -1543,7 +1543,15 @@ fm_super_main() {
     exit 1
   fi
   echo "$$" > "$PIDFILE"
-  fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
+  # The recorded identity is what proves this daemon still owns supervision after
+  # its watcher child exits (fm_afk_daemon_owns_supervision, read by the turn-end
+  # guard). Startup continues without it - a supervising daemon must not refuse to
+  # run because ps was unreadable - but say so, because the guard then keeps
+  # treating away-mode turn boundaries as unsupervised.
+  if ! fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null; then
+    rm -f "$LOCK/pid-identity" 2>/dev/null || true
+    log "warn: could not record this daemon's process identity; the turn-end guard cannot recognize away-mode supervision"
+  fi
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
