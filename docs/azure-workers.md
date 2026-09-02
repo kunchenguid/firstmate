@@ -207,8 +207,15 @@ The OS disk is disposable, while the account and task disks detach from VM delet
 Provider-account credentials never enter ARM parameters, controller output, logs, tags, images, browser state, or the control home.
 
 A submitted provider action has a canonical SHA-256 idempotency key and remains in the per-slot `pending_actions` map until the exact provider result is durably applied; the map entry is a deep copy that re-derives its own key at every load, and the legacy scalar slot permanently holds a sentinel an old binary refuses rather than misreads.
-After a host restart, the same action and key are replayed.
+After a host restart, the same action and key are replayed unless an operator has durably retained a deallocated never-assigned create under the safe recovery contract below.
 The compartment message lane (`message-put`/`message-collect`) is the one provider operation family outside the per-slot claim contract: bounded, content-addressed, idempotent data-plane blob transfers that touch no compute, no money, and no lifecycle state; every compute-mutating action keeps the full claim/lease/fence discipline.
+`assignment-status --task <id> --task-generation <generation> [--live] --json` projects one request into `queued-no-compute`, `creating-compute`, `compute-running-unassigned`, `assigned-execute-not-started`, `execute-running`, `progress-or-result-returned`, `releasing`, or `retained-for-investigation`.
+Every projected age starts at the controller transition that created the state: `enqueued_at` or `projected_at`, worker `created_at`, worker `assigned_at`, worker `execute_started_at`, worker `last_execution_at`, worker `released_at`, or the existing `last_refusal.at` on an operator-retained worker.
+The monitor's current time and terminal repaint time never enter those anchors, so printing the same line every 30 seconds cannot reset a stale clock.
+A live `compute-running-unassigned` projection explicitly carries `billable_idle=true` and `working_crewmate=false`, because a running VM with `assigned_at=null` and no execute claim is paid idle capacity rather than agent work.
+The bounded pre-work defaults are 1,800 seconds queued with no compute, 900 seconds creating compute, 300 seconds running but unassigned, and 300 seconds assigned without execute; the corresponding controller environment names are `FM_AZURE_WORKER_QUEUED_STALE_SECONDS`, `FM_AZURE_WORKER_CREATING_STALE_SECONDS`, `FM_AZURE_WORKER_UNASSIGNED_STALE_SECONDS`, and `FM_AZURE_WORKER_EXECUTE_START_STALE_SECONDS`.
+When a bound is reached, `bin/fm-spawn-cloud-monitor.sh` appends one `stale` wake for the task window, records the successful state-and-transition receipt only after the append, and exits instead of repainting another heartbeat.
+The stale wake names `stuck-crewmate-recovery`, and a restarted unchanged monitor sees the receipt and does not append an equivalent wake, while a real controller transition changes the receipt key and starts the next state's own durable clock.
 Child results return over that same lane: a compartment asks with a closed `fm.secondmate-attach-request/v1` carrying no selector at all, only a bounded monotone `attach_sequence` (1 to 32, strictly past what has been served) that distinguishes one ask from the next because the rest of the payload is constant for an assignment, and the monitor bundles the commits its secondmate home worktree gained over the compartment's dispatched repository generation, uploads them as `session/in/attach/<sha256>.bundle`, and announces name, digest, and byte count in an inbox message the guest's fetch checks size-first.
 That delta is the home repository's, which is the compartment's own repository, and deliberately not the child's code: a crewmate commits into a worktree of its project repository, whose history shares no ancestor with the home repository the compartment holds, so a project bundle could not fast-forward there even if it were shipped, and what actually returns is the child's report and other home artifacts.
 An ask that finds no delta serves nothing, records no acceptance, and burns no `attach_sequence`.
@@ -365,6 +372,14 @@ That is not evidence about an application-level verdict.
 This wrapper avoids that failure shape by using the worker supervisor's digest-bound execution record and returns a closed failed envelope when the guest produces no semantic artifact.
 Live Azure usability remains unclaimed until this exact wrapper/runtime/lifecycle path completes a billable zero-to-zero proof.
 
+### 2026-09-01 pre-work assignment stall
+
+`pi-refresh-bundled-entrypoint-fix-r4` remained in the same durable `assigning` transition from 00:53Z, and `bridge-deadcode-retire-v1` remained there from 01:21Z, while their tracking panes repainted `assigning` every 30 seconds.
+Both exact Azure VMs were running, both controller worker records still had `assigned_at=null`, the controller carried no execution for either task, and no crewmate had begun work.
+The repaint cadence hid hours of paid idle compute because the display timestamp was fresh while the semantic controller transition was not.
+Firstmate deallocated both exact VMs at 03:14Z and verified that all general Azure worker VMs were deallocated.
+The controller retained both pending create claims and task records, and those exact claims must enter `retain-create` rather than ordinary reconcile so no command restarts compute without fresh authority.
+
 ## Reconcile and bounded status
 
 A read-only plan is the default:
@@ -384,15 +399,17 @@ bin/fm-worker-lifecycle.sh reconcile \
 The home lock now covers only short read-validate-claim and apply sections; every provider mutation runs outside it under a non-blocking per-slot lease, so mutations for different slots run concurrently while readers and unrelated mutations proceed. Unapplied provider actions are durable per slot in `pending_actions`, every load is fenced to the lock hold that commits it, and a save whose on-disk revision moved since its load refuses instead of overwriting another writer's document.
 Reconcile drains stranded claims AFTER convergence, skipping any slot whose claim a live process still owns, so a wedged or hours-long replay cannot stop the fleet.
 `abandon-claim` can record and clear an exact-key provider result whose apply deterministically refuses, including a script-bound Failed or Canceled execution disposition that names the claimed task-command resource; an exact-key `REFUSED-IDENTITY` replay whose recorded resource identity can never bind again; or an execute that two fresh Azure views prove never started while the VM is deallocated and the assignment blobs are still initial. The never-started exit durably marks the exact key and every future execute refuses that marker; ordinary dark-VM cleanup then cascades the empty Run Command child.
-Both dispositions are recorded in `cleanup_refusals` before the claim is cleared, while an ordinary transient provider failure retains the claim unchanged.
+`retain-create` is the distinct non-replay recovery for a pending create whose VM an operator already deallocated or removed before assignment: it requires exact task, generation, slot, claim key, subscription, and confirmation; proves either the complete live identity and dark power state or a complete inventory with neither that worker nor an exact-slot conflict; refuses any assignment or execution evidence; moves the queue and worker to retained-for-investigation; and preserves the pending claim byte-for-byte.
+Reconcile and strict pending-claim drains refuse that retained create without calling the provider, so ordinary reconciliation cannot restart its compute and only a later fresh explicit exact-key operator action can replay it.
+Both abandonment dispositions are recorded in `cleanup_refusals` before the claim is cleared, while an ordinary transient provider failure and a retained create keep the exact claim unchanged.
 Azure may omit `source.script` even for the freshly created async preflight stub. That shape permits its one initial submission only while both staging blobs still carry the exact assignment/pending sentinels and instance view is Failed with exit `-202` and no result marker. The execution update atomically tags the Run Command with its request digest and idempotency key; a replay bearing those tags is bound even when source remains absent. A crash after staging changes but before the tagged update stays fail-closed. Every other missing, non-string, empty, or whitespace-only source is ambiguous unless a digest-valid result proves a differently tagged prior execution completed. An exact-bound Run Command that is still Updating or Running, reports Succeeded without a digest-valid request-bound result marker, or returns a terminal disposition naming a foreign task-command resource likewise retains the claim without submitting the command again.
 Each reconcile refreshes Azure before selecting the next action and stops after 64 actions even if a provider never converges.
 A provider error preserves the slot's pending action and records a bounded cleanup refusal.
 The next controller process replays that exact action before considering new work.
 
 `status` is local and bounded by default, while `status --live` refreshes Azure and cost evidence.
-The output includes author and specialized queue depths, desired and actual active workers, all five classification counts, assignment generations, worker-hours and warning threshold, actual and forecast spend, active policy phase and limit, the 128-vCPU regional ceiling plus observed and observed-plus-reserved usage, exact-family observed-plus-reserved commitments, the 64-vCPU author plan, active and reserved specialized capacity, 22-vCPU shared headroom, cooldown, warm target, retained-disk count, and the last ten cleanup refusals.
-It omits subscription IDs, resource IDs, raw account identities, worktree digests, private addresses, credentials, and secrets; the high-entropy reusable account binding is deliberately visible with profile load.
+The output includes author and specialized queue depths, desired and actual active workers, all five resource-recovery classification counts, the per-request semantic assignment states and durable ages, idle billable compute, assignment generations, worker-hours and warning threshold, actual and forecast spend, active policy phase and limit, the 128-vCPU regional ceiling plus observed and observed-plus-reserved usage, exact-family observed-plus-reserved commitments, the 64-vCPU author plan, active and reserved specialized capacity, 22-vCPU shared headroom, cooldown, warm target, retained-disk count, and the last ten cleanup refusals.
+It omits subscription IDs, resource IDs, raw account identities, worktree digests, private addresses, credentials, and secrets; the high-entropy reusable account binding and exact claim key are deliberately visible for profile-load correlation and exact-key recovery.
 
 ## Operator policy and overrides
 
@@ -405,6 +422,7 @@ Supported policy changes are deliberately narrow:
 - `FM_AZURE_WORKER_DAILY_BOUND_USD` changes the daily recorded-spend bound; unset means the default 100, and zero, negative, or non-numeric values refuse loudly instead of meaning unbounded.
 - `FM_AZURE_WORKER_DAILY_BOUND_OVERRIDE=<utc-day>` is the one explicit operator override past a tripped daily bound, valid only for the exact current UTC day, always printed and durably recorded when used.
 - `FM_AZURE_WORKER_IDLE_RELEASE_SECONDS` changes the idle-deallocate threshold between 600 and 604,800 seconds (default 14,400).
+- `FM_AZURE_WORKER_QUEUED_STALE_SECONDS`, `FM_AZURE_WORKER_CREATING_STALE_SECONDS`, `FM_AZURE_WORKER_UNASSIGNED_STALE_SECONDS`, and `FM_AZURE_WORKER_EXECUTE_START_STALE_SECONDS` change the four pre-work stale bounds between 60 and 86,400 seconds.
 - `FM_AZURE_WORKER_MAX` may lower the software cap but may never exceed sixteen.
 - `--required` admits already-authorized recovery or landing demand through cost pressure, but never through unreadable telemetry, quota, identity, or cleanup proofs.
 

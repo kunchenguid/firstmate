@@ -11,6 +11,7 @@ fm-arm-pretool-check.test.sh	hermetic
 fm-auto-reap-herdr-e2e.test.sh	herdr-lab
 fm-auto-reap.test.sh	hermetic
 fm-autocompact.test.sh	hermetic
+fm-azure-assignment-stall.test.sh	hermetic
 fm-azure-cell-image.test.sh	hermetic
 fm-azure-pilot.test.sh	hermetic
 fm-azure-runner.test.sh	hermetic

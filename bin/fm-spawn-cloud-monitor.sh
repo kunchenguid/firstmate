@@ -9,6 +9,13 @@
 # assignment has released, so endpoint loss can never strand account or
 # capacity ownership behind an otherwise successful worker exit.
 #
+# Pre-work supervision renders one semantic controller transition and its age,
+# never the time this pane repainted it. When a controller-owned pre-work state
+# exceeds its bound, this monitor appends one durable `stale` wake keyed to the
+# task window, records the successful emission receipt, and exits so a fresh
+# heartbeat cannot keep presenting paid idle compute as a working crewmate.
+# The existing stale-wake handler therefore enters stuck-crewmate-recovery.
+#
 # Convergence duty: when the spawn-time reconcile left the request queued
 # (transient admission evidence), a LATER reconcile assigns the worker after
 # the spawn process is gone. This monitor is the surviving local owner, so on
@@ -27,6 +34,8 @@ ID=${1:?task id}
 GENERATION=${2:?task generation id}
 FM_HOME=${FM_HOME:?FM_HOME is required}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # The controller document is the ONE money authority, and it lives under the
 # home FM_HOME names. $STATE is where THIS TASK's files live, which is the same
 # directory for every ordinary crewmate and the secondmate's own home on the
@@ -38,6 +47,7 @@ EXEC_LOG=$STATE/$ID.worker-execute.log
 ENTRYPOINT=$STATE/$ID.cloud-entrypoint
 CLOUD_ENV=$STATE/$ID.cloud-env
 DISPATCH_MARKER=$STATE/$ID.cloud-execute-dispatched
+STALE_WAKE_RECEIPT=$STATE/$ID.cloud-stale-wake
 INTERVAL=${FM_SPAWN_CLOUD_MONITOR_INTERVAL_SECONDS:-30}
 case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=30 ;; esac
 
@@ -73,6 +83,80 @@ item = (state.get("queue") or {}).get("{}@{}".format(task, generation)) or {}
 if item.get("status") == "assigned" and item.get("assignment_generation"):
     print(item["assignment_generation"])
 PY
+}
+
+assignment_snapshot() {
+  local lifecycle
+  (
+    # The monitor starts in a closed pane environment. Load the exact persisted
+    # controller identity just as dispatch does; a test may replace only the
+    # lifecycle executable, never the state projection.
+    # shellcheck source=/dev/null
+    . "$CLOUD_ENV" 2>/dev/null || true
+    lifecycle=${FM_CLOUD_ASSIGNMENT_LIFECYCLE_COMMAND:-$SCRIPT_DIR/fm-worker-lifecycle.sh}
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$lifecycle" assignment-status --task "$ID" \
+      --task-generation "$GENERATION" --live --json
+  )
+}
+
+assignment_fields() {  # <snapshot json>
+  python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin)
+except (OSError, ValueError):
+    raise SystemExit(1)
+fields = (
+    value.get("state") or "controller-unreadable",
+    value.get("queue_status") or "unknown",
+    value.get("since") or "unknown",
+    str(value.get("age_seconds") if value.get("age_seconds") is not None else "unknown"),
+    "1" if value.get("stale") else "0",
+    "1" if value.get("billable_idle") else "0",
+    str(value.get("stale_threshold_seconds") if value.get("stale_threshold_seconds") is not None else "none"),
+)
+print("\t".join(fields))
+'
+}
+
+wake_window() {
+  local window
+  window=$(awk -F= '$1 == "window" { print substr($0, index($0, "=") + 1); exit }' \
+    "$STATE/$ID.meta" 2>/dev/null) || window=
+  printf '%s\n' "${window:-$ID}"
+}
+
+emit_prework_stale_once() {  # <state> <since> <age> <threshold> <billable-idle>
+  local semantic=$1 since=$2 age=$3 threshold=$4 billable=$5 key held window payload tmp
+  key="$GENERATION|$semantic|$since"
+  held=$(cat "$STALE_WAKE_RECEIPT" 2>/dev/null || true)
+  if [ "$held" = "$key" ]; then
+    echo "cloud-crewmate $ID: stale $semantic wake was already emitted; stopping unchanged heartbeats"
+    return 0
+  fi
+  window=$(wake_window)
+  payload="stale: $window (Azure pre-work state $semantic unchanged for ${age}s from controller transition $since; threshold ${threshold}s; billable-idle=$billable; route through stuck-crewmate-recovery; repeated display heartbeats can hide hours of paid compute with no agent work)"
+  # Append first, receipt second. A crash between them may duplicate a queued
+  # record, which the queue drain dedupes; the opposite order could suppress
+  # the only wake forever.
+  if ! fm_wake_append stale "$window" "$payload"; then
+    echo "cloud-crewmate $ID: stale $semantic wake could not be queued; retrying without recording a receipt" >&2
+    return 1
+  fi
+  tmp=$(mktemp "$STATE/$ID.cloud-stale-wake.pending.XXXXXX") || {
+    echo "cloud-crewmate $ID: stale wake was queued but its one-shot receipt could not be created" >&2
+    return 0
+  }
+  if ! printf '%s\n' "$key" > "$tmp" || ! mv "$tmp" "$STALE_WAKE_RECEIPT"; then
+    rm -f "$tmp"
+    echo "cloud-crewmate $ID: stale wake was queued but its one-shot receipt could not be recorded" >&2
+    # The durable wake already exists. Exit rather than polling and spamming;
+    # a later process may safely duplicate it and drain-time dedupe keeps one.
+    return 0
+  fi
+  echo "$payload"
+  return 0
 }
 
 persisted_wall_seconds() {
@@ -379,12 +463,45 @@ while :; do
     land_outcome_bundle
     exit 0
   fi
-  status=$(queue_status)
-  printf '%s cloud-crewmate %s worker=%s\n' "$(date -u +%H:%M:%SZ)" "$ID" "$status"
+  snapshot=$(assignment_snapshot 2>/dev/null) || snapshot=
+  fields=$(printf '%s' "$snapshot" | assignment_fields 2>/dev/null) || fields=
+  if [ -n "$fields" ]; then
+    IFS=$(printf '\t') read -r semantic status since age stale billable threshold <<EOF
+$fields
+EOF
+  else
+    # Compatibility for a controller document from before assignment-status:
+    # retain the old queue rendering and dispatch behavior, but never invent a
+    # transition age or stale verdict.
+    status=$(queue_status)
+    semantic=controller-unreadable
+    since=unknown
+    age=unknown
+    stale=0
+    billable=0
+    threshold=none
+  fi
+  printf '%s cloud-crewmate %s worker=%s state=%s age=%ss since=%s stale=%s billable-idle=%s\n' \
+    "$(date -u +%H:%M:%SZ)" "$ID" "$status" "$semantic" "$age" "$since" "$stale" "$billable"
+  if [ "$billable" = 1 ]; then
+    echo "cloud-crewmate $ID: IDLE BILLABLE COMPUTE - VM running, assigned_at=null, execute absent"
+  fi
+  if [ "$stale" = 1 ]; then
+    if emit_prework_stale_once "$semantic" "$since" "$age" "$threshold" "$billable"; then
+      # Stop repainting the same controller state. Endpoint loss now reinforces
+      # the already-durable stale wake instead of masking it with a fresh line.
+      exit 75
+    fi
+    sleep "$INTERVAL"
+    continue
+  fi
   if [ "$status" = assigned ]; then
     reclaim_stale_dispatch
-    if [ ! -f "$DISPATCH_MARKER" ] && [ -f "$ENTRYPOINT" ] && [ -f "$CLOUD_ENV" ]; then
-      dispatch_converged_execute
+    if [ "$semantic" = assigned-execute-not-started ] \
+      || [ "$semantic" = controller-unreadable ]; then
+      if [ ! -f "$DISPATCH_MARKER" ] && [ -f "$ENTRYPOINT" ] && [ -f "$CLOUD_ENV" ]; then
+        dispatch_converged_execute
+      fi
     fi
   fi
   if [ -f "$EXEC_LOG" ]; then

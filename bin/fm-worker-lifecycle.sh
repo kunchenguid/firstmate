@@ -45,6 +45,7 @@
 #   fm-worker-lifecycle.sh release --task <id> --task-generation <id> --proof-file <json>
 #   fm-worker-lifecycle.sh withdraw --task <id> --task-generation <id> --confirm-withdraw --confirm-subscription <uuid>
 #   fm-worker-lifecycle.sh abandon-claim --slot <n> --idempotency-key <sha256> --confirm-abandon --confirm-subscription <uuid>
+#   fm-worker-lifecycle.sh retain-create --task <id> --task-generation <id> --slot <n> --idempotency-key <sha256> --confirm-retain --confirm-subscription <uuid>
 #   fm-worker-lifecycle.sh surrender --task <id> --task-generation <id> --reason <text> --output <json> --confirm-surrender --confirm-subscription <uuid> [--confirm-discard-unlanded] [--confirm-orphan-children]
 #   fm-worker-lifecycle.sh resume <exact recovery flags>
 #   fm-worker-lifecycle.sh steer <exact assignment flags>
@@ -53,6 +54,7 @@
 #   fm-worker-lifecycle.sh compartment-chain-tip <exact assignment flags> --sequence <n> --chain-digest <sha256>
 #   fm-worker-lifecycle.sh capacity-retire-fence <exact released fence and reservation ids>
 #   fm-worker-lifecycle.sh status [--live] [--json]
+#   fm-worker-lifecycle.sh assignment-status --task <id> --task-generation <id> [--live] [--json]
 #   fm-worker-lifecycle.sh acceptance-plan
 set -euo pipefail
 
@@ -162,7 +164,7 @@ fm_worker_receipt_credential_remains() {  # <task home file> <task id> <controll
 }
 
 case "${1:-}" in
-  request|release|resume|steer|execute|authority-receipt|capacity-reserve|capacity-reserve-shape|capacity-release|capacity-retire-fence|abandon-claim|message-put|message-collect|compartment-chain-tip)
+  request|release|resume|steer|execute|authority-receipt|capacity-reserve|capacity-reserve-shape|capacity-release|capacity-retire-fence|abandon-claim|retain-create|message-put|message-collect|compartment-chain-tip)
     exec python3 "$SCRIPT_DIR/fm-worker-lifecycle.py" "$@"
     ;;
   withdraw)
@@ -239,7 +241,7 @@ case "${1:-}" in
     done
     exec python3 "$SCRIPT_DIR/fm-worker-lifecycle.py" "$@"
     ;;
-  proof-template|status|acceptance-plan)
+  proof-template|status|assignment-status|acceptance-plan)
     exec python3 "$SCRIPT_DIR/fm-worker-lifecycle.py" "$@"
     ;;
   help|-h|--help|"")

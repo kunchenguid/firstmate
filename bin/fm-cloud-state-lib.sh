@@ -50,7 +50,8 @@ fm_cloud_state_transport_dirs() {  # <state_dir> <task_id>
 
 # The persisted convergence handles a later dispatch would otherwise inherit.
 fm_cloud_state_dispatch_paths() {  # <state_dir> <task_id>
-  printf '%s\n' "$1/$2.cloud-entrypoint" "$1/$2.cloud-env" "$1/$2.cloud-execute-dispatched"
+  printf '%s\n' "$1/$2.cloud-entrypoint" "$1/$2.cloud-env" \
+    "$1/$2.cloud-execute-dispatched" "$1/$2.cloud-stale-wake"
 }
 
 # The reports the lifecycle wrote for this task: the captured request stdout

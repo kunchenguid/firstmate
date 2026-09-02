@@ -78,6 +78,23 @@ SPECIALIZED_SHAPE_VCPUS = 40
 SHARED_HEADROOM_VCPUS = 22
 REGIONAL_NON_AUTHOR_RESERVE_VCPUS = SPECIALIZED_SHAPE_VCPUS + SHARED_HEADROOM_VCPUS
 DEFAULT_COOLDOWN_SECONDS = 300
+# Pre-work age is measured from these controller-owned transition timestamps,
+# never from a monitor repaint or terminal heartbeat. The shorter bounds cover
+# the two billable handoff gaps; queued work has no compute and gets a longer
+# admission window, while an ARM create retains enough time for its ordinary
+# multi-minute deployment.
+PREWORK_STALE_DEFAULTS = {
+    "queued-no-compute": 1800,
+    "creating-compute": 900,
+    "compute-running-unassigned": 300,
+    "assigned-execute-not-started": 300,
+}
+PREWORK_STALE_ENV = {
+    "queued-no-compute": "FM_AZURE_WORKER_QUEUED_STALE_SECONDS",
+    "creating-compute": "FM_AZURE_WORKER_CREATING_STALE_SECONDS",
+    "compute-running-unassigned": "FM_AZURE_WORKER_UNASSIGNED_STALE_SECONDS",
+    "assigned-execute-not-started": "FM_AZURE_WORKER_EXECUTE_START_STALE_SECONDS",
+}
 # The C3 requirement sentence is the number: a day's spend cannot quietly
 # reach 100 dollars.
 DEFAULT_DAILY_BOUND_USD = 100.0
@@ -385,6 +402,12 @@ def environment():
         "daily_bound_usd": daily_bound,
         "daily_bound_override": daily_override,
         "idle_release_seconds": idle_release,
+        "prework_stale_seconds": {
+            state_name: _bounded_env_int(
+                PREWORK_STALE_ENV[state_name], default, 60, 86400
+            )
+            for state_name, default in PREWORK_STALE_DEFAULTS.items()
+        },
         "provider_argv": provider_argv,
         # Where placement writes assignment-private single-profile snapshots.
         # CONTROLLER-owned, under the same state directory as the document that
@@ -2351,6 +2374,21 @@ def apply_pending(env, action, result):
     return state
 
 
+def retained_create_claim(state, slot, action):
+    """True only for the durable operator-retained never-assigned create."""
+    worker = state.get("workers", {}).get(str(slot))
+    if not isinstance(worker, dict) or worker.get("phase") != "retained":
+        return False
+    item = state.get("queue", {}).get(worker.get("queue_key"))
+    return bool(
+        isinstance(action, dict)
+        and action.get("type") == "create"
+        and worker.get("assigned_at") is None
+        and isinstance(item, dict)
+        and item.get("status") == "retained"
+    )
+
+
 def drain_pending(env, slot=None, strict=True, skip_slots=None):
     """Replay unapplied claims. Returns (drained_slots, refusals).
 
@@ -2390,6 +2428,7 @@ def drain_pending(env, slot=None, strict=True, skip_slots=None):
                 # before re-sending, or an already-applied key is mutated a
                 # second time for nothing and its absence then reads as a
                 # refusal.
+                retained_reason = None
                 with controller_lock(env):
                     live = load_state(env)
                     current = live.get("pending_actions", {}).get(slot_key)
@@ -2398,11 +2437,23 @@ def drain_pending(env, slot=None, strict=True, skip_slots=None):
                         and current.get("idempotency_key")
                         == action.get("idempotency_key")
                     ):
-                        current = enrich_legacy_service_cleanup_claim(
-                            env, live, slot_key, current
-                        )
+                        if retained_create_claim(live, slot_key, current):
+                            retained_reason = (
+                                "retained never-assigned create requires fresh exact-key operator "
+                                "authority and will not replay during reconcile"
+                            )
+                        else:
+                            current = enrich_legacy_service_cleanup_claim(
+                                env, live, slot_key, current
+                            )
                     else:
                         current = None
+                if retained_reason is not None:
+                    refusals.append({
+                        "type": "replay-refused", "slot": int(slot_key),
+                        "reason": retained_reason,
+                    })
+                    continue
                 if not isinstance(current, dict):
                     continue
                 action = current
@@ -2975,6 +3026,213 @@ def compartment_projection(state):
     return compartments
 
 
+def assignment_projection(env, state, item, inventory=None, now=None):
+    """Project one request's semantic progress from controller-owned facts.
+
+    Queue, worker, claim, execution, and release values all come from the one
+    controller document. A live inventory may refine a submitted create into
+    running-but-unassigned or retained, but it never becomes another durable
+    state record. Every age anchor names the controller timestamp that changed
+    at that transition; repaint and poll time are deliberately absent.
+    """
+    now = now or now_utc()
+    if item is None:
+        return {
+            "state": "unqueued",
+            "queue_status": "unqueued",
+            "since": None,
+            "since_source": None,
+            "age_seconds": None,
+            "stale_threshold_seconds": None,
+            "stale": False,
+            "pre_work": False,
+            "billable_idle": False,
+            "working_crewmate": False,
+            "agent_execution_started": False,
+            "note": "the exact task generation is absent from the controller queue",
+        }
+
+    key = request_key(item.get("task"), item.get("task_generation"))
+    slot = item.get("slot")
+    worker = None
+    if slot is not None:
+        candidate = state.get("workers", {}).get(str(slot))
+        if candidate is not None and candidate.get("queue_key") == key:
+            worker = candidate
+    if worker is None:
+        for candidate in state.get("workers", {}).values():
+            if candidate.get("queue_key") == key:
+                worker = candidate
+                slot = candidate.get("slot")
+                break
+
+    pending = None
+    if worker is not None:
+        pending = (state.get("pending_actions") or {}).get(str(worker.get("slot")))
+    cloud = None
+    if inventory is not None and worker is not None:
+        cloud = inventory_by_slot(inventory).get(worker.get("slot"))
+
+    queue_status = item.get("status") or "unknown"
+    state_name = "retained-for-investigation"
+    since = item.get("enqueued_at")
+    since_source = "queue.enqueued_at"
+    note = "controller ownership is incomplete or contradictory"
+    billable_idle = False
+
+    if queue_status in ("queued", "projecting") and worker is None:
+        state_name = "queued-no-compute"
+        if queue_status == "projecting" and item.get("projected_at"):
+            since = item.get("projected_at")
+            since_source = "queue.projected_at"
+        note = "request is queued and no controller worker owns compute"
+    elif queue_status == "complete":
+        state_name = "progress-or-result-returned"
+        since = item.get("completed_at") or (worker or {}).get("last_execution_at") or since
+        since_source = (
+            "queue.completed_at" if item.get("completed_at")
+            else "worker.last_execution_at" if (worker or {}).get("last_execution_at")
+            else since_source
+        )
+        note = "controller records a returned result and completed release"
+    elif queue_status == "releasing" or (worker or {}).get("release_proof") is not None:
+        state_name = "releasing"
+        since = (worker or {}).get("released_at") or since
+        since_source = "worker.released_at" if (worker or {}).get("released_at") else since_source
+        note = "release proof is recorded and exact cleanup is converging"
+    elif queue_status in ("retained", "retired") or (worker or {}).get("phase") == "retained":
+        state_name = "retained-for-investigation"
+        refusal_at = ((worker or {}).get("last_refusal") or {}).get("at")
+        since = refusal_at or (worker or {}).get("created_at") or since
+        since_source = (
+            "worker.last_refusal.at" if refusal_at
+            else "worker.created_at" if (worker or {}).get("created_at")
+            else since_source
+        )
+        note = "the exact task and claim are retained without automatic replay"
+    elif worker is None:
+        note = "queue status {} has no exact controller worker".format(queue_status)
+    elif (
+        isinstance(pending, dict)
+        and pending.get("type") in ("create", "resume")
+        and worker.get("assigned_at") is None
+    ):
+        state_name = "creating-compute"
+        since = worker.get("created_at") or since
+        since_source = "worker.created_at" if worker.get("created_at") else since_source
+        note = "the exact provider create claim is submitted but not durably assigned"
+        if inventory is not None:
+            if cloud is None:
+                state_name = "retained-for-investigation"
+                note = "the submitted create has no exact live cloud capacity"
+            else:
+                exact, reason = resources_exact(worker, cloud, allow_missing_compute=True)
+                resources = cloud.get("resources") or {}
+                vm = resources.get("vm")
+                power = str((vm or {}).get("power_state", "unknown")).lower()
+                if not exact:
+                    state_name = "retained-for-investigation"
+                    note = "live create identity is ambiguous: {}".format(reason)
+                elif vm is None:
+                    state_name = "retained-for-investigation"
+                    note = "the submitted create has durable disks or identity but no exact VM"
+                elif "deallocated" in power or "stopped" in power:
+                    state_name = "retained-for-investigation"
+                    note = "never-assigned create compute is dark and its exact claim is retained"
+                elif "running" in power:
+                    state_name = "compute-running-unassigned"
+                    billable_idle = True
+                    note = (
+                        "idle billable compute is running while assigned_at is null and no execute exists"
+                    )
+                else:
+                    note = "the exact create is still provisioning ({})".format(power or "unknown")
+    elif worker.get("assigned_at") is None or queue_status != "assigned":
+        since = worker.get("created_at") or since
+        since_source = "worker.created_at" if worker.get("created_at") else since_source
+        note = "worker ownership never reached the durable assigned transition"
+    else:
+        live_refusal = None
+        if inventory is not None:
+            if cloud is None:
+                live_refusal = "assigned worker has no exact live cloud capacity"
+            else:
+                exact, reason = resources_exact(worker, cloud, allow_missing_compute=True)
+                vm = (cloud.get("resources") or {}).get("vm")
+                power = str((vm or {}).get("power_state", "unknown")).lower()
+                if not exact:
+                    live_refusal = "assigned live identity is ambiguous: {}".format(reason)
+                elif vm is None:
+                    live_refusal = "assigned worker has no exact VM"
+                elif "deallocated" in power or "stopped" in power:
+                    live_refusal = "assigned worker compute is dark"
+        if live_refusal is not None:
+            state_name = "retained-for-investigation"
+            since = worker.get("assigned_at")
+            since_source = "worker.assigned_at"
+            note = live_refusal
+        elif isinstance(pending, dict) and pending.get("type") == "execute":
+            state_name = "execute-running"
+            since = worker.get("execute_started_at") or worker.get("assigned_at")
+            since_source = (
+                "worker.execute_started_at"
+                if worker.get("execute_started_at") else "worker.assigned_at"
+            )
+            note = "the exact execute claim is in flight"
+        elif worker.get("last_execution_at") or worker.get("last_execution_digest"):
+            state_name = "progress-or-result-returned"
+            since = worker.get("last_execution_at") or worker.get("assigned_at")
+            since_source = (
+                "worker.last_execution_at"
+                if worker.get("last_execution_at") else "worker.assigned_at"
+            )
+            note = "a digest-bound execution result is durable in controller state"
+        else:
+            state_name = "assigned-execute-not-started"
+            since = worker.get("assigned_at")
+            since_source = "worker.assigned_at"
+            note = "compute is assigned but no execute claim or result exists"
+
+    age_seconds = None
+    if since:
+        age_seconds = max(0, int((now - parse_time(since)).total_seconds()))
+    thresholds = env.get("prework_stale_seconds") or PREWORK_STALE_DEFAULTS
+    threshold = thresholds.get(state_name)
+    stale = bool(
+        threshold is not None
+        and age_seconds is not None
+        and age_seconds >= threshold
+    )
+    claim_type = pending.get("type") if isinstance(pending, dict) else None
+    claim_key = pending.get("idempotency_key") if isinstance(pending, dict) else None
+    assignment_generation = (
+        (worker or {}).get("assignment_generation")
+        or item.get("assignment_generation")
+    )
+    return {
+        "task": item.get("task"),
+        "task_generation": item.get("task_generation"),
+        "queue_status": queue_status,
+        "state": state_name,
+        "since": since,
+        "since_source": since_source,
+        "age_seconds": age_seconds,
+        "stale_threshold_seconds": threshold,
+        "stale": stale,
+        "pre_work": state_name in PREWORK_STALE_DEFAULTS,
+        "billable_idle": billable_idle,
+        "working_crewmate": state_name == "execute-running",
+        "agent_execution_started": state_name in (
+            "execute-running", "progress-or-result-returned", "releasing"
+        ),
+        "slot": int(slot) if slot is not None else None,
+        "assignment_generation": assignment_generation,
+        "claim_type": claim_type,
+        "claim_idempotency_key": claim_key,
+        "note": note,
+    }
+
+
 def status_projection(env, state, inventory=None):
     if inventory is None:
         metrics = state.get("last_metrics") or {}
@@ -3089,6 +3347,16 @@ def status_projection(env, state, inventory=None):
             profile_loads.items(), key=lambda pair: (pair[0][0], pair[0][1])
         )
     ]
+    observed_at = now_utc()
+    assignment_states = [
+        assignment_projection(env, state, item, inventory=inventory, now=observed_at)
+        for _, item in sorted(state["queue"].items())
+        if item.get("status") != "complete"
+    ]
+    idle_billable_compute = [
+        assignment for assignment in assignment_states
+        if assignment.get("billable_idle")
+    ]
     return {
         "schema": "fm.worker-status/v1",
         "daily_bound_usd": env["daily_bound_usd"],
@@ -3106,6 +3374,8 @@ def status_projection(env, state, inventory=None):
         "actual_active_workers": actual_active,
         "classification_counts": classes,
         "assignment_generations": sorted(assignment_generations),
+        "assignment_states": assignment_states,
+        "idle_billable_compute": idle_billable_compute,
         "worker_hours": round(hours, 3),
         "worker_hour_planning_threshold": env["planning_hours"],
         "worker_hour_warning": hours >= env["planning_hours"],
@@ -3155,6 +3425,33 @@ def print_status(status, json_output):
         json.dumps(status["classification_counts"], sort_keys=True, separators=(",", ":")),
     ))
     print("assignments: {}".format(",".join(status["assignment_generations"]) or "none"))
+    for assignment in status.get("assignment_states") or []:
+        print(
+            "assignment-state: task={}@{} state={} age={}s since={} source={} "
+            "stale={} billable-idle={} working-crewmate={}".format(
+                assignment["task"], assignment["task_generation"], assignment["state"],
+                assignment["age_seconds"] if assignment["age_seconds"] is not None else "unknown",
+                assignment["since"] or "unknown", assignment["since_source"] or "unknown",
+                str(assignment["stale"]).lower(),
+                str(assignment["billable_idle"]).lower(),
+                str(assignment["working_crewmate"]).lower(),
+            )
+        )
+        if assignment.get("billable_idle"):
+            print(
+                "IDLE BILLABLE COMPUTE: task={}@{} slot={} has running compute but no "
+                "assigned or executing crewmate".format(
+                    assignment["task"], assignment["task_generation"], assignment["slot"]
+                )
+            )
+        if assignment.get("stale"):
+            print(
+                "STALE PRE-WORK ASSIGNMENT: task={}@{} state={} exceeded {}s; "
+                "route through stuck-crewmate-recovery".format(
+                    assignment["task"], assignment["task_generation"], assignment["state"],
+                    assignment["stale_threshold_seconds"],
+                )
+            )
     print("worker-hours: {:.3f}/{} warning={}".format(
         status["worker_hours"], status["worker_hour_planning_threshold"],
         str(status["worker_hour_warning"]).lower(),
@@ -3286,6 +3583,16 @@ def parser():
     abandon_parser.add_argument("--idempotency-key", required=True)
     abandon_parser.add_argument("--confirm-abandon", action="store_true")
     abandon_parser.add_argument("--confirm-subscription", required=True)
+    retain_create = sub.add_parser(
+        "retain-create",
+        help="retain one exact dark-or-absent never-assigned create without replaying it",
+    )
+    retain_create.add_argument("--task", required=True)
+    retain_create.add_argument("--task-generation", required=True)
+    retain_create.add_argument("--slot", required=True)
+    retain_create.add_argument("--idempotency-key", required=True)
+    retain_create.add_argument("--confirm-retain", action="store_true")
+    retain_create.add_argument("--confirm-subscription", required=True)
 
     reconcile_parser = sub.add_parser("reconcile", help="plan or apply bounded convergence")
     reconcile_parser.add_argument("--apply", action="store_true")
@@ -3415,6 +3722,15 @@ def parser():
     status = sub.add_parser("status", help="show bounded local lifecycle and cost evidence")
     status.add_argument("--live", action="store_true")
     status.add_argument("--json", action="store_true")
+
+    assignment_status = sub.add_parser(
+        "assignment-status",
+        help="show one task generation's semantic controller transition and durable age",
+    )
+    assignment_status.add_argument("--task", required=True)
+    assignment_status.add_argument("--task-generation", required=True)
+    assignment_status.add_argument("--live", action="store_true")
+    assignment_status.add_argument("--json", action="store_true")
 
     sub.add_parser(
         "environment-check",
@@ -4548,6 +4864,12 @@ def command_execute(env, args):
             staged["account_dir"] = str(Path(args.account_dir).resolve())
         if args.outcome_dir is not None:
             staged["outcome_dir"] = str(Path(args.outcome_dir).resolve())
+        # This worker field is the durable execute-start transition. It lands
+        # in the same controller save as the exact execute claim, so a monitor
+        # never has to infer execution age from its dispatch-marker mtime.
+        # A later distinct execute replaces it with that transition's time;
+        # a refused claim is never saved and therefore cannot move the clock.
+        worker["execute_started_at"] = iso_utc()
         action = make_action(
             env, "execute", worker=worker, request=request,
             request_digest=request["request_digest"], **staged,
@@ -5081,6 +5403,126 @@ def write_surrender_output(path, proof):
     )
 
 
+def command_retain_create(env, args):
+    """Make a deallocated never-assigned create inert without dropping its claim.
+
+    This is the safe incident-recovery lane for compute an operator already
+    made dark or removed while the controller still owns an unapplied create. Replaying
+    that create could power the VM back on; clearing it would bypass the exact
+    idempotency-key obligation. The command therefore proves the exact live VM
+    is deallocated, proves controller execution never began, moves the request
+    to retained-for-investigation, and leaves the original claim byte-exact.
+    Ordinary reconcile recognizes that retained transition and never replays
+    the claim. A later replay still requires the separate explicit exact-key
+    abandon-claim authority.
+    """
+    if not args.confirm_retain:
+        raise LifecycleError("--confirm-retain is required")
+    if args.confirm_subscription != env["subscription"]:
+        raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
+    task = require_id("task", args.task)
+    generation = require_id("task generation", args.task_generation)
+    key = request_key(task, generation)
+    slot = str(args.slot)
+    if not slot.isdigit() or not 1 <= int(slot) <= MAX_WORKERS:
+        raise LifecycleError("retain-create requires one exact worker slot")
+    claim_key = require_binding("retained create idempotency key", args.idempotency_key)
+
+    with slot_lease(env, slot):
+        with controller_lock(env):
+            state = load_state(env)
+            action = (state.get("pending_actions") or {}).get(slot)
+            worker = state.get("workers", {}).get(slot)
+            item = state.get("queue", {}).get(key)
+            if not isinstance(action, dict) or action.get("idempotency_key") != claim_key:
+                raise LifecycleError(
+                    "slot {} does not hold the exact create claim".format(slot))
+            if action.get("type") != "create":
+                raise LifecycleError("retain-create accepts only an unapplied create claim")
+            bindings = action.get("bindings") or {}
+            if bindings.get("task") != task or bindings.get("task_generation") != generation:
+                raise LifecycleError("retained create claim task generation is not exact")
+            if (
+                not isinstance(worker, dict)
+                or not isinstance(item, dict)
+                or worker.get("queue_key") != key
+            ):
+                raise LifecycleError("retained create has no exact durable task owner")
+            if worker.get("assigned_at") is not None:
+                raise LifecycleError("retain-create refuses a worker that reached assignment")
+            if worker.get("last_execution_at") or worker.get("last_execution_digest"):
+                raise LifecycleError("retain-create refuses a worker with recorded execution")
+            if any(
+                execution.get("task") == task
+                and execution.get("task_generation") == generation
+                and execution.get("assignment_generation")
+                == worker.get("assignment_generation")
+                for execution in state.get("executions", {}).values()
+                if isinstance(execution, dict)
+            ):
+                raise LifecycleError("retain-create refuses a worker with a durable execution result")
+            already_retained = retained_create_claim(state, slot, action)
+        if already_retained:
+            print("retained create already records the same exact claim")
+            return
+
+        inventory = provider_call(env, "inventory")["inventory"]
+        cloud = inventory_by_slot(inventory).get(int(slot))
+        if int(slot) in inventory_conflict_slots(inventory):
+            raise LifecycleError(
+                "retain-create refuses a provider conflict in the exact worker slot")
+        if cloud is not None:
+            exact, reason = resources_exact(worker, cloud, allow_missing_compute=False)
+            if not exact:
+                raise LifecycleError(
+                    "retain-create live identity proof failed: {}".format(reason))
+            vm = (cloud.get("resources") or {}).get("vm")
+            power = str((vm or {}).get("power_state", "unknown")).lower()
+            if vm is None or ("deallocated" not in power and "stopped" not in power):
+                raise LifecycleError(
+                    "retain-create refuses compute that is not provably deallocated or stopped")
+        # A successful complete inventory with neither an exact worker nor an
+        # exact-slot conflict proves there is no controller-owned compute to
+        # restart today. Retaining is safe precisely because the create claim
+        # stays intact instead of being cleared as though it never submitted.
+
+        with controller_lock(env):
+            state = load_state(env)
+            action = (state.get("pending_actions") or {}).get(slot)
+            worker = state.get("workers", {}).get(slot)
+            item = state.get("queue", {}).get(key)
+            if (
+                not isinstance(action, dict)
+                or action.get("idempotency_key") != claim_key
+                or action.get("type") != "create"
+            ):
+                raise LifecycleError("slot {} create claim changed while retaining; retry".format(slot))
+            if (
+                not isinstance(worker, dict)
+                or not isinstance(item, dict)
+                or worker.get("queue_key") != key
+                or worker.get("assigned_at") is not None
+            ):
+                raise LifecycleError("retained create ownership changed while proving it; retry")
+            # Preserve this object verbatim: the whole point of this transition
+            # is to keep the exact provider replay obligation while making
+            # automatic reconciliation inert.
+            original_claim = copy.deepcopy(action)
+            worker["phase"] = "retained"
+            item["status"] = "retained"
+            record_refusal(
+                state, worker,
+                LifecycleError(
+                    "operator retained exact dark-or-absent never-assigned create without replay"
+                ),
+            )
+            if state["pending_actions"].get(slot) != original_claim:
+                raise LifecycleError("retain-create changed the exact pending claim")
+            save_state(env, state)
+    print("FM-RETAINED-CREATE {} {}".format(slot, claim_key))
+    print("exact create claim and task state retained; automatic reconcile cannot restart compute")
+
+
 def command_abandon_claim(env, args):
     """Retire one slot's unapplied claim after proving its mutation is complete.
 
@@ -5501,6 +5943,31 @@ def command_compartment_chain_tip(env, args):
     print("recorded compartment chain tip {} for {}".format(sequence, args.task))
 
 
+def command_assignment_status(env, args):
+    """Print one semantic assignment state, optionally refined by live inventory."""
+    task = require_id("task", args.task)
+    generation = require_id("task generation", args.task_generation)
+    key = request_key(task, generation)
+    with controller_lock(env):
+        state = load_state(env)
+        local = assignment_projection(env, state, state["queue"].get(key))
+    inventory = None
+    # Provider inventory is needed only before execution starts, where it
+    # distinguishes ordinary provisioning from paid idle compute or a dark
+    # retained VM. Execute/result/release states are already exact controller
+    # transitions and do not need one Azure inventory call every monitor poll.
+    if args.live and local.get("state") in (
+        "creating-compute", "assigned-execute-not-started"
+    ):
+        inventory = provider_call(env, "inventory")["inventory"]
+    with controller_lock(env):
+        state = load_state(env)
+        projection = assignment_projection(
+            env, state, state["queue"].get(key), inventory=inventory
+        )
+    print(json.dumps(projection, sort_keys=True, separators=(",", ":")))
+
+
 def command_status(env, args):
     inventory = None
     if args.live:
@@ -5572,6 +6039,8 @@ def main(argv=None):
         command_surrender(env, args)
     elif args.command == "abandon-claim":
         command_abandon_claim(env, args)
+    elif args.command == "retain-create":
+        command_retain_create(env, args)
     elif args.command == "resume":
         command_resume(env, args)
     elif args.command == "steer":
@@ -5584,6 +6053,8 @@ def main(argv=None):
         command_compartment_chain_tip(env, args)
     elif args.command == "status":
         command_status(env, args)
+    elif args.command == "assignment-status":
+        command_assignment_status(env, args)
     else:
         raise LifecycleError("unknown lifecycle command")
     return 0
