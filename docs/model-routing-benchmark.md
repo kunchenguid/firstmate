@@ -22,7 +22,7 @@ A gate that cannot obtain its evidence refuses; an unproven denial is never trea
 | `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, finite positive per-dimension mutation calibration, and exactly one bound capture record for every planned candidate head are all required. |
 | `manifest-build` / `manifest-check` | The original run, judge, capture, and cost arithmetic did not add up, and cost and elapsed time were tie-breakers while unmeasurable. Every count is now derived, and cost is low/base/high arithmetic rather than a quoted range. |
 | `promote-evaluate` | Only a six-of-six paired sweep with the predeclared margin, no blocker-class failure, and no regression against the baseline veto is eligible, and the captain still gives the word. |
-| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup. Every archive member must stay beneath its own sample directory, every bundle and archived evaluator is rerun by the drill, and cleanup is authorised only while the receipt still matches the current evidence and manifest bytes. |
+| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup. Every evidence file and the executed evaluator must be content-addressed beneath its own sample directory, every bundle and archived evaluator is rerun by the drill, and cleanup is authorised only while the receipt still matches the current evidence and manifest bytes. |
 | `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. A preflight that refuses or stops for the captain also revokes any receipt already on disk, so evidence degrading outside the plan cannot leave a stale clearance standing. |
 
 ## Where the refusal actually bites
@@ -31,6 +31,7 @@ A gate an operator can forget to run is not enforcement.
 `bin/fm-bench-launch-lib.sh` is sourced by `bin/fm-spawn.sh` and refuses any task id under the reserved `bench-` prefix unless a passing preflight receipt exists and still matches `benchmark.json`'s current bytes.
 Before delivery, the same launch boundary also verifies `isolation.json` against its receipt hash, resolves the matching entrant, requires the actual worktree and every private path to still equal the preflight-proven layout, and wraps the harness command in the same verified confinement argv that the probes cleared.
 An unavailable wrapper or changed path refuses the launch rather than falling back to the ordinary shell command.
+Because the verified wrapper and private paths are local evidence, a remote secondmate route refuses a `bench-` entrant rather than silently crossing to an unconfined remote launch.
 Editing the plan after a pass invalidates every receipt written against it, so a relaxed threshold or a swapped packet cannot ride an old clearance.
 Task ids outside that prefix cost one string comparison and are otherwise untouched.
 This mirrors the chokepoint pattern in `bin/fm-gate-refuse-lib.sh`, including its documented test-harness hatch.
@@ -45,11 +46,14 @@ Only a mechanism with its own PID namespace confines processes as well as storag
 `docs/verification/model-routing-benchmark.md` records the dated per-mechanism result.
 
 No declared path is trusted either.
-Each entrant's private object store, temp, home, and session space is a sibling probe target of its own, so a "private" path that is really a shared subtree is caught by attempting the read rather than by reading the declaration.
+Each entrant's private object store, temp, home, and session space must resolve within that entrant's root before it is a sibling probe target, so a path on a shared subtree or a separate filesystem is refused during `isolation-verify` rather than later at launch.
 Because a denial against an empty directory proves nothing, every declared private store must hold material the probe reaches unconfined, and a store that holds none is refused by name.
 
 The gate also resolves each clone's `objects/info/alternates` itself.
 An alternate is a second object database bound into the clone, so an entrant whose alternate escapes its own private storage is reachable by a route no probe walking the sibling root would ever visit; that alternate is refused and handed to the sibling probes as a target.
+
+The process probe passes its marker through the confinement environment rather than command-line arguments.
+That keeps the probe and its wrapper lineage from impersonating a sibling while the positive control still reports a genuinely visible marker process as a leak.
 
 ## The two captain-stop conditions
 

@@ -587,8 +587,9 @@ pass "the launch guard scopes to benchmark ids and otherwise stays out of the wa
 
 BENCH="$TMP_ROOT/launch-confinement"
 ENTRY_ROOT="$BENCH/entrant"
+ENTRY_HOME="$ENTRY_ROOT/home with space"
 write_plan "$BENCH"
-mkdir -p "$ENTRY_ROOT/objects" "$ENTRY_ROOT/tmp" "$ENTRY_ROOT/home" "$ENTRY_ROOT/session"
+mkdir -p "$ENTRY_ROOT/objects" "$ENTRY_ROOT/tmp" "$ENTRY_HOME" "$ENTRY_ROOT/session"
 python3 - "$BENCH" "$ROOT/bin/fm-bench-confine.sh" "$ENTRY_ROOT" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
@@ -599,7 +600,7 @@ bench, confine, entrant = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
     "entrants": [{"id": "bench-b1-k7", "root": str(entrant),
                   "private_object_store": str(entrant / "objects"),
                   "private_tmp": str(entrant / "tmp"),
-                  "private_home": str(entrant / "home"),
+                  "private_home": str(entrant / "home with space"),
                   "private_session": str(entrant / "session")}],
 }, indent=2, sort_keys=True) + "\n")
 digest = hashlib.sha256((bench / "benchmark.json").read_bytes()).hexdigest()
@@ -619,7 +620,7 @@ wrapped=$(FM_BENCH_ROOT="$BENCH" bash -c '
   fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "printf \"%s|%s|%s\" \"\$BENCH_PRIVATE_ROOT\" \"\$BENCH_PRIVATE_HOME\" \"\$BENCH_PRIVATE_TMP\""
 ' _ "$ROOT" "$ENTRY_ROOT") || fail "a benchmark launch must bind the proven confinement"
 out=$(bash -c "$wrapped") || fail "the bound benchmark launch must execute: $out"
-assert_contains "$out" "$ENTRY_ROOT|$ENTRY_ROOT/home|$ENTRY_ROOT/tmp" "the proven private root, home, and temp reach the entrant"
+assert_contains "$out" "$ENTRY_ROOT|$ENTRY_HOME|$ENTRY_ROOT/tmp" "the proven private root, home, and temp reach the entrant"
 python3 - "$BENCH/isolation.json" <<'PY'
 import json, sys
 p = sys.argv[1]; d = json.load(open(p))
@@ -654,6 +655,21 @@ out=$(FM_BENCH_ROOT="$BENCH" bash -c '
 expect_code 1 "$status" "a benchmark launch with no verified wrapper is refused"
 assert_contains "$out" "cannot use its preflight-proven confinement" "the launch refuses rather than falling back unconfined"
 pass "benchmark launches bind the preflight-proven confinement while ordinary launches stay unchanged"
+
+out=$(bash -c '
+  . "$1/bin/fm-bench-launch-lib.sh"
+  fm_refuse_unconfined_remote_benchmark_entrant ordinary-crew-task 2>&1
+  printf "rc=%s\n" "$?"
+' _ "$ROOT")
+assert_contains "$out" "rc=0" "an ordinary remote secondmate id remains unchanged"
+out=$(bash -c '
+  . "$1/bin/fm-bench-launch-lib.sh"
+  fm_refuse_unconfined_remote_benchmark_entrant bench-b1-k7 2>&1
+  printf "rc=%s\n" "$?"
+' _ "$ROOT")
+assert_contains "$out" "rc=1" "a benchmark remote secondmate refuses without local confinement"
+assert_contains "$out" "remote secondmate route" "the remote confinement refusal names the route"
+pass "remote benchmark secondmate launches fail closed instead of bypassing confinement"
 
 BENCH="$TMP_ROOT/launch"
 write_plan "$BENCH"
@@ -816,12 +832,12 @@ if [ -d /proc/1 ]; then
   "$MARKER" &
   marker_pid=$!
   sleep 1
-  out=$("$ROOT/bin/fm-bench-probe.sh" process_inspection fm-bench-marker)
+  out=$(PROCESS_INSPECTION_MARKER=fm-bench-marker "$ROOT/bin/fm-bench-probe.sh" process_inspection)
   kill "$marker_pid" 2>/dev/null
   wait "$marker_pid" 2>/dev/null
   assert_contains "$out" "PROBE LEAKED" "a shared process table read through /proc is a leak, not a denial"
   sleep 1
-  out=$("$ROOT/bin/fm-bench-probe.sh" process_inspection fm-bench-marker)
+  out=$(PROCESS_INSPECTION_MARKER=fm-bench-marker "$ROOT/bin/fm-bench-probe.sh" process_inspection)
   assert_contains "$out" "PROBE DENIED" "the same probe denies once no sibling process is running"
   pass "the process probe reads /proc without procps and still separates a leak from a denial"
 fi
@@ -843,6 +859,24 @@ expect_code 1 "$status" "private storage a probe cannot read carries no denial"
 assert_contains "$out" "isolation.bench-b1-k7.private_storage fail" "the barren private store is named"
 assert_contains "$out" "private_tmp" "the refusal names which declared store is unprovable"
 pass "declared private storage that no probe could read is refused, not trusted"
+
+BENCH="$TMP_ROOT/iso-outside-private"
+write_plan "$BENCH"
+write_isolation "$BENCH" none
+mkdir -p "$ISO/outside-private"
+printf 'outside private material\n' > "$ISO/outside-private/canary.txt"
+python3 - "$BENCH/isolation.json" "$ISO/outside-private" <<'PY'
+import json, sys
+path, outside = sys.argv[1:]
+d = json.load(open(path))
+d["entrants"][0]["private_tmp"] = outside
+json.dump(d, open(path, "w"), indent=2, sort_keys=True)
+PY
+out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
+expect_code 1 "$status" "private storage outside its entrant root is refused before launch"
+assert_contains "$out" "isolation.bench-b1-k7.private_containment fail" "the isolation gate owns private-path containment"
+assert_contains "$out" "private_tmp" "the containment refusal names the offending private path"
+pass "private paths outside the proven entrant root are refused during isolation verification"
 
 # An object store reached through .git/objects/info/alternates sits outside every
 # entrant root, so a probe that only walks the sibling root would miss it.
@@ -1042,6 +1076,7 @@ bench, kind = Path(sys.argv[1]), sys.argv[2]
 sample = sorted((bench / "archive").iterdir())[0]
 external = bench / "external.bundle"
 external.write_bytes((sample / "candidate.bundle").read_bytes())
+(sample / "candidate.bundle").unlink()
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
 if kind == "absolute":
@@ -1067,6 +1102,38 @@ archive_escape_refused "an absolute" absolute
 archive_escape_refused "a parent traversal" parent
 archive_escape_refused "a symlink" symlink
 pass "external archive evidence paths cannot make an archive self-contained only by declaration"
+
+BENCH="$TMP_ROOT/archive-unlisted"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-unlisted"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+(sample / "unlisted-evidence.txt").write_text("not addressed\n")
+PY
+out=$(run_gate "$BENCH" archive-verify) && status=0 || status=$?
+expect_code 1 "$status" "an archive evidence file without a content address is refused"
+assert_contains "$out" "archive files are not content-addressed" "the archive rejects unlisted evidence"
+pass "every archived evidence file is content-addressed"
+
+BENCH="$TMP_ROOT/archive-unlisted-evaluator"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-unlisted-evaluator"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["evaluator_rerun"]["argv"] = ["python3", "unlisted-evaluator.py"]
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a rerun evaluator absent from the content-addressed files is refused"
+assert_contains "$out" "not content-addressed" "the drill requires the executed evaluator to be addressed"
+assert_absent "$BENCH/archive/restore-drill.json" "an unaddressed evaluator writes no cleanup receipt"
+pass "the restore drill executes only a content-addressed evaluator"
 
 BENCH="$TMP_ROOT/archive-evaluator-drift"
 write_plan "$BENCH"

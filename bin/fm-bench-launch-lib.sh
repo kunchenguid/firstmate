@@ -72,6 +72,17 @@ fm_refuse_ungated_benchmark_entrant() {  # <task-id>
   return 0
 }
 
+fm_refuse_unconfined_remote_benchmark_entrant() {  # <task-id>
+  local id=${1-}
+  case "$id" in
+    bench-*) ;;
+    *) return 0 ;;
+  esac
+  [ "${FM_BENCH_LAUNCH_BYPASS:-}" = 1 ] && return 0
+  echo "error: benchmark entrant $id cannot use its preflight-proven confinement on a remote secondmate route; launch refused" >&2
+  return 1
+}
+
 fm_bench_wrap_entrant_launch() {  # <task-id> <worktree> <shell-command>
   local id=${1-} worktree=${2-} command=${3-} root wrapped isolation_hash receipt_hash
   case "$id" in
@@ -133,7 +144,7 @@ if "/" in launcher:
 elif shutil.which(launcher) is None:
     raise SystemExit(f"verified confinement wrapper is unavailable: {launcher}")
 env = [f"BENCH_PRIVATE_ROOT={declared_root}", f"BENCH_PRIVATE_OBJECT_STORE={private['private_object_store']}", f"BENCH_PRIVATE_TMP={private['private_tmp']}", f"BENCH_PRIVATE_HOME={private['private_home']}", f"BENCH_PRIVATE_SESSION={private['private_session']}"]
-print(" ".join(shlex.quote(item) for item in [*env, *argv, "/bin/sh", "-lc", command]))
+print(" ".join(shlex.quote(item) for item in ["env", *env, *argv, "/bin/sh", "-lc", command]))
 PY
 ) || {
     echo "error: benchmark entrant $id cannot use its preflight-proven confinement; launch refused" >&2

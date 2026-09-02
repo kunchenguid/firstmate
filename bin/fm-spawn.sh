@@ -459,6 +459,7 @@ spawn_remote_secondmate() {
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
   fm_refuse_ungated_benchmark_entrant "$id" || return 1
+  fm_refuse_unconfined_remote_benchmark_entrant "$id" || return 1
   mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
   SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
