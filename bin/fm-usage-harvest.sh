@@ -138,9 +138,14 @@ case "$TURNS" in ''|*[!0-9]*) TURNS=0 ;; esac
 REFDIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-usage-harvest.XXXXXX")
 LEDGER_LOCK=
 LEDGER_LOCK_HELD=0
+# Set once the staging file for the ledger append exists; cleanup owns its
+# removal so a failed append (an unwritable ledger) cannot leave the staging
+# file behind in the fleet data directory.
+LEDGER_TMP=
 harvest_cleanup() {
   local rc=$?
   [ "$LEDGER_LOCK_HELD" != 1 ] || fm_lock_release "$LEDGER_LOCK" || true
+  [ -z "$LEDGER_TMP" ] || rm -f -- "$LEDGER_TMP"
   rm -rf -- "$REFDIR"
   return "$rc"
 }
@@ -298,6 +303,7 @@ fi
 # Test seam: widen the check-to-append window so a concurrency regression (a
 # removed lock) is observable deterministically; unset in production.
 [ -z "${FM_USAGE_HARVEST_APPEND_DELAY:-}" ] || sleep "$FM_USAGE_HARVEST_APPEND_DELAY"
+LEDGER_TMP="$DATA/usage-ledger.jsonl.tmp.$$"
 jq -cn \
   --arg task "$ID" --arg harness "$HARNESS" \
   --arg model "$MODEL" --arg effort "$EFFORT" \
@@ -312,5 +318,5 @@ jq -cn \
     completed_at:(if $completed == "" then null else $completed end),
     wall_secs:$wall, turns:$turns,
     input_tokens:$it, cached_input_tokens:$ct, output_tokens:$ot,
-    reasoning_tokens:$rt, source:$source}' >> "$DATA/usage-ledger.jsonl.tmp.$$"
-cat "$DATA/usage-ledger.jsonl.tmp.$$" >> "$LEDGER" && rm -f -- "$DATA/usage-ledger.jsonl.tmp.$$"
+    reasoning_tokens:$rt, source:$source}' >> "$LEDGER_TMP"
+cat "$LEDGER_TMP" >> "$LEDGER"

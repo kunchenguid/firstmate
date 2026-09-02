@@ -2,8 +2,9 @@
 # Behavior tests for the fleet usage harvester and its report reader.
 # Covers claude-log request dedupe and cache folding, codex per-request delta
 # sums with cwd/window matching, cursor/unavailable null rows, the
-# no-double-append idempotency guard, the ledger report rendering, and the
-# teardown integration property that a harvest failure never blocks teardown.
+# no-double-append idempotency guard, the staging file the append stages
+# through leaving no debris, the ledger report rendering, and the teardown
+# integration property that a harvest failure never blocks teardown.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -347,6 +348,38 @@ lock_bound_case() {
   pass "usage harvest: a held ledger lock bounds the acquire, no hang or dup"
 }
 
+# --- staging file: a failed ledger append leaves no runtime debris ----------
+
+# The harvest builds its row in a staging file next to the ledger and then
+# appends it. A failed append (here an unwritable ledger) must still leave the
+# data directory free of staging files, otherwise every best-effort teardown
+# harvest against a broken ledger accumulates another one.
+staging_case() {
+  local id=usagestaging1 wt="$TMP_ROOT/wt-usagestaging1"
+  local data home rc leftovers
+  data=$(harvest_case "$id" cursor "$wt" cursor-x "")
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  # The ledger path being a directory forces the append to fail.
+  mkdir -p "$home/data/usage-ledger.jsonl"
+  rc=0
+  "$HARVEST" "$id" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "harvest returned 0 with an unwritable ledger"
+  leftovers=$(find "$home/data" -maxdepth 1 -name 'usage-ledger.jsonl.tmp.*' 2>/dev/null)
+  [ -z "$leftovers" ] \
+    || fail "failed ledger append left staging files: $leftovers"
+
+  # The same must hold on the success path.
+  rmdir "$home/data/usage-ledger.jsonl"
+  "$HARVEST" "$id" >/dev/null 2>&1 || fail "harvest failed with a writable ledger"
+  [ "$(wc -l < "$home/data/usage-ledger.jsonl" | tr -d ' ')" = 1 ] \
+    || fail "successful retry did not append exactly one row"
+  leftovers=$(find "$home/data" -maxdepth 1 -name 'usage-ledger.jsonl.tmp.*' 2>/dev/null)
+  [ -z "$leftovers" ] \
+    || fail "successful ledger append left staging files: $leftovers"
+  pass "usage harvest: no staging files survive a failed or successful append"
+}
+
 # --- report: per-model totals and per-task rows -----------------------------
 
 report_case() {
@@ -417,5 +450,6 @@ cursor_case
 remote_case
 race_case
 lock_bound_case
+staging_case
 report_case
 teardown_case
