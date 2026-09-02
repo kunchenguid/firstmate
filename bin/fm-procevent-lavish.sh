@@ -3,6 +3,11 @@
 #
 # Usage:
 #   fm-procevent-lavish.sh arm <artifact.html>
+#   fm-procevent-lavish.sh managed-poll <artifact.html>
+#   fm-procevent-lavish.sh receipt <source-id> <sequence> <result-file> <outcome-file>
+#   fm-procevent-lavish.sh applying <source-id> <sequence>
+#   fm-procevent-lavish.sh complete <source-id> <sequence>
+#   fm-procevent-lavish.sh receipt-text <source-id>
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
@@ -37,6 +42,10 @@
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
 #            calls, and the only place Lavish's notion of "ended" is decided.
+#            One guard is added to the plain session facts: a review whose latest
+#            received submission still owes its receipt is not terminal, so an
+#            ended review is never retired before its final receipt was displayed
+#            or became impossible to display.
 # silent     Exit 0 when the captured result is a routine no-op the runner should
 #            record and never announce; any other exit publishes the wake. This
 #            is the generic no-op contract bin/fm-procevent.sh calls, and the
@@ -60,10 +69,45 @@
 # positively proves nothing was said. Silence is only ever an absence this
 # adapter can see in the result, never an absence it assumes.
 #
-# This adapter is deliberately thin. It owns only what is specific to Lavish:
-# canonical source identity, the argv for the currently published poll command,
-# and how to read a completed result. Ownership, durable capture, publication,
-# and restart recovery all belong to bin/fm-procevent.sh.
+# VISIBLE RECEIPT LIFECYCLE, owned here. The captain's only proof that a
+# submission was not lost is the acknowledgement this adapter presents in the
+# review page itself, through the published poll's `--agent-reply` surface. The
+# per-source receipts record (`state/procevent/<source-id>.receipts`, layout
+# owned by the runner, bytes owned here) journals exactly one fact per event,
+# and every visible state is printed only after its fact exists:
+#
+#   Received   the runner's durable capture, journaled by the `receipt` seam
+#              after the capture exists in `state/procevent-inbox/`.
+#   Saved      what the one keyed-answer intake returned for that generation,
+#              journaled only after that intake has run; partial and rejected
+#              rows are reported as counts, never presented as saved.
+#   Applying   only `applying <source-id> <sequence>`, run by the handler when
+#              it begins routing the accepted answers.
+#   Complete   only `complete <source-id> <sequence>`, run by the handler when
+#              that routing is done; it refuses without a recorded Applying.
+#   Already received  a captured submission whose content digest matches an
+#              earlier generation; reported as a replay, never as new work.
+#
+# `arm` registers the source with `managed-poll` as its child instead of the
+# bare poll. managed-poll is still exactly the published blocking poll shape -
+# no timeout flag, no timer, no second owner - it only presents the current
+# receipt text through `--agent-reply` when the record has something to state,
+# journals that `armed` fact, and then behaves identically to the bare poll.
+# Because each poll presents the truth recorded so far, a receipt the captain
+# sees is always the state at the moment that poll armed; Applying and Complete
+# for the last round of an ended review are stated durably in the record even
+# though the ended page keeps the last displayed receipt. `arm` resets the
+# record, so re-hosting the same artifact never inherits an earlier session's
+# rounds.
+#
+# `receipt` is this adapter's half of the runner's generic receipt seam. It
+# journals delivery (a completed poll that armed a receipt proves it displayed,
+# unless the session was already gone), Received, and Saved - the outcome file
+# handed over by the runner states exactly what the keyed-answer intake
+# returned - and acknowledges one narrow generation: an ended session with no
+# queued submission whose only purpose was displaying a new receipt. Everything
+# else stays announced for the handler exactly as before. A missing or failing
+# step here changes nothing about publication or handling.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
@@ -106,7 +150,10 @@
 # LOSS LIMITATION, stated plainly. The published poll destructively clears
 # feedback before returning it. A result lost after that clearing and before the
 # runner reads the process output is unrecoverable, and no Firstmate wrapper can
-# close that source-side handoff window. Never describe this path as
+# close that source-side handoff window. The receipt lifecycle proves only what
+# reached Firstmate: it can never promise the captain that a submission lost in
+# that window was received, and the `--agent-reply` presentation proves nothing
+# about what the source delivered to the browser. Never describe this path as
 # at-least-once, no-loss, or lossless. The only durability this proves is the
 # runner's own: output that reached the runner is stored before it is announced.
 set -u
@@ -114,6 +161,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -123,16 +171,24 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,158p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+
+RECEIPT_SCHEMA=fm-lavish-receipt.v1
+RECEIPT_MAX_ROUNDS=8
+RECEIPT_MAX_TEXT_BYTES=4096
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
 # source and must never become two owners.
+resolve_real() {  # <artifact>
+  perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$1" 2>/dev/null
+}
+
 cmd_source_id() {
   local artifact=${1-} real
   [ -n "$artifact" ] || usage
   case "$artifact" in *$'\n'*) die "artifact paths cannot contain newlines" ;; esac
-  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+  real=$(resolve_real "$artifact") \
     || die "cannot resolve the artifact path: $artifact"
   [ -f "$real" ] || die "artifact does not exist: $artifact"
   if command -v shasum >/dev/null 2>&1; then
@@ -142,23 +198,346 @@ cmd_source_id() {
   fi
 }
 
+sha16_text() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print substr($1,1,16)}'
+  else
+    printf '%s' "$1" | sha256sum | awk '{print substr($1,1,16)}'
+  fi
+}
+
+fmt_utc() {  # <epoch>
+  if date -u -r "$1" '+%Y-%m-%d %H:%M UTC' >/dev/null 2>&1; then
+    date -u -r "$1" '+%Y-%m-%d %H:%M UTC'
+  else
+    date -u -d "@$1" '+%Y-%m-%d %H:%M UTC'
+  fi
+}
+
+# --- the receipts record -----------------------------------------------------
+# Layout lives in bin/fm-procevent-lib.sh so the runner cleans it with the
+# registration; every byte and rule below is owned here.
+
+receipts_path() { fm_procevent_receipts_path "$STATE" "$1"; }
+receipts_lock_path() { fm_procevent_receipts_lock_path "$STATE" "$1"; }
+
+# 0 when the record is absent (nothing journaled yet) or carries our schema.
+# Anything else at that path - a symlink, a directory, a foreign schema - is
+# unreadable rather than empty, so no state is ever presented from, and no event
+# ever written through, a record this adapter does not own.
+journal_readable() {  # <source-id>
+  local f
+  f=$(receipts_path "$1")
+  [ -e "$f" ] || [ -L "$f" ] || return 0
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  [ "$(sed -n '1p' "$f" 2>/dev/null)" = "$RECEIPT_SCHEMA" ]
+}
+
+journal_events() {  # <source-id> <type>: print one type's event lines, oldest first
+  local f
+  f=$(receipts_path "$1")
+  [ ! -L "$f" ] || return 1
+  [ -f "$f" ] || return 0
+  awk -F '\t' -v t="$2" '$1 == t { print }' "$f"
+}
+
+journal_count() {  # <source-id> <type>
+  local n
+  n=$(journal_events "$1" "$2" | grep -c '')
+  printf '%s\n' "$n"
+}
+
+journal_last_field() {  # <source-id> <type> <field-number>
+  journal_events "$1" "$2" | tail -n 1 | cut -f"$3"
+}
+
+journal_append() {  # <source-id> <event-line>
+  local f
+  f=$(receipts_path "$1")
+  [ ! -L "$f" ] || return 1
+  if [ ! -e "$f" ]; then
+    (umask 077; mkdir -p "$(dirname "$f")") || return 1
+    printf '%s\n' "$RECEIPT_SCHEMA" > "$f" || return 1
+    chmod 0600 "$f" 2>/dev/null || true
+  fi
+  printf '%s\n' "$2" >> "$f" || return 1
+}
+
+has_event() {  # <source-id> <type> <sequence>
+  journal_events "$1" "$2" | grep -qF "$(printf '%s\t%s\t' "$2" "$3")"
+}
+
+acquire_receipts_lock() {  # <source-id>
+  local lock
+  lock=$(receipts_lock_path "$1")
+  (umask 077; mkdir -p "$(dirname "$lock")") || return 1
+  fm_lock_acquire_wait "$lock"
+}
+
 cmd_arm() {
-  local artifact=${1-} id real
+  local artifact=${1-} id real record
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
-  real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
+  real=$(resolve_real "$artifact") \
     || die "cannot resolve the artifact path: $artifact"
   # This adapter's own listener command, which runs the plain blocking form with
   # no --timeout-ms so completion is a server event, and absorbs only the exact
   # transient interruption. Registering raw poll output is what let that
   # interruption reach the runner as a captured result.
-  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
-    -- "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" || exit 1
+  # A fresh arm hosts a fresh review, so the receipt lifecycle starts empty and
+  # a reused artifact never inherits an earlier session's rounds.
+  local record
+  record=$(receipts_path "$id")
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    acquire_receipts_lock "$id" || die "cannot lock the receipts record"
+    rm -f -- "$record"
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      fm_lock_release "$(receipts_lock_path "$id")"
+      die "cannot reset the receipts record: $id"
+    fi
+    fm_lock_release "$(receipts_lock_path "$id")"
+  fi
+  # The managed poll wraps the plain blocking form and nothing else: it presents
+  # the current receipt through --agent-reply when the record has something to
+  # state, then behaves identically to `lavish-axi poll <file>`.
+  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- \
+    "$SCRIPT_DIR/fm-procevent-lavish.sh" managed-poll "$real" || exit 1
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
+}
+
+# The registered child: the published blocking poll, plus the one visible
+# acknowledgement this adapter owns. With nothing received there is nothing to
+# present and this is exactly the bare poll; otherwise the current receipt text
+# is journaled as armed and passed through --agent-reply, so whatever the page
+# shows next is a fact this record can prove.
+cmd_managed_poll() {  # <artifact.html>
+  local artifact=${1-} id real text digest upto
+  [ "$#" -eq 1 ] || usage
+  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  id=$(cmd_source_id "$artifact") || exit 1
+  real=$(resolve_real "$artifact") \
+    || die "cannot resolve the artifact path: $artifact"
+  journal_readable "$id" || die "receipts record is unreadable: $id"
+  text=$(receipt_build_text "$id") || die "cannot build the receipt text: $id"
+  if [ -n "$text" ]; then
+    digest=$(sha16_text "$text")
+    acquire_receipts_lock "$id" || die "cannot lock the receipts record"
+    upto=$(journal_count "$id" received)
+    journal_append "$id" "$(printf 'armed\t%s\t%s\t%s' "$(date +%s)" "$upto" "$digest")" \
+      || { fm_lock_release "$(receipts_lock_path "$id")"; die "cannot journal the armed receipt"; }
+    fm_lock_release "$(receipts_lock_path "$id")"
+    run_poll "$real" --agent-reply "$text"
+    return  # the poll's exit status is the delivery attempt's outcome
+  fi
+  run_poll "$real"
+}
+
+# The runner's receipt seam: journal what this capture proved. Delivery first
+# (this capture exists because a poll completed), then Received and Saved in
+# that order - a Saved line is written only from the outcome file the runner
+# hands over, which states what the one keyed-answer intake actually returned.
+cmd_receipt() {  # <source-id> <sequence> <result-file> <outcome-file>
+  local id=${1-} seq=${2-} result=${3-} outcome=${4-}
+  [ "$#" -eq 4 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
+  [ -f "$result" ] && [ ! -L "$result" ] || die "result file does not exist: $result"
+  [ -f "$outcome" ] && [ ! -L "$outcome" ] || die "intake outcome file does not exist: $outcome"
+
+  local classify submission armed_upto delivered_upto epoch submission_line=''
+  classify=$(cmd_classify "$result")
+  submission=$(perl_rows submission "$result" 2>/dev/null) || submission=''
+
+  acquire_receipts_lock "$id" || die "cannot lock the receipts record"
+  trap 'fm_lock_release "$(receipts_lock_path "$id")"' EXIT
+  journal_readable "$id" || die "receipts record is unreadable: $id"
+  epoch=$(date +%s)
+
+  if [ "$classify" != missing ] && [ "$classify" != unknown ]; then
+    armed_upto=$(journal_last_field "$id" armed 3); armed_upto=${armed_upto:-0}
+    delivered_upto=$(journal_last_field "$id" delivered 3); delivered_upto=${delivered_upto:-0}
+    case "$armed_upto$delivered_upto" in *[!0-9]*) armed_upto=0; delivered_upto=0 ;; esac
+    if [ "$armed_upto" -gt "$delivered_upto" ]; then
+      # This poll completed after arming an uncovered receipt: it displayed it,
+      # unless the session was already gone - a missing session proves nothing.
+      journal_append "$id" "$(printf 'delivered\t%s\t%s' "$epoch" "$armed_upto")" || true
+      if [ "$classify" = ended ] && [ -z "$submission" ]; then
+        # A pure delivery capture has served its only purpose. Acknowledge it so
+        # its wake never publishes: the handled marker is written under the same
+        # per-source boundary the runner's publication checks - held across this
+        # seam by the runner when it invoked us, taken here when it was not - so
+        # a concurrent reconcile can never observe it unhandled. Any failure
+        # here leaves the ordinary announcement path fully intact.
+        local lock_taken=0
+        if [ "${FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD:-}" = 1 ] || fm_procevent_source_lock_acquire "$id"; then
+          [ "${FM_PROCEVENT_RUNNER_SOURCE_LOCK_HELD:-}" = 1 ] || lock_taken=1
+          fm_procevent_is_handled "$STATE" "$id" "$seq" \
+            || fm_procevent_mark_handled "$STATE" "$id" "$seq" >/dev/null 2>&1 || true
+          [ "$lock_taken" -eq 0 ] || fm_procevent_source_lock_release "$id"
+        fi
+      fi
+    fi
+  fi
+
+  if [ -n "$submission" ]; then
+    local choices messages digest replay='-' closed='' skipped='' quality=''
+    choices=$(printf '%s' "$submission" | cut -f1)
+    messages=$(printf '%s' "$submission" | cut -f2)
+    digest=$(printf '%s' "$submission" | cut -f3 | cut -c1-16)
+    if [ "$((choices + messages))" -gt 0 ] && ! has_event "$id" received "$seq"; then
+      if [ -n "$digest" ]; then
+        replay=$(journal_events "$id" received | awk -F '\t' -v d="$digest" '$6 == d { print NR; exit }')
+        [ -n "$replay" ] || replay='-'
+      fi
+      journal_append "$id" \
+        "$(printf 'received\t%s\t%s\t%s\t%s\t%s\t%s' "$seq" "$epoch" "$choices" "$messages" "$digest" "$replay")" || true
+      submission_line=received
+    elif has_event "$id" received "$seq"; then
+      submission_line=received
+    fi
+    local head_line
+    head_line=$(sed -n '1p' "$outcome")
+    if [ "${submission_line:-}" = received ] && [ "${head_line#fed }" != "$head_line" ]; then
+      closed=$(grep -c '^closed: ' "$outcome" || true)
+      skipped=$(grep -c '^skipped: ' "$outcome" || true)
+      quality=ok
+      if [ "$(sed -n '2p' "$outcome")" = truncated ]; then
+        quality=truncated
+      elif [ "$(sed -n '2p' "$outcome")" = unreadable ]; then
+        quality=unreadable
+      fi
+      if ! has_event "$id" saved "$seq"; then
+        journal_append "$id" \
+          "$(printf 'saved\t%s\t%s\t%s\t%s\t%s' "$seq" "$(date +%s)" "${closed:-0}" "${skipped:-0}" "$quality")" || true
+      fi
+    fi
+  fi
+
+  fm_lock_release "$(receipts_lock_path "$id")"
+  trap - EXIT
+}
+
+# Handler-owned state transitions. The wake handler records Applying when it
+# begins routing the accepted answers and Complete when that routing is done;
+# nothing else can produce these states, and Complete refuses without Applying.
+cmd_applying() {  # <source-id> <sequence>
+  local id=${1-} seq=${2-}
+  [ "$#" -eq 2 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
+  [ -f "$STATE/procevent-inbox/$id.$seq.result" ] && [ ! -L "$STATE/procevent-inbox/$id.$seq.result" ] \
+    || die "no captured result for that generation: $id $seq"
+  journal_readable "$id" || die "receipts record is unreadable: $id"
+  acquire_receipts_lock "$id" || die "cannot lock the receipts record"
+  trap 'fm_lock_release "$(receipts_lock_path "$id")"' EXIT
+  if ! has_event "$id" received "$seq"; then
+    die "no received submission for that generation: $id $seq"
+  fi
+  if has_event "$id" applying "$seq"; then
+    printf 'already-applying: %s %s\n' "$id" "$seq"
+  else
+    journal_append "$id" "$(printf 'applying\t%s\t%s' "$seq" "$(date +%s)")" \
+      || die "cannot record applying: $id $seq"
+    printf 'applying: %s %s\n' "$id" "$seq"
+  fi
+  fm_lock_release "$(receipts_lock_path "$id")"
+  trap - EXIT
+}
+
+cmd_complete() {  # <source-id> <sequence>
+  local id=${1-} seq=${2-}
+  [ "$#" -eq 2 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
+  [ -f "$STATE/procevent-inbox/$id.$seq.result" ] && [ ! -L "$STATE/procevent-inbox/$id.$seq.result" ] \
+    || die "no captured result for that generation: $id $seq"
+  journal_readable "$id" || die "receipts record is unreadable: $id"
+  acquire_receipts_lock "$id" || die "cannot lock the receipts record"
+  trap 'fm_lock_release "$(receipts_lock_path "$id")"' EXIT
+  if ! has_event "$id" applying "$seq"; then
+    fm_lock_release "$(receipts_lock_path "$id")"
+    trap - EXIT
+    die "complete requires a recorded applying for the same generation: $id $seq"
+  fi
+  if has_event "$id" complete "$seq"; then
+    printf 'already-complete: %s %s\n' "$id" "$seq"
+  else
+    journal_append "$id" "$(printf 'complete\t%s\t%s' "$seq" "$(date +%s)")" \
+      || die "cannot record complete: $id $seq"
+    printf 'complete: %s %s\n' "$id" "$seq"
+  fi
+  fm_lock_release "$(receipts_lock_path "$id")"
+  trap - EXIT
+}
+
+cmd_receipt_text() {  # <source-id>
+  local id=${1-} text
+  [ "$#" -eq 1 ] || usage
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
+  journal_readable "$id" || die "receipts record is unreadable: $id"
+  text=$(receipt_build_text "$id") || die "cannot build the receipt text: $id"
+  [ -n "$text" ] && printf '%s' "$text"
+  return 0
+}
+
+# Build the visible receipt: one concise line per received round, stating only
+# journaled facts. Every visible state - Received, Saved, Applying, Complete,
+# Already received - appears only after its fact exists in the record.
+receipt_build_text() {  # <source-id>
+  local id=$1 total skip_floor n=0 out='' ev
+  total=$(journal_count "$id" received) || return 1
+  [ "$total" -gt 0 ] || { printf ''; return 0; }
+  skip_floor=0
+  [ "$total" -le "$RECEIPT_MAX_ROUNDS" ] || skip_floor=$((total - RECEIPT_MAX_ROUNDS))
+  if [ "$skip_floor" -gt 0 ]; then
+    out+="(+$skip_floor earlier round(s) received.)"$'\n'
+  fi
+  local seq epoch choices messages digest replay saved_line s_epoch s_closed s_skipped s_quality
+  local applying_line a_epoch complete_line c_epoch answers_word
+  while IFS= read -r ev; do
+    [ -n "$ev" ] || continue
+    n=$((n + 1))
+    [ "$n" -gt "$skip_floor" ] || continue
+    IFS=$'\t' read -r _ seq epoch choices messages digest replay <<< "$ev"
+    if [ "$replay" != "-" ]; then
+      out+="Round $n: already received at $(fmt_utc "$epoch") (identical to round $replay); no new action."$'\n'
+      continue
+    fi
+    answers_word="$choices answer"
+    [ "$choices" = 1 ] || answers_word="$choices answers"
+    out+="Round $n: received $answers_word"
+    if [ "$messages" -gt 0 ]; then
+      [ "$messages" = 1 ] && out+=' and a message' || out+=" and $messages messages"
+    fi
+    out+=" at $(fmt_utc "$epoch")"
+    saved_line=$(journal_events "$id" saved | awk -F '\t' -v s="$seq" '$2 == s { print; exit }')
+    if [ -n "$saved_line" ] && [ "$choices" -gt 0 ]; then
+      IFS=$'\t' read -r _ _ s_epoch s_closed s_skipped s_quality <<< "$saved_line"
+      if [ "$s_quality" = ok ]; then
+        out+="; saved $s_closed of $choices at $(fmt_utc "$s_epoch")"
+        [ "$s_skipped" = 0 ] || out+=" ($s_skipped not saved - firstmate follows up in chat)"
+      else
+        out+="; its saving report was incomplete at $(fmt_utc "$s_epoch") - firstmate follows up in chat"
+      fi
+    fi
+    applying_line=$(journal_events "$id" applying | awk -F '\t' -v s="$seq" '$2 == s { print; exit }')
+    complete_line=$(journal_events "$id" complete | awk -F '\t' -v s="$seq" '$2 == s { print; exit }')
+    if [ -n "$complete_line" ]; then
+      IFS=$'\t' read -r _ _ c_epoch <<< "$complete_line"
+      out+="; complete at $(fmt_utc "$c_epoch")"
+    elif [ -n "$applying_line" ]; then
+      IFS=$'\t' read -r _ _ a_epoch <<< "$applying_line"
+      out+="; firstmate is applying them (since $(fmt_utc "$a_epoch"))"
+    fi
+    out+='.'$'\n'
+  done <<EOF
+$(journal_events "$id" received)
+EOF
+  printf '%s' "$out" | head -c "$RECEIPT_MAX_TEXT_BYTES"
 }
 
 cmd_retire() {
@@ -244,11 +623,16 @@ poll_retry_delay() {
   printf '%s\n' "$delay"
 }
 
-cmd_poll() {
+# Arguments beyond the artifact are presented ONCE, on the first attempt only.
+# The retried condition interrupts the poll response, after the server already
+# accepted the request, so re-sending a visible argument like --agent-reply
+# would repeat what the captain sees for a single round.
+run_poll() {  # <artifact> [first-attempt-only lavish-axi poll arguments...]
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc
-  local pipeline_status
-  [ -n "$artifact" ] || usage
-  [ "$#" -eq 1 ] || usage
+  local pipeline_status attempt_args
+  [ -n "$artifact" ] || return 1
+  shift
+  attempt_args=("$@")
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
@@ -265,7 +649,7 @@ cmd_poll() {
     trap "$cleanup_command; trap - $signal; kill -$signal $$" "$signal"
   done
   while :; do
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
+    lavish-axi poll "$artifact" ${attempt_args[@]+"${attempt_args[@]}"} | poll_response_filter "$response"
     pipeline_status=("${PIPESTATUS[@]}")
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}
@@ -274,6 +658,7 @@ cmd_poll() {
       10)
         if [ "$attempt" -lt "$POLL_RETRY_LIMIT" ]; then
           attempt=$((attempt + 1))
+          attempt_args=()
           sleep "$delay"
         else
           cat -- "$response"
@@ -284,6 +669,13 @@ cmd_poll() {
     esac
   done
   return "$rc"
+}
+
+cmd_poll() {
+  local artifact=${1-}
+  [ -n "$artifact" ] || usage
+  [ "$#" -eq 1 ] || usage
+  run_poll "$artifact"
 }
 
 # Read one field of the response's leading `session:` block. Those fields are
@@ -332,16 +724,37 @@ cmd_classify() {
 # produce, and the published poll delivers the final feedback of a `Send & End`
 # review marked with session_ended and returns only empty ended sessions after
 # it. Anything else - including an unreadable result - keeps the source armed.
+#
+# One guard is added on top of those session facts, and it is what makes the
+# visible receipt trustworthy: a review whose latest received submission still
+# owes its receipt is not terminal yet, so the source stays armed for exactly
+# one more poll - the one that presents the receipt - before retiring. A missing
+# session can never display anything again, so its queued receipt stays queued
+# and the source ends. An unreadable receipts record is never read as delivered.
 cmd_terminal() {
-  local file=${1-}
+  local file=${1-} classify id latest delivered
   [ -n "$file" ] || usage
-  [ -f "$file" ] || die "result file does not exist: $file"
-  case "$(cmd_classify "$file")" in
-    ended|missing) return 0 ;;
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  classify=$(cmd_classify "$file")
+  case "$classify" in
+    ended|missing) : ;;
+    *)
+      case "$(session_field "$file" session_ended)" in
+        true|True|TRUE) : ;;
+        *) return 1 ;;
+      esac
+      ;;
   esac
-  case "$(session_field "$file" session_ended)" in
-    true|True|TRUE) return 0 ;;
-  esac
+  [ "$classify" = missing ] && return 0
+  id=$(fm_procevent_result_source_id "$file") || return 1
+  fm_procevent_source_id_valid "$id" || return 1
+  journal_readable "$id" || return 1
+  latest=$(journal_count "$id" received)
+  case "$latest" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$latest" -gt 0 ] || return 0
+  delivered=$(journal_last_field "$id" delivered 3); delivered=${delivered:-0}
+  case "$delivered" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$delivered" -ge "$latest" ] && return 0
   return 1
 }
 
@@ -393,28 +806,34 @@ cmd_silent() {
   [ "$content_rc" -eq 1 ]
 }
 
-# Print `key<TAB>answer<TAB>label[<TAB>mode]` for every structured choice the
-# captain submitted in a captured result; the optional mode column relays the
-# card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
-# a `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
-# quoted fields carry JSON-style escapes, so this reads the declared field ORDER
-# rather than assuming a fixed column, and takes only rows whose `tag` field is
-# `choice`. A freeform `message` row is captain prose and is deliberately never a
-# source of decision keys. A row that does not carry both a slug-shaped `question`
-# and an `answer` inside its `Context data:` block is skipped, so a deck that does
-# not key its forms by decision key simply yields nothing.
-# The question cap is 128 so any task id fits, including the long legacy
-# `<origin>-decision-<key>` identities pre-collapse decks still carry; the
-# security property is the slug SHAPE, which is unchanged.
-cmd_answers() {
-  local file=${1-}
-  [ -n "$file" ] || usage
+# Shared row parser for the published response's `prompts[N]{field,...}:`
+# section: exactly N indented CSV rows whose quoted fields carry JSON-style
+# escapes, read in declared field ORDER rather than assuming a fixed column.
+#
+#   answers     print `key<TAB>answer<TAB>label[<TAB>mode]` for every structured
+#               choice; the optional mode column relays the card's declared close
+#               mode (`done` or `release`) to the keyed-answer intake. A freeform
+#               `message` row is captain prose and is deliberately never a source
+#               of decision keys. A row that does not carry both a slug-shaped
+#               `question` and an `answer` inside its `Context data:` block is
+#               skipped, so a deck that does not key its forms by decision key
+#               simply yields nothing. The question cap is 128 so any task id
+#               fits, including the long legacy `<origin>-decision-<key>`
+#               identities pre-collapse decks still carry; the security property
+#               is the slug SHAPE, which is unchanged.
+#   submission  print `choices<TAB>messages<TAB>sha256` summarizing every queued
+#               row (no output when the result carries no prompts section): the
+#               per-tag counts and a content digest over each row's tag, prompt,
+#               and text - the exact-submission identity a replay is detected
+#               by, stable across DOM uids and selectors.
+perl_rows() {  # <answers|submission> <result-file>
+  local mode=${1-} file=${2-}
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  perl -MJSON::PP -e '
+  perl -MJSON::PP -MDigest::SHA=sha256_hex -e '
     use strict; use warnings;
-    my ($path) = @ARGV;
+    my ($mode, $path) = @ARGV;
     open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
+    my (@fields, $want, @rows, @parsed);
     while (my $line = <$fh>) {
       if (!@fields) {
         next unless $line =~ /^prompts\[(\d+)\]\{([^}]*)\}:\s*$/;
@@ -427,8 +846,6 @@ cmd_answers() {
       push @rows, $line;
     }
     close $fh;
-    my %seen;
-    my @out;
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
@@ -445,8 +862,28 @@ cmd_answers() {
       }
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
-      next unless defined $f{tag} && $f{tag} eq "choice";
-      my $prompt = $f{prompt};
+      push @parsed, \%f;
+    }
+    if ($mode eq "submission") {
+      exit 0 unless @fields;
+      my ($choices, $messages) = (0, 0);
+      my $material = "";
+      for my $f (@parsed) {
+        my $tag = defined $f->{tag} ? $f->{tag} : "";
+        $choices++ if $tag eq "choice";
+        $messages++ if $tag eq "message";
+        my $prompt = defined $f->{prompt} ? $f->{prompt} : "";
+        my $text = defined $f->{text} ? $f->{text} : "";
+        $material .= join("\x1f", $tag, $prompt, $text) . "\x1e";
+      }
+      printf "%d\t%d\t%s\n", $choices, $messages, sha256_hex($material);
+      exit 0;
+    }
+    my %seen;
+    my @out;
+    for my $f (@parsed) {
+      next unless defined $f->{tag} && $f->{tag} eq "choice";
+      my $prompt = $f->{prompt};
       next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
       my $ctx = $1;
       my $data = eval { decode_json($ctx) };
@@ -454,24 +891,30 @@ cmd_answers() {
       my $key = $data->{question};
       my $answer = $data->{answer};
       next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
-      my $mode = "";
+      my $mode2 = "";
       if (exists $data->{close}) {
         next if !defined($data->{close}) || ref($data->{close})
           || ($data->{close} ne "done" && $data->{close} ne "release");
-        $mode = $data->{close};
+        $mode2 = $data->{close};
       }
       next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
       next unless length $answer && length($answer) <= 512;
-      my $label = defined $f{text} ? $f{text} : "";
+      my $label = defined $f->{text} ? $f->{text} : "";
       s/[\x00-\x1f\x7f]/ /g for ($answer, $label);
       $label = substr($label, 0, 512);
       # A re-answered form appears again later in the queue; the last submission wins.
       if (defined $seen{$key}) { $out[$seen{$key}] = undef }
       $seen{$key} = scalar @out;
-      push @out, length $mode ? "$key\t$answer\t$label\t$mode" : "$key\t$answer\t$label";
+      push @out, length $mode2 ? "$key\t$answer\t$label\t$mode2" : "$key\t$answer\t$label";
     }
     print "$_\n" for grep { defined } @out;
-  ' "$file"
+  ' "$mode" "$file"
+}
+
+cmd_answers() {
+  local file=${1-}
+  [ -n "$file" ] || usage
+  perl_rows answers "$file"
 }
 
 # Present one already-captured result for a handler. Body lines are prefixed
@@ -614,15 +1057,20 @@ cmd_read() {
 }
 
 case "${1-}" in
-  arm)       shift; cmd_arm "$@" ;;
-  retire)    shift; cmd_retire "$@" ;;
-  poll)      shift; cmd_poll "$@" ;;
-  source-id) shift; cmd_source_id "$@" ;;
-  classify)  shift; cmd_classify "$@" ;;
-  terminal)  shift; cmd_terminal "$@" ;;
-  silent)    shift; cmd_silent "$@" ;;
-  answers)   shift; cmd_answers "$@" ;;
-  read)      shift; cmd_read "$@" ;;
+  arm)          shift; cmd_arm "$@" ;;
+  managed-poll) shift; cmd_managed_poll "$@" ;;
+  receipt)      shift; cmd_receipt "$@" ;;
+  applying)     shift; cmd_applying "$@" ;;
+  complete)     shift; cmd_complete "$@" ;;
+  receipt-text) shift; cmd_receipt_text "$@" ;;
+  retire)       shift; cmd_retire "$@" ;;
+  poll)         shift; cmd_poll "$@" ;;
+  source-id)    shift; cmd_source_id "$@" ;;
+  classify)     shift; cmd_classify "$@" ;;
+  terminal)     shift; cmd_terminal "$@" ;;
+  silent)       shift; cmd_silent "$@" ;;
+  answers)      shift; cmd_answers "$@" ;;
+  read)         shift; cmd_read "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

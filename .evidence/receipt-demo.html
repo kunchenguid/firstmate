@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lavish receipt lifecycle demo</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 46rem; margin: 1.5rem auto; padding: 0 1rem; background: #ffffff; color: #111827; line-height: 1.5; }
+  h1 { font-size: 1.5rem; }
+  .badge { display: inline-block; background: #dbeafe; color: #1e3a8a; border-radius: 999px; padding: 0.1rem 0.7rem; font-size: 0.8rem; font-weight: 600; }
+  section { border: 1px solid #d1d5db; border-radius: 10px; padding: 1rem 1.25rem; margin: 1rem 0; background: #f9fafb; }
+  h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+  label { display: block; padding: 0.35rem 0; }
+  button { background: #1d4ed8; color: #ffffff; border: 0; border-radius: 6px; padding: 0.45rem 1rem; font-size: 0.95rem; cursor: pointer; }
+  button:hover { background: #1e40af; }
+  .queued { color: #065f46; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Lavish receipt lifecycle demo <span class="badge">candidate A</span></h1>
+<p>Answer the cards, queue each answer, then press <strong>Send to Agent</strong>.
+Firstmate acknowledges every submission in this conversation: received, saved,
+applying, complete, and already received for exact replays.</p>
+<section>
+  <h2>Alpha call</h2>
+  <form data-lavish-question="evidence-alpha" onsubmit="event.preventDefault(); const v=new FormData(event.currentTarget).get('q'); if(v){ window.lavish.queuePrompt('Alpha: '+v,{tag:'choice',text:'Alpha: '+v,element:event.currentTarget,data:{question:'evidence-alpha',answer:v}}); this.querySelector('.queued').hidden=false; }">
+    <label><input type="radio" name="q" value="go"> go</label>
+    <label><input type="radio" name="q" value="hold"> hold</label>
+    <button type="submit">Queue this answer</button>
+    <span class="queued" hidden>queued</span>
+  </form>
+</section>
+<section>
+  <h2>Beta call</h2>
+  <form data-lavish-question="evidence-beta" onsubmit="event.preventDefault(); const v=new FormData(event.currentTarget).get('q'); if(v){ window.lavish.queuePrompt('Beta: '+v,{tag:'choice',text:'Beta: '+v,element:event.currentTarget,data:{question:'evidence-beta',answer:v}}); this.querySelector('.queued').hidden=false; }">
+    <label><input type="radio" name="q" value="ship now"> ship now</label>
+    <label><input type="radio" name="q" value="park"> park</label>
+    <button type="submit">Queue this answer</button>
+    <span class="queued" hidden>queued</span>
+  </form>
+</section>
+<section>
+  <h2>Gamma call (released on answer)</h2>
+  <form data-lavish-question="evidence-gamma" onsubmit="event.preventDefault(); const v=new FormData(event.currentTarget).get('q'); if(v){ window.lavish.queuePrompt('Gamma: '+v,{tag:'choice',text:'Gamma: '+v,element:event.currentTarget,data:{question:'evidence-gamma',answer:v,close:'release'}}); this.querySelector('.queued').hidden=false; }">
+    <label><input type="radio" name="q" value="resume"> resume</label>
+    <label><input type="radio" name="q" value="keep held"> keep held</label>
+    <button type="submit">Queue this answer</button>
+    <span class="queued" hidden>queued</span>
+  </form>
+</section>
+<script>
+window.LAVISH_AUTO_QUEUE = "";
+window.addEventListener("load", function () {
+  function go() {
+    if (!window.LAVISH_AUTO_QUEUE || !window.lavish) return;
+    var cards = {
+      "evidence-alpha": { text: "Alpha", form: 0 },
+      "evidence-beta":  { text: "Beta",  form: 1 },
+      "evidence-gamma": { text: "Gamma", form: 2, close: "release" }
+    };
+    window.LAVISH_AUTO_QUEUE.split(";").forEach(function (pair) {
+      var kv = pair.split("=");
+      var card = cards[kv[0]];
+      if (!card || !kv[1]) return;
+      var form = document.querySelectorAll("form[data-lavish-question]")[card.form];
+      var radio = Array.prototype.slice.call(form.querySelectorAll("input")).find(function (r) { return r.value === kv[1]; });
+      if (radio) radio.checked = true;
+      var data = { question: kv[0], answer: kv[1] };
+      if (card.close) data.close = card.close;
+      window.lavish.queuePrompt(card.text + ": " + kv[1], { tag: "choice", text: card.text + ": " + kv[1], element: form, data: data });
+      var badge = form.querySelector(".queued");
+      if (badge) badge.hidden = false;
+    });
+  }
+  if (document.readyState === "complete") go(); else window.addEventListener("load", go);
+});
+</script>
+</body>
+</html>

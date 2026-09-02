@@ -1,0 +1,146 @@
+# Candidate A evidence: durable Lavish answer-receipt lifecycle
+
+Capture branch: `fm/fm-lavish-receipt-state-a`
+Code head producing this evidence: `ebdb2fa274e267246d7f0bb0db47077ec1792767`
+This directory (screenshots, demo artifact, this manifest) is delivery evidence
+committed on top of that head; it contains no code.
+
+Note on the commits after capture: one internal race was closed first (a
+concurrent reconcile could rarely duplicate a capture's internal announcement
+before the receipt seam acknowledged it; the per-source boundary now spans
+capture through the seam). Rebuilding this work on moved upstream then added
+two compatibility fixes - macOS ancestor symlinks (`/tmp` and `/var` through
+`/private`) no longer fail procevent private-directory validation, and the
+managed delivery poll now runs through the adapter's shared quiet-retry loop -
+and two review fixes hardening the receipts record and staging cleanup and
+presenting a round's receipt once instead of re-sending it on a quiet retry.
+None of them changes visible receipt text or page layout, so the screenshots
+below match the delivered behavior and the reproduction steps below remain
+valid.
+
+## What is committed
+
+- `screenshots/<state>-<variant>.png` for state in `success`, `partial`,
+  `duplicate`, `completion` and variant in `laptop` (1280x800), `mobile`
+  (375x812 emulated), `zoom200` (1280x800 at 200% zoom) - 12 images.
+- `receipt-demo.html` - the demo review artifact used live, including the
+  `window.LAVISH_AUTO_QUEUE` driver hook (empty by default) documented below.
+
+Every screenshot was captured against a live Lavish session
+(`lavish-axi` 0.1.53) whose source was armed by the committed adapter and
+driven by the committed runner and keyed-answer intake, with the handler
+steps run through the committed `applying`, `complete`, and `handled`
+commands. A manual `bin/fm-procevent.sh reconcile` loop stood in for the
+watcher cadence; all other code paths are the candidate's own.
+
+## Receipt text per state (as visible in the screenshots)
+
+- success:  `Round 1: received 1 answer at ...; saved 1 of 1 at ...`
+- partial:  `Round 3: received 2 answers at ...; saved 0 of 2 at ... (2 not saved - firstmate follows up in chat)`
+- duplicate:`Round 2: already received at ... (identical to round 1); no new action.`
+- completion:`... complete at ...` alongside the ended review's final receipt.
+
+In-page text carries counts and UTC timestamps only - no answer values,
+decision keys, prose, paths, or hosts.
+
+## WCAG AA
+
+The demo artifact styles body text `#111827` on `#ffffff`/`#f9fafb`
+(contrast >= 15:1) and the badge `#1e3a8a` on `#dbeafe` (>= 10:1).
+Receipt lines render with the Lavish conversation panel's own default text
+styles (near-white on dark panels in the screenshots). No low-contrast
+styling was introduced anywhere; legibility is verifiable in every image.
+
+## Reproducing every claimed state
+
+Prerequisites: `lavish-axi`, `tasks-axi`, `jq`, and `chrome-devtools-axi`
+installed; a desktop Chrome available to `chrome-devtools-axi`.
+
+1. Scratch home (outside any real Firstmate home):
+
+   ```sh
+   E=/tmp/receipt-repro; mkdir -p "$E/home/data" "$E/home/state" "$E/home/config"
+   cp .tasks.toml "$E/home/.tasks.toml"
+   printf '## In flight\n\n## Queued\n\n## Done\n' > "$E/home/data/backlog.md"
+   ```
+
+2. Three captain-held tasks (from inside `$E/home`):
+
+   ```sh
+   (cd "$E/home" && tasks-axi add evidence-alpha "Alpha" --kind ship --repo sample --body p)
+   (cd "$E/home" && tasks-axi add evidence-beta  "Beta"  --kind ship --repo sample --body p)
+   (cd "$E/home" && tasks-axi add evidence-gamma "Gamma" --kind ship --repo sample --body p)
+   # hold each: fm-captain-hold.sh hold evidence-alpha --reason demo  (etc.)
+   ```
+
+3. Copy `receipt-demo.html` anywhere stable, then bind BEFORE arming and arm
+   (the adapter registers the managed poll; arming resets the receipt
+   lifecycle):
+
+   ```sh
+   sid=$(bin/fm-procevent-lavish.sh source-id "$E/receipt-demo.html")
+   bin/fm-captain-hold.sh bind "$sid"
+   bin/fm-procevent-lavish.sh arm "$E/receipt-demo.html"
+   ```
+
+4. Open the printed session URL in the browser and set the round's
+   `window.LAVISH_AUTO_QUEUE` value by editing the `receipt-demo.html` copy
+   (Lavish reloads the artifact on file change, the load hook queues exactly
+   that spec), then press **Send to Agent**:
+
+   - success round:  `evidence-alpha=go;evidence-gamma=resume`
+   - partial round:  `evidence-beta=ship now;evidence-alpha=hold`
+     (alpha's task was closed by the success round, so the intake rejects it
+     while saving beta: `saved 1 of 2 (1 not saved ...)`)
+   - duplicate round: touch the artifact file so the same spec re-queues, and
+     send again - identical content digest, reported as already received
+   - completion round: clear the spec, type a message, press **Send & End**
+
+   After each Send, run `FM_HOME=$E/home bin/fm-procevent.sh reconcile`
+   until the capture appears under `$E/home/state/procevent-inbox/`, then run
+   the handler steps exactly as firstmate would and reconcile once more so
+   the next armed poll presents the receipt in the page:
+
+   ```sh
+   seq=<n>
+   bin/fm-procevent-lavish.sh applying "$sid" "$seq"
+   bin/fm-procevent-lavish.sh complete "$sid" "$seq"
+   bin/fm-procevent.sh handled "$sid" "$seq"
+   bin/fm-procevent.sh reconcile
+   ```
+
+5. Screenshots:
+
+   ```sh
+   chrome-devtools-axi resize 1280 800                       # laptop
+   chrome-devtools-axi emulate --viewport "375x812x2,mobile,touch"   # mobile
+   chrome-devtools-axi eval '() => { document.documentElement.style.zoom = "2"; }'  # 200%
+   chrome-devtools-axi screenshot <state>-<variant>.png
+   ```
+
+The ended review retires only after its final receipt was displayed (or the
+session became unreceivable), so the completion round ends with the source
+gone from `$E/home/state/procevent/` while the page still shows the final
+receipt under the "Session ended." notice.
+
+## Not committed (scratch)
+
+The disposable demo home (task scaffolding, wake-queue state, and raw
+captured poll results) was reproduced per the steps above and deleted after
+the session; the committed screenshots and this procedure are the complete
+record needed to reproduce and verify every claimed state.
+
+## Screenshot integrity (sha256)
+
+success-laptop.png  7d8d261fd3384fdadfe10d8a2457b06f3844c62fa8445d0d14f98bf5e012c19f
+success-mobile.png  9cee5f04fb2173223d3717c75f5d3086053bb4b875bccc5408ed829bf3859260
+success-zoom200.png  c15383f1ea2cd7261c5b2d9f7801d47b79cfa693e130eadc04e035a2389ac204
+partial-laptop.png  80f612a231c18fae08f7ee9cba269b9c66febe7eea618d8fb0f1196eb601d584
+partial-mobile.png  abe152671ff80953afe49cc25b1071ba03c8ae8a31a8e43d9e1538a2625d80a4
+partial-zoom200.png  6ddc65191bf9a116ad0f17ecf98a669fc661523bf5a21884ecb5fe7fddb46010
+duplicate-laptop.png  46a98f3b07666a5ecf1960b9f9ec49a1494a876ed8669e6e3528571d3202bea0
+duplicate-mobile.png  a0c9d247bf62b09bc5b469742487b33da8875757f3afa8f4c95773cf0075acee
+duplicate-zoom200.png  4082156f9eabc1fc9ae708e4420390b7f56c0e718a1f2f4460efb53cef8b7c0c
+completion-laptop.png  8d7af52ee2921b11633515b3b13e2256a4a4c9ca99271f7f89e26c846cfd5018
+completion-mobile.png  15c2ea42989b32d1e87f59ec5813251074c34ece9b636169dc2b26ba31d15bc7
+completion-zoom200.png  64e5d1b80a85918b7818324efaf0ad52921a85f676007b55d1a9fecbc981bada

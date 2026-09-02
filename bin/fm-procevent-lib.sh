@@ -39,6 +39,13 @@ fm_procevent_registry_dir() { printf '%s\n' "$1/procevent"; }
 fm_procevent_inbox_dir()    { printf '%s\n' "$1/procevent-inbox"; }
 fm_procevent_capture_reservation_dir() { printf '%s\n' "$1/procevent-capture-reservations"; }
 
+# A source's receipts record and its serialization lock live at the runner's
+# per-source layout so retire and sweep-home clean them with the registration.
+# The runner owns the file's LIFECYCLE and never reads its bytes; the source's
+# adapter owns the content and its schema.
+fm_procevent_receipts_path() { printf '%s/%s.receipts\n' "$(fm_procevent_registry_dir "$1")" "$2"; }
+fm_procevent_receipts_lock_path() { printf '%s/%s.receipts.lock\n' "$(fm_procevent_registry_dir "$1")" "$2"; }
+
 # A source id names a private file and a bounded wake slug, so it is held to the
 # same path-safe shape as a task id. Adapters derive it from canonical source
 # identity, never from a caller-supplied display string.
@@ -346,7 +353,10 @@ fm_procevent_claim_state_root_identity() {  # <state-root>
   local state=$1 canonical device inode owner mode
   fm_procevent_private_directory_valid "$state" 0 || return 1
   canonical=$(cd -P -- "$state" && pwd -P) || return 1
-  [ "$canonical" = "$(fm_procevent_path_normalize "$state")" ] || return 1
+  # Same canonical-vs-normalized-canonical comparison as the private-directory
+  # check above: macOS ancestor symlinks (/tmp, /var through /private) must not
+  # fail the claim identity.
+  [ "$canonical" = "$(fm_procevent_path_normalize "$canonical")" ] || return 1
   fm_procevent_claim_state_root_field_valid "$canonical" || return 1
   device=$(fm_pr_file_device "$canonical") || return 1
   inode=$(fm_pr_file_inode "$canonical") || return 1
@@ -598,7 +608,11 @@ fm_procevent_private_directory_valid() {
     return 1
   fi
   canonical=$(cd -P -- "$directory" && pwd -P) || return 1
-  normalized=$(fm_procevent_path_normalize "$directory") || return 1
+  # Compare the canonical form against the normalized canonical form, not the
+  # lexical input: macOS resolves /tmp and /var through /private, so an ancestor
+  # symlink is unavoidable for temp-dir homes and would fail every claim. The
+  # leaf-symlink, ownership, and mode checks above carry the boundary.
+  normalized=$(fm_procevent_path_normalize "$canonical") || return 1
   [ "$canonical" = "$normalized" ]
 }
 
@@ -815,6 +829,58 @@ fm_procevent_mark_handled() {
   marker=$(fm_procevent_handled_marker "$state" "$id" "$seq")
   [ ! -L "$marker" ] || return 2
   tmp=$(umask 077; mktemp "$inbox/.handled.XXXXXX") || return 2
+  if ! chmod 0600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 2
+  fi
+  if ln "$tmp" "$marker" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  [ -f "$marker" ] && [ ! -L "$marker" ] && return 1
+  return 2
+}
+
+# fm_procevent_receipt_marker <state> <source-id> <sequence>
+# fm_procevent_receipt_seam_ran <state> <source-id> <sequence>
+# fm_procevent_mark_receipt_seam <state> <source-id> <sequence>
+# The runner's durable note that the adapter-owned receipt seam has already been
+# given its one chance at one captured generation. Same private per-generation
+# layout as the handled marker, and a strictly different fact: handled records
+# what the HANDLER did with a result, this records only that the seam ran. It
+# exists because a runner killed between its durable capture and that seam
+# leaves a generation the adapter never saw, which reconcile must be able to
+# tell apart from a generation whose seam already ran - rerunning a completed
+# seam would let an adapter journal acknowledgement state no fact supports yet.
+# 0 = newly recorded, 1 = already recorded, 2 = error.
+fm_procevent_receipt_marker() {
+  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" = 1 ]; then
+    printf './%s.%s.receipted\n' "$2" "$3"
+    return
+  fi
+  printf '%s/%s.%s.receipted\n' "$(fm_procevent_inbox_dir "$1")" "$2" "$3"
+}
+
+fm_procevent_receipt_seam_ran() {
+  local marker; marker=$(fm_procevent_receipt_marker "$1" "$2" "$3")
+  [ -f "$marker" ] && [ ! -L "$marker" ]
+}
+
+fm_procevent_mark_receipt_seam() {
+  local state=$1 id=$2 seq=$3 inbox result marker tmp
+  fm_procevent_source_id_valid "$id" || return 2
+  case "$seq" in ''|*[!0-9]*) return 2 ;; esac
+  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" = 1 ]; then
+    inbox=.
+  else
+    inbox=$(fm_procevent_inbox_dir "$state")
+  fi
+  result="$inbox/$id.$seq.result"
+  [ -f "$result" ] && [ ! -L "$result" ] || return 2
+  marker=$(fm_procevent_receipt_marker "$state" "$id" "$seq")
+  [ ! -L "$marker" ] || return 2
+  tmp=$(umask 077; mktemp "$inbox/.receipted.XXXXXX") || return 2
   if ! chmod 0600 "$tmp"; then
     rm -f -- "$tmp"
     return 2
