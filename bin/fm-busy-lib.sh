@@ -950,7 +950,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       esac
       return 0
       ;;
-    agy*)
+    agy)
       # agy has no worker-state source. Placed AFTER the native arm above on
       # purpose: on herdr a genuinely streaming turn is still proven busy there,
       # and only what the native verdict cannot prove reaches this line. Neither

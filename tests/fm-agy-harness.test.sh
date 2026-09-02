@@ -89,8 +89,27 @@ agy_log() {
   [ -n "${FM_FAKE_AGY_EVENT_LOG:-}" ] || return 0
   printf '%s\n' "$1" >> "$FM_FAKE_AGY_EVENT_LOG"
 }
+render_agy() {
+  case "$1" in
+    trust)
+      printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
+      ;;
+    trust-tall)
+      printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
+      i=0
+      while [ "$i" -lt 14 ]; do printf '  workspace row %s\n' "$i"; i=$((i + 1)); done
+      printf '\n  >\n? for shortcuts\n'
+      ;;
+    trust-and-ready)
+      printf 'Do you trust the contents of this project?\n> Yes, I trust this folder\n\n  >\n? for shortcuts\n'
+      ;;
+    blank|same) : ;;
+    *) printf '  >\n\n? for shortcuts\n' ;;
+  esac
+}
 target=${FM_FAKE_AGY_SCREEN:-ready}
 phase_file=${FM_FAKE_AGY_PHASE:-}
+sentinel_file=${FM_FAKE_AGY_SENTINEL_FILE:-${phase_file:+$phase_file.sentinel}}
 # 0 pre-launch, 1 launch typed, 2 launch submitted, 3 dialog answered.
 phase=2
 if [ -n "$phase_file" ]; then
@@ -115,23 +134,16 @@ case "${1:-}" in
       printf 'a previous agy session\n? for shortcuts\n$ agy --dangerously-skip-permissions -i "brief"\n'
     fi
     [ "$phase" -ge 2 ] || exit 0
-    [ "$phase" -eq 3 ] && target=${FM_FAKE_AGY_AFTER_ENTER:-ready}
-    case "$target" in
-      trust)
-        printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
-        ;;
-      trust-tall)
-        printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
-        i=0
-        while [ "$i" -lt 14 ]; do printf '  workspace row %s\n' "$i"; i=$((i + 1)); done
-        printf '\n  >\n? for shortcuts\n'
-        ;;
-      trust-and-ready)
-        printf 'Do you trust the contents of this project?\n> Yes, I trust this folder\n\n  >\n? for shortcuts\n'
-        ;;
-      blank) : ;;
-      *) printf '  >\n\n? for shortcuts\n' ;;
-    esac
+    if [ "${FM_FAKE_AGY_HIDE_SENTINEL:-0}" != 1 ] && [ -n "$sentinel_file" ] && [ -f "$sentinel_file" ]; then
+      cat "$sentinel_file"
+    fi
+    if [ "$phase" -eq 3 ]; then
+      render_agy "$target"
+      after=${FM_FAKE_AGY_AFTER_ENTER:-ready}
+      [ "$after" = same ] || render_agy "$after"
+    else
+      render_agy "$target"
+    fi
     exit 0
     ;;
   send-keys)
@@ -140,6 +152,12 @@ case "${1:-}" in
       if [ "$prev" = "-l" ]; then
         [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         agy_log "literal:$a"
+        case "$a" in
+          *fm-agy-start-fm.*)
+            sentinel=$(printf '%s\n' "$a" | sed -n "s/.*'\(fm-agy-start-fm\.[^']*\)'.*/\1/p")
+            [ -z "$sentinel_file" ] || printf '%s\n' "$sentinel" > "$sentinel_file"
+            ;;
+        esac
         case "$a" in *--dangerously-skip-permissions*) set_phase 1 ;; esac
       fi
       prev=$a
@@ -149,7 +167,7 @@ case "${1:-}" in
       agy_log 'key:Enter'
       case "$phase" in
         1) set_phase 2 ;;
-        2) [ "$target" != trust ] || set_phase 3 ;;
+        2) case "$target" in trust|trust-tall) set_phase 3 ;; esac ;;
       esac
       break
     done
@@ -181,7 +199,8 @@ make_spawn_case() {
 run_agy_spawn() {
   local home=$1 proj=$2 wt=$3 fakebin=$4 agy_home=$5 id=$6
   shift 6
-  FM_AGY_CONFIG_HOME="$agy_home" FM_FAKE_LAUNCH_LOG="${FM_FAKE_LAUNCH_LOG:-}" \
+  FM_AGY_CONFIG_HOME="$agy_home" FM_FAKE_AGY_SENTINEL_FILE="$agy_home/.launch-sentinel" \
+    FM_FAKE_LAUNCH_LOG="${FM_FAKE_LAUNCH_LOG:-}" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" \
     "$id" "$proj" agy "$@"
 }
@@ -277,6 +296,25 @@ EOF
     *) fail "agy launch did not attach the brief to -i as its value: $launch" ;;
   esac
   pass "agy launches with -i and skip-permissions, never a positional prompt"
+}
+
+test_implicit_agy_selection_is_refused() {
+  local rec case_dir home proj wt fakebin agy_home id out
+  rec=$(make_spawn_case implicit)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  printf '%s\n' agy > "$home/config/crew-harness"
+  out=$(FM_AGY_CONFIG_HOME="$agy_home" fm_test_run_spawn "$home" "$wt" "$fakebin" \
+    "$id" "$proj" --mode no-mistakes --yolo off 2>&1) \
+    && fail "agy was selected implicitly from config/crew-harness"
+  case "$out" in
+    *"explicit per-task choice"*) : ;;
+    *) fail "implicit agy refusal did not require an explicit per-task choice: $out" ;;
+  esac
+  assert_absent "$agy_home/plugins/fm-turn-end/fm-turn-end.sh" \
+    "implicit agy selection installed its global hook"
+  pass "agy can only be selected explicitly for one crewmate or scout"
 }
 
 # agy 1.1.24 rejects xhigh outright ("invalid --effort \"xhigh\""), so an
@@ -525,6 +563,39 @@ EOF
   pass "a footer left behind by a previous session never settles agy readiness"
 }
 
+test_missing_launch_sentinel_fails_closed() {
+  local rec case_dir home proj wt fakebin agy_home id out
+  rec=$(make_spawn_case missing-sentinel)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_PRELAUNCH=stale FM_FAKE_AGY_SCREEN=ready \
+    FM_FAKE_AGY_HIDE_SENTINEL=1 FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=3 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    && fail "agy spawn accepted readiness without observing its launch sentinel: $out"
+  pass "an unreadable launch sentinel cannot promote predecessor output"
+}
+
+test_identical_post_trust_capture_does_not_settle_readiness() {
+  local rec case_dir home proj wt fakebin agy_home id out enters
+  rec=$(make_spawn_case trust-identical)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_SCREEN=trust-tall FM_FAKE_AGY_AFTER_ENTER=same \
+    FM_FAKE_AGY_PHASE="$case_dir/phase" FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=4 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    && fail "agy spawn accepted the same dialog/footer capture after its trust Enter: $out"
+  enters=$(agy_enters_after_launch "$case_dir/events.log")
+  [ "$enters" -eq 2 ] \
+    || fail "the identical capture received $enters Enters; expected launch plus one trust answer"
+  pass "an unchanged dialog/footer capture is not fresh post-trust readiness"
+}
+
 # The freshness rule must not turn a normal relaunch into a hang: output this
 # incarnation actually produced still settles the gate, and the dialog it draws
 # is still answered exactly once.
@@ -595,6 +666,27 @@ EOF
   agy_fire_hook "$hook" "$(agy_payload "$AGY_STOP_DONE" "$wt" | jq .)" >/dev/null
   assert_present "$turnend" "a pretty-printed fullyIdle=true Stop was silently dropped"
   pass "only a fullyIdle=true Stop counts as an agy turn end"
+}
+
+test_turnend_preserves_payload_while_stdin_stays_open() {
+  local rec case_dir home proj wt fakebin agy_home id out hook turnend fifo writer
+  rec=$(make_spawn_case turnend-open-stdin)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) || fail "agy spawn failed: $out"
+  hook="$agy_home/plugins/fm-turn-end/fm-turn-end.sh"
+  turnend="$home/state/$id.turn-ended"
+  fifo="$case_dir/stop-payload"
+  mkfifo "$fifo"
+  { agy_payload "$AGY_STOP_DONE" "$wt" | jq .; sleep 8; } > "$fifo" &
+  writer=$!
+  bash "$hook" < "$fifo" >/dev/null
+  kill "$writer" 2>/dev/null || true
+  wait "$writer" 2>/dev/null || true
+  assert_present "$turnend" "a complete multi-line Stop was lost while stdin remained open"
+  pass "the bounded hook preserves a complete multi-line payload without stdin EOF"
 }
 
 # The hook is global, so it must be a no-op for every agy session that is not a
@@ -726,7 +818,7 @@ EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
     --mode no-mistakes --yolo off) || fail "agy spawn failed: $out"
   token=$(sed -n 's/^token=//p' "$wt/.fm-agy-turnend")
-  out=$(FM_AGY_CONFIG_HOME="$agy_home" FM_HOME="$home" \
+  out=$(FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     PATH="$fakebin:$PATH" \
@@ -777,6 +869,9 @@ test_worker_state_is_unknown_never_idle() {
   [ "${verdict%% *}" != idle ] || fail "an agy task was classified idle from rendered text"
   [ "$verdict" = "unknown agy-unverified" ] \
     || fail "agy classified '$verdict' from a rendered footer, expected 'unknown agy-unverified'"
+  verdict=$(fm_busy_classify tmux fake-target agy-bin agy-task "$state" 'esc to cancel')
+  [ "$verdict" != "unknown agy-unverified" ] \
+    || fail "a raw agy-prefixed executable was promoted to the verified busy adapter"
   # And no busy-record source is trusted for agy, so nothing can seed a busy
   # record that its fullyIdle-gated hook could never settle.
   sources=$(fm_busy_sources_for_harness agy)
@@ -793,8 +888,10 @@ test_lifecycle_values() {
   # shellcheck source=bin/fm-control-lib.sh
   . "$ROOT/bin/fm-control-lib.sh"
   fm_control_harness_supported agy || fail "agy is not a supported control-plane harness"
-  out=$(fm_control_harness_family agy-1.1.24) || fail "a recorded agy harness had no family"
+  out=$(fm_control_harness_family agy) || fail "the exact agy harness had no family"
   [ "$out" = agy ] || fail "agy family resolved to '$out'"
+  fm_control_harness_family agy-1.1.24 >/dev/null 2>&1 \
+    && fail "a prefixed raw executable was promoted to the verified agy adapter"
   out=$(fm_control_interrupt_key agy)
   [ "$out" = Escape ] || fail "agy interrupt key is '$out', expected Escape"
   out=$(fm_control_interrupt_repeat agy)
@@ -831,6 +928,8 @@ test_wiring_paths_cover_every_artifact() {
   [ -z "$out" ] || fail "agy auth path accepted a traversing token: $out"
   out=$(FM_AGY_CONFIG_HOME=/cfg fm_control_harness_turnend_auth_path agy fm.abcdefghijkl)
   [ "$out" = "/cfg/fm-turn-end.d/fm.abcdefghijkl" ] || fail "agy auth path is '$out'"
+  out=$(fm_control_harness_turnend_auth_path agy /cfg/fm-turn-end.d/fm.abcdefghijkl)
+  [ "$out" = "/cfg/fm-turn-end.d/fm.abcdefghijkl" ] || fail "agy persisted auth path is '$out'"
   pass "agy's wiring and registry paths are complete and refuse a bad token"
 }
 
@@ -839,6 +938,7 @@ test_ancestry_detection
 test_ancestry_is_anchored
 test_tmux_process_classification
 test_launch_shape
+test_implicit_agy_selection_is_refused
 test_effort_is_clamped_to_supported_levels
 test_secondmate_is_refused
 test_secondmate_positional_agy_is_refused
@@ -848,8 +948,11 @@ test_answered_dialog_alone_does_not_prove_readiness
 test_ready_footer_settles_a_capture_still_carrying_the_dialog
 test_trust_dialog_above_the_footer_is_still_answered
 test_stale_footer_from_a_previous_session_does_not_settle_readiness
+test_missing_launch_sentinel_fails_closed
+test_identical_post_trust_capture_does_not_settle_readiness
 test_fresh_output_over_a_stale_footer_still_settles_readiness
 test_turnend_requires_fully_idle
+test_turnend_preserves_payload_while_stdin_stays_open
 test_turnend_requires_registered_token
 test_turnend_never_blocks_the_stop
 test_spawn_refuses_without_jq

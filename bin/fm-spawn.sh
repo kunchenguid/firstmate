@@ -1348,6 +1348,10 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
+    if [ "$HARNESS" = agy ]; then
+      echo "error: agy is selectable only as an explicit per-task choice; pass --harness agy for this crewmate or scout" >&2
+      exit 1
+    fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
@@ -2469,43 +2473,32 @@ AGY_READY_REGEX='esc to cancel|\? for shortcuts'
 # What the gate never managed to observe, reported verbatim when it gives up.
 AGY_READY_DETAIL=
 
-# The pane as it stood immediately before the launch Enter. Both backends answer
-# a capture with recent OUTPUT rather than a live screen, and nothing clears the
-# endpoint on a relaunch, so a pane adopted from a previous agent can keep
-# serving ITS footer - and a footer that predates this launch proves nothing
-# about the session firstmate just started. The anchor is the last baseline row
-# that is neither dialog nor footer text: everything after its last occurrence
-# was drawn after the launch line. Once it has scrolled out of the window every
-# remaining row is newer than it, which is the same claim, so an absent anchor
-# means the whole capture is fresh.
-AGY_READY_BASELINE=
+# Both backends answer a capture with recent OUTPUT rather than a live screen,
+# and nothing clears the endpoint on a relaunch. The launch prints a unique
+# sentinel before agy starts, and the gate accepts only output below that exact
+# row. A missing or unreadable sentinel therefore leaves the gate with no
+# evidence instead of promoting predecessor scrollback.
+AGY_READY_SENTINEL=
 
 agy_fresh_region() {  # <capture>
-  local cur=$1 anchor n
-  anchor=$(printf '%s\n' "$AGY_READY_BASELINE" \
-    | grep -v '^[[:space:]]*$' \
-    | grep -vE "$AGY_TRUST_REGEX" \
-    | grep -vE "$AGY_READY_REGEX" \
-    | tail -1)
-  if [ -z "$anchor" ]; then
-    printf '%s\n' "$cur"
-    return 0
-  fi
-  n=$(printf '%s\n' "$cur" | grep -nFx -- "$anchor" | tail -1 | cut -d: -f1)
-  [ -n "$n" ] || n=0
+  local cur=$1 n
+  [ -n "$AGY_READY_SENTINEL" ] || return 1
+  n=$(printf '%s\n' "$cur" | grep -nFx -- "$AGY_READY_SENTINEL" | tail -1 | cut -d: -f1)
+  [ -n "$n" ] || return 1
   printf '%s\n' "$cur" | tail -n +$((n + 1))
 }
 
 agy_wait_for_ready() {
-  local pane fresh blocked ready i=0 answered=0 max=${FM_AGY_READY_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  local pane fresh blocked ready ready_count min_ready_count=0 i=0 answered=0 max=${FM_AGY_READY_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
   AGY_READY_DETAIL="agy rendered nothing readable in its pane after the launch line: neither its workspace-trust dialog nor a ready footer ($AGY_READY_REGEX) was ever observed as output newer than the launch"
   while [ "$i" -lt "$max" ]; do
     pane=$(spawn_pane_capture)
-    fresh=$(agy_fresh_region "$pane")
+    fresh=$(agy_fresh_region "$pane") || fresh=
     blocked=0
     ready=0
     if printf '%s\n' "$fresh" | grep -qE "$AGY_TRUST_REGEX"; then blocked=1; fi
-    if printf '%s\n' "$fresh" | grep -qE "$AGY_READY_REGEX"; then ready=1; fi
+    ready_count=$(printf '%s\n' "$fresh" | grep -cE "$AGY_READY_REGEX" || true)
+    if [ "$ready_count" -gt "$min_ready_count" ]; then ready=1; fi
     if [ "$blocked" -eq 1 ] && [ "$answered" -eq 0 ]; then
       # Exactly one Enter for the whole gate. A second would land in the
       # composer of a session that has already started its turn, submitting an
@@ -2515,6 +2508,7 @@ agy_wait_for_ready() {
         return 1
       fi
       answered=1
+      min_ready_count=$ready_count
       AGY_READY_DETAIL="agy never rendered a ready footer ($AGY_READY_REGEX) after firstmate answered its workspace-trust dialog with one Enter"
     elif [ "$ready" -eq 1 ]; then
       return 0
@@ -2890,7 +2884,7 @@ EOF
         fi
       } > "$STATE/$ID.cursor-session"
       ;;
-    agy*)
+    agy)
       # agy fires a Stop hook when its execution loop terminates, and its global
       # customization root (${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}) is always
       # loaded with no trust grant - the same shape as grok's ~/.grok/hooks.
@@ -2939,7 +2933,7 @@ EOF
       auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
       umask "$old_umask"
       printf '%s\n' "$TURNEND" > "$auth_file"
-      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.agy-turnend-token"
+      printf '%s\n' "$auth_file" > "$STATE/$ID.agy-turnend-token"
       sq_agy_auth_dir=$(shell_quote "$AGY_AUTH_DIR")
       agy_hook_tmp=$(mktemp "$AGY_PLUGIN_DIR/.fm-turn-end.sh.XXXXXXXXXXXX")
       cat > "$agy_hook_tmp" <<EOF
@@ -2958,9 +2952,26 @@ printf '{}\n'
 # silently truncated to its first line. The read is BOUNDED rather than a plain
 # cat, so a hook runner that writes the payload without closing stdin cannot
 # park this process until agy's own 10s timeout kills it.
-IFS= read -r -t 5 -d '' payload || true
 auth_dir=$sq_agy_auth_dir
 command -v jq >/dev/null 2>&1 || exit 0
+payload_file=\$(mktemp "\${TMPDIR:-/tmp}/fm-agy-stop.XXXXXXXXXXXX") || exit 0
+exec 3<&0
+cat <&3 > "\$payload_file" &
+reader=\$!
+exec 3<&-
+payload=
+i=0
+while [ "\$i" -lt 50 ]; do
+  payload=\$(cat "\$payload_file" 2>/dev/null)
+  jq -e . >/dev/null 2>&1 <<< "\$payload" && break
+  kill -0 "\$reader" 2>/dev/null || break
+  sleep 0.1
+  i=\$((i + 1))
+done
+kill "\$reader" 2>/dev/null || true
+wait "\$reader" 2>/dev/null || true
+payload=\$(cat "\$payload_file" 2>/dev/null)
+rm -f "\$payload_file"
 # fullyIdle=true is the ONLY turn end. A false or absent value means agy is
 # still waiting on backgrounded work and will end another turn later.
 # Tested with == true, never with jq's // operator, which treats false as null.
@@ -3241,6 +3252,11 @@ if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
 
+if [ "$HARNESS" = agy ]; then
+  AGY_READY_SENTINEL="fm-agy-start-${auth_file##*/}"
+  LAUNCH="printf '%s\\n' $(shell_quote "$AGY_READY_SENTINEL"); $LAUNCH"
+fi
+
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
   # Fresh publication still owns the lock. Relaunch deliberately uses a short
@@ -3294,9 +3310,6 @@ sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
-fi
-if [ "$HARNESS" = agy ]; then
-  AGY_READY_BASELINE=$(spawn_pane_capture)
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = agy ]; then

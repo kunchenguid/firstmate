@@ -77,9 +77,8 @@ Its global hooks live in one shared `hooks.json` keyed by hook name, which is th
 Verified across two runs: the plugin's `Stop` hook fires, and `~/.gemini/config/config.json` is byte-identical before and after (`diff` reported no change), so plugin discovery does not rewrite operator configuration.
 Hook payloads arrive as JSON on **stdin**; the hook's working directory is the directory containing `hooks.json`, never the workspace, so the worktree comes only from `workspacePaths`.
 agy reads the hook's verdict from stdout and only the literal decision `continue` blocks the stop, so the hook prints `{}` first and always exits zero.
-The payload is read whole with a bounded `read -r -t 5 -d ''` rather than one line or a plain `cat`, so a multi-line payload survives and a runner that never closes stdin cannot park the hook until agy's 10s timeout kills it.
-That bounded form was not re-exercised against a live agy; only the EOF path was, and it is byte-identical to what the lab ran.
-Measured directly on this host (GNU bash 3.2.57, macOS arm64): on EOF the variable holds the complete payload, and on the 5s timeout bash 3.2 assigns nothing, so a runner holding stdin open loses that turn end rather than delivering a truncated one.
+The payload is copied by a background reader while the hook polls the captured bytes for complete JSON, then the reader is stopped after completion or a five-second bound.
+The portable regression proves that a pretty-printed payload is preserved even when the writer keeps stdin open; that bounded-open-stdin form was not re-exercised against a live agy.
 
 `PreInvocation` and `PostInvocation` fire once per model invocation, not once per turn: 10 of each across 2 turns.
 That is why they cannot pair with `Stop` to form a turn-level busy source.

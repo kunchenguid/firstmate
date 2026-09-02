@@ -71,11 +71,9 @@ fm_control_harness_supported() {  # <harness>
 # The verified adapter a RECORDED harness value belongs to. Every table below
 # is keyed by the exact verified adapter name, but a task launched from a raw
 # command records the command's basename instead (bin/fm-spawn.sh derives
-# harness= that way), which is why the spawn adapters match `claude*`, `muse*`,
-# and friends. This is the one place that prefix rule is stated. `pi` and
-# `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
-# and an unrecognized value returns nonzero rather than being guessed into a
-# family.
+# harness= that way), which is why most spawn adapters accept their established
+# executable prefixes here. `pi`, `pi-signed`, and `agy` are exact identities;
+# an unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
@@ -87,7 +85,7 @@ fm_control_harness_family() {  # <recorded-harness>
     kimi*) printf 'kimi' ;;
     cursor*) printf 'cursor' ;;
     muse*) printf 'muse' ;;
-    agy*) printf 'agy' ;;
+    agy) printf 'agy' ;;
     *) return 1 ;;
   esac
 }
@@ -246,8 +244,15 @@ fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   esac
 }
 
-fm_control_harness_turnend_auth_path() {  # <harness> <token>
+fm_control_harness_turnend_auth_path() {  # <harness> <token-or-path>
   local harness=${1-} token=${2-}
+  if [ "$harness" = agy ] && [ "${token#/}" != "$token" ]; then
+    case "$token" in
+      */../*|*/./*) return 0 ;;
+      */fm-turn-end.d/fm.????????????) printf '%s\n' "$token" ;;
+    esac
+    return 0
+  fi
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   case "$harness" in
     grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
