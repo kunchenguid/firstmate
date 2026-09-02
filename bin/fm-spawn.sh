@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--link-local <relative-path>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--link-local <relative-path>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -58,6 +58,13 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   --link-local <relative-path> may be repeated to symlink an existing,
+#   gitignored project-local file or directory into a fresh ship/scout worktree
+#   at the same relative path. This deliberately makes local secrets reachable
+#   from a disposable worktree. It is opt-in per spawn, never inferred, and
+#   refuses absolute paths, parent-path components, missing paths, tracked paths,
+#   or a worktree destination that already exists. It does not apply to relaunches
+#   or secondmate spawns.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -318,6 +325,8 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+LINK_LOCAL_PATHS=()
+LINK_LOCAL_PATH_COUNT=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -341,6 +350,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      link-local) LINK_LOCAL_PATHS+=("$a"); LINK_LOCAL_PATH_COUNT=$((LINK_LOCAL_PATH_COUNT + 1)) ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -364,6 +374,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --link-local) want_value=link-local ;;
+    --link-local=*) LINK_LOCAL_PATHS+=("${a#--link-local=}"); LINK_LOCAL_PATH_COUNT=$((LINK_LOCAL_PATH_COUNT + 1)) ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -402,6 +414,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$LINK_LOCAL_PATH_COUNT" -eq 0 ] || { echo "error: --link-local applies only to fresh ship or scout spawns; a relaunch reuses its recorded worktree" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -438,6 +451,10 @@ else
     }
   fi
 fi
+[ "$LINK_LOCAL_PATH_COUNT" -eq 0 ] || [ "$KIND" != secondmate ] || {
+  echo "error: --link-local applies only to ship or scout spawns, not --secondmate" >&2
+  exit 1
+}
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
@@ -949,6 +966,11 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  if [ "$LINK_LOCAL_PATH_COUNT" -gt 0 ]; then
+    for link_local in "${LINK_LOCAL_PATHS[@]}"; do
+      shared_args+=(--link-local "$link_local")
+    done
+  fi
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1595,6 +1617,149 @@ resolve_project_dir_arg() {
   esac
 }
 
+normalize_link_local_path() {  # collapses "//" and "." components so equivalent
+  local path=$1 part result=  # spellings (e.g. "config" and "./config/") compare equal
+  local -a parts
+  IFS=/ read -r -a parts <<< "$path"
+  for part in "${parts[@]}"; do
+    [ -n "$part" ] && [ "$part" != "." ] || continue
+    if [ -z "$result" ]; then
+      result=$part
+    else
+      result="$result/$part"
+    fi
+  done
+  printf '%s' "$result"
+}
+
+validate_link_local_paths() {  # validates against the primary project checkout
+  local path source path_bytes i j normalized
+  LINK_LOCAL_SOURCES=()
+  for ((i = 0; i < ${#LINK_LOCAL_PATHS[@]}; i++)); do
+    path=${LINK_LOCAL_PATHS[$i]}
+    [ -n "$path" ] || {
+      echo "error: --link-local requires a non-empty relative project path" >&2
+      return 1
+    }
+    case "$path" in
+      /*)
+        echo "error: --link-local path must be a relative project path, not an absolute path: $path" >&2
+        return 1 ;;
+      */../*|../*|*/..|..)
+        echo "error: --link-local path must not contain '..': $path" >&2
+        return 1 ;;
+    esac
+    path_bytes=$(fm_backlog_bytes_of_string "$path") || return 1
+    if ! fm_backlog_control_bytes_valid 0 "$path_bytes"; then
+      echo "error: --link-local path contains an invalid control byte" >&2
+      return 1
+    fi
+    normalized=$(normalize_link_local_path "$path")
+    [ -n "$normalized" ] || {
+      echo "error: --link-local path must not resolve to the project root: $path" >&2
+      return 1
+    }
+    # Recorded so every later use (worktree destination, conflict checks,
+    # state/<id>.meta, relaunch forwarding) sees one canonical spelling instead
+    # of comparing "config" against "./config/" as unrelated strings.
+    LINK_LOCAL_PATHS[i]=$normalized
+    path=$normalized
+    source="$PROJ_ABS/$path"
+    [ -e "$source" ] || {
+      echo "error: --link-local path does not exist in the primary checkout: $path" >&2
+      return 1
+    }
+    if ! git -C "$PROJ_ABS" check-ignore --quiet -- "$path"; then
+      echo "error: --link-local path is not gitignored in the project: $path" >&2
+      return 1
+    fi
+    LINK_LOCAL_SOURCES+=("$source")
+  done
+  # Caught here, before any symlink is created: a fresh worktree gets no
+  # cleanup on spawn failure, so letting link_local_paths_into_worktree
+  # discover a repeat or an ancestor/descendant pair mid-loop would leave a
+  # partial symlink behind that a retried spawn then refuses to overwrite.
+  for ((i = 0; i < ${#LINK_LOCAL_PATHS[@]}; i++)); do
+    for ((j = i + 1; j < ${#LINK_LOCAL_PATHS[@]}; j++)); do
+      if [ "${LINK_LOCAL_PATHS[$i]}" = "${LINK_LOCAL_PATHS[$j]}" ]; then
+        echo "error: --link-local path repeated: ${LINK_LOCAL_PATHS[$i]}" >&2
+        return 1
+      fi
+      # -ef (same device+inode) catches two spellings that only differ by
+      # case-folding on a case-insensitive filesystem, which the lexical
+      # normalization above cannot see.
+      if [ "${LINK_LOCAL_SOURCES[$i]}" -ef "${LINK_LOCAL_SOURCES[$j]}" ]; then
+        echo "error: --link-local paths resolve to the same project path: ${LINK_LOCAL_PATHS[$i]}, ${LINK_LOCAL_PATHS[$j]}" >&2
+        return 1
+      fi
+      if path_is_ancestor_of "${LINK_LOCAL_PATHS[$i]}" "${LINK_LOCAL_PATHS[$j]}" ||
+         path_is_ancestor_of "${LINK_LOCAL_PATHS[$j]}" "${LINK_LOCAL_PATHS[$i]}"; then
+        echo "error: --link-local paths conflict, one is nested in the other: ${LINK_LOCAL_PATHS[$i]}, ${LINK_LOCAL_PATHS[$j]}" >&2
+        return 1
+      fi
+    done
+  done
+}
+
+link_local_rollback() {  # undoes the symlinks/dirs a partial link_local_paths_into_worktree call made
+  local -a links=("${!1}") dirs=("${!2}")
+  local i
+  for ((i = ${#links[@]} - 1; i >= 0; i--)); do
+    rm -f -- "${links[$i]}" 2>/dev/null || true
+  done
+  for ((i = ${#dirs[@]} - 1; i >= 0; i--)); do
+    rmdir -- "${dirs[$i]}" 2>/dev/null || true
+  done
+}
+
+link_local_paths_into_worktree() {  # <worktree>, after its clean base refresh
+  local worktree=$1 path source destination parent component current i
+  local -a parent_components created_links=() created_dirs=()
+  for i in "${!LINK_LOCAL_PATHS[@]}"; do
+    path=${LINK_LOCAL_PATHS[$i]}
+    source=${LINK_LOCAL_SOURCES[$i]}
+    destination="$worktree/$path"
+    [ ! -e "$destination" ] && [ ! -L "$destination" ] || {
+      echo "error: --link-local destination already exists in the task worktree: $path" >&2
+      link_local_rollback created_links[@] created_dirs[@]
+      return 1
+    }
+    parent=${path%/*}
+    if [ "$parent" != "$path" ]; then
+      IFS=/ read -r -a parent_components <<< "$parent"
+      current=$worktree
+      for component in "${parent_components[@]}"; do
+        [ -n "$component" ] || continue
+        current="$current/$component"
+        if [ -L "$current" ]; then
+          echo "error: --link-local destination parent is a symlink in the task worktree: $path" >&2
+          link_local_rollback created_links[@] created_dirs[@]
+          return 1
+        fi
+        if [ -e "$current" ]; then
+          [ -d "$current" ] || {
+            echo "error: --link-local destination parent is not a directory in the task worktree: $path" >&2
+            link_local_rollback created_links[@] created_dirs[@]
+            return 1
+          }
+        else
+          mkdir "$current" || {
+            link_local_rollback created_links[@] created_dirs[@]
+            return 1
+          }
+          created_dirs+=("$current")
+        fi
+      done
+    fi
+    ln -s "$source" "$destination" || {
+      echo "error: could not link local project path into the task worktree: $path" >&2
+      link_local_rollback created_links[@] created_dirs[@]
+      return 1
+    }
+    created_links+=("$destination")
+  done
+}
+
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
   [ -n "$ancestor" ] || return 1
@@ -1766,6 +1931,7 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2; exit 1; }
+[ "$LINK_LOCAL_PATH_COUNT" -eq 0 ] || validate_link_local_paths || exit 1
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
@@ -2472,6 +2638,7 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+[ "$LINK_LOCAL_PATH_COUNT" -eq 0 ] || link_local_paths_into_worktree "$WT" || exit 1
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
@@ -2866,6 +3033,11 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ "$LINK_LOCAL_PATH_COUNT" -gt 0 ]; then
+    for link_local in "${LINK_LOCAL_PATHS[@]}"; do
+      echo "link_local=$link_local"
+    done
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
