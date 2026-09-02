@@ -200,7 +200,6 @@ It does this in its own separate, hard-coded loop, independent of two other owne
 - Pi's `lockOwnership()`.
 
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
-
 ### Exit codes
 
 Every ordinary transport path in both wrappers exits 0, including malformed state and adapter errors.
@@ -217,6 +216,7 @@ These conditions therefore surface as follows:
 - Broken GitHub auth surfaces through the deferred network result, inline or as a wake.
 
 None of these becomes a refusal to open the session.
+Broken registered-forge authentication, including GitLab auth, surfaces through the deferred network result inline or as a wake.
 
 ## Harness transports
 

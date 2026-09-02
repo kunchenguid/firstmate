@@ -1193,6 +1193,7 @@ Every home requires:
 - Compatible tasks-axi, as specified in "Backlog backend" above.
 - Compatible quota-axi.
 
+Registered GitHub projects additionally require GitHub tooling and authentication; registered GitLab projects additionally require `glab`, GitLab authentication via `glab auth login`, and compatible GitLab tooling. Local-only homes need neither forge delta.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 
