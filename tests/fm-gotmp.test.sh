@@ -2,8 +2,9 @@
 # Behavior tests for the per-task temp root (bin/fm-task-tmp-lib.sh).
 #
 # fm-spawn gives each task a temp root with Go's build temp nested at gotmp/,
-# exports GOTMPDIR into the crewmate pane, pins the agent's TMPDIR to the root so
-# its harness scratch lands there, and records tasktmp= in the task's meta.
+# exports GOTMPDIR into the crewmate pane, records tasktmp= in the task's meta,
+# and - only when the opt-in pin is enabled - also pins the agent's TMPDIR to the
+# root so its harness scratch lands there.
 # fm-teardown reads tasktmp= and removes that one root on cleanup.
 #
 # The removal is task-scoped on purpose: the worktree pool reuses slot numbers, so
@@ -17,8 +18,8 @@
 #
 # Creation is guarded too. The root's name is deterministic and its real parent
 # /tmp is world-writable, so the cases below also pin that fm_task_tmp_create
-# refuses a path this user does not own instead of letting the pinned TMPDIR
-# write the agent's whole scratch tree through it.
+# refuses a path this user does not own instead of letting the task write its
+# temp tree through it.
 #
 # These tests exercise fm-teardown directly as a subprocess against a fake FM_HOME/FM_ROOT
 # built so the real script resolves into it, with stub helper scripts, and call the
@@ -405,7 +406,7 @@ test_teardown_survives_an_unremovable_tasktmp() {
   FM_TASK_TMP_BASE="$base" FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" \
     > "$TMP_ROOT/$id.out" 2> "$TMP_ROOT/$id.err"
   rc=$?
-  set -e
+  set +e
   chmod 755 "$base"
   [ "$rc" = 0 ] || fail "teardown failed ($rc) because the temp root could not be removed"
   grep -q "could not be removed" "$TMP_ROOT/$id.err" \

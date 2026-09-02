@@ -19,8 +19,9 @@
 # home with a backlog but no compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
-# Cleanup also removes this task's own per-task temp root - the agent's harness
-# scratch plus gotmp/ - recorded as tasktmp= by fm-spawn, and only when it is
+# Cleanup also removes this task's own per-task temp root - gotmp/ always, plus
+# the agent's harness scratch when the opt-in TMPDIR pin confined it there -
+# recorded as tasktmp= by fm-spawn, and only when it is
 # exactly the path bin/fm-task-tmp-lib.sh derives for this task id. Nothing is
 # removed by worktree slot, by age, or by scanning for siblings, so a live task
 # sharing a reused slot is never touched. A refusal or failure there is reported
@@ -2549,8 +2550,9 @@ cleanup_firstmate_home_children() {
       fi
     fi
     # This child's own temp root, removed while its record still names it: once
-    # the meta below is gone nothing names the path, and since the TMPDIR pin it
-    # holds the child agent's whole scratch tree rather than only Go build temp.
+    # the meta below is gone nothing names the path, and with the opt-in TMPDIR
+    # pin it holds the child agent's whole scratch tree rather than only Go
+    # build temp.
     # The root is home-scoped, so it must be derived as the CHILD home the same
     # way the zellij branch above verifies that home's tabs; deriving it from the
     # parent's ambient FM_HOME/FM_ROOT would produce the parent's tag, fail the
@@ -2899,8 +2901,8 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root recorded by spawn: this task's own gotmp/ and its
-# agent's harness scratch, which the launch pinned there via TMPDIR. Read before
+# Remove the per-task temp root recorded by spawn: this task's own gotmp/, plus
+# its agent's harness scratch when the launch pinned TMPDIR there. Read before
 # the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 # Only the one path this task's own record names is ever removed, and only when it
 # is exactly the path fm_task_tmp_root derives for this id, so a live sibling

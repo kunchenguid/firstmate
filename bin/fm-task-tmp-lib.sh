@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 # Per-task temp root: one deterministic directory per task, created by
-# bin/fm-spawn.sh, handed to the launched agent as TMPDIR (and GOTMPDIR at
-# gotmp/), recorded as tasktmp= in the task's meta, and removed by
-# bin/fm-teardown.sh. Sourced by both so the path shape has exactly one owner.
+# bin/fm-spawn.sh, recorded as tasktmp= in the task's meta, carrying Go's build
+# temp at gotmp/ (exported as GOTMPDIR), and removed by bin/fm-teardown.sh
+# through the exact-match ownership check below. Sourced by both so the path
+# shape has exactly one owner. That much holds unconditionally.
 #
-# TMPDIR is what makes the agent's own scratch land here: a harness that derives
-# its scratch tree from the process TMPDIR keeps that tree inside a directory
-# teardown owns instead of leaking under /tmp. Claude Code is the harness
-# verified to do so (docs/verification/runtime-backends.md, "Per-task temp root
-# and harness scratch"), and it is the one whose scratch was observed leaking; a
-# harness that ignores TMPDIR simply keeps its scratch outside this root and
-# teardown still succeeds, as that record states. The scratch is often large
-# (search indexes, database copies) and /tmp is commonly a RAM-backed tmpfs, so
-# leaking it leaks memory until reboot.
+# Pinning the launched agent's own TMPDIR to this root as well - which is what
+# confines the agent's harness scratch to a directory teardown owns - is opt-in
+# and off by default; docs/configuration.md "Task TMPDIR pin" owns that flag and
+# what it does and does not solve. With the flag absent the agent's own scratch
+# stays wherever the harness puts it, outside this root, and teardown does not
+# remove it. With the flag present, a harness that derives its scratch tree from
+# the process TMPDIR keeps that tree here instead of leaking under /tmp. Claude
+# Code is the harness verified to do so (docs/verification/runtime-backends.md,
+# "Per-task temp root and harness scratch"), and it is the one whose scratch was
+# observed leaking; a harness that ignores TMPDIR simply keeps its scratch
+# outside this root and teardown still succeeds, as that record states. That
+# scratch is often large (search indexes, database copies) and /tmp is commonly a
+# RAM-backed tmpfs, so leaking it leaks memory until reboot.
 #
 # The root is HOME-SCOPED as well as task-scoped. /tmp is one namespace shared by
 # every firstmate home on the machine and task ids are per-home slugs, so two
@@ -29,9 +34,9 @@
 # recorded it, and nothing available at teardown time distinguishes this task's
 # root from the other home's, so removing it would be a guess. A permanent small
 # leak is better than one chance of deleting a live sibling home's directory -
-# and those roots hold only Go build temp, since agent scratch was never pinned
-# there before the TMPDIR pin, so what is left behind is small and bounded to the
-# tasks already in flight at upgrade. The exact-match guard below already refuses
+# and those roots hold only Go build temp, since no agent scratch was ever
+# pinned there, so what is left behind is small and bounded to the tasks already
+# in flight at upgrade. The exact-match guard below already refuses
 # such a path and reports it on stderr; there is no separate legacy code path.
 #
 # The safe unit of removal is the TASK, never the worktree slot: the worktree
@@ -122,11 +127,12 @@ fm_task_tmp_remove() {
 # refuses rather than writing through a path this user does not own.
 # The root name is deterministic and its default parent /tmp is world-writable,
 # so any other local user can plant a symlink or their own directory at that
-# name before a spawn reaches it. Since the launch pins the agent's TMPDIR here,
-# writing through such a path would put the whole scratch tree - search indexes,
-# database copies - somewhere this user neither controls nor tears down, and the
-# symlink refusal in fm_task_tmp_remove above comes too late to prevent it: it
-# runs at teardown, after the agent has written. So the root itself is created
+# name before a spawn reaches it. Writing through such a path would put
+# everything the task nests here - Go's build temp always, and with the TMPDIR
+# pin enabled the agent's whole scratch tree of search indexes and database
+# copies - somewhere this user neither controls nor tears down, and the symlink
+# refusal in fm_task_tmp_remove above comes too late to prevent it: it runs at
+# teardown, after the task has written. So the root itself is created
 # with a plain mkdir, which fails on an existing path instead of following it,
 # and an already-present root - a relaunch reuses its task's root - is accepted
 # only when it is a real directory owned by this user. Mode 0700 keeps the
