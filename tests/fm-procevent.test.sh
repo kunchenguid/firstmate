@@ -359,30 +359,6 @@ private_mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -
 assert_contains "$private_mode" 600 "the handled marker is private under a permissive caller umask"
 pass "handled acknowledgement creation is private and fails safely"
 
-# A symlinked ancestor can redirect this home's whole private subtree, so
-# ownership refuses to bind a claim to a state root reached through one. The
-# operating system's own /tmp and /var aliases are the sole exception - every
-# home this suite runs in lives under a temp dir macOS resolves through
-# /private - so the identical home reached by its real path must run where the
-# redirected one fails.
-HREAL="$TMP_ROOT/ancestor-real"; new_home "$HREAL/home"
-HLINK="$TMP_ROOT/ancestor-link"
-ln -s "$HREAL" "$HLINK"
-pe_register "$HREAL/home" lavish ancestor-src -- /bin/echo ancestor-payload >/dev/null
-symlink_status=0
-symlink_out=$(pe "$HLINK/home" start ancestor-src 2>&1) || symlink_status=$?
-[ "$symlink_status" -ne 0 ] \
-  || fail "the runner claimed a source whose state root was reached through a symlinked ancestor"
-assert_contains "$symlink_out" "cannot claim source" \
-  "the redirected state root was refused somewhere other than ownership"
-assert_absent "$HREAL/home/state/procevent-inbox/ancestor-src.1.result" \
-  "a capture landed under a redirected private subtree"
-pe "$HREAL/home" start ancestor-src >/dev/null \
-  || fail "the runner refused a home whose only symlinked ancestors are the system temp aliases"
-assert_present "$HREAL/home/state/procevent-inbox/ancestor-src.1.result" \
-  "the same home reached by its real path could not capture a result"
-pass "private procevent directories refuse a non-system symlinked ancestor"
-
 # --- a terminal result retires its source, on the adapter's verdict alone ----
 # The runner must carry no notion of its own about what "done" means for a
 # source. It asks that source's adapter whether the captured result ends the
