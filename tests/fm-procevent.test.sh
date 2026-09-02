@@ -186,11 +186,9 @@ assert_grep 'lavish' "${RESULT%.result}.adapter" "the captured result retains it
 assert_absent "${RESULT%.result}.handled" "publication alone never marks a result handled"
 
 # --- a home spelled through a symlinked ancestor still runs its sources ------
-# /tmp and $TMPDIR are symlinks on macOS, so an operator's home is routinely
-# reached through a symlinked ancestor. Such a home must run process-event
-# sources exactly like a physically spelled one: reconcile's detached runner
-# discards its own stderr, so a refusal here is invisible to the caller and the
-# source simply never fires.
+# Such a home must run process-event sources exactly like a physically spelled
+# one: reconcile's detached runner discards its own stderr, so a refusal here is
+# invisible to the caller and the source simply never fires.
 HPHYS="$TMP_ROOT/symlinked-parent-target"
 mkdir -p "$HPHYS"
 ln -s "$HPHYS" "$TMP_ROOT/symlinked-parent"

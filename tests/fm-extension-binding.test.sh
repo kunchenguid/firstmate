@@ -2160,9 +2160,8 @@ FM_HOME="$H_EXAMPLE" "$PROCEVENT" retire example-file --if-owner "$example_token
 pass "the shipped file-signal package is a runnable end-to-end external adapter"
 
 # The same home spelled through a symlinked ancestor must capture external
-# evidence identically: /tmp and $TMPDIR are symlinks on macOS, so an operator
-# home is routinely reached that way, and the external capture path pins its
-# staging, inbox, and reservation boundaries to physical directories.
+# evidence identically, including the external capture path's pinned staging,
+# inbox, and reservation boundaries.
 ln -s "$HOMES" "$TMP_ROOT/homes-through-symlink"
 H_EXAMPLE_SYMLINKED="$TMP_ROOT/homes-through-symlink/example"
 SIGNAL_FILE_SYMLINKED="$TMP_ROOT/example-symlinked-result.txt"
