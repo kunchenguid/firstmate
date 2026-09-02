@@ -25,6 +25,8 @@ FM_WAKE_POST_OUTPUT_ACTION=
 FM_WATCH_DELIVERED_REASON=
 FM_WATCH_DELIVERY_PID=
 FM_WATCH_DELIVERY_IDENTITY=
+# Ledger rows are pid<TAB>process-identity<TAB>reason<TAB>Pi-ticket-sideband.
+# The fourth field is empty outside Pi mode, and readers accept legacy three-field rows.
 WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
 WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
 WATCH_DELIVERY_MAX_BYTES=${FM_WATCH_DELIVERY_MAX_BYTES:-65536}
@@ -40,8 +42,12 @@ watch_delivery_clean_reason() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
 }
 
+watch_delivery_clean_tickets() {
+  printf '%s' "$1" | tr '\t\r\n' '  ;' | cut -c1-8192
+}
+
 watch_delivery_publish() {
-  local reason=$1 i size tmp raw
+  local reason=$1 tickets=${2:-} i size tmp raw
   [ -n "$FM_WATCH_DELIVERY_PID" ] || return 0
   [ -n "$FM_WATCH_DELIVERY_IDENTITY" ] || return 0
   i=0
@@ -50,10 +56,11 @@ watch_delivery_publish() {
     sleep 0.02
     i=$((i + 1))
   done
-  printf '%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\n' \
     "$FM_WATCH_DELIVERY_PID" \
     "$(watch_delivery_clean_identity "$FM_WATCH_DELIVERY_IDENTITY")" \
-    "$(watch_delivery_clean_reason "$reason")" >> "$WATCH_DELIVERY_LOG" 2>/dev/null || true
+    "$(watch_delivery_clean_reason "$reason")" \
+    "$(watch_delivery_clean_tickets "$tickets")" >> "$WATCH_DELIVERY_LOG" 2>/dev/null || true
   size=$(wc -c < "$WATCH_DELIVERY_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$size" in
     ''|*[!0-9]*) ;;
@@ -95,7 +102,12 @@ wake() {
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
   if echo "$1"; then
     output_status=0
-    watch_delivery_publish "$1" || true
+    # Pi alone consumes the machine-only identity lines. Every other primary
+    # keeps the historical one-line arm completion surface byte-for-byte.
+    if [ "${FM_PI_WATCH_DELIVERY:-0}" = 1 ] && [ -n "$FM_WAKE_APPENDED_TICKETS" ]; then
+      printf '%s\n' "$FM_WAKE_APPENDED_TICKETS" || true
+    fi
+    watch_delivery_publish "$1" "$FM_WAKE_APPENDED_TICKETS" || true
     # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
     FM_WATCH_DELIVERED_REASON=$1
   else

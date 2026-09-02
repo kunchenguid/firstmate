@@ -40,7 +40,9 @@
 # that ends with no reason line and no healthy successor is resolved against the
 # watcher's identity-bound delivery record: a matching record reports that wake
 # and exits 0, and only a cycle that delivered nothing is the typed nonzero
-# failure. Neither is ever a clean empty completion. On FAILED it exits non-zero
+# failure. In Pi delivery mode the same record replays its fourth-field wake
+# tickets after the human reason; every other mode retains one-line output.
+# Neither is ever a clean empty completion. On FAILED it exits non-zero
 # so the failure is loud. A live cycle already present means re-arm attaches - do
 # not start a second watcher.
 #
@@ -277,7 +279,7 @@ fail_unexplained_cycle() {
 # Close a cycle whose reason line this arm could not read against the bounded
 # terminal-delivery ledger the watcher publishes before releasing its lock.
 close_unobserved_cycle() {
-  local i reason clean_identity record_pid record_identity record_reason
+  local i reason tickets clean_identity record_pid record_identity record_reason record_tickets
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
@@ -289,16 +291,21 @@ close_unobserved_cycle() {
     i=$((i + 1))
   done
   reason=
+  tickets=
   if [ -f "$WATCH_DELIVERY_LOG" ]; then
-    while IFS=$'\t' read -r record_pid record_identity record_reason; do
+    while IFS=$'\t' read -r record_pid record_identity record_reason record_tickets; do
       if [ "$record_pid" = "$cycle_watcher_pid" ] && [ "$record_identity" = "$clean_identity" ]; then
         reason=$record_reason
+        tickets=$record_tickets
       fi
     done < "$WATCH_DELIVERY_LOG"
   fi
   fm_lock_release "$WATCH_DELIVERY_LOCK"
   if [ -n "$reason" ]; then
     printf '%s\n' "$reason"
+    if [ "${FM_PI_WATCH_DELIVERY:-0}" = 1 ] && [ -n "$tickets" ]; then
+      printf '%s' "$tickets" | tr ';' '\n'
+    fi
     return 0
   fi
   fail_unexplained_cycle

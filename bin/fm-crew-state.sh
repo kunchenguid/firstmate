@@ -17,6 +17,13 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
+# `fm-crew-state.sh <id> --activity-token` reuses the same attribution and emits
+# `activity: <opaque-token>` only for a full, actively-working structured run
+# whose current step log is readable. The watcher snapshots that token at
+# wedge-timer start and compares it only at the escalation boundary; it is
+# progress evidence, never a current-state source. Every other state prints
+# nothing in this mode.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
@@ -29,7 +36,8 @@
 #   2. Attribute an active or terminal no-mistakes run under the branch, head,
 #      pipeline-custody, and newest-first rules owned by bin/fm-nm-run-lib.sh.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
-#      awaiting_approval/fix_review -> parked (with gate findings), terminal
+#      awaiting_approval/fix_review -> parked (with gate findings), including
+#      when a nonterminal run retains a stale terminal outcome; terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
@@ -68,7 +76,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+MODE=${2:-}
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id> [--activity-token]" >&2; exit 2; }
+case "$MODE" in ''|--activity-token) ;; *) echo "usage: fm-crew-state.sh <id> [--activity-token]" >&2; exit 2 ;; esac
+[ "$#" -le 2 ] || { echo "usage: fm-crew-state.sh <id> [--activity-token]" >&2; exit 2; }
+ACTIVITY_MODE=false
+[ "$MODE" != --activity-token ] || ACTIVITY_MODE=true
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -85,6 +98,7 @@ SEP=' · '
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
+  [ "$ACTIVITY_MODE" = false ] || exit 0
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
@@ -103,6 +117,9 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+if [ "$ACTIVITY_MODE" = true ] && { [ "$KIND" != ship ] || [ -n "$REMOTE_HOST" ]; }; then
+  exit 0
+fi
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
@@ -331,20 +348,64 @@ nm_effective_ci_step_status() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
+NM_CI_LOG_TAIL=
+NM_CI_CHECKS_STATE=unknown
 nm_ci_checks_state() {
-  local run_id log_tail marker
+  local run_id marker
+  NM_CI_LOG_TAIL=
+  NM_CI_CHECKS_STATE=unknown
   run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || { printf 'unknown'; return; }
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
-  [ -n "$log_tail" ] || { printf 'unknown'; return; }
-  marker=$(printf '%s\n' "$log_tail" \
+  [ -n "$run_id" ] || return 0
+  NM_CI_LOG_TAIL=$(nm_run axi logs --step ci --run "$run_id") || true
+  [ -n "$NM_CI_LOG_TAIL" ] || return 0
+  marker=$(printf '%s\n' "$NM_CI_LOG_TAIL" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
-    *) printf 'unknown' ;;
+    *"checks passed"*|*"no CI checks reported - still monitoring"*) NM_CI_CHECKS_STATE=green ;;
+    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) NM_CI_CHECKS_STATE=not-ready ;;
   esac
+}
+
+validation_activity_hash() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print "sha256-" $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print "sha256-" $1}'
+  else
+    cksum | awk '{print "cksum-" $1 "-" $2}'
+  fi
+}
+
+nm_active_step() {
+  local row step
+  row=$(printf '%s\n' "$RUN_OUT" \
+    | grep -E '^[[:space:]]*(intent|rebase|review|test|document|lint|push|pr|ci),[[:space:]]*"?(running|fixing)"?[[:space:]]*,' \
+    | tail -1)
+  if [ -n "$row" ]; then
+    row=$(trim "$row")
+    step=$(strip_quotes "${row%%,*}")
+    printf '%s' "$step"
+    return 0
+  fi
+  [ "${RUN_STATUS:-}" = ci ] && printf 'ci'
+}
+
+nm_validation_activity_token() {
+  local run_id step log_tail digest
+  run_id=$(strip_quotes "$(nm_field id)")
+  step=$(nm_active_step)
+  case "$run_id" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  case "$step" in intent|rebase|review|test|document|lint|push|pr|ci) ;; *) return 0 ;; esac
+  if [ "$step" = ci ] && [ -n "$NM_CI_LOG_TAIL" ]; then
+    log_tail=$NM_CI_LOG_TAIL
+  else
+    log_tail=$(nm_run axi logs --step "$step" --run "$run_id") || true
+  fi
+  [ -n "$log_tail" ] || return 0
+  digest=$(printf '%s' "$log_tail" | validation_activity_hash) || return 0
+  [ -n "$digest" ] || return 0
+  printf '%s-%s-%s' "$run_id" "$step" "$digest"
 }
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
@@ -496,16 +557,21 @@ if [ "$HAVE_RUN" = 1 ]; then
     gate_status=$(nm_gate_status)
     has_gate=0
     nm_has_gate && has_gate=1
+    agent_wait=0
+    fm_nm_run_has_agent_wait "$RUN_OUT" && agent_wait=1
+    gate_wait=0
+    if [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] \
+      || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+      gate_wait=1
+    fi
+    current_gate=0
+    case "$status" in completed|failed|cancelled) ;; *) [ "$gate_wait" -eq 0 ] || current_gate=1 ;; esac
 
-    if [ -n "$outcome" ]; then
-      case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
-        failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
-        *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
-      esac
-    elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+    # A direct fix-review/approval wait on a nonterminal structured run is the
+    # current actionable state even if a stale terminal outcome field remains.
+    # A bare scalar gate keeps its historical behavior only when no outcome
+    # contradicts it; terminal top-level status always remains terminal.
+    if [ "$current_gate" -eq 1 ] && { [ "$agent_wait" -eq 1 ] || [ -z "$outcome" ]; }; then
       if [ "$has_gate" = 1 ]; then
         gate=$(nm_gate_line_name)
       else
@@ -515,11 +581,22 @@ if [ "$HAVE_RUN" = 1 ]; then
       [ -n "$gate" ] || gate=gate
       RUN_STATE=parked
       RUN_DETAIL="parked at $gate"
+      if [ -n "$gate_status" ] && [ "$gate_status" != "$gate" ]; then
+        RUN_DETAIL="$RUN_DETAIL ($gate_status)"
+      fi
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
       if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
+    elif [ -n "$outcome" ]; then
+      case "$outcome" in
+        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
+        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
+      esac
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
@@ -534,7 +611,8 @@ if [ "$HAVE_RUN" = 1 ]; then
         CI_STEP_STATUS=$(nm_effective_ci_step_status)
         case "$CI_STEP_STATUS" in
           running)
-            CI_LOG_STATE=$(nm_ci_checks_state)
+            nm_ci_checks_state
+            CI_LOG_STATE=$NM_CI_CHECKS_STATE
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
@@ -556,7 +634,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$RUN_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
+      nm_ci_checks_state
+      CI_LOG_STATE=$NM_CI_CHECKS_STATE
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
@@ -580,8 +659,17 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  if [ "$ACTIVITY_MODE" = true ]; then
+    if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ]; then
+      ACTIVITY_TOKEN=$(nm_validation_activity_token)
+      [ -z "$ACTIVITY_TOKEN" ] || printf 'activity: %s\n' "$ACTIVITY_TOKEN"
+    fi
+    exit 0
+  fi
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
+
+[ "$ACTIVITY_MODE" = false ] || exit 0
 
 # --- fallback: no run attributed to this crew ------------------------------
 # The run-step path above already handled any crew with a run, regardless of pane

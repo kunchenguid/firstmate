@@ -109,7 +109,9 @@ SH
 # FM_CREW_STATE_BIN) to read a crew's current state on no-verb signal and stale
 # paths; the fake returns a canned "state: <s> · source: <src> · <detail>"
 # verdict line so a test can fix the provably-working decision without a real
-# worktree or no-mistakes.
+# worktree or no-mistakes. The optional --activity-token mode mirrors the
+# production helper's opaque structured-run step-log token through
+# FM_FAKE_CREW_ACTIVITY[_<sanitized-id>].
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
@@ -119,7 +121,14 @@ make_fake_crew_state() {  # <fakebin>
 #!/usr/bin/env bash
 set -u
 id=${1:-}
+mode=${2:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
+if [ "$mode" = --activity-token ]; then
+  var="FM_FAKE_CREW_ACTIVITY_$key"
+  val=${!var:-${FM_FAKE_CREW_ACTIVITY:-}}
+  [ -z "$val" ] || printf 'activity: %s\n' "$val"
+  exit 0
+fi
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"

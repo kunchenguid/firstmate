@@ -31,6 +31,19 @@ When that retained arm later closes, its actual close is classified as a new sup
 After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
 
+Pi revalidates an actionable close only after successor establishment and immediately before offering or queuing its follow-up.
+The watcher emits Pi-only sideband tickets that bind the queue sequence, kind, key, task, and `spawn_gen` incarnation captured by the durable append; every other primary retains the historical one-line output.
+The queue sequence is event identity, while task generation and the current metadata endpoint decide whether a stale event still names the same worker.
+A stable queue snapshot drops a ticket already acknowledged or presented to either actor, an older same-kind/same-key ticket superseded by a newer row, a stale ticket whose task was cleaned up, a stale ticket whose endpoint was replaced, and a stale ticket whose task incarnation changed.
+A signal row remains deliverable while it is still unseen even after task cleanup because that row may be the only durable decision, failure, or terminal result, and check or heartbeat rows remain global so merge results, credentials, and fleet reviews are never tied to task cleanup.
+Missing, malformed, ambiguous, or mutation-racing evidence delivers rather than suppresses.
+`bin/fm-wake-drain.sh` publishes `state/.main-presented-rows` or `state/.branch-presented-rows` only after that actor's raw rows reach stdout and while the queue lock is still held; a pre-output interruption leaves no receipt, while post-handling acknowledgement remains the consumption authority.
+The Pi extension waits a bounded interval for an active queue mutation to settle before applying those receipts and queue identity.
+One Pi session generation owns its pending closes and delivered-ticket claims, so same-generation duplicate callbacks coalesce while session replacement clears pending delivery and leaves the replacement session to establish its own watcher.
+Close classification remains serialized through successor restoration but does not await an earlier Pi follow-up, so a blocked follow-up cannot stop a later successor close from restoring continuity and delivering a distinct real event.
+When an actionable close has established a healthy successor, a queued failure is surfaced exactly once without replacing or re-arming that successor.
+OpenCode and every other primary retain their existing delivery surfaces.
+
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding, so a finished, hung, or identity-mismatched claim cannot suppress it ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
 The recovery-episode contract below owns once-per-generation announcement.
@@ -62,12 +75,13 @@ An acknowledged episode does not freeze the generation, because the next downtim
 ## Per-actor acknowledgement
 
 `bin/fm-wake-drain.sh` consumes the queue per actor, not per whole-queue cutoff, using `bin/fm-lease-lib.sh`'s existing `fm_lease_actor` identity (`FM_SUPERVISION_ACTOR`, unset or `main` for every non-Pi harness and Pi's own main session; `branch` only inside the Pi supervision branch's own bash tool calls, injected deterministically by the extension - never agent memory).
-Every presented row is claimed to exactly one actor under the durable queue lock.
+Every row selected for presentation is claimed to exactly one actor under the durable queue lock.
 An ordinary presentation drain bounds both its initial queue-lock acquire and its later status-presentation-lock acquire at the deadline owned by the script header.
 A live initial queue-lock holder produces one PID-naming advisory and skips the whole drain before any claim or mutation, while a live status-presentation-lock holder produces one such advisory after raw wake presentation and leaves status annotations, sections, and cursors retriable on the next drain.
 Acknowledgement invocations and every other mutation-critical queue-lock acquire retain blocking semantics, so acknowledgement atomicity is unchanged.
-Main records its presented set in `state/.main-eligible-rows`.
+Main records its claim in `state/.main-eligible-rows`.
 A branch grant is published through `bin/fm-wake-grant.sh` under that same lock in `state/.branch-eligible-rows`, bound to the live branch process and extension generation recorded in `state/.branch-eligible-owner`, and publication is refused if main already claimed any requested row.
+After raw output succeeds, the drain records the deduplicated sequences in that actor's separate `.main-presented-rows` or `.branch-presented-rows` receipt, so a claim created before output is never mistaken for delivery.
 A main drain validates that owner evidence under the queue lock and reclaims the grant when its process is gone or its identity no longer matches.
 A main drain claims every currently unclaimed row and excludes an active branch grant from both presentation and acknowledgement.
 Its `--ack-through <SEQ>` deletes only claimed main rows at or below the cutoff, while a branch acknowledgement deletes only claimed branch rows at or below its cutoff.
@@ -88,7 +102,8 @@ An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one, because it holds no handle on the watcher's stdout and cannot read the reason line itself.
 Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.
-A matching PID and identity lets an attached arm report the delivered reason and exit zero even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
+The bounded record carries a fourth, Pi-only sideband field containing the append tickets; legacy three-field rows and every non-Pi arm output retain their prior behavior.
+A matching PID and identity lets an attached arm report the delivered reason and its Pi tickets even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
@@ -101,8 +116,10 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 
 ## Regression coverage
 
-`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
-The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
+`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove every successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+The same suite covers delayed delivery after either actor presents a row, direct acknowledgement or consumption, endpoint replacement, cleanup, repeated same-task stale rows, current task generation changes, current declared-pause rechecks, global merge results, task turn-end and failure signals, Pi session replacement, ordinary `/new`/`/resume`/`/fork` generation behavior, and OpenCode's unchanged lack of Pi-only ticket mode.
+`tests/fm-wake-queue.test.sh` covers queue ticket generation, non-Pi output compatibility, global check scope, both actors' post-output presentation receipts, and the pre-output interruption boundary.
+`tests/fm-crew-state.test.sh` and `tests/fm-watch-triage.test.sh` cover backend-independent structured validation-log tokens, changed-log deferral, unchanged-log wedge escalation, and parked-state rejection.
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.

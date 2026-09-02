@@ -471,6 +471,58 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+### Delayed Pi wake identity and active validation
+
+The delayed-follow-up correction was verified on 2026-09-01 with Pi 0.84.0, Node v25.9.0, no-mistakes v1.60.2, and ShellCheck 0.11.0 against isolated homes and fake or scratch endpoints only.
+The reproduced noisy path closed an actionable arm child, delayed Pi delivery until after successor restoration, then presented or consumed the exact durable row or replaced the task endpoint before the old callback ran.
+The single-delivery counterfactual retained the exact queue row, endpoint, and task incarnation until delivery.
+This separated the actionable close that initiated delivery from row identity and endpoint replacement that invalidated it, and from the repeated follow-up that was only the visible symptom.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh --check-coverage
+bin/fm-test-run.sh tests/fm-pi-watch-extension.test.sh tests/fm-crew-state.test.sh tests/fm-daemon.test.sh tests/fm-supervision-instructions.test.sh
+bin/fm-test-run.sh tests/fm-supervision-instructions.test.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-cursor-primary.test.sh
+bin/fm-test-run.sh tests/fm-backend-tmux-smoke.test.sh
+bin/fm-test-run.sh tests/fm-pi-primary-types.test.sh tests/fm-pi-watch-extension.test.sh
+```
+
+Observed bounded output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: 3 workflow files valid
+fm-doc-audience-check: ok surfaces=89 local_links=302
+FM_TEST_COVERAGE ok total=175 parallel=24 serial=139 serial_shards=4 herdr=12
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=195864
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=205721
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=1031
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=1 duration_ms=103004
+```
+
+The Pi extension matrix covered delayed delivery after either actor presented a row, active queue mutation, direct consumption, endpoint replacement, cleanup, repeated same-task stale rows, fresh and changed task generations, session replacement, successor-before-delivery ordering, global merge checks, task turn-end signals, failures, and declared pauses.
+It also proved that a blocked Pi follow-up cannot stop a later successor close from restoring continuity and delivering a distinct event.
+The structured validation matrix proved that fresh current-step log activity resets the short wedge timer, continuously advancing validation still reaches the long bounded resurfacing cadence, and an unchanged-log counterfactual still wedges.
+It also proved that active fix review outranks a stale failure field, terminal top-level state remains terminal, and parked or unattributed runs expose no activity token.
+The declared-pause matrices passed unchanged in both normal and away supervision.
+`tests/fm-wake-queue.test.sh` covers Pi-only ticket generation, ordinary-primary output compatibility, both actors' post-output receipt boundary, interrupted presentation, and actor-scoped acknowledgement.
+
+| Primary surface | Applicability evidence |
+| --- | --- |
+| Pi and pi-signed | Applicable because both load the tracked Pi extension; the extension and watcher suites above exercise ticket delivery, delayed revalidation, generation replacement, and the live guard below. |
+| OpenCode | Not applicable to Pi tickets because its separate plugin never sets `FM_PI_WATCH_DELIVERY`; the shared extension suite asserts that absence while rerunning OpenCode successor continuity. |
+| Claude | Not applicable because its Stop-owned arm path does not set Pi delivery mode; the Claude auto-arm suite passed unchanged. |
+| Codex | Not applicable because its foreground checkpoint path does not set Pi delivery mode; the supervision renderer and turn-end suites preserve that path. |
+| Grok | Not applicable because its tracked background arm command does not set Pi delivery mode; the renderer suite preserved its command and passive Stop backstop. |
+| Cursor | Not applicable because its stop-hook park does not set Pi delivery mode; the Cursor primary suite passed unchanged. |
+| Standalone Kimi | Not applicable because it has no dedicated primary watcher bridge and the generic primary protocol never enables Pi delivery mode; Kimi hosted under Pi follows the Pi row above. |
+| Muse | Not a primary surface; it remains crewmate/scout-only. |
+
+`tests/fm-pi-primary-types.test.sh` remained an explicit gate skip because the standalone `@earendil-works/pi-coding-agent` package was not installed, so no type-check success is claimed for that optional surface.
+The credentialed watcher-only refresh command is `FM_PI_LIVE_E2E=1 FM_PI_LIVE_E2E_WATCHER_ONLY=1 bin/fm-test-run.sh tests/fm-pi-primary-live-e2e.test.sh`.
+Its isolated 2026-09-01 run reported `ok - Pi 0.84.0 watcher-only live E2E covered the Calm working ship and watcher continuity` and `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=44967`.
+
 The once-per-generation recovery bound and immediate handling-successor poll were verified on 2026-08-21 with the tracked Pi extension, real watcher processes, and an isolated home.
 The regression forced handling confirmation to fail, observed one recovery follow-up across the former repeat window, confirmed the successor remained live, and then proved a separate handling successor durably queued a crew event within the bounded poll window.
 

@@ -5,7 +5,8 @@
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
 # (pre-teardown run abort, see its "Fix 1" header comment). Teardown uses only
 # strict branch-and-head identity; crew-state additionally permits the active
-# pipeline-owned exemption defined below. Getting this wrong in either
+# pipeline-owned exemption and current agent-wait evidence defined below. Getting
+# this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
@@ -56,6 +57,18 @@ fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
 }
 
+# 0 when an active top-level run status carries direct evidence that the agent
+# must answer an approval/fix-review wait. This stronger current-gate evidence
+# outranks a stale terminal outcome field, but never a terminal top-level status.
+fm_nm_run_has_agent_wait() {  # <toon-output>
+  local out=$1 status
+  status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
+  case "$status" in completed|failed|cancelled) return 1 ;; esac
+  case "$status" in awaiting_approval|fix_review) return 0 ;; esac
+  printf '%s\n' "$out" | grep -Eq \
+    '^[[:space:]]*awaiting_agent:|^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,|^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$'
+}
+
 # 0 if run head $2 matches worktree $1's code identity, per the same rule
 # everywhere this attribution is needed:
 #   - missing/empty head: cannot bind; reject
@@ -99,14 +112,16 @@ fm_nm_branch_sync_state() {  # <toon-output>
   fm_nm_strip_quotes "$s"
 }
 
-# 0 if the run in captured `axi status` TOON $1 is still in flight: no
-# terminal outcome and no terminal status.
+# 0 if the run in captured `axi status` TOON $1 is still in flight: its
+# top-level status is nonterminal and it either has no terminal outcome or has
+# direct current agent-wait evidence that resolves a contradictory stale outcome
+# toward the actionable gate.
 fm_nm_run_is_active() {  # <toon-output>
   local status outcome
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$1" status)")
-  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$1" outcome)")
-  [ -z "$outcome" ] || return 1
   case "$status" in completed|failed|cancelled) return 1 ;; esac
+  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$1" outcome)")
+  [ -z "$outcome" ] || fm_nm_run_has_agent_wait "$1"
 }
 
 # The one exemption to the head rule above: while the pipeline OWNS the branch

@@ -9,6 +9,10 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+# Pi's watcher extension uses these process-local tickets to bind a delayed
+# follow-up to the exact durable queue rows that caused it. Other watcher
+# adapters never render them; bin/fm-push-transition-lib.sh owns that boundary.
+FM_WAKE_APPENDED_TICKETS=
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -1459,8 +1463,71 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+# Capture one task incarnation for Pi's delayed-delivery revalidation. The
+# durable queue sequence remains the event identity; this ticket adds the task
+# and spawn generation that were current at append time. Signal and stale rows
+# are task-bound. Check and heartbeat rows stay global so a real merge result,
+# credential failure, or fleet review survives task cleanup unchanged.
+#
+# Ticket grammar (one line, all fields ASCII-safe):
+#   firstmate-wake-ticket: v1 seq=<n> kind=<kind> key=<hex> scope=<task|global> task=<id|-> spawn=<generation|legacy|->
+# The raw queue key is hex-encoded rather than copied into an arm protocol line.
+# A proven legacy task with no spawn_gen records `spawn=legacy`, `-` means the
+# task identity was unavailable, and current spawned tasks carry exactly one
+# generation and therefore get the stronger incarnation check.
+fm_wake_ticket_for_append() {  # <sequence> <kind> <clean-key>
+  local seq=$1 kind=$2 key=$3 scope=global task=- spawn=- key_hex meta candidate window terminal spawn_count
+  case "$kind" in
+    signal)
+      case "$key" in
+        *.status) task=${key%.status} ;;
+        *.turn-ended) task=${key%.turn-ended} ;;
+        *) task=- ;;
+      esac
+      scope=task
+      ;;
+    stale)
+      scope=task
+      for candidate in "$STATE"/*.meta; do
+        [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+        window=$(grep '^window=' "$candidate" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+        terminal=$(grep '^terminal=' "$candidate" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+        [ "$window" = "$key" ] || [ "$terminal" = "$key" ] || continue
+        if [ "$task" != - ]; then
+          task=-
+          break
+        fi
+        task=${candidate##*/}
+        task=${task%.meta}
+      done
+      ;;
+  esac
+  if [ "$scope" = task ]; then
+    case "$task" in
+      ''|.*|*[!A-Za-z0-9._-]*) task=- ;;
+    esac
+  fi
+  if [ "$task" != - ]; then
+    meta="$STATE/$task.meta"
+    if [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ]; then
+      spawn_count=$(awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$meta" 2>/dev/null) || spawn_count=-1
+      case "$spawn_count" in
+        0) spawn=legacy ;;
+        1)
+          spawn=$(awk -F= '$1 == "spawn_gen" { sub(/^[^=]*=/, ""); print }' "$meta" 2>/dev/null || true)
+          case "$spawn" in ''|.*|*[!A-Za-z0-9._-]*) spawn=- ;; esac
+          ;;
+      esac
+    fi
+  fi
+  key_hex=$(printf '%s' "$key" | LC_ALL=C od -An -v -tx1 | tr -d '[:space:]') || return 1
+  [ -n "$key_hex" ] || return 1
+  printf 'firstmate-wake-ticket: v1 seq=%s kind=%s key=%s scope=%s task=%s spawn=%s' \
+    "$seq" "$kind" "$key_hex" "$scope" "$task" "$spawn"
+}
+
 fm_wake_append() {
-  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
+  local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status ticket
   local recovery_marker
   case "$kind" in
     signal|stale|check|heartbeat) ;;
@@ -1486,6 +1553,17 @@ fm_wake_append() {
   fi
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
+  fi
+  if [ "$status" -eq 0 ] && [ "${FM_PI_WATCH_DELIVERY:-0}" = 1 ]; then
+    ticket=$(fm_wake_ticket_for_append "$seq" "$kind" "$clean_key") || ticket=
+    if [ -n "$ticket" ]; then
+      if [ -n "$FM_WAKE_APPENDED_TICKETS" ]; then
+        FM_WAKE_APPENDED_TICKETS="$FM_WAKE_APPENDED_TICKETS
+$ticket"
+      else
+        FM_WAKE_APPENDED_TICKETS=$ticket
+      fi
+    fi
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"

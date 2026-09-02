@@ -53,6 +53,69 @@ test_concurrent_append_and_drain() {
   pass "concurrent append plus drain preserves durable records through acknowledgement"
 }
 
+test_pi_wake_ticket_is_sideband_and_generation_bound() {
+  local dir state pi_out ordinary_out check_out reason
+  dir=$(make_case pi-wake-ticket)
+  state="$dir/state"
+  printf 'window=default:w3:pT\nkind=ship\nspawn_gen=spawn-one\n' > "$state/forge.meta"
+  reason='stale: default:w3:pT (idle 500s, possible wedge, escalation 1)'
+
+  pi_out=$(FM_STATE_OVERRIDE="$state" FM_PI_WATCH_DELIVERY=1 bash -c '
+    . "$1"
+    fm_wake_append stale "default:w3:pT" "$2" || exit
+    wake "$2"
+  ' _ "$ROOT/bin/fm-push-transition-lib.sh" "$reason") || fail "Pi ticket wake failed"
+  [ "$(printf '%s\n' "$pi_out" | sed -n '1p')" = "$reason" ] || fail "Pi ticket changed the human wake reason"
+  printf '%s\n' "$pi_out" | grep -Eq \
+    '^firstmate-wake-ticket: v1 seq=1 kind=stale key=[0-9a-f]+ scope=task task=forge spawn=spawn-one$' \
+    || fail "Pi wake omitted its durable row/task generation ticket: $pi_out"
+
+  ordinary_out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_append stale "default:w3:pT" "$2" || exit
+    wake "$2"
+  ' _ "$ROOT/bin/fm-push-transition-lib.sh" "$reason") || fail "ordinary wake failed"
+  [ "$ordinary_out" = "$reason" ] || fail "a non-Pi primary received Pi ticket output: $ordinary_out"
+
+  check_out=$(FM_STATE_OVERRIDE="$state" FM_PI_WATCH_DELIVERY=1 bash -c '
+    . "$1"
+    fm_wake_append check "forge.check.sh" "check: forge.check.sh: merged" || exit
+    wake "check: forge.check.sh: merged"
+  ' _ "$ROOT/bin/fm-push-transition-lib.sh") || fail "Pi check ticket wake failed"
+  printf '%s\n' "$check_out" | grep -Eq \
+    '^firstmate-wake-ticket: v1 seq=[0-9]+ kind=check key=[0-9a-f]+ scope=global task=- spawn=-$' \
+    || fail "a real check result was incorrectly bound to task cleanup: $check_out"
+  pass "Pi alone receives durable wake tickets; task rows bind spawn generation while real checks stay global"
+}
+
+test_presented_receipt_rejects_non_regular_target() {
+  local dir state sentinel out err rc sequence generation
+  dir=$(make_case presented-receipt-target)
+  state="$dir/state"
+  sentinel="$dir/sentinel"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  printf 'must remain intact\n' > "$sentinel"
+  ln -s "$sentinel" "$state/.main-presented-rows"
+  append_wake "$state" signal task.status "signal: task" || fail "receipt-target wake append failed"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a symlinked presentation receipt was accepted"
+  [ "$(cat "$sentinel")" = "must remain intact" ] || fail "presentation receipt followed and changed a symlink target"
+  [ -s "$state/.wake-queue" ] || fail "failed receipt publication consumed the durable row"
+
+  rm -f "$state/.main-presented-rows"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "receipt publication did not recover after removing the invalid target"
+  [ "$(cat "$state/.main-presented-rows" 2>/dev/null || true)" = 1 ] \
+    || fail "recovered presentation did not publish its exact sequence"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "recovered receipt-target row could not be acknowledged"
+  pass "post-output presentation receipts reject non-regular targets without losing durable rows"
+}
+
 test_signal_catchup_without_running_watcher() {
   local dir state fakebin out drain_out drain_err status_file sequence generation
   dir=$(make_case signal)
@@ -629,6 +692,8 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
   grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "branch drain omitted its eligible signal row"
   grep -Fq "$(printf '\tstale\tfm-window\t')" "$out" || fail "branch drain omitted its eligible stale row"
   grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" && fail "branch drain presented the main-owned row"
+  [ "$(cat "$state/.branch-presented-rows" 2>/dev/null || true)" = "$(printf '2\n3')" ] \
+    || fail "branch presentation receipt did not bind exactly its delivered rows"
 
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
@@ -654,6 +719,8 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$count" -eq 1 ] || fail "main's later drain should see exactly the one remaining main-owned row: $(cat "$out")"
   grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" || fail "main's later drain lost the main-owned row"
+  [ "$(cat "$state/.main-presented-rows" 2>/dev/null || true)" = 1 ] \
+    || fail "main presentation receipt did not bind exactly its delivered row"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
   [ -n "$sequence" ] && [ -n "$generation" ] || fail "main's drain omitted its acknowledgement boundary"
@@ -1019,9 +1086,13 @@ test_interruption_before_and_after_raw_commit() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
+  [ ! -e "$state/.main-presented-rows" ] \
+    || fail "a pre-output main claim was misrecorded as successful presentation"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$dir/replay.err" || fail "restored pre-commit wake did not drain"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
   [ "$count" -eq 1 ] || fail "pre-commit interruption lost or duplicated the durable row"
+  [ "$(cat "$state/.main-presented-rows" 2>/dev/null || true)" = 1 ] \
+    || fail "successful main replay did not publish its post-output presentation receipt"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/replay.err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/replay.err")
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
@@ -1032,6 +1103,8 @@ test_interruption_before_and_after_raw_commit() {
   pid=$!
   wait_for_file_text "$after_out" "$(printf '\tsignal\ttask.status\t')" \
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain did not print its raw row"; }
+  wait_for_file_text "$state/.main-presented-rows" "2" \
+    || { kill "$pid" 2>/dev/null || true; fail "post-output main drain did not publish its presentation receipt"; }
   [ -s "$state/.wake-queue" ] \
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain consumed its raw row before handling acknowledgement"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw presentation"
@@ -1047,6 +1120,8 @@ test_interruption_before_and_after_raw_commit() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
     || fail "post-interruption replay acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledged interrupted wake remained durable"
+  [ "$(cat "$state/.main-presented-rows" 2>/dev/null || true)" = 2 ] \
+    || fail "main presentation receipt did not retain the consumed event identity"
   pass "interruptions preserve durable rows until post-handling acknowledgement"
 }
 
@@ -1448,6 +1523,8 @@ test_empty_prefix_mate_preserves_other_mate_receipt
 test_self_announced_append_guards
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
+test_pi_wake_ticket_is_sideband_and_generation_bound
+test_presented_receipt_rejects_non_regular_target
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor

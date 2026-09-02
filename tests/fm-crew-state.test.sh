@@ -143,6 +143,10 @@ run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
+run_crew_activity() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2" --activity-token
+}
+
 new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
@@ -263,6 +267,34 @@ steps[3]{step,status,findings,duration_ms}:
   review,fix_review,1,0
   test,pending,0,0
 EOF
+}
+
+run_fix_review_with_stale_failed_outcome() {  # <branch> [<head>] [pipeline-owned]
+  cat <<EOF
+run:
+  id: "01RUST"
+  branch: $1
+  status: running
+  awaiting_agent: parked 4m12s
+  head: "${2:-${FM_FAKE_RUN_HEAD:-abc1234}}"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    rust-review,error,src/lib.rs,42,auto-fix,review fix requires agent response
+gate:
+  step: review
+  status: fix_review
+steps[3]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  review,fix_review,1,0
+  test,pending,0,0
+outcome: failed
+EOF
+  if [ "${3:-}" = pipeline-owned ]; then
+    cat <<'EOF'
+branch_sync:
+  state: pipeline_owned
+EOF
+  fi
 }
 
 run_passed() {  # <branch>
@@ -439,6 +471,54 @@ test_gate_block_parked_not_superseded() {
   assert_contains "$out" "1 finding(s)" "gate block wait includes finding count"
   assert_not_contains "$out" "superseded" "gate block wait not flagged stale"
   pass "gate block parked run is not flagged superseded"
+}
+
+test_fix_review_wait_outranks_stale_failure_outcome() {
+  reset_fakes
+  local d out short activity
+  d=$(new_case rust-fix-review-wait)
+  make_repo_on_branch "$d/wt" fm/rust-fix-review
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/rust.meta" "window=default:w9G:p2" "worktree=$d/wt" "kind=ship" "harness=pi"
+  printf 'failed: stale pane classification from before review resumed\n' > "$d/state/rust.status"
+  FM_FAKE_AXI_STATUS=$(run_fix_review_with_stale_failed_outcome fm/rust-fix-review)
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d" rust)
+  assert_contains "$out" "state: parked" "active Rust fix-review wait -> parked"
+  assert_contains "$out" "source: run-step" "active Rust fix-review wait stays structured-run sourced"
+  assert_contains "$out" "fix_review" "active Rust fix-review wait names the actionable gate status"
+  assert_not_contains "$out" "state: failed" "stale failed outcome did not mask active fix-review"
+  assert_not_contains "$out" "source: status-log" "dead pane and stale failure log did not override active fix-review"
+  activity=$(run_crew_activity "$d" rust)
+  [ -z "$activity" ] || fail "an actionable fix-review wait emitted working activity evidence: $activity"
+
+  # The same contradiction must preserve pipeline-owned attribution when the
+  # gate head is not an object in the worker's local repository. Without the
+  # active-gate exception, fallback revives the newest failed runs-list row.
+  FM_FAKE_AXI_STATUS=$(run_fix_review_with_stale_failed_outcome fm/rust-fix-review f0f0f0f0 pipeline-owned)
+  short=$(git -C "$d/wt" rev-parse --short HEAD)
+  FM_FAKE_RUNS_LIST="failed fm/rust-fix-review $short 2026-08-31"
+  out=$(run_crew_state "$d" rust)
+  assert_contains "$out" "state: parked" "pipeline-owned Rust fix-review wait -> parked"
+  assert_contains "$out" "source: run-step" "pipeline-owned active gate beats failed fallback history"
+  assert_not_contains "$out" "state: failed" "failed runs-list row did not replace pipeline-owned fix-review"
+  pass "active fix-review waits outrank stale failure fields, dead panes, status history, and failed coarse fallback"
+}
+
+test_terminal_failure_outranks_leftover_fix_review() {
+  reset_fakes
+  local d out
+  d=$(new_case terminal-failure-leftover-gate)
+  make_repo_on_branch "$d/wt" fm/rust-terminal-failure
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/rust-terminal.meta" "window=fm:fm-rust-terminal" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS=$(run_fix_review_with_stale_failed_outcome fm/rust-terminal-failure \
+    | awk '!changed && /status: running/ { sub(/status: running/, "status: completed"); changed=1 } { print }')
+  out=$(run_crew_state "$d" rust-terminal)
+  assert_contains "$out" "state: failed" "terminal top-level status keeps genuine failure authoritative"
+  assert_contains "$out" "source: run-step" "terminal failure remains structured-run sourced"
+  assert_not_contains "$out" "state: parked" "leftover gate did not hide a terminal failure"
+  pass "a genuinely terminal failed run still outranks leftover fix-review fields"
 }
 
 test_ci_ready_done_log_beats_monitoring_run() {
@@ -1389,6 +1469,36 @@ test_local_advanced_past_run_head_invalidates() {
   pass "local work advanced past run head invalidates attribution"
 }
 
+test_active_validation_activity_token_tracks_step_log() {
+  reset_fakes
+  local d first same changed parked backend backend_token
+  d=$(new_case active-validation-activity)
+  make_repo_on_branch "$d/wt" fm/feat-activity
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/activity.meta" "window=fm:fm-activity" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(run_ci_monitoring fm/feat-activity)
+  FM_FAKE_CI_LOGS='CI checks running: poll one'
+  first=$(run_crew_activity "$d" activity)
+  assert_contains "$first" "activity: 01RUN-ci-" "active CI emits an opaque activity token"
+  for backend in tmux herdr zellij orca cmux; do
+    fm_write_meta "$d/state/activity.meta" "window=fm:fm-activity" "terminal=orca-terminal" \
+      "worktree=$d/wt" "kind=ship" "harness=claude" "backend=$backend"
+    backend_token=$(run_crew_activity "$d" activity)
+    [ "$backend_token" = "$first" ] \
+      || fail "$backend changed backend-independent structured validation activity: $backend_token"
+  done
+  same=$(run_crew_activity "$d" activity)
+  [ "$same" = "$first" ] || fail "an unchanged validation log changed its activity token"
+  FM_FAKE_CI_LOGS='CI checks running: poll two'
+  changed=$(run_crew_activity "$d" activity)
+  [ -n "$changed" ] && [ "$changed" != "$first" ] || fail "fresh validation-log activity did not change the token"
+
+  FM_FAKE_AXI_STATUS=$(run_parked fm/feat-activity)
+  parked=$(run_crew_activity "$d" activity)
+  [ -z "$parked" ] || fail "a parked structured run emitted active validation evidence: $parked"
+  pass "structured active validation exposes a log-sensitive token while parked work exposes none"
+}
+
 # --- Run-attribution precedence for pipeline-owned lane heads ----------------
 # A live run whose pipeline OWNS the branch (branch_sync.state=pipeline_owned)
 # can report a lane head that is not a git object in the task worktree.
@@ -1554,6 +1664,8 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
+test_fix_review_wait_outranks_stale_failure_outcome
+test_terminal_failure_outranks_leftover_fix_review
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
@@ -1600,6 +1712,7 @@ test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
+test_active_validation_activity_token_tracks_step_log
 test_pipeline_owned_active_run_beats_superseded_failed_row
 test_failed_run_with_no_later_run_still_surfaces
 test_coarse_unresolvable_active_row_never_falls_to_older_row

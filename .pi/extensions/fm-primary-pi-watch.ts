@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -35,9 +35,37 @@ type ArmResult = {
 
 type LockOwnership = "owned" | "missing" | "other";
 
+type WakeTicket = {
+  seq: number;
+  kind: "signal" | "stale" | "check" | "heartbeat";
+  keyHex: string;
+  scope: "task" | "global";
+  task: string;
+  spawn: string;
+};
+
 type CloseClassification = {
   kind: "actionable" | "failure";
   message: string;
+  tickets: WakeTicket[];
+};
+
+type PendingClose = {
+  classification: CloseClassification;
+  predecessorArmPid: string;
+};
+
+type WakeQueueRow = {
+  seq: number;
+  kind: WakeTicket["kind"];
+  key: string;
+  payload: string;
+};
+
+type DeliveryRevalidation = {
+  status: "deliver" | "obsolete" | "unknown";
+  message: string;
+  identities: string[];
 };
 
 type WatchToolShellState = {
@@ -58,6 +86,8 @@ type SessionGeneration = {
   retryTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
+  pendingCloses: PendingClose[];
+  deliveryClaims: Set<string>;
   seq: number;
 };
 
@@ -109,6 +139,8 @@ let activeGeneration: SessionGeneration | null = null;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
+const establishedArmChildren = new WeakSet<ChildProcess>();
+const expectedArmRetirements = new WeakSet<ChildProcess>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -159,35 +191,264 @@ function actionableLine(output: string): string {
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
 }
 
+function wakeTickets(output: string): WakeTicket[] {
+  const tickets: WakeTicket[] = [];
+  const seen = new Set<string>();
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^firstmate-wake-ticket: v1 seq=([1-9][0-9]*) kind=(signal|stale|check|heartbeat) key=([0-9a-f]+) scope=(task|global) task=(-|[A-Za-z0-9._-]+) spawn=(-|[A-Za-z0-9._-]+)$/.exec(line);
+    if (!match) continue;
+    const seq = Number(match[1]);
+    if (!Number.isSafeInteger(seq)) continue;
+    if (match[5] !== "-" && (match[5].startsWith(".") || match[5].length > 64)) continue;
+    if (match[6] !== "-" && match[6].startsWith(".")) continue;
+    const identity = `${seq}:${match[2]}:${match[3]}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    tickets.push({
+      seq,
+      kind: match[2] as WakeTicket["kind"],
+      keyHex: match[3],
+      scope: match[4] as WakeTicket["scope"],
+      task: match[5],
+      spawn: match[6],
+    });
+  }
+  return tickets;
+}
+
 function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
+  const tickets = wakeTickets(combined);
   const reason = actionableLine(combined);
-  if (reason) return { kind: "actionable", message: reason };
+  if (reason) return { kind: "actionable", message: reason, tickets };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
       kind: "failure",
       message: `watcher: FAILED - Pi extension arm child found an external healthy watcher instead of owning wake delivery\n${healthy}`,
+      tickets: [],
     };
   }
   const failed = combined.split(/\r?\n/).find((line) => /^watcher: FAILED/.test(line));
-  if (failed) return { kind: "failure", message: failed };
+  if (failed) return { kind: "failure", message: failed, tickets: [] };
   if (signal) {
     return {
       kind: "failure",
       message: `watcher: FAILED - Pi extension arm child ended from ${signal}${combined ? `\n${combined}` : ""}`,
+      tickets: [],
     };
   }
   if (code && code !== 0) {
     return {
       kind: "failure",
       message: `watcher: FAILED - fm-watch-arm.sh exited ${code}${combined ? `\n${combined}` : ""}`,
+      tickets: [],
     };
   }
   return {
     kind: "failure",
     message: "watcher: FAILED - Pi extension arm cycle ended without an actionable reason",
+    tickets: [],
   };
+}
+
+type StateFileRead =
+  | { status: "ok"; content: string }
+  | { status: "absent" }
+  | { status: "invalid" };
+
+function readRegularStateFile(path: string): StateFileRead {
+  try {
+    const info = lstatSync(path);
+    if (!info.isFile() || info.isSymbolicLink()) return { status: "invalid" };
+    return { status: "ok", content: readFileSync(path, "utf8") };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { status: "absent" };
+    return { status: "invalid" };
+  }
+}
+
+function statePathExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+function parseWakeQueue(content: string): WakeQueueRow[] | null {
+  const rows: WakeQueueRow[] = [];
+  const seen = new Set<number>();
+  for (const line of content.split(/\r?\n/)) {
+    if (!line) continue;
+    const fields = line.split("\t");
+    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return null;
+    const seq = Number(fields[1]);
+    const kind = fields[2];
+    if (!Number.isSafeInteger(seq) || seen.has(seq) || !/^(signal|stale|check|heartbeat)$/.test(kind)) return null;
+    seen.add(seq);
+    rows.push({
+      seq,
+      kind: kind as WakeQueueRow["kind"],
+      key: fields[3],
+      payload: fields.slice(4).join("\t"),
+    });
+  }
+  return rows;
+}
+
+function readSequenceReceipt(path: string): Set<number> | null {
+  const file = readRegularStateFile(path);
+  if (file.status === "absent") return new Set<number>();
+  if (file.status !== "ok") return null;
+  const claimed = new Set<number>();
+  for (const line of file.content.split(/\r?\n/)) {
+    if (!line) continue;
+    if (!/^[0-9]+$/.test(line)) return null;
+    const seq = Number(line);
+    if (!Number.isSafeInteger(seq) || claimed.has(seq)) return null;
+    claimed.add(seq);
+  }
+  return claimed;
+}
+
+function metadataValues(content: string, key: string): string[] {
+  return content
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(`${key}=`))
+    .map((line) => line.slice(key.length + 1));
+}
+
+function taskTicketStatus(ticket: WakeTicket, row: WakeQueueRow): "current" | "obsolete" | "unknown" {
+  if (ticket.scope === "global") return "current";
+  // Status and turn-end rows may carry the only durable decision, failure, or
+  // terminal result left after cleanup. Their exact queue identity still
+  // coalesces and invalidates a handled row, but metadata disappearance never
+  // makes their unseen content obsolete.
+  if (ticket.kind === "signal") {
+    if (ticket.task === "-") return "unknown";
+    return row.key === `${ticket.task}.status` || row.key === `${ticket.task}.turn-ended`
+      ? "current"
+      : "unknown";
+  }
+  if (ticket.task === "-") return "unknown";
+  const meta = readRegularStateFile(`${state}/${ticket.task}.meta`);
+  if (meta.status === "absent") return "obsolete";
+  if (meta.status !== "ok") return "unknown";
+
+  const spawnValues = metadataValues(meta.content, "spawn_gen");
+  if (ticket.spawn === "-") {
+    return "unknown";
+  } else if (ticket.spawn === "legacy") {
+    if (spawnValues.length === 1 && /^[A-Za-z0-9._-]+$/.test(spawnValues[0])) return "obsolete";
+    if (spawnValues.length !== 0) return "unknown";
+  } else {
+    if (spawnValues.length === 0) return "obsolete";
+    if (spawnValues.length !== 1 || !/^[A-Za-z0-9._-]+$/.test(spawnValues[0])) return "unknown";
+    if (spawnValues[0] !== ticket.spawn) return "obsolete";
+  }
+
+  if (ticket.kind === "stale") {
+    const windows = metadataValues(meta.content, "window");
+    const terminals = metadataValues(meta.content, "terminal");
+    const targets = [...windows.slice(-1), ...terminals.slice(-1)].filter(Boolean);
+    if (targets.length === 0) return "unknown";
+    return targets.includes(row.key) ? "current" : "obsolete";
+  }
+  return "current";
+}
+
+function wakeDedupeIdentity(row: WakeQueueRow): string {
+  return row.kind === "heartbeat" ? "heartbeat" : `${row.kind}\u0000${row.key}`;
+}
+
+function ticketIdentity(ticket: WakeTicket): string {
+  return `${ticket.seq}:${ticket.kind}:${ticket.keyHex}`;
+}
+
+function revalidateWakeDelivery(
+  owner: SessionGeneration,
+  message: string,
+  tickets: readonly WakeTicket[],
+): DeliveryRevalidation {
+  if (tickets.length === 0) return { status: "deliver", message, identities: [] };
+  const identities = tickets.map(ticketIdentity);
+  if (statePathExists(`${state}/.wake-queue.lock`)) {
+    return { status: "unknown", message, identities };
+  }
+  const queueFile = readRegularStateFile(`${state}/.wake-queue`);
+  if (queueFile.status !== "ok") return { status: "unknown", message, identities };
+  const rows = parseWakeQueue(queueFile.content);
+  const mainPresented = readSequenceReceipt(`${state}/.main-presented-rows`);
+  const branchPresented = readSequenceReceipt(`${state}/.branch-presented-rows`);
+  if (!rows || !mainPresented || !branchPresented || statePathExists(`${state}/.wake-queue.lock`)) {
+    return { status: "unknown", message, identities };
+  }
+  const presented = new Set([...mainPresented, ...branchPresented]);
+  const bySequence = new Map(rows.map((row) => [row.seq, row]));
+  const newest = new Map<string, number>();
+  for (const row of rows) {
+    const key = wakeDedupeIdentity(row);
+    newest.set(key, Math.max(newest.get(key) ?? 0, row.seq));
+  }
+
+  const current: Array<{ ticket: WakeTicket; row: WakeQueueRow }> = [];
+  let uncertain = false;
+  for (const ticket of tickets) {
+    const identity = ticketIdentity(ticket);
+    if (owner.deliveryClaims.has(identity)) continue;
+    const row = bySequence.get(ticket.seq);
+    if (!row) continue;
+    if (row.kind !== ticket.kind || Buffer.from(row.key, "utf8").toString("hex") !== ticket.keyHex) {
+      uncertain = true;
+      continue;
+    }
+    if (presented.has(ticket.seq)) continue;
+    if ((newest.get(wakeDedupeIdentity(row)) ?? row.seq) > row.seq) continue;
+    const taskStatus = taskTicketStatus(ticket, row);
+    if (taskStatus === "unknown") {
+      uncertain = true;
+      continue;
+    }
+    if (taskStatus === "current") current.push({ ticket, row });
+  }
+  if (uncertain) return { status: "unknown", message, identities };
+  if (current.length === 0) return { status: "obsolete", message: "", identities: [] };
+
+  const latest = current.reduce((left, right) => left.row.seq > right.row.seq ? left : right);
+  const allCurrent = current.length === tickets.length;
+  const currentMessage = allCurrent
+    ? message
+    : latest.row.kind === "signal"
+      ? "signal: current task event is waiting"
+      : latest.row.payload || message;
+  return {
+    status: "deliver",
+    message: currentMessage,
+    identities: current.map(({ ticket }) => ticketIdentity(ticket)),
+  };
+}
+
+async function revalidateWakeDeliveryAfterQueueMutation(
+  owner: SessionGeneration,
+  message: string,
+  tickets: readonly WakeTicket[],
+): Promise<DeliveryRevalidation> {
+  let delivery = revalidateWakeDelivery(owner, message, tickets);
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    if (delivery.status !== "unknown") return delivery;
+    if (!statePathExists(`${state}/.wake-queue.lock`)) {
+      return revalidateWakeDelivery(owner, message, tickets);
+    }
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, 20);
+      timer.unref();
+    });
+    if (!generationIsLive(owner)) return { status: "obsolete", message: "", identities: [] };
+    delivery = revalidateWakeDelivery(owner, message, tickets);
+  }
+  return delivery;
 }
 
 function createGeneration(): SessionGeneration {
@@ -198,6 +459,8 @@ function createGeneration(): SessionGeneration {
     retryTimer: null,
     retryFailures: 0,
     restoring: false,
+    pendingCloses: [],
+    deliveryClaims: new Set<string>(),
     seq: 0,
   };
 }
@@ -214,6 +477,8 @@ function stopGeneration(generation: SessionGeneration): void {
   generation.stopping = true;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   generation.retryTimer = null;
+  generation.pendingCloses = [];
+  generation.deliveryClaims.clear();
   if (generation.child) generation.child.kill("SIGTERM");
   generation.child = null;
 }
@@ -319,23 +584,43 @@ export default function (pi: ExtensionAPI) {
   async function deliverActionableWake(
     owner: SessionGeneration,
     message: string,
-    repairFailed: boolean,
+    tickets: readonly WakeTicket[],
+    restorationFailure: string,
     recovery?: { generation: string; watcherPid: string },
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
-    if (recovery) {
-      const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
-      if (!confirmed.ok) {
-        const watcherPid = recovery.watcherPid;
-        if (!pidAlive(watcherPid)) {
-          await retireArm(owner.child);
+
+    // Successor establishment can take seconds. Re-read the exact durable rows
+    // only now, immediately before Pi queues a follow-up: a row already printed
+    // by either actor, acknowledged, superseded by a newer same-key row, cleaned
+    // up, moved to a replacement endpoint, or bound to another spawn generation
+    // no longer describes work the captain should see. Read or format uncertainty
+    // stays in the safe direction and delivers; only positive obsolescence suppresses.
+    const delivery = await revalidateWakeDeliveryAfterQueueMutation(owner, message, tickets);
+    if (!generationIsLive(owner)) return;
+    const eventMessage = delivery.status === "obsolete" ? "" : delivery.message;
+    if (!eventMessage && !restorationFailure) return;
+    const finalMessage = [eventMessage, restorationFailure].filter(Boolean).join("\n\n");
+
+    for (const identity of delivery.identities) owner.deliveryClaims.add(identity);
+    try {
+      if (recovery) {
+        const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
+        if (!confirmed.ok) {
+          const watcherPid = recovery.watcherPid;
+          if (!pidAlive(watcherPid)) {
+            await retireArm(owner.child);
+          }
+          await sendWake(owner, [eventMessage, restorationFailure, confirmed.detail].filter(Boolean).join("\n\n"));
+          return;
         }
-        await sendWake(owner, `${message}\n\n${confirmed.detail}`);
-        return;
       }
+      if (!restorationFailure && eventMessage && offerWakeToBranch(eventMessage)) return;
+      await sendWake(owner, finalMessage);
+    } catch (error) {
+      for (const identity of delivery.identities) owner.deliveryClaims.delete(identity);
+      throw error;
     }
-    if (!repairFailed && offerWakeToBranch(message)) return;
-    await sendWake(owner, message);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -369,12 +654,18 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
-    if (!armChild) return true;
-    armChild.kill("SIGTERM");
+    if (!armChild || armChild.exitCode !== null || armChild.signalCode !== null) return true;
     const closed = armClose.get(armChild);
     if (!closed) return false;
+    expectedArmRetirements.add(armChild);
+    armChild.kill("SIGTERM");
     return new Promise((resolveRetired) => {
-      const timer = setTimeout(() => resolveRetired(false), armRetireTimeoutMs);
+      const timer = setTimeout(() => {
+        // A child that ignored retirement remains supervision-relevant when it
+        // eventually closes; do not leave its late actionable result muted.
+        expectedArmRetirements.delete(armChild);
+        resolveRetired(false);
+      }, armRetireTimeoutMs);
       timer.unref();
       void closed.then(() => {
         clearTimeout(timer);
@@ -433,9 +724,68 @@ export default function (pi: ExtensionAPI) {
       if (!result.ok) {
         surfaceFailure(owner, `watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
       }
+      processClassifiedCloses(owner);
     }, retryDelay(owner.retryFailures));
     timer.unref();
     owner.retryTimer = timer;
+  }
+
+  function processClassifiedCloses(owner: SessionGeneration): void {
+    if (!generationIsLive(owner) || owner.restoring || owner.pendingCloses.length === 0) return;
+    owner.restoring = true;
+    void (async () => {
+      try {
+        while (generationIsLive(owner) && owner.pendingCloses.length > 0) {
+          const pending = owner.pendingCloses[0];
+          if (!pending) break;
+          if (pending.classification.kind === "failure") {
+            if (owner.child && establishedArmChildren.has(owner.child)) {
+              owner.pendingCloses.shift();
+              surfaceFailure(owner, pending.classification.message);
+              continue;
+            }
+            // A replacement is still determining whether it is healthy. Keep
+            // the failure queued: scheduleRetry deliberately leaves that child
+            // alone, so removing its notification here would lose it forever.
+            if (owner.child) break;
+            owner.pendingCloses.shift();
+            scheduleRetry(owner, pending.classification.message, pending.predecessorArmPid);
+            break;
+          }
+          owner.pendingCloses.shift();
+          owner.retryFailures = 0;
+          const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
+          if (!generationIsLive(owner)) return;
+          void deliverActionableWake(
+            owner,
+            pending.classification.message,
+            pending.classification.tickets,
+            restoration.failure,
+            restoration.recovery,
+          ).catch((error) => {
+            const detail = error instanceof Error ? error.message : String(error);
+            surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
+          });
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
+      } finally {
+        if (generationIsLive(owner)) {
+          owner.restoring = false;
+          const waitingForSuccessor = owner.pendingCloses[0]?.classification.kind === "failure"
+            && !!owner.child
+            && !establishedArmChildren.has(owner.child);
+          if (!owner.retryTimer && !waitingForSuccessor) processClassifiedCloses(owner);
+        }
+      }
+    })();
+  }
+
+  function enqueueClassifiedClose(owner: SessionGeneration, close: PendingClose): void {
+    if (!generationIsLive(owner)) return;
+    owner.pendingCloses.push(close);
+    processClassifiedCloses(owner);
   }
 
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
@@ -469,6 +819,7 @@ export default function (pi: ExtensionAPI) {
       FM_CONFIG_OVERRIDE: config,
       FM_WATCH_ARM_SCRIPT: armScript,
       FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
+      FM_PI_WATCH_DELIVERY: "1",
     };
     const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
       cwd: fmRoot,
@@ -500,7 +851,9 @@ export default function (pi: ExtensionAPI) {
       const recovery = combined.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
       if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
       if (/^watcher: (?:started|attached)\b/m.test(combined)) {
+        establishedArmChildren.add(armChild);
         settleReadiness(true);
+        processClassifiedCloses(owner);
       }
     };
     const releaseChild = (): void => {
@@ -520,30 +873,12 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
+      if (expectedArmRetirements.delete(armChild)) return;
       if (!generationIsLive(owner)) return;
-      const classification = classifyClose(stdout, stderr, code, signal);
-      const predecessor = String(armChild.pid ?? "");
-      if (classification.kind === "actionable") {
-        if (owner.restoring) return;
-        owner.retryFailures = 0;
-        owner.restoring = true;
-        void (async () => {
-          try {
-            const restoration = await restoreAfterActionableClose(owner, predecessor);
-            if (!generationIsLive(owner)) return;
-            const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-            await deliverActionableWake(owner, message, Boolean(restoration.failure), restoration.recovery);
-          } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
-          } finally {
-            if (generationIsLive(owner)) owner.restoring = false;
-          }
-        })();
-        return;
-      }
-      if (owner.restoring) return;
-      scheduleRetry(owner, classification.message, predecessor);
+      enqueueClassifiedClose(owner, {
+        classification: classifyClose(stdout, stderr, code, signal),
+        predecessorArmPid: String(armChild.pid ?? ""),
+      });
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
@@ -551,9 +886,16 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
+      if (expectedArmRetirements.delete(armChild)) return;
       if (!generationIsLive(owner)) return;
-      if (owner.restoring) return;
-      scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
+      enqueueClassifiedClose(owner, {
+        classification: {
+          kind: "failure",
+          message: `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`,
+          tickets: [],
+        },
+        predecessorArmPid: String(armChild.pid ?? ""),
+      });
     });
     return {
       ok: true,

@@ -1802,8 +1802,8 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
 
-  # Phase B: backdate the idle timer past the threshold; the next run escalates.
-  # (The subsequent-sight timer path does not re-read the crew state.)
+  # Phase B: backdate the idle timer past the threshold; with no structured
+  # validation activity token to prove new log output, the next run escalates.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1817,6 +1817,94 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+# --- active structured validation with fresh step-log activity: defer wedge ---
+# A static endpoint is normal while CI is long-polling. The structured run remains
+# authoritative over pane appearance, and a changed opaque step-log token is
+# positive progress evidence. The smallest counterfactual is the same endpoint,
+# run state, and timer with only that token held constant: it must wedge.
+test_active_validation_log_progress_defers_then_stalls() {
+  local dir state fakebin out capture_file window key pane_hash sig pid baseline now back
+  dir=$(make_case active-validation-log-progress); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="default:w9G:p2"
+  printf 'idle CI monitor\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nspawn_gen=active-ci-one\n' "$window" > "$state/active-ci.meta"
+  printf 'working: monitoring CI\n' > "$state/active-ci.status"
+  sig=$(seen_sig "$state/active-ci.status"); printf '%s' "$sig" > "$state/.seen-active-ci_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle CI monitor")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  export FM_FAKE_CREW_ACTIVITY='run-one-ci-log-a'
+
+  # Prime one stale window and capture the active run's initial log token.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; fail "active CI priming round surfaced: $(cat "$out")"; }
+  baseline=$(sed -n '2p' "$state/.stale-since-$key")
+  [ "$baseline" = run-one-ci-log-a ] || { reap "$pid"; fail "active CI timer did not capture its initial log token"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional active-CI priming stop"
+
+  # Causal counterfactual A: only the validation log changes. The old timer is
+  # due, but fresh structured progress restarts it without a possible-wedge wake.
+  printf '%s\n%s\n' "$(( $(date +%s) - 500 ))" "$baseline" > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_ACTIVITY='run-one-ci-log-b'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; fail "fresh active CI log activity was wedge-escalated: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "fresh active CI log activity printed a wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "fresh active CI log activity enqueued a wake"; }
+  [ "$(sed -n '2p' "$state/.stale-since-$key")" = run-one-ci-log-b ] \
+    || { reap "$pid"; fail "fresh active CI token did not advance"; }
+  now=$(date +%s)
+  [ "$((now - $(sed -n '1p' "$state/.stale-since-$key")))" -lt 30 ] \
+    || { reap "$pid"; fail "fresh active CI progress did not restart the short wedge timer"; }
+  [ -e "$state/.validation-since-$key" ] || { reap "$pid"; fail "active CI deferral chain was not bounded"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional active-CI deferral stop"
+
+  # Bounded-progress control: even continuously changing validation logs must
+  # re-surface on the long cadence rather than hiding the worker indefinitely.
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$state/.validation-since-$key"
+  printf '%s\n%s\n' "$back" run-one-ci-log-b > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_ACTIVITY='run-one-ci-log-c'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "continuously advancing validation did not re-surface on the long cadence"
+  grep -F "active validation log advanced" "$out" >/dev/null \
+    || fail "long-cadence validation recheck omitted its progress reason: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "long-cadence validation recheck was mislabeled as a wedge"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the bounded active-validation recheck"
+
+  # Causal counterfactual B: everything stays identical, including the current
+  # structured run, but its step log stops changing. Bounded wedge detection fires.
+  printf '%s\n%s\n' "$(( $(date +%s) - 500 ))" run-one-ci-log-c > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "stalled active CI log never reached bounded wedge detection"
+  grep -F "possible wedge" "$out" >/dev/null || fail "stalled active CI log omitted its wedge reason: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_ACTIVITY
+  pass "fresh structured validation-log activity defers a static endpoint, continuous progress re-surfaces, and the unchanged-log counterfactual still wedges"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -3846,6 +3934,7 @@ test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_active_validation_log_progress_defers_then_stalls
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed

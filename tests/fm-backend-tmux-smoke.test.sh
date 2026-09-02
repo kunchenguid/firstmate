@@ -43,7 +43,10 @@ cleanup_all() {
 SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke.XXXXXX")
 cat > "$SHIM_DIR/tmux" <<SH
 #!/usr/bin/env bash
-exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+# The private server must also ignore the operator's tmux configuration.
+# A configured terminal name without local terminfo can otherwise make the
+# smoke's shell-ready clear command fail before the adapter is exercised.
+exec "$REAL_TMUX" -f /dev/null -L "$SOCKET" "\$@"
 SH
 chmod +x "$SHIM_DIR/tmux"
 PATH="$SHIM_DIR:$PATH"

@@ -333,10 +333,11 @@ EOF
 }
 
 test_pi_actionable_close_starts_single_successor_before_delivery() {
-  local repo home plugin log stop out status
+  local repo home plugin log delivery stop out status
   repo="$TMP_ROOT/pi-continuous-rearm-root"
   home="$TMP_ROOT/pi-continuous-rearm-home"
   log="$TMP_ROOT/pi-continuous-rearm.log"
+  delivery="$TMP_ROOT/pi-continuous-rearm.delivery"
   stop="$TMP_ROOT/pi-continuous-rearm.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
@@ -354,18 +355,24 @@ if [ "$count" -eq 1 ]; then
   printf 'signal: synthetic actionable close\n'
   exit 0
 fi
+if [ "$count" -eq 2 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+  while [ ! -e "$FM_DELIVERY_FILE" ]; do sleep 0.02; done
+  printf 'check: successor actionable close\n'
+  exit 0
+fi
 printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
 trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_DELIVERY_FILE="$delivery" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
-let deliveryStarted = false;
-let rowsAtDelivery = 0;
+const deliveries = [];
+const rowsAtDelivery = [];
 let releaseDelivery = () => {};
 const deliveryBlocked = new Promise((resolve) => {
   releaseDelivery = resolve;
@@ -376,11 +383,12 @@ const pi = {
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
-  sendUserMessage: async () => {
-    rowsAtDelivery = existsSync(process.env.FM_ARM_LOG)
+  sendUserMessage: async (message) => {
+    deliveries.push(message);
+    rowsAtDelivery.push(existsSync(process.env.FM_ARM_LOG)
       ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm=")).length
-      : 0;
-    deliveryStarted = true;
+      : 0);
+    if (deliveries.length === 1) writeFileSync(process.env.FM_DELIVERY_FILE, "blocked\n");
     await deliveryBlocked;
   },
 };
@@ -388,29 +396,30 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-continuity", {}, undefined, undefined, {});
-for (let i = 0; i < 250; i += 1) {
+for (let i = 0; i < 500; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
     : [];
-  if (rows.length >= 2 && deliveryStarted) break;
+  if (rows.filter((row) => row.startsWith("arm=")).length >= 3 && deliveries.length >= 2) break;
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 const armRows = rows.filter((row) => row.startsWith("arm="));
-if (armRows.length !== 2) throw new Error(`expected one successor arm, got ${armRows.length}: ${rows.join(" | ")}`);
-if (!deliveryStarted) throw new Error("wake delivery did not begin");
-if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
-if (!/predecessor=[0-9]+/.test(armRows[1])) throw new Error(`successor did not receive predecessor identity: ${armRows[1]}`);
-if (!rows.some((row) => row.startsWith("confirmed generation=fixture-generation"))) {
-  throw new Error(`handling delivery was not confirmed before the follow-up: ${rows.join(" | ")}`);
+if (armRows.length !== 3) throw new Error(`expected two successor arms, got ${armRows.length}: ${rows.join(" | ")}`);
+if (deliveries.length !== 2) throw new Error(`expected both actionable deliveries, got ${deliveries.length}`);
+if (rowsAtDelivery[0] !== 2) throw new Error(`first wake delivery began before successor establishment (${rowsAtDelivery[0]} arm rows)`);
+if (rowsAtDelivery[1] !== 3) throw new Error(`successor wake delivery began before its replacement (${rowsAtDelivery[1]} arm rows)`);
+if (!deliveries[1].includes("successor actionable close")) throw new Error(`successor close was lost: ${deliveries.join(" | ")}`);
+if (!/predecessor=[0-9]+/.test(armRows[1]) || !/predecessor=[0-9]+/.test(armRows[2])) {
+  throw new Error(`a successor did not receive predecessor identity: ${armRows.join(" | ")}`);
 }
 await new Promise((resolve) => setTimeout(resolve, 100));
 const stableRows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
-if (stableRows.filter((row) => row.startsWith("arm=")).length !== 2) {
-  throw new Error(`blocked follow-up started extra arm work: ${stableRows.join(" | ")}`);
+if (stableRows.filter((row) => row.startsWith("arm=")).length !== 3) {
+  throw new Error(`blocked follow-ups started extra arm work: ${stableRows.join(" | ")}`);
 }
-if (stableRows.filter((row) => row.startsWith("confirmed ")).length !== 1) {
-  throw new Error(`successful prompt delivery was not confirmed exactly once: ${stableRows.join(" | ")}`);
+if (stableRows.filter((row) => row.startsWith("confirmed ")).length !== 2) {
+  throw new Error(`actionable deliveries were not each confirmed exactly once: ${stableRows.join(" | ")}`);
 }
 releaseDelivery();
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
@@ -418,9 +427,358 @@ process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "Pi actionable close must start one successor before wake delivery settles"
+  expect_code 0 "$status" "Pi actionable closes must each start a successor before blocked wake delivery settles"
   [ -z "$out" ] || fail "Pi continuous-rearm test printed output: $out"
-  pass "Pi actionable close starts one successor before wake delivery settles"
+  pass "Pi actionable closes restore each successor before delivery and keep supervising while an earlier follow-up is blocked"
+}
+
+test_pi_delayed_wake_revalidates_durable_identity_and_task_generation() {
+  local scenario repo home plugin log release stop reason_file ticket_file ticket kind key reason out status expected
+  for scenario in drained branch-presented mutation-race receipt-invalid consumed replaced cleaned generation current pause check signal failure; do
+    repo="$TMP_ROOT/pi-ticket-$scenario-root"
+    home="$TMP_ROOT/pi-ticket-$scenario-home"
+    log="$TMP_ROOT/pi-ticket-$scenario.log"
+    release="$TMP_ROOT/pi-ticket-$scenario.release"
+    stop="$TMP_ROOT/pi-ticket-$scenario.stop"
+    reason_file="$TMP_ROOT/pi-ticket-$scenario.reason"
+    ticket_file="$TMP_ROOT/pi-ticket-$scenario.ticket"
+    mkdir -p "$repo/bin" "$home/state" "$home/config"
+    install_pi_watch_extension_fixture "$repo"
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    kind=stale
+    key='default:w3:pT'
+    reason='stale: default:w3:pT (idle 500s, possible wedge, escalation 1)'
+    printf 'window=default:w3:pT\nkind=ship\nspawn_gen=spawn-old\n' > "$home/state/forge.meta"
+    case "$scenario" in
+      pause)
+        reason='stale: default:w3:pT (paused 3600s, awaiting external - declared pause, rechecked on a long cadence not a wedge)'
+        ;;
+      check)
+        kind=check
+        key='forge-pr-poll'
+        reason='check: forge-pr-poll: merged'
+        ;;
+      signal)
+        kind=signal
+        key='forge.turn-ended'
+        reason='signal: forge.turn-ended'
+        ;;
+      failure)
+        kind=signal
+        key='forge.status'
+        reason='signal: forge.status'
+        printf 'failed: validation failed irrecoverably\n' > "$home/state/forge.status"
+        ;;
+    esac
+    ticket=$(FM_STATE_OVERRIDE="$home/state" FM_PI_WATCH_DELIVERY=1 bash -c '
+      . "$1"
+      fm_wake_append "$2" "$3" "$4" || exit
+      printf "%s\n" "$FM_WAKE_APPENDED_TICKETS"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$kind" "$key" "$reason") || fail "could not create $scenario wake ticket"
+    printf '%s\n' "$reason" > "$reason_file"
+    printf '%s\n' "$ticket" > "$ticket_file"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  cat "$FM_REASON_FILE"
+  cat "$FM_TICKET_FILE"
+  exit 0
+fi
+printf 'successor-waiting\n' >> "$FM_ARM_LOG"
+while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+      FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" FM_REASON_FILE="$reason_file" FM_TICKET_FILE="$ticket_file" \
+      FM_SCENARIO="$scenario" FM_REAL_ROOT="$ROOT" FM_DRAIN="$ROOT/bin/fm-wake-drain.sh" \
+      node --input-type=module 2>&1 <<'EOF'
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("ticket-revalidation", {}, undefined, undefined, {});
+await waitFor(
+  () => existsSync(process.env.FM_ARM_LOG) && readFileSync(process.env.FM_ARM_LOG, "utf8").includes("successor-waiting"),
+  "delayed successor",
+);
+switch (process.env.FM_SCENARIO) {
+  case "drained": {
+    const drained = spawnSync("bash", [process.env.FM_DRAIN], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: process.env.FM_HOME,
+        FM_STATE_OVERRIDE: state,
+        FM_ROOT_OVERRIDE: process.env.FM_REAL_ROOT,
+      },
+    });
+    if (drained.status !== 0 || !drained.stdout.includes("\t1\tstale\tdefault:w3:pT\t")) {
+      throw new Error(`real drain did not present the delayed row: status=${drained.status} stdout=${drained.stdout} stderr=${drained.stderr}`);
+    }
+    if (readFileSync(`${state}/.main-presented-rows`, "utf8").trim() !== "1") {
+      throw new Error("real drain did not publish the delayed row's main presentation receipt");
+    }
+    break;
+  }
+  case "branch-presented":
+    writeFileSync(`${state}/.branch-presented-rows`, "1\n");
+    break;
+  case "mutation-race":
+    writeFileSync(`${state}/.wake-queue.lock`, "mutation in progress\n");
+    setTimeout(() => {
+      rmSync(`${state}/.wake-queue.lock`);
+      writeFileSync(`${state}/.main-presented-rows`, "1\n");
+    }, 100);
+    break;
+  case "receipt-invalid":
+    writeFileSync(`${state}/.main-presented-rows`, "not-a-sequence\n");
+    break;
+  case "consumed":
+    writeFileSync(`${state}/.wake-queue`, "");
+    break;
+  case "replaced":
+    writeFileSync(`${state}/forge.meta`, "window=default:w3:pX\nkind=ship\nspawn_gen=spawn-old\n");
+    break;
+  case "cleaned":
+    rmSync(`${state}/forge.meta`);
+    break;
+  case "generation":
+    writeFileSync(`${state}/forge.meta`, "window=default:w3:pT\nkind=ship\nspawn_gen=spawn-new\n");
+    break;
+  case "failure":
+    rmSync(`${state}/forge.meta`);
+    break;
+}
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await new Promise((resolve) => setTimeout(resolve, 500));
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+const shouldDeliver = ["receipt-invalid", "current", "pause", "check", "signal", "failure"].includes(process.env.FM_SCENARIO);
+if (shouldDeliver && prompts.length !== 1) {
+  throw new Error(`${process.env.FM_SCENARIO} expected one prompt, got ${prompts.length}: ${prompts.join(" | ")}`);
+}
+if (!shouldDeliver && prompts.length !== 0) {
+  throw new Error(`${process.env.FM_SCENARIO} delivered obsolete prompt: ${prompts.join(" | ")}`);
+}
+if (process.env.FM_SCENARIO === "current" && !prompts[0]?.includes("default:w3:pT")) {
+  throw new Error(`current stale event lost its endpoint: ${prompts.join(" | ")}`);
+}
+if (process.env.FM_SCENARIO === "pause" && !prompts[0]?.includes("declared pause")) {
+  throw new Error(`declared-pause recheck was suppressed: ${prompts.join(" | ")}`);
+}
+if (process.env.FM_SCENARIO === "check" && !prompts[0]?.includes("merged")) {
+  throw new Error(`real merge result was suppressed: ${prompts.join(" | ")}`);
+}
+if (process.env.FM_SCENARIO === "signal" && !prompts[0]?.includes("forge.turn-ended")) {
+  throw new Error(`real turn-end signal was suppressed: ${prompts.join(" | ")}`);
+}
+if (process.env.FM_SCENARIO === "failure" && !prompts[0]?.includes("forge.status")) {
+  throw new Error(`unseen failure signal was suppressed after cleanup: ${prompts.join(" | ")}`);
+}
+EOF
+    )
+    status=$?
+    expected="obsolete delayed rows suppressed"
+    case "$scenario" in receipt-invalid|current|pause|check|signal|failure) expected="current or uncertain event delivered once" ;; esac
+    expect_code 0 "$status" "Pi $scenario ticket revalidation: $expected"
+    [ -z "$out" ] || fail "Pi $scenario ticket test printed output: $out"
+  done
+  pass "Pi revalidates delayed rows after either actor presents them, during queue mutation, after consumption, endpoint replacement, cleanup, and generation change while malformed evidence and current stale, declared-pause, merge, turn-end, and failure events still deliver"
+}
+
+test_pi_repeated_stale_rows_coalesce_and_successor_continues() {
+  local repo home plugin log stop first_reason second_reason first_ticket second_ticket out status
+  repo="$TMP_ROOT/pi-repeated-stale-root"
+  home="$TMP_ROOT/pi-repeated-stale-home"
+  log="$TMP_ROOT/pi-repeated-stale.log"
+  stop="$TMP_ROOT/pi-repeated-stale.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'window=default:w9G:p2\nkind=ship\nspawn_gen=spawn-ci\n' > "$home/state/ci.meta"
+  first_reason='stale: default:w9G:p2 (idle 500s, possible wedge, escalation 1)'
+  first_ticket=$(FM_STATE_OVERRIDE="$home/state" FM_PI_WATCH_DELIVERY=1 bash -c '
+    . "$1"; fm_wake_append stale "default:w9G:p2" "$2" || exit; printf "%s\n" "$FM_WAKE_APPENDED_TICKETS"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$first_reason") || fail "could not append first repeated stale"
+  second_reason='stale: default:w9G:p2 (idle 500s, possible wedge, escalation 2)'
+  second_ticket=$(FM_STATE_OVERRIDE="$home/state" FM_PI_WATCH_DELIVERY=1 bash -c '
+    . "$1"; fm_wake_append stale "default:w9G:p2" "$2" || exit; printf "%s\n" "$FM_WAKE_APPENDED_TICKETS"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$second_reason") || fail "could not append second repeated stale"
+  printf '%s\n' "$first_reason" > "$repo/first.reason"
+  printf '%s\n' "$first_ticket" > "$repo/first.ticket"
+  printf '%s\n' "$second_reason" > "$repo/second.reason"
+  printf '%s\n' "$second_ticket" > "$repo/second.ticket"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+case "$count" in
+  1)
+    printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+    cat "$FM_FIXTURE_ROOT/first.reason" "$FM_FIXTURE_ROOT/first.ticket"
+    ;;
+  2)
+    printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+    sleep 0.05
+    cat "$FM_FIXTURE_ROOT/second.reason" "$FM_FIXTURE_ROOT/second.ticket"
+    ;;
+  *)
+    printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+    trap 'exit 0' TERM INT
+    while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+    ;;
+esac
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_FIXTURE_ROOT="$repo" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {}, registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage: async (message) => { prompts.push(message); },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("repeated-stale", {}, undefined, undefined, {});
+for (let i = 0; i < 800; i += 1) {
+  const arms = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((line) => line.startsWith("arm=")).length
+    : 0;
+  if (arms >= 3 && prompts.length >= 1) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((line) => line.startsWith("arm=")).length;
+if (arms !== 3) throw new Error(`successor continuity expected 3 arms, got ${arms}`);
+if (prompts.length !== 1) throw new Error(`repeated stale rows produced ${prompts.length} prompts: ${prompts.join(" | ")}`);
+if (!prompts[0].includes("escalation 2") || prompts[0].includes("escalation 1")) {
+  throw new Error(`the newest same-task stale did not replace the old delivery: ${prompts[0]}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi must coalesce repeated same-task stale rows and keep the closing successor supervised"
+  [ -z "$out" ] || fail "Pi repeated-stale test printed output: $out"
+  pass "Pi coalesces repeated same-task stale events to the newest durable identity and restores a successor for it"
+}
+
+test_pi_delayed_wake_does_not_cross_session_replacement() {
+  local repo home plugin log stop reason ticket out status
+  repo="$TMP_ROOT/pi-delayed-session-root"
+  home="$TMP_ROOT/pi-delayed-session-home"
+  log="$TMP_ROOT/pi-delayed-session.log"
+  stop="$TMP_ROOT/pi-delayed-session.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'window=default:w3:pT\nkind=ship\nspawn_gen=spawn-session\n' > "$home/state/session-task.meta"
+  reason='stale: default:w3:pT (idle 500s, possible wedge, escalation 1)'
+  ticket=$(FM_STATE_OVERRIDE="$home/state" FM_PI_WATCH_DELIVERY=1 bash -c '
+    . "$1"; fm_wake_append stale "default:w3:pT" "$2" || exit; printf "%s\n" "$FM_WAKE_APPENDED_TICKETS"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$reason") || fail "could not append delayed session ticket"
+  printf '%s\n' "$reason" > "$repo/reason"
+  printf '%s\n' "$ticket" > "$repo/ticket"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+case "$count" in
+  1)
+    printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+    cat "$FM_FIXTURE_ROOT/reason" "$FM_FIXTURE_ROOT/ticket"
+    ;;
+  2)
+    printf 'old-successor-waiting\n' >> "$FM_ARM_LOG"
+    trap 'exit 0' TERM INT
+    while :; do sleep 0.02; done
+    ;;
+  *)
+    printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+    trap 'exit 0' TERM INT
+    while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+    ;;
+esac
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+    FM_FIXTURE_ROOT="$repo" FM_STOP_FILE="$stop" FM_PI_ARM_READY_TIMEOUT_MS=1000 \
+    node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+let tool = null;
+const prompts = [];
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage: async (message) => { prompts.push(message); },
+};
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("old-session", {}, undefined, undefined, {});
+await waitFor(
+  () => existsSync(process.env.FM_ARM_LOG) && readFileSync(process.env.FM_ARM_LOG, "utf8").includes("old-successor-waiting"),
+  "old delayed successor",
+);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+const replacement = await tool.execute("replacement-session", {}, undefined, undefined, {});
+if (!replacement.details?.ok) throw new Error(`replacement session did not arm: ${JSON.stringify(replacement.details)}`);
+await waitFor(
+  () => readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((line) => line.startsWith("arm=")).length >= 3,
+  "replacement session arm",
+);
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (prompts.length !== 0) throw new Error(`old delayed wake crossed into the replacement session: ${prompts.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi delayed wake must remain owned by its original session generation"
+  [ -z "$out" ] || fail "Pi delayed-session test printed output: $out"
+  pass "Pi session replacement retires the old delayed delivery while the new session owns successor supervision"
 }
 
 test_pi_branch_offer_owns_actionable_wake() {
@@ -1324,6 +1682,275 @@ EOF
   pass "Pi clean empty close triggers a bounded continuity retry"
 }
 
+test_pi_retry_resumes_actionable_close_queued_behind_failure() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-retry-queued-actionable-root"
+  home="$TMP_ROOT/pi-retry-queued-actionable-home"
+  log="$TMP_ROOT/pi-retry-queued-actionable.log"
+  stop="$TMP_ROOT/pi-retry-queued-actionable.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: original actionable close\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  printf 'watcher: FAILED - synthetic successor failure\n'
+  exit 1
+fi
+if [ "$count" -eq 3 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+  printf 'signal: actionable close queued behind failure\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=40 FM_WATCH_REARM_RETRY_MAX_MS=40 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-retry-queued-actionable", {}, undefined, undefined, {});
+for (let i = 0; i < 750; i += 1) {
+  if (rows().filter((row) => row.startsWith("arm=")).length >= 4
+    && prompts.some((message) => message.includes("actionable close queued behind failure"))) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const armRows = rows().filter((row) => row.startsWith("arm="));
+if (armRows.length !== 4) throw new Error(`expected recovery retry to start one healthy arm, got ${armRows.length}: ${rows().join(" | ")}`);
+if (!prompts.some((message) => message.includes("original actionable close"))) {
+  throw new Error(`original actionable close was not delivered: ${prompts.join(" | ")}`);
+}
+if (!prompts.some((message) => message.includes("actionable close queued behind failure"))) {
+  throw new Error(`actionable close queued behind retry failure was lost: ${prompts.join(" | ")}`);
+}
+if (rows().filter((row) => row.startsWith("confirmed ")).length !== 2) {
+  throw new Error(`each actionable close was not confirmed exactly once: ${rows().join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi retry must resume an actionable close queued behind a failed successor"
+  [ -z "$out" ] || fail "Pi retry-queued-actionable test printed output: $out"
+  pass "Pi retry resumes the actionable close queued behind a failed successor"
+}
+
+test_pi_retry_lock_loss_resumes_actionable_close_queued_behind_failure() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-retry-lock-loss-queued-actionable-root"
+  home="$TMP_ROOT/pi-retry-lock-loss-queued-actionable-home"
+  log="$TMP_ROOT/pi-retry-lock-loss-queued-actionable.log"
+  stop="$TMP_ROOT/pi-retry-lock-loss-queued-actionable.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: original actionable close\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  printf 'watcher: FAILED - synthetic successor failure\n'
+  exit 1
+fi
+if [ "$count" -eq 3 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+  printf 'signal: actionable close queued behind retry lock loss\n'
+  exit 0
+fi
+printf 'unexpected arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=100 FM_WATCH_REARM_RETRY_MAX_MS=100 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+const lock = `${process.env.FM_HOME}/state/.lock`;
+writeFileSync(lock, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-retry-lock-loss-queued-actionable", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && rows().filter((row) => row.startsWith("arm=")).length < 3; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (rows().filter((row) => row.startsWith("arm=")).length !== 3) {
+  throw new Error(`fixture did not queue the retry behind a failed successor: ${rows().join(" | ")}`);
+}
+const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  writeFileSync(lock, `${other.pid}\n`);
+  for (let i = 0; i < 750; i += 1) {
+    if (prompts.some((message) => message.includes("actionable close queued behind retry lock loss"))) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const armRows = rows().filter((row) => row.startsWith("arm="));
+  if (armRows.length !== 3) throw new Error(`retry launched a successor after lock loss: ${rows().join(" | ")}`);
+  if (!prompts.some((message) => message.includes("original actionable close"))) {
+    throw new Error(`original actionable close was not delivered: ${prompts.join(" | ")}`);
+  }
+  const queued = prompts.find((message) => message.includes("actionable close queued behind retry lock loss"));
+  if (!queued) throw new Error(`actionable close queued behind retry lock loss was lost: ${prompts.join(" | ")}`);
+  if (!queued.includes("no longer owns the lock")) {
+    throw new Error(`queued actionable close omitted continuity failure after lock loss: ${queued}`);
+  }
+  if (rows().filter((row) => row.startsWith("confirmed ")).length !== 1) {
+    throw new Error(`only the restored original actionable close should be confirmed: ${rows().join(" | ")}`);
+  }
+} finally {
+  other.kill("SIGTERM");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi retry lock loss must resume actionable closes queued behind a failed successor"
+  [ -z "$out" ] || fail "Pi retry-lock-loss-queued-actionable test printed output: $out"
+  pass "Pi retry lock loss resumes queued actionable closes without a successor"
+}
+
+test_pi_healthy_successor_surfaces_failure_queued_during_restore() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-healthy-successor-queued-failure-root"
+  home="$TMP_ROOT/pi-healthy-successor-queued-failure-home"
+  log="$TMP_ROOT/pi-healthy-successor-queued-failure.log"
+  stop="$TMP_ROOT/pi-healthy-successor-queued-failure.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: original actionable close\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  printf 'watcher: FAILED - synthetic queued failure\n'
+  exit 1
+fi
+if [ "$count" -eq 3 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+  trap 'exit 0' TERM INT
+  while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+  exit 0
+fi
+printf 'unexpected arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+exit 1
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=40 FM_WATCH_REARM_RETRY_MAX_MS=40 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-healthy-successor-queued-failure", {}, undefined, undefined, {});
+for (let i = 0; i < 750; i += 1) {
+  if (rows().filter((row) => row.startsWith("arm=")).length >= 3
+    && prompts.some((message) => message.includes("original actionable close"))) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+await new Promise((resolve) => setTimeout(resolve, 150));
+const armRows = rows().filter((row) => row.startsWith("arm="));
+if (armRows.length !== 3) throw new Error(`queued failure disturbed the healthy successor: ${rows().join(" | ")}`);
+if (!prompts.some((message) => message.includes("original actionable close"))) {
+  throw new Error(`original actionable close was not delivered: ${prompts.join(" | ")}`);
+}
+const failures = prompts.filter((message) => message.includes("synthetic queued failure"));
+if (failures.length !== 1) {
+  throw new Error(`queued failure was not surfaced exactly once beside the healthy successor: ${prompts.join(" | ")}`);
+}
+if (rows().filter((row) => row.startsWith("confirmed ")).length !== 1) {
+  throw new Error(`original actionable close was not confirmed exactly once: ${rows().join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+await new Promise((resolve) => setTimeout(resolve, 80));
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must surface a queued failure without replacing its healthy successor"
+  [ -z "$out" ] || fail "Pi healthy-successor queued-failure test printed output: $out"
+  pass "Pi surfaces a queued failure without disturbing its healthy successor"
+}
+
 test_pi_established_empty_close_honors_retry_limit() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-established-empty-close-root"
@@ -2075,7 +2702,7 @@ if [ "${1:-}" = --handling-delivered ]; then
   printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
   exit 0
 fi
-printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+printf 'arm=%s predecessor=%s pi-delivery=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" "${FM_PI_WATCH_DELIVERY:-unset}" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
 if [ "$count" -eq 1 ]; then
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
@@ -2130,6 +2757,9 @@ if (armRows.length !== 2) throw new Error(`expected one successor arm, got ${arm
 if (prompts !== 1) throw new Error(`expected one blocked wake prompt, got ${prompts}`);
 if (rowsAtPrompt !== 2) throw new Error(`wake prompt began before successor establishment (${rowsAtPrompt} arm rows)`);
 if (!/predecessor=[0-9]+/.test(armRows[1])) throw new Error(`successor did not receive predecessor identity: ${armRows[1]}`);
+if (armRows.some((row) => !row.includes("pi-delivery=unset"))) {
+  throw new Error(`OpenCode inherited Pi-only delivery identity mode: ${armRows.join(" | ")}`);
+}
 if (!rows.some((row) => row.startsWith("confirmed generation=fixture-generation"))) {
   throw new Error(`handling delivery was not confirmed before the follow-up: ${rows.join(" | ")}`);
 }
@@ -2809,6 +3439,9 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_delayed_wake_revalidates_durable_identity_and_task_generation
+test_pi_repeated_stale_rows_coalesce_and_successor_continues
+test_pi_delayed_wake_does_not_cross_session_replacement
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
@@ -2820,6 +3453,9 @@ test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
 test_pi_empty_close_retries_instead_of_disappearing
+test_pi_retry_resumes_actionable_close_queued_behind_failure
+test_pi_retry_lock_loss_resumes_actionable_close_queued_behind_failure
+test_pi_healthy_successor_surfaces_failure_queued_during_restore
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership

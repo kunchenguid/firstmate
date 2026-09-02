@@ -27,9 +27,13 @@
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
+#                          both surfaced at once. At the wedge threshold, a token
+#                          change from the currently attributed structured run's
+#                          active step log restarts the short timer; an unchanged,
+#                          unavailable, parked, terminal, or pane-only result
+#                          continues toward an "escalation N" reason. Continuously
+#                          advancing validation still re-surfaces on the bounded
+#                          declared-pause cadence. At FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
@@ -312,7 +316,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*), and live homes hold those markers on
+# .wedge-escalations-, .paused-*, .writing-*, .validation-*), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -692,6 +696,45 @@ EOF
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+FM_VALIDATION_ACTIVITY_TOKEN=
+crew_validation_activity_read() {  # <task>
+  local task=$1 line token
+  FM_VALIDATION_ACTIVITY_TOKEN=
+  line=$("$FM_CREW_STATE_BIN" "$task" --activity-token 2>/dev/null) || return 1
+  case "$line" in activity:\ *) token=${line#activity: } ;; *) return 1 ;; esac
+  case "$token" in ''|*[!A-Za-z0-9._:-]*) return 1 ;; esac
+  FM_VALIDATION_ACTIVITY_TOKEN=$token
+}
+
+# Record one wedge window with the current structured validation/log identity.
+# The first line remains the historical epoch-only format, so legacy markers
+# stay compatible; line two is optional and opaque.
+wedge_timer_start() {  # <since-file> <task> [<already-read-token>]
+  local since_file=$1 task=$2 token=${3:-}
+  if [ -z "$token" ]; then
+    crew_validation_activity_read "$task" || true
+    token=$FM_VALIDATION_ACTIVITY_TOKEN
+  fi
+  if [ -n "$token" ]; then
+    printf '%s\n%s\n' "$(date +%s)" "$token" > "$since_file"
+  else
+    date +%s > "$since_file"
+  fi
+}
+
+validation_log_progressed() {  # <since-file> <task>
+  local since_file=$1 task=$2 baseline
+  baseline=$(sed -n '2p' "$since_file" 2>/dev/null || true)
+  [ -n "$baseline" ] || return 1
+  crew_validation_activity_read "$task" || return 1
+  [ "$FM_VALIDATION_ACTIVITY_TOKEN" != "$baseline" ]
+}
+
+clear_validation_tracking() {  # <window-key>
+  local key=$1
+  rm -f "$STATE/.validation-since-$key" "$STATE/.validation-resurfaced-$key"
+}
+
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
 # absorb can rot invisibly. <age> is how long the current absorb has held and
 # <throttle> is the per-window marker whose mtime records the last re-surface, so
@@ -709,6 +752,22 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
   wake "$reason"
 }
 
+# A current run-step plus a changed step log is harder evidence than a static
+# endpoint. Reset only the short wedge window, keep a chain age, and re-surface
+# that chain on the declared-pause cadence. Once the structured run stops or its
+# log stops advancing, the ordinary wedge timer fires.
+wedge_defer_validation() {  # <window> <since-file> <triage-label> <idle-age> <task>
+  local win=$1 since_file=$2 label=$3 age=$4 task=$5 key chain_file chain_age
+  key=$(window_key "$win")
+  chain_file="$STATE/.validation-since-$key"
+  [ -e "$chain_file" ] || date +%s > "$chain_file"
+  chain_age=$(age_of "$chain_file")
+  wedge_timer_start "$since_file" "$task" "$FM_VALIDATION_ACTIVITY_TOKEN"
+  resurface_absorbed "$win" "$STATE/.validation-resurfaced-$key" "$chain_age" \
+    "stale: $win (idle ${age}s, active validation log advanced for ${chain_age}s, rechecked on a long cadence not a wedge; confirm validation is still making progress)"
+  triage_log "absorbed $label (structured validation log advanced, idle ${age}s): $win"
+}
+
 # Defer ONE wedge escalation for a pane that went quiet while its own task
 # worktree is demonstrably still being written (crew_worktree_written_since in
 # fm-classify-lib.sh). The pane and the run step both say nothing is happening;
@@ -723,13 +782,13 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
 # counter is left alone: it is neither advanced (this is not an escalation) nor
 # reset (a later genuine escalation must still carry the demand-deep-inspection
 # history it had already earned).
-wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
-  local win=$1 since_file=$2 label=$3 age=$4 key wsf wage
+wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age> <task>
+  local win=$1 since_file=$2 label=$3 age=$4 task=$5 key wsf wage
   key=$(window_key "$win")
   wsf="$STATE/.writing-since-$key"
   [ -e "$wsf" ] || date +%s > "$wsf"
   wage=$(age_of "$wsf")
-  date +%s > "$since_file"
+  wedge_timer_start "$since_file" "$task"
   resurface_absorbed "$win" "$STATE/.writing-resurfaced-$key" "$wage" \
     "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
@@ -746,30 +805,37 @@ clear_write_tracking() {  # <window-key>
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# escalates once STALE_ESCALATE_SECS have elapsed. At that boundary only, it
+# revalidates structured run ownership and compares the active step-log token;
+# fresh validation progress restarts the short timer while an unchanged,
+# unavailable, terminal, or pane-only verdict keeps escalating. Shared by both
+# places a hash can be absorbed this way: the plain non-terminal path and the
+# stale_is_terminal-overridden path.
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
-  since=$(cat "$since_file" 2>/dev/null || true)
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason key
+  key=$(window_key "$win")
+  since=$(sed -n '1p' "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
-      # Publish the repaired timer only after its old write-deferral chain is
-      # gone, so observers cannot mistake a new idle window for the old chain.
-      clear_write_tracking "$(window_key "$win")"
-      date +%s > "$since_file"
+      # Publish the repaired timer only after its old deferral chains are gone,
+      # so observers cannot mistake a new idle window for either old chain.
+      clear_write_tracking "$key"
+      clear_validation_tracking "$key"
+      wedge_timer_start "$since_file" "$task"
       triage_log "absorbed $label timer reset: $win"
       ;;
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if validation_log_progressed "$since_file" "$task"; then
+          wedge_defer_validation "$win" "$since_file" "$label" "$age" "$task"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
-          wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          wedge_defer_writing "$win" "$since_file" "$label" "$age" "$task"
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -780,7 +846,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
-        clear_write_tracking "$(window_key "$win")"
+        clear_write_tracking "$key"
+        clear_validation_tracking "$key"
         wake "$reason"
       fi
       ;;
@@ -823,6 +890,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
+  clear_validation_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -880,6 +948,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       key=$(window_key "$win")
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
+      clear_validation_tracking "$key"
       declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
       if [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" != "$declared" ]; then
         fm_wake_append stale "$win" "stale: $win" || exit 1
@@ -904,6 +973,7 @@ clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_write_tracking "$key"
+  clear_validation_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
@@ -974,6 +1044,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
+  clear_validation_tracking "$key"
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
@@ -1797,17 +1868,19 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            if crew_is_provably_working "$task"; then
               printf '%s' "$h" > "$sf"
-              date +%s > "$ssf"
               clear_write_tracking "$key"
+              clear_validation_tracking "$key"
+              wedge_timer_start "$ssf" "$task"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
+              clear_validation_tracking "$key"
+              stale_status="$STATE/$task.status"
               stale_record=$(status_span_first_actionable_record "$stale_status" 0)
               case $? in
                 0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
@@ -1847,7 +1920,7 @@ EOF
               working)
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
-                date +%s > "$ssf"
+                wedge_timer_start "$ssf" "$task"
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
@@ -1884,6 +1957,7 @@ EOF
         else
           rm -f "$ssf" "$ewf"
           clear_write_tracking "$key"
+          clear_validation_tracking "$key"
         fi
         # A busy pane normally means real work resumed, so stale pause bookkeeping
         # is cleared - but not in the same poll the declared-pause cadence just
@@ -1902,6 +1976,7 @@ EOF
       else
         rm -f "$ssf" "$ewf"
         clear_write_tracking "$key"
+        clear_validation_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then

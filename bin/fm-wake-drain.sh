@@ -63,6 +63,7 @@ ACTOR=$(fm_lease_actor) || exit 2
 ELIGIBLE_ROWS_FILE="$STATE/.branch-eligible-rows"
 ELIGIBLE_OWNER_FILE="$STATE/.branch-eligible-owner"
 MAIN_ROWS_FILE="$STATE/.main-eligible-rows"
+PRESENTED_ROWS_FILE="$STATE/.$ACTOR-presented-rows"
 
 rows_file_valid() {
   [ -s "$1" ] && awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$1"
@@ -100,6 +101,24 @@ write_rows_file_locked() { # <target> <source>
   fi
   chmod 0600 "$source" || return 1
   _fm_atomic_replace "$source" "$target"
+}
+
+# Publish only rows whose raw presentation reached this actor's stdout
+# successfully. Pi's delayed-follow-up validator uses the receipt to distinguish
+# a row merely claimed before output from one already delivered to a handling
+# turn. Queue acknowledgement remains the consumption authority.
+publish_presented_rows_locked() {  # <deduped-raw-rows>
+  local raw=$1 tmp
+  if [ -e "$PRESENTED_ROWS_FILE" ] || [ -L "$PRESENTED_ROWS_FILE" ]; then
+    [ -f "$PRESENTED_ROWS_FILE" ] && [ ! -L "$PRESENTED_ROWS_FILE" ] || return 1
+  fi
+  tmp=$(mktemp "$STATE/.$ACTOR-presented-rows.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$raw" | awk -F '\t' '$2 ~ /^[0-9]+$/ { print $2 }' > "$tmp" \
+    || ! chmod 0600 "$tmp" || ! _fm_atomic_replace "$tmp" "$PRESENTED_ROWS_FILE" \
+    || [ ! -f "$PRESENTED_ROWS_FILE" ] || [ -L "$PRESENTED_ROWS_FILE" ]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 claim_main_rows_locked() {
@@ -605,6 +624,7 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
 esac
 if [ -n "$RAW_ROWS" ]; then
   printf '%s\n' "$RAW_ROWS" || exit "$?"
+  publish_presented_rows_locked "$RAW_ROWS" || exit 1
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN

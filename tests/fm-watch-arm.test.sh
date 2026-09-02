@@ -29,10 +29,15 @@ SEED_PID=
 ARM_PID=
 
 # Start the real watcher as the singleton holder.
-start_seed_watcher() {  # <state> <fakebin> <watch-out>
-  local state=$1 fakebin=$2 out=$3 i
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+start_seed_watcher() {  # <state> <fakebin> <watch-out> [pi-ticket-mode]
+  local state=$1 fakebin=$2 out=$3 pi_mode=${4:-0} i
+  if [ "$pi_mode" = 1 ]; then
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_PI_WATCH_DELIVERY=1 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  else
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  fi
   SEED_PID=$!
   i=0
   while [ "$i" -lt 60 ]; do
@@ -46,10 +51,15 @@ start_seed_watcher() {  # <state> <fakebin> <watch-out>
 }
 
 # Attach a real arm to the live cycle.
-start_attached_arm() {  # <state> <fakebin> <arm-out> <confirm-timeout>
-  local state=$1 fakebin=$2 armout=$3 confirm=$4 i
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
-    FM_ARM_CONFIRM_TIMEOUT="$confirm" "$WATCH_ARM" > "$armout" &
+start_attached_arm() {  # <state> <fakebin> <arm-out> <confirm-timeout> [pi-ticket-mode]
+  local state=$1 fakebin=$2 armout=$3 confirm=$4 pi_mode=${5:-0} i
+  if [ "$pi_mode" = 1 ]; then
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_PI_WATCH_DELIVERY=1 FM_ARM_ATTACH_POLL=0.1 \
+      FM_ARM_CONFIRM_TIMEOUT="$confirm" "$WATCH_ARM" > "$armout" &
+  else
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+      FM_ARM_CONFIRM_TIMEOUT="$confirm" "$WATCH_ARM" > "$armout" &
+  fi
   ARM_PID=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -181,10 +191,34 @@ test_attached_arm_reports_the_delivered_wake() {
     || fail "attached arm reported a delivered wake as a failed cycle: $(cat "$armout")"
   grep -q '^signal:' "$armout" \
     || fail "attached arm did not report the durably recorded wake reason: $(cat "$armout")"
+  ! grep -q '^firstmate-wake-ticket:' "$armout" \
+    || fail "ordinary attached arm exposed Pi-only ticket output: $(cat "$armout")"
   expect_code 0 "$status" "an attached arm whose cycle delivered a wake must close successfully"
   grep -q 'reason=attached-delivered-wake' "$state/.watch-cycle-exits.log" \
     || fail "the delivered-wake close was not classified in the lifecycle ledger"
   pass "watch-arm: an attached arm reports the wake its cycle delivered instead of a false failure"
+}
+
+test_pi_attached_arm_replays_delivery_ticket() {
+  local dir state fakebin out armout status
+  dir=$(make_case attached-pi-ticket)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  start_seed_watcher "$state" "$fakebin" "$out" 1
+  start_attached_arm "$state" "$fakebin" "$armout" 1 1
+
+  printf 'done: Pi ticket fixture finished\n' > "$state/demo.status"
+  wait_for_exit "$SEED_PID" 120
+  wait_for_exit "$ARM_PID" 120
+  status=$?
+  grep -q '^signal:' "$armout" \
+    || fail "Pi attached arm omitted its delivered reason: $(cat "$armout")"
+  grep -Eq '^firstmate-wake-ticket: v1 seq=[0-9]+ kind=signal key=[0-9a-f]+ scope=task task=demo spawn=-$' "$armout" \
+    || fail "Pi attached arm did not replay the delivery ticket from the watcher ledger: $(cat "$armout")"
+  expect_code 0 "$status" "a Pi attached arm must replay its exact delivery ticket"
+  pass "watch-arm: Pi attached delivery replay preserves the watcher ticket while non-Pi output stays unchanged"
 }
 
 test_attached_arm_reports_the_delivered_wake_after_drain() {
@@ -288,8 +322,7 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   append_wake "$state" check startup-network 'check: startup-network'
 
   start_rearm_arm "$home" "$state" "$fakebin" "$armout"
-  sleep 0.25
-  if is_live_non_zombie "$ARM_PID"; then
+  if ! wait_for_exit "$ARM_PID" 80; then
     # End the fixture through an ordinary actionable status transition so this
     # failing pre-fix path leaves no child behind.
     printf 'done: fixture cleanup\n' > "$state/cleanup.status"
@@ -806,6 +839,7 @@ test_downtime_marker_does_not_follow_symlink() {
 }
 
 test_attached_arm_reports_the_delivered_wake
+test_pi_attached_arm_replays_delivery_ticket
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision

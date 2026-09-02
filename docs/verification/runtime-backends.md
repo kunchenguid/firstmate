@@ -6,6 +6,36 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Structured validation activity
+
+The backend-independence of structured validation activity was verified on 2026-09-01 with no-mistakes v1.60.2 and ShellCheck 0.11.0.
+`bin/fm-crew-state.sh --activity-token` resolves metadata and no-mistakes attribution, emits only for a full actively working run with a readable current-step log, and exits before every pane capture, native busy query, or status-log fallback.
+The executable matrix rewrote one task record through all five backend values and required the identical token for each, then changed only the current-step log and required the token to change; a parked fix-review counterfactual emitted nothing.
+
+```sh
+bin/fm-test-run.sh tests/fm-crew-state.test.sh
+bin/fm-test-run.sh tests/fm-backend-tmux-smoke.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - structured active validation exposes a log-sensitive token while parked work exposes none
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=51144
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=1031
+```
+
+| Backend | Integration review |
+| --- | --- |
+| tmux | Metadata parsing applies; transport-specific activity logic is not applicable because activity mode returns from the attributed run path before `pane_readable` or semantic busy classification, and the real tmux adapter smoke passed. |
+| Herdr | Metadata parsing applies; native `agent.get`, pane capture, and push events are not applicable to the token because activity mode returns before those branches. |
+| Zellij | Metadata parsing applies; capture and composer paths are not applicable because activity mode returns before backend fallback. |
+| Orca | `terminal=` target parsing applies; terminal reads are not applicable because activity mode returns before backend fallback. |
+| cmux | Workspace/surface metadata parsing applies; screen reads and composer paths are not applicable because activity mode returns before backend fallback. |
+
+The watcher consumes this opaque backend-independent token only at the short wedge boundary.
+`tests/fm-watch-triage.test.sh` owns the changed-token, unchanged-token, and long-cadence counterfactuals.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
