@@ -2221,7 +2221,7 @@ SH
 }
 
 test_large_local_snapshot_composes_under_five_seconds_without_projection_drift() {
-  local home fakebin worktree serial parallel parallel_file snapshot_pid started elapsed i
+  local home fakebin worktree real_cp serial parallel parallel_file snapshot_pid started elapsed i
   home=$(make_home large-local-snapshot)
   worktree="$home/projects/shared-worktree"
   fm_git_init_commit "$worktree"
@@ -2235,7 +2235,27 @@ if [ "$*" = "axi status" ] && [ "${FAKE_NM_DELAY:-0}" = 1 ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/no-mistakes"
+  real_cp=$(command -v cp)
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+"$REAL_CP" "$@" || exit
+if [ "${FAKE_REPLACE_AFTER_COPY:-0}" = 1 ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "$FAKE_REPLACE_META" ]; then
+      cat > "$FAKE_REPLACE_META" <<EOF
+window=fixture:local-1
+worktree=$FAKE_REPLACEMENT_WORKTREE
+project=firstmate
+harness=claude
+kind=scout
+mode=scout
+EOF
+      break
+    fi
+  done
+fi
+SH
+  chmod +x "$fakebin/no-mistakes" "$fakebin/cp"
 
   {
     printf '## In flight\n'
@@ -2260,10 +2280,13 @@ SH
     i=$((i + 1))
   done
 
-  serial=$(FAKE_NM_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
+  serial=$(REAL_CP="$real_cp" FAKE_NM_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
   started=$(date +%s)
   parallel_file="$home/parallel-snapshot.json"
-  FAKE_NM_DELAY=1 FAKE_NM_SIGNAL="$home/nm-started" FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 \
+  REAL_CP="$real_cp" FAKE_REPLACE_AFTER_COPY=1 \
+    FAKE_REPLACE_META="$home/state/local-1.meta" \
+    FAKE_REPLACEMENT_WORKTREE="$home/projects/replacement-not-created" \
+    FAKE_NM_DELAY=1 FAKE_NM_SIGNAL="$home/nm-started" FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 \
     run "$home" "$fakebin" --json > "$parallel_file" &
   snapshot_pid=$!
   i=0
@@ -2276,12 +2299,9 @@ SH
     wait "$snapshot_pid" 2>/dev/null || true
     fail "concurrent local snapshot never began a current-state read"
   fi
-  # Replace mutable publication metadata while current-state reads are in flight.
-  # The composed row must retain the metadata generation paired with its prefetched
-  # observation rather than becoming a ship observation attributed to a scout.
-  fm_write_meta "$home/state/local-1.meta" \
-    "window=fixture:local-1" "worktree=$worktree" "project=firstmate" \
-    "harness=claude" "kind=scout" "mode=scout"
+  # The cp fixture replaces local-1 immediately after its captured generation is
+  # copied, before observation workers start. Current state must use that captured
+  # metadata too, rather than crossing into the replacement task generation.
   wait "$snapshot_pid" || fail "concurrent local snapshot failed"
   parallel=$(<"$parallel_file")
   elapsed=$(( $(date +%s) - started ))

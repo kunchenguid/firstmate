@@ -70,7 +70,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
 
-META="$STATE/$ID.meta"
+META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
