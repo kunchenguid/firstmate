@@ -966,7 +966,7 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 | Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
 
 The `Workspace trust` and `Autonomy` rows record what the `--yolo` flag itself does, measured when that flag was still the launch default.
-`bin/fm-spawn.sh` now launches cursor with `--trust --auto-review --sandbox enabled` instead, and no measurement of that posture is recorded here.
+`bin/fm-spawn.sh` now launches cursor with `--trust --auto-review --sandbox enabled` instead; that posture is measured under [Crewmate autonomy and the status-file write contract](#crewmate-autonomy-and-the-status-file-write-contract).
 
 ### End-to-end
 
