@@ -268,7 +268,7 @@ journal_append() {  # <source-id> <event-line>
   [ ! -L "$f" ] || return 1
   if [ ! -e "$f" ]; then
     (umask 077; mkdir -p "$(dirname "$f")") || return 1
-    printf '%s\n' "$RECEIPT_SCHEMA" > "$f" || return 1
+    (umask 077; printf '%s\n' "$RECEIPT_SCHEMA" > "$f") || return 1
     chmod 0600 "$f" 2>/dev/null || true
   fi
   printf '%s\n' "$2" >> "$f" || return 1

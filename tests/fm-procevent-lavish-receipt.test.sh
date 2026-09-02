@@ -769,6 +769,34 @@ run_lavish "$H13" receipt "$SID13" 4 "$R15" "$O14" >/dev/null
   || fail "a truncated block was journaled as a received round by the seam"
 pass "the seam's outcome contract drives the incomplete, bare, and refused receipts"
 
+# --- the receipts record is private whatever umask the caller brought --------
+# The record holds a review's submitted answers and comments, so its privacy is
+# the seam's to enforce rather than the caller's to grant. Creation is proven
+# under a permissive umask with the tightening chmod removed from under it, so
+# only the mode the record is born with can satisfy this.
+FAIL_CHMOD_DIR="$TMP_ROOT/fail-chmod-bin"
+mkdir -p "$FAIL_CHMOD_DIR"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$FAIL_CHMOD_DIR/chmod"
+chmod +x "$FAIL_CHMOD_DIR/chmod"
+H13B=$(make_home h13b)
+RECEIPT_HOME=$H13B
+ART13B="$TMP_ROOT/deck13b.html"
+printf '<h1>deck</h1>\n' > "$ART13B"
+SID13B=$(run_lavish "$H13B" source-id "$ART13B")
+J13B="$H13B/state/procevent/$SID13B.receipts"
+R13B="$TMP_ROOT/r13b.result"
+O13B="$TMP_ROOT/o13b.outcome"
+write_result "$R13B" false 1 "$(choice_row 2 deck-alpha go 'Alpha')"
+printf 'fed 0\n' > "$O13B"
+(umask 022; PATH="$FAIL_CHMOD_DIR:$PATH" run_lavish "$H13B" receipt "$SID13B" 1 "$R13B" "$O13B" >/dev/null) \
+  || fail "the seam could not journal its round with the tightening chmod unavailable"
+assert_present "$J13B" "the seam journaled no round to prove the record's mode by"
+record_mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+  '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$J13B")
+assert_contains "$record_mode" 600 \
+  "the receipts record is private under a permissive caller umask"
+pass "the receipts record is created private regardless of the caller's umask"
+
 # --- a replay whose own outcome proves a new effect is a new action ----------
 # An answer skipped on its first submission - its task was not held yet - is
 # genuinely applied when the captain resubmits it. The identical digest must not

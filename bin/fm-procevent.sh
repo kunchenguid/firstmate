@@ -1205,6 +1205,12 @@ recover_receipt_seams() {
         fi
       elif [ -z "$outcome" ]; then
         staged=$(staging_file "$id" "reconcile.$$.rcpt")
+        # A reconcile killed before its trailing removal leaves this exact name
+        # behind, and no reaper knows it: the claim reap and the sweep key on a
+        # claim token this name can never be. A later reconcile that reuses the
+        # dead PID would otherwise refuse to stage, skip the seam entirely, and
+        # strand the generation - so drop the leftover and its notes first.
+        rm -f -- "$staged" "$staged.gen" "$staged.body" "$staged.tmp"
         if [ ! -e "$staged" ] && [ ! -L "$staged" ] && (umask 077; : > "$staged"); then
           outcome=$staged
         else
