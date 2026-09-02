@@ -1214,8 +1214,14 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+          head=$FM_PR_POLL_SNAPSHOT_HEAD
+          if [ "$provider" = codebase ]; then
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+              "$provider" "$url" "$host" "$path" "$number" "$head" || exit 1
+          else
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+              "$provider" "$url" "$host" "$path" "$number" || exit 1
+          fi
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
@@ -1232,7 +1238,7 @@ while :; do
         reason="check: $c: $out"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ] \
           && fm_pr_poll_merge_already_notified "$STATE" "$id" \
-            "$provider" "$host" "$path" "$number"; then
+            "$provider" "$host" "$path" "$number" "$head"; then
           # This exact merge was already surfaced to main once for this task
           # (fm_pr_poll_merge_mark_notified below records that at first
           # notification, and it survives a later re-registered poll for the
@@ -1248,7 +1254,7 @@ while :; do
         fm_wake_append check "$c" "$reason" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           fm_pr_poll_merge_mark_notified "$STATE" "$id" \
-            "$provider" "$host" "$path" "$number" \
+            "$provider" "$host" "$path" "$number" "$head" \
             || triage_log "merge notification receipt could not be recorded for $id"
           retire_merged_pr_poll "$id"
         fi

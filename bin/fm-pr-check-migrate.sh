@@ -509,6 +509,7 @@ MIGRATION_URL=
 MIGRATION_HOST=
 MIGRATION_PATH=
 MIGRATION_NUMBER=
+MIGRATION_HEAD=
 metadata_pr_is_canonical() {
   local meta=$1
   MIGRATION_PROVIDER=
@@ -516,12 +517,14 @@ metadata_pr_is_canonical() {
   MIGRATION_HOST=
   MIGRATION_PATH=
   MIGRATION_NUMBER=
+  MIGRATION_HEAD=
   fm_pr_metadata_identity_parse "$meta" || return 1
   MIGRATION_PROVIDER=$FM_PR_META_PROVIDER
   MIGRATION_URL=$FM_PR_META_URL
   MIGRATION_HOST=$FM_PR_META_HOST
   MIGRATION_PATH=$FM_PR_META_PATH
   MIGRATION_NUMBER=$FM_PR_META_NUMBER
+  [ "$MIGRATION_PROVIDER" != codebase ] || MIGRATION_HEAD=$FM_PR_META_HEAD
 }
 
 quarantine_artifact() {
@@ -793,7 +796,7 @@ record_ambiguous_failure() {
 }
 
 canonical_repair_from_pending() {
-  local id=$1 meta data registration provider url host path number check
+  local id=$1 meta data registration provider url host path number head check
   meta="$STATE/$id.meta"
   data="$STATE/$id.pr-poll"
   registration="$STATE/$id.pr-poll-registration"
@@ -806,11 +809,12 @@ canonical_repair_from_pending() {
   host=$MIGRATION_HOST
   path=$MIGRATION_PATH
   number=$MIGRATION_NUMBER
+  head=$MIGRATION_HEAD
   quarantine_artifact "$data" "$id" data || return 1
   quarantine_artifact "$registration" "$id" registration || return 1
   [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
   [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
-  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" || return 1
+  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" "$head" || return 1
   fm_pr_poll_publish_prepared || return 1
   canonical_terminal_success "$id"
 }
@@ -1053,6 +1057,7 @@ if migration_needed; then
         host=$MIGRATION_HOST
         path=$MIGRATION_PATH
         number=$MIGRATION_NUMBER
+        head=$MIGRATION_HEAD
         message="task $id: migration outcome tracking started before legacy poll handling"
         if ! ensure_diagnostic_obligation "$prefix" pending-canonical "$message" \
           || ! process_diagnostic_obligations; then
@@ -1063,7 +1068,7 @@ if migration_needed; then
         if quarantine_artifact "$check" "$prefix" check \
           && quarantine_artifact "$data" "$prefix" data \
           && quarantine_artifact "$registration" "$prefix" registration \
-          && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" \
+          && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" "$head" \
           && fm_pr_poll_publish_prepared \
           && complete_canonical_outcome "$id"; then
           :
