@@ -825,21 +825,67 @@ pass "all seven sibling-access probes detect a real leak when nothing confines t
 # Reading /proc must yield one line per process: a single concatenated line
 # makes the probe's own self-exclusion delete the whole table and report a
 # denial while every host process is readable.
-if [ -d /proc/1 ]; then
-  MARKER="$TMP_ROOT/fm-bench-marker-entrant"
+if command -v ps >/dev/null 2>&1; then
+  MARKER_FILE="$TMP_ROOT/process-target"
+  READY_FILE="$TMP_ROOT/process-ready"
+  RELEASE_FILE="$TMP_ROOT/process-release"
+  FAKE_BIN="$TMP_ROOT/process-tools"
+  PS_BIN=$(command -v ps)
+  TR_BIN=$(command -v tr)
+  mkdir -p "$FAKE_BIN"
+  cat > "$FAKE_BIN/tr" <<'EOF'
+#!/usr/bin/env bash
+: > "${PROCESS_PROBE_READY_FILE:?}"
+while [ ! -e "${PROCESS_PROBE_RELEASE_FILE:?}" ]; do sleep 0.01; done
+exec "${PROCESS_PROBE_REAL_TOOL:?}" "$@"
+EOF
+  cp "$FAKE_BIN/tr" "$FAKE_BIN/ps"
+  chmod +x "$FAKE_BIN/tr" "$FAKE_BIN/ps"
+  MARKER_VALUE="fm-bench-marker-${RANDOM}-$$"
+  printf '%s\n' "$MARKER_VALUE" > "$MARKER_FILE"
+  PATH="$FAKE_BIN:$PATH" PROCESS_INSPECTION_MARKER_FILE="$MARKER_FILE" \
+    PROCESS_PROBE_READY_FILE="$READY_FILE" PROCESS_PROBE_RELEASE_FILE="$RELEASE_FILE" \
+    PROCESS_PROBE_REAL_TOOL="$([ -d /proc/1 ] && printf '%s' "$TR_BIN" || printf '%s' "$PS_BIN")" \
+    "$ROOT/bin/fm-bench-probe.sh" process_inspection > "$TMP_ROOT/process.out" &
+  probe_pid=$!
+  for _ in $(seq 1 100); do [ -e "$READY_FILE" ] && break; sleep 0.01; done
+  [ -e "$READY_FILE" ] || fail "the in-flight process probe did not reach its process-table read"
+  marker_in_argv=0
+  probe_chain=$("$PS_BIN" -A -o pid= -o ppid= | awk -v root="$probe_pid" '
+    { parent[$1] = $2 }
+    END {
+      for (pid in parent) {
+        current = pid
+        while (current && current != 0 && !seen[current]++) {
+          if (current == root) {
+            print pid
+            break
+          }
+          current = parent[current]
+        }
+        delete seen
+      }
+    }')
+  for process_pid in $probe_chain; do
+    process_line=$("$PS_BIN" -p "$process_pid" -o args=)
+    case "$process_line" in *"$MARKER_VALUE"*) marker_in_argv=1; break ;; esac
+  done
+  [ "$marker_in_argv" -eq 0 ] || fail "the process-inspection marker reached a gate-owned command line"
+  : > "$RELEASE_FILE"
+  wait "$probe_pid" || fail "the marker-free in-flight process probe did not finish"
+  out=$(cat "$TMP_ROOT/process.out")
+  assert_contains "$out" "PROBE DENIED" "the marker-free launch chain denies when no sibling marker process runs"
+  MARKER="$TMP_ROOT/$MARKER_VALUE"
   printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$MARKER"
   chmod +x "$MARKER"
   "$MARKER" &
   marker_pid=$!
   sleep 1
-  out=$(PROCESS_INSPECTION_MARKER=fm-bench-marker "$ROOT/bin/fm-bench-probe.sh" process_inspection)
+  out=$(PROCESS_INSPECTION_MARKER_FILE="$MARKER_FILE" "$ROOT/bin/fm-bench-probe.sh" process_inspection)
   kill "$marker_pid" 2>/dev/null
   wait "$marker_pid" 2>/dev/null
-  assert_contains "$out" "PROBE LEAKED" "a shared process table read through /proc is a leak, not a denial"
-  sleep 1
-  out=$(PROCESS_INSPECTION_MARKER=fm-bench-marker "$ROOT/bin/fm-bench-probe.sh" process_inspection)
-  assert_contains "$out" "PROBE DENIED" "the same probe denies once no sibling process is running"
-  pass "the process probe reads /proc without procps and still separates a leak from a denial"
+  assert_contains "$out" "PROBE LEAKED" "a shared process table is a leak, not a denial"
+  pass "the process probe keeps its marker out of the launch chain and separates leaks from denials"
 fi
 
 # A declared private path with nothing readable under it cannot carry a denial.
@@ -1004,7 +1050,18 @@ for track_name, candidate, packet in work:
     put("projection.diff", f"neutral projection for {slug}\n")
     put("transcript.md", "redacted transcript\n")
     put("capture.json", '{"pixel":0.003}\n')
-    put("scoring.py", "from pathlib import Path\nprint(Path('capture.json').read_text().strip())\n")
+    scoring = """#!/usr/bin/env python3
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+tree = Path(sys.argv[1])
+payload = {"candidate_sha256": hashlib.sha256((tree / "work.txt").read_bytes()).hexdigest(), "pixel": 0.003}
+print(json.dumps(payload, sort_keys=True))
+"""
+    put("scoring.py", scoring)
+    (out / "scoring.py").chmod(0o755)
     put("judging.json", '{"raw":[8,9],"order":["k7","r2"]}\n')
     put("timing.json", '{"operational_s":1200,"session_s":1100}\n')
     put("verdict.md", "label K7 -> candidate\n")
@@ -1022,8 +1079,8 @@ for track_name, candidate, packet in work:
         "tree_binding": {"original_sha": sha, "original_tree": tree, "neutral_sha": sha,
                          "neutral_tree": tree, "base_tree": base_tree,
                          "patch_hash": hashlib.sha256(slug.encode()).hexdigest()},
-        "evaluator_rerun": {"argv": ["python3", "scoring.py"],
-                             "result_hash": hashlib.sha256(b'{\"pixel\":0.003}\n').hexdigest()},
+        "evaluator_rerun": {"argv": ["scoring.py"],
+                             "result_hash": hashlib.sha256((json.dumps({"candidate_sha256": hashlib.sha256((slug + "\n").encode()).hexdigest(), "pixel": 0.003}, sort_keys=True) + "\n").encode()).hexdigest()},
     }, indent=2, sort_keys=True) + "\n")
 PY
 }
@@ -1126,7 +1183,7 @@ from pathlib import Path
 sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
-record["evaluator_rerun"]["argv"] = ["python3", "unlisted-evaluator.py"]
+record["evaluator_rerun"]["argv"] = ["unlisted-evaluator.py"]
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
@@ -1134,6 +1191,64 @@ expect_code 1 "$status" "a rerun evaluator absent from the content-addressed fil
 assert_contains "$out" "not content-addressed" "the drill requires the executed evaluator to be addressed"
 assert_absent "$BENCH/archive/restore-drill.json" "an unaddressed evaluator writes no cleanup receipt"
 pass "the restore drill executes only a content-addressed evaluator"
+
+BENCH="$TMP_ROOT/archive-noop-evaluator"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-noop-evaluator"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["evaluator_rerun"] = {"argv": ["cat", "capture.json"], "result_hash": hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()}
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "an archived-file echo cannot stand in for a restored-tree evaluator"
+assert_contains "$out" "exactly one executable evaluator file" "the rerun contract rejects an arbitrary command invocation"
+assert_absent "$BENCH/archive/restore-drill.json" "a no-op evaluator writes no cleanup receipt"
+pass "the restore drill requires an executable evaluator over restored candidate content"
+
+BENCH="$TMP_ROOT/archive-scratch-evaluator"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-scratch-evaluator"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text(scoring.read_text().replace("tree = Path(sys.argv[1])", "Path('scratch-only.txt').write_text('scratch\\n')\ntree = Path(sys.argv[1])"))
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) || fail "an evaluator that writes scratch output must not dirty its archive: $out"
+first_sample=$(find "$BENCH/archive" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1)
+assert_absent "$first_sample/scratch-only.txt" "evaluator scratch output never reaches the certified archive"
+out=$(run_gate "$BENCH" cleanup-gate) || fail "a scratch-only evaluator must leave cleanup authorised: $out"
+pass "archived evaluators rerun in scratch rather than certified storage"
+
+BENCH="$TMP_ROOT/archive-post-rerun"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-post-rerun"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text(scoring.read_text().replace("tree = Path(sys.argv[1])", f"Path({str(sample / 'archive-dirty.txt')!r}).write_text('dirty\\n')\ntree = Path(sys.argv[1])"))
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "an evaluator that changes archive evidence during a drill is refused"
+assert_contains "$out" "restore.archive_stability fail" "the drill re-verifies archive bytes after evaluator execution"
+assert_absent "$BENCH/archive/restore-drill.json" "a post-rerun archive change writes no cleanup receipt"
+pass "post-rerun archive verification catches an evaluator that dirties evidence"
 
 BENCH="$TMP_ROOT/archive-evaluator-drift"
 write_plan "$BENCH"

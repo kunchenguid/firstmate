@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -1048,12 +1049,19 @@ def probe_command(probe: str, target: str) -> list[str]:
 
 
 def run_probe(
-    wrapper: list[str], probe: str, target: str, timeout: int, env: dict[str, str] | None = None
+    wrapper: list[str],
+    probe: str,
+    target: str,
+    timeout: int,
+    env: dict[str, str] | None = None,
+    marker_file: Path | None = None,
 ) -> tuple[str, str]:
     argv = list(wrapper) + probe_command(probe, target)
     probe_env = dict(env) if env is not None else dict(os.environ)
     if probe == "process_inspection":
-        probe_env["PROCESS_INSPECTION_MARKER"] = target
+        if marker_file is None:
+            return "inconclusive", "process marker material is unavailable"
+        probe_env["PROCESS_INSPECTION_MARKER_FILE"] = str(marker_file)
     try:
         proc = subprocess.run(
             argv,
@@ -1092,10 +1100,11 @@ class ProbeControls:
 
     def __init__(self, canary: str) -> None:
         self.canary = canary
+        self.process_marker = f"fm-bench-marker-{uuid.uuid4().hex}"
         self._tmp = tempfile.TemporaryDirectory(prefix="fm-bench-control-")
         self.env = dict(os.environ)
         self.env[f"{canary}LEAK_CANARY"] = "1"
-        marker = Path(self._tmp.name) / "fm-bench-marker-entrant"
+        marker = Path(self._tmp.name) / self.process_marker
         marker.write_text("#!/bin/sh\nwhile :; do sleep 1; done\n", encoding="utf-8")
         marker.chmod(0o755)
         self._proc: subprocess.Popen[bytes] | None = None
@@ -1288,15 +1297,27 @@ def probe_entrants(
             targets.append(("protected_path_read", guarded))
         # The control marker stands in for a sibling entrant's process: it is a
         # real process outside this entrant that a shared process table exposes.
-        targets.append(("process_inspection", "fm-bench-marker"))
+        targets.append(("process_inspection", controls.process_marker))
         targets.append(("environment_leakage", str(record.get("leak_marker", "FM_BENCH_"))))
 
         targets = list(dict.fromkeys(targets))
         exercised = {probe for probe, _ in targets}
         entrant_wrapper = [item.replace("{root}", str(entrant.get("root"))) for item in wrapper]
+        marker_file = Path(str(entrant.get("private_session"))) / ".process-target"
+        try:
+            marker_file.write_text(f"{controls.process_marker}\n", encoding="utf-8")
+        except OSError as exc:
+            report.fail(
+                f"isolation.{entrant_id}.process_marker",
+                f"could not provision marker material inside the private session: {exc}",
+            )
+            marker_file = None
         for probe, target in targets:
             check = f"isolation.{entrant_id}.{probe}"
-            control, control_detail = run_probe([], probe, target, timeout, controls.env)
+            if probe == "process_inspection" and marker_file is None:
+                report.fail(check, "process marker material is unavailable; the process denial is unproven")
+                continue
+            control, control_detail = run_probe([], probe, target, timeout, controls.env, marker_file)
             if control != "leaked":
                 report.fail(
                     check,
@@ -1304,13 +1325,22 @@ def probe_entrants(
                     f"{control} ({control_detail}); a denial here would prove nothing",
                 )
                 continue
-            verdict, detail = run_probe(entrant_wrapper, probe, target, timeout, controls.env)
+            verdict, detail = run_probe(entrant_wrapper, probe, target, timeout, controls.env, marker_file)
             if verdict == "denied":
                 report.ok(check, f"denied against {target}, which is reachable without the confinement")
             elif verdict == "leaked":
                 report.fail(check, f"reachable against {target}: {detail}")
             else:
                 report.fail(check, f"inconclusive against {target}: {detail}; an unproven denial fails closed")
+
+        if marker_file is not None:
+            try:
+                marker_file.unlink()
+            except OSError as exc:
+                report.fail(
+                    f"isolation.{entrant_id}.process_marker",
+                    f"could not remove private process marker material: {exc}",
+                )
 
         unexercised = sorted(set(ISOLATION_PROBES) - exercised)
         report.require(
@@ -1714,31 +1744,45 @@ def run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedPro
     )
 
 
-def rerun_archived_evaluator(sample: Path, record: dict[str, Any]) -> tuple[bool, str]:
+def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree: Path) -> tuple[bool, str]:
     rerun = record.get("evaluator_rerun")
     if not isinstance(rerun, dict):
         return False, "archive manifest has no deterministic evaluator rerun"
     argv = rerun.get("argv")
     expected = rerun.get("result_hash")
-    if not isinstance(argv, list) or len(argv) < 2 or not all(isinstance(item, str) and item for item in argv):
-        return False, "archived evaluator argv must name an executable and an archived evaluator file"
+    if not isinstance(argv, list) or len(argv) != 1 or not isinstance(argv[0], str) or not argv[0]:
+        return False, "archived evaluator argv must name exactly one executable evaluator file"
     if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
         return False, "archived evaluator result_hash must be a sha256 digest"
     files = record.get("files")
-    if not isinstance(files, dict) or argv[1] not in files:
+    groups = record.get("groups")
+    if not isinstance(files, dict) or argv[0] not in files:
         return False, "archived evaluator file is not content-addressed in its sample manifest"
-    evaluator = (sample / argv[1]).resolve()
+    if not isinstance(groups, dict) or argv[0] not in (groups.get("capture_and_scoring") or []):
+        return False, "archived evaluator must be declared in the capture_and_scoring evidence group"
+    evaluator = (sample / argv[0]).resolve()
     if not is_within(evaluator, sample.resolve()) or not evaluator.is_file():
         return False, "archived evaluator file escapes or is absent from its sample archive"
+    if not os.access(evaluator, os.X_OK):
+        return False, "archived evaluator file is not executable"
     try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(sample),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=60,
-        )
+        with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as workspace:
+            scratch = Path(workspace) / "evidence"
+            for relative in files:
+                source = (sample / relative).resolve()
+                if not is_within(source, sample.resolve()) or not source.is_file():
+                    return False, f"archived evaluator input is unavailable: {relative}"
+                destination = scratch / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            completed = subprocess.run(
+                [str(scratch / argv[0]), str(restored_tree)],
+                cwd=str(scratch),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=60,
+            )
     except subprocess.TimeoutExpired:
         return False, "archived evaluator exceeded the 60-second restore-drill limit"
     except OSError as exc:
@@ -1785,10 +1829,12 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
             continue
         binding = record.get("tree_binding", {})
         sample_ok = True
-        for bundle_name in bundles:
-            bundle = sample / bundle_name
-            with tempfile.TemporaryDirectory(prefix="fm-bench-restore-") as workdir:
-                fresh = Path(workdir) / "repo"
+        restored_trees: list[Path] = []
+        with tempfile.TemporaryDirectory(prefix="fm-bench-restore-") as workdir:
+            work = Path(workdir)
+            for index, bundle_name in enumerate(bundles):
+                bundle = sample / bundle_name
+                fresh = work / f"repo-{index}"
                 init = run_git(["init", "--quiet", "--bare", str(fresh)])
                 if init.returncode != 0:
                     report.fail(check, "could not create a fresh repository for the restore")
@@ -1818,10 +1864,24 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                     )
                     sample_ok = False
                     continue
+                restored_tree = work / f"tree-{index}"
+                restored_tree.mkdir()
+                checkout = run_git(
+                    ["--work-tree", str(restored_tree), "checkout", "--quiet", "--force", str(binding.get("original_sha")), "--", "."],
+                    cwd=fresh,
+                )
+                if checkout.returncode != 0:
+                    report.fail(check, f"the archived head could not materialise a restored candidate tree from {bundle_name}")
+                    sample_ok = False
+                    continue
+                restored_trees.append(restored_tree)
+            if sample_ok:
+                reran_ok, rerun_detail = rerun_archived_evaluator(sample, record, restored_trees[0])
+            else:
+                reran_ok, rerun_detail = False, "candidate bundle restoration did not complete"
         if not sample_ok:
             drill_ok = False
             continue
-        reran_ok, rerun_detail = rerun_archived_evaluator(sample, record)
         if reran_ok:
             reran += 1
         else:
@@ -1837,6 +1897,14 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
         "every archived candidate needs a deterministic evaluator rerun",
     )
     drill_ok = drill_ok and ok
+    post_recheck = Report("archive-post-rerun", quiet=True)
+    post_ok, post_digest = check_archive(root, plan, post_recheck)
+    if not post_ok or post_digest != archive_digest:
+        report.fail(
+            "restore.archive_stability",
+            "the archive changed while evaluators reran; no cleanup receipt may cover unstable evidence",
+        )
+        drill_ok = False
     if drill_ok:
         write_json(
             root / "archive" / "restore-drill.json",
