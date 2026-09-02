@@ -980,10 +980,13 @@ fmx_meta_followups_set() {
 # x_request/x_request_ts/x_followups and reply-platform lines while preserving
 # every other meta line. With expected-request, a present link is cleared only
 # when its request identity matches, and absence succeeds only when the
-# authorized parent directory can be inspected safely. Unguarded calls remain
-# idempotent when <meta> is missing.
+# authorized parent directory can be inspected safely. That guarded mode also
+# bounds its lock wait (FMX_LINK_CLEAR_LOCK_TIMEOUT, default 10 seconds) so an
+# unattended remote clear refuses instead of hanging. Unguarded calls remain
+# idempotent when <meta> is missing and keep the ordinary unbounded wait.
 fmx_meta_link_clear() {
   local meta=$1 expected_set=0 expected='' tmp lock line rid='' link_present=0 parent
+  local lock_timeout
   if [ "$#" -ge 2 ]; then
     expected_set=1
     expected=$2
@@ -996,7 +999,19 @@ fmx_meta_link_clear() {
   [ ! -L "$meta" ] || return 1
   [ -f "$meta" ] || return 0
   lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock"
+  if [ "$expected_set" -eq 1 ]; then
+    # A guarded clear runs unattended over the secondmate transport, so it must
+    # refuse rather than wedge. The parent's writability can flip between the
+    # check above and lock creation, and the ordinary unbounded wait would then
+    # retry forever instead of returning the reconciliation refusal this guard
+    # exists to produce. A bounded acquire turns that race, and a live holder,
+    # into a refusal. Unguarded local callers keep the ordinary wait unchanged.
+    lock_timeout=${FMX_LINK_CLEAR_LOCK_TIMEOUT:-10}
+    case "$lock_timeout" in ''|*[!0-9]*|0) lock_timeout=10 ;; esac
+    fm_lock_acquire_wait_bounded "$lock" "$lock_timeout" || return 1
+  else
+    fm_lock_acquire_wait "$lock"
+  fi
   [ ! -L "$meta" ] || { fm_lock_release "$lock"; return 1; }
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }
   if [ "$expected_set" -eq 1 ]; then

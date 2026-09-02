@@ -2575,6 +2575,58 @@ test_remote_retire_refuses_nonwritable_absence() {
   pass "retire fails closed on link absence in non-writable remote state"
 }
 
+# The guarded clear runs unattended over the transport, so it must REFUSE rather
+# than wedge when it cannot take the metadata lock. The writability precondition
+# narrows that window but cannot close it: the parent can turn non-writable
+# between that check and lock creation, and a lock held by a live holder is
+# indistinguishable from it at the acquire. The ordinary wait retries forever, so
+# before the bounded acquire this path hung instead of returning the
+# reconciliation refusal, leaving deliver or retire stuck with nothing reported.
+#
+# The state directory is deliberately left WRITABLE here, so a refusal can only
+# come from the bounded lock wait and never from the writability precondition.
+test_remote_retire_refuses_unacquirable_lock_without_hanging() {
+  local home remote meta lock holder rc started elapsed
+  remote_fixture_prepare
+  home=$(make_home remote-lock-bound)
+  remote=$(make_remote_route "$home" mate)
+  seed_repro_commitment "$home" pf-remote-lock req-remote-lock secondmate:mate work-lock
+  meta="$remote/state/work-lock.meta"
+  fm_write_meta "$meta" \
+    "status=working" "x_request=req-remote-lock" "x_request_ts=1700000000" "x_followups=1"
+
+  # A lock held by a genuinely live process: it cannot be reclaimed as stale, so
+  # the acquire can never succeed and only a bound can end the wait.
+  sleep 300 &
+  holder=$!
+  lock="$remote/state/.meta-work-lock.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$holder" > "$lock/pid"
+
+  started=$(date +%s)
+  rc=0
+  EXPECT_OUT=$(run_pf_remote "$home" retire pf-remote-lock --reason "lock held" --force 2>&1) || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  rm -rf "$lock"
+
+  [ "$rc" -ne 0 ] || fail "retire must refuse when the metadata lock cannot be acquired"
+  # The bound is what this case exists to prove. An unbounded wait never returns
+  # at all, so any completion under a generous ceiling is the observable proof.
+  [ "$elapsed" -lt 120 ] \
+    || fail "the guarded clear did not return promptly; it waited ${elapsed}s for an unacquirable lock"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "an unacquirable lock must use the retained reconciliation refusal"
+  assert_present "$home/state/public-followup/registry/pf-remote-lock" \
+    "an unacquirable lock must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-lock" \
+    "an unacquirable lock must not write a retirement receipt"
+  assert_grep 'x_request=req-remote-lock' "$meta" \
+    "an unacquirable lock must leave the remote link untouched"
+  pass "the guarded remote clear refuses a lock it cannot acquire instead of hanging"
+}
+
 # fm-on.sh passes ssh's status through, so 255 is unknown remote completion, not
 # proof the clear failed. The close must refuse and retain rather than either
 # claiming the link is gone or reporting a definite failure, so reconciliation
@@ -2670,4 +2722,5 @@ test_remote_retire_refuses_reassigned_route
 test_remote_retire_refuses_unreadable_state
 test_remote_retire_refuses_nonwritable_state
 test_remote_retire_refuses_nonwritable_absence
+test_remote_retire_refuses_unacquirable_lock_without_hanging
 test_remote_unconfirmed_clear_is_unknown_completion

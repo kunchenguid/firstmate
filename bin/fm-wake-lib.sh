@@ -938,10 +938,13 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
 
 # fm_lock_acquire_wait_bounded <lockdir> <positive-seconds>
 #
-# Presentation-only acquire variant. It preserves the ordinary wait/reclaim
-# behavior until fm-timeout-lib.sh's hard deadline, returns 124 when a live
-# holder still owns the lock, and leaves FM_LOCK_HELD_PID naming that holder.
-# Mutation-critical callers continue to use fm_lock_acquire_wait.
+# Bounded acquire variant. It preserves the ordinary wait/reclaim behavior
+# until fm-timeout-lib.sh's hard deadline, returns 124 when a live holder still
+# owns the lock, and leaves FM_LOCK_HELD_PID naming that holder.
+# Use it where a caller must refuse rather than block: wake presentation, and
+# the guarded remote link clear, whose whole contract is to return a
+# reconciliation refusal instead of wedging an unattended close.
+# Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
 fm_lock_acquire_wait_bounded() {
   local lockdir=$1 seconds=$2 caller_pid rc owner_pid
   case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
