@@ -849,7 +849,6 @@ test_attached_arm_reports_the_owner_recorded_exit() {
   fakebin="$dir/fakebin"
   ownerout="$dir/owner-arm.out"
   attachout="$dir/attached-arm.out"
-  mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$ownerout" &
   ownerpid=$!
   i=0
@@ -902,7 +901,6 @@ test_owner_recorded_exit_survives_a_long_identity() {
   dir=$(make_case long-identity)
   state="$dir/state"
   fakebin="$dir/fakebin"
-  mark_pr_check_migration_complete "$state"
 
   # ~470 characters of path, so lstart plus the command clears the 497-character
   # point where the two truncations start to disagree.
@@ -969,7 +967,6 @@ test_attached_arm_does_not_blame_the_watcher_for_its_arms_signal() {
   ledger="$state/.watch-cycle-exits.log"
   ownerout="$dir/owner-arm.out"
   attachout="$dir/attached-arm.out"
-  mark_pr_check_migration_complete "$state"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$ownerout" 2>&1 &
   ownerpid=$!
   i=0
@@ -1040,7 +1037,6 @@ test_unprovable_liveness_is_not_reported_as_a_death() {
   blindout="$dir/blind-arm.out"
   deadout="$dir/dead-arm.out"
   mkdir -p "$noproc"
-  mark_pr_check_migration_complete "$state"
 
   # Route every identity read through ps on both Linux and macOS, then make that
   # read fail for one arm only, on demand. Nothing else in the fixture carries
