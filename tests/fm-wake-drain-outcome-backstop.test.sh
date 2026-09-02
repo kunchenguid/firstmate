@@ -303,12 +303,11 @@ test_rejected_decision_line_surfaces_once_through_backstop() {
   pass "captain-facing decisions rejected by the fold surface once"
 }
 
-test_outcome_index_recovery_is_fail_closed_and_migratable() {
-  local dir state before after old
-  dir=$(make_case index-recovery)
+test_missing_index_self_heals_on_first_drain() {
+  local dir state out old
+  dir=$(make_case index-selfheal-covered)
   state="$dir/state"
-  before="$dir/before.out"
-  after="$dir/after.out"
+  out="$dir/drain.out"
 
   printf 'done: handled before cache interruption\n' > "$state/recovered.status"
   old=$(( $(date +%s) - 20 ))
@@ -317,20 +316,114 @@ test_outcome_index_recovery_is_fail_closed_and_migratable() {
     > "$state/branch-outcomes.jsonl"
   printf '1\n' > "$state/.branch-outcomes-cursor"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$before" \
-    || fail "fail-closed drain failed with interrupted index publication"
-  grep -F 'bounded outcome indexes need recovery' "$before" >/dev/null \
-    || fail "missing index readiness re-presented or hid recovery state: $(cat "$before")"
-  grep -F 'recovered done:' "$before" >/dev/null \
-    && fail "interrupted index publication re-presented a handled outcome"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "first drain failed while self-healing a missing outcome index"
+  [ ! -s "$out" ] \
+    || fail "self-healed index re-presented a handled outcome: $(cat "$out")"
+  [ -f "$state/.branch-outcome-index-ready" ] \
+    || fail "first drain did not publish the outcome-index ready marker"
+  if grep -F 'Pi supervision' "$out" >/dev/null; then
+    fail "self-heal drain still mentioned Pi supervision: $(cat "$out")"
+  fi
+  pass "a missing outcome index self-heals on the first drain and suppresses its handled status"
+}
 
-  FM_STATE_OVERRIDE="$state" "$OUTCOMES" processed-init \
-    || fail "processed-init did not rebuild outcome indexes"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$after" \
-    || fail "drain failed after index recovery"
-  [ ! -s "$after" ] \
-    || fail "recovered index did not suppress its handled status: $(cat "$after")"
-  pass "authoritative outcome rows recover interrupted bounded indexes"
+test_uncovered_event_surfaces_on_first_drain_without_index() {
+  local dir state out body
+  dir=$(make_case index-selfheal-uncovered)
+  state="$dir/state"
+  out="$dir/drain.out"
+
+  printf 'done: uncovered completion with no index\n' > "$state/fresh.status"
+  printf '%s\n' '{"seq":1,"epoch":1,"task":"other","wake":"","verdict":"captain","summary":"unrelated"}' \
+    > "$state/branch-outcomes.jsonl"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "first drain failed for an uncovered status with no outcome index"
+  grep -F 'STATUS OUTCOME BACKSTOP (' "$out" >/dev/null \
+    || fail "first drain skipped the backstop instead of self-healing: $(cat "$out")"
+  body=$(backstop_body "$out")
+  case "$body" in *'fresh done: uncovered completion with no index'*) ;; *)
+    fail "uncovered status did not surface after index self-heal: $body"
+    ;;
+  esac
+  [ -f "$state/.branch-outcome-index-ready" ] \
+    || fail "first drain did not publish the outcome-index ready marker"
+  if grep -F 'Pi supervision' "$out" >/dev/null; then
+    fail "uncovered self-heal drain mentioned Pi supervision: $(cat "$out")"
+  fi
+  pass "a fresh home with a status log and no index surfaces the backstop on its first drain"
+}
+
+test_malformed_outcome_store_fails_closed_without_pi_advice() {
+  local dir state out
+  dir=$(make_case index-selfheal-store-fault)
+  state="$dir/state"
+  out="$dir/drain.out"
+
+  printf 'done: must not surface over a corrupt outcome store\n' > "$state/unsafe.status"
+  printf 'not-json\n' > "$state/branch-outcomes.jsonl"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed closed incorrectly on a malformed outcome store"
+  grep -F 'STATUS OUTCOME BACKSTOP SKIPPED:' "$out" >/dev/null \
+    || fail "malformed store did not fail closed: $(cat "$out")"
+  grep -F 'outcome store is unsafe' "$out" >/dev/null \
+    || fail "store-fault skip lost its repair wording: $(cat "$out")"
+  if grep -F 'Pi supervision' "$out" >/dev/null; then
+    fail "store-fault skip still advised restarting Pi supervision: $(cat "$out")"
+  fi
+  grep -F 'unsafe done:' "$out" >/dev/null \
+    && fail "malformed store still presented a backstop event: $(cat "$out")"
+  [ ! -f "$state/.branch-outcome-index-ready" ] \
+    || fail "a store fault published a ready marker"
+  pass "a genuine outcome-store fault fails closed without Pi-specific restart advice"
+}
+
+test_index_self_heal_runs_under_the_outcome_lock() {
+  local dir state busy_out healed_out holder i
+  dir=$(make_case index-selfheal-lock)
+  state="$dir/state"
+  busy_out="$dir/busy.out"
+  healed_out="$dir/healed.out"
+
+  printf 'done: uncovered while the outcome lock is contested\n' > "$state/locked.status"
+  printf '%s\n' '{"seq":1,"epoch":1,"task":"other","wake":"","verdict":"captain","summary":"unrelated"}' \
+    > "$state/branch-outcomes.jsonl"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$1"
+    fm_lock_try_acquire "$STATE/.branch-outcomes.lock" || exit 1
+    trap "fm_lock_release \"$STATE/.branch-outcomes.lock\"" EXIT
+    sleep 30
+  ' _ "$ROOT/bin/fm-wake-lib.sh" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    [ -e "$state/.branch-outcomes.lock" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.branch-outcomes.lock" ] \
+    || { kill "$holder" 2>/dev/null || true; fail "test lock holder did not publish the outcome lock"; }
+
+  FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$busy_out" \
+    || fail "drain failed while the outcome lock was held"
+  grep -F 'branch outcome history is busy' "$busy_out" >/dev/null \
+    || fail "contested lock did not skip the backstop: $(cat "$busy_out")"
+  [ ! -f "$state/.branch-outcome-index-ready" ] \
+    || fail "self-heal published a ready marker without holding the outcome lock"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$healed_out" \
+    || fail "drain failed after the outcome lock was released"
+  grep -F 'locked done: uncovered while the outcome lock is contested' "$healed_out" >/dev/null \
+    || fail "self-heal under the lock did not surface the uncovered event: $(cat "$healed_out")"
+  [ -f "$state/.branch-outcome-index-ready" ] \
+    || fail "self-heal under the lock did not publish the ready marker"
+  pass "index self-heal runs only while the outcome lock is held"
 }
 
 test_overbound_routine_event_stays_silent() {
@@ -382,6 +475,9 @@ test_successful_backstop_is_idempotent_without_consuming_delayed_annotation
 test_output_failure_does_not_commit_the_backstop_receipt
 test_receipt_commit_failure_repeats_the_already_presented_backstop
 test_rejected_decision_line_surfaces_once_through_backstop
-test_outcome_index_recovery_is_fail_closed_and_migratable
+test_missing_index_self_heals_on_first_drain
+test_uncovered_event_surfaces_on_first_drain_without_index
+test_malformed_outcome_store_fails_closed_without_pi_advice
+test_index_self_heal_runs_under_the_outcome_lock
 test_overbound_routine_event_stays_silent
 test_backstop_output_is_bounded

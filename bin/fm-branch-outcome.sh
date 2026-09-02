@@ -44,6 +44,9 @@
 #     before append and published only after the cache update; processed-init
 #     rebuilds every cache before publishing it, so interruption or upgrade
 #     fails closed without making each drain scan lifetime history.
+#     Main-actor drain calls processed-init under the outcome lock when that
+#     ready marker is absent or invalid, on every harness; only a genuine store
+#     fault keeps the lost-wake backstop skipped.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -65,10 +68,12 @@
 #     Advance the processed marker after main acknowledged the captain rows
 #     through <seq>; the target itself must be a currently unprocessed captain
 #     row at or below the read cursor.
-#   fm-branch-outcome.sh processed-init
+#   fm-branch-outcome.sh processed-init [--held-lock]
 #     Rebuild the bounded per-task outcome indexes, then create the processed
 #     marker at the current read cursor when it does not exist yet; validate a
-#     present marker without changing it.
+#     present marker without changing it. --held-lock is only for a caller that
+#     already holds $STATE/.branch-outcomes.lock (fm-wake-drain.sh); it skips
+#     the nested acquire so drain's bounded lock wait remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
@@ -97,7 +102,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -344,6 +349,38 @@ print_unprocessed() {
     'select(.verdict == "captain" and .seq > $processed and .seq <= $cursor)' "$STORE"
 }
 
+# Assumes $LOCK is already held. Callers that do not already hold it use the
+# processed-init command, which acquires and releases around this body.
+processed_init_locked() {
+  local store_last cursor_seq processed_seq
+  if ! store_last=$(last_seq); then
+    echo "error: refusing processed initialization because the outcome store is malformed or non-sequential" >&2
+    return 1
+  fi
+  if ! cursor_seq=$(read_cursor); then
+    return 1
+  fi
+  if [ "$cursor_seq" -gt "$store_last" ]; then
+    echo "error: refusing processed initialization because the outcome cursor is ahead of the store" >&2
+    return 1
+  fi
+  if [ -e "$PROCESSED" ]; then
+    if ! processed_seq=$(read_processed); then
+      return 1
+    fi
+    if [ "$processed_seq" -gt "$cursor_seq" ]; then
+      echo "error: refusing processed initialization because the processed marker is ahead of the read cursor" >&2
+      return 1
+    fi
+  else
+    write_processed "$cursor_seq"
+  fi
+  if ! rebuild_outcome_indexes; then
+    echo "error: outcome index migration could not be completed safely" >&2
+    return 1
+  fi
+}
+
 CMD=${1:-}
 shift 2>/dev/null || true
 
@@ -489,41 +526,24 @@ case "$CMD" in
     fm_lock_release "$LOCK"
     ;;
   processed-init)
+    HELD_LOCK=0
+    if [ "${1:-}" = --held-lock ]; then
+      HELD_LOCK=1
+      shift
+    fi
     [ "$#" -eq 0 ] || usage
-    fm_lock_acquire_wait "$LOCK"
-    if ! LAST_SEQ=$(last_seq); then
-      fm_lock_release "$LOCK"
-      echo "error: refusing processed initialization because the outcome store is malformed or non-sequential" >&2
-      exit 1
+    if [ "$HELD_LOCK" -eq 0 ]; then
+      fm_lock_acquire_wait "$LOCK"
     fi
-    if ! CURSOR_SEQ=$(read_cursor); then
-      fm_lock_release "$LOCK"
-      exit 1
-    fi
-    if [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ]; then
-      fm_lock_release "$LOCK"
-      echo "error: refusing processed initialization because the outcome cursor is ahead of the store" >&2
-      exit 1
-    fi
-    if [ -e "$PROCESSED" ]; then
-      if ! PROCESSED_SEQ=$(read_processed); then
+    if ! processed_init_locked; then
+      if [ "$HELD_LOCK" -eq 0 ]; then
         fm_lock_release "$LOCK"
-        exit 1
       fi
-      if [ "$PROCESSED_SEQ" -gt "$CURSOR_SEQ" ]; then
-        fm_lock_release "$LOCK"
-        echo "error: refusing processed initialization because the processed marker is ahead of the read cursor" >&2
-        exit 1
-      fi
-    else
-      write_processed "$CURSOR_SEQ"
-    fi
-    if ! rebuild_outcome_indexes; then
-      fm_lock_release "$LOCK"
-      echo "error: outcome index migration could not be completed safely" >&2
       exit 1
     fi
-    fm_lock_release "$LOCK"
+    if [ "$HELD_LOCK" -eq 0 ]; then
+      fm_lock_release "$LOCK"
+    fi
     ;;
   list)
     RECENT=20

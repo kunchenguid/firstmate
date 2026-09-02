@@ -57,7 +57,8 @@ The drain reads one fixed-size per-task outcome index instead of scanning append
 Status provenance added to new outcome rows distinguishes covered and genuinely later events even within one timestamp second.
 Legacy outcomes predate that causal position, so equal-second migration cannot prove order and deliberately favors surfacing a plausibly later event; this can rarely duplicate an already handled legacy event.
 A pathological latest status line that crosses the 64 KiB window is unclassifiable and remains silent rather than risking presentation of routine content; this is an accepted limit, not a status-line size contract.
-Interrupted or missing outcome indexes fail closed with a repair diagnostic and are rebuilt from the authoritative outcome rows by `processed-init` during Pi reconciliation.
+A missing or invalid outcome-index ready marker is rebuilt from the authoritative outcome rows by `processed-init` under the outcome lock on the next main drain, on every harness.
+Only a genuine store fault keeps that backstop skipped.
 
 ## How the branch knows what the captain said
 
