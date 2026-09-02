@@ -66,6 +66,7 @@
 #   (ah) malformed pool listing                     -> REFUSE
 #   (ai) unreadable pool listing                    -> REFUSE
 #   (al) entry omitting the lease/process fields    -> REFUSE (proves nothing)
+#   (am) entry with a wrong-typed lease/process     -> REFUSE (proves nothing)
 #   (aj) ordinary non-lock error, pool available    -> REFUSE (wrong signature)
 #   (ak) copy owned by another home's clone         -> REFUSE (cross-home)
 set -u
@@ -2966,6 +2967,42 @@ test_pool_entry_without_lease_and_process_fields_refuses() {
   pass "a pool entry that never reports lease or process state proves nothing and refuses cleanup"
 }
 
+# Every required key is present, but a field carries a type treehouse never uses.
+# jq's has() is true for a key whose value is null, so key presence alone would let
+# "processes": null read as an empty process list; only the type gate refuses these.
+test_pool_entry_with_wrong_typed_fields_refuses() {
+  local shape name fields case_dir rc wt_canon
+  for shape in \
+    'null-processes|"lease_id":"","lease_holder":"","leased_at":null,"processes":null' \
+    'numeric-lease-id|"lease_id":0,"lease_holder":"","leased_at":null,"processes":[]'
+  do
+    name=${shape%%|*}
+    fields=${shape#*|}
+    case_dir=$(make_case "already-returned-$name")
+    write_meta "$case_dir" no-mistakes ship
+    land_task_branch_on_origin "$case_dir"
+    add_status_aware_treehouse "$case_dir"
+    wt_canon=$(cd "$case_dir/wt" && pwd -P)
+    printf '[{"name":"1","path":"%s","status":"available","flavor":"git",%s}]\n' "$wt_canon" "$fields" \
+      > "$case_dir/pool.json"
+
+    set +e
+    FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "already-returned-$name: a wrong-typed lease or process field must refuse"
+    assert_present "$case_dir/state/task-x1.meta" \
+      "already-returned-$name: teardown deleted task records on a wrong-typed listing entry"
+    assert_grep "in treehouse's own shape" "$case_dir/stderr" \
+      "already-returned-$name: teardown did not explain the refusal"
+    assert_not_contains "$(cat "$case_dir/stderr")" "already returned before this cleanup ran" \
+      "already-returned-$name: teardown converged on a field type treehouse never reports"
+  done
+  pass "a pool entry reporting a lease or process field with the wrong type refuses cleanup"
+}
+
 test_unreadable_pool_listing_refuses() {
   local case_dir rc
   case_dir=$(make_case already-returned-unreadable)
@@ -3108,6 +3145,7 @@ test_missing_target_in_pool_listing_refuses
 test_duplicate_pool_entries_for_the_same_copy_refuse
 test_malformed_pool_listing_refuses
 test_pool_entry_without_lease_and_process_fields_refuses
+test_pool_entry_with_wrong_typed_fields_refuses
 test_unreadable_pool_listing_refuses
 test_ordinary_treehouse_return_error_still_refuses
 test_another_homes_copy_is_never_treated_as_returned
