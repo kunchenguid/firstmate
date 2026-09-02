@@ -1021,15 +1021,25 @@ if (mirroredCaptainText.some((text) =>
   throw new Error("canonical current or legacy operational input entered captain mirror context");
 }
 if ((globalThis.__fmPrompts ?? []).length !== 5) throw new Error("a handled fleet wake was rerun");
-const processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+let processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
 if (sentToMain.length !== 1 + processingRequests.length) {
   throw new Error(`captain results entered model delivery as unkeyed messages: ${JSON.stringify(sentToMain)}`);
 }
-if (processingRequests.length !== requestedPrompts.length || processingRequests.some((sent) => sent.options.triggerTurn !== true)) {
-  throw new Error(`each requested result must open exactly one keyed processing turn: ${JSON.stringify(processingRequests)}`);
+if (processingRequests.length !== 1 || processingRequests[0].options.triggerTurn !== true) {
+  throw new Error(`captain results re-sent while the first keyed request was pending: ${JSON.stringify(processingRequests)}`);
 }
-if (!processingRequests.at(-1).message.content.includes("[seq 5] task-resource: healthy resource report: CPU 12%, memory 41%")) {
-  throw new Error(`the latest processing request lost the newest sequence: ${processingRequests.at(-1).message.content}`);
+fire("agent_settled", {}, mainCtx);
+processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+if (processingRequests.length !== 2 || processingRequests[1].options.triggerTurn !== true) {
+  throw new Error(`the widened captain sequence set did not open one keyed turn at the run boundary: ${JSON.stringify(processingRequests)}`);
+}
+for (let seq = 2; seq <= 5; seq += 1) {
+  if (!processingRequests[1].message.content.includes(`[seq ${seq}] task-resource: healthy resource report: CPU 12%, memory 41%`)) {
+    throw new Error(`the widened processing request lost seq ${seq}: ${processingRequests[1].message.content}`);
+  }
+}
+if (!processingRequests[1].message.content.includes("through=5")) {
+  throw new Error(`the widened processing request lost its highest acknowledgement key: ${processingRequests[1].message.content}`);
 }
 if (fleetOperations.length !== 10 || fleetOperations.some((operation) => operation.status !== 0)) {
   throw new Error(`fleet event ownership repeated or failed work: ${JSON.stringify(fleetOperations)}`);

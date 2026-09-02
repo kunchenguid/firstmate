@@ -28,12 +28,15 @@
 #     tool) is main's. A captain row between the two markers is "unprocessed":
 #     delivered and shown, not yet acted on. Routine rows never wait on this
 #     marker. It only advances through an explicit sequence-bound
-#     acknowledgement, never past the read cursor and never backwards, so an
+#     acknowledgement naming a currently unprocessed captain row at or below
+#     the read cursor; a routine, unread, or already-processed target is
+#     refused. It never moves past the read cursor or backwards, so an
 #     unrelated or empty model answer cannot move it. An absent marker reads as
 #     0 (every delivered captain row is unprocessed, the safe direction);
 #     processed-init is the one-time migration that sets an absent marker to
 #     the read cursor so rows delivered before the marker existed are not
-#     re-presented. A marker ahead of the read cursor fails closed.
+#     re-presented. A present marker is validated before the migration returns,
+#     and a marker ahead of the read cursor fails closed.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -52,11 +55,12 @@
 #     Print every captain record that is read but not yet processed (raw
 #     JSONL, ascending seq). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-processed --through <seq>
-#     Advance the processed marker (never backwards, never past the read
-#     cursor) after main acknowledged the captain rows through <seq>.
+#     Advance the processed marker after main acknowledged the captain rows
+#     through <seq>; the target itself must be a currently unprocessed captain
+#     row at or below the read cursor.
 #   fm-branch-outcome.sh processed-init
 #     Create the processed marker at the current read cursor when it does not
-#     exist yet; a present marker is left untouched.
+#     exist yet; validate a present marker without changing it.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
