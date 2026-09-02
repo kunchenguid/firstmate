@@ -46,6 +46,94 @@ agy_payload() {  # <template> <workspace>
 
 # --- spawn scaffolding ------------------------------------------------------
 
+# The shared spawn stub answers no capture-pane at all, which would leave every
+# case here staring at a blank screen. agy's launch is followed by a readiness
+# gate that reads the pane, so this suite needs a stub that RENDERS one.
+#
+# FM_FAKE_AGY_SCREEN names what agy shows once its launch line is submitted:
+#   ready (default) - a pre-trusted workspace already on agy's idle footer
+#   trust           - blocked on the workspace-trust dialog until an Enter lands
+#   blank           - nothing renders at all, the case where the gate gives up
+#
+# FM_FAKE_AGY_PHASE, when set, makes the stub honour launch ORDER: the screen
+# stays empty until the launch line is typed AND submitted. Without it the spawn
+# lines that precede the launch (`treehouse get`, the TRACEPARENT export) each
+# carry an Enter that would resolve a dialog agy has not drawn yet.
+# Every send-keys event is recorded in order to FM_FAKE_AGY_EVENT_LOG so a case
+# can count the Enters that arrive AFTER the launch line.
+make_spawn_fakebin() {
+  local dir=$1 fakebin
+  shift
+  fakebin=$(fm_fakebin "$dir")
+  fm_fake_exit0 "$fakebin" treehouse "$@"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+agy_log() {
+  [ -n "${FM_FAKE_AGY_EVENT_LOG:-}" ] || return 0
+  printf '%s\n' "$1" >> "$FM_FAKE_AGY_EVENT_LOG"
+}
+target=${FM_FAKE_AGY_SCREEN:-ready}
+phase_file=${FM_FAKE_AGY_PHASE:-}
+# 0 pre-launch, 1 launch typed, 2 launch submitted, 3 dialog answered.
+phase=2
+if [ -n "$phase_file" ]; then
+  phase=0
+  if [ -f "$phase_file" ]; then
+    IFS= read -r phase < "$phase_file" || phase=0
+  fi
+fi
+set_phase() {
+  [ -n "$phase_file" ] || return 0
+  printf '%s\n' "$1" > "$phase_file"
+}
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  capture-pane)
+    [ "$phase" -ge 2 ] || exit 0
+    [ "$phase" -eq 3 ] && target=ready
+    case "$target" in
+      trust)
+        printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
+        ;;
+      blank) : ;;
+      *) printf '  >\n\n? for shortcuts\n' ;;
+    esac
+    exit 0
+    ;;
+  send-keys)
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = "-l" ]; then
+        [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        agy_log "literal:$a"
+        case "$a" in *--dangerously-skip-permissions*) set_phase 1 ;; esac
+      fi
+      prev=$a
+    done
+    for a in "$@"; do
+      [ "$a" = Enter ] || continue
+      agy_log 'key:Enter'
+      case "$phase" in
+        1) set_phase 2 ;;
+        2) [ "$target" != trust ] || set_phase 3 ;;
+      esac
+      break
+    done
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
 make_spawn_case() {
   local name=$1 case_dir home proj wt fakebin agy_home id
   case_dir="$TMP_ROOT/$name"
@@ -226,6 +314,81 @@ EOF
     *) fail "positional agy secondmate refusal did not name the reason: $out" ;;
   esac
   pass "positional agy refuses a secondmate spawn and says why"
+}
+
+# --- workspace trust --------------------------------------------------------
+
+# Enters that arrived AFTER the launch line, which is the only window the
+# readiness gate acts in. Counting every Enter in the spawn would mostly count
+# the shell lines that set the pane up.
+agy_enters_after_launch() {  # <event-log>
+  awk '
+    seen && $0 == "key:Enter" { n++ }
+    /^literal:.*--dangerously-skip-permissions/ { seen = 1 }
+    END { print n + 0 }
+  ' "$1"
+}
+
+# Every crewmate and scout runs in a FRESH per-task worktree, which is outside
+# agy's trustedWorkspaces, so agy blocks on "Do you trust the contents of this
+# project?" before it ever reads the brief. --dangerously-skip-permissions does
+# not suppress it, and the only Stop it fires carries fullyIdle=false, which the
+# turn-end gate ignores by design - so an unanswered dialog is a silent hang.
+# One Enter resolves it, and exactly one: a second would submit an empty message
+# into a session that has already started its turn.
+test_trust_dialog_is_answered_exactly_once() {
+  local rec case_dir home proj wt fakebin agy_home id out trusted blocked
+  rec=$(make_spawn_case trust-pre)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_SCREEN=ready FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=8 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) || fail "agy spawn failed on a trusted workspace: $out"
+  trusted=$(agy_enters_after_launch "$case_dir/events.log")
+
+  rec=$(make_spawn_case trust-dialog)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_SCREEN=trust FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=8 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) || fail "agy spawn failed on an untrusted workspace: $out"
+  blocked=$(agy_enters_after_launch "$case_dir/events.log")
+
+  [ "$blocked" -eq "$((trusted + 1))" ] \
+    || fail "the trust dialog drew $blocked Enters against a trusted baseline of $trusted; expected exactly one more"
+  pass "agy's workspace-trust dialog is answered with exactly one Enter, and only when it is on screen"
+}
+
+# A pane that renders neither the dialog nor either agy footer must FAIL the
+# spawn. The alternative is the defect this gate exists to close: a task that
+# reports launched, never reads its brief, and classifies unknown forever.
+test_spawn_fails_when_agy_never_renders() {
+  local rec case_dir home proj wt fakebin agy_home id out status
+  rec=$(make_spawn_case trust-blank)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_SCREEN=blank \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=2 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    && fail "agy spawn reported success against a pane that never rendered: $out"
+  case "$out" in
+    *"workspace-trust dialog"*) : ;;
+    *) fail "the agy readiness failure did not name the reason: $out" ;;
+  esac
+  status=$(cat "$home/state/$id.status" 2>/dev/null || true)
+  case "$status" in
+    *failed:*) : ;;
+    *) fail "the agy readiness failure was not recorded in the task status: $status" ;;
+  esac
+  pass "an agy pane that never reaches a ready state fails the spawn loudly"
 }
 
 # --- the fullyIdle turn-end rule -------------------------------------------
@@ -464,6 +627,8 @@ test_launch_shape
 test_effort_is_clamped_to_supported_levels
 test_secondmate_is_refused
 test_secondmate_positional_agy_is_refused
+test_trust_dialog_is_answered_exactly_once
+test_spawn_fails_when_agy_never_renders
 test_turnend_requires_fully_idle
 test_turnend_requires_registered_token
 test_turnend_never_blocks_the_stop

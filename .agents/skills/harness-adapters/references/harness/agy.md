@@ -18,7 +18,7 @@ Launch shape: `agy --dangerously-skip-permissions -i "<brief>"`.
 | Exit | `/exit` plus Enter; prints `Resume with -c (or command below): agy --conversation=<id>` and the pane returns to the shell. |
 | Resume | `agy --conversation=<id>`, or `-c` for the most recent. Firstmate uses `relaunch` instead, per the control plane's no-`resume`-verb rule. |
 | Marker | `ANTIGRAVITY_AGENT=1` on child/tool processes, plus `ANTIGRAVITY_LS_VERSION`, `ANTIGRAVITY_CONVERSATION_ID`, `ANTIGRAVITY_PROJECT_ID`. Sets neither `CLAUDECODE` nor `GROK_AGENT`. |
-| Trust | Dialog `Do you trust the contents of this project?` with `Yes, I trust this folder` preselected; one Enter resolves it. `--dangerously-skip-permissions` does NOT suppress it. |
+| Trust | Dialog `Do you trust the contents of this project?` with `Yes, I trust this folder` preselected; one Enter resolves it. `--dangerously-skip-permissions` does NOT suppress it, and a fresh per-task worktree always raises it, so `../../../bin/fm-spawn.sh` answers it after launch with a single Enter once it is proven on screen, and refuses the spawn when the pane reaches no ready state at all. |
 | Composer | Prompt `>` between two horizontal rules `───`, no box. Classifies `unknown`, never `empty`; see "Composer" below. |
 | Model | `--model <id>`; discover with `agy models`, which answers without opening a session. |
 | Effort | `--effort low\|medium\|high`. `xhigh` and `max` are omitted rather than passed; `../common/model-and-effort.md` owns fallback, and the generic ceiling is `high` as it is for Grok. |

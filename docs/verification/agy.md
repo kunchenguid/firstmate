@@ -135,6 +135,10 @@ Outside `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`, agy as
 `--dangerously-skip-permissions` does not suppress it.
 A session blocked on this dialog still fires `Stop` hooks with `fullyIdle:false`, which is a second reason the gate matters.
 
+Every crewmate and scout runs in a fresh per-task worktree, so the dialog is the ordinary case rather than an edge one, and an unanswered one is a silent hang: agy never reads the brief, its only `Stop` is ignored by the `fullyIdle` gate, and the busy classifier stays at `unknown agy-unverified`.
+`bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen, returns as soon as it is gone, and fails the spawn loudly when the pane renders neither the dialog nor either footer.
+That gate is covered by `tests/fm-agy-harness.test.sh` against a rendered pane; the Enter itself was not re-exercised against a live agy in this session, so treat the dialog text above as the measured fact and the gate as the portable regression's contract.
+
 ## Quota
 
 `quota-axi` reads agy over `cli-rpc` (plan Google AI Pro) but only while the Antigravity application is running; with it stopped it reports `Antigravity/agy is not running`.

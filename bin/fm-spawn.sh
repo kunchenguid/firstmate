@@ -1285,7 +1285,8 @@ launch_template() {
     # so the brief rides that flag rather than a bare argument.
     # --dangerously-skip-permissions is what makes an unattended crewmate
     # viable (footer shows `accept-edits`); it does NOT cover the workspace
-    # trust dialog, which the readiness gate below answers instead.
+    # trust dialog, which agy_wait_for_ready below answers with a single Enter
+    # once the dialog is proven on screen.
     # agy's turn-end signal rides neither the launch command nor a project
     # config: it is a global Stop hook installed below as a firstmate-owned
     # plugin plus a per-task worktree pointer, gated on `fullyIdle`.
@@ -2383,7 +2384,8 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
-kimi_capture() {
+# One pane read, shared by every launch-time readiness and delivery gate.
+spawn_pane_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
@@ -2402,7 +2404,7 @@ kimi_composer_is_empty() {
 kimi_wait_for_ready() {
   local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
-    pane=$(kimi_capture)
+    pane=$(spawn_pane_capture)
     if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' \
        || kimi_composer_is_empty; then
       return 0
@@ -2428,7 +2430,7 @@ kimi_delivery_is_confirmed() {  # <plain-pane-capture>
 kimi_wait_for_delivery() {
   local pane i=0 max=${FM_KIMI_DELIVERY_POLLS:-40} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
-    pane=$(kimi_capture)
+    pane=$(spawn_pane_capture)
     kimi_delivery_is_confirmed "$pane" && return 0
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -2436,9 +2438,49 @@ kimi_wait_for_delivery() {
   return 1
 }
 
-kimi_spawn_fail() {  # <detail>
+spawn_harness_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
+}
+
+# agy gates a workspace it has not seen before behind a trust dialog, and
+# --dangerously-skip-permissions does NOT suppress it (verified live, agy
+# 1.1.24). Every crewmate and scout runs in a FRESH per-task worktree, so that
+# dialog is the ordinary case rather than an edge one, and it blocks before the
+# brief is read. Leaving it unanswered is a SILENT hang: the only Stop it fires
+# carries fullyIdle=false, which the turn-end gate correctly ignores, and agy
+# has no worker-state source, so the task would sit at `unknown agy-unverified`
+# forever with nothing to observe. One Enter resolves it (Yes is preselected).
+# Either line of the dialog proves it: a narrow pane can wrap the question, and
+# the preselected answer is the row the Enter is aimed at anyway.
+AGY_TRUST_REGEX='Do you trust the contents of this project|Yes, I trust this folder'
+# Rendered evidence that this pane is already PAST the dialog: the streaming
+# footer or the idle one. Both are agy's own footers, not composer shapes.
+AGY_READY_REGEX='esc to cancel|\? for shortcuts'
+
+agy_wait_for_ready() {
+  local pane i=0 answered=0 max=${FM_AGY_READY_POLLS:-60} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(spawn_pane_capture)
+    if printf '%s\n' "$pane" | grep -qE "$AGY_TRUST_REGEX"; then
+      # Exactly one Enter, and only while the dialog is still on screen. A
+      # second one would land in the composer of a session that has already
+      # started its turn, submitting an empty message into the brief.
+      if [ "$answered" -eq 0 ]; then
+        spawn_send_key "$T" Enter || return 1
+        answered=1
+      fi
+    elif [ "$answered" -eq 1 ]; then
+      # The dialog is gone after firstmate answered it: that IS the proof, and
+      # it does not depend on which footer agy renders next.
+      return 0
+    elif printf '%s\n' "$pane" | grep -qE "$AGY_READY_REGEX"; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -3198,9 +3240,15 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = agy ]; then
+  if ! agy_wait_for_ready; then
+    spawn_harness_fail "agy neither reached a rendered ready state nor cleared its workspace-trust dialog"
+    exit 1
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    spawn_harness_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
@@ -3210,15 +3258,15 @@ if [ "$HARNESS" = kimi ]; then
   if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
       "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
       "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_harness_fail "kimi brief pointer could not be submitted"
     exit 1
   fi
   if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_harness_fail "kimi brief pointer could not be submitted"
     exit 1
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    spawn_harness_fail "kimi brief pointer delivery was not confirmed"
     exit 1
   fi
 fi

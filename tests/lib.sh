@@ -201,8 +201,9 @@ SH
 
 # fm_test_named_interpreter <dir> <name>: place an executable at <dir>/<name>
 # that behaves like bash AND that the platform's own process table reports under
-# <name>, then echo its path. Returns 1 when no construction on this host
-# achieves that, so a caller can skip loudly instead of asserting nothing.
+# <name> (whole, or truncated by the platform's own name limit), then echo its
+# path. Returns 1 when no construction on this host achieves that, so a caller
+# can skip loudly instead of asserting nothing.
 #
 # Two constructions are needed because the two supported platforms answer
 # `ps -o comm=` from different sources. procps on Linux reports the KERNEL exec
@@ -248,7 +249,20 @@ fm_test_named_interpreter_try() {  # <method> <dir> <name> <real-bash>
   esac
   # shellcheck disable=SC2016  # the probe body is evaluated by the CHILD shell, not this one
   reported=$("$path" -c 'p=$(ps -o comm= -p $$); printf "%s" "$p"' 2>/dev/null || true)
-  [ "$(basename -- "${reported:-}")" = "$name" ] && return 0
+  reported=$(basename -- "${reported:-}")
+  # Linux's kernel comm field holds 15 usable characters (TASK_COMM_LEN is 16)
+  # and procps reads exactly that field, so a longer name comes back TRUNCATED
+  # there while macOS returns it whole. A truncated report still proves the
+  # construction: the process really is running under the requested name, and
+  # every consumer of this helper matches a PREFIX glob. The length gate is what
+  # keeps that from degenerating into a bare prefix rule, under which a probe
+  # reporting `bash` would "prove" a name like `bash-x`.
+  if [ "$reported" = "$name" ]; then
+    return 0
+  fi
+  if [ "${#reported}" -eq 15 ]; then
+    case "$name" in "$reported"*) return 0 ;; esac
+  fi
   rm -f "$path"
   return 1
 }
