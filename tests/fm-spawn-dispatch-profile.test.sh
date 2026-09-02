@@ -177,7 +177,7 @@ test_non_agy_launch_clears_inherited_antigravity_marker() {
   set +f
   [ "${1:-}" = env ] || fail "claude launch carried no env scrub at all: $launch"
   shift
-  prefix=env
+  prefix="env"
   while [ "${1:-}" = "-u" ]; do
     prefix="$prefix -u $2"
     shift 2
