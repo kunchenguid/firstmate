@@ -2,7 +2,9 @@
 # bin/backends/thurbox.sh - the thurbox session-provider adapter (EXPERIMENTAL).
 #
 # Design: docs/thurbox-backend.md carries the live verification pass this
-# adapter is built on (real thurbox-cli 2.11.0, Linux x86_64, 2026-09-01).
+# adapter is built on (real thurbox-cli 2.11.0 and 2.11.1, Linux x86_64,
+# 2026-09-01 and 2026-09-02). Dated notes below naming 2.11.0 record when a
+# behaviour was first observed; the supported floor is 2.11.1.
 # thurbox is a session provider ONLY, exactly like herdr/zellij/cmux: the
 # worktree provider stays treehouse. Sourced only through bin/fm-backend.sh's
 # fm_backend_source in normal operation; the unit tests source it directly.
@@ -64,12 +66,15 @@
 # the bare value its --help promises, and an UNSET key prints the literal
 # string `value: null` rather than nothing.
 
-# Version floor. 2.11.0 is the first release carrying every verb this adapter
-# depends on: `watch` (native push), `session create --command/--arg/--env`
-# (launching firstmate's own harness without an agents.toml entry),
-# `--on-existing` (idempotent create), `session meta` (the driver key/value
-# space), `session exec`, and `session stop`/`start`.
-FM_BACKEND_THURBOX_MIN_VERSION="2.11.0"
+# Version floor. 2.11.1 is the first release on which every read this adapter
+# makes answers correctly. 2.11.0 introduced the verbs - `watch` (native push),
+# `session create --command/--arg/--env` (launching firstmate's own harness
+# without an agents.toml entry), `--on-existing` (idempotent create),
+# `session meta`, `session exec`, `session stop`/`start` - but reported a parked
+# session through `session get`/`session list` identically to a running one, so
+# readiness and recovery could not tell them apart. 2.11.1 puts `stopped` on both
+# reads and answers `state` with `stopped`, which is what this adapter needs.
+FM_BACKEND_THURBOX_MIN_VERSION="2.11.1"
 
 # Composer capture depth. 0 = the visible pane only, with no scrollback rows
 # prepended. This is REQUIRED, not a tuning choice: `session capture`'s
@@ -265,51 +270,22 @@ fm_backend_thurbox_session_row() {  # <session-uuid>
 }
 
 # fm_backend_thurbox_target_ready: cheap liveness - the session exists, is not
-# soft-deleted, and actually HAS a pane a write can land on.
+# soft-deleted, and is not PARKED.
 #
-# The pane check cannot come from the session row. A PARKED session (`session
-# stop`) keeps its row, checkout and conversation but loses its pane, and
-# thurbox 2.11.0 reports a parked session through `session get`/`session list`
-# IDENTICALLY to a running one - same `state`, same `backend_id` naming the
-# window that no longer exists, and no `stopped` field on either read (verified
-# 2026-09-01; docs/thurbox-backend.md "Parked sessions are not visible to the
-# read verbs"). Gating on the row would therefore call every parked session
-# ready and let every write silently address nothing.
-#
-# `session capture` is the probe instead: it fails on a parked session, because
-# the underlying window is genuinely gone. It is one extra call, and it is the
-# only cheap read whose answer actually changes when the pane does.
+# A parked session (`session stop`) keeps its row, checkout and conversation but
+# loses its pane, so no send, key, or capture can land on it; treating one as
+# ready would make every write silently address nothing. From 2.11.1 the row
+# answers that directly, which is why the floor is 2.11.1 rather than 2.11.0 -
+# on 2.11.0 this read could not distinguish the two at all.
 #
 # It also PARSES the target in the caller's scope, so a caller that gates a
 # write on this call can use FM_BACKEND_THURBOX_SESSION on the next line.
 fm_backend_thurbox_target_ready() {  # <target>
   fm_backend_thurbox_parse_target "$1" || return 1
-  fm_backend_thurbox_session_row "$FM_BACKEND_THURBOX_SESSION" >/dev/null || return 1
-  fm_backend_thurbox_json session capture "$FM_BACKEND_THURBOX_SESSION" --lines 0 >/dev/null
-}
-
-# fm_backend_thurbox_is_parked: the AUTHORITATIVE parked read, for the recovery
-# path that must not confuse a parked session with a transient failure.
-#
-# `watch --initial --session <uuid>` is the only read in 2.11.0 that reports the
-# parked flag at all; it emits one `present` row carrying `stopped` and then
-# exits on its own budget. That costs about a second, which is why the hot
-# readiness path above uses the capture probe and only this recovery-grade
-# caller pays for certainty.
-#
-# Returns 0 parked, 1 running, 2 when the read could not answer - the caller
-# must not treat 2 as either.
-fm_backend_thurbox_is_parked() {  # <session-uuid>
-  local uuid=$1 line stopped
-  [ -n "$uuid" ] || return 2
-  line=$(thurbox-cli watch --initial --session "$uuid" --for-secs 1 --json 2>/dev/null | head -1) || return 2
-  [ -n "$line" ] || return 2
-  stopped=$(printf '%s' "$line" | jq -r '.stopped // empty' 2>/dev/null) || return 2
-  case "$stopped" in
-    true) return 0 ;;
-    false) return 1 ;;
-    *) return 2 ;;
-  esac
+  local raw stopped
+  raw=$(fm_backend_thurbox_session_row "$FM_BACKEND_THURBOX_SESSION") || return 1
+  stopped=$(printf '%s' "$raw" | jq -r '.stopped // empty' 2>/dev/null)
+  [ "$stopped" != true ]
 }
 
 # --- container and task creation ---------------------------------------------
@@ -653,12 +629,8 @@ fm_backend_thurbox_busy_state() {  # <target> -> busy|idle|unknown
 #
 # A PARKED session is `dead`, not `missing`: the row, checkout and conversation
 # are all still there, so recovery must relaunch into it rather than treat the
-# task's endpoint as gone. That verdict comes from
-# fm_backend_thurbox_is_parked, NOT from the session row - the row cannot tell
-# a parked session from a running one at all (see target_ready's header). A
-# parked session's `session capture` fails, so without that check a park would
-# read `unreadable` and recovery would stall on a session it could simply
-# restart.
+# task's endpoint as gone. The inventory row already in hand carries `stopped`,
+# so that costs no extra read.
 fm_backend_thurbox_agent_state() {  # <target>
   if ! fm_backend_thurbox_parse_target "$1"; then
     printf 'unreadable'
@@ -672,7 +644,7 @@ fm_backend_thurbox_agent_state() {  # <target>
     printf 'missing'
     return 0
   fi
-  if fm_backend_thurbox_is_parked "$FM_BACKEND_THURBOX_SESSION"; then
+  if [ "$(printf '%s' "$row" | jq -r '.stopped // empty' 2>/dev/null)" = true ]; then
     printf 'dead'
     return 0
   fi
@@ -732,10 +704,7 @@ fm_backend_thurbox_endpoint_confirmed_gone() {  # <target>
 fm_backend_thurbox_list_live() {
   local inventory
   inventory=$(fm_backend_thurbox_json session list) || return 1
-  # No parked filter: `session list` does not report the parked flag, so there
-  # is nothing here to filter on. A parked session is still a real endpoint
-  # this home may own, and every caller re-checks readiness before writing.
-  printf '%s' "$inventory" | jq -r '.[] | "thurbox:" + .id + "\t" + (.name // "")' 2>/dev/null
+  printf '%s' "$inventory" | jq -r '.[] | select(.stopped != true) | "thurbox:" + .id + "\t" + (.name // "")' 2>/dev/null
 }
 
 # fm_backend_thurbox_resolve_bare_selector: thurbox sessions are addressed by

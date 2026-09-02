@@ -1077,7 +1077,7 @@ The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
 ## thurbox
 
-The current compatibility floor is thurbox-cli 2.11.0, and the active live evidence uses 2.11.0 on Linux x86_64, verified 2026-09-01.
+The current compatibility floor is thurbox-cli 2.11.1, and the active live evidence uses 2.11.0 and 2.11.1 on Linux x86_64, verified 2026-09-01 and 2026-09-02.
 Real checks create only `fm-*-probe` sessions in a scratch git repository and remove them with `session delete --force`.
 
 ```sh
@@ -1087,8 +1087,11 @@ thurbox-cli version --json
 Observed version:
 
 ```text
-{"data_dir":"/home/<user>/.local/share/thurbox","schema_version":41,"tmux_socket":"thurbox","version":"2.11.0"}
+{"data_dir":"/home/<user>/.local/share/thurbox","schema_version":41,"tmux_socket":"thurbox","version":"2.11.1"}
 ```
+
+The compatibility floor is 2.11.1 rather than 2.11.0 because 2.11.0 could not
+report a parked session; see "Parked sessions" below.
 
 ### Error stream
 
@@ -1180,8 +1183,25 @@ The adapter does not use it.
 
 ### Parked sessions
 
-`session stop` removes a session's pane but leaves its row. The ordinary read
-verbs do not report that.
+`session stop` removes a session's pane but leaves its row, and from 2.11.1 the
+ordinary read verbs report that:
+
+```sh
+thurbox-cli session get <probe> --json   # before and after `session stop`
+```
+
+```text
+running: {"state":"uncovered","stopped":false}
+parked:  {"state":"stopped","stopped":true}
+```
+
+Verified on 2.11.1, 2026-09-02.
+
+The rest of this subsection records 2.11.0's behaviour, which the adapter's
+version floor exists to refuse.
+
+`session stop` removed a session's pane but the ordinary read
+verbs did not report that.
 
 ```sh
 thurbox-cli session get <probe> --json   # before and after `session stop`

@@ -96,11 +96,11 @@ assert_log_args() {  # <msg> <arg>...
   grep -F -- "$needle" "$FM_THURBOX_LOG" >/dev/null || fail "$msg"
 }
 
-# A REAL 2.11.0 session row. Deliberately carries no `stopped` field, because
-# neither `session get` nor `session list` emits one - the parked flag is
-# reachable only through `watch`. A fixture that invented it would let the
-# adapter's parked handling pass against a field that does not exist.
-SESSION_ROW='{"id":"11111111-2222-3333-4444-555555555555","name":"fm-firstmate-abcd1234-t1","state":"working","state_source":"hook","hook_state_contradicted":false,"cwd":"/tmp/wt"}'
+# A REAL 2.11.1 session row, including the `stopped` field that release put on
+# `session get` and `session list`. 2.11.0 omitted it and reported a parked
+# session identically to a running one, which is why the adapter's floor is
+# 2.11.1: below it these reads cannot answer at all.
+SESSION_ROW='{"id":"11111111-2222-3333-4444-555555555555","name":"fm-firstmate-abcd1234-t1","state":"working","state_source":"hook","hook_state_contradicted":false,"stopped":false,"cwd":"/tmp/wt"}'
 TARGET='thurbox:11111111-2222-3333-4444-555555555555'
 
 # adapter: run <body> in a subshell with the adapter sourced fresh. Every <body>
@@ -131,14 +131,14 @@ adapter() {  # <case-dir> <body>
 
 new_case version-floor; d=$CASE_DIR
 out=$(adapter "$d" '
-  fm_backend_thurbox_version_at_least 2.11.0 2.11.0 && echo eq
-  fm_backend_thurbox_version_at_least 2.11.1 2.11.0 && echo patch-up
-  fm_backend_thurbox_version_at_least 2.12.0 2.11.0 && echo minor-up
-  fm_backend_thurbox_version_at_least 3.0.0 2.11.0 && echo major-up
-  fm_backend_thurbox_version_at_least 2.10.9 2.11.0 || echo below-minor
-  fm_backend_thurbox_version_at_least 1.99.99 2.11.0 || echo below-major
+  fm_backend_thurbox_version_at_least 2.11.1 2.11.1 && echo eq
+  fm_backend_thurbox_version_at_least 2.11.2 2.11.1 && echo patch-up
+  fm_backend_thurbox_version_at_least 2.12.0 2.11.1 && echo minor-up
+  fm_backend_thurbox_version_at_least 3.0.0 2.11.1 && echo major-up
+  fm_backend_thurbox_version_at_least 2.11.0 2.11.1 || echo below-patch
+  fm_backend_thurbox_version_at_least 1.99.99 2.11.1 || echo below-major
 ')
-for want in eq patch-up minor-up major-up below-minor below-major; do
+for want in eq patch-up minor-up major-up below-patch below-major; do
   case "$out" in *"$want"*) ;; *) fail "version floor: missing $want (got: $out)" ;; esac
 done
 pass "version comparison holds at the floor boundary in both directions"
@@ -146,8 +146,16 @@ pass "version comparison holds at the floor boundary in both directions"
 new_case version-refusal; d=$CASE_DIR
 out=$(FM_BACKEND_THURBOX_VERSION_OVERRIDE=2.10.0 adapter "$d" 'fm_backend_thurbox_version_check 2>&1; echo "rc=$?"')
 assert_contains "$out" 'rc=1' "a below-floor thurbox-cli must be refused"
-assert_contains "$out" '2.11.0 floor' "the refusal must name the floor it needs"
+assert_contains "$out" '2.11.1 floor' "the refusal must name the floor it needs"
 pass "a thurbox-cli below the version floor is refused loudly, naming the floor"
+
+# 2.11.0 has every verb this adapter calls and still fails the gate, because it
+# cannot report a parked session. Pinning the boundary keeps a future floor
+# change from silently re-admitting it.
+new_case version-refusal-2110; d=$CASE_DIR
+out=$(FM_BACKEND_THURBOX_VERSION_OVERRIDE=2.11.0 adapter "$d" 'fm_backend_thurbox_version_check 2>&1; echo "rc=$?"')
+assert_contains "$out" 'rc=1' "2.11.0 must be refused: it cannot report a parked session"
+pass "2.11.0 is refused despite having every verb, because it cannot report a parked session"
 
 # --- the stdout-error contract -----------------------------------------------
 #
@@ -251,7 +259,7 @@ pass "a failed session read reports unknown rather than guessing a busy verdict"
 # live agent.
 
 new_case agent-missing; d=$CASE_DIR
-respond "$d" 1 '[{"id":"other-session"}]'
+respond "$d" 1 '[{"id":"other-session","stopped":false}]'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = missing ] || fail "a successful inventory omitting the session must read missing (got: $out)"
 pass "a successful inventory that omits the session reports missing"
@@ -263,53 +271,43 @@ out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 pass "a failed inventory read reports unreadable, so a CLI error can never license recovery"
 
 new_case agent-alive; d=$CASE_DIR
-respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555"}]'
-respond "$d" 2 '{"at":1,"event":"present","session":"11111111-2222-3333-4444-555555555555","state":"working","stopped":false}'
-respond "$d" 3 '{"foreground_process":"claude","foreground_command":"claude --resume x","output":""}'
+respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555","stopped":false}]'
+respond "$d" 2 '{"foreground_process":"claude","foreground_command":"claude --resume x","output":""}'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = alive ] || fail "an agent foreground process must read alive (got: $out)"
 pass "a live agent in the pane's foreground reports alive"
 
 new_case agent-dead-shell; d=$CASE_DIR
-respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555"}]'
-respond "$d" 2 '{"at":1,"event":"present","session":"11111111-2222-3333-4444-555555555555","state":null,"stopped":false}'
-respond "$d" 3 '{"foreground_process":"bash","foreground_command":"/bin/bash -i","output":""}'
+respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555","stopped":false}]'
+respond "$d" 2 '{"foreground_process":"bash","foreground_command":"/bin/bash -i","output":""}'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = dead ] || fail "a bare shell foreground must read dead (got: $out)"
 pass "a pane that fell back to its shell reports dead"
 
 new_case agent-ambiguous; d=$CASE_DIR
-respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555"}]'
-respond "$d" 2 '{"at":1,"event":"present","session":"11111111-2222-3333-4444-555555555555","state":null,"stopped":false}'
-respond "$d" 3 '{"foreground_process":null,"foreground_command":null,"output":""}'
+respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555","stopped":false}]'
+respond "$d" 2 '{"foreground_process":null,"foreground_command":null,"output":""}'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = ambiguous ] || fail "an unattributable foreground must read ambiguous (got: $out)"
 pass "a pane whose foreground process cannot be attributed reports ambiguous, not dead"
 
 new_case agent-parked; d=$CASE_DIR
-respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555"}]'
-respond "$d" 2 '{"at":1,"event":"present","session":"11111111-2222-3333-4444-555555555555","state":null,"stopped":true}'
+respond "$d" 1 '[{"id":"11111111-2222-3333-4444-555555555555","stopped":true}]'
 out=$(adapter "$d" "fm_backend_thurbox_agent_state '$TARGET'")
 [ "$out" = dead ] || fail "a parked session must read dead, not missing (got: $out)"
 pass "a parked session reports dead, keeping its row and checkout out of missing-endpoint recovery"
 
-# thurbox 2.11.0 reports a parked session through `session get` IDENTICALLY to a
-# running one, so this case gives the adapter exactly what the real CLI gives it:
-# a perfectly ordinary row, followed by the capture failure that is the only
-# observable difference. An adapter that trusts the row calls this ready.
 new_case target-ready-parked; d=$CASE_DIR
-respond "$d" 1 "$SESSION_ROW"
-respond_exit "$d" 2 1 '{"error":"capture_pane_text: ... can'"'"'t find window: tb-fm-x"}'
+respond "$d" 1 '{"id":"11111111-2222-3333-4444-555555555555","state":"stopped","stopped":true}'
 out=$(adapter "$d" "fm_backend_thurbox_target_ready '$TARGET'; echo rc=\$?")
 assert_contains "$out" 'rc=1' "a parked session has no pane and must not be ready"
-pass "a parked session is not ready, even though its session row is indistinguishable from a running one"
+pass "a parked session is not a ready target, so no write can silently address nothing"
 
 new_case target-ready-running; d=$CASE_DIR
 respond "$d" 1 "$SESSION_ROW"
-respond "$d" 2 '{"output":"","cursor_row":0}'
 out=$(adapter "$d" "fm_backend_thurbox_target_ready '$TARGET'; echo rc=\$?")
-assert_contains "$out" 'rc=0' "a session with a readable pane must be ready"
-pass "a session whose pane reads is ready"
+assert_contains "$out" 'rc=0' "a running session must be ready"
+pass "a running session is a ready target"
 
 # --- the readiness gate leaves the caller able to address the session --------
 #
@@ -322,7 +320,6 @@ pass "a session whose pane reads is ready"
 
 new_case ready-then-write; d=$CASE_DIR
 respond "$d" 1 "$SESSION_ROW"
-respond "$d" 2 '{"output":"","cursor_row":0}'
 adapter "$d" "fm_backend_thurbox_send_literal '$TARGET' hello" >/dev/null 2>&1
 assert_log_args "a write gated on the readiness check must address the session the target names" \
   session send 11111111-2222-3333-4444-555555555555 hello
@@ -330,7 +327,6 @@ pass "a write gated on the readiness check still addresses the target's own sess
 
 new_case ready-then-key; d=$CASE_DIR
 respond "$d" 1 "$SESSION_ROW"
-respond "$d" 2 '{"output":"","cursor_row":0}'
 adapter "$d" "fm_backend_thurbox_send_key '$TARGET' Enter" >/dev/null 2>&1
 assert_log_args "a key gated on the readiness check must address the session the target names" \
   session key 11111111-2222-3333-4444-555555555555 enter

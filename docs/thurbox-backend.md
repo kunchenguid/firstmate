@@ -14,7 +14,9 @@ thurbox is cross-platform and works headless, so unlike cmux it is usable over S
 
 Prerequisites:
 
-- thurbox 2.11.0 or newer, providing `watch`, `session create --command/--arg/--env`, `--on-existing`, `session meta`, `session exec`, and `session stop`.
+- thurbox 2.11.1 or newer.
+  2.11.0 introduced every verb this backend calls - `watch`, `session create --command/--arg/--env`, `--on-existing`, `session meta`, `session exec`, `session stop` - but reported a parked session identically to a running one, so readiness and recovery could not tell them apart.
+  2.11.1 is the first release on which every read this adapter makes answers correctly.
 - `jq` for JSON responses.
 - Treehouse, which remains the worktree provider.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
@@ -171,27 +173,22 @@ A bare `session delete` only soft-deletes the row and leaves the pane running un
 
 Firstmate's tasks are created with `--repo-path` against an already-built Treehouse worktree, never with `--worktree-branch`, so thurbox owns no worktree for them and `--force` removes none.
 
-### Parked sessions are not visible to the read verbs
+### Parked sessions
 
-A parked session (`session stop`) keeps its row, checkout and conversation but loses its pane.
-thurbox 2.11.0 reports that session through `session get` and `session list` **identically to a running one**: same `state`, same `backend_id` still naming the window that no longer exists, and no `stopped` field on either read.
-Only `watch` carries the parked flag.
+A parked session (`session stop`) keeps its row, checkout and conversation but loses its pane, so no send, key, or capture can land on it.
+From 2.11.1 the session row says so directly: `stopped` is on both `session get` and `session list`, and `state` answers `stopped`.
 
-That shapes two adapter reads.
+`fm_backend_thurbox_target_ready` reads that flag, so a parked session is never a ready write target.
+`fm_backend_thurbox_agent_state` reads it off the inventory row it already holds and reports `dead` rather than `missing`, so recovery relaunches into the session instead of treating the endpoint as gone.
 
-`fm_backend_thurbox_target_ready` probes the pane with `session capture`, which fails on a parked session, rather than trusting the row.
-Gating on the row would call every parked session ready and let every write silently address nothing.
-
-`fm_backend_thurbox_agent_state` takes the authoritative answer from `watch --initial --session <uuid> --for-secs 1`, the only read that reports the flag.
-It reports a parked session as `dead` rather than `missing`, so recovery relaunches into it instead of treating the endpoint as gone.
-That read costs about a second, which is why only this recovery-grade caller pays for it.
+On 2.11.0 neither read could answer, which is what the version floor exists to refuse.
 
 ## Known gaps
 
 - **No secondmate spawns.** `--secondmate` is refused on this backend, matching cmux. The path is not verified.
 - **`session exec` does not carry the session's environment.** It sets the cwd and host but inherits the *caller's* environment, so `--env` values from `session create` are absent and the caller's own `THURBOX_SESSION` leaks into the child. A `thurbox-cli session signal` run through `session exec` would report state for the caller's session rather than the target's. The adapter does not use `session exec`; the pane's own environment is correct, and a pane created for a task carries that task's `THURBOX_SESSION`, not its parent's.
 - **Hook coverage requires thurbox to launch the agent.** See "Agent state and hook coverage" above. Native busy state is unavailable for Firstmate-launched agents until the hook payload can be applied to an externally launched one.
-- **A parked session is unreadable from `session get` and `session list`.** See "Parked sessions are not visible to the read verbs" above. The adapter works around it with a pane probe and a `watch` read; a cheap authoritative field on the ordinary read verbs would remove both.
+- **Native busy state still needs thurbox to launch the agent.** See "Agent state and hook coverage". From 2.11.1 `thurbox-cli agent launch-args <name>` reports the `command`, `args` and `env` thurbox would launch an agent with, which is the missing piece; the adapter does not apply them yet, so a firstmate-spawned agent still reports no hook state.
 
 ## Verification
 
