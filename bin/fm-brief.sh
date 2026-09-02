@@ -51,6 +51,12 @@
 # Ship briefs open with an explicitly numbered safety contract: 1 worktree
 # isolation, 2 base freshness, 3 branch creation. Nothing is read or written
 # until steps 1 and 2 pass.
+# Which base that check names depends on the delivery path: PR-based modes
+# (no-mistakes, direct-PR) compare against `origin/<default>` after exactly one
+# fetch, local-only compares against the clone's LOCAL default branch with no
+# network refresh, and a scout has no delivery mode so it prefers origin and
+# degrades to the local default. The default branch is always resolved from the
+# repository, never hard-coded to main.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -217,11 +223,17 @@ resolve_brief_repo() {  # <repo-name-or-directory>
   printf '%s\n' "$resolved"
 }
 
+# Reads the FULL ref, never the `--short` abbreviation: `--short` output is
+# ambiguity-dependent, so a clone that also holds a ref literally named
+# `origin/<default>` (a local branch or a tag) gets `remotes/origin/<default>`
+# back instead. An unparseable answer here is indistinguishable from an absent
+# `origin/HEAD`, which is the one case allowed to fall through to the
+# main/master guess, so this parse must never fail on a resolvable default.
 origin_default_branch_name() {  # <repo-dir>
   local repo=$1 ref
-  ref=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
+  ref=$(git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null) || return 1
   case "$ref" in
-    origin/*) printf '%s\n' "${ref#origin/}" ;;
+    refs/remotes/origin/*) printf '%s\n' "${ref#refs/remotes/origin/}" ;;
     *) return 1 ;;
   esac
 }
@@ -483,14 +495,14 @@ $step. **Check your base before starting work.** Refresh the remote exactly once
    \`git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF\`
    Only \`0\` passes against $BASE_DESCRIPTION.
    If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
-   If the count is not \`0\`, rebase onto \`$BASE_SHELL_REF\` before reading or writing anything.
+   If the count is not \`0\`, rebase onto \`$BASE_REF\` before reading or writing anything.
 EOF
   else
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_NO_FETCH_REASON; measure against the local branch:
    \`git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF\`
    Only \`0\` passes against $BASE_DESCRIPTION.
-   If the count is not \`0\`, rebase onto \`$BASE_SHELL_REF\` before reading or writing anything.
+   If the count is not \`0\`, rebase onto \`$BASE_REF\` before reading or writing anything.
 EOF
   fi
   BASE_FRESHNESS_SECTION=${BASE_FRESHNESS_SECTION%$'\n'}

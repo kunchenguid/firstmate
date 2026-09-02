@@ -486,6 +486,49 @@ test_absent_local_ref_for_origin_default_never_substitutes_another_branch() {
   pass "fm-brief.sh: an absent local ref for origin's default never substitutes another branch"
 }
 
+# `git symbolic-ref --short` abbreviates only while the result is unambiguous: a
+# clone that also holds a ref literally named `origin/<default>` gets
+# `remotes/origin/<default>` back instead. Reading the default branch through
+# that abbreviation turned a resolvable default into "no authority exists at
+# all" and silently substituted the local `main` - the exact wrong-base failure
+# this check exists to catch.
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
+test_ambiguous_origin_head_still_resolves_the_real_default_branch() {
+  local home ambiguous setup rules
+  home="$TMP_ROOT/ambiguous-origin-head-home"
+  ambiguous="$BRIEF_PROJECTS/ambiguous-origin-head"
+  mkdir -p "$home/data"
+
+  fm_git_init_commit "$ambiguous"
+  git -C "$ambiguous" branch -M develop
+  fm_git_add_origin "$ambiguous" "$ambiguous.origin.git"
+  git -C "$ambiguous" fetch --quiet origin
+  git -C "$ambiguous" remote set-head origin --auto >/dev/null
+  git -C "$ambiguous" branch main
+  git -C "$ambiguous" tag origin/develop
+  [ "$(git -C "$ambiguous" symbolic-ref --quiet --short refs/remotes/origin/HEAD)" = 'remotes/origin/develop' ] \
+    || fail "fixture did not make the --short abbreviation of origin/HEAD ambiguous"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ambiguous-head ambiguous-origin-head --mode local-only >/dev/null 2>&1 \
+    || fail "an ambiguous origin/HEAD abbreviation must not fail the scaffold"
+  setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/ambiguous-head/brief.md")
+  rules=$(sed -n '/^# Rules$/,/^# Firstmate instruction inbox$/p' "$home/data/ambiguous-head/brief.md")
+
+  assert_contains "$setup" "git rev-list --count \$(git merge-base HEAD 'develop')..'develop'" \
+    "an ambiguous origin/HEAD abbreviation stopped the brief measuring against the real default branch"
+  assert_contains "$setup" 'Only `0` passes against your local default branch `develop`.' \
+    "the brief did not name the real default branch in its zero-only criterion"
+  assert_not_contains "$setup" 'your local default branch `main`' \
+    "an ambiguous origin/HEAD abbreviation substituted main for the real default branch"
+  assert_not_contains "$setup" 'git rev-list --count $(git merge-base HEAD <default>)..<default>' \
+    "a resolvable default branch was deferred to the runtime fallback"
+  assert_contains "$rules" 'firstmate handles the merge into local `develop`' \
+    "Rule 1 named a branch other than the real default"
+  assert_not_contains "$rules" 'merge into local `main`' \
+    "Rule 1 substituted main for the real default branch"
+  pass "fm-brief.sh: an ambiguous origin/HEAD abbreviation still resolves the real default branch"
+}
+
 # The generated brief must not contradict itself: a local-only task whose Setup
 # rebases onto `release` cannot tell the worker firstmate merges into `main`.
 # shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
@@ -499,8 +542,10 @@ test_local_only_rule_names_the_resolved_default_branch() {
   setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/rule-local/brief.md")
   rules=$(sed -n '/^# Rules$/,/^# Firstmate instruction inbox$/p' "$home/data/rule-local/brief.md")
 
-  assert_contains "$setup" "rebase onto \`'release'\`" \
+  assert_contains "$setup" "rebase onto \`release\`" \
     "the local-only fixture no longer resolves its non-main default branch"
+  assert_not_contains "$setup" "rebase onto \`'release'\`" \
+    "the prose rebase instruction leaked the shell quoting that only the executed command needs"
   assert_contains "$rules" 'firstmate handles the merge into local `release`' \
     "Rule 1 named a branch other than the resolved local default"
   assert_not_contains "$rules" 'merge into local `main`' \
@@ -1181,6 +1226,7 @@ test_unresolvable_repo_label_still_mandates_the_base_check
 test_missing_origin_head_never_relabels_the_current_branch
 test_non_root_directory_never_resolves_to_its_enclosing_repo
 test_absent_local_ref_for_origin_default_never_substitutes_another_branch
+test_ambiguous_origin_head_still_resolves_the_real_default_branch
 test_local_only_rule_names_the_resolved_default_branch
 test_scout_local_fallback_uses_kind_neutral_wording
 test_unresolved_scout_fallback_degrades_to_a_local_default
