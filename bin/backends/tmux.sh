@@ -98,6 +98,53 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
   printf '%s\n' "$wid"
 }
 
+# fm_backend_tmux_window_ids_named: every live window id in <session> whose
+# name is exactly <window-name>. Names are firstmate task labels (fm-<id>), so
+# a tab-separated #{window_id}\t#{window_name} inventory is unambiguous.
+fm_backend_tmux_window_ids_named() {  # <session> <window-name>
+  local ses=$1 wname=$2
+  tmux list-windows -t "$ses" -F $'#{window_id}\t#{window_name}' \
+    | awk -F '\t' -v n="$wname" '$2==n {print $1}'
+}
+
+# fm_backend_tmux_adopt_or_create_task: missing-endpoint reconstruction's
+# creation boundary. `new-window -S` is one tmux-server command: if a window
+# of that name already exists it is selected and -d makes the client a no-op
+# (no second window); otherwise it creates. That is the documented
+# select-or-create primitive; list-then-new-window is not. Prints
+# "created <window-id>" or "adopted <window-id>". Multiple same-name windows
+# after the command refuse rather than guessing which restored identity won.
+fm_backend_tmux_adopt_or_create_task() {  # <session> <window-name> <proj-abs>
+  local ses=$1 wname=$2 proj_abs=$3 wid ids id_count
+  wid=$(tmux new-window -dPS -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  if [ -n "$wid" ]; then
+    # Pin before the uniqueness inventory. automatic-rename can otherwise
+    # rewrite the name before list-windows runs, so a just-created window
+    # would look missing by label.
+    tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+    tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+    tmux rename-window -t "$wid" "$wname" 2>/dev/null || true
+  fi
+  ids=$(fm_backend_tmux_window_ids_named "$ses" "$wname") || return 1
+  id_count=$(printf '%s\n' "$ids" | awk 'NF{n++} END{print n+0}')
+  if [ "$id_count" -gt 1 ]; then
+    echo "error: window $ses:$wname is not a unique restored target after select-or-create; refusing rather than picking a duplicate" >&2
+    return 1
+  fi
+  if [ -n "$wid" ]; then
+    [ "$id_count" -eq 1 ] && [ "$ids" = "$wid" ] \
+      || { echo "error: tmux select-or-create printed $wid but inventory for $ses:$wname is '${ids:-empty}'" >&2; return 1; }
+    printf 'created %s\n' "$wid"
+    return 0
+  fi
+  [ "$id_count" -eq 1 ] \
+    || { echo "error: tmux select-or-create adopted $ses:$wname but the window is gone" >&2; return 1; }
+  wid=$ids
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  printf 'adopted %s\n' "$wid"
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.

@@ -96,12 +96,18 @@ A second, baseline-gated conversion covers harnesses whose mid-turn screen the c
 Without that baseline, an `unknown` verdict is preserved untouched, so a busy-looking pane can never convert an unread composer into a confirmation.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 
+### Missing-endpoint reconstruction
+
+Missing-endpoint reconstruction uses tmux's single-command `new-window -S` select-or-create.
+[`agent-control.md`](agent-control.md) owns the relaunch transaction.
+
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh
+tests/fm-control-relaunch.test.sh
 tests/fm-tmux-agent-liveness.test.sh
 tests/fm-harness-liveness-drift-live-e2e.test.sh
 tests/fm-composer-ghost.test.sh

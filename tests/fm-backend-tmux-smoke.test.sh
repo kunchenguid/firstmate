@@ -73,6 +73,26 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# --- select-or-create reconstruction primitive (new-window -S) -------------
+
+ADOPT_NEW="fm-smoke-adopt"
+adopt_created=$(fm_backend_tmux_adopt_or_create_task "$SESSION" "$ADOPT_NEW" "$HOME") \
+  || fail "fm_backend_tmux_adopt_or_create_task failed to create a missing window"
+case "$adopt_created" in
+  created\ @*) : ;;
+  *) fail "creating a missing window should print 'created <window-id>', got '$adopt_created'" ;;
+esac
+adopt_again=$(fm_backend_tmux_adopt_or_create_task "$SESSION" "$ADOPT_NEW" "$HOME") \
+  || fail "fm_backend_tmux_adopt_or_create_task failed to adopt an existing window"
+case "$adopt_again" in
+  adopted\ @*) : ;;
+  *) fail "an existing same-name window should print 'adopted <window-id>', got '$adopt_again'" ;;
+esac
+adopt_count=$(tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -cx "$ADOPT_NEW" || true)
+[ "$adopt_count" = 1 ] \
+  || fail "select-or-create must leave exactly one window named $ADOPT_NEW, got $adopt_count"
+pass "real tmux: fm_backend_tmux_adopt_or_create_task creates when missing and adopts the same-name window without duplicating it"
+
 # --- send text + Enter -------------------------------------------------------
 
 # A newly-created interactive shell can exist before its startup files and line

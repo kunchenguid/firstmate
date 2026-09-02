@@ -55,6 +55,9 @@
 # verification doc) uses LABEL matching (fm-<id> tab labels), never trusts a
 # stored pane id blindly: fm_backend_herdr_list_live. The presentation journal
 # is deliberately excluded from that path.
+# Unpublished tab creates record exact identity at state/<id>.herdr-create-attempt
+# before the create CLI; fm_backend_herdr_create_task owns that format and
+# exact-id cleanup.
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
@@ -1984,6 +1987,16 @@ fm_backend_herdr_agent_alive() {  # <target>
 # This mirrors fm_backend_herdr_workspace_prune_seeded_default_tab's own
 # create-before-close safety argument.
 #
+# Create-attempt identity is published under state/<id>.herdr-create-attempt
+# before the tab create CLI runs, so a successful create that later fails to
+# parse or clean up never returns an untraceable resource. Cleanup uses only
+# exact tab/pane ids from that response. The journal is retired only after a
+# successful query proves that exact id gone: a tab list that omits the tab, or
+# a pane get whose structured body is pane_not_found
+# (fm_backend_herdr_pane_presence_state). Transport, permission, socket,
+# session, parse, and protocol failures are unknown and keep the record.
+# Label-based deletion is never used.
+#
 # --no-focus: verified tab create never focuses by default regardless of
 # sibling tabs, so this is defense in depth rather than a behavior change.
 # <seeded_default_tab_id> (4th arg, may be empty) is exactly the value
@@ -1997,8 +2010,157 @@ fm_backend_herdr_agent_alive() {  # <target>
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
+FM_BACKEND_HERDR_CREATE_ATTEMPT_SUFFIX=".herdr-create-attempt"
+FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE=
+FM_BACKEND_HERDR_CREATE_ATTEMPT_RESPONSE=
+
+fm_backend_herdr_create_attempt_task_id() {  # <label>
+  local label=$1
+  case "$label" in
+    fm-[A-Za-z0-9._-]*)
+      printf '%s' "${label#fm-}"
+      ;;
+    *)
+      printf 'anon'
+      ;;
+  esac
+}
+
+fm_backend_herdr_create_attempt_path() {  # <state-dir> <task-id>
+  printf '%s/%s%s' "$1" "$2" "$FM_BACKEND_HERDR_CREATE_ATTEMPT_SUFFIX"
+}
+
+fm_backend_herdr_create_attempt_begin() {  # <session> <workspace-id> <label>
+  local session=$1 wsid=$2 label=$3 state id journal token tmp
+  FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE=
+  FM_BACKEND_HERDR_CREATE_ATTEMPT_RESPONSE=
+  state="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  id=$(fm_backend_herdr_create_attempt_task_id "$label")
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*)
+      echo "error: invalid herdr create-attempt id derived from label '$label'" >&2
+      return 1
+      ;;
+  esac
+  mkdir -p "$state" || {
+    echo "error: could not create $state for a herdr create-attempt record" >&2
+    return 1
+  }
+  journal=$(fm_backend_herdr_create_attempt_path "$state" "$id")
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    echo "error: a herdr create-attempt record already exists at $journal; inspect that exact identity before creating another tab" >&2
+    return 1
+  fi
+  token=$(fm_backend_herdr_projection_id) || {
+    echo "error: could not generate a herdr create-attempt id" >&2
+    return 1
+  }
+  tmp=$(mktemp "$state/.${id}.herdr-create-attempt.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! {
+    printf 'version=1\n'
+    printf 'task_id=%s\n' "$id"
+    printf 'attempt_id=%s\n' "$token"
+    printf 'session=%s\n' "$session"
+    printf 'workspace_id=%s\n' "$wsid"
+    printf 'label=%s\n' "$label"
+    printf 'phase=pre-create\n'
+    printf 'tab_id=\n'
+    printf 'pane_id=\n'
+    printf 'create_status=\n'
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! ln "$tmp" "$journal" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "error: a herdr create-attempt record appeared concurrently at $journal; refusing tab create" >&2
+    return 1
+  fi
+  rm -f "$tmp"
+  FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE=$journal
+  FM_BACKEND_HERDR_CREATE_ATTEMPT_RESPONSE="${journal}.response"
+  return 0
+}
+
+fm_backend_herdr_create_attempt_update() {  # <phase> [tab_id] [pane_id] [create_status]
+  local journal=$FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE
+  local phase=$1 tab_id=${2:-} pane_id=${3:-} create_status=${4:-} tmp
+  [ -n "$journal" ] && [ -f "$journal" ] || return 1
+  tmp=$(mktemp "${journal}.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  {
+    grep -v -e '^phase=' -e '^tab_id=' -e '^pane_id=' -e '^create_status=' "$journal" || true
+    printf 'phase=%s\n' "$phase"
+    printf 'tab_id=%s\n' "$tab_id"
+    printf 'pane_id=%s\n' "$pane_id"
+    printf 'create_status=%s\n' "$create_status"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$journal"
+}
+
+fm_backend_herdr_create_attempt_store_response() {  # <bytes>
+  local dest=$FM_BACKEND_HERDR_CREATE_ATTEMPT_RESPONSE
+  [ -n "$dest" ] || return 1
+  printf '%s' "$1" > "$dest"
+}
+
+fm_backend_herdr_create_attempt_retire() {
+  local journal=$FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE
+  [ -n "$journal" ] || return 0
+  rm -f "$journal" "${journal}.response"
+  FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE=
+  FM_BACKEND_HERDR_CREATE_ATTEMPT_RESPONSE=
+}
+
+fm_backend_herdr_create_task_tab_absent() {  # <session> <workspace-id> <tab-id>
+  local session=$1 wsid=$2 tab_id=$3 list
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid") || return 1
+  printf '%s' "$list" | jq -e --arg want "$tab_id" \
+    '((.result.tabs | type) == "array") and (([.result.tabs[].tab_id] | index($want)) == null)' >/dev/null 2>&1
+}
+
+# Close only an exact tab or pane id, then prove it is gone. Close failure is
+# never discarded. Ambiguous identity (neither id) does not delete anything.
+# Pane absence is only the structured pane_not_found body; any other pane-get
+# outcome is unknown and keeps the create-attempt record.
+fm_backend_herdr_create_task_cleanup() {  # <session> <workspace-id> <tab-id> <pane-id>
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 presence
+  if [ -n "$tab_id" ]; then
+    if ! fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null; then
+      echo "error: herdr tab close failed for exact tab $tab_id in workspace $wsid (session $session)" >&2
+      return 1
+    fi
+    if ! fm_backend_herdr_create_task_tab_absent "$session" "$wsid" "$tab_id"; then
+      echo "error: herdr tab $tab_id was closed but is still present in workspace $wsid (session $session)" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if [ -n "$pane_id" ]; then
+    if ! fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null; then
+      echo "error: herdr pane close failed for exact pane $pane_id (session $session)" >&2
+      return 1
+    fi
+    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+    case "$presence" in
+      dead) return 0 ;;
+      present)
+        echo "error: herdr pane $pane_id was closed but is still present (session $session)" >&2
+        return 1
+        ;;
+      *)
+        echo "error: herdr pane $pane_id absence could not be proved after close (session $session); the create-attempt record is $FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE" >&2
+        return 1
+        ;;
+    esac
+  fi
+  echo "error: herdr create produced no exact tab or pane id to clean up; the create-attempt record is $FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE" >&2
+  return 1
+}
+
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs create_status journal
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2020,10 +2182,52 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
 $dup_tabs
 EOF
   fi
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  fm_backend_herdr_create_attempt_begin "$session" "$wsid" "$label" || return 1
+  journal=$FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null)
+  create_status=$?
+  fm_backend_herdr_create_attempt_store_response "$out" || true
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if ! fm_backend_herdr_create_attempt_update created "$tab_id" "$pane_id" "$create_status"; then
+    echo "error: could not record herdr create-attempt identity at $journal" >&2
+    if [ -n "$tab_id" ] || [ -n "$pane_id" ]; then
+      if ! fm_backend_herdr_create_task_cleanup "$session" "$wsid" "$tab_id" "$pane_id"; then
+        {
+          printf 'phase=cleanup-unproven\n'
+          printf 'tab_id=%s\n' "$tab_id"
+          printf 'pane_id=%s\n' "$pane_id"
+          printf 'create_status=%s\n' "$create_status"
+        } >> "$journal" 2>/dev/null || true
+        echo "error: could not record create-attempt identity and exact cleanup could not be proved; recovery record is $journal" >&2
+        return 1
+      fi
+      fm_backend_herdr_create_attempt_retire
+    fi
+    return 1
+  fi
+  if [ "$create_status" -ne 0 ]; then
+    if [ -n "$tab_id" ] || [ -n "$pane_id" ]; then
+      if ! fm_backend_herdr_create_task_cleanup "$session" "$wsid" "$tab_id" "$pane_id"; then
+        fm_backend_herdr_create_attempt_update cleanup-unproven "$tab_id" "$pane_id" "$create_status" || true
+        echo "error: herdr tab create failed and exact cleanup could not be proved; recovery record is $journal" >&2
+        return 1
+      fi
+      fm_backend_herdr_create_attempt_retire
+    else
+      echo "error: herdr tab create failed with no exact tab or pane id; recovery record is $journal" >&2
+      return 1
+    fi
+    echo "error: herdr tab create failed for '$label' in workspace $wsid (session $session)" >&2
+    return 1
+  fi
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+    if ! fm_backend_herdr_create_task_cleanup "$session" "$wsid" "$tab_id" "$pane_id"; then
+      fm_backend_herdr_create_attempt_update cleanup-unproven "$tab_id" "$pane_id" "$create_status" || true
+      echo "error: could not parse tab/pane id from herdr tab create output; recovery record is $journal" >&2
+      return 1
+    fi
+    fm_backend_herdr_create_attempt_retire
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
@@ -2031,15 +2235,36 @@ EOF
   if [ -n "$dup_tab_ids" ]; then
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
-      fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1 || true
+      if ! fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null; then
+        if ! fm_backend_herdr_create_task_cleanup "$session" "$wsid" "$tab_id" "$pane_id"; then
+          fm_backend_herdr_create_attempt_update cleanup-unproven "$tab_id" "$pane_id" "$create_status" || true
+          echo "error: herdr husk close failed for $dup and replacement cleanup could not be proved; recovery record is $journal" >&2
+          return 1
+        fi
+        fm_backend_herdr_create_attempt_retire
+        echo "error: herdr husk close failed for exact tab $dup in workspace $wsid (session $session)" >&2
+        return 1
+      fi
     done <<EOF
 $dup_tab_ids
 EOF
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+      if ! fm_backend_herdr_create_task_cleanup "$session" "$wsid" "$tab_id" "$pane_id"; then
+        fm_backend_herdr_create_attempt_update cleanup-unproven "$tab_id" "$pane_id" "$create_status" || true
+        echo "error: could not verify herdr husk removal and replacement cleanup could not be proved; recovery record is $journal" >&2
+        return 1
+      fi
+      fm_backend_herdr_create_attempt_retire
       echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
       return 1
     }
     if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+      if ! fm_backend_herdr_create_task_cleanup "$session" "$wsid" "$tab_id" "$pane_id"; then
+        fm_backend_herdr_create_attempt_update cleanup-unproven "$tab_id" "$pane_id" "$create_status" || true
+        echo "error: could not parse herdr tab list after husk close and replacement cleanup could not be proved; recovery record is $journal" >&2
+        return 1
+      fi
+      fm_backend_herdr_create_attempt_retire
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
       return 1
     fi
@@ -2047,10 +2272,17 @@ EOF
       '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
+      if ! fm_backend_herdr_create_task_cleanup "$session" "$wsid" "$tab_id" "$pane_id"; then
+        fm_backend_herdr_create_attempt_update cleanup-unproven "$tab_id" "$pane_id" "$create_status" || true
+        echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs and replacement cleanup could not be proved; recovery record is $journal" >&2
+        return 1
+      fi
+      fm_backend_herdr_create_attempt_retire
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     fi
   fi
+  fm_backend_herdr_create_attempt_retire
   printf '%s %s' "$tab_id" "$pane_id"
 }
 

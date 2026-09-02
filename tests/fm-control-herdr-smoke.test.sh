@@ -9,12 +9,14 @@
 # an agent is running, and therefore whether a lifecycle verb may act at all,
 # comes from herdr's own agent registry.
 #
-# No real agent is launched. herdr's `pane report-agent` is the same registry
-# the adapter reads, so registering and not registering an agent on a plain
-# shell pane exercises exactly the classification the control plane gates on.
+# No real coding agent is launched. herdr's `pane report-agent` is the same
+# registry the adapter reads, so registering and not registering an agent on a
+# plain shell pane exercises exactly the classification the control plane gates
+# on. A missing Herdr endpoint is also exercised to prove reconstruction refuses
+# until session restoration can be excluded atomically.
 #
 # Always runs on a private, named, throwaway lab session, never the default
-# one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
+# one (bin/fm-herdr-lab.sh; the 2026-07-02 incident). Skips cleanly
 # when herdr or jq is missing.
 set -u
 
@@ -30,15 +32,16 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 . "$ROOT/tests/herdr-test-safety.sh"
 herdr_forget_inherited_pane
 
-SESSION="fm-lab-control-smoke-$$"
+LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+SESSION=$("$LAB_HELPER" name control-smoke)
 export HERDR_SESSION="$SESSION"
 SCRATCH=
 cleanup_all() {
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
-  herdr_safe_stop_and_delete "$SESSION"
+  "$LAB_HELPER" teardown "$SESSION" >/dev/null 2>&1 || true
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+"$LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
@@ -55,6 +58,19 @@ printf '# proj\n' > "$PROJ/README.md"
 git -C "$PROJ" add README.md
 git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 git -C "$PROJ" worktree add --quiet -b hsmoke "$WT"
+printf 'uncommitted\n' > "$WT/keep-me.txt"
+
+mkdir -p "$SCRATCH/fakebin"
+cat > "$SCRATCH/fakebin/claude" <<SH
+#!/usr/bin/env bash
+pane=\${HERDR_PANE_ID:-}
+if [ -n "\$pane" ]; then
+  "$LAB_HELPER" run "$SESSION" pane report-agent "\$pane" --source fm-control-smoke \
+    --agent claude --state idle >/dev/null 2>&1 || true
+fi
+exec sleep 3600
+SH
+chmod +x "$SCRATCH/fakebin/claude"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -90,8 +106,9 @@ EOF
 } > "$HOME_DIR/state/hsmoke.meta"
 
 run_control() {
-  env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" \
-    FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=2 \
+  env PATH="$SCRATCH/fakebin:$PATH" FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" \
+    FM_SPAWN_NO_GUARD=1 \
+    FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=2 FM_CONTROL_LAUNCH_WAIT=20 \
     "$ROOT/bin/fm-control.sh" "$@" 2>&1
 }
 
@@ -115,8 +132,9 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 
 # --- a registered agent: classification flips, and the verbs follow ---------
 
-herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
-  --state idle --session "$SESSION" >/dev/null 2>&1 \
+"$LAB_HELPER" run "$SESSION" pane report-agent "$PANE_ID" --source fm-control-smoke \
+  --agent fm-control-smoke-agent --state idle \
+  >/dev/null 2>&1 \
   || fail "could not register a live agent on the task pane"
 
 STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
@@ -129,7 +147,7 @@ case "$OUT" in
 esac
 pass "real herdr: interrupt delivers the harness's key and proves the agent survived it"
 
-herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+"$LAB_HELPER" run "$SESSION" pane get "$PANE_ID" >/dev/null 2>&1 \
   || fail "the control plane must never remove the endpoint it was operating on"
 [ -d "$WT" ] || fail "the control plane must never remove the task's local copy"
 pass "real herdr: no control verb removed the endpoint or the task's local copy"
@@ -146,4 +164,20 @@ case "$OUT" in
 esac
 pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
 
+# --- missing pane: refuse non-atomic reconstruction -------------------------
+
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true
+STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
+[ "$STATE" = missing ] || fail "closing the pane should classify it missing, got '$STATE'"
+cp "$HOME_DIR/state/hsmoke.meta" "$SCRATCH/meta.before"
+if OUT=$(run_control hsmoke relaunch --note "herdr pane gone, resume" 2>&1); then
+  fail "missing-pane Herdr relaunch should refuse until restore exclusion is atomic: $OUT"
+fi
+case "$OUT" in
+  *"cannot atomically exclude endpoint restoration"*) : ;;
+  *) fail "missing-pane refusal should name the restore race, got: $OUT" ;;
+esac
+cmp -s "$HOME_DIR/state/hsmoke.meta" "$SCRATCH/meta.before" \
+  || fail "a refused missing-pane relaunch must keep the prior durable record"
+[ -f "$WT/keep-me.txt" ] || fail "a refused missing-pane relaunch must keep uncommitted work"
+pass "real herdr: a missing pane refuses non-atomic reconstruction"

@@ -17,6 +17,10 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. A positively missing recorded endpoint is already-stopped for relaunch:
+#      reconstruction uses the backend creation path, revalidates before
+#      replacement, preserves uncommitted work, and never duplicates a live
+#      agent.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -76,7 +80,9 @@ case "${1:-}" in
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
         *'encode launch-brief'*)
-          cat "$D/becomes" > "$D/command"
+          if [ -z "${FM_FAKE_NEVER_STARTS:-}" ]; then
+            cat "$D/becomes" > "$D/command"
+          fi
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
       esac
@@ -95,7 +101,7 @@ case "${1:-}" in
       esac
     fi
     exit 0 ;;
-  display-message)
+    display-message)
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
@@ -106,11 +112,102 @@ case "${1:-}" in
             /bin/sleep 1
           fi
           cat "$D/cwd"; printf '\n'; exit 0 ;;
+        '#S') printf '%s\n' "${FM_FAKE_SESSION:-fmses}"; exit 0 ;;
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  list-windows)
+    if [ -n "${FM_RELAUNCH_STOP_REVALIDATE:-}" ] && [ -n "${FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE:-}" ]; then
+      : > "$D/windows"
+    fi
+    if [ -n "${FM_RELAUNCH_PRE_REPLACE:-}" ] && [ -n "${FM_FAKE_ENDPOINT_REAPPEAR_READY:-}" ]; then
+      : > "$FM_FAKE_ENDPOINT_REAPPEAR_READY"
+      while [ ! -e "$FM_FAKE_ENDPOINT_REAPPEAR_RELEASE" ]; do /bin/sleep 0.01; done
+    fi
+    format=
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -F) format=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$format" = $'#{window_id}\t#{window_name}' ]; then
+      n=0
+      [ -f "$D/windows" ] || exit 0
+      while IFS= read -r wname; do
+        [ -n "$wname" ] || continue
+        n=$((n + 1))
+        printf '@%s\t%s\n' "$n" "$wname"
+      done < "$D/windows"
+      exit 0
+    fi
+    [ -f "$D/windows" ] && cat "$D/windows"
+    exit 0 ;;
+  has-session) exit 0 ;;
+  new-session) exit 0 ;;
+  new-window)
+    shift
+    name= cwd= select_existing=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -n) name=$2; shift 2 ;;
+        -c) cwd=$2; shift 2 ;;
+        -F) shift 2 ;;
+        -*)
+          flags=${1#-}
+          while [ -n "$flags" ]; do
+            ch=${flags%"${flags#?}"}
+            flags=${flags#?}
+            [ "$ch" = S ] && select_existing=1
+          done
+          shift ;;
+        *) shift ;;
+      esac
+    done
+    [ -z "${FM_FAKE_CREATE_FAIL:-}" ] || exit 1
+    if [ -n "${FM_FAKE_RESTORE_ON_CREATE:-}" ]; then
+      [ -n "$name" ] && printf '%s\n' "$name" >> "$D/windows"
+      if [ -n "${FM_FAKE_RESTORE_DUPLICATE:-}" ]; then
+        [ -n "$name" ] && printf '%s\n' "$name" >> "$D/windows"
+      fi
+      printf '%s\n' "${FM_FAKE_RESTORE_AGENT:-zsh}" > "$D/command"
+      : > "$D/restored-on-create"
+    fi
+    if [ "$select_existing" = 1 ] && [ -n "$name" ] && grep -Fqx "$name" "$D/windows" 2>/dev/null; then
+      printf '%s\n' "$name" > "$D/adopted"
+      exit 0
+    fi
+    [ -n "$name" ] && printf '%s\n' "$name" >> "$D/windows"
+    [ -n "$cwd" ] && printf '%s' "$cwd" > "$D/cwd"
+    printf 'zsh' > "$D/command"
+    printf '%s\n' "$name" > "$D/created"
+    [ -n "$cwd" ] && printf '%s\n' "$cwd" > "$D/created-cwd"
+    n=$(grep -c . "$D/windows" 2>/dev/null || echo 0)
+    printf '@%s\n' "$n"
+    exit 0 ;;
+  set-window-option) exit 0 ;;
+  kill-window)
+    shift
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    name=${target##*:}
+    name=${name#=}
+    if [ -n "$name" ] && [ -f "$D/windows" ]; then
+      grep -Fxv "$name" "$D/windows" > "$D/windows.tmp" || true
+      mv "$D/windows.tmp" "$D/windows"
+    fi
+    : > "$D/killed"
+    printf '%s\n' "$name" >> "$D/killed"
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -173,6 +270,14 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_CREATE_FAIL="${FM_FAKE_CREATE_FAIL:-}" \
+    FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE="${FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE:-}" \
+    FM_FAKE_ENDPOINT_REAPPEAR_READY="${FM_FAKE_ENDPOINT_REAPPEAR_READY:-}" \
+    FM_FAKE_ENDPOINT_REAPPEAR_RELEASE="${FM_FAKE_ENDPOINT_REAPPEAR_RELEASE:-}" \
+    FM_FAKE_RESTORE_ON_CREATE="${FM_FAKE_RESTORE_ON_CREATE:-}" \
+    FM_FAKE_RESTORE_AGENT="${FM_FAKE_RESTORE_AGENT:-}" \
+    FM_FAKE_RESTORE_DUPLICATE="${FM_FAKE_RESTORE_DUPLICATE:-}" \
+    FM_FAKE_NEVER_STARTS="${FM_FAKE_NEVER_STARTS:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -180,6 +285,12 @@ run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_FAKE_CREATE_FAIL="${FM_FAKE_CREATE_FAIL:-}" \
+    FM_FAKE_RESTORE_ON_CREATE="${FM_FAKE_RESTORE_ON_CREATE:-}" \
+    FM_FAKE_RESTORE_AGENT="${FM_FAKE_RESTORE_AGENT:-}" \
+    FM_FAKE_RESTORE_DUPLICATE="${FM_FAKE_RESTORE_DUPLICATE:-}" \
+    FM_FAKE_NEVER_STARTS="${FM_FAKE_NEVER_STARTS:-}" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -1315,7 +1426,8 @@ test_spawn_relaunch_refuses_a_live_agent() {
   add_ship_task "$dir" rl15 claude
   out=$(run_spawn "$dir" rl15 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "relaunching into a live endpoint should refuse"
-  assert_contains "$out" "positively agent-free endpoint" "the refusal should demand an agent-free endpoint"
+  assert_contains "$out" "positively agent-free or authoritatively missing recorded endpoint" \
+    "the refusal should demand an agent-free or missing endpoint"
   assert_contains "$out" "fm-control.sh rl15 exit" "the refusal should point at the way to stop it"
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
@@ -1477,6 +1589,289 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# --- 7. missing-endpoint reconstruction -------------------------------------
+
+mark_endpoint_missing() {  # <case-dir>
+  : > "$1/fake/windows"
+}
+
+test_missing_endpoint_relaunch_reconstructs_and_preserves_identity() {
+  local dir out rc
+  dir=$(new_case missing-ok rl50)
+  add_ship_task "$dir" rl50 claude
+  mark_endpoint_missing "$dir"
+  out=$(run_control "$dir" rl50 relaunch --note "endpoint vanished, resume the fix"); rc=$?
+  expect_code 0 "$rc" "missing-endpoint relaunch should reconstruct"$'\n'"$out"
+  assert_contains "$out" "relaunched rl50 harness=claude from=claude" "the outcome should name the transition"
+  [ "$(meta_field "$dir" rl50 window)" = "fmses:fm-rl50" ] \
+    || fail "tmux reconstruction should keep the recorded window name, got '$(meta_field "$dir" rl50 window)'"
+  [ "$(meta_field "$dir" rl50 worktree)" = "$dir/wt" ] \
+    || fail "the worktree must be reused, not reallocated"
+  [ "$(meta_field "$dir" rl50 kind)" = ship ] || fail "kind must survive reconstruction"
+  [ "$(journal_field "$dir" rl50 prior_endpoint_state)" = missing ] \
+    || fail "the journal should record that the prior endpoint was missing"
+  [ "$(journal_field "$dir" rl50 exit_result)" = already-stopped ] \
+    || fail "a missing endpoint should be treated as already-stopped"
+  [ "$(cat "$dir/fake/created")" = "fm-rl50" ] \
+    || fail "reconstruction should create the replacement window"
+  [ "$(cat "$dir/fake/created-cwd")" = "$dir/wt" ] \
+    || fail "the replacement window must start in the recorded worktree"
+  assert_no_grep "/exit" "$dir/fake/literal" "a missing endpoint must receive no exit command"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  pass "fm-control relaunch: a missing endpoint is reconstructed into the same worktree"
+}
+
+test_dead_endpoint_disappearing_during_relaunch_stop_still_recovers() {
+  local dir out rc
+  dir=$(new_case dead-disappears rl59)
+  add_ship_task "$dir" rl59 claude
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE=1 \
+    run_control "$dir" rl59 relaunch --note "endpoint disappeared after stop proof"); rc=$?
+  expect_code 0 "$rc" "a proven-dead endpoint that disappears during relaunch stop should recover"$'\n'"$out"
+  [ "$(journal_field "$dir" rl59 prior_endpoint_state)" = dead ] \
+    || fail "the transaction should retain the initial dead-endpoint proof"
+  [ "$(journal_field "$dir" rl59 exit_result)" = already-stopped ] \
+    || fail "the relaunch-only stop should accept dead becoming missing"
+  [ "$(cat "$dir/fake/created")" = "fm-rl59" ] \
+    || fail "the replacement endpoint should be reconstructed"
+  pass "fm-control relaunch: a proven-dead endpoint may disappear before replacement"
+}
+
+test_missing_endpoint_relaunch_preserves_uncommitted_work() {
+  local dir head
+  dir=$(new_case missing-dirty rl51)
+  add_ship_task "$dir" rl51 claude
+  printf 'scratch\n' > "$dir/wt/uncommitted.txt"
+  head=$(git -C "$dir/wt" rev-parse HEAD)
+  mark_endpoint_missing "$dir"
+  run_control "$dir" rl51 relaunch --note "keep the scratch file" >/dev/null
+  [ "$(journal_field "$dir" rl51 worktree_head)" = "$head" ] \
+    || fail "the checkpoint should record the head it preserved"
+  [ "$(journal_field "$dir" rl51 worktree_dirty)" = yes ] \
+    || fail "the checkpoint should record that uncommitted work was present"
+  [ -f "$dir/wt/uncommitted.txt" ] || fail "uncommitted work must survive missing-endpoint reconstruction"
+  [ "$(cat "$dir/wt/uncommitted.txt")" = "scratch" ] \
+    || fail "uncommitted contents must be byte-identical after reconstruction"
+  pass "fm-control relaunch: missing-endpoint reconstruction preserves uncommitted work"
+}
+
+test_missing_endpoint_relaunch_repeats_safely() {
+  local dir out rc
+  dir=$(new_case missing-repeat rl52)
+  add_ship_task "$dir" rl52 claude
+  mark_endpoint_missing "$dir"
+  out=$(run_control "$dir" rl52 relaunch --note "first recovery"); rc=$?
+  expect_code 0 "$rc" "first missing recovery should succeed"$'\n'"$out"
+  mark_endpoint_missing "$dir"
+  printf 'zsh' > "$dir/fake/command"
+  : > "$dir/fake/literal"
+  rm -f "$dir/fake/created"
+  out=$(run_control "$dir" rl52 relaunch --note "second recovery"); rc=$?
+  expect_code 0 "$rc" "repeated missing recovery should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl52 worktree)" = "$dir/wt" ] \
+    || fail "repeated recovery must keep the original worktree"
+  [ "$(cat "$dir/fake/created")" = "fm-rl52" ] \
+    || fail "the second recovery should reconstruct again"
+  pass "fm-control relaunch: missing-endpoint recovery can run more than once"
+}
+
+test_missing_endpoint_reappear_as_live_refuses_duplicate() {
+  local dir out rc control_pid i=0 ready release
+  dir=$(new_case missing-reappear rl53)
+  add_ship_task "$dir" rl53 claude
+  mark_endpoint_missing "$dir"
+  ready="$dir/reappear-ready"
+  release="$dir/reappear-release"
+  FM_FAKE_ENDPOINT_REAPPEAR_READY="$ready" \
+    FM_FAKE_ENDPOINT_REAPPEAR_RELEASE="$release" \
+    run_control "$dir" rl53 relaunch --note "do not duplicate" > "$dir/control.out" &
+  control_pid=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || {
+    kill "$control_pid" 2>/dev/null || true
+    wait "$control_pid" 2>/dev/null || true
+    fail "relaunch did not reach pre-replacement revalidation"
+  }
+  printf '%s\n' "fm-rl53" > "$dir/fake/windows"
+  printf 'claude' > "$dir/fake/command"
+  : > "$release"
+  wait "$control_pid"; rc=$?
+  out=$(cat "$dir/control.out")
+  expect_code 1 "$rc" "a reappeared live endpoint should refuse"$'\n'"$out"
+  assert_contains "$out" "reappeared as a live agent" \
+    "the refusal should name the duplicate-agent hazard"
+  [ ! -e "$dir/fake/created" ] \
+    || fail "a reappeared live endpoint must not create a second window"
+  [ "$(meta_field "$dir" rl53 window)" = "fmses:fm-rl53" ] \
+    || fail "refusal must leave the prior durable endpoint identity in place"
+  pass "fm-control relaunch: an endpoint that reappears live during reconstruction refuses a duplicate"
+}
+
+test_missing_endpoint_backend_create_failure_keeps_prior_record() {
+  local dir out rc before
+  dir=$(new_case missing-createfail rl54)
+  add_ship_task "$dir" rl54 claude
+  before=$(cat "$dir/home/state/rl54.meta")
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_CREATE_FAIL=1 run_control "$dir" rl54 relaunch --note "create failed"); rc=$?
+  expect_code 1 "$rc" "backend creation failure should fail closed"$'\n'"$out"
+  [ "$(cat "$dir/home/state/rl54.meta")" = "$before" ] \
+    || fail "a failed reconstruction must keep the prior durable record"
+  [ "$(journal_field "$dir" rl54 rollback)" = prior-record-kept ] \
+    || fail "unpublished reconstruction failure should retain the live durable record"
+  [ ! -e "$dir/fake/created" ] || fail "a failed create must not leave a replacement window"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "launch must not run after backend creation failure"
+  pass "fm-control relaunch: backend creation failure keeps the prior record"
+}
+
+test_missing_endpoint_launch_failure_removes_unproved_endpoint() {
+  local dir out rc before
+  dir=$(new_case missing-launchfail rl55)
+  add_ship_task "$dir" rl55 claude
+  before=$(cat "$dir/home/state/rl55.meta")
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_NEVER_STARTS=1 run_control "$dir" rl55 relaunch --note "agent never came up"); rc=$?
+  expect_code 1 "$rc" "readiness failure should fail closed"$'\n'"$out"
+  [ "$(cat "$dir/home/state/rl55.meta")" = "$before" ] \
+    || fail "a readiness failure must keep the prior durable record"
+  [ -e "$dir/fake/killed" ] \
+    || fail "an unproved reconstructed endpoint must be removed"
+  [ ! -s "$dir/fake/windows" ] \
+    || fail "the reconstructed window must not remain after readiness failure"
+  [ -d "$dir/wt" ] || fail "readiness failure must not destroy the worktree"
+  pass "fm-control relaunch: launch/readiness failure removes the unproved endpoint and keeps the work"
+}
+
+test_missing_endpoint_publication_failure_restores_prior_record() {
+  local dir out rc real_mv meta
+  dir=$(new_case missing-pubfail rl56)
+  add_ship_task "$dir" rl56 claude
+  meta="$dir/home/state/rl56.meta"
+  mark_endpoint_missing "$dir"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+    run_control "$dir" rl56 relaunch --note "publication failed"); rc=$?
+  expect_code 1 "$rc" "publication failure should fail closed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl56 harness)" = claude ] \
+    || fail "a failed publication should retain the prior durable record"
+  [ -z "$(meta_field "$dir" rl56 control_relaunch_tx)" ] \
+    || fail "unpublished reconstruction must not claim a replacement transaction"
+  [ -e "$dir/fake/killed" ] \
+    || fail "an unpublished reconstructed endpoint must be removed"
+  [ -d "$dir/wt" ] || fail "publication failure must not destroy the worktree"
+  pass "fm-control relaunch: metadata publication failure restores the prior record"
+}
+
+test_agent_free_endpoint_relaunch_still_reuses_the_pane() {
+  local dir out rc
+  dir=$(new_case agent-free-reuse rl57)
+  add_ship_task "$dir" rl57 claude
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_control "$dir" rl57 relaunch --note "reuse the idle pane"); rc=$?
+  expect_code 0 "$rc" "agent-free relaunch should still succeed"$'\n'"$out"
+  [ ! -e "$dir/fake/created" ] \
+    || fail "an existing agent-free endpoint must be reused, not reconstructed"
+  [ "$(meta_field "$dir" rl57 window)" = "fmses:fm-rl57" ] \
+    || fail "reuse must keep the recorded endpoint"
+  pass "fm-control relaunch: an existing agent-free endpoint is still reused"
+}
+
+test_spawn_relaunch_reconstructs_a_missing_endpoint() {
+  local dir out rc
+  dir=$(new_case spawn-missing rl58)
+  add_ship_task "$dir" rl58 claude
+  mark_endpoint_missing "$dir"
+  out=$(run_spawn "$dir" rl58 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "direct spawn --relaunch should reconstruct a missing endpoint"$'\n'"$out"
+  [ "$(cat "$dir/fake/created")" = "fm-rl58" ] \
+    || fail "direct spawn reconstruction should create the replacement window"
+  [ "$(meta_field "$dir" rl58 worktree)" = "$dir/wt" ] \
+    || fail "direct spawn reconstruction must keep the recorded worktree"
+  pass "fm-spawn --relaunch: a missing recorded endpoint is reconstructed"
+}
+
+test_missing_endpoint_restore_during_select_or_create_adopts_idle_target() {
+  local dir out rc
+  dir=$(new_case missing-restore-idle rl60)
+  add_ship_task "$dir" rl60 claude
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_RESTORE_ON_CREATE=1 FM_FAKE_RESTORE_AGENT=zsh \
+    run_control "$dir" rl60 relaunch --note "restored idle window wins"); rc=$?
+  expect_code 0 "$rc" "a restored idle window at select-or-create should be adopted"$'\n'"$out"
+  [ -e "$dir/fake/adopted" ] || fail "tmux select-or-create should adopt the restored window"
+  [ ! -e "$dir/fake/created" ] \
+    || fail "a restored same-name window must not create a second tmux window"
+  [ "$(grep -c -Fx 'fm-rl60' "$dir/fake/windows")" = 1 ] \
+    || fail "select-or-create must leave exactly one window named fm-rl60"
+  [ "$(meta_field "$dir" rl60 worktree)" = "$dir/wt" ] \
+    || fail "adopting a restored window must keep the recorded worktree"
+  assert_grep "encode launch-brief" "$dir/fake/literal" \
+    "adopting an idle restored window must still launch the replacement agent"
+  pass "fm-control relaunch: restore at tmux select-or-create adopts the idle target"
+}
+
+test_missing_endpoint_restore_during_select_or_create_refuses_live_duplicate() {
+  local dir out rc
+  dir=$(new_case missing-restore-live rl61)
+  add_ship_task "$dir" rl61 claude
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_RESTORE_ON_CREATE=1 FM_FAKE_RESTORE_AGENT=claude \
+    run_control "$dir" rl61 relaunch --note "do not launch into restored live"); rc=$?
+  expect_code 1 "$rc" "a restored live window at select-or-create should refuse"$'\n'"$out"
+  assert_contains "$out" "restored as a live agent" \
+    "the refusal should name the restored live duplicate"
+  [ -e "$dir/fake/adopted" ] || fail "select-or-create should still adopt rather than create a second window"
+  [ ! -e "$dir/fake/created" ] \
+    || fail "a restored live window must not create a duplicate tmux window"
+  [ "$(grep -c -Fx 'fm-rl61' "$dir/fake/windows")" = 1 ] \
+    || fail "refusal must leave exactly one restored window"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "launch must not run into a restored live agent"
+  pass "fm-control relaunch: restore of a live agent at select-or-create refuses a duplicate"
+}
+
+test_missing_endpoint_restore_duplicate_name_refuses_rather_than_picking() {
+  local dir out rc
+  dir=$(new_case missing-restore-dup rl62)
+  add_ship_task "$dir" rl62 claude
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_RESTORE_ON_CREATE=1 FM_FAKE_RESTORE_DUPLICATE=1 FM_FAKE_RESTORE_AGENT=zsh \
+    run_control "$dir" rl62 relaunch --note "do not pick among duplicates"); rc=$?
+  expect_code 1 "$rc" "two same-name restored windows should refuse"$'\n'"$out"
+  assert_contains "$out" "not a unique restored target" \
+    "the refusal should name the non-unique restored window"
+  [ ! -e "$dir/fake/created" ] \
+    || fail "a non-unique restored name must not create another tmux window"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "launch must not run into a non-unique restored window"
+  pass "fm-control relaunch: non-unique restored tmux names refuse rather than picking one"
+}
+
+test_missing_endpoint_restore_idle_launch_failure_keeps_restored_window() {
+  local dir out rc before
+  dir=$(new_case missing-restore-launchfail rl63)
+  add_ship_task "$dir" rl63 claude
+  before=$(cat "$dir/home/state/rl63.meta")
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_RESTORE_ON_CREATE=1 FM_FAKE_RESTORE_AGENT=zsh FM_FAKE_NEVER_STARTS=1 \
+    run_control "$dir" rl63 relaunch --note "restored idle never starts"); rc=$?
+  expect_code 1 "$rc" "readiness failure after adopting a restored window should fail closed"$'\n'"$out"
+  [ "$(cat "$dir/home/state/rl63.meta")" = "$before" ] \
+    || fail "a readiness failure on an adopted window must keep the prior durable record"
+  [ ! -e "$dir/fake/killed" ] \
+    || fail "readiness failure must not destroy a restored window this relaunch did not create"
+  [ "$(grep -c -Fx 'fm-rl63' "$dir/fake/windows")" = 1 ] \
+    || fail "the restored window must remain after readiness failure"
+  [ -d "$dir/wt" ] || fail "readiness failure must not destroy the worktree"
+  pass "fm-control relaunch: launch failure after adopting a restored idle window keeps that window"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1528,3 +1923,17 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_missing_endpoint_relaunch_reconstructs_and_preserves_identity
+test_dead_endpoint_disappearing_during_relaunch_stop_still_recovers
+test_missing_endpoint_relaunch_preserves_uncommitted_work
+test_missing_endpoint_relaunch_repeats_safely
+test_missing_endpoint_reappear_as_live_refuses_duplicate
+test_missing_endpoint_backend_create_failure_keeps_prior_record
+test_missing_endpoint_launch_failure_removes_unproved_endpoint
+test_missing_endpoint_publication_failure_restores_prior_record
+test_agent_free_endpoint_relaunch_still_reuses_the_pane
+test_spawn_relaunch_reconstructs_a_missing_endpoint
+test_missing_endpoint_restore_during_select_or_create_adopts_idle_target
+test_missing_endpoint_restore_during_select_or_create_refuses_live_duplicate
+test_missing_endpoint_restore_duplicate_name_refuses_rather_than_picking
+test_missing_endpoint_restore_idle_launch_failure_keeps_restored_window

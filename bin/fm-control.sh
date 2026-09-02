@@ -32,20 +32,27 @@
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME endpoint and SAME worktree, on the same or a newly chosen
-#              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. With no explicit axis, a secondmate re-resolves its
-#              durable config/secondmate-harness pin (harness plus its optional
-#              model and effort tokens) exactly as any other respawn does, while
-#              a ship or scout keeps the exact adapter already recorded for it.
-#              A prefixed raw-command basename cannot reconstruct its launch
-#              command, so relaunch requires an explicit --harness for it.
-#              --note is required for a ship or scout, whose replacement
-#              inherits the local copy but none of the conversation; a
-#              secondmate reconciles its own home's records at startup, so its
+#              SAME worktree, on the same or a newly chosen harness/model/effort
+#              - so switching harness is one ordinary use of this verb. A
+#              positively agent-free recorded endpoint is reused; a positively
+#              missing recorded endpoint is treated as an already-stopped prior
+#              worker rather than receiving lifecycle input. Tmux reconstructs
+#              it through new-window -S so a restored same-name window is adopted.
+#              Herdr clearly refuses until restore exclusion is atomic.
+#              Live or ambiguous endpoints
+#              still refuse replacement. With no explicit axis, a secondmate
+#              re-resolves its durable config/secondmate-harness pin (harness
+#              plus its optional model and effort tokens) exactly as any other
+#              respawn does, while a ship or scout keeps the exact adapter
+#              already recorded for it. A prefixed raw-command basename cannot
+#              reconstruct its launch command, so relaunch requires an explicit
+#              --harness for it. --note is required for a ship or scout, whose
+#              replacement inherits the local copy but none of the conversation;
+#              a secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              Records a durable checkpoint and that note, exits the old agent,
-#              then delegates the launch to its single owner,
+#              Records a durable checkpoint and that note, exits the old agent
+#              when one is still there, then delegates launch (and missing-
+#              endpoint reconstruction) to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
@@ -79,9 +86,14 @@
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
 #     classifier (tmux, herdr), because without one the "the agent stopped"
 #     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#     than reported as successful blind. Missing-endpoint reconstruction is
+#     supported only for tmux; Herdr refuses until endpoint restoration and tab
+#     creation can be excluded atomically, and the other backends have no proven
+#     safe missing-target rebuild.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
-#     classified state acts.
+#     classified state acts. `exit` still refuses a missing endpoint; `relaunch`
+#     treats that same missing classification as already-stopped so recovery
+#     can reach replacement launch.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -445,7 +457,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
-  local state cmd verdict cancel interrupt_result=not-needed
+  local missing_policy=${1:-strict} state cmd verdict cancel interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -454,7 +466,13 @@ do_exit() {
       return 0
       ;;
     alive) ;;
-    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
+    missing)
+      if [ "$missing_policy" = relaunch-after-dead ]; then
+        printf 'already-stopped'
+        return 0
+      fi
+      die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action"
+      ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
@@ -782,7 +800,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line prior_endpoint_state
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -819,14 +837,37 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
-  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  prior_endpoint_state=$(agent_state)
+  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "prior_endpoint_state=$prior_endpoint_state"
+  case "$prior_endpoint_state" in
+    missing)
+      # The recorded target is gone: there is no agent to stop and nothing to
+      # send lifecycle input into. Treat that as an already-stopped prior
+      # worker so replacement launch can make the backend-specific recovery
+      # decision. Live, dead, and ambiguous states keep using do_exit.
+      exit_result=already-stopped
+      ;;
+    dead)
+      export FM_RELAUNCH_STOP_REVALIDATE=1
+      exit_result=$(do_exit relaunch-after-dead)
+      unset FM_RELAUNCH_STOP_REVALIDATE
+      ;;
+    alive)
+      exit_result=$(do_exit)
+      ;;
+    *)
+      die "task $ID's endpoint reads '$prior_endpoint_state' rather than a positively classified state; refusing to replace an unattributed endpoint"
+      ;;
+  esac
+  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "exit_result=$exit_result" "prior_endpoint_state=$prior_endpoint_state"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
-  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX" \
+    "prior_endpoint_state=$prior_endpoint_state"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
@@ -839,12 +880,22 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
+  # Reconstruction publishes a new endpoint identity; reuse keeps the old one.
+  # Re-read the published record before waiting so readiness is checked on the
+  # endpoint that actually exists.
+  if [ "$RELAUNCH_META_PUBLISHED" = 1 ]; then
+    fm_backend_validate_task_endpoint "$META" "$ID" \
+      || die "task $ID's replacement record is not a valid endpoint identity after launch"
+    BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+    T=$FM_BACKEND_VALIDATED_TARGET
+  fi
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result" \
+    "prior_endpoint_state=$prior_endpoint_state"
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
