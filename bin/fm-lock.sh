@@ -3,6 +3,11 @@
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
 # PID of any one tool call, which is dead moments after it is written.
+# It also records, in the adjacent state/.lock.session binding, which harness
+# session acquired that pid, because ancestry is not a stable session identity:
+# a call served by a reparented worker pool never reaches its own session. That
+# binding is what lets the acquiring session keep proving ownership; a lock that
+# carries no binding behaves exactly as it did before it existed.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -55,17 +60,12 @@ release_claim_lock() {
 trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 
-if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
-  old=$(cat "$LOCK" 2>/dev/null || true)
-  if [ "$old" = "$me" ]; then
-    echo "lock acquired: harness pid $me"
-    exit 0
-  fi
-  if fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
-    exit 1
-  fi
-fi
+backfill_session_binding() {
+  local id
+  id=$(fm_harness_session_identity) || return 0
+  fm_session_lock_binding_names_session "$STATE" "$id" && return 0
+  fm_session_lock_publish_identity "$STATE" "$old" || true
+}
 
 if ! fm_lock_try_acquire "$CLAIM_LOCK"; then
   sweep_pid=$(sed -n 's/^pid=//p' "$STATE/.startup-network.status" 2>/dev/null | tail -1)
@@ -86,6 +86,17 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
+  if fm_session_lock_owned_by_self "$STATE"; then
+    backfill_session_binding
+    release_claim_lock
+    echo "lock acquired: harness pid $old"
+    exit 0
+  fi
+  if [ "$old" != "$me" ] && fm_session_lock_owned_by_session_identity "$STATE"; then
+    release_claim_lock
+    echo "lock acquired: harness pid $old"
+    exit 0
+  fi
   if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
@@ -103,5 +114,10 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
+# Bind the verified lock to this session's own identity, so this home stays
+# provable from a worker pool that cannot reach the session through ancestry.
+# A failure here is deliberately not fatal: the home simply keeps the
+# ancestry-only behavior it had before this binding existed.
+fm_session_lock_publish_identity "$STATE" "$me" || true
 release_claim_lock
 echo "lock acquired: harness pid $me"

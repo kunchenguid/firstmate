@@ -2605,6 +2605,351 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# Replace the treehouse mock with one that logs every invocation to
+# $case_dir/treehouse.log and succeeds. Args: case_dir
+add_logging_treehouse() {
+  local case_dir=$1
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# Fast-forward the project's local main to the worktree HEAD so the local-only
+# landed-work safety check passes. Args: case_dir
+merge_wt_into_local_main() {
+  local case_dir=$1 wt_head
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+}
+
+# The 2026-08-08 incident end to end (teardown-rerun-reissue): attempt 1 returns
+# the pool worktree, then fails on the refused pane close; the freed slot is
+# reissued to a NEWER task; the sanctioned rerun must close the stale pane and
+# finish cleanup WITHOUT re-returning the slot under the live tenant.
+test_rerun_after_return_and_reissue_never_rereturns() {
+  local case_dir log closed rc
+  case_dir=$(make_case rerun-reissue)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  merge_wt_into_local_main "$case_dir"
+  configure_flat_herdr_teardown_case "$case_dir"
+  add_logging_treehouse "$case_dir"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  : > "$case_dir/state/task-x1.status"
+
+  # Attempt 1: the pane close cannot record success (FM_FAKE_HERDR_CLOSED points
+  # into a missing dir), so the pane stays present and teardown fails AFTER the
+  # worktree return - the incident's exact failure point.
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$case_dir/noexist/closed" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "rerun-reissue: attempt 1 reported success although the pane was never closed"
+  [ "$(wc -l < "$case_dir/treehouse.log")" -eq 1 ] \
+    || fail "rerun-reissue: attempt 1 did not return the worktree exactly once: $(cat "$case_dir/treehouse.log")"
+  [ -e "$case_dir/state/task-x1.worktree-returned" ] \
+    || fail "rerun-reissue: the completed return left no durable marker for the rerun"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "rerun-reissue: attempt 1 erased the durable metadata"
+
+  # The pool reissues the same slot to a newer task: its meta binds the same
+  # worktree path and its session occupies the worktree on its own branch with
+  # uncommitted work.
+  fm_write_meta "$case_dir/state/task-x2.meta" \
+    "window=default:wZ:pZ" \
+    "endpoint_task_id=task-x2" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=scout" \
+    "mode=no-mistakes" \
+    "backend=herdr"
+  git -C "$case_dir/wt" checkout -q -b fm/task-x2
+  printf '%s\n' "tenant work in flight" > "$case_dir/wt/tenant.txt"
+
+  # Attempt 2 (the sanctioned rerun): the pane close now works.
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "rerun-reissue: the rerun failed: $(cat "$case_dir/stderr2")"
+  [ "$(wc -l < "$case_dir/treehouse.log")" -eq 1 ] \
+    || fail "rerun-reissue: the rerun re-returned the reissued slot: $(cat "$case_dir/treehouse.log")"
+  assert_grep "skipping worktree return" "$case_dir/stdout2" \
+    "rerun-reissue: the rerun did not say it skipped the return"
+  [ -e "$closed" ] || fail "rerun-reissue: the rerun never closed the stale pane"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = "fm/task-x2" ] \
+    || fail "rerun-reissue: the rerun moved the tenant's branch"
+  [ -f "$case_dir/wt/tenant.txt" ] || fail "rerun-reissue: the rerun destroyed the tenant's uncommitted work"
+  [ -e "$case_dir/state/task-x2.meta" ] || fail "rerun-reissue: the rerun removed the tenant's metadata"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "rerun-reissue: the rerun left the old metadata behind"
+  [ ! -e "$case_dir/state/task-x1.worktree-returned" ] \
+    || fail "rerun-reissue: the rerun left the return marker behind"
+  grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
+    || fail "rerun-reissue: the rerun did not report completion"
+  pass "a rerun after a completed return and a reissued slot closes the pane and cleans records without re-returning"
+}
+
+test_teardown_and_spawn_share_task_set_first_lock_order() {
+  local case_dir holder_pid teardown_pid i status
+  case_dir=$(make_case task-set-lock-order)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  merge_wt_into_local_main "$case_dir"
+  add_logging_treehouse "$case_dir"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    set_lock=$(fm_task_set_lock_path "$case_dir/state") || exit 1
+    meta_lock=$(fm_meta_lock_path "$case_dir/state/task-x1.meta") || exit 1
+    fm_lock_acquire_wait "$set_lock" || exit 1
+    : > "$case_dir/task-set-held"
+    while [ ! -e "$case_dir/acquire-meta" ]; do sleep 0.05; done
+    fm_lock_acquire_wait "$meta_lock" || exit 1
+    : > "$case_dir/meta-held"
+    while [ ! -e "$case_dir/release-spawn-locks" ]; do sleep 0.05; done
+    fm_lock_release "$meta_lock" || exit 1
+    fm_lock_release "$set_lock" || exit 1
+  ) &
+  holder_pid=$!
+  for i in $(seq 1 100); do
+    [ ! -e "$case_dir/task-set-held" ] || break
+    sleep 0.05
+  done
+  [ -e "$case_dir/task-set-held" ] || fail "task-set-lock-order: spawn fixture never acquired the task-set lock"
+
+  (
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    printf '%s\n' "$?" > "$case_dir/teardown.status"
+  ) &
+  teardown_pid=$!
+  sleep 0.3
+  : > "$case_dir/acquire-meta"
+  for i in $(seq 1 100); do
+    [ ! -e "$case_dir/meta-held" ] || break
+    sleep 0.05
+  done
+  if [ ! -e "$case_dir/meta-held" ]; then
+    kill "$holder_pid" "$teardown_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    wait "$teardown_pid" 2>/dev/null || true
+    fail "task-set-lock-order: spawn and teardown deadlocked on opposite task-set/meta lock order"
+  fi
+  : > "$case_dir/release-spawn-locks"
+  wait "$holder_pid" || fail "task-set-lock-order: spawn fixture failed while releasing locks"
+  wait "$teardown_pid"
+  status=$(cat "$case_dir/teardown.status")
+  [ "$status" -eq 0 ] || fail "task-set-lock-order: teardown failed after the spawn released its locks: $(cat "$case_dir/stderr")"
+  [ "$(wc -l < "$case_dir/treehouse.log")" -eq 1 ] \
+    || fail "task-set-lock-order: teardown did not return the worktree exactly once"
+  pass "spawn and teardown acquire the task-set lock before task metadata"
+}
+
+test_marker_failure_reissue_before_rerun_preserves_new_tenant() {
+  local case_dir log closed rc spawn_pid rerun_pid i rerun_status
+  case_dir=$(make_case marker-failure-reissue-race)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  merge_wt_into_local_main "$case_dir"
+  configure_flat_herdr_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  : > "$case_dir/state/task-x1.status"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+ln -s "$case_dir/missing/marker" "$case_dir/state/task-x1.worktree-returned"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$case_dir/noexist/closed" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "marker-failure-race: attempt 1 succeeded although its pane stayed open"
+  assert_grep "could not record the completed worktree return" "$case_dir/stderr" \
+    "marker-failure-race: the fixture did not force marker publication to fail"
+  rm -f "$case_dir/state/task-x1.worktree-returned"
+
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    lock=$(fm_task_set_lock_path "$case_dir/state") || exit 1
+    fm_lock_acquire_wait "$lock" || exit 1
+    git -C "$case_dir/wt" checkout -q -b fm/task-x2 || exit 1
+    printf '%s\n' "tenant work in flight" > "$case_dir/wt/tenant.txt" || exit 1
+    : > "$case_dir/reissue-acquired"
+    while [ ! -e "$case_dir/allow-meta-publish" ]; do sleep 0.05; done
+    cat > "$case_dir/state/.task-x2.meta.spawn" <<EOF
+window=default:wZ:pZ
+endpoint_task_id=task-x2
+worktree=$case_dir/wt
+project=$case_dir/project
+kind=scout
+mode=no-mistakes
+backend=herdr
+EOF
+    mv "$case_dir/state/.task-x2.meta.spawn" "$case_dir/state/task-x2.meta" || exit 1
+    fm_lock_release "$lock" || exit 1
+  ) &
+  spawn_pid=$!
+  for i in $(seq 1 100); do
+    [ ! -e "$case_dir/reissue-acquired" ] || break
+    sleep 0.05
+  done
+  [ -e "$case_dir/reissue-acquired" ] || fail "marker-failure-race: replacement spawn never acquired the slot"
+
+  (
+    FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+      run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+    printf '%s\n' "$?" > "$case_dir/rerun.status"
+  ) &
+  rerun_pid=$!
+  sleep 0.3
+  kill -0 "$rerun_pid" 2>/dev/null \
+    || fail "marker-failure-race: rerun did not wait for the replacement binding publication"
+  [ "$(wc -l < "$case_dir/treehouse.log")" -eq 1 ] \
+    || fail "marker-failure-race: rerun returned the slot before replacement metadata publication"
+
+  : > "$case_dir/allow-meta-publish"
+  wait "$spawn_pid" || fail "marker-failure-race: replacement spawn failed"
+  wait "$rerun_pid"
+  rerun_status=$(cat "$case_dir/rerun.status")
+  [ "$rerun_status" -eq 0 ] || fail "marker-failure-race: rerun failed: $(cat "$case_dir/stderr2")"
+  [ "$(wc -l < "$case_dir/treehouse.log")" -eq 1 ] \
+    || fail "marker-failure-race: rerun re-returned the replacement tenant's slot"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = "fm/task-x2" ] \
+    || fail "marker-failure-race: rerun moved the replacement tenant's branch"
+  [ -f "$case_dir/wt/tenant.txt" ] || fail "marker-failure-race: rerun destroyed replacement tenant work"
+  [ -e "$case_dir/state/task-x2.meta" ] || fail "marker-failure-race: rerun removed replacement tenant metadata"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "marker-failure-race: rerun retained predecessor metadata"
+  pass "marker failure and pre-publication slot reissue leave the replacement tenant untouched"
+}
+
+# A plain first-run teardown of a task that still owns its worktree must return
+# it exactly as before the guard existed.
+test_first_run_still_returns_worktree() {
+  local case_dir
+  case_dir=$(make_case first-run-return)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  merge_wt_into_local_main "$case_dir"
+  add_logging_treehouse "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "first-run-return: teardown failed: $(cat "$case_dir/stderr")"
+  grep -q "return --force $case_dir/wt" "$case_dir/treehouse.log" \
+    || fail "first-run-return: the worktree was never returned: $(cat "$case_dir/treehouse.log")"
+  grep -q "skipping worktree return" "$case_dir/stdout" \
+    && fail "first-run-return: a first run wrongly skipped the return"
+  [ ! -e "$case_dir/state/task-x1.worktree-returned" ] \
+    || fail "first-run-return: the return marker survived a completed teardown"
+  pass "a first-run teardown of an owned worktree still returns it to the pool"
+}
+
+# A rerun whose worktree is still bound to this task and un-returned (the first
+# attempt failed BEFORE or AT the return) must perform the return.
+test_rerun_still_bound_unreturned_returns() {
+  local case_dir rc
+  case_dir=$(make_case rerun-unreturned)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  merge_wt_into_local_main "$case_dir"
+
+  # Attempt 1: the return itself fails with a non-lock error, so no marker may
+  # be written and the rerun must retry the return.
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+echo "error: pool server unavailable" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "rerun-unreturned: attempt 1 reported success although the return failed"
+  [ ! -e "$case_dir/state/task-x1.worktree-returned" ] \
+    || fail "rerun-unreturned: a failed return still wrote the returned marker"
+
+  add_logging_treehouse "$case_dir"
+  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "rerun-unreturned: the rerun failed: $(cat "$case_dir/stderr2")"
+  grep -q "return --force $case_dir/wt" "$case_dir/treehouse.log" \
+    || fail "rerun-unreturned: the rerun never returned the still-bound worktree"
+  grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
+    || fail "rerun-unreturned: the rerun did not report completion"
+  pass "a rerun with the worktree still bound to this task and un-returned performs the return"
+}
+
+# Second signal: even with the durable marker lost, another task's meta binding
+# the same worktree path proves reissue and must skip every worktree step.
+test_reissued_slot_without_marker_skips_return() {
+  local case_dir
+  case_dir=$(make_case reissue-no-marker)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  merge_wt_into_local_main "$case_dir"
+  add_logging_treehouse "$case_dir"
+  fm_write_meta "$case_dir/state/task-x2.meta" \
+    "window=firstmate:fm-task-x2" \
+    "endpoint_task_id=task-x2" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "reissue-no-marker: teardown failed: $(cat "$case_dir/stderr")"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "reissue-no-marker: the reissued slot was still returned: $(cat "$case_dir/treehouse.log")"
+  grep -q "recorded for task task-x2" "$case_dir/stdout" \
+    || fail "reissue-no-marker: the skip line did not name the tenant"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = "fm/task-x1" ] \
+    || fail "reissue-no-marker: the tenant's checked-out branch was dropped"
+  [ -e "$case_dir/state/task-x2.meta" ] || fail "reissue-no-marker: the tenant's metadata was removed"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "reissue-no-marker: the old metadata survived"
+  grep -q "teardown task-x1 complete" "$case_dir/stdout" \
+    || fail "reissue-no-marker: teardown did not report completion"
+  pass "a reissued slot is never re-returned even when the durable marker is lost"
+}
+
+# Mirror of the incident window: a PREDECESSOR of this slot already returned it
+# (its own worktree-returned marker proves that) but awaits its sanctioned
+# rerun, so its stale meta still binds the same worktree path. The CURRENT
+# tenant's teardown must ignore that past-tenancy binding and still perform
+# its own return.
+test_returned_predecessor_binding_does_not_skip_current_return() {
+  local case_dir
+  case_dir=$(make_case predecessor-returned)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  merge_wt_into_local_main "$case_dir"
+  add_logging_treehouse "$case_dir"
+  fm_write_meta "$case_dir/state/task-x0.meta" \
+    "window=firstmate:fm-task-x0" \
+    "endpoint_task_id=task-x0" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  : > "$case_dir/state/task-x0.worktree-returned"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "predecessor-returned: teardown failed: $(cat "$case_dir/stderr")"
+  grep -q "return --force $case_dir/wt" "$case_dir/treehouse.log" \
+    || fail "predecessor-returned: the owned slot was never returned: $(cat "$case_dir/treehouse.log")"
+  grep -q "skipping worktree return" "$case_dir/stdout" \
+    && fail "predecessor-returned: the predecessor's stale binding wrongly skipped the return"
+  [ -e "$case_dir/state/task-x0.worktree-returned" ] \
+    || fail "predecessor-returned: the predecessor's own return marker was removed"
+  [ -e "$case_dir/state/task-x0.meta" ] \
+    || fail "predecessor-returned: the predecessor's metadata was removed"
+  [ ! -e "$case_dir/state/task-x1.worktree-returned" ] \
+    || fail "predecessor-returned: the return marker survived a completed teardown"
+  grep -q "teardown task-x1 complete" "$case_dir/stdout" \
+    || fail "predecessor-returned: teardown did not report completion"
+  pass "a returned predecessor's stale binding does not block the current tenant's own return"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -2663,3 +3008,10 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_rerun_after_return_and_reissue_never_rereturns
+test_teardown_and_spawn_share_task_set_first_lock_order
+test_marker_failure_reissue_before_rerun_preserves_new_tenant
+test_first_run_still_returns_worktree
+test_rerun_still_bound_unreturned_returns
+test_reissued_slot_without_marker_skips_return
+test_returned_predecessor_binding_does_not_skip_current_return

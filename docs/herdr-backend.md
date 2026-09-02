@@ -233,6 +233,7 @@ The poll density bounds the residual possibility of an extremely fast complete t
 
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
+It also requests ANSI and strips it locally for plain-text callers, because Herdr 0.8.0's text-format recent read can visibly scroll an idle alt-screen pane while harvesting history; the ANSI path returns retained rows without that harvest.
 This generous floor is required for small composer and peek reads.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.

@@ -196,6 +196,12 @@ Crewmates never intentionally touch your project clone; [treehouse](https://gith
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
+That base stays origin's tip even on a project whose local default branch is ahead of it, because a branch destined for an upstream PR must never carry local-only commits; the spawn only warns about the divergence.
+The cost of that choice lands later, when such a branch is merged into the local default branch, so `bin/fm-merge-local.sh` refuses any landing that would drop a commit the local default branch has and the task branch does not, names those commits, and points at the `git merge <default>` reconciliation inside the task branch.
+Its `--drop-local-commits` escape hatch exists for the case where losing them is the intent: never the default, never silent, recorded in `state/<id>.local-merge-drop` before the branch moves, and destructive enough to need the captain's explicit word.
+Recovery does not rest on the reflog, which expires and is then pruned by `git gc`: the drop pins the pre-reset tip under its own `refs/fm-dropped/<id>/` rescue ref in the project before moving the branch, and refuses to move the branch when that ref cannot be planted.
+Dropped commits therefore stay in the project for as long as their ref does, so successive drops on one task coexist and releasing one is an explicit, per-drop act that leaves every other rescue alone.
+Its header owns the exact ref naming, drop record, and release command, and `tests/fm-merge-local.test.sh` owns the regression coverage.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
@@ -300,7 +306,8 @@ Every GitHub refusal states what it could not observe as plainly as what it did,
 A confirmed merge leaves a durable role-routed outcome instead of living only in the merging agent's memory, and [`bin/fm-merge-outcome-lib.sh`](../bin/fm-merge-outcome-lib.sh)'s header owns its destination, shape, identity, normal-case deduplication, and at-least-once recovery.
 The same emitter handles a merge firstmate performed and one its poll detected, while the watcher immediately delivers the emitter's local actionable poll row.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
-[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
+Those worktree-scoped checks and the return itself apply only while the pool slot is still provably this task's: a sanctioned teardown rerun that finds the slot already returned or reissued to a newer task skips them instead of resetting the live tenant's worktree.
+[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, stale-lock recovery procedure, and the rerun tenant-safety ownership signals.
 
 ## Optional Relay
 

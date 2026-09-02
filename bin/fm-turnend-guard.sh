@@ -60,10 +60,12 @@
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
 #   3. only when neither materializes is the auto-arm genuinely absent: re-block
-#      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
-#      (default 3) consecutive blocks per session - safely below Claude Code's
-#      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#      with the repair banner, accounting distinct failed auto-arm epochs up to
+#      FM_CLAUDE_TURNEND_BLOCK_BUDGET (default 3), while the independent
+#      FM_CLAUDE_TURNEND_STALL_BUDGET (default and maximum 7) bounds the actual
+#      uninterrupted blocked Stops safely before Claude Code's hard
+#      8-consecutive-block override; then allow one loud attended fail-open for
+#      either a verified failure episode or the bounded stalled series.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,9 +80,14 @@ CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
+STALL_BUDGET=${FM_CLAUDE_TURNEND_STALL_BUDGET:-7}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
+case "$STALL_BUDGET" in
+  1|2|3|4|5|6|7) : ;;
+  *) STALL_BUDGET=7 ;;
+esac
 
 for arg in "$@"; do
   case "$arg" in
@@ -207,22 +214,37 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
-budget_account_current_epoch() {
-  local current_epoch outcome old_session old_count old_epoch tmp initialized
+# Consecutive-block accounting. COUNT is keyed on the auto-arm's epoch identity
+# so one event epoch is charged at most once, which is correct while the auto-arm
+# is running: a fresh epoch means the automatic path made a decision. It stops
+# being a bound at all once the auto-arm stops writing entirely, because then the
+# epoch never changes, COUNT never advances, and the guard re-blocks for as long
+# as the fault lasts (measured: 172 consecutive blocked stops with COUNT frozen
+# at 1 and the one attended alarm never reachable). STALLED counts the blocked
+# stops themselves, so a completely inert automatic path is still bounded.
+budget_account_current_epoch() {  # [block]
+  local charge_block=${1:-} current_epoch outcome old_session old_count old_epoch
+  local old_stalled tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   initialized=0
   COUNT=0
+  STALLED=0
   if [ -f "$BUDGET_FILE" ]; then
     old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
     old_count=$(sed -n '2s/^count=//p' "$BUDGET_FILE" 2>/dev/null || true)
     old_epoch=$(sed -n '3s/^epoch=//p' "$BUDGET_FILE" 2>/dev/null || true)
+    old_stalled=$(sed -n '4s/^stalled=//p' "$BUDGET_FILE" 2>/dev/null || true)
     case "$old_count" in
       ''|*[!0-9]*) old_count=0 ;;
     esac
+    case "$old_stalled" in
+      ''|*[!0-9]*) old_stalled=0 ;;
+    esac
     if [ "$old_session" = "$SESSION_ID" ]; then
       COUNT=$old_count
+      STALLED=$old_stalled
       if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
         :
       else
@@ -230,6 +252,7 @@ budget_account_current_epoch() {
       fi
     fi
   fi
+  [ "$charge_block" != block ] || STALLED=$((STALLED + 1))
   if [ ! -f "$BUDGET_FILE" ] || [ "${old_session:-}" != "$SESSION_ID" ]; then
     case "$outcome" in
       failed|failed-suppressed)
@@ -244,7 +267,8 @@ budget_account_current_epoch() {
     esac
   fi
   tmp="$BUDGET_FILE.tmp.$$"
-  if ! printf 'session=%s\ncount=%s\nepoch=%s\n' "$SESSION_ID" "$COUNT" "$current_epoch" > "$tmp" 2>/dev/null \
+  if ! printf 'session=%s\ncount=%s\nepoch=%s\nstalled=%s\n' \
+      "$SESSION_ID" "$COUNT" "$current_epoch" "$STALLED" > "$tmp" 2>/dev/null \
     || ! mv -f "$tmp" "$BUDGET_FILE" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$BUDGET_LOCK"
@@ -308,10 +332,40 @@ autoarm_owns_recovery() {
   return 1
 }
 
+# The episode the one attended fail-open is allowed for. Historically that was
+# only a VERIFIED failure episode: the auto-arm recorded an exhausted failure and
+# spent its one notice. That proof can only be produced by an auto-arm that runs,
+# so a hook that never claims the home at all - the shape this bound exists for -
+# could never reach the alarm no matter how many turns blocked. A long
+# uninterrupted run of blocked stops is the second, mechanism-independent
+# evidence that supervision is genuinely down, so it opens the same one alarm.
+# Away mode is excluded from both, because the away daemon owns supervision and
+# nobody is attending the alarm.
+#
+# The stalled episode is deduplicated by the counter itself, on the single value
+# that ends the run, and NOT by the failure-alarm marker. That marker also tells
+# the auto-arm to stop creating exit-2 continuations until a watcher is verified
+# healthy again, which is right for a mechanism that ran and failed, and wrong
+# here: an auto-arm that comes back would have its very first genuine wake
+# swallowed. A series that resumes after a turn the guard let through is a new
+# episode and alarms again on its own count.
+fail_open_episode() {
+  FAIL_OPEN_REASON=
+  [ ! -e "$STATE/.afk" ] || return 1
+  if [ "$STALLED" -eq $((STALL_BUDGET + 1)) ]; then
+    FAIL_OPEN_REASON=stalled
+    return 0
+  fi
+  if [ "$COUNT" -gt "$BLOCK_BUDGET" ] && failure_episode_verified; then
+    FAIL_OPEN_REASON=failure
+    return 0
+  fi
+  return 1
+}
+
 terminal_fail_open() {
-  local pid role old_session old_count
-  [ "$COUNT" -gt "$BLOCK_BUDGET" ] || return 1
-  failure_episode_verified || return 1
+  local pid role old_session old_count old_stalled
+  fail_open_episode || return 1
   [ ! -e "$FAILURE_ALARM" ] || return 1
   # A live open generation claim is a concurrent recovery decision to step
   # aside for, exactly like the legacy live-owner case below.
@@ -343,13 +397,18 @@ terminal_fail_open() {
   fi
   old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
   old_count=$(sed -n '2s/^count=//p' "$BUDGET_FILE" 2>/dev/null || true)
+  old_stalled=$(sed -n '4s/^stalled=//p' "$BUDGET_FILE" 2>/dev/null || true)
   case "$old_count" in
     ''|*[!0-9]*) old_count=0 ;;
   esac
+  case "$old_stalled" in
+    ''|*[!0-9]*) old_stalled=0 ;;
+  esac
+  COUNT=$old_count
+  STALLED=$old_stalled
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if [ "$role" != terminal-check ] || [ "$old_session" != "$SESSION_ID" ] \
-    || [ "$old_count" -le "$BLOCK_BUDGET" ] || ! failure_episode_verified \
-    || [ -e "$FAILURE_ALARM" ]; then
+    || ! fail_open_episode || [ -e "$FAILURE_ALARM" ]; then
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
     return 1
@@ -373,7 +432,14 @@ terminal_fail_open() {
     fm_lock_release "$OWNER_LOCK"
     return 2
   fi
-  if ! (set -C; : > "$FAILURE_ALARM") 2>/dev/null; then
+  if ! budget_store_stall held 0; then
+    fm_lock_release "$BUDGET_LOCK"
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  if [ "$FAIL_OPEN_REASON" = failure ] \
+    && ! (set -C; : > "$FAILURE_ALARM") 2>/dev/null; then
+    budget_store_stall held "$old_stalled" || true
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
     return 1
@@ -394,12 +460,41 @@ failure_episode_verified() {
   esac
 }
 
+# A stop this guard lets through is progress, so the consecutive-block series
+# ends here. Only an uninterrupted run of blocked stops reaches the stall bound.
+budget_store_stall() {
+  local mode=${1:-acquire} stalled=${2:-0} session count epoch tmp status=0 acquired=0
+  [ -f "$BUDGET_FILE" ] || return 0
+  if [ "$mode" = acquire ]; then
+    fm_lock_try_acquire "$BUDGET_LOCK" || return 1
+    acquired=1
+  fi
+  session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
+  count=$(sed -n '2s/^count=//p' "$BUDGET_FILE" 2>/dev/null || true)
+  epoch=$(sed -n '3s/^epoch=//p' "$BUDGET_FILE" 2>/dev/null || true)
+  case "$count" in
+    ''|*[!0-9]*) count=0 ;;
+  esac
+  tmp="$BUDGET_FILE.tmp.$$"
+  if ! printf 'session=%s\ncount=%s\nepoch=%s\nstalled=%s\n' \
+      "$session" "$count" "$epoch" "$stalled" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$BUDGET_FILE" 2>/dev/null; then
+    status=1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  if [ "$acquired" -eq 1 ]; then
+    fm_lock_release "$BUDGET_LOCK" || status=1
+  fi
+  return "$status"
+}
+
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       fm_failure_episode_reset "$STATE" || exit 2
     fi
+    budget_store_stall || exit 2
     exit 0
   fi
   sleep 0.1
@@ -409,12 +504,13 @@ if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     fm_failure_episode_reset "$STATE" || exit 2
   fi
+  budget_store_stall || exit 2
   exit 0
 fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
-budget_account_current_epoch || block_stop
+budget_account_current_epoch block || block_stop
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then
@@ -425,8 +521,16 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  if [ "$FAIL_OPEN_REASON" = stalled ]; then
+    printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, and this turn boundary has now blocked %s times in a row without the Stop-owned auto-arm ever claiming this home, so the automatic path is not running at all. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' \
+      "$NEED_DESC" "$STALLED"
+  else
+    printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  fi
   exit 0
 fi
-[ "$terminal_status" -eq 2 ] && exit 0
+if [ "$terminal_status" -eq 2 ]; then
+  budget_store_stall || exit 2
+  exit 0
+fi
 block_stop

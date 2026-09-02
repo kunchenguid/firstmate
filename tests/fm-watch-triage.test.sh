@@ -2054,6 +2054,61 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# A declared pause surfaces once on first sight under the long-cadence semantics,
+# but a declared pause must never mask an agent that subsequently dies: endpoint-
+# mort detection keeps priority over the long cadence. So when the same pane goes
+# dead after surfacing as a live pause, it must still re-surface on the bounded
+# pause cadence (the death is detected for a recheck), never stay hidden behind
+# the pause cadence and never be mislabeled a wedge.
+test_live_paused_agent_death_still_rechecks() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case live-paused-then-dead); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-gate"
+  printf 'idle external-decision gate\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle external-decision gate")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Phase A: the live agent's declared pause surfaces once on first sight under
+  # the long-cadence semantics, recording its pause marker, then is acknowledged.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "live paused agent did not surface once on first sight: $(cat "$out")"
+  [ -e "$state/.paused-$key" ] || fail "live paused surface did not record its pause marker"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live-pause surface"
+
+  # Phase B: the agent dies (stopped, bare shell) while the pause status remains.
+  # The death must still be detected on the bounded pause cadence: age the status
+  # and the re-surface throttle past PAUSE_RESURFACE_SECS and confirm the pane
+  # re-surfaces as a paused recheck, not a wedge and not hidden behind the pause
+  # cadence. (Phase A's first-sight surface set the resurface throttle, so the
+  # re-surface is due once that cadence elapses, not immediately.)
+  printf 'idle bare shell after agent death\n' > "$capture_file"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf" "$state/.paused-resurfaced-$key"
+  else touch -m -d "@$back" "$statusf" "$state/.paused-resurfaced-$key"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "dead-after-pause agent did not re-surface on the bounded cadence: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "dead-after-pause agent did not re-surface with a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null || fail "dead-after-pause re-surface was not labeled a paused recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "dead-after-pause agent was mislabeled a possible wedge"
+  pass "a live paused agent that subsequently dies still re-surfaces on the bounded pause cadence (death not masked)"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3862,6 +3917,7 @@ test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_live_paused_agent_death_still_rechecks
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

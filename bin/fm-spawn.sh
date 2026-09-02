@@ -147,6 +147,9 @@
 #   containment test reads local refs only and never fetches, so this gate stays
 #   usable offline; a stale remote-tracking ref can therefore make an unpushed
 #   commit look contained, which is exactly why no remedy command is printed.
+#   That base stays origin's tip even when the LOCAL default branch is ahead of
+#   it, so an upstream PR never carries local-only commits; the spawn only warns
+#   about the divergence, and bin/fm-merge-local.sh guards the local landing.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1892,6 +1895,21 @@ EOF
   printf '%s' "$lines" >&2
 }
 
+# Warn when the project's LOCAL default branch carries commits origin's tip does
+# not, which is normal on a fork that cannot merge upstream and on local
+# adoptions of unmerged upstream work. The base itself stays origin's tip on
+# purpose: a branch destined for an upstream PR must never carry local-only
+# commits. The cost lands later instead, when that branch is landed locally, so
+# say so at spawn. Advisory only - it never changes the base and never stops a
+# launch. bin/fm-merge-local.sh owns the refusal that actually protects them.
+warn_local_default_divergence() {  # <worktree> <default>
+  local worktree=$1 default=$2 ahead
+  git -C "$worktree" rev-parse --verify --quiet "refs/heads/$default^{commit}" >/dev/null || return 0
+  ahead=$(git -C "$worktree" rev-list --count "origin/$default..refs/heads/$default" 2>/dev/null || true)
+  case "$ahead" in ''|0) return 0 ;; esac
+  echo "warning: local $default is $ahead commit(s) ahead of origin/$default; this worker starts from origin/$default (correct for an upstream PR), so landing its branch locally will need 'git merge $default' inside the branch first" >&2
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -1936,6 +1954,7 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
+  warn_local_default_divergence "$worktree" "$default"
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>

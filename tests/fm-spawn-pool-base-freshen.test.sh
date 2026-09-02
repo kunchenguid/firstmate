@@ -424,6 +424,40 @@ test_stale_pin_beside_other_dirt_reports_one_verdict() {
     "spawn discarded the untracked file while refusing the pool"
   pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
 }
+test_local_default_ahead_warns_without_changing_the_base() {
+  local rec id out status current adopted
+  id='pool-local-ahead-r7'
+  rec=$(make_case local-ahead "$id")
+  read_case_record "$rec"
+
+  # The project's local default branch carries an adoption origin never had -
+  # the fork-that-cannot-merge-upstream shape. The base must stay origin's tip,
+  # so the branch never carries it into an upstream PR, and the spawn must say so.
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" merge --quiet --ff-only "origin/$DEFAULT_BRANCH"
+  printf 'local adoption that must not reach an upstream PR\n' > "$PROJECT_DIR/adoption.txt"
+  git -C "$PROJECT_DIR" add adoption.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'adopt upstream PR locally'
+  adopted=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a diverged local default branch must not stop the spawn: $out"
+  assert_contains "$out" "ahead of origin/$DEFAULT_BRANCH" "spawn did not warn about the local divergence"
+  assert_contains "$out" "git merge $DEFAULT_BRANCH" "the warning did not name the landing reconciliation"
+  current=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "the warning changed the spawn base away from origin/$DEFAULT_BRANCH"
+  [ "$current" != "$adopted" ] || fail "fixture did not prove local $DEFAULT_BRANCH is ahead of origin"
+  [ ! -e "$POOL_DIR/adoption.txt" ] \
+    || fail "the worker base carries a local-only adoption that would pollute an upstream PR"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed divergence warning: %s\n' "$(printf '%s\n' "$out" | grep 'ahead of origin')"
+  fi
+  pass "a local default branch ahead of origin warns at spawn without moving the base off origin's tip"
+}
+
 
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
@@ -436,5 +470,6 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_local_default_ahead_warns_without_changing_the_base
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
