@@ -103,7 +103,7 @@ fm_forge_safe_ssh_config_file() {
         [ "$in_match" -eq 0 ] || continue
         for pattern in $rest; do
           case "$pattern" in
-            ~/*) candidate="${HOME:-}/.ssh/${pattern#~/}" ;;
+            ~/*) candidate="${HOME:-}/${pattern#~/}" ;;
             /*) candidate=$pattern ;;
             *) candidate="$dir/$pattern" ;;
           esac
