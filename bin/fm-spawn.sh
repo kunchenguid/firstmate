@@ -3088,6 +3088,7 @@ fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
+LAUNCH=$(fm_bench_wrap_entrant_launch "$ID" "$WT" "$LAUNCH") || exit 1
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0

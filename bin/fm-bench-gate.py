@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1458,17 +1459,32 @@ def check_evaluator_mutations(base: Path, weights: dict[str, Any] | None, report
         dimension = record.get("dimension")
         deltas = record.get("dimension_deltas")
         threshold = record.get("movement_threshold")
-        if not nonempty_str(dimension) or not isinstance(deltas, dict) or not isinstance(threshold, (int, float)):
+        valid_threshold = (
+            isinstance(threshold, (int, float))
+            and not isinstance(threshold, bool)
+            and math.isfinite(float(threshold))
+            and float(threshold) > 0
+        )
+        if not nonempty_str(dimension) or not isinstance(deltas, dict) or not valid_threshold:
             report.fail(check, "a mutation record needs dimension, dimension_deltas, and movement_threshold")
             continue
         target = deltas.get(dimension)
-        if not isinstance(target, (int, float)) or abs(float(target)) < float(threshold):
+        if (
+            not isinstance(target, (int, float))
+            or isinstance(target, bool)
+            or not math.isfinite(float(target))
+            or abs(float(target)) < float(threshold)
+        ):
             report.fail(check, f"the mutated dimension {dimension} did not move beyond {threshold}")
             continue
         bled = sorted(
             name
             for name, value in deltas.items()
-            if name != dimension and isinstance(value, (int, float)) and abs(float(value)) >= float(threshold)
+            if name != dimension
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and abs(float(value)) >= float(threshold)
         )
         if bled:
             report.fail(check, f"unrelated dimensions moved with {dimension}: {', '.join(bled)}")
@@ -1539,6 +1555,32 @@ def check_evaluator_captures(base: Path, plan: dict[str, Any], expected: int, re
         f"{len(trees)} distinct candidate trees carry {len(seen)} independent results",
         "capture records share a candidate tree; each head needs its own bound result",
     )
+    planned = {
+        (str(entrant.get("name", "")), str(packet.get("id", "")))
+        for track in (plan.get("tracks") or {}).values()
+        if isinstance(track, dict) and track.get("capture_required") is True
+        for entrant in (track.get("entrants") or [])
+        if isinstance(entrant, dict)
+        for packet in (track.get("packets") or [])
+        if isinstance(packet, dict)
+    }
+    missing = sorted(planned - seen)
+    unexpected = sorted(seen - planned)
+    render = lambda pairs: ", ".join(f"{entrant} on {packet}" for entrant, packet in pairs)
+    report.require(
+        not missing and not unexpected,
+        "evaluator.capture_scope",
+        f"capture records exactly cover all {len(planned)} planned candidate heads",
+        "capture records do not match planned candidate heads: "
+        + "; ".join(
+            part
+            for part in (
+                f"missing {render(missing)}" if missing else "",
+                f"unexpected {render(unexpected)}" if unexpected else "",
+            )
+            if part
+        ),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1605,8 +1647,15 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             ok = False
             continue
         bad: list[str] = []
-        for relative in sorted(files):
-            target = sample / relative
+        sample_root = sample.resolve()
+        for relative in sorted(files, key=str):
+            if not isinstance(relative, str):
+                bad.append(f"{relative!r} (path is not a string)")
+                continue
+            target = (sample / relative).resolve()
+            if not is_within(target, sample_root):
+                bad.append(f"{relative} (escapes sample archive)")
+                continue
             if not target.is_file():
                 bad.append(f"{relative} (absent)")
             elif sha256_file(target) != files[relative]:
@@ -1615,7 +1664,14 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             report.fail(check, "content addresses do not match stored bytes: " + "; ".join(bad))
             ok = False
             continue
-        digests.append(sha256_bytes(json.dumps({sample.name: files}, sort_keys=True).encode("utf-8")))
+        digests.append(
+            sha256_bytes(
+                json.dumps(
+                    {"sample": sample.name, "files": files, "manifest_sha256": sha256_file(sample / "manifest.json")},
+                    sort_keys=True,
+                ).encode("utf-8")
+            )
+        )
         report.ok(check, f"{len(files)} files verified across {len(REQUIRED_ARCHIVE_GROUPS)} evidence groups")
     return ok, sha256_bytes("".join(sorted(digests)).encode("utf-8"))
 
@@ -1630,6 +1686,31 @@ def run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedPro
     )
 
 
+def rerun_archived_evaluator(sample: Path, record: dict[str, Any]) -> tuple[bool, str]:
+    rerun = record.get("evaluator_rerun")
+    if not isinstance(rerun, dict):
+        return False, "archive manifest has no deterministic evaluator rerun"
+    argv = rerun.get("argv")
+    expected = rerun.get("result_hash")
+    if not isinstance(argv, list) or len(argv) < 2 or not all(isinstance(item, str) and item for item in argv):
+        return False, "archived evaluator argv must name an executable and an archived evaluator file"
+    if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        return False, "archived evaluator result_hash must be a sha256 digest"
+    evaluator = (sample / argv[1]).resolve()
+    if not is_within(evaluator, sample.resolve()) or not evaluator.is_file():
+        return False, "archived evaluator file escapes or is absent from its sample archive"
+    try:
+        completed = subprocess.run(argv, cwd=str(sample), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except OSError as exc:
+        return False, f"archived evaluator could not execute: {exc}"
+    if completed.returncode != 0:
+        return False, f"archived evaluator exited {completed.returncode}"
+    actual = sha256_bytes(completed.stdout)
+    if actual != expected:
+        return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}"
+    return True, actual
+
+
 def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
     """Restore each candidate bundle into a fresh repository and rebind its tree."""
     archive_ok, archive_digest = check_archive(root, plan, report)
@@ -1638,6 +1719,10 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
         return
     samples = archive_samples(root)
     drill_ok = archive_ok and bool(samples)
+    receipt = root / "archive" / "restore-drill.json"
+    if not archive_ok:
+        receipt.unlink(missing_ok=True)
+        return
     if not samples:
         report.fail("restore.scope", "no sample archive to restore")
     reran = 0
@@ -1696,16 +1781,20 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
         if not sample_ok:
             drill_ok = False
             continue
-        rerun = record.get("evaluator_rerun")
-        if isinstance(rerun, dict) and nonempty_str(rerun.get("result_hash")):
+        reran_ok, rerun_detail = rerun_archived_evaluator(sample, record)
+        if reran_ok:
             reran += 1
-        report.ok(check, "bundle verified, restored into a fresh repository, and rebound to its archived tree")
+        else:
+            report.fail(check, rerun_detail)
+            drill_ok = False
+            continue
+        report.ok(check, "bundle verified, restored into a fresh repository, and rebound to its archived tree; archived evaluator rerun")
 
     ok = report.require(
-        reran >= 1 if samples else False,
+        reran == len(samples) if samples else False,
         "restore.evaluator_rerun",
         f"{reran} archived deterministic evaluator results rerun from the archive",
-        "at least one deterministic evaluator must be rerun from the archive",
+        "every archived candidate needs a deterministic evaluator rerun",
     )
     drill_ok = drill_ok and ok
     if drill_ok:
@@ -1720,6 +1809,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
         )
         report.ok("restore.receipt", "restore drill receipt written; cleanup may now be authorised")
     else:
+        receipt.unlink(missing_ok=True)
         report.fail("restore.receipt", "no receipt written; the archive is not restorable and cleanup stays refused")
 
 
@@ -2050,6 +2140,7 @@ def preflight(root: Path, plan: dict[str, Any], report: Report, timeout: int) ->
                 "schema": RECEIPT_SCHEMA,
                 "verdict": "pass",
                 "plan_sha256": sha256_file(root / "benchmark.json"),
+                "isolation_sha256": sha256_file(root / "isolation.json"),
                 "stages": list(PREFLIGHT_STAGES),
             },
         )
