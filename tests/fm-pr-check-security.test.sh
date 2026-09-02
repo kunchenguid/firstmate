@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Security and regression tests for canonical PR parsing, static merge polls,
 # private atomic artifacts, authenticated custom checks, and teardown cleanup.
+# The GitHub CLI fake also rejects `gh api --slurp` and `gh pr checks --json`
+# so firstmate's own forge helpers stay compatible with Ubuntu 24.04's gh 2.45.0.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -134,6 +136,24 @@ SH
   chmod +x "$fake_root/bin/fm-guard.sh"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+# Ubuntu 24.04 ships gh 2.45.0, which has neither `gh api --slurp` (2.48.0)
+# nor `gh pr checks --json` (2.50.0). Firstmate's GitHub helpers must keep
+# working on that surface; rejecting these flags here fails the suite if a
+# helper starts depending on them.
+for arg in "$@"; do
+  if [ "$arg" = --slurp ]; then
+    printf 'unknown flag: --slurp\n' >&2
+    exit 1
+  fi
+done
+if [ "${1:-}" = pr ] && [ "${2:-}" = checks ]; then
+  for arg in "$@"; do
+    if [ "$arg" = --json ]; then
+      printf 'unknown flag: --json\n' >&2
+      exit 1
+    fi
+  done
+fi
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
@@ -2121,6 +2141,38 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_github_cli_without_slurp_or_pr_checks_json() {
+  local dir expected poll_out
+  dir=$(make_case gh-245-compat)
+  write_task_meta "$dir"
+  expected=0123456789abcdef0123456789abcdef01234567
+  FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/o/r/pull/12 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "PR recording failed on a gh that rejects --slurp: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/12' "$dir/home/state/task-a.meta" \
+    || fail "canonical pr metadata was not recorded without --slurp"
+  grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" \
+    || fail "PR head was not read without --slurp"
+  [ -s "$dir/gh.log" ] || fail "PR recording never invoked gh"
+
+  poll_out=$(FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN PATH="$dir/fakebin:$BASE_PATH" \
+    "$POLL" --validated github https://github.com/o/r/pull/12 github.com o/r 12) \
+    || fail "open-PR poll failed on a gh that rejects --slurp"
+  [ -z "$poll_out" ] || fail "open PR poll printed: $poll_out"
+
+  poll_out=$(FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED PATH="$dir/fakebin:$BASE_PATH" \
+    "$POLL" --validated github https://github.com/o/r/pull/12 github.com o/r 12) \
+    || fail "merged-PR poll failed on a gh that rejects --slurp"
+  [ "$poll_out" = merged ] || fail "merged PR poll did not report merged: $poll_out"
+
+  : > "$dir/gh-axi.log"
+  run_merge_entry "$dir" task-a https://github.com/o/r/pull/12 -- --merge \
+    >/dev/null 2>"$dir/merge.err" || fail "merge wrapper failed on a gh that rejects --slurp: $(cat "$dir/merge.err")"
+  grep -qxF 'pr merge 12 --repo o/r --merge' "$dir/gh-axi.log" \
+    || fail "merge wrapper did not invoke gh-axi"
+  pass "PR record, poll, and merge still work when gh rejects --slurp and pr checks --json"
+}
+
+test_github_cli_without_slurp_or_pr_checks_json
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once

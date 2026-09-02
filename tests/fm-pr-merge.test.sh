@@ -134,6 +134,12 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = --slurp ]; then
+    printf 'unknown flag: --slurp\\n' >&2
+    exit 1
+  fi
+done
 printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
