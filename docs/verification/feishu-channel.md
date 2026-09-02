@@ -88,7 +88,7 @@ A sentinel executable on `PATH` proves the transport does not invoke the former 
 
 ```console
 $ bash tests/fm-pi-primary-types.test.sh
-ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.3
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
 ```
 
 The check compiles the bridge, native-queue channel, watcher integration, turn-end integration, and shared state declarations with strict TypeScript settings against the installed Pi declarations.
