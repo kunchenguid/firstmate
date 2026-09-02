@@ -45,6 +45,40 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# Portable single-pid process introspection. procps `ps -o comm=/args=/ppid=`
+# custom-format columns are the primary path (Linux, macOS, MSYS2/Git-for-Windows).
+# Cygwin's ps has no -o option at all and fails outright ("unknown option -- o"),
+# which otherwise makes every ancestry walk report "cannot locate harness process
+# in ancestry" even when the harness process is right there - so these fall back
+# to parsing Cygwin's `ps -f -p PID` (fixed columns UID PID PPID TTY STIME COMMAND)
+# instead. A genuinely dead or inaccessible pid still fails both paths, so this
+# adds no false positives.
+fm_ps_comm() {  # <pid> -> command basename (no args)
+  local pid=$1 out
+  out=$(ps -o comm= -p "$pid" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  out=$(ps -f -p "$pid" 2>/dev/null | awk 'NR==2 { for (i=6;i<=NF;i++) printf "%s ", $i }')
+  out=$(printf '%s' "$out" | sed 's/[[:space:]]*$//')
+  [ -n "$out" ] || return 1
+  printf '%s' "${out%% *}"
+}
+
+fm_ps_args() {  # <pid> -> full command line
+  local pid=$1 out
+  out=$(ps -o args= -p "$pid" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  out=$(ps -f -p "$pid" 2>/dev/null | awk 'NR==2 { for (i=6;i<=NF;i++) printf "%s ", $i }')
+  out=$(printf '%s' "$out" | sed 's/[[:space:]]*$//')
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+fm_ps_ppid() {  # <pid> -> parent pid
+  local pid=$1 out
+  out=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  out=$(ps -f -p "$pid" 2>/dev/null | awk 'NR==2 {print $3}')
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
