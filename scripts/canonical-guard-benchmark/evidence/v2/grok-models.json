@@ -1,0 +1,6 @@
+{
+  "command": "grok models",
+  "authenticated": true,
+  "default_model": "grok-4.6",
+  "available_models": ["grok-4.6", "grok-4.5"]
+}

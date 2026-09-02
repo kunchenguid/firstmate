@@ -1,0 +1,188 @@
+{
+  "blinded_profile": true,
+  "catalogues": {
+    "claude": {
+      "claude-fable-5": {
+        "exit_code": 1,
+        "result": "Not logged in \u00b7 Please run /login",
+        "stderr": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\n",
+        "terminal_reason": "api_error"
+      },
+      "claude-haiku-4.5": {
+        "exit_code": 1,
+        "result": "Not logged in \u00b7 Please run /login",
+        "stderr": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\n[claude-code:unrecognized_model] {\"model\":\"claude-haiku-4.5\",\"query_source\":\"sdk\"}\n",
+        "terminal_reason": "api_error"
+      },
+      "claude-opus-5": {
+        "exit_code": 1,
+        "result": "Not logged in \u00b7 Please run /login",
+        "stderr": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\n",
+        "terminal_reason": "api_error"
+      },
+      "claude-sonnet-5": {
+        "exit_code": 1,
+        "result": "Not logged in \u00b7 Please run /login",
+        "stderr": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\n",
+        "terminal_reason": "api_error"
+      }
+    },
+    "codex": {
+      "exit_code": 1,
+      "stderr": "WARNING: proceeding, even though we could not create PATH aliases: failed to canonicalize CODEX_HOME \"<throwaway-home>/.codex\": Operation not permitted (os error 1)\nError: failed to canonicalize CODEX_HOME \"<throwaway-home>/.codex\": Operation not permitted (os error 1)\n",
+      "stdout": ""
+    },
+    "grok": {
+      "exit_code": 0,
+      "matches": [
+        "Default model: grok-4.6",
+        "  * grok-4.6 (default)"
+      ],
+      "stderr": ""
+    },
+    "pi": {
+      "exit_code": 0,
+      "matches": [
+        "kimi-coding                 k3                               1.0M     131.1K   yes       yes   ",
+        "opencode                    glm-5.2                          1M       131.1K   yes       no    ",
+        "opencode-go                 glm-5.2                          1M       131.1K   yes       no    ",
+        "opencode-go                 qwen3.7-max                      1M       65.5K    yes       no    ",
+        "opencode-go                 qwen3.8-max                      1M       131.1K   yes       yes   ",
+        "qwen-token-plan-individual  deepseek-v4-flash-0731           1M       384K     yes       no    ",
+        "qwen-token-plan-individual  glm-5.2                          1M       131.1K   yes       no    ",
+        "qwen-token-plan-individual  qwen3.6-flash                    1M       65.5K    yes       yes   ",
+        "qwen-token-plan-individual  qwen3.7-max                      1M       131.1K   yes       no    ",
+        "qwen-token-plan-individual  qwen3.8-max                      1M       131.1K   yes       yes   "
+      ],
+      "stderr": "Warning: Could not read <harness-root>/AGENTS.md: Error: EPERM: operation not permitted, stat '<harness-root>/AGENTS.md'\nWarning: Could not read <harness-root>/AGENTS.MD: Error: EPERM: operation not permitted, stat '<harness-root>/AGENTS.MD'\nWarning: Could not read <harness-root>/CLAUDE.md: Error: EPERM: operation not permitted, stat '<harness-root>/CLAUDE.md'\nWarning: Could not read <harness-root>/CLAUDE.MD: Error: EPERM: operation not permitted, stat '<harness-root>/CLAUDE.MD'\n"
+    }
+  },
+  "claude_credentials_modes": [
+    "absent"
+  ],
+  "evidence_status": "historical-pre-route-schema",
+  "models": [
+    {
+      "harness": "codex",
+      "provider": null,
+      "model": "gpt-5.6-sol",
+      "route_model": "gpt-5.6-sol",
+      "reason": "exact id absent or catalogue command failed",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "codex",
+      "provider": null,
+      "model": "gpt-5.6-terra",
+      "route_model": "gpt-5.6-terra",
+      "reason": "exact id absent or catalogue command failed",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "codex",
+      "provider": null,
+      "model": "gpt-5.6-luna",
+      "route_model": "gpt-5.6-luna",
+      "reason": "exact id absent or catalogue command failed",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "claude",
+      "provider": null,
+      "model": "claude-opus-5",
+      "route_model": "claude-opus-5",
+      "reason": "Not logged in \u00b7 Please run /login",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "claude",
+      "provider": null,
+      "model": "claude-fable-5",
+      "route_model": "claude-fable-5",
+      "reason": "Not logged in \u00b7 Please run /login",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "claude",
+      "provider": null,
+      "model": "claude-sonnet-5",
+      "route_model": "claude-sonnet-5",
+      "reason": "Not logged in \u00b7 Please run /login",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "claude",
+      "provider": null,
+      "model": "claude-haiku-4.5",
+      "route_model": "claude-haiku-4.5",
+      "reason": "Not logged in \u00b7 Please run /login",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "grok",
+      "provider": null,
+      "model": "grok-4.6",
+      "route_model": "grok-4.6",
+      "reason": "exact id present",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "provider": "kimi-coding",
+      "model": "kimi-coding/k3",
+      "route_model": "k3",
+      "reason": "exact id present",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "provider": "kimi-coding",
+      "model": "moonshotai/Kimi-K2.7-Code",
+      "route_model": "moonshotai/Kimi-K2.7-Code",
+      "reason": "exact id absent or catalogue command failed",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "pi",
+      "provider": "qwen-token-plan-individual",
+      "model": "glm-5.2",
+      "route_model": "glm-5.2",
+      "reason": "exact id present",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "provider": "qwen-token-plan-individual",
+      "model": "qwen3.7-max",
+      "route_model": "qwen3.7-max",
+      "reason": "exact id present",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "provider": "qwen-token-plan-individual",
+      "model": "qwen3.8-max",
+      "route_model": "qwen3.8-max",
+      "reason": "exact id present",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "provider": "qwen-token-plan-individual",
+      "model": "qwen3.6-flash",
+      "route_model": "qwen3.6-flash",
+      "reason": "exact id present",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "provider": "qwen-token-plan-individual",
+      "model": "deepseek-v4-flash-0731",
+      "route_model": "deepseek-v4-flash-0731",
+      "reason": "exact id present",
+      "status": "included"
+    }
+  ],
+  "recorded_at": "2026-09-02T00:24:59.982558Z",
+  "schema_version": "canonical-guard-catalogue-smoke/v1"
+}

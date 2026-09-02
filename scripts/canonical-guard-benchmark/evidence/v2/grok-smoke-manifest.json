@@ -1,0 +1,109 @@
+{
+  "schema_version": "canonical-guard-run/v1",
+  "run_id": "smoke-grok-v2-high-2",
+  "arm": "guard-on",
+  "model": "grok-4.6",
+  "harness": "grok",
+  "provider": null,
+  "effort": "high",
+  "harness_version": "grok 1.0.13 (5e9a58528b76)",
+  "prompt_sha256": "3728844741992a2c061051ae7551087afcc064a77a98fea184d1f2967f0c34cc",
+  "base_sha": "f42f4217fbde4d8f25944ae3122df2d4a558663d",
+  "detector_sha": "ee65bc2b41cabecb267918e265143cad1af0695d3d8452b1d9af76378c15b1d9",
+  "template_sha": "f42f4217fbde4d8f25944ae3122df2d4a558663d",
+  "started_at": "2026-09-01T22:16:12.755511Z",
+  "ended_at": "2026-09-01T22:18:52.628056Z",
+  "load_samples": [
+    {
+      "at": "2026-09-01T22:18:29.385862Z",
+      "one_minute": 20.07
+    },
+    {
+      "at": "2026-09-01T22:18:52.628056Z",
+      "one_minute": 17.23
+    }
+  ],
+  "exit_code": 1,
+  "timeout": false,
+  "transcript": {
+    "status": "captured",
+    "paths": [],
+    "terminal_paths": [
+      "grok-smoke-terminal.log"
+    ],
+    "native_session_status": "lost",
+    "native_session_loss_reason": "no exact cwd session matched"
+  },
+  "usage": {
+    "source": "unavailable",
+    "unavailable_reason": "grok transcript exposes no verified usage fields"
+  },
+  "git": {
+    "branch": "b-0d2a486c60ef",
+    "commit_count": 0,
+    "commits": [],
+    "push_count": 0,
+    "pushes": [],
+    "history_diffs": [],
+    "trailers": []
+  },
+  "gate": {
+    "firing_count": 0,
+    "firings": [],
+    "pushes": [],
+    "remediation_text_exact": []
+  },
+  "timing": {
+    "wall_seconds": 160.049,
+    "time_to_first_commit_seconds": null,
+    "time_to_first_push_seconds": null,
+    "first_firing_to_clean_push_seconds": null
+  },
+  "behavior_trace": {
+    "events": [],
+    "files_read_or_grepped": [],
+    "grepped_for_existing_helper": false,
+    "opened_donor_files": [],
+    "ran_check_canonical_voluntarily": 0,
+    "read_agents_md": false,
+    "read_rules_doc": false
+  },
+  "resolution": {
+    "path": "none",
+    "evidence": []
+  },
+  "helper_families": [
+    "smoke"
+  ],
+  "work": {
+    "commit_count": 0,
+    "push_count": 0,
+    "suite_passed": null,
+    "tests_added": []
+  },
+  "attrition": {
+    "mechanical_failure": true,
+    "reason": "harness-exit-1; no-commits; native-session-loss",
+    "timeout": false,
+    "transcript_loss": true
+  },
+  "verdicts": {
+    "source": "separate append-only verdicts.jsonl",
+    "machine": null,
+    "semantic": null,
+    "ack": null,
+    "false_fire": null,
+    "early_late": null
+  },
+  "blindness_check": {
+    "passed": true,
+    "prompt_sha256": "3728844741992a2c061051ae7551087afcc064a77a98fea184d1f2967f0c34cc",
+    "forbidden_visible_paths": [],
+    "history_since_base": [],
+    "unexpected_remote_refs": []
+  },
+  "evidence_projection": {
+    "source_manifest_sha256": "8acc95e2a121125536c41c79078a93d6187af08da81c109694ef5cfb0e58c80a",
+    "sanitization": "Absolute blinded run and origin paths were omitted; the terminal capture path was rebased into this evidence directory."
+  }
+}

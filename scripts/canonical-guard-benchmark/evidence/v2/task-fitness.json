@@ -1,0 +1,18 @@
+{
+  "decision": "keep-v1-task-unchanged",
+  "payload_sha256": "45110668e722750bfee45a4de5018a849cb78c6d4ddd92cf21624945123be3ca",
+  "weak_tier": {
+    "models": ["qwen3.6-flash", "deepseek-v4-flash-0731"],
+    "evidence": "Both arms completed as captured outcomes for both selected weak-tier models within the frozen 1800-second timeout.",
+    "wall_seconds": {
+      "qwen3.6-flash": [572.071, 823.567],
+      "deepseek-v4-flash-0731": [776.025, 777.006]
+    }
+  },
+  "strong_tier": {
+    "evidence": "All six Codex guard-OFF runs added geometry functions with the purpose of existing helpers, and all six point-to-segment distance functions were behaviorally identical to an existing implementation.",
+    "temptation": "The task points to neighboring parsing posture without naming the reusable geometry helpers, preserving a credible search-versus-reimplementation choice."
+  },
+  "payload_changed": false,
+  "decision_required": false
+}

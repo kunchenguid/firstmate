@@ -5,7 +5,7 @@ set -euo pipefail
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-BENCH="$ROOT/bin/fm-canonical-guard-benchmark.sh"
+BENCH="${FM_CGB_TEST_BENCH_OVERRIDE:-$ROOT/bin/fm-canonical-guard-benchmark.sh}"
 TMP_ROOT=$(fm_test_tmproot fm-cgb)
 SOURCE="$TMP_ROOT/source"
 WORKSPACE="$TMP_ROOT/workspace"
@@ -174,6 +174,10 @@ formats = {
         {"timestamp":"2026-01-01T00:00:00Z","type":"toolCall","id":"c1","name":"bash","input":{"command":"git push origin HEAD"}},
         {"timestamp":"2026-01-01T00:00:01Z","type":"toolResult","tool_use_id":"c1","content":"duplicate implementation detected"},
     ],
+    "grok": [
+        {"timestamp":"2026-01-01T00:00:00Z","type":"tool_use","id":"c1","name":"Bash","input":{"command":"git push origin HEAD"}},
+        {"timestamp":"2026-01-01T00:00:01Z","type":"tool_result","tool_use_id":"c1","content":"duplicate implementation detected"},
+    ],
 }
 for harness, rows in formats.items():
     path = tmp / f"{harness}.jsonl"
@@ -216,6 +220,58 @@ for destination in (worktree.resolve(), origin.resolve(), candidate_home.resolve
         raise SystemExit(f"linux sandbox omitted current-run binding {destination}: {argv}")
 if any("other-run" in item for item in argv):
     raise SystemExit(f"linux sandbox exposed another run: {argv}")
+arguments = type("Args", (), {"harness":"grok", "model":"grok-4.6", "effort":"high", "provider":None, "mirror":origin})()
+grok_command = module.harness_command(arguments, worktree, candidate_home, "Do the trivial task.")
+required_grok = ("grok", "--model", "grok-4.6", "--reasoning-effort", "high", "--output-format", "streaming-messages-json")
+if any(value not in grok_command for value in required_grok):
+    raise SystemExit(f"grok command omitted the blinded headless capture contract: {grok_command}")
+
+def blindness_fixture(name):
+    repo = tmp / "blindness" / name
+    remote = tmp / "blindness" / f"{name}.git"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "snapshot"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=repo, check=True)
+    (repo / "safe.txt").write_text("safe\n")
+    subprocess.run(["git", "add", "safe.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fixture snapshot"], cwd=repo, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "HEAD:dev"], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin", "+refs/heads/dev:refs/remotes/origin/dev"], cwd=repo, check=True)
+    return repo, remote, base
+
+def expect_blindness_failure(label, repo, base):
+    try:
+        module.verify_blindness(repo, "ordinary coding task", base)
+    except SystemExit:
+        return
+    raise SystemExit(f"blindness fixture did not fail for {label}")
+
+cwd_repo, _, cwd_base = blindness_fixture("guard-off-cwd")
+expect_blindness_failure("cwd path", cwd_repo, cwd_base)
+origin_repo, origin_remote, origin_base = blindness_fixture("origin-ref")
+subprocess.run(["git", "--git-dir", str(origin_remote), "update-ref", "refs/heads/guard-on", origin_base], check=True)
+expect_blindness_failure("origin remote arm ref", origin_repo, origin_base)
+history_repo, _, history_base = blindness_fixture("history")
+(history_repo / "history.txt").write_text("history\n")
+subprocess.run(["git", "add", "history.txt"], cwd=history_repo, check=True)
+subprocess.run(["git", "commit", "-q", "-m", "prepare guard-off template"], cwd=history_repo, check=True)
+expect_blindness_failure("template history", history_repo, history_base)
+object_repo, _, object_base = blindness_fixture("object")
+subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=object_repo, input="guard-on hidden arm\n", text=True, check=True, stdout=subprocess.PIPE)
+expect_blindness_failure("unreachable Git object", object_repo, object_base)
+tree_repo, _, tree_base = blindness_fixture("tree-object")
+safe_blob = subprocess.check_output(
+    ["git", "hash-object", "-w", "--stdin"], cwd=tree_repo, input="ordinary content\n", text=True,
+).strip()
+subprocess.run(
+    ["git", "mktree"], cwd=tree_repo,
+    input=f"100644 blob {safe_blob}\tguard-off-hidden.txt\n", text=True, check=True, stdout=subprocess.PIPE,
+)
+expect_blindness_failure("unreachable Git tree path", tree_repo, tree_base)
 bwrap = pathlib.Path("/usr/bin/bwrap")
 if bwrap.is_file():
     fake_home = tmp / "bwrap-home"
@@ -423,6 +479,10 @@ pass "runtime dependencies the profile blinds are supplied instead of failing mi
 cat >"$FAKEBIN/codex" <<'SH'
 #!/usr/bin/env bash
 set -eu
+if [ "${1:-}" = debug ] && [ "${2:-}" = models ]; then
+  printf '%s\n' '{"models":[{"slug":"gpt-5.6-sol","base_instructions":"do-not-persist"},{"slug":"gpt-5.6-terra","base_instructions":"do-not-persist"},{"slug":"gpt-5.6-luna","base_instructions":"do-not-persist"}]}'
+  exit 0
+fi
 cwd=
 out=
 while [ "$#" -gt 0 ]; do
@@ -503,6 +563,268 @@ jq -e '
 jq -e '.blindness_check.passed == true and .blindness_check.remote_refs == ["refs/heads/dev"]' \
   "$MANIFEST" >/dev/null || fail "manifest omitted the expanded blindness proof"
 pass "run driver captures a headless push end to end and tears down serially"
+
+cat >"$FAKEBIN/grok" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = --version ]; then printf 'grok fixture\n'; exit 0; fi
+if [ "${1:-}" = models ]; then printf 'Available models:\n- grok-4.6\n'; exit 0; fi
+cwd=
+model=
+effort=
+output_format=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --cwd) cwd=$2; shift 2 ;;
+    --model) model=$2; shift 2 ;;
+    --reasoning-effort) effort=$2; shift 2 ;;
+    --output-format) output_format=$2; shift 2 ;;
+    --single) shift 2 ;;
+    --always-approve) shift ;;
+    *) shift ;;
+  esac
+done
+[ "$model" = grok-4.6 ] && [ "$effort" = high ] && [ "$output_format" = streaming-messages-json ]
+printf 'smoke\n' >"$cwd/grok-smoke.txt"
+git -C "$cwd" add grok-smoke.txt
+git -C "$cwd" commit -q -m 'test: grok smoke'
+git -C "$cwd" push -q origin HEAD
+mkdir -p "$HOME/.grok/sessions/fixture"
+printf '{"timestamp":"2026-01-01T00:00:00Z","cwd":"%s","type":"assistant","message":{"content":"Grok smoke complete."}}\n' "$cwd" >"$HOME/.grok/sessions/fixture/events.jsonl"
+printf '{"type":"result","result":"Grok smoke complete."}\n'
+SH
+chmod +x "$FAKEBIN/grok"
+PATH="$FAKEBIN:$PATH" "$BENCH" run --workspace "$WORKSPACE" --run-id smoke-grok \
+    --arm guard-on --harness grok --model grok-4.6 --effort high --prompt-file "$SMOKE_PROMPT" \
+    --helper-family smoke --stage smoke --load-file "$TMP_ROOT/load" --max-load 8 --timeout 30
+jq -e '
+  .harness == "grok"
+  and .model == "grok-4.6"
+  and .effort == "high"
+  and .blindness_check.passed == true
+  and .transcript.status == "captured"
+  and (.transcript.paths | length) == 1
+  and (.transcript.terminal_paths | length) == 1
+  and .work.commit_count == 1
+  and .attrition.mechanical_failure == false
+' "$WORKSPACE/bundles/smoke-grok/manifest.json" >/dev/null \
+  || fail "grok smoke lost its blinded transcript or delivery evidence"
+pass "grok runs natively under the blinded profile and captures its terminal buffer"
+
+python3 - "$ROOT/scripts/canonical-guard-benchmark/evidence/v2/grok-smoke.json" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+evidence_path = pathlib.Path(sys.argv[1])
+evidence = json.loads(evidence_path.read_text())
+for path_key, hash_key in (("manifest_path", "manifest_sha256"), ("transcript_path", "transcript_sha256")):
+    reference = pathlib.Path(evidence[path_key])
+    target = evidence_path.parent / reference
+    if reference.is_absolute() or not target.is_file():
+        raise SystemExit(f"Grok evidence reference is not replayable inside its evidence directory: {path_key}")
+    if hashlib.sha256(target.read_bytes()).hexdigest() != evidence[hash_key]:
+        raise SystemExit(f"Grok evidence reference hash mismatch: {path_key}")
+PY
+pass "committed Grok evidence replays without private workspace paths"
+
+cat >"$FAKEBIN/claude" <<'SH'
+#!/usr/bin/env bash
+set -eu
+model=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model) model=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$model" in
+  claude-opus-5|claude-fable-5|claude-sonnet-5|claude-haiku-4.5) printf '{"model":"%s","result":"catalogue-ok"}\n' "$model" ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$FAKEBIN/claude"
+cat >"$FAKEBIN/pi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+cat <<'MODELS'
+provider model
+kimi-coding k3
+kimi-coding moonshotai/Kimi-K2.7-Code
+qwen-token-plan-individual glm-5.2
+qwen-token-plan-individual qwen3.7-max
+qwen-token-plan-individual qwen3.8-max
+qwen-token-plan-individual qwen3.6-flash
+qwen-token-plan-individual deepseek-v4-flash-0731
+MODELS
+SH
+chmod +x "$FAKEBIN/pi"
+PATH="$FAKEBIN:$PATH" "$BENCH" catalogue-smoke --workspace "$WORKSPACE" --output "$TMP_ROOT/catalogue-smoke.json"
+jq -e '
+  .blinded_profile == true
+  and .evidence_status == "current"
+  and (.source_harness_sha256 | test("^[0-9a-f]{64}$"))
+  and (.workspace_base_sha | test("^[0-9a-f]{40}$"))
+  and .command_timeout_seconds == 60
+  and (.models | length) == 15
+  and ([.models[] | select(.status == "included")] | length) == 15
+  and (.models | all(has("harness") and has("provider")))
+  and (.models[] | select(.model == "gpt-5.6-sol") | .harness == "codex" and .provider == null)
+  and (.models[] | select(.model == "kimi-coding/k3") | .harness == "pi" and .provider == "kimi-coding")
+  and (.models[] | select(.model == "glm-5.2") | .harness == "pi" and .provider == "qwen-token-plan-individual")
+  and (.claude_credentials_modes | all(. == "0600" or . == "absent"))
+  and (.catalogues.codex.matches | all(has("base_instructions") | not))
+' "$TMP_ROOT/catalogue-smoke.json" >/dev/null \
+  || fail "catalogue smoke did not admit exact ids without persisting unrelated model metadata"
+failed_catalogue_fixture() {
+  case "$1" in
+    codex)
+      cat <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' '{"models":[{"slug":"gpt-5.6-sol"},{"slug":"gpt-5.6-terra"},{"slug":"gpt-5.6-luna"}]}'
+exit 1
+SH
+      ;;
+    claude)
+      cat <<'SH'
+#!/usr/bin/env bash
+set -eu
+model=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model) model=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '{"model":"%s","result":"catalogue-ok"}\n' "$model"
+exit 1
+SH
+      ;;
+    grok)
+      cat <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'Available models:\n- grok-4.6\n'
+exit 1
+SH
+      ;;
+    pi)
+      cat <<'SH'
+#!/usr/bin/env bash
+set -eu
+cat <<'MODELS'
+provider model
+kimi-coding k3
+kimi-coding moonshotai/Kimi-K2.7-Code
+qwen-token-plan-individual glm-5.2
+qwen-token-plan-individual qwen3.7-max
+qwen-token-plan-individual qwen3.8-max
+qwen-token-plan-individual qwen3.6-flash
+qwen-token-plan-individual deepseek-v4-flash-0731
+MODELS
+exit 1
+SH
+      ;;
+  esac
+}
+failed_route_admissions=
+for failed_harness in codex claude grok pi; do
+  cp "$FAKEBIN/$failed_harness" "$FAKEBIN/$failed_harness-good"
+  failed_catalogue_fixture "$failed_harness" >"$FAKEBIN/$failed_harness"
+  chmod +x "$FAKEBIN/$failed_harness"
+  failed_output="$TMP_ROOT/catalogue-nonzero-$failed_harness.json"
+  PATH="$FAKEBIN:$PATH" "$BENCH" catalogue-smoke --workspace "$WORKSPACE" --output "$failed_output"
+  case "$failed_harness" in
+    codex) expected_routes=3 ;;
+    claude) expected_routes=4 ;;
+    grok) expected_routes=1 ;;
+    pi) expected_routes=7 ;;
+  esac
+  jq -e --arg harness "$failed_harness" --argjson expected "$expected_routes" '
+    ([.models[] | select(.harness == $harness)] | length) == $expected
+  ' "$failed_output" >/dev/null || fail "failed catalogue fixture omitted $failed_harness routes"
+  if [ "$failed_harness" = claude ]; then
+    jq -e '(.catalogues.claude | length) == 4 and ([.catalogues.claude[].exit_code] | all(. == 1))' \
+      "$failed_output" >/dev/null || fail "failed Claude catalogue fixture did not exit 1 for every route"
+  else
+    jq -e --arg harness "$failed_harness" '.catalogues[$harness].exit_code == 1' \
+      "$failed_output" >/dev/null || fail "failed $failed_harness catalogue fixture did not exit 1"
+  fi
+  admitted=$(jq -r --arg harness "$failed_harness" '
+    .models[] | select(.harness == $harness and .status != "excluded-with-reason") | .model
+  ' "$failed_output")
+  if [ -n "$admitted" ]; then
+    failed_route_admissions="${failed_route_admissions}${failed_route_admissions:+,}${admitted//$'\n'/,}"
+  fi
+  mv "$FAKEBIN/$failed_harness-good" "$FAKEBIN/$failed_harness"
+done
+[ -z "$failed_route_admissions" ] \
+  || fail "catalogue smoke admitted routes from failed commands: $failed_route_admissions"
+pass "catalogue smoke refuses partial model output across all exact routes"
+if "$BENCH" go-no-go --help | grep -q -- '--repository'; then
+  fail "go-no-go advertised an unused repository option"
+fi
+sed 's/qwen-token-plan-individual glm-5.2/opencode glm-5.2/' "$FAKEBIN/pi" >"$FAKEBIN/pi-wrong-provider"
+mv "$FAKEBIN/pi-wrong-provider" "$FAKEBIN/pi"
+chmod +x "$FAKEBIN/pi"
+PATH="$FAKEBIN:$PATH" "$BENCH" catalogue-smoke --workspace "$WORKSPACE" --output "$TMP_ROOT/catalogue-wrong-provider.json"
+jq -e '
+  .models[]
+  | select(.model == "glm-5.2")
+  | .status == "excluded-with-reason" and .harness == "pi" and .provider == "qwen-token-plan-individual"
+' "$TMP_ROOT/catalogue-wrong-provider.json" >/dev/null \
+  || fail "catalogue smoke substituted a model from the wrong provider route"
+cp "$FAKEBIN/claude" "$FAKEBIN/claude-good"
+cat >"$FAKEBIN/claude" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '{"model":"claude-opus-5","result":"catalogue-ok"}\n'
+SH
+chmod +x "$FAKEBIN/claude"
+PATH="$FAKEBIN:$PATH" "$BENCH" catalogue-smoke --workspace "$WORKSPACE" --output "$TMP_ROOT/catalogue-wrong-claude-model.json"
+jq -e '
+  .models[]
+  | select(.model == "claude-fable-5")
+  | .status == "excluded-with-reason" and (.reason | contains("returned claude-opus-5"))
+' "$TMP_ROOT/catalogue-wrong-claude-model.json" >/dev/null \
+  || fail "catalogue smoke admitted a substituted Claude response model"
+mv "$FAKEBIN/claude-good" "$FAKEBIN/claude"
+if PATH="$FAKEBIN:$PATH" "$BENCH" catalogue-smoke --workspace "$WORKSPACE" --output "$TMP_ROOT/catalogue-smoke.json" >/dev/null 2>&1; then
+  fail "catalogue smoke overwrote existing evidence"
+fi
+[ ! -e "$WORKSPACE/.catalogue-smoke-lock" ] || fail "catalogue evidence refusal leaked its lock"
+mkdir "$WORKSPACE/.catalogue-smoke-lock"
+if PATH="$FAKEBIN:$PATH" "$BENCH" catalogue-smoke --workspace "$WORKSPACE" --output "$TMP_ROOT/catalogue-smoke-second.json" >/dev/null 2>&1; then
+  fail "catalogue smoke ignored another active catalogue run"
+fi
+[ -d "$WORKSPACE/.catalogue-smoke-lock" ] || fail "catalogue refusal removed another run's lock"
+rmdir "$WORKSPACE/.catalogue-smoke-lock"
+cp "$FAKEBIN/grok" "$FAKEBIN/grok-fast"
+cat >"$FAKEBIN/grok" <<'SH'
+#!/usr/bin/env bash
+set -eu
+sleep 2
+printf 'grok-4.6\n'
+SH
+chmod +x "$FAKEBIN/grok"
+PATH="$FAKEBIN:$PATH" "$BENCH" catalogue-smoke --workspace "$WORKSPACE" \
+  --timeout 1 --output "$TMP_ROOT/catalogue-timeout.json"
+jq -e '
+  .models[]
+  | select(.model == "grok-4.6")
+  | .status == "excluded-with-reason" and (.reason | contains("timed out after 1"))
+' "$TMP_ROOT/catalogue-timeout.json" >/dev/null \
+  || fail "catalogue smoke did not record a bounded model-list timeout"
+[ ! -e "$WORKSPACE/.catalogue-smoke-lock" ] || fail "catalogue timeout leaked its workspace lock"
+mv "$FAKEBIN/grok-fast" "$FAKEBIN/grok"
+mkdir "$WORKSPACE/.catalogue-smoke-lock"
+printf '{"pid":999999,"process_identity":"definitely-not-live"}\n' >"$WORKSPACE/.catalogue-smoke-lock/owner.json"
+PATH="$FAKEBIN:$PATH" "$BENCH" catalogue-smoke --workspace "$WORKSPACE" \
+  --output "$TMP_ROOT/catalogue-stale-lock-recovery.json" >/dev/null
+[ ! -e "$WORKSPACE/.catalogue-smoke-lock" ] || fail "catalogue stale-lock recovery left its lock behind"
+pass "catalogue smoke saves exact admissions without substitution and owns its lock"
 
 cat >"$FAKEBIN/cursor-agent" <<'SH'
 #!/usr/bin/env bash
@@ -682,6 +1004,109 @@ done
   || fail "verdict ledger is not separate and append-only"
 pass "separate verdicts generate all seven tables without hand-entered aggregates"
 
+V2_SCOREBOARD_WORKSPACE="$TMP_ROOT/v2-scoreboard-workspace"
+mkdir -p "$V2_SCOREBOARD_WORKSPACE/bundles"
+cp "$WORKSPACE/workspace.json" "$V2_SCOREBOARD_WORKSPACE/workspace.json"
+python3 - "$MANIFEST" "$V2_SCOREBOARD_WORKSPACE" <<'PY'
+import copy
+import json
+import pathlib
+import sys
+
+template = json.loads(pathlib.Path(sys.argv[1]).read_text())
+workspace = pathlib.Path(sys.argv[2])
+verdicts = []
+for wave in ("high", "medium"):
+    for index in range(1, 16):
+        model = f"fixture-model-{index:02d}"
+        for arm in ("guard-off", "guard-on"):
+            run_id = f"{wave}-{index:02d}-{arm}"
+            bundle = workspace / "bundles" / run_id
+            bundle.mkdir()
+            manifest = copy.deepcopy(template)
+            manifest.update({
+                "run_id": run_id,
+                "stage": "matrix",
+                "wave": wave,
+                "effort": wave,
+                "model": model,
+                "arm": arm,
+                "lane": f"lane-{index:02d}",
+            })
+            manifest["gate"].update({"firing_count": 0, "firings": [], "remediation_text_exact": []})
+            (bundle / "manifest.json").write_text(json.dumps(manifest))
+            (bundle / "final.diff").write_text("")
+            duplicate = arm == "guard-off"
+            verdicts.append({
+                "run_id": run_id,
+                "machine": "duplicate" if duplicate else "clean",
+                "semantic": "duplicate" if duplicate else "clean",
+                "outcome_class": "reached-review" if duplicate else "never-duplicated",
+                "false_fire": False,
+                "ack": False,
+            })
+(workspace / "verdicts.jsonl").write_text("".join(json.dumps(row) + "\n" for row in verdicts))
+PY
+"$BENCH" scoreboard --workspace "$V2_SCOREBOARD_WORKSPACE" \
+  --markdown "$TMP_ROOT/v2-scoreboard.md" --html "$TMP_ROOT/v2-scoreboard.html"
+for heading in \
+  'High wave model scoreboard' 'High wave pooled primary result' \
+  'Medium wave model scoreboard' 'Medium wave pooled primary result'; do
+  assert_grep "$heading" "$TMP_ROOT/v2-scoreboard.md" "v2 scoreboard omitted $heading"
+done
+assert_grep 'high-01-guard-off' "$TMP_ROOT/v2-scoreboard.md" \
+  "v2 scoreboard omitted a high-wave result"
+assert_grep 'medium-01-guard-off' "$TMP_ROOT/v2-scoreboard.md" \
+  "v2 scoreboard omitted a medium-wave result"
+pass "scoreboard keeps both fifteen-pair replication waves separate"
+
+SMALL_SCOREBOARD_WORKSPACE="$TMP_ROOT/small-scoreboard-workspace"
+mkdir -p "$SMALL_SCOREBOARD_WORKSPACE/bundles"
+cp "$V2_SCOREBOARD_WORKSPACE/workspace.json" "$SMALL_SCOREBOARD_WORKSPACE/workspace.json"
+python3 - "$V2_SCOREBOARD_WORKSPACE" "$SMALL_SCOREBOARD_WORKSPACE" <<'PY'
+import json
+import pathlib
+import shutil
+import sys
+
+source, destination = map(pathlib.Path, sys.argv[1:])
+run_ids = {
+    f"{wave}-{index:02d}-{arm}"
+    for wave in ("high", "medium")
+    for index in range(1, 4)
+    for arm in ("guard-on", "guard-off")
+}
+for run_id in run_ids:
+    shutil.copytree(source / "bundles" / run_id, destination / "bundles" / run_id)
+verdicts = [
+    json.loads(line) for line in (source / "verdicts.jsonl").read_text().splitlines()
+    if json.loads(line)["run_id"] in run_ids
+]
+(destination / "verdicts.jsonl").write_text("".join(json.dumps(row) + "\n" for row in verdicts))
+PY
+"$BENCH" scoreboard --workspace "$SMALL_SCOREBOARD_WORKSPACE" \
+  --markdown "$TMP_ROOT/small-scoreboard.md" --html "$TMP_ROOT/small-scoreboard.html" >/dev/null
+assert_grep 'High wave model scoreboard' "$TMP_ROOT/small-scoreboard.md" \
+  "scoreboard rejected an otherwise valid non-fifteen-pair replication"
+python3 - "$SMALL_SCOREBOARD_WORKSPACE/bundles/medium-01-guard-off/manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+manifest = json.loads(path.read_text())
+manifest["model"] = "asymmetric-model"
+path.write_text(json.dumps(manifest))
+PY
+if "$BENCH" scoreboard --workspace "$SMALL_SCOREBOARD_WORKSPACE" \
+    --markdown "$TMP_ROOT/asymmetric-scoreboard.md" --html "$TMP_ROOT/asymmetric-scoreboard.html" \
+    >"$TMP_ROOT/asymmetric-scoreboard.out" 2>&1; then
+  fail "scoreboard accepted a shape that freeze rejects"
+fi
+assert_grep 'medium/lane-01' "$TMP_ROOT/asymmetric-scoreboard.out" \
+  "scoreboard shape refusal did not name the asymmetric pair"
+pass "scoreboard consumes the same arbitrary paired-wave shape that freeze accepts"
+
 PLAN_WORKSPACE="$TMP_ROOT/plan-workspace"
 mkdir -p "$PLAN_WORKSPACE"
 cp "$WORKSPACE/workspace.json" "$PLAN_WORKSPACE/workspace.json"
@@ -691,31 +1116,506 @@ JSON
 if "$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/invalid-plan.json" >/dev/null 2>&1; then
   fail "freeze accepted a partial, unsafe, unpaired plan"
 fi
-python3 - "$TMP_ROOT" <<'PY'
+python3 - "$TMP_ROOT" "$SMOKE_PROMPT" <<'PY'
+import hashlib
 import json
 import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
+prompt_sha = hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
 def plan(pair_count):
     runs = []
     for index in range(1, pair_count + 1):
         lane = f"lane-{index}"
         for order, arm in enumerate(("guard-on", "guard-off"), 1):
             runs.append({"run_id":f"pair-{index}-{arm}","arm":arm,"harness":"codex","model":f"fixture-{index}","provider":None,"effort":None,"helper_family":"distance-helper","lane":lane,"lane_order":order,"concurrent_lane_count":1})
-    return {"ratified_at":"2026-01-01T00:00:00Z","amendment":"fixture","prompt_sha256":"a" * 64,"max_load":8,"timeout_seconds":30,"runs":runs}
-for name, count in (("under-plan.json", 1), ("valid-plan.json", 7), ("over-plan.json", 8)):
-    (root / name).write_text(json.dumps(plan(count)))
+    return {"ratified_at":"2026-01-01T00:00:00Z","amendment":"fixture","prompt_sha256":prompt_sha,"max_load":8,"timeout_seconds":30,"runs":runs}
+legacy = plan(7)
+(root / "legacy-plan.json").write_text(json.dumps(legacy, indent=2, sort_keys=True) + "\n")
+(root / "valid-plan.json").write_text(json.dumps(legacy))
+v2 = plan(15)
+for item in v2["runs"]:
+    item["wave"] = "high"
+    item["effort"] = "high"
+medium = []
+for item in v2["runs"]:
+    replica = dict(item)
+    replica["run_id"] = replica["run_id"].replace("pair-", "medium-pair-")
+    replica["wave"] = "medium"
+    replica["effort"] = "medium"
+    medium.append(replica)
+v2["runs"].extend(medium)
+(root / "v2-plan.json").write_text(json.dumps(v2))
+odd = json.loads(json.dumps(v2))
+odd["runs"] = [item for item in odd["runs"] if item["run_id"] != "medium-pair-15-guard-off"]
+(root / "odd-plan.json").write_text(json.dumps(odd))
+asymmetric = json.loads(json.dumps(v2))
+next(item for item in asymmetric["runs"] if item["run_id"] == "medium-pair-9-guard-off")["model"] = "different-model"
+(root / "asymmetric-plan.json").write_text(json.dumps(asymmetric))
+cross_wave = json.loads(json.dumps(v2))
+for item in cross_wave["runs"]:
+    if item["wave"] == "medium" and item["lane"] == "lane-9":
+        item["model"] = "different-model"
+(root / "cross-wave-plan.json").write_text(json.dumps(cross_wave))
+same_effort = json.loads(json.dumps(v2))
+for item in same_effort["runs"]:
+    if item["wave"] == "medium":
+        item["effort"] = "high"
+(root / "same-effort-plan.json").write_text(json.dumps(same_effort))
+swapped_effort = json.loads(json.dumps(v2))
+for item in swapped_effort["runs"]:
+    item["effort"] = "medium" if item["wave"] == "high" else "high"
+(root / "swapped-effort-plan.json").write_text(json.dumps(swapped_effort))
+null_effort = json.loads(json.dumps(v2))
+for item in null_effort["runs"]:
+    item["effort"] = None
+(root / "null-effort-plan.json").write_text(json.dumps(null_effort))
 PY
-for invalid_size in under over; do
-  if "$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/$invalid_size-plan.json" >/dev/null 2>&1; then
-    fail "freeze accepted a $invalid_size-sized confirmatory slate"
+for invalid in odd asymmetric cross-wave same-effort swapped-effort null-effort; do
+  rm -f "$PLAN_WORKSPACE/frozen-plan.json"
+  if "$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/$invalid-plan.json" >"$TMP_ROOT/$invalid.out" 2>&1; then
+    fail "freeze accepted the $invalid paired slate"
   fi
 done
-"$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/valid-plan.json" >/dev/null
-jq -e '.max_load == 8 and .timeout_seconds == 30 and (.runs | length) == 14' "$PLAN_WORKSPACE/frozen-plan.json" >/dev/null \
-  || fail "freeze did not preserve the complete seven-pair execution design"
-pass "freeze validates and binds the complete paired execution design"
+assert_grep 'medium/lane-15' "$TMP_ROOT/odd.out" "odd-slate refusal did not name its pair"
+assert_grep 'medium/lane-9' "$TMP_ROOT/asymmetric.out" "asymmetric-slate refusal did not name its pair"
+assert_grep 'between high/lane-9 and medium/lane-9' "$TMP_ROOT/cross-wave.out" \
+  "cross-wave refusal did not name both replication pairs"
+assert_grep 'medium/lane-1' "$TMP_ROOT/same-effort.out" \
+  "same-effort refusal did not name the mislabeled replication pair"
+assert_grep 'high/lane-1' "$TMP_ROOT/swapped-effort.out" \
+  "swapped-effort refusal did not name the mislabeled replication pair"
+assert_grep 'high/lane-1' "$TMP_ROOT/null-effort.out" \
+  "null-effort refusal did not name the mislabeled replication pair"
+"$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/v2-plan.json" >/dev/null
+jq -e '
+  (.runs | length) == 60
+  and ([.runs[] | select(.wave == "high")] | length) == 30
+  and ([.runs[] | select(.wave == "medium")] | length) == 30
+' "$PLAN_WORKSPACE/frozen-plan.json" >/dev/null \
+  || fail "freeze did not preserve the fifteen-pair high and medium waves"
+rm -f "$PLAN_WORKSPACE/frozen-plan.json"
+"$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/legacy-plan.json" >/dev/null
+python3 - "$TMP_ROOT/legacy-plan.json" "$PLAN_WORKSPACE/frozen-plan.json" <<'PY'
+import json
+import pathlib
+import sys
+before = json.loads(pathlib.Path(sys.argv[1]).read_text())
+after = json.loads(pathlib.Path(sys.argv[2]).read_text())
+after.pop("frozen_at")
+after.pop("schema_version")
+if before != after:
+    raise SystemExit("legacy seven-pair plan changed during freeze")
+PY
+pass "freeze accepts arbitrary paired waves and preserves the legacy seven-pair plan"
+
+python3 - "$ROOT" "$TMP_ROOT" "$BASE_SHA" "$SMOKE_PROMPT" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+root = pathlib.Path(sys.argv[1])
+tmp = pathlib.Path(sys.argv[2])
+payload_sha = sys.argv[3]
+prompt_sha = hashlib.sha256(pathlib.Path(sys.argv[4]).read_bytes()).hexdigest()
+paths = [
+    "bin/fm-canonical-guard-benchmark.sh",
+    "scripts/canonical-guard-benchmark/benchmark.py",
+    "scripts/canonical-guard-benchmark/manifest.schema.json",
+    "tests/fm-canonical-guard-benchmark.test.sh",
+]
+digest = hashlib.sha256(b"".join((root / path).read_bytes() for path in paths)).hexdigest()
+(tmp / "extension-result.json").write_text(json.dumps({
+    "selection": "scripts",
+    "scripts": [{"path": "tests/fm-canonical-guard-benchmark.test.sh", "exit": 0, "gate_skip": False}],
+    "summary": {"total": 1, "failed": 0, "skipped_gate": 0},
+}))
+(tmp / "extension-evidence.json").write_text(json.dumps({
+    "passed": True,
+    "harness_digest": digest,
+    "command": "bin/fm-test-run.sh tests/fm-canonical-guard-benchmark.test.sh",
+    "result_path": "extension-result.json",
+    "result_sha256": hashlib.sha256((tmp / "extension-result.json").read_bytes()).hexdigest(),
+}))
+(tmp / "grok-terminal.log").write_text("blinded grok smoke transcript\n")
+(tmp / "grok-manifest.json").write_text(json.dumps({
+    "schema_version": "canonical-guard-run/v1", "run_id": "grok-positive", "arm": "guard-on",
+    "model": "grok-4.6", "harness": "grok", "provider": None, "effort": "high",
+    "harness_version": "fixture", "prompt_sha256": prompt_sha, "base_sha": "b" * 40,
+    "detector_sha": "c" * 64, "template_sha": "d" * 40, "started_at": "2026-01-01T00:00:00Z",
+    "ended_at": "2026-01-01T00:00:01Z", "load_samples": [], "exit_code": 0, "timeout": False,
+    "transcript": {"status": "captured", "paths": [], "terminal_paths": ["grok-terminal.log"]},
+    "usage": {}, "git": {}, "gate": {}, "timing": {}, "behavior_trace": [], "resolution": {},
+    "helper_families": [], "work": {"commit_count": 1},
+    "attrition": {"mechanical_failure": False, "timeout": False, "transcript_loss": False},
+    "verdicts": [], "blindness_check": {"passed": True},
+}))
+(tmp / "grok-evidence.json").write_text(json.dumps({
+    "model": "grok-4.6",
+    "effort": "high",
+    "blindness_passed": True,
+    "mechanical_failure": False,
+    "transcript_captured": True,
+    "transcript_path": "grok-terminal.log",
+    "transcript_sha256": hashlib.sha256((tmp / "grok-terminal.log").read_bytes()).hexdigest(),
+    "manifest_path": "grok-manifest.json",
+    "manifest_sha256": hashlib.sha256((tmp / "grok-manifest.json").read_bytes()).hexdigest(),
+}))
+routes = [
+    ("codex", None, "gpt-5.6-sol"), ("codex", None, "gpt-5.6-terra"),
+    ("codex", None, "gpt-5.6-luna"), ("claude", None, "claude-opus-5"),
+    ("claude", None, "claude-fable-5"), ("claude", None, "claude-sonnet-5"),
+    ("claude", None, "claude-haiku-4.5"), ("grok", None, "grok-4.6"),
+    ("pi", "kimi-coding", "k3"), ("pi", "kimi-coding", "moonshotai/Kimi-K2.7-Code"),
+    ("pi", "qwen-token-plan-individual", "glm-5.2"),
+    ("pi", "qwen-token-plan-individual", "qwen3.7-max"),
+    ("pi", "qwen-token-plan-individual", "qwen3.8-max"),
+    ("pi", "qwen-token-plan-individual", "qwen3.6-flash"),
+    ("pi", "qwen-token-plan-individual", "deepseek-v4-flash-0731"),
+]
+(tmp / "catalogue-evidence.json").write_text(json.dumps({
+    "blinded_profile": True,
+    "models": [
+        {
+            "harness": harness,
+            "provider": provider,
+            "model": "kimi-coding/k3" if (provider, model) == ("kimi-coding", "k3") else model,
+            "route_model": model,
+            "status": "included",
+        }
+        for harness, provider, model in routes
+    ],
+    "catalogues": {
+        "codex": {"exit_code": 0, "matches": [{"slug": model} for harness, _, model in routes if harness == "codex"]},
+        "claude": {model: {"exit_code": 0, "model": model} for harness, _, model in routes if harness == "claude"},
+        "grok": {"exit_code": 0, "matches": ["grok-4.6"]},
+        "pi": {"exit_code": 0, "matches": [f"{provider} {model}" for harness, provider, model in routes if harness == "pi"]},
+    },
+}))
+(tmp / "pr-evidence.json").write_text(json.dumps({
+    "state": "merged",
+    "head_sha": "b" * 40,
+    "local_test": {"head_sha": "c" * 40, "passed": True, "macos_sandbox": True, "command": "local macOS sandbox suite"},
+}))
+(tmp / "corpus-evidence.json").write_text(json.dumps({
+    "schema_version": "canonical-guard-corpus-sync-evidence/v1",
+    "decision": "excluded",
+    "reason": "frozen v2 exclusion",
+}))
+(tmp / "router-evidence.json").write_text(json.dumps({
+    "schema_version": "canonical-guard-router-pause-evidence/v1",
+    "scope": "router-ranking",
+    "state": "paused",
+    "reason": "fixture pause remains active",
+}))
+(tmp / "launch-evidence.json").write_text(json.dumps({
+    "payload_sha": payload_sha,
+    "keyboard_guard_included": True,
+    "keyboard_guard_path": "lefthook.yml",
+    "corpus_sync": {
+        "evidence_path": "corpus-evidence.json",
+        "evidence_sha256": hashlib.sha256((tmp / "corpus-evidence.json").read_bytes()).hexdigest(),
+    },
+    "router_ranking": {
+        "evidence_path": "router-evidence.json",
+        "evidence_sha256": hashlib.sha256((tmp / "router-evidence.json").read_bytes()).hexdigest(),
+    },
+    "pr_178": {
+        "evidence_path": "pr-evidence.json",
+        "evidence_sha256": hashlib.sha256((tmp / "pr-evidence.json").read_bytes()).hexdigest(),
+    },
+    "artifacts": {
+        name: {"sha256": hashlib.sha256((tmp / filename).read_bytes()).hexdigest()}
+        for name, filename in {
+            "extension": "extension-evidence.json",
+            "grok": "grok-evidence.json",
+            "catalogue": "catalogue-evidence.json",
+        }.items()
+    },
+}))
+PY
+cat >"$FAKEBIN/gh-axi" <<SH
+#!/usr/bin/env bash
+touch "$TMP_ROOT/hosted-pr-check-was-used"
+printf 'merged: yes\nchecks: "29 passed, 0 failed, 0 skipped, 29 total"\n'
+SH
+chmod +x "$FAKEBIN/gh-axi"
+if PATH="$FAKEBIN:$PATH" "$BENCH" go-no-go --workspace "$PLAN_WORKSPACE" \
+    --prompt-file "$SMOKE_PROMPT" \
+    --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+    --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+    --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+    --launch-evidence "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/go-no-go.out" 2>&1; then
+  fail "go-no-go accepted PR 178 local evidence from a different head"
+fi
+[ ! -e "$TMP_ROOT/hosted-pr-check-was-used" ] \
+  || fail "go-no-go consulted hosted PR checks instead of exact-head local evidence"
+assert_grep 'PR 178 exact-head local macOS sandbox evidence' "$TMP_ROOT/go-no-go.out" \
+  "go-no-go omitted the exact-head local PR 178 gate"
+jq '.local_test.head_sha = .head_sha' \
+  "$TMP_ROOT/pr-evidence.json" >"$TMP_ROOT/pr-evidence-next.json"
+mv "$TMP_ROOT/pr-evidence-next.json" "$TMP_ROOT/pr-evidence.json"
+PR_EVIDENCE_HASH=$(shasum -a 256 "$TMP_ROOT/pr-evidence.json" | awk '{print $1}')
+jq --arg pr_hash "$PR_EVIDENCE_HASH" '.pr_178.evidence_sha256 = $pr_hash' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+if PATH="$FAKEBIN:$PATH" "$BENCH" go-no-go --workspace "$PLAN_WORKSPACE" \
+    --prompt-file "$SMOKE_PROMPT" \
+    --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+    --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+    --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+    --launch-evidence "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/go-no-go.out" 2>&1; then
+  fail "go-no-go unexpectedly passed before the frozen routes were corrected"
+fi
+assert_grep '[GO] PR 178 exact-head local macOS sandbox evidence' "$TMP_ROOT/go-no-go.out" \
+  "go-no-go did not derive the PR 178 verdict from its bound local evidence"
+jq '.payload_sha = "ffffffffffffffffffffffffffffffffffffffff"' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+if PATH="$FAKEBIN:$PATH" "$BENCH" go-no-go --workspace "$PLAN_WORKSPACE" \
+    --prompt-file "$SMOKE_PROMPT" \
+    --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+    --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+    --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+    --launch-evidence "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/go-no-go.out" 2>&1; then
+  fail "go-no-go accepted an unresolved payload commit"
+fi
+assert_grep '[NO-GO] payload SHA and keyboard guard inclusion' "$TMP_ROOT/go-no-go.out" \
+  "go-no-go trusted a SHA-shaped payload string without resolving it"
+jq --arg payload_sha "$BASE_SHA" '.payload_sha = $payload_sha' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+ABBREVIATED_PAYLOAD=$(printf '%s' "$BASE_SHA" | cut -c1-8)
+jq --arg payload_sha "$ABBREVIATED_PAYLOAD" '.payload_sha = $payload_sha' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+if PATH="$FAKEBIN:$PATH" "$BENCH" go-no-go --workspace "$PLAN_WORKSPACE" \
+    --prompt-file "$SMOKE_PROMPT" \
+    --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+    --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+    --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+    --launch-evidence "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/go-no-go.out" 2>&1; then
+  fail "go-no-go unexpectedly passed before the frozen routes were corrected"
+fi
+assert_grep '[GO] payload SHA and keyboard guard inclusion' "$TMP_ROOT/go-no-go.out" \
+  "go-no-go rejected a uniquely resolvable abbreviated payload SHA"
+jq --arg payload_sha "$BASE_SHA" '.payload_sha = $payload_sha' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+jq '.scripts[0].exit = 1 | .summary.failed = 1' \
+  "$TMP_ROOT/extension-result.json" >"$TMP_ROOT/extension-result-next.json"
+mv "$TMP_ROOT/extension-result-next.json" "$TMP_ROOT/extension-result.json"
+EXTENSION_RESULT_HASH=$(shasum -a 256 "$TMP_ROOT/extension-result.json" | awk '{print $1}')
+jq --arg result_hash "$EXTENSION_RESULT_HASH" '.result_sha256 = $result_hash' \
+  "$TMP_ROOT/extension-evidence.json" >"$TMP_ROOT/extension-evidence-next.json"
+mv "$TMP_ROOT/extension-evidence-next.json" "$TMP_ROOT/extension-evidence.json"
+EXTENSION_HASH=$(shasum -a 256 "$TMP_ROOT/extension-evidence.json" | awk '{print $1}')
+jq --arg extension_hash "$EXTENSION_HASH" '.artifacts.extension.sha256 = $extension_hash' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+if PATH="$FAKEBIN:$PATH" "$BENCH" go-no-go --workspace "$PLAN_WORKSPACE" \
+    --prompt-file "$SMOKE_PROMPT" \
+    --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+    --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+    --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+    --launch-evidence "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/go-no-go.out" 2>&1; then
+  fail "go-no-go accepted a failing bound extension test result"
+fi
+assert_grep '[NO-GO] extension tests' "$TMP_ROOT/go-no-go.out" \
+  "go-no-go trusted the extension evidence passed boolean instead of the runner result"
+jq '.scripts[0].exit = 0 | .summary.failed = 0' \
+  "$TMP_ROOT/extension-result.json" >"$TMP_ROOT/extension-result-next.json"
+mv "$TMP_ROOT/extension-result-next.json" "$TMP_ROOT/extension-result.json"
+EXTENSION_RESULT_HASH=$(shasum -a 256 "$TMP_ROOT/extension-result.json" | awk '{print $1}')
+jq --arg result_hash "$EXTENSION_RESULT_HASH" '.result_sha256 = $result_hash' \
+  "$TMP_ROOT/extension-evidence.json" >"$TMP_ROOT/extension-evidence-next.json"
+mv "$TMP_ROOT/extension-evidence-next.json" "$TMP_ROOT/extension-evidence.json"
+EXTENSION_HASH=$(shasum -a 256 "$TMP_ROOT/extension-evidence.json" | awk '{print $1}')
+jq --arg extension_hash "$EXTENSION_HASH" '.artifacts.extension.sha256 = $extension_hash' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+cp "$TMP_ROOT/grok-manifest.json" "$TMP_ROOT/grok-manifest-original.json"
+printf '\n' >>"$TMP_ROOT/grok-manifest.json"
+if PATH="$FAKEBIN:$PATH" "$BENCH" go-no-go --workspace "$PLAN_WORKSPACE" \
+    --prompt-file "$SMOKE_PROMPT" \
+    --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+    --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+    --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+    --launch-evidence "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/go-no-go.out" 2>&1; then
+  fail "go-no-go accepted a Grok manifest that changed after its transcript was bound"
+fi
+assert_grep '[NO-GO] Grok blinded smoke' "$TMP_ROOT/go-no-go.out" \
+  "go-no-go trusted Grok booleans instead of its bound run manifest"
+mv "$TMP_ROOT/grok-manifest-original.json" "$TMP_ROOT/grok-manifest.json"
+printf '\n' >>"$TMP_ROOT/catalogue-evidence.json"
+if PATH="$FAKEBIN:$PATH" "$BENCH" go-no-go --workspace "$PLAN_WORKSPACE" \
+    --prompt-file "$SMOKE_PROMPT" \
+    --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+    --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+    --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+    --launch-evidence "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/go-no-go.out" 2>&1; then
+  fail "go-no-go accepted a catalogue artifact that changed after launch evidence was recorded"
+fi
+assert_grep 'evidence artifact hashes' "$TMP_ROOT/go-no-go.out" \
+  "go-no-go omitted its content-addressed evidence gate"
+CATALOGUE_HASH=$(shasum -a 256 "$TMP_ROOT/catalogue-evidence.json" | awk '{print $1}')
+jq --arg catalogue_hash "$CATALOGUE_HASH" \
+  '.artifacts.catalogue.sha256 = $catalogue_hash' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+jq '(.models[] | select(.model == "qwen3.8-max").provider) = "wrong-provider"' \
+  "$TMP_ROOT/catalogue-evidence.json" >"$TMP_ROOT/catalogue-evidence-next.json"
+mv "$TMP_ROOT/catalogue-evidence-next.json" "$TMP_ROOT/catalogue-evidence.json"
+CATALOGUE_HASH=$(shasum -a 256 "$TMP_ROOT/catalogue-evidence.json" | awk '{print $1}')
+jq --arg catalogue_hash "$CATALOGUE_HASH" '.artifacts.catalogue.sha256 = $catalogue_hash' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+if PATH="$FAKEBIN:$PATH" "$BENCH" go-no-go --workspace "$PLAN_WORKSPACE" \
+    --prompt-file "$SMOKE_PROMPT" \
+    --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+    --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+    --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+    --launch-evidence "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/go-no-go.out" 2>&1; then
+  fail "go-no-go accepted a catalogue row routed through the wrong provider"
+fi
+assert_grep '[NO-GO] blinded catalogue smoke: wrong or missing row routes: qwen3.8-max' "$TMP_ROOT/go-no-go.out" \
+  "go-no-go trusted catalogue ids without their exact harness/provider/model route"
+jq '(.models[] | select(.model == "qwen3.8-max").provider) = "qwen-token-plan-individual"' \
+  "$TMP_ROOT/catalogue-evidence.json" >"$TMP_ROOT/catalogue-evidence-next.json"
+mv "$TMP_ROOT/catalogue-evidence-next.json" "$TMP_ROOT/catalogue-evidence.json"
+CATALOGUE_HASH=$(shasum -a 256 "$TMP_ROOT/catalogue-evidence.json" | awk '{print $1}')
+jq '.state = "released" | .reason = "fixture deliberately proves a no-go"' \
+  "$TMP_ROOT/router-evidence.json" >"$TMP_ROOT/router-evidence-next.json"
+mv "$TMP_ROOT/router-evidence-next.json" "$TMP_ROOT/router-evidence.json"
+ROUTER_HASH=$(shasum -a 256 "$TMP_ROOT/router-evidence.json" | awk '{print $1}')
+jq --arg catalogue_hash "$CATALOGUE_HASH" --arg router_hash "$ROUTER_HASH" \
+  '.artifacts.catalogue.sha256 = $catalogue_hash | .router_ranking.evidence_sha256 = $router_hash' \
+  "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/launch-evidence-next.json"
+mv "$TMP_ROOT/launch-evidence-next.json" "$TMP_ROOT/launch-evidence.json"
+if PATH="$FAKEBIN:$PATH" "$BENCH" go-no-go --workspace "$PLAN_WORKSPACE" \
+    --prompt-file "$SMOKE_PROMPT" \
+    --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+    --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+    --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+    --launch-evidence "$TMP_ROOT/launch-evidence.json" >"$TMP_ROOT/go-no-go.out" 2>&1; then
+  fail "go-no-go accepted a released router-ranking pause"
+fi
+for line in \
+  'harness commit' 'PR 178 exact-head local macOS sandbox evidence' 'extension tests' \
+  'evidence artifact hashes' 'Grok blinded smoke' 'blinded catalogue smoke' 'payload SHA and keyboard guard inclusion' \
+  'corpus-sync inclusion recorded' 'fixture, template, detector, and freeze evidence' \
+  'router-ranking pause intact' 'VERDICT: NO-GO'; do
+  assert_grep "$line" "$TMP_ROOT/go-no-go.out" "go-no-go omitted $line"
+done
+
+GO_ROOT="$TMP_ROOT/go-root"
+GO_WORKSPACE="$TMP_ROOT/go-workspace"
+mkdir -p "$GO_ROOT/bin" "$GO_ROOT/scripts/canonical-guard-benchmark" "$GO_ROOT/tests" "$GO_WORKSPACE"
+cp "$ROOT/bin/fm-canonical-guard-benchmark.sh" "$GO_ROOT/bin/"
+cp "$ROOT/scripts/canonical-guard-benchmark/benchmark.py" \
+  "$ROOT/scripts/canonical-guard-benchmark/manifest.schema.json" "$GO_ROOT/scripts/canonical-guard-benchmark/"
+cp "$ROOT/tests/fm-canonical-guard-benchmark.test.sh" "$GO_ROOT/tests/"
+cp "$PLAN_WORKSPACE/workspace.json" "$GO_WORKSPACE/workspace.json"
+cp "$WORKSPACE/fixture-results.jsonl" "$GO_WORKSPACE/fixture-results.jsonl"
+python3 - "$GO_ROOT" "$GO_WORKSPACE" "$TMP_ROOT" "$SMOKE_PROMPT" "$BASE_SHA" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root, workspace, evidence = map(pathlib.Path, sys.argv[1:4])
+prompt_sha = hashlib.sha256(pathlib.Path(sys.argv[4]).read_bytes()).hexdigest()
+payload_sha = sys.argv[5]
+routes = [
+    ("codex", None, "gpt-5.6-sol"), ("codex", None, "gpt-5.6-terra"),
+    ("codex", None, "gpt-5.6-luna"), ("claude", None, "claude-opus-5"),
+    ("claude", None, "claude-fable-5"), ("claude", None, "claude-sonnet-5"),
+    ("claude", None, "claude-haiku-4.5"), ("grok", None, "grok-4.6"),
+    ("pi", "kimi-coding", "k3"), ("pi", "kimi-coding", "moonshotai/Kimi-K2.7-Code"),
+    ("pi", "qwen-token-plan-individual", "glm-5.2"),
+    ("pi", "qwen-token-plan-individual", "qwen3.7-max"),
+    ("pi", "qwen-token-plan-individual", "qwen3.8-max"),
+    ("pi", "qwen-token-plan-individual", "qwen3.6-flash"),
+    ("pi", "qwen-token-plan-individual", "deepseek-v4-flash-0731"),
+]
+runs = []
+for wave in ("high", "medium"):
+    for index, (harness, provider, model) in enumerate(routes, 1):
+        lane = f"route-{index:02d}"
+        for order, arm in enumerate(("guard-on", "guard-off"), 1):
+            runs.append({
+                "run_id": f"{wave}-{index:02d}-{arm}", "wave": wave, "lane": lane,
+                "lane_order": order, "arm": arm, "harness": harness, "provider": provider,
+                "model": model, "effort": wave, "helper_family": "distance-helper",
+                "concurrent_lane_count": 1,
+            })
+(workspace / "frozen-plan.json").write_text(json.dumps({
+    "schema_version": "canonical-guard-frozen-plan/v1", "prompt_sha256": prompt_sha,
+    "runs": runs,
+}))
+harness_paths = [
+    "bin/fm-canonical-guard-benchmark.sh",
+    "scripts/canonical-guard-benchmark/benchmark.py",
+    "scripts/canonical-guard-benchmark/manifest.schema.json",
+    "tests/fm-canonical-guard-benchmark.test.sh",
+]
+digest = hashlib.sha256(b"".join((root / path).read_bytes() for path in harness_paths)).hexdigest()
+extension = json.loads((evidence / "extension-evidence.json").read_text())
+extension["harness_digest"] = digest
+(evidence / "extension-evidence.json").write_text(json.dumps(extension))
+(evidence / "corpus-evidence.json").write_text(json.dumps({
+    "schema_version": "canonical-guard-corpus-sync-evidence/v1",
+    "decision": "excluded",
+    "reason": "frozen v2 exclusion",
+}))
+(evidence / "router-evidence.json").write_text(json.dumps({
+    "schema_version": "canonical-guard-router-pause-evidence/v1",
+    "scope": "router-ranking",
+    "state": "paused",
+    "reason": "fixture pause remains active",
+}))
+launch = {
+    "payload_sha": payload_sha,
+    "keyboard_guard_path": "lefthook.yml",
+    "corpus_sync": {
+        "evidence_path": "corpus-evidence.json",
+        "evidence_sha256": hashlib.sha256((evidence / "corpus-evidence.json").read_bytes()).hexdigest(),
+    },
+    "router_ranking": {
+        "evidence_path": "router-evidence.json",
+        "evidence_sha256": hashlib.sha256((evidence / "router-evidence.json").read_bytes()).hexdigest(),
+    },
+    "pr_178": {
+        "evidence_path": "pr-evidence.json",
+        "evidence_sha256": hashlib.sha256((evidence / "pr-evidence.json").read_bytes()).hexdigest(),
+    },
+    "artifacts": {
+        name: {"sha256": hashlib.sha256((evidence / filename).read_bytes()).hexdigest()}
+        for name, filename in {
+            "extension": "extension-evidence.json", "grok": "grok-evidence.json",
+            "catalogue": "catalogue-evidence.json",
+        }.items()
+    },
+}
+(evidence / "go-launch-evidence.json").write_text(json.dumps(launch))
+PY
+git -C "$GO_ROOT" init -q -b main
+git -C "$GO_ROOT" config user.email benchmark@example.invalid
+git -C "$GO_ROOT" config user.name Benchmark
+git -C "$GO_ROOT" add -A
+git -C "$GO_ROOT" commit -q -m fixture
+PATH="$FAKEBIN:$PATH" "$GO_ROOT/bin/fm-canonical-guard-benchmark.sh" go-no-go \
+  --workspace "$GO_WORKSPACE" --prompt-file "$SMOKE_PROMPT" \
+  --extension-evidence "$TMP_ROOT/extension-evidence.json" \
+  --grok-evidence "$TMP_ROOT/grok-evidence.json" \
+  --catalogue-evidence "$TMP_ROOT/catalogue-evidence.json" \
+  --launch-evidence "$TMP_ROOT/go-launch-evidence.json" >"$TMP_ROOT/go-positive.out"
+assert_grep 'VERDICT: GO' "$TMP_ROOT/go-positive.out" \
+  "go-no-go lacks a real positive fixture with every v2 gate green"
+assert_no_grep '[NO-GO]' "$TMP_ROOT/go-positive.out" \
+  "go-no-go positive fixture left a launch gate red"
+pass "go-no-go prints a machine verdict for every frozen v2 launch gate"
 
 if "$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/valid-plan.json" >/dev/null 2>&1; then
   fail "freeze silently replaced an already-frozen plan"

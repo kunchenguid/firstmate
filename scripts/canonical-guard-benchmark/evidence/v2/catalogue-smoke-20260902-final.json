@@ -1,0 +1,200 @@
+{
+  "blinded_profile": true,
+  "catalogues": {
+    "claude": {
+      "claude-fable-5": {
+        "exit_code": 1,
+        "model": null,
+        "result": "",
+        "stderr": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\nEEXIST: file already exists, mkdir '/tmp/claude-501'\n",
+        "terminal_reason": null
+      },
+      "claude-haiku-4.5": {
+        "exit_code": 1,
+        "model": null,
+        "result": "",
+        "stderr": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\nEEXIST: file already exists, mkdir '/tmp/claude-501'\n",
+        "terminal_reason": null
+      },
+      "claude-opus-5": {
+        "exit_code": 1,
+        "model": null,
+        "result": "",
+        "stderr": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\nEEXIST: file already exists, mkdir '/tmp/claude-501'\n",
+        "terminal_reason": null
+      },
+      "claude-sonnet-5": {
+        "exit_code": 1,
+        "model": null,
+        "result": "",
+        "stderr": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\nEEXIST: file already exists, mkdir '/tmp/claude-501'\n",
+        "terminal_reason": null
+      }
+    },
+    "codex": {
+      "exit_code": 0,
+      "matches": [
+        {
+          "slug": "gpt-5.6-sol"
+        },
+        {
+          "slug": "gpt-5.6-terra"
+        },
+        {
+          "slug": "gpt-5.6-luna"
+        }
+      ]
+    },
+    "grok": {
+      "exit_code": 0,
+      "matches": [
+        "Default model: grok-4.6",
+        "  * grok-4.6 (default)"
+      ],
+      "stderr": ""
+    },
+    "pi": {
+      "exit_code": 0,
+      "matches": [
+        "kimi-coding                 k3                               1.0M     131.1K   yes       yes   ",
+        "qwen-token-plan-individual  deepseek-v4-flash-0731           1M       384K     yes       no    ",
+        "qwen-token-plan-individual  glm-5.2                          1M       131.1K   yes       no    ",
+        "qwen-token-plan-individual  qwen3.6-flash                    1M       65.5K    yes       yes   ",
+        "qwen-token-plan-individual  qwen3.7-max                      1M       131.1K   yes       no    ",
+        "qwen-token-plan-individual  qwen3.8-max                      1M       131.1K   yes       yes   "
+      ],
+      "stderr": "Warning: Could not read <harness-root>/AGENTS.md: Error: EPERM: operation not permitted, stat '<harness-root>/AGENTS.md'\nWarning: Could not read <harness-root>/AGENTS.MD: Error: EPERM: operation not permitted, stat '<harness-root>/AGENTS.MD'\nWarning: Could not read <harness-root>/CLAUDE.md: Error: EPERM: operation not permitted, stat '<harness-root>/CLAUDE.md'\nWarning: Could not read <harness-root>/CLAUDE.MD: Error: EPERM: operation not permitted, stat '<harness-root>/CLAUDE.MD'\n"
+    }
+  },
+  "claude_credentials_modes": [
+    "0600"
+  ],
+  "command_timeout_seconds": 5.0,
+  "evidence_status": "current",
+  "models": [
+    {
+      "harness": "codex",
+      "model": "gpt-5.6-sol",
+      "provider": null,
+      "reason": "exact id present",
+      "route_model": "gpt-5.6-sol",
+      "status": "included"
+    },
+    {
+      "harness": "codex",
+      "model": "gpt-5.6-terra",
+      "provider": null,
+      "reason": "exact id present",
+      "route_model": "gpt-5.6-terra",
+      "status": "included"
+    },
+    {
+      "harness": "codex",
+      "model": "gpt-5.6-luna",
+      "provider": null,
+      "reason": "exact id present",
+      "route_model": "gpt-5.6-luna",
+      "status": "included"
+    },
+    {
+      "harness": "claude",
+      "model": "claude-opus-5",
+      "provider": null,
+      "reason": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\nEEXIST: file already exists, mkdir '/tmp/claude-501'",
+      "route_model": "claude-opus-5",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "claude",
+      "model": "claude-fable-5",
+      "provider": null,
+      "reason": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\nEEXIST: file already exists, mkdir '/tmp/claude-501'",
+      "route_model": "claude-fable-5",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "claude",
+      "model": "claude-sonnet-5",
+      "provider": null,
+      "reason": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\nEEXIST: file already exists, mkdir '/tmp/claude-501'",
+      "route_model": "claude-sonnet-5",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "claude",
+      "model": "claude-haiku-4.5",
+      "provider": null,
+      "reason": "Ignoring 65 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"<blinded-root>/cgb-v3/worktrees/catalogue-smoke\"].hasTrustDialogAccepted: true in <throwaway-home>/.claude/.claude.json.\nEEXIST: file already exists, mkdir '/tmp/claude-501'",
+      "route_model": "claude-haiku-4.5",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "grok",
+      "model": "grok-4.6",
+      "provider": null,
+      "reason": "exact id present",
+      "route_model": "grok-4.6",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "model": "kimi-coding/k3",
+      "provider": "kimi-coding",
+      "reason": "exact id present",
+      "route_model": "k3",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "model": "moonshotai/Kimi-K2.7-Code",
+      "provider": "kimi-coding",
+      "reason": "exact route absent: harness=pi provider=kimi-coding model=moonshotai/Kimi-K2.7-Code",
+      "route_model": "moonshotai/Kimi-K2.7-Code",
+      "status": "excluded-with-reason"
+    },
+    {
+      "harness": "pi",
+      "model": "glm-5.2",
+      "provider": "qwen-token-plan-individual",
+      "reason": "exact id present",
+      "route_model": "glm-5.2",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "model": "qwen3.7-max",
+      "provider": "qwen-token-plan-individual",
+      "reason": "exact id present",
+      "route_model": "qwen3.7-max",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "model": "qwen3.8-max",
+      "provider": "qwen-token-plan-individual",
+      "reason": "exact id present",
+      "route_model": "qwen3.8-max",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "model": "qwen3.6-flash",
+      "provider": "qwen-token-plan-individual",
+      "reason": "exact id present",
+      "route_model": "qwen3.6-flash",
+      "status": "included"
+    },
+    {
+      "harness": "pi",
+      "model": "deepseek-v4-flash-0731",
+      "provider": "qwen-token-plan-individual",
+      "reason": "exact id present",
+      "route_model": "deepseek-v4-flash-0731",
+      "status": "included"
+    }
+  ],
+  "recorded_at": "2026-09-02T17:00:37.277643Z",
+  "schema_version": "canonical-guard-catalogue-smoke/v1",
+  "source_harness_sha256": "67329e5227e7995abf8578d2599f698c504d2b7dd14e88ed461f936bcc18313a",
+  "workspace_base_sha": "f42f4217fbde4d8f25944ae3122df2d4a558663d"
+}

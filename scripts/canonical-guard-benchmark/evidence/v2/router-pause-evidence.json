@@ -1,0 +1,6 @@
+{
+  "schema_version": "canonical-guard-router-pause-evidence/v1",
+  "scope": "router-ranking",
+  "state": "unverified",
+  "reason": "No committed router-ranking pause receipt was available in this checkout."
+}

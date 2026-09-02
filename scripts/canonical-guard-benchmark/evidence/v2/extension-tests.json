@@ -1,0 +1,9 @@
+{
+  "command": "bin/fm-test-run.sh tests/fm-canonical-guard-benchmark.test.sh",
+  "harness_digest": "d3b33931bb461b03049128937868ab092e0cb2d789f01997c166b2b2c6f9961c",
+  "passed": true,
+  "result_path": "extension-test-result.json",
+  "result_sha256": "376a602ed83ffca338085d0b116531bdc452624b6277ebec614117201d9b54d3",
+  "result": "1 script passed, 0 failed",
+  "schema_version": "canonical-guard-extension-tests/v1"
+}

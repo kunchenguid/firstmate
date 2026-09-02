@@ -6,11 +6,14 @@
 #   fm-canonical-guard-benchmark.sh fixture-check --workspace DIR
 #   fm-canonical-guard-benchmark.sh freeze --workspace DIR --file PLAN.json
 #   fm-canonical-guard-benchmark.sh run --workspace DIR --run-id ID --arm guard-on|guard-off \
-#     --harness codex|claude|cursor-agent|kimi|pi --model MODEL --prompt-file FILE \
-#     [--effort LEVEL] [--stage smoke|matrix] [--lane ID] [--helper-family FAMILY] \
+#     --harness codex|claude|cursor-agent|grok|kimi|pi --model MODEL --prompt-file FILE \
+#     [--effort LEVEL] [--stage smoke|matrix] [--lane ID] [--wave high|medium] [--helper-family FAMILY] \
 #     [--max-load N] [--load-file FILE] [--timeout SECONDS]
 #   fm-canonical-guard-benchmark.sh score --workspace DIR --run-id ID --semantic-file FILE
 #   fm-canonical-guard-benchmark.sh record-verdict --workspace DIR --file FILE
+#   fm-canonical-guard-benchmark.sh catalogue-smoke --workspace DIR --output FILE
+#   fm-canonical-guard-benchmark.sh go-no-go --workspace DIR --prompt-file FILE --extension-evidence FILE \
+#     --grok-evidence FILE --catalogue-evidence FILE --launch-evidence FILE
 #   fm-canonical-guard-benchmark.sh schema-check --workspace DIR
 #   fm-canonical-guard-benchmark.sh scoreboard --workspace DIR --markdown FILE --html FILE
 #   fm-canonical-guard-benchmark.sh freeze-wave --workspace DIR --file WAVE.json

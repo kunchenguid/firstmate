@@ -1,0 +1,35 @@
+{
+  "schema_version": "canonical-guard-launch-evidence/v1",
+  "recorded_at": "2026-09-02T17:44:15Z",
+  "payload_sha": "3bb8cabb",
+  "keyboard_guard_path": null,
+  "keyboard_guard_evidence": "No committed exact-head inclusion evidence was available in this checkout.",
+  "corpus_sync": {
+    "evidence_path": "corpus-sync-evidence.json",
+    "evidence_sha256": "13644906d782211b3a308faaa6d61e45c833ec90f65b1dc396bd713c1f51eafb"
+  },
+  "router_ranking": {
+    "evidence_path": "router-pause-evidence.json",
+    "evidence_sha256": "f1997b428fe152beaeeeb46fc32d41610eb75cc18e0e35e5f63565cff59f462f"
+  },
+  "pr_178": {
+    "evidence_path": "pr-178-evidence.json",
+    "evidence_sha256": "666c6ab6870c392d4213826a1cafa1faf3bf4c701314161d845c5dd713aa401f"
+  },
+  "pr_4631": {
+    "head_sha": "3bb8cabb",
+    "verified": false,
+    "evidence": "The requested head was supplied in the launch instruction but was not independently verifiable from this repository."
+  },
+  "artifacts": {
+    "extension": {
+      "sha256": "be389c9f8bc0095179608ce82a31ca087d680c842317d524e8e9f87c635bd336"
+    },
+    "grok": {
+      "sha256": "4069511ef027bd1bc6fae52c1b86afaea3dd8cd9060a915d276a1ee09aa1d7f7"
+    },
+    "catalogue": {
+      "sha256": "b2e9474a0184b814951bbedb7df59a76c369a2481767381a5784a073a53230bd"
+    }
+  }
+}

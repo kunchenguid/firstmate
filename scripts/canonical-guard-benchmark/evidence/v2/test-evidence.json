@@ -1,0 +1,140 @@
+{
+  "command": "bin/fm-test-run.sh tests/fm-canonical-guard-benchmark.test.sh",
+  "cases": [
+    {
+      "subject": "Grok adapter",
+      "red": "error: canonical-guard benchmark: unsupported harness: grok; 1 failed",
+      "green": "Native command construction and fake blinded end-to-end transcript capture passed."
+    },
+    {
+      "subject": "Arbitrary paired freeze",
+      "red": "The old executable rejected every confirmatory plan other than exactly seven pairs.",
+      "green": "Fifteen high pairs plus fifteen medium pairs passed; odd and asymmetric fixtures were refused by pair name; the legacy seven-pair plan retained all original fields."
+    },
+    {
+      "subject": "Go/no-go",
+      "red": "The old parser did not contain the go-no-go subcommand.",
+      "green": "One machine verdict printed for every frozen v2 checklist line."
+    },
+    {
+      "subject": "Blindness fixtures",
+      "red": "blindness fixture did not fail for unreachable Git object; 1 failed",
+      "green": "Cwd, origin-ref, template-history, and hidden-Git-object fixtures were all refused."
+    },
+    {
+      "subject": "Catalogue smoke",
+      "red": "invalid choice: catalogue-smoke; 1 failed",
+      "green": "All 15 exact fake-catalogue identifiers were admitted under the blinded profile with no substitution path."
+    },
+    {
+      "subject": "Wave-aware scoreboard",
+      "red": "presentation scoreboard requires all fourteen matrix manifests and verdicts; 1 failed",
+      "green": "The legacy 14-run scoreboard and separate high/medium tables for all 60 v2 runs passed."
+    },
+    {
+      "subject": "Cross-wave replication",
+      "red": "freeze accepted the cross-wave paired slate; 1 failed",
+      "green": "A model-axis change shared by both arms in only one wave was refused with both replication pair names."
+    },
+    {
+      "subject": "Catalogue route identity",
+      "red": "catalogue smoke substituted a model from the wrong provider route; 1 failed",
+      "green": "Rows retain harness and provider, and a matching model on the wrong provider is excluded with its intended route."
+    },
+    {
+      "subject": "PR 178 exact-head local evidence",
+      "red": "go-no-go consulted hosted PR checks instead of exact-head local evidence; 1 failed",
+      "green": "The gate ignores hosted status and requires a passing local macOS sandbox result whose head equals the merged PR head."
+    },
+    {
+      "subject": "Content-addressed launch evidence",
+      "red": "go-no-go omitted its content-addressed evidence gate; 1 failed",
+      "green": "The launch manifest binds extension, Grok, and catalogue evidence by SHA-256, and the Grok evidence binds its transcript by SHA-256."
+    },
+    {
+      "subject": "Catalogue route provenance",
+      "red": "go-no-go trusted catalogue ids without their exact harness/provider/model route; 1 failed",
+      "green": "The gate derives admissions from raw catalogue records, validates each row route, and compares the exact route set with every frozen run."
+    },
+    {
+      "subject": "Bound Grok run evidence",
+      "red": "go-no-go trusted Grok booleans instead of its bound run manifest; 1 failed",
+      "green": "The gate validates the hashed run manifest, inline blindness result, attrition state, and the manifest-referenced terminal capture."
+    },
+    {
+      "subject": "Bound extension test result",
+      "red": "go-no-go trusted the extension evidence passed boolean instead of the runner result; 1 failed",
+      "green": "The gate validates the hashed fm-test-run result and requires one passing, unskipped benchmark script."
+    },
+    {
+      "subject": "Resolvable payload",
+      "red": "go-no-go trusted a SHA-shaped payload string without resolving it; 1 failed",
+      "green": "The gate resolves the exact commit in the benchmark mirror, checks the named guard path at that commit, and matches the prompt file to the frozen prompt hash."
+    },
+    {
+      "subject": "Bound PR 178 local result",
+      "red": "go-no-go did not derive the PR 178 verdict from its bound local evidence; 1 failed",
+      "green": "The gate hashes the PR evidence record and requires its merged head to equal the locally tested macOS sandbox head."
+    },
+    {
+      "subject": "Unreachable Git tree blindness",
+      "red": "blindness fixture did not fail for unreachable Git tree path; 1 failed",
+      "green": "The inline blindness proof inspects unreachable trees as well as blobs, commits, and tags, so an arm-bearing tree path is refused."
+    },
+    {
+      "subject": "Claude exact-model admission",
+      "red": "catalogue smoke admitted a substituted Claude response model; 1 failed",
+      "green": "Each Claude request is included only when its successful JSON response names the exact requested model."
+    },
+    {
+      "subject": "Bounded catalogue lifecycle",
+      "red": "benchmark.py: error: unrecognized arguments: --timeout 1; 1 failed",
+      "green": "Every native catalogue command has a configurable timeout, timeout exclusions retain the reason, and identity-checked stale locks recover without deleting a live owner's lock."
+    },
+    {
+      "subject": "Shared confirmatory shape",
+      "red": "scoreboard shape refusal did not name the asymmetric pair; 1 failed",
+      "green": "Freeze, scoreboard, and launch preflight consume one arbitrary-pair validator; the scoreboard rejects the deliberate medium/lane-01 model mismatch."
+    },
+    {
+      "subject": "Bound corpus and router receipts",
+      "red": "The all-green go-no-go fixture exited 1 after inline corpus and router booleans were replaced with receipt references.",
+      "green": "Both gates now require schema-valid, content-addressed evidence files; a released router receipt is rejected even when its new hash is recorded."
+    },
+    {
+      "subject": "Wave-labelled effort",
+      "red": "freeze accepted the same-effort paired slate; 1 failed",
+      "green": "High, medium, swapped, same-effort, and null-effort fixtures prove every labelled pair uses the effort named by its wave."
+    },
+    {
+      "subject": "Abbreviated payload commit",
+      "red": "go-no-go rejected a uniquely resolvable abbreviated payload SHA; 1 failed",
+      "green": "A unique eight-character payload id resolves to a full commit, binds the guard path, and prints a green payload row."
+    },
+    {
+      "subject": "Replayable Grok failure evidence",
+      "red": "Grok evidence reference is not replayable inside its evidence directory: manifest_path; 1 failed",
+      "green": "The sanitized manifest and exact terminal capture are committed beside the evidence wrapper with matching SHA-256 references and no private absolute paths."
+    },
+    {
+      "subject": "Paired and ranking freeze composition",
+      "red": "cannot read JSON .../valid-plan.json: No such file or directory; 1 failed",
+      "green": "The legacy plan fixture is shared by supersession and ranking checks while the 60-run paired replication remains independently asserted; 1 script passed, 0 failed."
+    },
+    {
+      "subject": "Minimized Codex catalogue evidence",
+      "red": "catalogue smoke did not admit exact ids without persisting unrelated model metadata; 1 failed",
+      "green": "The saved Codex catalogue keeps only exact model slugs, excluding unrelated runtime instructions and metadata; 1 script passed, 0 failed."
+    },
+    {
+      "subject": "Failed catalogue command output",
+      "red": "The pre-fix head admitted all 11 Codex, Grok, and Pi routes from valid partial output after exit 1; all four Claude routes were correctly excluded; 1 failed.",
+      "green": "The route-complete fixture forces exit 1 with valid output for all 15 exact routes and proves Codex 3/3, Claude 4/4, Grok 1/1, and Pi 7/7 are excluded; 1 script passed, 0 failed."
+    },
+    {
+      "subject": "Go/no-go CLI scope",
+      "red": "go-no-go advertised an unused repository option; 1 failed",
+      "green": "The unused repository option was removed, leaving only inputs consumed by the local evidence checks."
+    }
+  ]
+}

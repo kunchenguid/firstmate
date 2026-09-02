@@ -1,0 +1,13 @@
+{
+  "blindness_passed": true,
+  "effort": "high",
+  "manifest_path": "grok-smoke-manifest.json",
+  "manifest_sha256": "4768e17c0c018518bf8ef1e06e02aef9266844b28f174afcea60b624d77662d0",
+  "mechanical_failure": true,
+  "model": "grok-4.6",
+  "reason": "The blinded macOS sandbox started the native Grok binary but it exited with: Operation not permitted (os error 1). No keychain workaround was attempted and the lane was stopped.",
+  "status": "excluded-with-reason",
+  "transcript_captured": true,
+  "transcript_path": "grok-smoke-terminal.log",
+  "transcript_sha256": "b5bd28a8697c502f84e124ef0e690705c19eca1cf10e38f6d12fb0dbd587227b"
+}

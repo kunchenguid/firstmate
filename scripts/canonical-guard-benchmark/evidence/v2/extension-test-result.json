@@ -1,0 +1,30 @@
+{
+  "families": [
+    {
+      "count": 1,
+      "duration_ms": 61865,
+      "failed": 0,
+      "name": "pure-contract-unit"
+    }
+  ],
+  "finished_at": "2026-09-02T17:43:44Z",
+  "run_id": "fm-test-run-1788370962286-42753",
+  "scripts": [
+    {
+      "duration_ms": 61865,
+      "exit": 0,
+      "expected_gate_skip": "none",
+      "family": "pure-contract-unit",
+      "gate_skip": false,
+      "path": "tests/fm-canonical-guard-benchmark.test.sh"
+    }
+  ],
+  "selection": "scripts",
+  "started_at": "2026-09-02T17:42:42Z",
+  "summary": {
+    "duration_ms": 62002,
+    "failed": 0,
+    "skipped_gate": 0,
+    "total": 1
+  }
+}

@@ -30,8 +30,110 @@ from typing import Any, Iterable
 SCHEMA_VERSION = "canonical-guard-run/v1"
 VERDICT_VERSION = "canonical-guard-verdict/v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
-HARNESS_NAMES = ("codex", "claude", "cursor-agent", "kimi", "pi")
+HARNESS_NAMES = ("codex", "claude", "cursor-agent", "grok", "kimi", "pi")
 ARMS = ("guard-on", "guard-off")
+WAVES = ("high", "medium")
+CATALOGUE_MODELS = (
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+    "claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4.5",
+    "grok-4.6", "kimi-coding/k3", "moonshotai/Kimi-K2.7-Code", "glm-5.2",
+    "qwen3.7-max", "qwen3.8-max", "qwen3.6-flash", "deepseek-v4-flash-0731",
+)
+CATALOGUE_PROVIDERS = {
+    "kimi-coding/k3": "kimi-coding",
+    "moonshotai/Kimi-K2.7-Code": "kimi-coding",
+    "glm-5.2": "qwen-token-plan-individual",
+    "qwen3.7-max": "qwen-token-plan-individual",
+    "qwen3.8-max": "qwen-token-plan-individual",
+    "qwen3.6-flash": "qwen-token-plan-individual",
+    "deepseek-v4-flash-0731": "qwen-token-plan-individual",
+}
+
+
+def catalogue_route(model: str) -> tuple[str, str | None, str]:
+    index = CATALOGUE_MODELS.index(model)
+    if index < 3:
+        harness = "codex"
+    elif index < 7:
+        harness = "claude"
+    elif index < 8:
+        harness = "grok"
+    else:
+        harness = "pi"
+    return harness, CATALOGUE_PROVIDERS.get(model), "k3" if model == "kimi-coding/k3" else model
+
+
+def catalogue_raw_routes(catalogue: dict[str, Any]) -> set[tuple[str, str | None, str]]:
+    raw = catalogue.get("catalogues")
+    if not isinstance(raw, dict):
+        return set()
+    routes: set[tuple[str, str | None, str]] = set()
+    codex = raw.get("codex")
+    if isinstance(codex, dict) and codex.get("exit_code") == 0:
+        for item in codex.get("matches", []):
+            if isinstance(item, dict) and isinstance(item.get("slug"), str):
+                routes.add(("codex", None, item["slug"]))
+    claude = raw.get("claude")
+    if isinstance(claude, dict):
+        for model, result in claude.items():
+            if isinstance(result, dict) and result.get("exit_code") == 0 and result.get("model") == model:
+                routes.add(("claude", None, model))
+    grok = raw.get("grok")
+    if isinstance(grok, dict) and grok.get("exit_code") == 0:
+        for line in grok.get("matches", []):
+            if isinstance(line, str) and re.search(r"(?<![A-Za-z0-9._/-])grok-4\.6(?![A-Za-z0-9._/-])", line, re.I):
+                routes.add(("grok", None, "grok-4.6"))
+    pi = raw.get("pi")
+    if isinstance(pi, dict) and pi.get("exit_code") == 0:
+        for line in pi.get("matches", []):
+            if not isinstance(line, str):
+                continue
+            fields = line.split()
+            if len(fields) >= 2:
+                routes.add(("pi", fields[0], fields[1]))
+    return routes
+
+
+def confirmatory_shape(runs: Any) -> tuple[list[str | None], int]:
+    if not isinstance(runs, list) or not runs or any(not isinstance(item, dict) for item in runs):
+        raise ValueError("confirmatory runs must be a non-empty object array")
+    pairs: dict[tuple[str | None, str], list[dict[str, Any]]] = {}
+    for item in runs:
+        lane = item.get("lane")
+        if (not isinstance(lane, str) or not lane) and item.get("wave") is None:
+            lane = f"legacy-{item.get('harness')}-{item.get('provider')}-{item.get('model')}"
+        elif not isinstance(lane, str) or not lane:
+            raise ValueError(f"wave-labelled confirmatory run has no lane: {item.get('run_id', '<unknown>')}")
+        pairs.setdefault((item.get("wave"), lane), []).append(item)
+    wave_values = {item.get("wave") for item in runs}
+    if wave_values == {None}:
+        wave_order: list[str | None] = [None]
+    elif wave_values == set(WAVES):
+        wave_order = list(WAVES)
+    else:
+        raise ValueError("a wave-labelled confirmatory slate requires high and medium")
+    paired_axes = ("harness", "model", "provider", "effort", "helper_family", "concurrent_lane_count")
+    for (wave, lane), pair in pairs.items():
+        pair_name = f"{wave}/{lane}" if wave else lane
+        if len(pair) != 2 or {item.get("arm") for item in pair} != set(ARMS):
+            raise ValueError(f"confirmatory pair is not one paired ON/OFF slate: {pair_name}")
+        if any(pair[0].get(axis) != pair[1].get(axis) for axis in paired_axes):
+            raise ValueError(f"confirmatory pair changes non-arm axes within its pair: {pair_name}")
+        if wave is not None and pair[0].get("effort") != wave:
+            raise ValueError(f"confirmatory pair effort does not match its labelled wave: {pair_name}")
+    if wave_order == list(WAVES):
+        lanes = {wave: {lane for pair_wave, lane in pairs if pair_wave == wave} for wave in WAVES}
+        if lanes["high"] != lanes["medium"]:
+            lane = sorted(lanes["high"] ^ lanes["medium"])[0]
+            raise ValueError(f"cross-wave replication is missing high/{lane} or medium/{lane}")
+        replication_axes = ("harness", "model", "provider", "helper_family", "concurrent_lane_count")
+        for lane in sorted(lanes["high"]):
+            if any(pairs[("high", lane)][0].get(axis) != pairs[("medium", lane)][0].get(axis) for axis in replication_axes):
+                raise ValueError(f"cross-wave replication changes frozen axes between high/{lane} and medium/{lane}")
+        return wave_order, len(lanes["high"])
+    return wave_order, len(pairs)
+
+
 PLAN_SHAPES = ("confirmatory", "ranking")
 RANK_SUITE_VERSION = "canonical-guard-rank-suite/v1"
 RESOLUTION_PATHS = (
@@ -85,8 +187,9 @@ def run(
     text: bool = True,
     stdout: Any = subprocess.PIPE,
     stderr: Any = subprocess.PIPE,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[Any]:
-    result = subprocess.run(argv, cwd=cwd, env=env, text=text, stdout=stdout, stderr=stderr, check=False)
+    result = subprocess.run(argv, cwd=cwd, env=env, text=text, stdout=stdout, stderr=stderr, check=False, timeout=timeout)
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip() if text else ""
         die(f"command failed ({result.returncode}): {' '.join(argv)}{': ' + detail if detail else ''}")
@@ -469,6 +572,7 @@ def copy_candidate_credentials(harness: str, candidate_home: pathlib.Path) -> No
         "codex": (".codex/auth.json",),
         "claude": (".claude/.credentials.json",),
         "cursor-agent": (".cursor/cli-config.json",),
+        "grok": (".grok/auth.json", ".grok/agent_id"),
         "kimi": (".kimi-code/credentials/kimi-code.json", ".kimi-code/oauth/kimi-code", ".kimi-code/device_id"),
         "pi": (".pi/agent/auth.json",),
     }
@@ -498,12 +602,15 @@ def candidate_environment(harness: str, candidate_home: pathlib.Path) -> dict[st
         "codex": ("OPENAI_API_KEY",),
         "claude": ("ANTHROPIC_API_KEY",),
         "cursor-agent": ("CURSOR_API_KEY",),
+        "grok": ("XAI_API_KEY",),
         "kimi": ("KIMI_API_KEY", "MOONSHOT_API_KEY"),
         "pi": (),
     }
     env = {name: inherited[name] for name in ordinary + provider_secrets[harness] if name in inherited}
     temporary = candidate_home / "tmp"
     temporary.mkdir(parents=True, exist_ok=True)
+    for relative in (".codex", ".claude", ".grok", ".pi/agent"):
+        (candidate_home / relative).mkdir(parents=True, exist_ok=True, mode=0o700)
     env.update({
         "HOME": str(candidate_home),
         "TMPDIR": str(temporary),
@@ -556,12 +663,13 @@ def runtime_scratch_paths(harness: str, worktree: pathlib.Path) -> list[pathlib.
 
 
 def macos_sandbox_command(command: list[str], worktree: pathlib.Path, run_origin: pathlib.Path, candidate_home: pathlib.Path, workspace: pathlib.Path, harness: str = "") -> list[str]:
-    executable = pathlib.Path(shutil.which(command[0]) or command[0]).resolve()
     source_home = pathlib.Path.home().resolve()
+    command, runtime_paths = selected_runtime_paths(command, source_home)
+    executable = pathlib.Path(command[0]).resolve()
     readable = [
         pathlib.Path(path) for path in ("/System", "/usr", "/bin", "/sbin", "/Library", "/Applications", "/opt/homebrew", "/usr/local", "/private/etc", "/private/var/db/timezone", "/private/var/run", "/dev") if pathlib.Path(path).exists()
     ]
-    for candidate in (source_home / ".nvm", source_home / ".local", source_home / ".bun", executable.parent):
+    for candidate in (source_home / ".nvm", source_home / ".local", source_home / ".bun", executable.parent, *runtime_paths):
         if candidate.exists():
             readable.append(candidate.resolve())
     readable.extend((worktree.resolve(), run_origin.resolve(), candidate_home.resolve()))
@@ -678,6 +786,20 @@ def sandboxed_command(command: list[str], worktree: pathlib.Path, run_origin: pa
     return []
 
 
+def unreachable_git_object_hints(worktree: pathlib.Path, forbidden: re.Pattern[str]) -> list[str]:
+    result = run(["git", "-C", str(worktree), "fsck", "--full", "--unreachable", "--no-reflogs"], check=False)
+    hints: list[str] = []
+    for line in (result.stdout + "\n" + result.stderr).splitlines():
+        match = re.search(r"(?:unreachable|dangling) (blob|commit|tag|tree) ([0-9a-f]{40,64})", line)
+        if not match:
+            continue
+        kind, identity = match.groups()
+        payload = run(["git", "-C", str(worktree), "cat-file", "-p", identity], check=False, text=False).stdout
+        if isinstance(payload, bytes) and forbidden.search(payload.decode(errors="replace")):
+            hints.append(f"{kind}:{identity}")
+    return hints
+
+
 def verify_blindness(worktree: pathlib.Path, prompt: str, base_sha: str) -> dict[str, Any]:
     cwd = str(worktree.resolve())
     remote = git(worktree, "remote", "get-url", "--all", "origin")
@@ -689,6 +811,7 @@ def verify_blindness(worktree: pathlib.Path, prompt: str, base_sha: str) -> dict
     tracked_paths = git(worktree, "ls-files").splitlines()
     forbidden = re.compile(r"canonical[-_]?guard[-_]?benchmark|guard-on|guard-off|measurement[-_]?arm|benchmark-template|benchmark-base", re.I)
     leaked_paths = [path for path in tracked_paths if forbidden.search(path)]
+    unreachable_hints = unreachable_git_object_hints(worktree, forbidden)
     remote_ref_names = [line.split("\t", 1)[1] for line in remote_refs.splitlines() if "\t" in line]
     unexpected_remote_refs = [ref for ref in remote_ref_names if ref != "refs/heads/dev"]
     surfaces = "\n".join((cwd, remote, branch, branches, history, reflog, prompt))
@@ -702,11 +825,12 @@ def verify_blindness(worktree: pathlib.Path, prompt: str, base_sha: str) -> dict
         "reflog": reflog.splitlines(),
         "forbidden_visible_paths": leaked_paths,
         "unexpected_remote_refs": unexpected_remote_refs,
+        "unreachable_git_object_hints": unreachable_hints,
         "prompt_sha256": sha256_bytes(prompt.encode()),
         "passed": False,
     }
-    if forbidden.search(surfaces) or leaked_paths or unexpected_remote_refs:
-        die("blindness check found a study hint, setup history, or contaminating remote ref")
+    if forbidden.search(surfaces) or leaked_paths or unexpected_remote_refs or unreachable_hints:
+        die("blindness check found a study hint, setup history, contaminating remote ref, or hidden Git object")
     evidence["passed"] = True
     return evidence
 
@@ -740,6 +864,12 @@ def harness_command(args: argparse.Namespace, cwd: pathlib.Path, candidate_home:
         return command + [prompt]
     if args.harness == "cursor-agent":
         return ["cursor-agent", "-p", "--output-format", "stream-json", "--trust", "--force", "--workspace", str(cwd), "--model", args.model, prompt]
+    if args.harness == "grok":
+        if args.model != "grok-4.6":
+            die("grok adapter requires the frozen grok-4.6 model id")
+        if effort not in WAVES:
+            die("grok adapter requires reasoning effort high or medium")
+        return ["grok", "--cwd", str(cwd), "--always-approve", "--model", args.model, "--reasoning-effort", effort, "--output-format", "streaming-messages-json", "--single", prompt]
     if args.harness == "kimi":
         return ["kimi", "--yolo", "-m", args.model, "-p", prompt, "--output-format", "stream-json"]
     if args.harness == "pi":
@@ -775,6 +905,8 @@ def session_candidates(harness: str, cwd: pathlib.Path, candidate_home: pathlib.
         roots = [home / ".claude/projects" / encoded]
     elif harness == "cursor-agent":
         roots = [home / ".cursor/projects"]
+    elif harness == "grok":
+        roots = [home / ".grok/sessions"]
     elif harness == "kimi":
         roots = [home / ".kimi-code/sessions"]
     elif harness == "pi":
@@ -1239,6 +1371,7 @@ def command_run(args: argparse.Namespace) -> None:
             "effort": args.effort,
             "helper_family": args.helper_family,
             "lane": args.lane,
+            "wave": args.wave,
             "concurrent_lane_count": args.concurrent_lane_count,
         }
         if any(frozen_expected.get(key) != value for key, value in actual_axes.items()):
@@ -1321,6 +1454,8 @@ def command_run(args: argparse.Namespace) -> None:
         copied_transcripts = copy_transcripts(discovered, bundle)
         if args.harness == "cursor-agent":
             copied_terminals = copy_auxiliary_files(cursor_terminal_candidates(worktree, candidate_home, started_wall), bundle, "terminals")
+        elif args.harness == "grok":
+            copied_terminals = copy_auxiliary_files([session_log], bundle, "terminals")
         candidate_note = candidate_home / "delivery-note.txt"
         if candidate_note.is_file():
             shutil.copy2(candidate_note, bundle / "delivery-note.txt")
@@ -1618,6 +1753,7 @@ def command_freeze(args: argparse.Namespace) -> None:
     if shape not in PLAN_SHAPES:
         die("frozen plan_shape must be confirmatory or ranking")
     ids: set[str] = set()
+    pairs: dict[tuple[str | None, str], list[dict[str, Any]]] = {}
     lanes: dict[str, list[dict[str, Any]]] = {}
     helper_families = ("distance-helper", "point-in-polygon", "both", "smoke")
     for item in runs:
@@ -1645,14 +1781,41 @@ def command_freeze(args: argparse.Namespace) -> None:
             die(f"invalid frozen lane order: {run_id}")
         lanes.setdefault(lane, []).append(item)
     if shape == "confirmatory":
-        if len(runs) != 14 or len(lanes) != 7:
-            die("frozen confirmatory plan requires exactly seven paired lanes and fourteen runs")
+        for item in runs:
+            wave = item.get("wave")
+            if wave is not None and wave not in WAVES:
+                die(f"invalid frozen wave: {item['run_id']}")
+            pairs.setdefault((wave, item["lane"]), []).append(item)
+        explicit_waves = {wave for wave, _ in pairs if wave is not None}
+        if explicit_waves and explicit_waves != set(WAVES):
+            die("wave-labelled frozen plans require both high and medium replications")
+        if explicit_waves and any(wave is None for wave, _ in pairs):
+            die("wave-labelled frozen plans cannot mix unlabelled pairs")
         paired_axes = ("harness", "model", "provider", "effort", "helper_family", "concurrent_lane_count")
-        for lane, pair in lanes.items():
+        for (wave, lane), pair in pairs.items():
+            pair_name = f"{wave}/{lane}" if wave else lane
             if len(pair) != 2 or {item["arm"] for item in pair} != set(ARMS) or {item["lane_order"] for item in pair} != {1, 2}:
-                die(f"frozen lane is not one paired ON/OFF slate: {lane}")
+                die(f"frozen pair is not one paired ON/OFF slate: {pair_name}")
             if any(pair[0][key] != pair[1][key] for key in paired_axes):
-                die(f"frozen lane changes non-arm axes within its pair: {lane}")
+                die(f"frozen pair changes non-arm axes within its pair: {pair_name}")
+            if wave is not None and pair[0]["effort"] != wave:
+                die(f"frozen pair effort does not match its labelled wave: {pair_name}")
+        if explicit_waves:
+            high_lanes = {lane for wave, lane in pairs if wave == "high"}
+            medium_lanes = {lane for wave, lane in pairs if wave == "medium"}
+            if high_lanes != medium_lanes:
+                lane = sorted(high_lanes ^ medium_lanes)[0]
+                die(f"cross-wave replication is missing high/{lane} or medium/{lane}")
+            replication_axes = ("harness", "model", "provider", "helper_family", "concurrent_lane_count")
+            for lane in sorted(high_lanes):
+                high_pair = pairs[("high", lane)]
+                medium_pair = pairs[("medium", lane)]
+                if any(high_pair[0][key] != medium_pair[0][key] for key in replication_axes):
+                    die(f"cross-wave replication changes frozen axes between high/{lane} and medium/{lane}")
+        try:
+            confirmatory_shape(runs)
+        except ValueError as exc:
+            die(str(exc))
     else:
         if len(runs) < 2:
             die("frozen ranking plan requires at least two scored candidates")
@@ -1939,6 +2102,601 @@ def command_score_locked(args: argparse.Namespace, workspace: pathlib.Path) -> N
     print(json.dumps({"recorded": args.run_id, "machine": machine, "semantic": semantic_verdict, "outcome_class": outcome}, sort_keys=True))
 
 
+def sanitize_catalogue_text(value: str, workspace: pathlib.Path, candidate_home: pathlib.Path) -> str:
+    replacements = (
+        (str(candidate_home.resolve()), "<throwaway-home>"),
+        (str(workspace.parent.resolve()), "<blinded-root>"),
+        (str(pathlib.Path(__file__).resolve().parents[2]), "<harness-root>"),
+        (str(pathlib.Path.home().resolve()), "<operator-home>"),
+    )
+    for source, replacement in replacements:
+        value = value.replace(source, replacement)
+    return value
+
+
+def resolve_evidence_reference(reference: Any, evidence_path: pathlib.Path, root: pathlib.Path) -> pathlib.Path | None:
+    if not isinstance(reference, str) or not reference or pathlib.Path(reference).is_absolute():
+        return None
+    for base in (evidence_path.parent, root):
+        candidate = (base / reference).resolve()
+        try:
+            candidate.relative_to(base.resolve())
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def process_identity(pid: int) -> str | None:
+    stat_path = pathlib.Path(f"/proc/{pid}/stat")
+    command_path = pathlib.Path(f"/proc/{pid}/cmdline")
+    try:
+        stat = stat_path.read_text()
+        command = command_path.read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        tail = stat.rsplit(")", 1)[1].split()
+        return f"linux:{tail[19]}:{command}" if len(tail) > 19 else None
+    except OSError:
+        result = run(["ps", "-o", "lstart=", "-o", "command=", "-p", str(pid)], check=False)
+        value = result.stdout.strip()
+        return f"ps:{value}" if result.returncode == 0 and value else None
+
+
+def acquire_catalogue_lock(lock: pathlib.Path) -> dict[str, Any]:
+    identity = process_identity(os.getpid())
+    if not identity:
+        die("cannot establish catalogue lock process identity")
+    owner = {"pid": os.getpid(), "process_identity": identity}
+    try:
+        lock.mkdir()
+    except FileExistsError:
+        if lock.is_symlink() or not lock.is_dir():
+            die("catalogue lock is not a safe directory")
+        owner_path = lock / "owner.json"
+        try:
+            owner_bytes = owner_path.read_bytes()
+            recorded = json.loads(owner_bytes)
+        except (OSError, json.JSONDecodeError):
+            die("another catalogue smoke holds an unreadable catalogue lock")
+        if not isinstance(recorded, dict) or type(recorded.get("pid")) is not int or not isinstance(recorded.get("process_identity"), str):
+            die("another catalogue smoke holds an invalid catalogue lock")
+        if process_identity(recorded["pid"]) == recorded["process_identity"]:
+            die("another catalogue smoke holds the catalogue lock")
+        original_stat = lock.stat()
+        if owner_path.read_bytes() != owner_bytes or (lock.stat().st_dev, lock.stat().st_ino) != (original_stat.st_dev, original_stat.st_ino):
+            die("catalogue lock changed during stale-owner recovery")
+        stale = lock.with_name(f"{lock.name}.stale.{os.getpid()}")
+        try:
+            os.rename(lock, stale)
+        except OSError:
+            die("catalogue stale lock changed before recovery")
+        moved_stat = stale.stat()
+        if (moved_stat.st_dev, moved_stat.st_ino) != (original_stat.st_dev, original_stat.st_ino) or (stale / "owner.json").read_bytes() != owner_bytes:
+            die("catalogue stale lock identity changed during recovery")
+        shutil.rmtree(stale)
+        try:
+            lock.mkdir()
+        except FileExistsError:
+            die("another catalogue smoke acquired the lock during recovery")
+    write_json(lock / "owner.json", owner)
+    return owner
+
+
+def release_catalogue_lock(lock: pathlib.Path, owner: dict[str, Any]) -> None:
+    try:
+        recorded = read_json(lock / "owner.json")
+    except SystemExit:
+        return
+    if recorded == owner and process_identity(owner["pid"]) == owner["process_identity"]:
+        shutil.rmtree(lock)
+
+
+def command_catalogue_smoke(args: argparse.Namespace) -> None:
+    workspace = require_workspace(args.workspace)
+    lock = workspace / ".catalogue-smoke-lock"
+    if type(args.timeout) not in (int, float) or not math.isfinite(args.timeout) or args.timeout <= 0:
+        die("catalogue timeout must be a positive finite number")
+    lock_owner = acquire_catalogue_lock(lock)
+    output = pathlib.Path(args.output).expanduser().resolve()
+    try:
+        if output.exists():
+            die(f"catalogue evidence already exists: {output}")
+        config = read_json(workspace / "workspace.json")
+        scratch = workspace / "worktrees" / "catalogue-smoke"
+        home_root = workspace / "catalogue-homes"
+        origin = home_root / "origin.git"
+        template = pathlib.Path(config["templates"]["guard-on"]["path"])
+    except BaseException:
+        release_catalogue_lock(lock, lock_owner)
+        raise
+    raw: dict[str, Any] = {}
+    rows: list[dict[str, str]] = []
+    claude_modes: list[str] = []
+    try:
+        home_root.mkdir()
+        cow_copy(pathlib.Path(config["mirror"]), origin)
+        cow_copy(template, scratch)
+        git(scratch, "checkout", "-b", "b-catalogue")
+        git(scratch, "remote", "set-url", "origin", str(origin))
+        verify_blindness(scratch, "List the authenticated model catalogue.", config["base_sha"])
+        harness_models = {
+            "codex": CATALOGUE_MODELS[:3],
+            "claude": CATALOGUE_MODELS[3:7],
+            "grok": CATALOGUE_MODELS[7:8],
+            "pi": CATALOGUE_MODELS[8:],
+        }
+        for harness, expected in harness_models.items():
+            candidate_home = home_root / harness
+            candidate_home.mkdir(mode=0o700)
+            copy_candidate_credentials(harness, candidate_home)
+            environment = candidate_environment(harness, candidate_home)
+            providers: dict[str, str | None] = {model: CATALOGUE_PROVIDERS.get(model) for model in expected}
+            if harness == "codex":
+                commands = [(None, ["codex", "debug", "models"])]
+            elif harness == "claude":
+                credential = candidate_home / ".claude/.credentials.json"
+                claude_modes.append(format(credential.stat().st_mode & 0o777, "04o") if credential.is_file() else "absent")
+                commands = [
+                    (model, ["claude", "--print", "--model", model, "--output-format", "json", "--no-session-persistence", "--dangerously-skip-permissions", "Reply with catalogue-ok."])
+                    for model in expected
+                ]
+            elif harness == "grok":
+                commands = [(None, ["grok", "models"])]
+            else:
+                commands = [(None, ["pi", "--list-models"])]
+            outputs: dict[str, dict[str, Any]] = {}
+            for model, command in commands:
+                sandboxed = sandboxed_command(command, scratch, origin, candidate_home, workspace)
+                key = model or "catalogue"
+                try:
+                    result = run(sandboxed, cwd=scratch, env=environment, check=False, timeout=args.timeout)
+                    outputs[key] = {
+                        "exit_code": result.returncode,
+                        "stdout": sanitize_catalogue_text(result.stdout, workspace, candidate_home),
+                        "stderr": sanitize_catalogue_text(result.stderr, workspace, candidate_home),
+                    }
+                except subprocess.TimeoutExpired as exc:
+                    stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+                    stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+                    outputs[key] = {
+                        "exit_code": 124,
+                        "stdout": sanitize_catalogue_text(stdout, workspace, candidate_home),
+                        "stderr": sanitize_catalogue_text(f"catalogue command timed out after {args.timeout:g} seconds\n{stderr}", workspace, candidate_home),
+                    }
+            if harness == "codex":
+                try:
+                    parsed = json.loads(outputs["catalogue"]["stdout"])
+                    available = (
+                        {item.get("slug") for item in parsed.get("models", []) if isinstance(item, dict)}
+                        if outputs["catalogue"]["exit_code"] == 0
+                        else set()
+                    )
+                    raw[harness] = {
+                        "exit_code": outputs["catalogue"]["exit_code"],
+                        "matches": [{"slug": item["slug"]} for item in parsed.get("models", []) if isinstance(item, dict) and item.get("slug") in expected],
+                    }
+                except (json.JSONDecodeError, AttributeError):
+                    available = set()
+                    raw[harness] = outputs["catalogue"]
+            elif harness == "claude":
+                claude_results: dict[str, dict[str, Any]] = {}
+                for model in expected:
+                    try:
+                        parsed_result = json.loads(outputs[model]["stdout"])
+                    except json.JSONDecodeError:
+                        parsed_result = {}
+                    claude_results[model] = parsed_result if isinstance(parsed_result, dict) else {}
+                available = {
+                    model for model in expected
+                    if outputs[model]["exit_code"] == 0 and claude_results[model].get("model") == model
+                }
+                raw[harness] = {}
+                for model in expected:
+                    result = outputs[model]
+                    parsed_result = claude_results[model]
+                    raw[harness][model] = {
+                        "exit_code": result["exit_code"],
+                        "model": parsed_result.get("model"),
+                        "result": str(parsed_result.get("result") or "")[:2000],
+                        "terminal_reason": parsed_result.get("terminal_reason"),
+                        "stderr": result["stderr"][:2000],
+                    }
+            elif harness == "grok":
+                text = outputs["catalogue"]["stdout"]
+                available = (
+                    {model for model in expected if re.search(rf"(?<![A-Za-z0-9._/-]){re.escape(model)}(?![A-Za-z0-9._/-])", text, re.I)}
+                    if outputs["catalogue"]["exit_code"] == 0
+                    else set()
+                )
+                matching_lines = [line for line in text.splitlines() if any(model.lower() in line.lower() or (model == "kimi-coding/k3" and re.search(r"^kimi-coding\s+k3(?:\s|$)", line)) for model in expected)]
+                raw[harness] = {"exit_code": outputs["catalogue"]["exit_code"], "matches": matching_lines, "stderr": outputs["catalogue"]["stderr"]}
+            else:
+                text = outputs["catalogue"]["stdout"]
+                available = set()
+                matching_lines = []
+                lines = text.splitlines() if outputs["catalogue"]["exit_code"] == 0 else []
+                for line in lines:
+                    fields = line.split()
+                    if len(fields) < 2:
+                        continue
+                    provider, routed_model = fields[:2]
+                    for model in expected:
+                        expected_model = "k3" if model == "kimi-coding/k3" else model
+                        if provider == providers[model] and routed_model == expected_model:
+                            available.add(model)
+                            matching_lines.append(line)
+                raw[harness] = {"exit_code": outputs["catalogue"]["exit_code"], "matches": matching_lines, "stderr": outputs["catalogue"]["stderr"]}
+            for model in expected:
+                included = model in available
+                _, provider, route_model = catalogue_route(model)
+                detail = "exact id present" if included else "exact id absent or catalogue command failed"
+                command_result = outputs[model] if harness == "claude" else outputs["catalogue"]
+                if not included and command_result["exit_code"] == 124:
+                    detail = command_result["stderr"].strip()[:2000]
+                if harness == "pi" and not included:
+                    detail = f"exact route absent: harness=pi provider={provider} model={route_model}"
+                if harness == "claude" and not included:
+                    try:
+                        claude_output = json.loads(outputs[model]["stdout"])
+                    except json.JSONDecodeError:
+                        claude_output = {}
+                    returned_model = claude_output.get("model") if isinstance(claude_output, dict) else None
+                    if outputs[model]["exit_code"] == 0 and returned_model != model:
+                        detail = f"requested {model} but catalogue response returned {returned_model or '<missing>'}"
+                    else:
+                        claude_result = claude_output.get("result") if isinstance(claude_output, dict) else None
+                        detail = str(claude_result or outputs[model]["stderr"] or detail).strip()[:2000]
+                rows.append({
+                    "harness": harness,
+                    "provider": provider,
+                    "model": model,
+                    "route_model": route_model,
+                    "status": "included" if included else "excluded-with-reason",
+                    "reason": detail,
+                })
+        evidence = {
+            "schema_version": "canonical-guard-catalogue-smoke/v1",
+            "recorded_at": utc_now(),
+            "evidence_status": "current",
+            "source_harness_sha256": sha256_file(pathlib.Path(__file__)),
+            "workspace_base_sha": config["base_sha"],
+            "command_timeout_seconds": args.timeout,
+            "blinded_profile": True,
+            "claude_credentials_modes": claude_modes,
+            "models": rows,
+            "catalogues": raw,
+        }
+        write_json(output, evidence)
+        print(json.dumps({"output": str(output), "included": sum(row["status"] == "included" for row in rows), "excluded": sum(row["status"] != "included" for row in rows)}, sort_keys=True))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(home_root, ignore_errors=True)
+        profile_root = workspace / ".sandbox-profiles"
+        for name in ("codex", "claude", "grok", "pi"):
+            (profile_root / f"{name}.sb").unlink(missing_ok=True)
+        try:
+            profile_root.rmdir()
+        except OSError:
+            pass
+        release_catalogue_lock(lock, lock_owner)
+
+
+def command_go_no_go(args: argparse.Namespace) -> None:
+    workspace = require_workspace(args.workspace)
+    root = pathlib.Path(__file__).resolve().parents[2]
+    prompt_path = pathlib.Path(args.prompt_file).expanduser().resolve()
+    extension_path = pathlib.Path(args.extension_evidence).expanduser().resolve()
+    grok_path = pathlib.Path(args.grok_evidence).expanduser().resolve()
+    catalogue_path = pathlib.Path(args.catalogue_evidence).expanduser().resolve()
+    launch_path = pathlib.Path(args.launch_evidence).expanduser().resolve()
+    results: list[tuple[str, bool, str]] = []
+
+    def add(label: str, passed: bool, detail: str) -> None:
+        results.append((label, passed, detail))
+
+    harness_paths = [
+        "bin/fm-canonical-guard-benchmark.sh",
+        "scripts/canonical-guard-benchmark/benchmark.py",
+        "scripts/canonical-guard-benchmark/manifest.schema.json",
+        "tests/fm-canonical-guard-benchmark.test.sh",
+    ]
+    head = git(root, "rev-parse", "HEAD")
+    dirty = git(root, "status", "--porcelain", "--", *harness_paths, check=False)
+    add("harness commit", not dirty, head if not dirty else "harness paths have uncommitted changes")
+
+    launch = read_json(launch_path)
+    pr_reference = launch.get("pr_178", {})
+    if not isinstance(pr_reference, dict):
+        pr_reference = {}
+    pr_path = resolve_evidence_reference(pr_reference.get("evidence_path"), launch_path, root)
+    pr: dict[str, Any] = {}
+    if pr_path and sha256_file(pr_path) == pr_reference.get("evidence_sha256"):
+        try:
+            pr = read_json(pr_path)
+        except json.JSONDecodeError:
+            pr = {}
+    local_test = pr.get("local_test", {})
+    if not isinstance(local_test, dict):
+        local_test = {}
+    pr_head = pr.get("head_sha")
+    pr_green = (
+        pr.get("state") == "merged"
+        and isinstance(pr_head, str)
+        and bool(re.fullmatch(r"[0-9a-f]{40,64}", pr_head))
+        and local_test.get("head_sha") == pr_head
+        and local_test.get("passed") is True
+        and local_test.get("macos_sandbox") is True
+        and isinstance(local_test.get("command"), str)
+        and bool(local_test["command"].strip())
+    )
+    add("PR 178 exact-head local macOS sandbox evidence", pr_green, f"local evidence for {pr_head}" if pr_green else "missing, failing, or not for the merged head")
+
+    artifact_paths = {"extension": extension_path, "grok": grok_path, "catalogue": catalogue_path}
+    artifact_records = launch.get("artifacts", {})
+    artifact_mismatches = []
+    if not isinstance(artifact_records, dict) or set(artifact_records) != set(artifact_paths):
+        artifact_mismatches.append("artifact inventory")
+    else:
+        for name, path in artifact_paths.items():
+            record = artifact_records.get(name)
+            expected = record.get("sha256") if isinstance(record, dict) else None
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected) or not path.is_file() or sha256_file(path) != expected:
+                artifact_mismatches.append(name)
+    add("evidence artifact hashes", not artifact_mismatches, "extension, Grok, and catalogue evidence match the launch manifest" if not artifact_mismatches else "mismatch: " + ", ".join(artifact_mismatches))
+
+    extension = read_json(extension_path)
+    expected_digest = sha256_bytes(b"".join((root / path).read_bytes() for path in harness_paths))
+    extension_result_path = resolve_evidence_reference(extension.get("result_path"), extension_path, root)
+    extension_result: dict[str, Any] = {}
+    if extension_result_path and sha256_file(extension_result_path) == extension.get("result_sha256"):
+        try:
+            extension_result = read_json(extension_result_path)
+        except json.JSONDecodeError:
+            extension_result = {}
+    extension_scripts = extension_result.get("scripts", [])
+    extension_summary = extension_result.get("summary", {})
+    extension_script = extension_scripts[0] if isinstance(extension_scripts, list) and len(extension_scripts) == 1 and isinstance(extension_scripts[0], dict) else {}
+    if not isinstance(extension_summary, dict):
+        extension_summary = {}
+    extension_green = (
+        extension.get("harness_digest") == expected_digest
+        and extension.get("command") == "bin/fm-test-run.sh tests/fm-canonical-guard-benchmark.test.sh"
+        and extension_result.get("selection") == "scripts"
+        and extension_script.get("path") == "tests/fm-canonical-guard-benchmark.test.sh"
+        and extension_script.get("exit") == 0
+        and extension_script.get("gate_skip") is False
+        and extension_summary.get("total") == 1
+        and extension_summary.get("failed") == 0
+        and extension_summary.get("skipped_gate") == 0
+    )
+    add("extension tests", extension_green, "bound runner result passed 1/1" if extension_green else "missing, failing, or unbound runner result")
+
+    grok = read_json(grok_path)
+    transcript_path = resolve_evidence_reference(grok.get("transcript_path"), grok_path, root)
+    manifest_path = resolve_evidence_reference(grok.get("manifest_path"), grok_path, root)
+    manifest: dict[str, Any] = {}
+    if manifest_path and sha256_file(manifest_path) == grok.get("manifest_sha256"):
+        try:
+            manifest = read_json(manifest_path)
+            validate_manifest(manifest)
+        except (SystemExit, json.JSONDecodeError):
+            manifest = {}
+    manifest_transcript = manifest.get("transcript", {})
+    manifest_blindness = manifest.get("blindness_check", {})
+    manifest_attrition = manifest.get("attrition", {})
+    if not isinstance(manifest_transcript, dict):
+        manifest_transcript = {}
+    if not isinstance(manifest_blindness, dict):
+        manifest_blindness = {}
+    if not isinstance(manifest_attrition, dict):
+        manifest_attrition = {}
+    bound_terminals: set[pathlib.Path] = set()
+    if manifest_path:
+        terminal_paths = manifest_transcript.get("terminal_paths", [])
+        if isinstance(terminal_paths, list):
+            for item in terminal_paths:
+                if not isinstance(item, str) or pathlib.Path(item).is_absolute():
+                    continue
+                terminal = (manifest_path.parent / item).resolve()
+                try:
+                    terminal.relative_to(manifest_path.parent.resolve())
+                except ValueError:
+                    continue
+                bound_terminals.add(terminal)
+    transcript_green = (
+        transcript_path is not None
+        and transcript_path in bound_terminals
+        and isinstance(grok.get("transcript_sha256"), str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", grok["transcript_sha256"]))
+        and sha256_file(transcript_path) == grok["transcript_sha256"]
+    )
+    grok_green = (
+        manifest.get("harness") == "grok"
+        and manifest.get("model") == "grok-4.6"
+        and manifest.get("effort") in WAVES
+        and manifest_blindness.get("passed") is True
+        and manifest_attrition.get("mechanical_failure") is False
+        and manifest_transcript.get("status") == "captured"
+        and transcript_green
+    )
+    add("Grok blinded smoke", grok_green, "bound grok-4.6 manifest and terminal capture" if grok_green else "missing or invalid bound Grok manifest/transcript evidence")
+
+    catalogue = read_json(catalogue_path)
+    rows = catalogue.get("models", [])
+    if not isinstance(rows, list):
+        rows = []
+    exact_ids = set(CATALOGUE_MODELS)
+    expected_routes = {catalogue_route(model) for model in CATALOGUE_MODELS}
+    seen = {row.get("model") for row in rows if isinstance(row, dict)}
+    admitted = {row.get("model") for row in rows if isinstance(row, dict) and row.get("status") == "included"}
+    admitted_routes = {
+        (row.get("harness"), row.get("provider"), row.get("route_model"))
+        for row in rows
+        if isinstance(row, dict) and row.get("status") == "included"
+    }
+    wrong_routes = []
+    for model in CATALOGUE_MODELS:
+        matching = [row for row in rows if isinstance(row, dict) and row.get("model") == model]
+        harness, provider, route_model = catalogue_route(model)
+        if len(matching) != 1 or any(
+            matching[0].get(key) != value
+            for key, value in (("harness", harness), ("provider", provider), ("route_model", route_model))
+        ):
+            wrong_routes.append(model)
+    raw_routes = catalogue_raw_routes(catalogue)
+    frozen_for_catalogue = read_json(workspace / "frozen-plan.json") if (workspace / "frozen-plan.json").is_file() else {}
+    frozen_routes = {
+        (item.get("harness"), item.get("provider"), item.get("model"))
+        for item in frozen_for_catalogue.get("runs", [])
+        if isinstance(item, dict)
+    }
+    catalogue_green = (
+        exact_ids == seen == admitted
+        and not wrong_routes
+        and expected_routes == admitted_routes == raw_routes == frozen_routes
+        and catalogue.get("blinded_profile") is True
+    )
+    if wrong_routes:
+        catalogue_detail = "wrong or missing row routes: " + ", ".join(wrong_routes)
+    elif raw_routes != expected_routes:
+        catalogue_detail = "raw catalogue records do not admit every exact route"
+    elif frozen_routes != expected_routes:
+        catalogue_detail = "frozen runs do not match the fifteen admitted routes"
+    else:
+        catalogue_detail = f"{len(admitted)}/{len(exact_ids)} exact ids included with exact routes"
+    add("blinded catalogue smoke", catalogue_green, catalogue_detail)
+
+    payload = launch.get("payload_sha")
+    workspace_config = read_json(workspace / "workspace.json")
+    mirror = pathlib.Path(str(workspace_config.get("mirror", "")))
+    payload_resolved = ""
+    if mirror.is_dir() and isinstance(payload, str) and re.fullmatch(r"[0-9a-f]{7,64}", payload):
+        payload_resolved = git(mirror, "rev-parse", "--verify", f"{payload}^{{commit}}", check=False).strip()
+    keyboard_path = launch.get("keyboard_guard_path")
+    keyboard_green = False
+    if payload_resolved and isinstance(keyboard_path, str) and keyboard_path and not pathlib.PurePosixPath(keyboard_path).is_absolute() and ".." not in pathlib.PurePosixPath(keyboard_path).parts:
+        keyboard_green = run(
+            ["git", "-C", str(mirror), "cat-file", "-e", f"{payload_resolved}:{keyboard_path}"],
+            check=False,
+        ).returncode == 0
+    frozen_payload_plan = read_json(workspace / "frozen-plan.json") if (workspace / "frozen-plan.json").is_file() else {}
+    prompt_green = prompt_path.is_file() and sha256_file(prompt_path) == frozen_payload_plan.get("prompt_sha256")
+    payload_green = bool(payload_resolved) and payload_resolved.startswith(payload) and keyboard_green and prompt_green
+    add(
+        "payload SHA and keyboard guard inclusion",
+        payload_green,
+        f"resolved {payload_resolved}; frozen prompt {'matches' if prompt_green else 'mismatch'}" if payload_resolved else "payload commit does not resolve",
+    )
+    corpus_reference = launch.get("corpus_sync", {})
+    if not isinstance(corpus_reference, dict):
+        corpus_reference = {}
+    corpus_path = resolve_evidence_reference(corpus_reference.get("evidence_path"), launch_path, root)
+    corpus: dict[str, Any] = {}
+    if corpus_path and sha256_file(corpus_path) == corpus_reference.get("evidence_sha256"):
+        try:
+            corpus = read_json(corpus_path)
+        except json.JSONDecodeError:
+            corpus = {}
+    corpus_decision = corpus.get("decision")
+    corpus_green = (
+        corpus.get("schema_version") == "canonical-guard-corpus-sync-evidence/v1"
+        and (
+            (corpus_decision == "included" and isinstance(corpus.get("sha"), str) and bool(re.fullmatch(r"[0-9a-f]{40,64}", corpus["sha"])))
+            or (corpus_decision == "excluded" and isinstance(corpus.get("reason"), str) and bool(corpus["reason"].strip()))
+        )
+    )
+    corpus_detail = str(corpus.get("sha") or corpus.get("reason") or "missing or unbound corpus-sync decision")
+    add("corpus-sync inclusion recorded", corpus_green, corpus_detail)
+
+    fixture = workspace / "fixture-results.jsonl"
+    frozen = workspace / "frozen-plan.json"
+    templates_green = True
+    for arm in ARMS:
+        info = workspace_config.get("templates", {}).get(arm, {})
+        template_path = pathlib.Path(str(info.get("path", "")))
+        lefthook = template_path / "lefthook.yml"
+        content_sha = sha256_bytes((str(info.get("sha", "")) + "\0").encode() + lefthook.read_bytes()) if lefthook.is_file() else None
+        templates_green = templates_green and template_path.is_dir() and content_sha == info.get("content_sha")
+    detector_path = pathlib.Path(str(workspace_config.get("templates", {}).get("guard-on", {}).get("path", ""))) / "packages/frontend/scripts/canonical/check-canonical.ts"
+    detector_green = detector_path.is_file() and sha256_file(detector_path) == workspace_config.get("detector_sha")
+    fixture_green = False
+    if fixture.is_file():
+        try:
+            fixture_rows = [json.loads(line) for line in fixture.read_text().splitlines() if line.strip()]
+            by_case = {row.get("case"): row for row in fixture_rows if isinstance(row, dict)}
+            fixture_green = (
+                len(fixture_rows) == 3
+                and by_case.get("top-level-verbatim", {}).get("fired") is True
+                and by_case.get("reshaped-top-level", {}).get("fired") is False
+                and by_case.get("subdirectory-verbatim", {}).get("fired") is False
+                and by_case.get("subdirectory-verbatim", {}).get("blind_spot") is True
+            )
+        except json.JSONDecodeError:
+            fixture_green = False
+    frozen_green = False
+    if frozen.is_file():
+        frozen_plan = read_json(frozen)
+        frozen_runs = frozen_plan.get("runs", [])
+        frozen_pairs: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+        if isinstance(frozen_runs, list):
+            for item in frozen_runs:
+                if isinstance(item, dict):
+                    frozen_pairs.setdefault((item.get("wave"), item.get("lane")), []).append(item)
+        pair_axes = ("harness", "model", "provider", "effort", "helper_family", "concurrent_lane_count")
+        replication_axes = ("harness", "model", "provider", "helper_family", "concurrent_lane_count")
+        try:
+            frozen_waves, frozen_pairs_per_wave = confirmatory_shape(frozen_runs)
+        except ValueError:
+            frozen_waves, frozen_pairs_per_wave = [], 0
+        high_lanes = {lane for wave, lane in frozen_pairs if wave == "high"}
+        medium_lanes = {lane for wave, lane in frozen_pairs if wave == "medium"}
+        frozen_green = (
+            frozen_waves == list(WAVES)
+            and frozen_pairs_per_wave == 15
+            and len(frozen_pairs) == 30
+            and all(
+                len(pair) == 2
+                and {item.get("arm") for item in pair} == set(ARMS)
+                and all(pair[0].get(axis) == pair[1].get(axis) for axis in pair_axes)
+                and pair[0].get("effort") == wave
+                for (wave, _), pair in frozen_pairs.items()
+            )
+            and high_lanes == medium_lanes
+            and all(
+                all(
+                    frozen_pairs[("high", lane)][0].get(axis) == frozen_pairs[("medium", lane)][0].get(axis)
+                    for axis in replication_axes
+                )
+                for lane in high_lanes
+            )
+        )
+    evidence_green = fixture_green and templates_green and detector_green and frozen_green
+    add("fixture, template, detector, and freeze evidence", evidence_green, "all evidence present and hash-valid" if evidence_green else "evidence incomplete or invalid")
+    router_reference = launch.get("router_ranking", {})
+    if not isinstance(router_reference, dict):
+        router_reference = {}
+    router_path = resolve_evidence_reference(router_reference.get("evidence_path"), launch_path, root)
+    router: dict[str, Any] = {}
+    if router_path and sha256_file(router_path) == router_reference.get("evidence_sha256"):
+        try:
+            router = read_json(router_path)
+        except json.JSONDecodeError:
+            router = {}
+    router_green = (
+        router.get("schema_version") == "canonical-guard-router-pause-evidence/v1"
+        and router.get("scope") == "router-ranking"
+        and router.get("state") == "paused"
+        and isinstance(router.get("reason"), str)
+        and bool(router["reason"].strip())
+    )
+    add("router-ranking pause intact", router_green, str(router.get("reason") or "missing or unbound pause evidence"))
+
+    for label, passed, detail in results:
+        print(f"[{'GO' if passed else 'NO-GO'}] {label}: {detail}")
+    overall = all(passed for _, passed, _ in results)
+    print(f"VERDICT: {'GO' if overall else 'NO-GO'}")
+    if not overall:
+        raise SystemExit(1)
 def ranking_plan(workspace: pathlib.Path) -> dict[str, Any]:
     path = workspace / "frozen-plan.json"
     if not path.is_file():
@@ -2332,8 +3090,6 @@ def command_rank_scoreboard(args: argparse.Namespace) -> None:
     )
     pathlib.Path(args.html).write_text(page)
     print(json.dumps({"markdown": args.markdown, "html": args.html, "ranked": len(ranked), "unranked": len(untokened), "missing_lanes": len(missing)}, sort_keys=True))
-
-
 def command_schema_check(args: argparse.Namespace) -> None:
     workspace = require_workspace(args.workspace)
     unsupported = []
@@ -2464,74 +3220,111 @@ def command_scoreboard(args: argparse.Namespace) -> None:
     all_runs = manifests(workspace)
     runs = [item for item in all_runs if item.get("stage") == "matrix"]
     judged = verdicts(workspace)
-    if len(runs) != 14 or any(item["run_id"] not in judged for item in runs):
-        die("presentation scoreboard requires all fourteen matrix manifests and verdicts")
+    try:
+        wave_order, pairs_per_wave = confirmatory_shape(runs)
+    except ValueError as exc:
+        die(f"presentation scoreboard rejected the confirmatory shape: {exc}")
+    if any(item["run_id"] not in judged for item in runs):
+        die("presentation scoreboard requires a verdict for every matrix manifest")
     remediations = {item["run_id"]: captured_gate_remediations(workspace / "bundles" / item["run_id"], item) for item in runs}
     rank = {"glm-5.2-high": 0, "composer-2.5": 1, "cursor-grok-4.5-high-fast": 2, "claude-sonnet-5": 3, "gpt-5.6-sol": 4, "gpt-5.6-terra": 5, "gpt-5.6-luna": 6}
-    models = sorted({item["model"] for item in runs}, key=lambda value: (rank.get(value, 99), value))
-    by_cell = {(item["model"], item["arm"]): item for item in runs}
+    by_cell = {(item.get("wave"), item["model"], item["arm"]): item for item in runs}
+    if len(by_cell) != len(runs):
+        die("presentation scoreboard found duplicate model/arm cells within a wave")
 
     def cell(value: Any, item: dict[str, Any]) -> str:
         return f"{value} [{item['run_id']}]"
 
-    headline_rows = []
-    for model in models:
-        off = by_cell[(model, "guard-off")]
-        on = by_cell[(model, "guard-on")]
-        off_verdict = judged[off["run_id"]]
-        on_verdict = judged[on["run_id"]]
-        on_fired = bool(remediations[on["run_id"]] or on["gate"]["firing_count"])
-        label = model + (" — underdog" if model == "glm-5.2-high" else "")
-        headline_rows.append([
-            label,
-            cell("yes" if off_verdict["machine"] == "duplicate" else "no", off),
-            cell("yes" if primary_outcome(off, off_verdict, remediations[off["run_id"]]) == "self-corrected" else "no", off),
-            cell("yes" if on_fired else "no", on),
-            cell("yes" if on_fired and on_verdict["machine"] == "clean" else "no", on),
-            cell("yes" if on_verdict["ack"] else "no", on),
-            cell(f"{off['timing']['wall_seconds']:.0f}s / {off['usage']['total_tokens'] if off['usage']['total_tokens'] is not None else 'tokens unavailable'}", off),
-            cell(f"{on['timing']['wall_seconds']:.0f}s / {on['usage']['total_tokens'] if on['usage']['total_tokens'] is not None else 'tokens unavailable'}", on),
+    sections: list[tuple[str, list[str], list[list[Any]]]] = []
+    wave_results: dict[str, dict[str, Any]] = {}
+    models_by_wave: dict[str | None, list[str]] = {}
+    for wave in wave_order:
+        selected = [item for item in runs if item.get("wave") == wave]
+        models = sorted({item["model"] for item in selected}, key=lambda value: (rank.get(value, 99), value))
+        models_by_wave[wave] = models
+        headline_rows = []
+        for model in models:
+            try:
+                off = by_cell[(wave, model, "guard-off")]
+                on = by_cell[(wave, model, "guard-on")]
+            except KeyError:
+                die(f"presentation scoreboard requires paired ON/OFF cells for {wave or 'legacy'}/{model}")
+            off_verdict = judged[off["run_id"]]
+            on_verdict = judged[on["run_id"]]
+            on_fired = bool(remediations[on["run_id"]] or on["gate"]["firing_count"])
+            label = model + (" - underdog" if wave is None and model == "glm-5.2-high" else "")
+            headline_rows.append([
+                label,
+                cell("yes" if off_verdict["machine"] == "duplicate" else "no", off),
+                cell("yes" if primary_outcome(off, off_verdict, remediations[off["run_id"]]) == "self-corrected" else "no", off),
+                cell("yes" if on_fired else "no", on),
+                cell("yes" if on_fired and on_verdict["machine"] == "clean" else "no", on),
+                cell("yes" if on_verdict["ack"] else "no", on),
+                cell(f"{off['timing']['wall_seconds']:.0f}s / {off['usage']['total_tokens'] if off['usage']['total_tokens'] is not None else 'tokens unavailable'}", off),
+                cell(f"{on['timing']['wall_seconds']:.0f}s / {on['usage']['total_tokens'] if on['usage']['total_tokens'] is not None else 'tokens unavailable'}", on),
+            ])
+        off_runs = [item for item in selected if item["arm"] == "guard-off"]
+        on_runs = [item for item in selected if item["arm"] == "guard-on"]
+        off_duplicates = sum(judged[item["run_id"]]["machine"] == "duplicate" for item in off_runs)
+        on_duplicates = sum(judged[item["run_id"]]["machine"] == "duplicate" for item in on_runs)
+        fisher = fisher_two_sided(on_duplicates, len(on_runs) - on_duplicates, off_duplicates, len(off_runs) - off_duplicates)
+        difference = on_duplicates / len(on_runs) - off_duplicates / len(off_runs)
+        on_interval = wilson_interval(on_duplicates, len(on_runs))
+        off_interval = wilson_interval(off_duplicates, len(off_runs))
+        lower = difference - math.sqrt((on_duplicates / len(on_runs) - on_interval[0]) ** 2 + (off_interval[1] - off_duplicates / len(off_runs)) ** 2)
+        upper = difference + math.sqrt((on_interval[1] - on_duplicates / len(on_runs)) ** 2 + (off_duplicates / len(off_runs) - off_interval[0]) ** 2)
+        key = wave or "legacy"
+        wave_results[key] = {
+            "off_duplicates": off_duplicates,
+            "off_runs": len(off_runs),
+            "on_duplicates": on_duplicates,
+            "on_runs": len(on_runs),
+            "fisher_p": fisher,
+            "risk_difference": difference,
+        }
+        model_title = "Confirmatory model scoreboard" if wave is None else f"{wave.title()} wave model scoreboard"
+        pooled_title = "Pooled primary result" if wave is None else f"{wave.title()} wave pooled primary result"
+        sections.extend([
+            (model_title, ["Model", "OFF duplicate shipped?", "OFF self-corrected?", "ON gate fired?", "ON fixed before review?", "ON acknowledged?", "OFF wall / tokens", "ON wall / tokens"], headline_rows),
+            (pooled_title, ["Outcome", "Without guard", "With guard", "Risk difference", "Significance"], [["Machine duplicates", f"{off_duplicates}/{len(off_runs)}", f"{on_duplicates}/{len(on_runs)}", f"{difference * 100:+.1f} pp (Newcombe 95% CI {lower * 100:+.1f} to {upper * 100:+.1f})", f"two-sided Fisher p={fisher:.3f}"]]),
         ])
-
-    off_runs = [item for item in runs if item["arm"] == "guard-off"]
-    on_runs = [item for item in runs if item["arm"] == "guard-on"]
-    off_duplicates = sum(judged[item["run_id"]]["machine"] == "duplicate" for item in off_runs)
-    on_duplicates = sum(judged[item["run_id"]]["machine"] == "duplicate" for item in on_runs)
-    fisher = fisher_two_sided(on_duplicates, len(on_runs) - on_duplicates, off_duplicates, len(off_runs) - off_duplicates)
-    difference = on_duplicates / len(on_runs) - off_duplicates / len(off_runs)
-    on_interval = wilson_interval(on_duplicates, len(on_runs))
-    off_interval = wilson_interval(off_duplicates, len(off_runs))
-    lower = difference - math.sqrt((on_duplicates / len(on_runs) - on_interval[0]) ** 2 + (off_interval[1] - off_duplicates / len(off_runs)) ** 2)
-    upper = difference + math.sqrt((on_interval[1] - on_duplicates / len(on_runs)) ** 2 + (off_duplicates / len(off_runs) - off_interval[0]) ** 2)
-    pooled_rows = [["Machine duplicates", f"{off_duplicates}/{len(off_runs)}", f"{on_duplicates}/{len(on_runs)}", f"{difference * 100:+.1f} pp (Newcombe 95% CI {lower * 100:+.1f} to {upper * 100:+.1f})", f"two-sided Fisher p={fisher:.3f}"]]
-
-    sections: list[tuple[str, list[str], list[list[Any]]]] = [
-        ("Confirmatory model scoreboard", ["Model", "OFF duplicate shipped?", "OFF self-corrected?", "ON gate fired?", "ON fixed before review?", "ON acknowledged?", "OFF wall / tokens", "ON wall / tokens"], headline_rows),
-        ("Pooled primary result", ["Outcome", "Without guard", "With guard", "Risk difference", "Significance"], pooled_rows),
-    ]
+    labelled = wave_order != [None]
     detail = []
-    for item in sorted(runs, key=lambda value: (rank.get(value["model"], 99), value["arm"])):
+    for item in sorted(runs, key=lambda value: (wave_order.index(value.get("wave")), rank.get(value["model"], 99), value["arm"])):
         verdict = judged[item["run_id"]]
-        detail.append([item["run_id"], item["model"], item["arm"], verdict["machine"], primary_outcome(item, verdict, remediations[item["run_id"]]), len(remediations[item["run_id"]]), item["resolution"]["path"], item["usage"]["total_tokens"], item["timing"]["wall_seconds"]])
-    sections.append(("Per-run engineering detail", ["Run", "Model", "Arm", "Machine verdict", "Primary class", "Firings", "Resolution path", "Tokens", "Wall seconds"], detail))
-    outcome_rows = [[arm, outcome, sum(primary_outcome(item, judged[item["run_id"]], remediations[item["run_id"]]) == outcome for item in runs if item["arm"] == arm)] for arm in ARMS for outcome in ("caught-early", "reached-review", "self-corrected", "never-duplicated")]
-    sections.append(("Primary outcome classes by arm", ["Arm", "Outcome class", "Runs"], outcome_rows))
-    family_rows = []
-    for family in ("distance-helper", "point-in-polygon", "both", "none"):
+        row = [item["run_id"], item["model"], item["arm"], verdict["machine"], primary_outcome(item, verdict, remediations[item["run_id"]]), len(remediations[item["run_id"]]), item["resolution"]["path"], item["usage"]["total_tokens"], item["timing"]["wall_seconds"]]
+        detail.append(([item["wave"]] if labelled else []) + row)
+    detail_headers = (["Wave"] if labelled else []) + ["Run", "Model", "Arm", "Machine verdict", "Primary class", "Firings", "Resolution path", "Tokens", "Wall seconds"]
+    sections.append(("Per-run engineering detail", detail_headers, detail))
+    outcome_rows = []
+    for wave in wave_order:
         for arm in ARMS:
-            selected = [item for item in runs if item["arm"] == arm and (family in item["helper_families"] or (family == "both" and len(item["helper_families"]) > 1) or (family == "none" and not item["helper_families"]))]
-            family_rows.append([family, arm, len(selected), sum(judged[item["run_id"]]["machine"] == "duplicate" for item in selected), sum(judged[item["run_id"]]["semantic"] == "duplicate" for item in selected)])
-    sections.append(("Results by helper family", ["Helper family", "Arm", "Runs", "Machine duplicates", "Provisional semantic duplicates"], family_rows))
+            for outcome in ("caught-early", "reached-review", "self-corrected", "never-duplicated"):
+                count = sum(primary_outcome(item, judged[item["run_id"]], remediations[item["run_id"]]) == outcome for item in runs if item.get("wave") == wave and item["arm"] == arm)
+                outcome_rows.append(([wave] if labelled else []) + [arm, outcome, count])
+    outcome_headers = (["Wave"] if labelled else []) + ["Arm", "Outcome class", "Runs"]
+    sections.append(("Primary outcome classes by arm", outcome_headers, outcome_rows))
+    family_rows = []
+    for wave in wave_order:
+        for family in ("distance-helper", "point-in-polygon", "both", "none"):
+            for arm in ARMS:
+                selected = [item for item in runs if item.get("wave") == wave and item["arm"] == arm and (family in item["helper_families"] or (family == "both" and len(item["helper_families"]) > 1) or (family == "none" and not item["helper_families"]))]
+                family_rows.append(([wave] if labelled else []) + [family, arm, len(selected), sum(judged[item["run_id"]]["machine"] == "duplicate" for item in selected), sum(judged[item["run_id"]]["semantic"] == "duplicate" for item in selected)])
+    family_headers = (["Wave"] if labelled else []) + ["Helper family", "Arm", "Runs", "Machine duplicates", "Provisional semantic duplicates"]
+    sections.append(("Results by helper family", family_headers, family_rows))
     def reused_existing_helper(item: dict[str, Any]) -> bool:
         final_diff = (workspace / "bundles" / item["run_id"] / "final.diff").read_text(errors="replace")
         return bool(re.search(r"^\+import[^\n]*\b(?:pointInRing|pointInPolygon|polygonContains|pointToSegmentDistance|minDistanceToBoundary)\b", final_diff, re.M))
 
-    clean_runs = [item for item in runs if judged[item["run_id"]]["machine"] == "clean"]
-    clean_rows = [
-        ["exported then imported an existing helper", sum(reused_existing_helper(item) for item in clean_runs)],
-        ["new functions with an existing helper's purpose (behavior may differ)", sum(not reused_existing_helper(item) for item in clean_runs)],
-    ]
-    sections.append(("Clean-path breakdown", ["Resolution path", "Machine-clean runs"], clean_rows))
+    clean_rows = []
+    for wave in wave_order:
+        clean_runs = [item for item in runs if item.get("wave") == wave and judged[item["run_id"]]["machine"] == "clean"]
+        clean_rows.extend([
+            ([wave] if labelled else []) + ["exported then imported an existing helper", sum(reused_existing_helper(item) for item in clean_runs)],
+            ([wave] if labelled else []) + ["new functions with an existing helper's purpose (behavior may differ)", sum(not reused_existing_helper(item) for item in clean_runs)],
+        ])
+    clean_headers = (["Wave"] if labelled else []) + ["Resolution path", "Machine-clean runs"]
+    sections.append(("Clean-path breakdown", clean_headers, clean_rows))
     teach_rows = []
     for item in runs:
         for ordinal, remediation in enumerate(remediations[item["run_id"]], 1):
@@ -2558,34 +3351,54 @@ def command_scoreboard(args: argparse.Namespace) -> None:
             exploratory_rows.append([item["run_id"], item["model"], item["arm"], None, None, None, "dropped by slate cut" if item["model"] in dropped else "pending"])
     sections.append(("Exploratory extension — outside confirmatory counts", ["Run", "Model", "Arm", "Concurrent lanes", "Peak 1m load", "Wall seconds", "Status"], exploratory_rows))
 
-    no_fire_pairs = []
-    for model in models:
-        on = by_cell[(model, "guard-on")]
-        off = by_cell[(model, "guard-off")]
-        if not remediations[on["run_id"]]:
-            no_fire_pairs.append((on, off))
-    wall_overheads = [(on["timing"]["wall_seconds"] / off["timing"]["wall_seconds"] - 1) * 100 for on, off in no_fire_pairs]
-    token_overheads = [(on["usage"]["total_tokens"] / off["usage"]["total_tokens"] - 1) * 100 for on, off in no_fire_pairs if on["usage"]["total_tokens"] and off["usage"]["total_tokens"]]
-    catches = sum(bool(remediations[item["run_id"]]) and judged[item["run_id"]]["machine"] == "clean" for item in on_runs)
-    wall_summary = f"{statistics.median(wall_overheads):+.1f}%" if wall_overheads else "unknown"
-    token_summary = f"{statistics.median(token_overheads):+.1f}%" if token_overheads else "unknown"
-    cost_text = f"The guard caught {catches} machine-detectable duplicate runs before review. On the {len(no_fire_pairs)} ON/OFF pairs where it did not fire, median wall overhead was {wall_summary} and median token overhead among measured pairs was {token_summary}. No confirmatory run has verified dollar cost, and PR 4479 supplies 19 review submissions but no dollar telemetry; the money comparison is therefore unknown rather than zero."
+    cost_parts = []
+    for wave in wave_order:
+        no_fire_pairs = []
+        for model in models_by_wave[wave]:
+            on = by_cell[(wave, model, "guard-on")]
+            off = by_cell[(wave, model, "guard-off")]
+            if not remediations[on["run_id"]]:
+                no_fire_pairs.append((on, off))
+        wall_overheads = [(on["timing"]["wall_seconds"] / off["timing"]["wall_seconds"] - 1) * 100 for on, off in no_fire_pairs]
+        token_overheads = [(on["usage"]["total_tokens"] / off["usage"]["total_tokens"] - 1) * 100 for on, off in no_fire_pairs if on["usage"]["total_tokens"] and off["usage"]["total_tokens"]]
+        catches = sum(bool(remediations[item["run_id"]]) and judged[item["run_id"]]["machine"] == "clean" for item in runs if item.get("wave") == wave and item["arm"] == "guard-on")
+        wall_summary = f"{statistics.median(wall_overheads):+.1f}%" if wall_overheads else "unknown"
+        token_summary = f"{statistics.median(token_overheads):+.1f}%" if token_overheads else "unknown"
+        wave_label = "The confirmatory wave" if wave is None else f"The {wave} wave"
+        cost_parts.append(f"{wave_label} caught {catches} machine-detectable duplicate runs before review. On its {len(no_fire_pairs)} ON/OFF pairs where the guard did not fire, median wall overhead was {wall_summary} and median token overhead among measured pairs was {token_summary}.")
+    cost_text = " ".join(cost_parts) + " No confirmatory run has verified dollar cost, and PR 4479 supplies 19 review submissions but no dollar telemetry; the money comparison is therefore unknown rather than zero."
     packet_note = " A masked packet set accompanies this workspace." if (workspace / "semantic-packets").is_dir() else ""
-    semantic_text = "LLM judge: 14/14 final modules contain a semantic duplicate in both arms — PROVISIONAL, human verdict pending. The frozen primary detector tests normalized near-verbatim implementations; the secondary rubric judges whether new functions repeat an existing helper's purpose and natural input shape, which does not necessarily imply identical behavior." + packet_note
-    skeptic = "All four OFF-arm machine-positive runs contain a near-verbatim pointInRing copy, so every primary catch is in the PR-adjacent point-in-polygon family rather than the PR-untouched distance-helper headline stratum. The first run started 4.1 seconds after the plan froze. The max-load ceiling was relaxed from 8 to 100 under the recorded section 5-S sprint amendment, with every sample retained. The human reviewer may have seen the differential-equivalence result before completing the masked pass."
+    semantic_duplicates = sum(judged[item["run_id"]]["semantic"] == "duplicate" for item in runs)
+    semantic_text = f"LLM judge: {semantic_duplicates}/{len(runs)} final modules contain a semantic duplicate - PROVISIONAL, human verdict pending. The frozen primary detector tests normalized near-verbatim implementations; the secondary rubric judges whether new functions repeat an existing helper's purpose and natural input shape, which does not necessarily imply identical behavior." + packet_note
+    if labelled:
+        skeptic = "High and medium are separate paired replications. Their model rows and pooled statistics remain separated so an effort effect cannot be mistaken for additional samples from one wave."
+    else:
+        skeptic = "All four OFF-arm machine-positive runs contain a near-verbatim pointInRing copy, so every primary catch is in the PR-adjacent point-in-polygon family rather than the PR-untouched distance-helper headline stratum. The first run started 4.1 seconds after the plan froze. The max-load ceiling was relaxed from 8 to 100 under the recorded section 5-S sprint amendment, with every sample retained. The human reviewer may have seen the differential-equivalence result before completing the masked pass."
     reshape_markdown, reshape_html = reshape_equivalence_appendix(args.reshape_report)
     recovery_note = " Exact post-teardown terminal recoveries are hash-recorded in the supplied capture-recoveries.jsonl ledger." if (workspace / "capture-recoveries.jsonl").is_file() else ""
-    honesty = "n=1 per model and n=7 per arm: model rows are descriptive and the pooled Fisher result is not a powered per-model claim. Five contaminated pre-refreeze runs are exclusions, not outcomes. Cursor token/cost fields are unavailable by protocol. The subdirectory detector blind spot remains. An OFF candidate can reconstruct the hidden arm difference with targeted Git-object forensics. The raw manifest firing count is unreliable for the three Cursor ON runs; exact terminal captures are the scoreboard authority." + recovery_note
+    if labelled:
+        honesty = f"n=1 per model per wave and n={pairs_per_wave} per arm within each wave: model rows are descriptive, and each wave's Fisher result is not a powered per-model claim. Cross-wave results are replications, not pooled cells. Token and cost fields that a harness does not expose remain unavailable rather than zero." + recovery_note
+    else:
+        honesty = f"n=1 per model and n={pairs_per_wave} per arm: model rows are descriptive and the pooled Fisher result is not a powered per-model claim. Five contaminated pre-refreeze runs are exclusions, not outcomes. Cursor token/cost fields are unavailable by protocol. The subdirectory detector blind spot remains. An OFF candidate can reconstruct the hidden arm difference with targeted Git-object forensics. The raw manifest firing count is unreliable for the three Cursor ON runs; exact terminal captures are the scoreboard authority." + recovery_note
     evidence_note = "Evidence note: per-run convenience fields for suites, remediation, pushes, reviews, and firing counts are not authoritative in this benchmark version. Every published duplicate/result count and outcome was re-derived from final diffs plus pinned-detector evidence and independently recomputed."
-    markdown = "# Canonical guard benchmark scoreboard\n\n**Primary result:** the guard reduced machine-detectable duplicates from " + f"{off_duplicates}/{len(off_runs)} to {on_duplicates}/{len(on_runs)}, but the two-sided Fisher result is p={fisher:.3f}.\n\n> {semantic_text}\n\n> {evidence_note}\n\n"
+    primary_parts = []
+    for wave in wave_order:
+        result = wave_results[wave or "legacy"]
+        label = "Confirmatory" if wave is None else wave.title()
+        primary_parts.append(f"{label}: {result['off_duplicates']}/{result['off_runs']} OFF versus {result['on_duplicates']}/{result['on_runs']} ON, two-sided Fisher p={result['fisher_p']:.3f}.")
+    primary_text = " ".join(primary_parts)
+    markdown = f"# Canonical guard benchmark scoreboard\n\n**Primary result:** {primary_text}\n\n> {semantic_text}\n\n> {evidence_note}\n\n"
     for title, headers, rows in sections:
         markdown += f"## {title}\n\n{md_table(headers, rows)}\n\n"
     markdown += f"## Cost versus review\n\n{cost_text}\n\n## Skeptic notes\n\n{skeptic}\n\n{reshape_markdown}## Honesty footer\n\n{honesty}\n"
     pathlib.Path(args.markdown).write_text(markdown)
     body = "".join(f"<section><h2>{html.escape(title)}</h2>{html_table(headers, rows)}</section>" for title, headers, rows in sections)
-    page = f"<!doctype html><html><head><meta charset='utf-8'><title>Canonical guard benchmark</title><style>:root{{--ink:#17202a;--muted:#65707d;--paper:#fbfaf7;--line:#d8dce2;--good:#dff4e8;--bad:#fde4e1;--accent:#4353ff}}*{{box-sizing:border-box}}body{{font:15px/1.45 Inter,ui-sans-serif,system-ui;color:var(--ink);background:var(--paper);margin:0}}main{{max-width:1440px;margin:auto;padding:48px}}h1{{font-size:42px;letter-spacing:-.03em;margin:0 0 8px}}h2{{margin:42px 0 14px;font-size:24px}}.kicker{{color:var(--accent);font-weight:750;text-transform:uppercase;letter-spacing:.09em}}.lede{{font-size:20px;max-width:900px}}.callout{{background:#eef0ff;border-left:5px solid var(--accent);padding:16px 20px;margin:24px 0;max-width:1100px}}.table-wrap{{overflow:auto;border:1px solid var(--line);border-radius:10px;background:white}}table{{border-collapse:collapse;width:100%;min-width:780px}}th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:pre-wrap}}th{{background:#f0f2f5;position:sticky;top:0}}td.good{{background:var(--good)}}td.bad{{background:var(--bad)}}.foot{{color:var(--muted);border-top:1px solid var(--line);margin-top:48px;padding-top:20px}}@media print{{main{{padding:20px}}.table-wrap{{overflow:visible}}}}</style></head><body><main><div class='kicker'>Frozen 14-run confirmatory benchmark</div><h1>Canonical guard scoreboard</h1><p class='lede'>Machine-detectable duplicates fell from <strong>{off_duplicates}/{len(off_runs)}</strong> without the guard to <strong>{on_duplicates}/{len(on_runs)}</strong> with it. Two-sided Fisher p={fisher:.3f}; risk difference {difference * 100:+.1f} percentage points.</p><div class='callout'>{html.escape(semantic_text)}</div><div class='callout'>{html.escape(evidence_note)}</div>{body}<section><h2>Cost versus review</h2><p>{html.escape(cost_text)}</p></section><section><h2>Skeptic notes</h2><p>{html.escape(skeptic)}</p></section>{reshape_html}<div class='foot'><strong>Honesty footer.</strong> {html.escape(honesty)}</div></main></body></html>\n"
+    page = f"<!doctype html><html><head><meta charset='utf-8'><title>Canonical guard benchmark</title><style>:root{{--ink:#17202a;--muted:#65707d;--paper:#fbfaf7;--line:#d8dce2;--good:#dff4e8;--bad:#fde4e1;--accent:#4353ff}}*{{box-sizing:border-box}}body{{font:15px/1.45 Inter,ui-sans-serif,system-ui;color:var(--ink);background:var(--paper);margin:0}}main{{max-width:1440px;margin:auto;padding:48px}}h1{{font-size:42px;letter-spacing:-.03em;margin:0 0 8px}}h2{{margin:42px 0 14px;font-size:24px}}.kicker{{color:var(--accent);font-weight:750;text-transform:uppercase;letter-spacing:.09em}}.lede{{font-size:20px;max-width:900px}}.callout{{background:#eef0ff;border-left:5px solid var(--accent);padding:16px 20px;margin:24px 0;max-width:1100px}}.table-wrap{{overflow:auto;border:1px solid var(--line);border-radius:10px;background:white}}table{{border-collapse:collapse;width:100%;min-width:780px}}th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:pre-wrap}}th{{background:#f0f2f5;position:sticky;top:0}}td.good{{background:var(--good)}}td.bad{{background:var(--bad)}}.foot{{color:var(--muted);border-top:1px solid var(--line);margin-top:48px;padding-top:20px}}@media print{{main{{padding:20px}}.table-wrap{{overflow:visible}}}}</style></head><body><main><div class='kicker'>Frozen {len(runs)}-run confirmatory benchmark</div><h1>Canonical guard scoreboard</h1><p class='lede'>{html.escape(primary_text)}</p><div class='callout'>{html.escape(semantic_text)}</div><div class='callout'>{html.escape(evidence_note)}</div>{body}<section><h2>Cost versus review</h2><p>{html.escape(cost_text)}</p></section><section><h2>Skeptic notes</h2><p>{html.escape(skeptic)}</p></section>{reshape_html}<div class='foot'><strong>Honesty footer.</strong> {html.escape(honesty)}</div></main></body></html>\n"
     pathlib.Path(args.html).write_text(page)
-    print(json.dumps({"markdown": args.markdown, "html": args.html, "matrix_runs": len(runs), "exploratory_runs": len(exploratory), "verdicts": len(judged), "fisher_p": fisher, "risk_difference": difference}, sort_keys=True))
+    output = {"markdown": args.markdown, "html": args.html, "matrix_runs": len(runs), "exploratory_runs": len(exploratory), "verdicts": len(judged), "waves": wave_results}
+    if not labelled:
+        output.update({"fisher_p": wave_results["legacy"]["fisher_p"], "risk_difference": wave_results["legacy"]["risk_difference"]})
+    print(json.dumps(output, sort_keys=True))
 
 
 def parser() -> argparse.ArgumentParser:
@@ -2610,8 +3423,8 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--prompt-file", required=True)
     run_parser.add_argument("--helper-family", choices=("distance-helper", "point-in-polygon", "both", "smoke"))
     run_parser.add_argument("--stage", choices=("smoke", "matrix", "exploratory", "wave"), default="matrix")
-    run_parser.add_argument("--wave", help="label of the frozen wave plan a wave run belongs to")
     run_parser.add_argument("--lane")
+    run_parser.add_argument("--wave", choices=WAVES)
     run_parser.add_argument("--concurrent-lane-count", type=int, default=1)
     run_parser.add_argument("--load-file")
     run_parser.add_argument("--max-load", type=float, default=8.0)
@@ -2632,6 +3445,19 @@ def parser() -> argparse.ArgumentParser:
     record.add_argument("--workspace", required=True)
     record.add_argument("--file", required=True)
     record.set_defaults(handler=command_record_verdict)
+    catalogue = commands.add_parser("catalogue-smoke", help="save exact v2 model admissions from all four catalogues under the blinded profile")
+    catalogue.add_argument("--workspace", required=True)
+    catalogue.add_argument("--output", required=True)
+    catalogue.add_argument("--timeout", type=float, default=60.0, help="per-command timeout in seconds (default: 60)")
+    catalogue.set_defaults(handler=command_catalogue_smoke)
+    go_no_go = commands.add_parser("go-no-go", help="machine-check every frozen v2 launch gate and print one verdict per checklist line")
+    go_no_go.add_argument("--workspace", required=True)
+    go_no_go.add_argument("--prompt-file", required=True)
+    go_no_go.add_argument("--extension-evidence", required=True)
+    go_no_go.add_argument("--grok-evidence", required=True)
+    go_no_go.add_argument("--catalogue-evidence", required=True)
+    go_no_go.add_argument("--launch-evidence", required=True)
+    go_no_go.set_defaults(handler=command_go_no_go)
     rank_suite = commands.add_parser("rank-suite", help="replay one ranking run's captured tree and execute the frozen suite command against the tests it added")
     rank_suite.add_argument("--workspace", required=True)
     rank_suite.add_argument("--run-id", required=True)
