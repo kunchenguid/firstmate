@@ -60,6 +60,9 @@
 # Every base ref the brief emits reaches the worker as one shell word: a
 # scaffold-resolved ref is shell-quoted here, and a worker-resolved `<default>`
 # is rendered inside quotes with its substitution rule spelled out.
+# A refname may itself hold a backtick, so a scaffold-resolved ref also reaches
+# the worker as one complete markdown code span through md_code_span, which is
+# what delimits the command it must run.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -199,6 +202,29 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+# Renders <text> as the markdown code span the worker reads as a command boundary.
+# git permits a backtick in a refname, so a fixed one-backtick fence around a
+# resolved ref ends at that character and hands the worker a truncated command
+# instead of the freshness check: shell_quote keeps the ref one shell WORD, and
+# this keeps the whole command one readable SPAN. The fence is one backtick longer
+# than the longest run in the content, because a span closes only on a run of the
+# same length, and content carrying a backtick is padded so the span can neither
+# open nor close on one; both extras render away.
+md_code_span() {  # <text>
+  local text=$1 run='`' fence=
+  while :; do
+    case $text in
+      *"$run"*) fence=$run; run="$run\`" ;;
+      *) break ;;
+    esac
+  done
+  fence="$fence\`"
+  case $text in
+    *'`'*) printf '%s %s %s\n' "$fence" "$text" "$fence" ;;
+    *) printf '%s%s%s\n' "$fence" "$text" "$fence" ;;
+  esac
 }
 
 resolve_brief_repo() {  # <repo-name-or-directory>
@@ -396,6 +422,7 @@ REPO=${POS[1]}
 # mandate a single `git fetch origin --quiet` first. Scouts have no delivery
 # mode: prefer the remote path, and otherwise use their local base.
 BASE_REF=
+BASE_REF_CODE=
 BASE_SHELL_REF=
 BASE_DESCRIPTION=
 BASE_NEEDS_FETCH=0
@@ -418,8 +445,9 @@ set_origin_base() {  # <repo-dir>
   local branch
   branch=$(resolve_origin_default_branch "$1") || return 1
   BASE_REF="origin/$branch"
+  BASE_REF_CODE=$(md_code_span "$BASE_REF")
   BASE_SHELL_REF=$(shell_quote "refs/remotes/origin/$branch")
-  BASE_DESCRIPTION="the freshly fetched default branch \`$BASE_REF\`"
+  BASE_DESCRIPTION="the freshly fetched default branch $BASE_REF_CODE"
   BASE_NEEDS_FETCH=1
 }
 
@@ -427,8 +455,9 @@ set_local_base() {  # <repo-dir> <why-no-fetch>
   local branch
   branch=$(resolve_local_default_branch "$1") || return 1
   BASE_REF=$branch
+  BASE_REF_CODE=$(md_code_span "$BASE_REF")
   BASE_SHELL_REF=$(shell_quote "refs/heads/$branch")
-  BASE_DESCRIPTION="your local default branch \`$branch\`"
+  BASE_DESCRIPTION="your local default branch $BASE_REF_CODE"
   BASE_NO_FETCH_REASON=$2
 }
 
@@ -480,7 +509,10 @@ RUNTIME_REF_QUOTING_RULE=${RUNTIME_REF_QUOTING_RULE%$'\n'}
 
 # Sets BASE_FRESHNESS_SECTION as the numbered startup step <step-number>.
 build_base_freshness_section() {  # <step-number>
-  local step=$1
+  local step=$1 count_command rebase_target
+  # Both spans carry the resolved ref, so both take their fence from its content.
+  count_command=$(md_code_span "git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF")
+  rebase_target=$(md_code_span "$BASE_SHELL_REF")
   if [ -n "$BASE_UNRESOLVED_REASON" ] && [ "$BASE_POLICY" = 'origin-then-local' ]; then
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
@@ -523,17 +555,17 @@ EOF
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** Refresh the remote exactly once, then measure:
    \`git fetch origin --quiet\`
-   \`git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF\`
+   $count_command
    Only \`0\` passes against $BASE_DESCRIPTION.
    If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
-   If the count is not \`0\`, rebase onto \`$BASE_SHELL_REF\` before reading or writing anything.
+   If the count is not \`0\`, rebase onto $rebase_target before reading or writing anything.
 EOF
   else
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_NO_FETCH_REASON; measure against the local branch:
-   \`git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF\`
+   $count_command
    Only \`0\` passes against $BASE_DESCRIPTION.
-   If the count is not \`0\`, rebase onto \`$BASE_SHELL_REF\` before reading or writing anything.
+   If the count is not \`0\`, rebase onto $rebase_target before reading or writing anything.
 EOF
   fi
   BASE_FRESHNESS_SECTION=${BASE_FRESHNESS_SECTION%$'\n'}
@@ -641,7 +673,7 @@ case "$MODE" in
   local-only)
     SETUP2=""
     if [ -n "$BASE_REF" ]; then
-      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`$BASE_REF\`."
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local $BASE_REF_CODE."
     else
       RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into the local default branch you resolved in Setup."
     fi

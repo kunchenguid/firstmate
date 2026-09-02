@@ -345,6 +345,78 @@ test_resolved_default_branch_is_shell_quoted_in_the_freshness_command() {
   pass "fm-brief.sh: resolved default branches are shell-quoted in freshness commands"
 }
 
+# Reads the first command the brief DELIMITS on a line of its own, the way the
+# reading worker does: a markdown code span opens on a backtick run and closes on
+# the first later run of the same length, and one padding space on each side is
+# dropped. The tests below must not assume a one-backtick fence, or they would
+# read past a broken span and pass on output no worker could run.
+brief_delimited_command() {  # <setup-text> <command-prefix>
+  perl - "$2" "$1" <<'PERL'
+use strict;
+use warnings;
+
+my ($prefix, $text) = @ARGV;
+for my $line (split /\n/, $text) {
+  next unless $line =~ /^\s*(`+)(.*)$/;
+  my ($fence, $rest) = ($1, $2);
+  my $content;
+  while ($rest =~ /(`+)/g) {
+    next unless length($1) == length($fence);
+    $content = substr($rest, 0, $-[1]);
+    last;
+  }
+  next unless defined $content;
+  $content = $1 if $content =~ /^ (.*) $/;
+  next unless index($content, $prefix) == 0;
+  print "$content\n";
+  exit 0;
+}
+exit 1;
+PERL
+}
+
+# git permits a backtick in a refname, and the brief is generated worker-facing
+# output whose markdown code span is what tells the worker where the mandatory
+# command ends. A fixed one-backtick fence closes on the ref's own backtick, so
+# the worker is handed a truncated, unrunnable fragment of the freshness check
+# while the scaffold still reports success - the check silently stops existing
+# for that repo. Drive such a branch through the scaffold and run exactly what
+# the brief delimits.
+test_resolved_default_branch_survives_a_backtick_in_its_name() {
+  local home backtick worktree setup freshness_command count branch
+  home="$TMP_ROOT/backtick-default-home"
+  backtick="$BRIEF_PROJECTS/backtick-default"
+  worktree="$TMP_ROOT/backtick-default-worktree"
+  branch='rel`ease'
+  mkdir -p "$home/data"
+
+  fm_git_init_commit "$backtick"
+  git -C "$backtick" branch -M "$branch"
+  fm_git_add_origin "$backtick" "$backtick.origin.git"
+  git -C "$backtick" worktree add --quiet --detach "$worktree" HEAD
+  printf '%s\n' 'the default branch advances' >> "$backtick/README.md"
+  git -C "$backtick" add README.md
+  git -C "$backtick" commit -qm 'default branch advances'
+  printf '%s\n' 'the default branch advances again' >> "$backtick/README.md"
+  git -C "$backtick" add README.md
+  git -C "$backtick" commit -qm 'default branch advances again'
+  git -C "$backtick" push --quiet origin "$branch"
+  git -C "$backtick" fetch --quiet origin
+  git -C "$backtick" remote set-head origin --auto >/dev/null
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" backtick-base backtick-default --mode direct-PR >/dev/null 2>&1 \
+    || fail "a backtick in the default branch name must not fail the scaffold"
+  setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/backtick-base/brief.md")
+  freshness_command=$(brief_delimited_command "$setup" 'git rev-list --count ') \
+    || fail "the brief delimited no complete freshness command for a backtick default branch"
+
+  count=$(cd "$worktree" && eval "$freshness_command") \
+    || fail "the delimited freshness command did not run against a backtick default branch"
+  [ "$count" -eq 2 ] \
+    || fail "the delimited command measured '$count' instead of 2 commits behind the default branch"
+  pass "fm-brief.sh: a backtick in the default branch name still delimits a runnable command"
+}
+
 # The runtime twin of the test above. An unresolvable repo label leaves the base
 # to be named by the WORKER at runtime, so the emitted command carries a
 # `<default>` placeholder instead of a scaffold-quoted ref. git permits refnames
@@ -1407,6 +1479,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_base_freshness_check_is_resolved_and_mode_aware
 test_resolved_default_branch_is_shell_quoted_in_the_freshness_command
+test_resolved_default_branch_survives_a_backtick_in_its_name
 test_runtime_fallback_ref_stays_one_shell_word
 test_emitted_base_command_survives_a_same_named_tag
 test_unresolvable_repo_label_still_mandates_the_base_check
