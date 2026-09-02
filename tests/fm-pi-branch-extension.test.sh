@@ -1705,7 +1705,7 @@ EOF
   pass "a settled branch turn without a durable outcome falls back and releases its grant for main replay"
 }
 
-test_post_construction_provider_error_falls_back_and_latches_branch() {
+test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown() {
   local repo home out status
   repo="$TMP_ROOT/provider-error-root"
   home="$TMP_ROOT/provider-error-home"
@@ -1714,10 +1714,12 @@ test_post_construction_provider_error_falls_back_and_latches_branch() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, mainUserMessages, sentToMain }; })()`);
-const { dispatch, fire, settle, home, mainUserMessages, sentToMain } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain }; })()`);
+const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain } = globalThis.__t;
 import { existsSync } from "node:fs";
 
+let now = 1_000_000;
+Date.now = () => now;
 const entries = [];
 fire("session_start", {}, {
   sessionManager: {
@@ -1731,6 +1733,7 @@ globalThis.__fmInitialBranchMessages = Array.from({ length: 100 }, (_, index) =>
   ...(index % 2 === 0 ? {} : { stopReason: "stop" }),
 }));
 let attempt = 0;
+let releaseFailedProbe;
 globalThis.__fmOnBranchPrompt = async ({ session }) => {
   attempt += 1;
   if (attempt === 1) {
@@ -1739,11 +1742,16 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
       ...Array.from({ length: 10 }, (_, index) => ({ role: "user", content: `retained ${index}` })),
     ];
   }
-  if (attempt === 2) {
+  if (attempt === 2 || attempt === 6 || attempt === 8) {
     const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+    const summary = attempt === 2
+      ? "healthy branch turn reset the provider-error streak"
+      : attempt === 6
+        ? "cooldown probe recovered the branch"
+        : "post-recovery report proved the provider-error streak was clear";
     const recorded = await report.execute(
-      "healthy-between-errors",
-      { task: "branch-driver", verdict: "routine", summary: "healthy branch turn reset the provider-error streak" },
+      `healthy-${attempt}`,
+      { task: "branch-driver", verdict: "routine", summary },
       undefined,
       undefined,
       {},
@@ -1751,6 +1759,9 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
     if (recorded.isError) throw new Error(`healthy report failed: ${JSON.stringify(recorded)}`);
     session.messages.push({ role: "assistant", content: [], stopReason: "stop" });
     return;
+  }
+  if (attempt === 5) {
+    await new Promise((resolve) => { releaseFailedProbe = resolve; });
   }
   session.messages.push({
     role: "assistant",
@@ -1790,12 +1801,59 @@ await new Promise((resolve) => setTimeout(resolve, 50));
 if (attempt !== 4 || mainUserMessages.length !== 3) {
   throw new Error(`latched branch still prompted or emitted its own fallback: attempts=${attempt} fallbacks=${mainUserMessages.length}`);
 }
+const pauseNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch paused after repeated provider errors"));
+if (pauseNotes.length !== 1 || pauseNotes[0].message.content.includes("\n")) {
+  throw new Error(`the first latch must surface exactly one one-line note: ${JSON.stringify(pauseNotes)}`);
+}
+
+// No provider attempt occurs inside the first five-minute cooldown. Exactly
+// one probe is accepted when it elapses, and all other wakes remain on main
+// even while that probe is still in flight.
+now += (5 * 60 * 1000) - 1;
+if (dispatch("signal: still inside first cooldown").accepted) {
+  throw new Error("the latched branch re-probed before its first cooldown elapsed");
+}
+now += 1;
+const failedProbe = dispatch("signal: first cooldown probe");
+if (!failedProbe.accepted) throw new Error("the branch did not accept one probe after its cooldown elapsed");
+await settle(() => attempt === 5 && typeof releaseFailedProbe === "function", "in-flight failed cooldown probe");
+const duringProbe = makeOffer("signal: main owns wakes during a branch probe");
+pi.events.emit("fm-branch-supervision:dispatch", duringProbe);
+if (duringProbe.accepted) throw new Error("a second wake entered the branch while its one cooldown probe was in flight");
+releaseFailedProbe();
+await settle(() => mainUserMessages.length === 4, "failed cooldown probe fallback");
+
+// The failed probe doubles the cooldown from five to ten minutes. Five more
+// minutes are not enough, but the next five admit exactly one recovery probe.
+now += 5 * 60 * 1000;
+if (dispatch("signal: inside extended cooldown").accepted) {
+  throw new Error("a failed probe did not extend the next cooldown beyond five minutes");
+}
+now += 5 * 60 * 1000;
+const recoveryProbe = dispatch("signal: recovery probe after extended cooldown");
+if (!recoveryProbe.accepted) throw new Error("the branch did not re-probe after the extended cooldown elapsed");
+await settle(() => attempt === 6 && sentToMain.some((sent) => sent.message.content.includes("cooldown probe recovered the branch")), "successful recovery probe");
+if (mainUserMessages.length !== 4) throw new Error("a successful recovery probe also fell back to main");
+const recoveryNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch recovered after a successful cooldown probe"));
+if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n")) {
+  throw new Error(`recovery must surface exactly one one-line note: ${JSON.stringify(recoveryNotes)}`);
+}
+
+// The durable report cleared both the latch and the old streak: one new
+// provider error falls back but does not latch, so a following wake still
+// reaches the branch and can report successfully.
+const afterRecoveryError = dispatch("signal: first provider error after recovery");
+if (!afterRecoveryError.accepted) throw new Error("the successful probe did not clear the branch latch");
+await settle(() => mainUserMessages.length === 5, "first post-recovery provider fallback");
+const afterRecoveryHealthy = dispatch("signal: healthy turn after one post-recovery error");
+if (!afterRecoveryHealthy.accepted) throw new Error("the successful probe did not clear the provider-error streak");
+await settle(() => attempt === 8 && sentToMain.some((sent) => sent.message.content.includes("post-recovery report proved")), "post-recovery healthy report");
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "a settled provider error must fall back to main and repeated provider failures must latch: $out"
-  pass "post-construction provider errors fall back immediately and repeated failures defer later wakes directly to main"
+  expect_code 0 "$status" "provider errors must latch, cool down, re-probe once, back off, and recover through a durable report: $out"
+  pass "provider-error latches cool down, re-probe once with backoff, and recover through a durable report"
 }
 
 test_selection_change_does_not_corrupt_inflight_provider_state() {
@@ -3644,7 +3702,7 @@ test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_settled_branch_prompt_releases_unacknowledged_grant
-test_post_construction_provider_error_falls_back_and_latches_branch
+test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown
 test_selection_change_does_not_corrupt_inflight_provider_state
 test_main_owned_grant_result_falls_back_to_main
 test_branch_predrain_recheck_noops_already_drained_wake
