@@ -126,6 +126,17 @@ status_is_terminal_verb() {
   esac
 }
 
+# 0 if the given (last) status line's leading verb is the terminal done verb.
+# A crew that reported done and then idles is waiting on merge authority, which
+# the PR poll owns, so the watcher's stale path gives that idle pane the declared
+# pause cadence instead of a wedge escalation (fm-watch.sh owns the idle-only
+# scope). The other terminal verbs keep their immediate surface.
+status_is_done() {  # <status-line>
+  local line=$1
+  [ -n "$line" ] || return 1
+  [ "$(status_line_verb "$line")" = 'done' ]
+}
+
 # 0 if the given (last) status line matches a captain-relevant verb.
 # Verb-aware by default: terminal verbs always match; nonterminal progress verbs
 # (working, resolved, captain-held) and paused never match from free-text prose;
