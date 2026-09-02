@@ -17,6 +17,14 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 
+# The canonical owner of the Grok busy-footer signature
+# (FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT), sourced here because production
+# callers (bin/fm-supervise-daemon.sh, bin/fm-tmux-lib.sh) source it too;
+# without it the Grok arm would silently exercise fm-busy-lib.sh's defensive
+# literal fallback instead of the value that actually classifies.
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-composer-lib.sh"
+
 TMP_ROOT=$(fm_test_tmproot fm-busy-state)
 EV="$ROOT/bin/fm-busy-event.sh"
 
@@ -304,6 +312,51 @@ Ctrl+c:cancel')
   pass "the grok fallback is regex-scoped to grok and classifies only grok tasks"
 }
 
+# Regression for fm-grok-idle-misclassification: a real grok window shows
+# "Esc:cancel" for the entire span a turn is active (waiting for response,
+# thinking, responding, writing a command, and running an approved tool) and
+# only shows "Ctrl+c:cancel" during its own separate tool-approval dialog.
+# Shapes captured live from grok 1.0.5 (5115b46bc909) [stable], 2026-08-29
+# (docs/verification/runtime-backends.md). Before the fix, a tail carrying
+# only "Esc:cancel" (no "Ctrl+c:cancel") classified idle while genuinely busy;
+# this pins the fix and would fail again on a regex-only revert.
+test_grok_regex_active_turn_busy() {
+  local state out
+  state=$(new_state_dir grok-active-turn)
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" '    ⠋ Thinking… 0.4s
+  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts')
+  [ "$out" = "busy grok-regex" ] || fail "grok thinking (Esc:cancel only) must classify busy, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" '    ⠋ Run a build  40s
+  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts')
+  [ "$out" = "busy grok-regex" ] || fail "grok running an approved tool (Esc:cancel only) must classify busy, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" '  1/3:select  │  Tab:next option  │  Ctrl+o:always-approve  │  Ctrl+c:cancel  │  Esc:scrollback')
+  [ "$out" = "busy grok-regex" ] || fail "grok's tool-approval dialog (Ctrl+c:cancel only) must classify busy, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" '  Shift+Tab:mode  │  Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] || fail "grok's genuinely idle composer must classify idle, got '$out'"
+  pass "grok classifies busy for its full active-turn span, not just its approval dialog"
+}
+
+# bin/fm-busy-lib.sh carries a defensive literal duplicate of the grok
+# signature, used only on a path that sources it without bin/fm-composer-lib.sh.
+# The canonical owner is sourced above, so it would otherwise mask that literal
+# entirely; unsetting it in a subshell is what actually exercises the duplicate
+# and keeps the two copies from drifting apart.
+test_grok_regex_fallback_literal_matches_without_composer_lib() {
+  local state out
+  state=$(new_state_dir grok-fallback-literal)
+  out=$(unset FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT
+    fm_busy_classify tmux w1 grok t1 "$state" '    ⠋ Thinking… 0.4s
+  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts')
+  [ "$out" = "busy grok-regex" ] || fail "fallback literal must match an active turn (Esc:cancel), got '$out'"
+  out=$(unset FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT
+    fm_busy_classify tmux w1 grok t1 "$state" '  1/3:select  │  Tab:next option  │  Ctrl+c:cancel  │  Esc:scrollback')
+  [ "$out" = "busy grok-regex" ] || fail "fallback literal must match the approval dialog (Ctrl+c:cancel), got '$out'"
+  out=$(unset FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT
+    fm_busy_classify tmux w1 grok t1 "$state" '  Shift+Tab:mode  │  Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] || fail "fallback literal must not match the genuinely idle footer, got '$out'"
+  pass "the grok fallback literal stays correct when the canonical owner is unsourced"
+}
+
 # --- kimi verification gate -----------------------------------------------------
 
 test_codex_unverified_gate() {
@@ -454,6 +507,8 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
+test_grok_regex_active_turn_busy
+test_grok_regex_fallback_literal_matches_without_composer_lib
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals

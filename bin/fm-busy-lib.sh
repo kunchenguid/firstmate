@@ -823,12 +823,22 @@ fm_busy_cursor_turn_state() {  # <transcript>
 }
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
-# Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
+# Consumes the tail on stdin; 0 when Grok's verified busy signature matches:
+# "Esc:cancel" for the entire span a turn is active (waiting for response,
+# thinking, responding, writing a command, and running an approved tool) or
+# "Ctrl+c:cancel" during Grok's own tool-approval dialog, which never shows
+# "Esc:cancel" (see bin/fm-composer-lib.sh's FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT,
+# the canonical owner of this signature; the literal fallback below is a
+# defensive duplicate for callers that source this file without that one).
+# An earlier revision matched only "Ctrl+c:cancel", so a Grok window running
+# an approved tool call classified idle while genuinely busy
+# (fm-grok-idle-misclassification; verified live, grok 1.0.5 (5115b46bc909)
+# [stable], 2026-08-29: docs/verification/runtime-backends.md).
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
 # historical operator escape hatch.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Esc:cancel|Ctrl\\+c:cancel}}"
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the

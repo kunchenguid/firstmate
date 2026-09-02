@@ -238,6 +238,89 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+## Grok busy-footer signature
+
+Task fm-grok-idle-misclassification (2026-08-29): the semantic busy classifier's Grok-only rendered-tail fallback (`bin/fm-busy-lib.sh` `fm_busy_grok_tail_busy`, signature owned by `bin/fm-composer-lib.sh` `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT`) matched only `Ctrl\+c:cancel`, which never appears while a real Grok window is thinking, responding, writing a command, or running an approved tool - only during Grok's own separate tool-approval dialog.
+A worker executing a command therefore classified `idle grok-regex`, inviting a steer, interrupt, or relaunch against live work.
+
+Captured live on `grok 1.0.5 (5115b46bc909) [stable]` (app banner reports `Grok Build 1.0.13`), tmux 3.6a, Linux x86_64, on a private tmux session (`tmux new-session -d -s grok-probe -x 220 -y 50 grok`), by submitting a real prompt that both required LLM turns and ran an approved multi-second shell command, and polling `tmux capture-pane -p` (the same plain-text primitive `bin/backends/tmux.sh`'s `fm_backend_tmux_capture` uses) roughly twice a second through the whole turn.
+
+Genuinely idle composer, no prompt yet submitted or a prior turn fully settled:
+
+```text
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯
+
+  Shift+Tab:mode  │  Ctrl+x:shortcuts
+```
+
+Active turn - identical footer observed across "Waiting for response...", "Thinking...", "Responding...", "Writing command...", and the actual command execution (`Ctrl+b:send to bg` additionally appears only once a tool is running):
+
+```text
+    ⠴ Thinking… 4.7s                                                                     9.7s ⇣1.63k [stop]
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯
+
+  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts
+```
+
+```text
+    ⠋ Print timestamps every 2 seconds, 8 time… 40s                                       [running the approved command]
+
+  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts
+```
+
+Grok's own tool-approval dialog (a distinct state - the model has proposed a command and is waiting for the human or firstmate to approve it), which shows `Ctrl+c:cancel` but never `Esc:cancel`:
+
+```text
+  ┃  Print timestamps every 2 seconds, 8 times
+  ┃  for i in 1 2 3 4 5 6 7 8; do date +%s; sleep 2; done
+  ┃
+  ┃  1 (●) Yes, and don't ask again for anything (always-approve mode)
+  ┃  2 (○) Yes, proceed
+  ┃  3 (○) No, reject (type to add feedback)
+
+  1/3:select  │  Tab:next option  │  Ctrl+o:always-approve  │  Ctrl+c:cancel  │  Esc:scrollback
+```
+
+The fix widens the per-harness signature `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT` to `Esc:cancel|Ctrl\+c:cancel`, so every active-turn shape above classifies `busy grok-regex` and only the first, genuinely idle shape classifies `idle grok-regex`.
+`bin/fm-busy-lib.sh`'s defensive literal fallback, used only by a caller that sources it without `bin/fm-composer-lib.sh`, carries the same widened token pair so the two copies cannot drift apart.
+Pinned by `tests/fm-busy-state.test.sh`'s `test_grok_regex_active_turn_busy`, which fails against the pre-fix single-token regex, and by `test_grok_regex_fallback_literal_matches_without_composer_lib`, which unsets the canonical owner to exercise that fallback directly.
+The portable regressions named in this section are the only automated coverage: the capture above was hand-driven (a private tmux session plus manual `tmux capture-pane` polling), and no scripted `live-harness-optin` guard reads a busy footer today, so unlike this file's guarded checks these shapes cannot self-refresh on a future Grok upgrade and a live busy-footer guard covering every installed harness is still owed.
+
+The widening is scoped to grok's own signature.
+The harness-less union `FM_DELIVERY_BUSY_REGEX_DEFAULT` deliberately does NOT gain `Esc:cancel`.
+`fm_tmux_submit_core` (`bin/fm-tmux-lib.sh`) reads the pane's busy state with no harness argument, so widening the union would also change `fm-send`'s delivery verdict for a grok pane that is genuinely mid-turn when a steer is typed: a structurally proven-pending composer would convert from the safe `pending` (exit 3, unconfirmed) to `empty` (reported delivered).
+That pending+busy conversion is verified only against opencode 1.18.4's known behavior of accepting and queueing a mid-turn Enter, and this capture establishes only what grok RENDERS, not that grok queues a mid-turn Enter rather than silently dropping it.
+A silently lost steer or watcher doorbell to a busy grok worker is worse than the misclassification this task fixes, so the delivery plane is left unchanged.
+Task fm-grok-queued-enter-verify tracks live-verifying grok's mid-turn Enter handling.
+`tests/fm-tmux-submit-busy.test.sh`'s `test_grok_esc_cancel_widens_harness_signature_only` pins both halves at the real interfaces: grok's active-turn footer reads busy for the grok harness but not for the harness-less union, a mid-turn grok steer therefore stays the safe `pending`, and the union's existing approval-dialog conversion to `empty` is unchanged.
+
+This capture is scoped to the busy/idle worker-state signature only.
+It does not refresh the separate, already-known staleness of grok 1.0.5's `empty`-composer shape classification noted above (`fm_composer_classify_screen`, used for away-mode injection and spawn readiness, not for busy-state supervision) - that remains owed and out of scope for this task.
+
+### Ctrl+C interrupt, re-verified on grok 1.0.5
+
+The Interrupt fact for grok (`.agents/skills/harness-adapters/references/harness/grok.md`, `bin/fm-control-lib.sh:109-121`) was verified on grok 0.2.73 and had not been re-verified since.
+The busy-footer capture above raised a live doubt: the approval dialog's footer advertises `Ctrl+c:cancel`, and a footer string is advertising, not proof of a key's actual behavior - the exact trap the busy-footer fix itself was written to avoid for `Esc:cancel`.
+So the same session re-verified Ctrl+C directly rather than carry that same kind of unproven claim forward.
+
+Verified live on `grok 1.0.5 (5115b46bc909)` [stable] (app banner `Grok Build 1.0.13`), tmux 3.6a, Linux x86_64, on a private tmux session, 2026-08-29.
+A prompt was submitted that ran an approved real shell command (`sleep 25 && echo ...`) through Grok's own tool, confirmed as a genuine local OS child process by `pstree -p <grok-pid>` (`grok-+-bash---sleep`, not a remote or simulated execution), then `Ctrl+C` (`tmux send-keys C-c`) was sent while that child process was live.
+
+Observed, checked directly against OS process state rather than trusting Grok's own self-reported tool-duration text (which did not track real wall-clock time in this environment):
+
+- The turn's own transcript reported `Turn cancelled by user`.
+- The `sleep` child process's PID was polled with `kill -0` once a second for 15 seconds after `Ctrl+C`: it was already gone by the first 1-second check and never reappeared - the real underlying command was killed, not merely detached or left running in the background.
+- The composer footer returned to the genuinely idle shape (`Shift+Tab:mode | Ctrl+x:shortcuts`) within 1 second and accepted new input immediately.
+
+Conclusion: `Ctrl+C` cancels the turn AND kills the underlying command on grok 1.0.5, matching the 0.2.73 behavior this fact was originally verified against.
+The `Interrupt` row and the `bin/fm-control-lib.sh:109-121` comment are updated to cite this record instead of carrying forward an unverified claim.
+This re-verification was hand-driven too (the same private tmux session, `tmux send-keys` plus manual `kill -0` and `tmux capture-pane` polling) with no scripted `live-harness-optin` refresh guard, so it cannot self-refresh on a future Grok upgrade the way this file's guarded checks do.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).

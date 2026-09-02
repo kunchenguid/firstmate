@@ -107,7 +107,18 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 }
 
 # The key that cancels a running turn. Escape for every adapter except grok,
-# whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
+# which cancels on Ctrl+C: it cancels the turn AND kills the underlying command
+# process, re-verified live on grok 1.0.5 on 2026-08-29 against OS process
+# state (docs/verification/runtime-backends.md, "Ctrl+C interrupt, re-verified
+# on grok 1.0.5").
+# OPEN QUESTION, tracked as task fm-grok-escape-interrupt-verify: the recorded
+# fact that grok's Esc only moves focus to the scrollback and does NOT
+# interrupt was verified on grok 0.2.73 and has NOT been re-verified since. On
+# grok 1.0.5 the active-turn footer advertises Esc:cancel, while Esc:scrollback
+# shows only in the approval dialog, so that older fact is now in doubt - but a
+# footer advertising a key is not proof of what the key actually does, so
+# neither capture settles it. grok deliberately stays on Ctrl+C until a live
+# re-verification resolves it.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|kimi|cursor|muse) printf 'Escape' ;;

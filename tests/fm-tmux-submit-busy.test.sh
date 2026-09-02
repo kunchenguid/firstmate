@@ -327,6 +327,73 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
 }
 
+# Regression for fm-grok-idle-misclassification's deliberately EXCLUDED half.
+# The task widened grok's own signature (FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT)
+# to `Esc:cancel|Ctrl\+c:cancel`, but deliberately did NOT add `Esc:cancel` to
+# the harness-less union FM_DELIVERY_BUSY_REGEX_DEFAULT, because
+# fm_tmux_submit_core reads the pane with NO harness argument: widening the
+# union would convert a proven-pending composer on a mid-turn grok pane from
+# the safe `pending` (unconfirmed, exit 3 at the fm-send layer) to `empty`
+# (reported delivered), and grok's mid-turn Enter is not verified to queue the
+# way opencode's does. This pins both halves at the real interfaces, so a
+# later "just add it to the union too" edit fails here.
+test_grok_esc_cancel_widens_harness_signature_only() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/grok-esc-cancel-scope"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+
+  # Real fm_pane_is_busy (this file overrides the name at top level, so the
+  # regex-owning original is reached through a fresh shell that sources it).
+  pane_busy() {  # <label> [harness]
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy "$2" "$3"' \
+      _ "$ROOT" "$1" "${2:-}"
+  }
+  # One real submit against the real (non-overridden) busy read.
+  submit() {  # -> verdict on stdout
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+      FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_submit_enter_core "$2" 2 0.05' \
+      _ "$ROOT" "win" 2>/dev/null
+  }
+
+  # Grok 1.0.5's active-turn footer under a composer holding a typed steer.
+  printf '%s\n' \
+    '╭────────────╮' \
+    '│ > fix      │' \
+    '╰────────────╯' \
+    '  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts' > "$composer"
+  : > "$sent"; touch "$dir/.swallow"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" fm_tmux_composer_state "win" > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "pre-check: grok mid-turn composer expected pending, got '$(cat "$vfile")'"
+
+  pane_busy grok grok || fail "grok's active-turn Esc:cancel footer must read busy for the grok harness"
+  pane_busy union && fail "Esc:cancel must NOT enter the harness-less union"
+  submit > "$vfile"
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "a mid-turn grok steer must stay the safe unconfirmed 'pending', got '$(cat "$vfile")'"
+
+  # Grok's approval-dialog footer: the token that IS in the union, so the
+  # union is genuinely consulted and its opencode-verified conversion is intact.
+  printf '%s\n' \
+    '╭────────────╮' \
+    '│ > fix      │' \
+    '╰────────────╯' \
+    '  Ctrl+o:always-approve  │  Ctrl+c:cancel  │  Esc:scrollback' > "$composer"
+  : > "$sent"; touch "$dir/.swallow"
+  pane_busy union || fail "Ctrl+c:cancel must remain in the harness-less union"
+  submit > "$vfile"
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "the union's existing queued-Enter conversion must be unchanged, got '$(cat "$vfile")'"
+
+  unset -f pane_busy submit
+  pass "grok's Esc:cancel widens only its own signature, never the delivery union"
+}
+
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
 test_wrapped_continuation_retries_swallowed_enter
@@ -338,3 +405,4 @@ test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes
+test_grok_esc_cancel_widens_harness_signature_only

@@ -1,16 +1,16 @@
 # Grok Build
 
 The xAI `grok` TUI is Claude-Code-compatible.
-Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, and exit on 2026-07-19 with 0.2.103.
+Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, exit on 2026-07-19 with 0.2.103, and busy-state signature and Ctrl+C interrupt on 2026-08-29 with 1.0.5.
 Launch shape: `grok --always-approve "$(cat <brief>)"`.
 
 ## Operating facts
 
 | Fact | Value |
 |---|---|
-| Busy state | The last rendered-tail fallback, isolated to Grok pending a semantic source: ASCII mid-turn `Ctrl+c:cancel`, absent from idle bar `Shift+Tab:mode │ Ctrl+.:shortcuts`, never the locale-fragile braille spinner. |
+| Busy state | The last rendered-tail fallback, isolated to Grok pending a semantic source. The signature has two shapes, verified on 2026-08-29 with 1.0.5: the active-turn footer shows `Esc:cancel` for the entire span a turn is live, covering waiting for a response, thinking, responding, writing a command, and running an approved tool, while `Ctrl+c:cancel` appears ONLY in Grok's own separate tool-approval dialog and never during the turn itself. The genuinely idle bar carries neither token: `Shift+Tab:mode │ Ctrl+x:shortcuts`. So the signature matches `Esc:cancel` or `Ctrl+c:cancel`, either one alone proving a turn is live; it is owned by `FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT` in `../../../bin/fm-composer-lib.sh`. ASCII is matched rather than the locale-fragile braille spinner. `../../../docs/verification/runtime-backends.md` "Grok busy-footer signature" owns the live captures of all three shapes. |
 | Exit | `/exit` prints `Resume this session with: grok --resume <session-id>`; fallback is `Ctrl+Q` twice within 1000ms, `Ctrl+D` quits in VS Code-family terminals, and `Ctrl+C` interrupts. |
-| Interrupt | Single `Ctrl+C`; Escape only focuses scrollback. |
+| Interrupt | Single `Ctrl+C`: it cancels the turn AND kills the underlying command process, re-verified live on 2026-08-29 with 1.0.5 against OS process state, recorded in `../../../docs/verification/runtime-backends.md` "Ctrl+C interrupt, re-verified on grok 1.0.5". OPEN QUESTION, tracked as task `fm-grok-escape-interrupt-verify`: the recorded fact that Escape only focuses scrollback and does NOT interrupt was verified on 0.2.73 and has not been re-verified since. On 1.0.5 the active-turn footer advertises `Esc:cancel` while `Esc:scrollback` appears only in the approval dialog, so that older fact is now in doubt, and a footer string advertising a key is not proof of what the key does. Firstmate's interrupt therefore stays `Ctrl+C` deliberately until a live re-verification resolves it. |
 | Skill | `/<skill>`, for example `/no-mistakes`, with end-to-end user-skill discovery, invocation, and real `no-mistakes axi run` evidence; the popup may consume Enter and fill an argument placeholder, requiring a real second Enter. |
 | Autonomy | `--always-approve`, footer `· always-approve`, verified unattended; `--permission-mode bypassPermissions` is stronger equivalent. |
 | Marker | `GROK_AGENT=1` on child or tool processes in 0.2.73 and no `CLAUDECODE`; a 1.0.0 hook instead had `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`, and `GROK_WORKSPACE_ROOT` without `GROK_AGENT`, so ancestry guarantees identity. |
