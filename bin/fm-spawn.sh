@@ -171,9 +171,11 @@
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 # Every task gets its own temp root (bin/fm-task-tmp-lib.sh owns the path),
-# recorded as tasktmp= in the meta and handed to the launched agent as TMPDIR
-# (with GOTMPDIR at gotmp/), so the agent's harness scratch is confined to one
-# directory fm-teardown removes with the task instead of leaking under /tmp.
+# recorded as tasktmp= in the meta, with Go's build temp at gotmp/ exported as
+# GOTMPDIR, and fm-teardown removes that root with the task.
+# Pinning the agent's own TMPDIR to that root as well - which is what confines
+# harness scratch to it - is opt-in through the config/task-tmpdir-pin presence
+# flag and off by default; see docs/configuration.md "Task TMPDIR pin".
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -2494,14 +2496,15 @@ fi
 # build temp nested at gotmp/. Go won't create GOTMPDIR, so mkdir before it is
 # used; fm-teardown removes the whole root. Nested (not a bare root/gotmp) so
 # other per-task temp lives alongside it and teardown cleans one deterministic
-# path. The agent's own harness scratch is the other occupant: it follows the
-# process TMPDIR, which the launch command below pins to this root, so it is
-# torn down with the task instead of accumulating under /tmp until reboot.
+# path. The agent's own harness scratch becomes a second occupant only when the
+# config/task-tmpdir-pin flag is present, which is what pins the launch TMPDIR
+# here; with the flag absent that scratch stays where the harness puts it.
 TASK_TMP=$(fm_task_tmp_root "$ID") || { echo "error: cannot derive a temp root for task '$ID'" >&2; exit 1; }
 # Creation is validated by the same library that owns the path: the root name is
 # predictable and /tmp is world-writable, so a foreign symlink or directory
-# planted at that name would receive the agent's whole scratch tree through the
-# TMPDIR pin below. Refuse the spawn rather than write through it.
+# planted at that name would receive whatever this task writes through it - Go's
+# build temp always, and the agent's whole scratch tree when the TMPDIR pin
+# below is enabled. Refuse the spawn rather than write through it.
 fm_task_tmp_create "$TASK_TMP" || exit 1
 # A fresh spawn owns this root before anything records it. If the spawn aborts
 # between here and the meta publish below, no record would name the path and no
@@ -3017,12 +3020,18 @@ esac
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
-# Pin the agent's temp root to this task's own, so harness scratch (tool
-# results, scratchpad files, and anything else it derives from TMPDIR) lands
-# where teardown removes it. The pane shell keeps its ambient TMPDIR; only the
-# agent process tree is scoped. A raw launch command is the unverified-adapter
-# escape hatch and is passed through exactly as given, so it is left alone.
-if [ "$LAUNCH_RAW" -eq 0 ]; then
+# Optionally pin the agent's temp root to this task's own, so harness scratch
+# (tool results, scratchpad files, and anything else it derives from TMPDIR)
+# lands where teardown removes it. The pane shell keeps its ambient TMPDIR; only
+# the agent process tree is scoped. A raw launch command is the
+# unverified-adapter escape hatch and is passed through exactly as given, so it
+# is left alone.
+# Off unless config/task-tmpdir-pin is present: TMPDIR is far broader than the
+# GOTMPDIR export above, redirecting every temp file the agent and its children
+# create, so it ships as a flag to enable rather than a new default. With the
+# flag absent the agent's scratch stays wherever the harness puts it (commonly
+# /tmp/claude-<uid>/), outside this root and not removed by teardown.
+if [ "$LAUNCH_RAW" -eq 0 ] && [ -f "$CONFIG/task-tmpdir-pin" ]; then
   LAUNCH="TMPDIR=$(shell_quote "$TASK_TMP") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then

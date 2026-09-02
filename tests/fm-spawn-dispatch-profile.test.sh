@@ -66,6 +66,9 @@ make_spawn_case() {
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   fm_test_spawn_home "$home" "$harness"
+  # This suite asserts the ENABLED launch pin, which is opt-in and off by
+  # default (config/task-tmpdir-pin; docs/configuration.md "Task TMPDIR pin").
+  touch "$home/config/task-tmpdir-pin"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   for id in "$@"; do
     fm_test_spawn_brief "$home" "$id"
@@ -763,6 +766,46 @@ test_claude_omits_config_dir_prefix_when_unset() {
   pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
 }
 
+test_launch_pins_tmpdir_only_when_the_flag_is_present() {
+  # The pin is opt-in (config/task-tmpdir-pin). Both sides are asserted here so
+  # neither can go quietly vacuous: with the flag absent no TMPDIR prefix is
+  # added, and with it present the prefix names this task's own temp root. The
+  # per-task root itself is created and recorded either way, which is what
+  # teardown removes, so the flag changes only where harness scratch lands.
+  local rec id out status launch task_tmp
+  id=profile-tmpdir-flag-off-z20
+  rec=$(make_spawn_case profile-tmpdir-flag-off claude "$id")
+  read_case_record "$rec"
+  # make_spawn_case turns the flag on for this suite; this case is the default.
+  rm -f "$HOME_DIR/config/task-tmpdir-pin"
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn without the temp-root pin flag should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "TMPDIR=" \
+    "launch must not pin TMPDIR when config/task-tmpdir-pin is absent"
+  assert_grep "tasktmp=$task_tmp" "$HOME_DIR/state/$id.meta" \
+    "the per-task temp root must still be recorded when the pin is off"
+  [ -d "$task_tmp" ] || fail "the per-task temp root must still be created when the pin is off"
+
+  id=profile-tmpdir-flag-on-z21
+  rec=$(make_spawn_case profile-tmpdir-flag-on claude "$id")
+  read_case_record "$rec"
+  [ -f "$HOME_DIR/config/task-tmpdir-pin" ] \
+    || fail "precondition: this case must carry the pin flag"
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "spawn with the temp-root pin flag should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "TMPDIR='$task_tmp' " \
+    "launch did not pin TMPDIR to this task's temp root when the flag is present"
+  pass "the launch TMPDIR pin follows config/task-tmpdir-pin and the temp root is recorded either way"
+}
+
 test_non_claude_harness_ignores_config_dir() {
   local rec id out status launch
   id=profile-codex-nocfgdir-z19
@@ -828,5 +871,6 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_launch_pins_tmpdir_only_when_the_flag_is_present
 
 echo "# all fm-spawn-dispatch-profile tests passed"

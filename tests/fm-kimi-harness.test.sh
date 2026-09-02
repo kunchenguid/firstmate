@@ -150,6 +150,9 @@ make_spawn_case() {
   printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
   printf 'brief for kimi\n' > "$home/data/$id/brief.md"
   printf 'kimi\n' > "$home/config/crew-harness"
+  # These cases assert the ENABLED launch pin, which is opt-in and off by
+  # default (config/task-tmpdir-pin; docs/configuration.md "Task TMPDIR pin").
+  touch "$home/config/task-tmpdir-pin"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"

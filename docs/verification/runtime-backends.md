@@ -1119,7 +1119,8 @@ A second regression holds a branch settlement open while the verified successor 
 
 ## Per-task temp root and harness scratch
 
-`bin/fm-spawn.sh` pins each launched agent's `TMPDIR` to that task's own temp root so its harness scratch is torn down with the task (`bin/fm-task-tmp-lib.sh`).
+`bin/fm-spawn.sh` pins each launched agent's `TMPDIR` to that task's own temp root so its harness scratch is torn down with the task (`bin/fm-task-tmp-lib.sh`), but only where the default-off `config/task-tmpdir-pin` flag is present; see [`../configuration.md`](../configuration.md) "Task TMPDIR pin".
+The evidence below is what that flag buys when it is on, and equally what an unpinned default leaves under `/tmp`.
 That confinement depends on one vendor-observable fact: a harness derives its scratch tree from the process `TMPDIR` rather than a fixed `/tmp`.
 
 Verified on 2026-08-28 with Claude Code 2.1.251 on Linux 6.19.12 x86_64, in a tmux pane whose shell exported `TMPDIR` before launch:
@@ -1141,5 +1142,6 @@ Only Claude Code is verified here; it is the harness whose scratch was observed 
 
 No live guard is registered for this fact, because nothing in Firstmate reads harness output to reach a verdict from it.
 A harness that stopped honoring `TMPDIR` would simply keep its scratch outside the task root: teardown still removes exactly the one recorded temp root, still refuses anything else, and still succeeds.
-The portable regressions for the removal itself are in `tests/fm-gotmp.test.sh`, including a live sibling task in a reused worktree slot that must survive; the launch pin is asserted in `tests/fm-kimi-harness.test.sh` and `tests/fm-spawn-dispatch-profile.test.sh`.
+The portable regressions for the removal itself are in `tests/fm-gotmp.test.sh`, including a live sibling task in a reused worktree slot that must survive, and that suite also pins both sides of the flag: absent, the launch carries no `TMPDIR=` prefix while `GOTMPDIR` still ships; present, the prefix names this task's own root.
+The enabled launch pin is also asserted in `tests/fm-kimi-harness.test.sh` and `tests/fm-spawn-dispatch-profile.test.sh`.
 Forced secondmate retirement removes each retired child's own root the same way, and `tests/fm-teardown.test.sh` holds that path against a live sibling home whose task carries the same id.

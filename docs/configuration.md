@@ -187,6 +187,21 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Task TMPDIR pin (config/task-tmpdir-pin)
+
+The optional local, gitignored `config/task-tmpdir-pin` presence flag opts this home into pinning each launched agent's `TMPDIR` to that task's own temp root, so the harness scratch the agent derives from `TMPDIR` is torn down with the task.
+It is off by default because `TMPDIR` is far broader than the `GOTMPDIR` export that ships unconditionally: it redirects every temporary file the agent and its child processes create, not just Go's build temp.
+A new default that broad would assume consent, so it ships as a flag to enable.
+
+With the flag absent, behavior is unchanged: the per-task temp root is still created, still recorded as `tasktmp=`, still holds Go's build temp at `gotmp/`, and is still removed by `fm-teardown.sh`, but the agent's own scratch stays wherever the harness puts it.
+For Claude Code that is `/tmp/claude-<uid>/`, which is outside the task root and is **not** removed by teardown, so that scratch accumulates until the directory is cleared by hand or the machine reboots.
+On a RAM-backed `/tmp` that is retained memory rather than disk.
+Turning the flag on is what closes that leak; the default only bounds Go's build temp.
+
+A raw launch command is the unverified-adapter escape hatch and is never given the pin, with the flag on or off.
+The flag is inherited by secondmate homes, so a secondmate's own crewmates follow the primary's choice.
+`bin/fm-spawn.sh` owns the launch mechanics and [`bin/fm-task-tmp-lib.sh`](../bin/fm-task-tmp-lib.sh)'s header owns the temp-root path shape, creation validation, and removal rules.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
@@ -931,12 +946,12 @@ FM_INBOX_PROFILE=       # overrides config/inbox-profile; explicitly empty force
 
 A task that was already in flight when the per-task temp root became home-scoped recorded the older undiscriminated `<base>/fm-<id>` shape, so its teardown prints `warning: recorded temp root ... is not <id>'s own` and leaves the directory in place.
 That is intended one-time upgrade behavior rather than a fault: the old shape cannot be attributed to a home, because two homes with colliding task ids both recorded exactly it, so removing it would risk deleting a live sibling home's directory.
-What is left behind is small and bounded - those roots hold only Go build temp, since agent scratch was never pinned there before this change - and it stops appearing once the tasks in flight at the upgrade are gone.
+What is left behind is small and bounded - those roots hold only Go build temp, since agent scratch reaches a task root only where `config/task-tmpdir-pin` is on - and it stops appearing once the tasks in flight at the upgrade are gone.
 An operator who wants the space back can remove such a directory by hand after confirming no live task is using it.
 [`bin/fm-task-tmp-lib.sh`](../bin/fm-task-tmp-lib.sh)'s header owns the full rationale for that refusal.
 
 `fm-spawn.sh` also refuses to start a task when the path it would use as that task's temp root already exists as a symlink, as a non-directory, or as a directory belonging to another user, printing `error: temp root ... refusing to use it`.
-The root's name is deterministic and its default parent `/tmp` is world-writable, and the launch pins the agent's `TMPDIR` to that root, so writing through such a path would hand the agent's whole scratch tree to a directory this user neither controls nor tears down.
+The root's name is deterministic and its default parent `/tmp` is world-writable, so writing through such a path would hand whatever the task puts there - Go's build temp always, and the agent's whole scratch tree when `config/task-tmpdir-pin` is on - to a directory this user neither controls nor tears down.
 Remove or rename the offending path after establishing where it came from, then spawn again.
 A fresh spawn that aborts before its task record is published removes the root it just created, because nothing would name that path afterwards.
 
