@@ -181,7 +181,7 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend, and re-validated on 2026-09-02 after the Orca fixtures were corrected.
 Until then the Orca fixtures recorded bare tokens such as `wt-teardown`, which no real Orca deployment emits: `orca worktree create --json` returns a composite `<id>::<absolute worktree path>` id, so the pre-correction claim did not cover the value cleanup actually validates.
 The fixtures now carry that composite shape.
-Cleanup checks that structure only, and deliberately applies no character allowlist to either half, because the recorded value only ever reaches `orca` as a single quoted argv element and its path half is never used as a filesystem path.
+[`orca-backend.md`](../orca-backend.md#task-shape-and-metadata) owns the shape cleanup enforces, and the `fm_backend_orca_worktree_id_valid` comment in `bin/fm-backend.sh` owns why the shared endpoint-atom allowlist was not widened for it.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
