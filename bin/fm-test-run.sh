@@ -1168,15 +1168,16 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     bin/fm-backend-hometag-lib.sh)
-      # The shared home tag: herdr workspace and session naming
-      # (backend-dispatch, real-herdr-gated), the cmux and zellij scoped titles,
-      # whose suites re-derive the prefix-and-hash shape byte for byte (cmux,
-      # zellij), and, since it also discriminates the per-task temp root,
-      # everything bin/fm-task-tmp-lib.sh covers below.
-      printf '%s\n' backend-dispatch
-      printf '%s\n' real-herdr-gated
+      # The shared home tag has exactly three call sites: bin/backends/cmux.sh
+      # and bin/backends/zellij.sh scope their titles with it, and
+      # bin/fm-task-tmp-lib.sh discriminates the per-task temp root with it.
+      # The cmux and zellij suites re-derive its prefix-and-hash shape byte for
+      # byte (cmux, zellij); the temp-root side is everything
+      # bin/fm-task-tmp-lib.sh covers below. Herdr does not use this tag - it
+      # labels workspaces through fm_backend_herdr_workspace_label instead.
       printf '%s\n' cmux
       printf '%s\n' zellij
+      printf '%s\n' backend-dispatch
       printf '%s\n' pr-forge
       printf '%s\n' session-bootstrap
       printf '%s\n' orca
