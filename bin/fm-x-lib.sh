@@ -989,26 +989,13 @@ fmx_meta_link_clear() {
     expected=$2
     parent=${meta%/*}
     [ "$parent" != "$meta" ] || parent=.
-    [ -d "$parent" ] && [ ! -L "$parent" ] && [ -r "$parent" ] && [ -x "$parent" ] \
-      || return 1
+    [ -d "$parent" ] && [ ! -L "$parent" ] && [ -r "$parent" ] \
+      && [ -w "$parent" ] && [ -x "$parent" ] || return 1
     fm_backlog_record_parent_authorized "$meta" "task record" "$STATE" || return 1
   fi
   [ ! -L "$meta" ] || return 1
   [ -f "$meta" ] || return 0
   lock=$(fm_meta_lock_path "$meta") || return 1
-  if [ "$expected_set" -eq 1 ] && [ ! -w "$parent" ]; then
-    # A new publisher cannot acquire this lock while the directory is read-only.
-    # Refuse if an earlier publisher already owns it; that owner may make the
-    # directory writable and publish after an unlocked absence scan.
-    [ ! -e "$lock" ] && [ ! -L "$lock" ] || return 1
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        x_request=*) link_present=1; rid=${line#*=} ;;
-      esac
-    done < "$meta" || return 1
-    [ "$link_present" -eq 0 ] || return 1
-    return 0
-  fi
   fm_lock_acquire_wait "$lock"
   [ ! -L "$meta" ] || { fm_lock_release "$lock"; return 1; }
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }

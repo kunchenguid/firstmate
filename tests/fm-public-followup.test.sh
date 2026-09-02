@@ -2553,7 +2553,7 @@ test_remote_retire_refuses_nonwritable_state() {
   pass "retire fails closed when remote state is non-writable"
 }
 
-test_remote_retire_succeeds_without_link() {
+test_remote_retire_refuses_nonwritable_absence() {
   local home remote rc
   remote_fixture_prepare
   home=$(make_home remote-no-link)
@@ -2563,16 +2563,16 @@ test_remote_retire_succeeds_without_link() {
   chmod 555 "$remote/state"
 
   rc=0
-  run_pf_remote "$home" retire pf-remote-no-link --reason "already cleared" --force >/dev/null || rc=$?
+  run_pf_remote "$home" retire pf-remote-no-link --reason "already cleared" --force >/dev/null 2>&1 || rc=$?
   chmod 700 "$remote/state"
-  [ "$rc" -eq 0 ] || fail "retire must remain idempotent when the non-writable remote link is absent"
-  assert_present "$home/state/public-followup/retired/pf-remote-no-link" \
-    "an already-cleared remote link must permit a retirement receipt"
-  assert_absent "$home/state/public-followup/registry/pf-remote-no-link" \
-    "an already-cleared remote link must permit registration removal"
+  [ "$rc" -ne 0 ] || fail "retire must refuse absence it cannot serialize in non-writable state"
+  assert_absent "$home/state/public-followup/retired/pf-remote-no-link" \
+    "an unserialized absent link must not permit a retirement receipt"
+  assert_present "$home/state/public-followup/registry/pf-remote-no-link" \
+    "an unserialized absent link must retain the registration"
   assert_no_grep 'x_request=' "$remote/state/work-no-link.meta" \
-    "an already-cleared remote task must remain unlinked"
-  pass "retire completes without a link in non-writable remote state"
+    "a refused already-cleared remote task must remain unlinked"
+  pass "retire fails closed on link absence in non-writable remote state"
 }
 
 # fm-on.sh passes ssh's status through, so 255 is unknown remote completion, not
@@ -2669,5 +2669,5 @@ test_remote_retire_force_semantics_unchanged
 test_remote_retire_refuses_reassigned_route
 test_remote_retire_refuses_unreadable_state
 test_remote_retire_refuses_nonwritable_state
-test_remote_retire_succeeds_without_link
+test_remote_retire_refuses_nonwritable_absence
 test_remote_unconfirmed_clear_is_unknown_completion
