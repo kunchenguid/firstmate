@@ -312,10 +312,15 @@ log_reports_ci_ready() {
 # those rows; nothing is lost by rejecting them, because the same output's steps
 # table still carries that step as `ci,running,0,0`. That store-wide scan reached
 # terminal runs only, so the active-run shape was settled by direct observation
-# instead - `axi status` captured mid-step on a live run (v1.60.2, eb4e379, built
-# 2026-08-29), sampled on three different running steps, renders the running step
-# as `<step>,running,0,0` in the steps table beside `<step>,running,7s,...` in
-# active_steps. An output shape is a fact about a version, not a law.
+# instead - `axi status` captured mid-step on live runs (v1.60.2, eb4e379, built
+# 2026-08-29), sampled on three different running steps - three distinct step
+# names, not three runs - renders the running step as `<step>,running,0,0` in the
+# steps table beside `<step>,running,<duration>,...` in active_steps. The
+# durations observed across those samples span both second scale (7s, 18s, 19s)
+# and minute scale (2m34s, 3m41s, both on a running test step), so the
+# minute-scale third column the test fixture carries is a shape this version
+# actually renders rather than a plausible-looking one. An output shape is a fact
+# about a version, not a law.
 nm_step_rows() {
   printf '%s\n' "$RUN_OUT" \
     | grep -E "^[[:space:]]*[A-Za-z0-9_-]+,[[:space:]]*\"?[A-Za-z0-9_-]+\"?[[:space:]]*,[[:space:]]*[0-9]+[[:space:]]*,"

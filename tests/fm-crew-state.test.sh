@@ -403,9 +403,13 @@ EOF
 # `ci,running,0,0`, followed by the second
 # active_steps[1]{step,status,active_for,last_activity,agent_pid,round} table
 # whose third column is a DURATION rather than a count. Both tables, their order
-# and their column shapes were captured from a live run on no-mistakes v1.60.2
-# (eb4e379, built 2026-08-29), sampled on three different running steps; only
-# the step name and the durations differ here.
+# and their column shapes were captured from live runs on no-mistakes v1.60.2
+# (eb4e379, built 2026-08-29), sampled on three different running steps - three
+# distinct step names, not three runs. The durations observed across those
+# samples span both second scale (7s, 18s, 19s) and minute scale (2m34s, 3m41s,
+# both on a running test step), so the `1m40s` below is a duration string that
+# version actually renders rather than a plausible-looking one invented to fill
+# the column; only the step name and the durations differ here.
 run_ci_monitoring_with_active_steps() {  # <branch>
   cat <<EOF
 run:
