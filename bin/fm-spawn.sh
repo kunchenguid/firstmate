@@ -1833,16 +1833,23 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # relaunch marker wins: generated contracts are appended after {TASK} text that
 # may mention the same phrases or headings, and a later progress note must not
 # override them. Truncation anchors on the exact generated marker (`## Progress
-# note (ISO-timestamp)` followed by `This task was relaunched.`), not on heading
-# text alone. When that section is missing, older one-line records are read
-# from the brief prefix before that marker only. bin/fm-merge-local.sh uses
-# the same rule for landing.
+# note (ISO-timestamp)` followed by `This task was relaunched.`) only when that
+# marker is not followed by the generated Setup line (`You are in a disposable
+# git worktree of `). A copy inside replaceable {TASK} text therefore cannot
+# hide the generated section. Heading text alone is not a boundary. When that
+# section is missing, older one-line records are read from the brief prefix
+# before that marker only. bin/fm-merge-local.sh uses the same rule for landing.
 brief_dod_section() {
   awk '
-    BEGIN { pending_relaunch=0 }
+    FNR==NR {
+      if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+      next
+    }
     pending_relaunch && /^[[:space:]]*$/ { next }
     pending_relaunch {
-      if ($0 ~ /^This task was relaunched\./) { exit }
+      if ($0 ~ /^This task was relaunched\./) {
+        if (!last_setup || FNR > last_setup) exit
+      }
       pending_relaunch=0
     }
     /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
@@ -1853,15 +1860,20 @@ brief_dod_section() {
     /^#{1,6}[[:space:]]/ { grab=0; next }
     grab { buf = buf $0 ORS }
     END { printf "%s", buf }
-  ' "$1"
+  ' "$1" "$1"
 }
 
 brief_truncated_prefix() {
   awk '
-    BEGIN { pending_relaunch=0 }
+    FNR==NR {
+      if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+      next
+    }
     pending_relaunch && /^[[:space:]]*$/ { next }
     pending_relaunch {
-      if ($0 ~ /^This task was relaunched\./) { exit }
+      if ($0 ~ /^This task was relaunched\./) {
+        if (!last_setup || FNR > last_setup) exit
+      }
       pending_relaunch=0
     }
     /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
@@ -1869,7 +1881,7 @@ brief_truncated_prefix() {
       next
     }
     { print }
-  ' "$1"
+  ' "$1" "$1"
 }
 
 brief_contract_region_nonempty() {

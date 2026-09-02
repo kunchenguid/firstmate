@@ -292,7 +292,8 @@ invalid base-branch name|brief-refused-b7 some-proj --mode no-mistakes --base-br
 branch-name on a secondmate charter|brief-refused-b8 --secondmate --no-projects --branch-name feature/x|--branch-name applies only to ship and scout briefs
 empty branch-name value|brief-refused-b9 some-proj --mode no-mistakes --branch-name=|--branch-name requires a non-empty value
 invalid branch-name|brief-refused-b10 some-proj --mode no-mistakes --branch-name bad..name|--branch-name is not a usable git branch name
-identical base and crew branch|brief-refused-b11 some-proj --mode no-mistakes --base-branch feature/x --branch-name feature/x|--branch-name and --base-branch cannot name the same branch
+identical base and crew branch|brief-refused-b11 some-proj --mode no-mistakes --base-branch feature/x --branch-name feature/x|--base-branch cannot be the crew branch
+default crew branch equals base-branch|brief-refused-b12 some-proj --mode no-mistakes --base-branch fm/brief-refused-b12|--base-branch cannot be the crew branch
 ROWS
   pass "fm-brief.sh: --yolo, scout/secondmate --mode, and misplaced --base-branch/--branch-name are refused, never silently dropped"
 }

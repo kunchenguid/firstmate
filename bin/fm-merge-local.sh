@@ -9,7 +9,9 @@
 # phrase. Both lookups read only the generated contract region: the last
 # `# Definition of done` before an fm-control relaunch marker when that section
 # exists, otherwise the brief prefix before that marker so older one-line
-# records keep working. A relaunch progress note is never scanned. When the
+# records keep working. A marker copied into replaceable {TASK} text does not
+# count: it still sits before the generated Setup line. A relaunch progress
+# note is never scanned. When the
 # crew-branch line is absent from that region, this
 # script still uses fm/<id>. When the base-branch line is absent, it still
 # lands on the project's default branch. Omitted flags therefore stay
@@ -63,15 +65,23 @@ default_branch() {
 
 # Generated contracts live in the last `# Definition of done` before an
 # fm-control relaunch marker. Truncation anchors on the exact generated marker
-# (`## Progress note (ISO-timestamp)` followed by `This task was relaunched.`),
-# not on heading text alone, so task-authored progress-note prose cannot hide
-# the generated section.
+# (`## Progress note (ISO-timestamp)` followed by `This task was relaunched.`)
+# only when that marker is not followed by the generated Setup line
+# (`You are in a disposable git worktree of `). A copy inside replaceable
+# {TASK} text therefore cannot hide the generated section, while a real
+# fm-control append after Setup still ends the scan. Heading text alone is
+# not a boundary.
 brief_dod_section() {
   awk '
-    BEGIN { pending_relaunch=0 }
+    FNR==NR {
+      if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+      next
+    }
     pending_relaunch && /^[[:space:]]*$/ { next }
     pending_relaunch {
-      if ($0 ~ /^This task was relaunched\./) { exit }
+      if ($0 ~ /^This task was relaunched\./) {
+        if (!last_setup || FNR > last_setup) exit
+      }
       pending_relaunch=0
     }
     /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
@@ -82,17 +92,23 @@ brief_dod_section() {
     /^#{1,6}[[:space:]]/ { grab=0; next }
     grab { buf = buf $0 ORS }
     END { printf "%s", buf }
-  ' "$1"
+  ' "$1" "$1"
 }
 
-# Brief body before the first fm-control relaunch marker. Progress notes after
-# that marker are untrusted free text for contract lookup.
+# Brief body before the first fm-control relaunch marker that is not followed
+# by generated Setup. Progress notes after that marker are untrusted free
+# text for contract lookup.
 brief_truncated_prefix() {
   awk '
-    BEGIN { pending_relaunch=0 }
+    FNR==NR {
+      if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+      next
+    }
     pending_relaunch && /^[[:space:]]*$/ { next }
     pending_relaunch {
-      if ($0 ~ /^This task was relaunched\./) { exit }
+      if ($0 ~ /^This task was relaunched\./) {
+        if (!last_setup || FNR > last_setup) exit
+      }
       pending_relaunch=0
     }
     /^## Progress note \([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\)$/ {
@@ -100,7 +116,7 @@ brief_truncated_prefix() {
       next
     }
     { print }
-  ' "$1"
+  ' "$1" "$1"
 }
 
 brief_contract_region_nonempty() {
