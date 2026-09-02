@@ -1010,9 +1010,10 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
 }
 
 test_post_publication_launch_failure_keeps_the_new_record() {
-  local dir out rc
+  local dir out rc task_tmp
   dir=$(new_case published rl24)
   add_ship_task "$dir" rl24 claude
+  task_tmp=$(fm_test_task_tmp_root "$dir/home" rl24)
   printf 'codex' > "$dir/fake/becomes"
   out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
     run_control "$dir" rl24 relaunch --harness codex --note "keep the published record"); rc=$?
@@ -1023,6 +1024,8 @@ test_post_publication_launch_failure_keeps_the_new_record() {
     || fail "the published replacement record should identify its relaunch transaction"
   [ "$(journal_field "$dir" rl24 rollback)" = none-new-record-kept ] \
     || fail "the journal should record that the published replacement record was kept"
+  [ -d "$task_tmp" ] \
+    || fail "a failure after publication removed the temp root the published record names"
   pass "fm-control relaunch: post-publication failure keeps the new durable record"
 }
 
@@ -1088,6 +1091,30 @@ test_prepublication_abort_retires_replacement_wiring_and_busy_state() {
   [ "$(journal_field "$dir" rl28 rollback)" = prior-record-kept ] \
     || fail "the journal should record the unpublished replacement rollback"
   pass "fm-spawn relaunch: prepublication abort removes replacement state"
+}
+
+test_legacy_relaunch_abort_removes_the_root_it_created() {
+  # A task recorded before tasktmp= existed carries no temp root, so a relaunch
+  # of it CREATES one. Nothing names that path until the replacement record is
+  # published, so an abort in between is the only chance to reclaim it - a later
+  # teardown reads the prior record and finds no path at all.
+  local dir out rc real_mv meta task_tmp
+  dir=$(new_case legacytmp rl42)
+  add_ship_task "$dir" rl42 claude
+  meta="$dir/home/state/rl42.meta"
+  grep -v '^tasktmp=' "$meta" > "$meta.legacy" && mv "$meta.legacy" "$meta"
+  task_tmp=$(fm_test_task_tmp_root "$dir/home" rl42)
+  [ ! -e "$task_tmp" ] || fail "the legacy fixture must start without a temp root: $task_tmp"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+    run_control "$dir" rl42 relaunch --note "reclaim the unrecorded temp root"); rc=$?
+  expect_code 1 "$rc" "a failed metadata publication should fail closed"$'\n'"$out"
+  grep -q '^tasktmp=' "$meta" \
+    && fail "the aborted relaunch published a record naming the temp root"
+  [ ! -e "$task_tmp" ] \
+    || fail "the aborted legacy relaunch left behind the temp root it created: $task_tmp"
+  pass "fm-spawn relaunch: an abort before publication removes a temp root the relaunch created"
 }
 
 test_journal_records_the_checkpoint_it_proved() {
@@ -1510,6 +1537,7 @@ test_post_publication_launch_failure_keeps_the_new_record
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
+test_legacy_relaunch_abort_removes_the_root_it_created
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home

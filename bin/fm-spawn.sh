@@ -2506,11 +2506,14 @@ TASK_TMP=$(fm_task_tmp_root "$ID") || { echo "error: cannot derive a temp root f
 # build temp always, and the agent's whole scratch tree when the TMPDIR pin
 # below is enabled. Refuse the spawn rather than write through it.
 fm_task_tmp_create "$TASK_TMP" || exit 1
-# Arm the abort trap only for a root this spawn created itself, which is the one
-# case where no record can name the path yet (FM_TASK_TMP_CREATED, contract in
-# bin/fm-task-tmp-lib.sh). A relaunch, and a spawn that accepted a root already
-# there, keep a root whose record outlives the abort.
-if [ "$RELAUNCH" -eq 0 ] && [ "$FM_TASK_TMP_CREATED" -eq 1 ]; then
+# Arm the abort trap only for a root this spawn created itself (the outcome
+# FM_TASK_TMP_CREATED reports, contract in bin/fm-task-tmp-lib.sh), and keep it
+# armed until a published record names the path. A root that was already there
+# may be a live task's own scratch, so an abort must leave it. Whether this is a
+# relaunch is not the discriminator: a relaunch of a task recorded before
+# tasktmp= existed creates the root too, and nothing would name it if the
+# relaunch aborted before publishing its replacement record.
+if [ "$FM_TASK_TMP_CREATED" -eq 1 ]; then
   TASK_TMP_ABORT_CLEANUP=1
 fi
 
@@ -2967,6 +2970,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  # The replacement record now carries tasktmp=, so teardown can find the root;
+  # a later abort must leave it for teardown rather than remove it here.
+  TASK_TMP_ABORT_CLEANUP=0
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so
