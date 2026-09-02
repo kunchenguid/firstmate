@@ -3166,11 +3166,18 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+LAUNCH_SCRUB=
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse|agy)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    LAUNCH_SCRUB="$LAUNCH_SCRUB -u CURSOR_AGENT -u CURSOR_INVOKED_AS"
     ;;
 esac
+case "$HARNESS" in
+  claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    LAUNCH_SCRUB="$LAUNCH_SCRUB -u ANTIGRAVITY_AGENT"
+    ;;
+esac
+[ -z "$LAUNCH_SCRUB" ] || LAUNCH="env$LAUNCH_SCRUB $LAUNCH"
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
