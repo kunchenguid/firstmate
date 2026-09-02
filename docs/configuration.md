@@ -130,6 +130,7 @@ A backend spawn refusal from a missing dependency, version gate, or unauthentica
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
+A herdr task using presentation additionally records `crew_label=` (e.g. `C7`, `X3`): the harness-letter-plus-running-number prefix of its presentation workspace label, allocated once from a per-home, per-letter counter in `state/.crew-label-seq-<letter>` and reused unchanged on every later relaunch or presentation rebuild instead of being renumbered.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.

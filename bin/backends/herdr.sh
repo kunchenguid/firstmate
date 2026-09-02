@@ -494,7 +494,7 @@ fm_backend_herdr_projection_journal_field() {  # <journal> <key>
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines expected_label expected_task_label exact
+  local journal=$1 id=$2 lines expected_task_label exact
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
@@ -548,10 +548,18 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   [ -n "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
-  expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+  # The stored workspace_label is trusted verbatim rather than recomputed:
+  # its content depends on the crew_label and backlog title captured at
+  # creation time, neither of which this snapshot has access to (and a
+  # title can legitimately change in the backlog after creation). Only the
+  # exact-token grammar is enforced here, matching every accepted label
+  # generation (current "<L><n> <title>" and legacy "└ <task>").
   expected_task_label="fm-$id"
-  [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
+  case "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" in
+    *" · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID") ;;
+    *) return 1 ;;
+  esac
+  [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
 }
 
 # fm_backend_herdr_projection_journal_token: validate and read either journal
@@ -641,12 +649,83 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   printf '%s' "$task"
 }
 
+# fm_backend_herdr_projection_crew_label_letter: the one-uppercase-letter
+# harness tag used to open a visible crew label ("C" for claude, "X" for
+# codex, else the harness name's own first letter upper-cased).
+fm_backend_herdr_projection_crew_label_letter() {  # <harness>
+  case "$1" in
+    claude) printf 'C' ;;
+    codex) printf 'X' ;;
+    '') printf 'F' ;;
+    *) printf '%.1s' "$1" | tr '[:lower:]' '[:upper:]' ;;
+  esac
+}
+
+# fm_backend_herdr_projection_label_title_sanitize: make a backlog title safe
+# to embed in a presentation workspace label. Collapses newlines/tabs/runs of
+# spaces to single spaces, drops the "·" separator glyph so it cannot forge
+# the trailing " · p:<token>" grammar, trims, and caps length.
+fm_backend_herdr_projection_label_title_sanitize() {  # <title>
+  local title=$1
+  title=${title//$'\n'/ }
+  title=${title//$'\r'/ }
+  title=${title//$'\t'/ }
+  title=${title//·/}
+  while :; do
+    case "$title" in
+      *'  '*) title=${title//'  '/' '} ;;
+      *) break ;;
+    esac
+  done
+  title=${title# }
+  title=${title% }
+  if [ "${#title}" -gt 60 ]; then
+    title=${title:0:60}
+    title=${title% }
+  fi
+  printf '%s' "$title"
+}
+
 # fm_backend_herdr_projection_workspace_label: presentation-only child label.
-# Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, the
-# concise task label, then the unchanged · p:<full-22-char-token> suffix.
+# Current format is "<L><n> <title> · p:<full-22-char-token>", where <L><n>
+# is the recorded crew_label ("C7", "X3", ...) from state/<id>.meta - never
+# recomputed here - and <title> is the sanitized backlog title, falling back
+# to the concise task label when no title was resolved. A caller with no
+# crew_label (an old-format recompute) gets the legacy "└ <concise-task> ·
+# p:<token>" form so already-published callers keep working.
 # Labels and tokens remain non-authoritative correlators only.
-fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
-  printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id> [<crew-label> [<title>]]
+  local task=$1 token=$2 crew_label=${3:-} title=${4:-}
+  title=$(fm_backend_herdr_projection_label_title_sanitize "$title")
+  [ -n "$title" ] || title=$(fm_backend_herdr_projection_concise_task_label "$task")
+  if [ -n "$crew_label" ]; then
+    printf '%s %s · p:%s' "$crew_label" "$title" "$token"
+  else
+    printf '└ %s · p:%s' "$title" "$token"
+  fi
+}
+
+# fm_backend_herdr_projection_crew_label_allocate: the next per-home,
+# per-letter crew label ("C7", "X3", ...) for <harness>, drawn from a
+# monotonic counter file under <state-dir> so two concurrent spawns never
+# race onto the same number. Requires fm_lock_acquire_wait/fm_lock_release
+# (bin/fm-wake-lib.sh) already sourced by the caller. The caller must persist
+# the result as crew_label= in the task's own meta and reuse that recorded
+# value on every later relaunch or presentation rebuild instead of calling
+# this a second time for the same task.
+fm_backend_herdr_projection_crew_label_allocate() {  # <state-dir> <harness>
+  local state=$1 harness=$2 letter seqfile lock n
+  letter=$(fm_backend_herdr_projection_crew_label_letter "$harness")
+  seqfile="$state/.crew-label-seq-$letter"
+  lock="$seqfile.lock"
+  fm_lock_acquire_wait "$lock"
+  n=0
+  [ -f "$seqfile" ] && n=$(cat "$seqfile" 2>/dev/null)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$((n + 1))
+  printf '%s\n' "$n" > "$seqfile"
+  fm_lock_release "$lock" || true
+  printf '%s%s' "$letter" "$n"
 }
 
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
@@ -1297,7 +1376,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       and ((.label == "firstmate") or (.label | test("^2ndmate-[^/]+$")));
     def is_new_child:
       (.label | type) == "string"
-      and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+      and (.label | test("^([A-Z][0-9]+|└) .+ · p:[A-Za-z0-9_-]{22}$"));
     def is_legacy_child:
       (.label | type) == "string"
       and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
@@ -2224,7 +2303,7 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
     --arg workspace_label "$workspace_label" '
       def is_new_child:
         (.label | type) == "string"
-        and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+        and (.label | test("^([A-Z][0-9]+|└) .+ · p:[A-Za-z0-9_-]{22}$"));
       def is_legacy_child_for($owner):
         (.label | type) == "string"
         and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))

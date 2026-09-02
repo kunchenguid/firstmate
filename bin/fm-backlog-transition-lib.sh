@@ -53,6 +53,9 @@ FM_BACKLOG_TRANSITION_ERROR=
 FM_BACKLOG_ROW_RESULT=
 FM_BACKLOG_ROW_STATE=
 FM_BACKLOG_ROW_ERROR=
+# Set by fm_backlog_row_probe on a found row: the backlog title, or empty
+# when tasks-axi printed none.
+FM_BACKLOG_ROW_TITLE=
 # Set by fm_backlog_close_marker_replay: closed | closed_incomplete | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
@@ -191,15 +194,17 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 file id=$2 out state held blocked command_status
+  local data authorized_data=$1 file id=$2 out state held blocked title command_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
+    FM_BACKLOG_ROW_TITLE=
     FM_BACKLOG_ROW_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
   FM_BACKLOG_ROW_RESULT=error
   FM_BACKLOG_ROW_STATE=
+  FM_BACKLOG_ROW_TITLE=
   FM_BACKLOG_ROW_ERROR=
   file=$(fm_backlog_file "$data") || {
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
@@ -225,12 +230,17 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   state=$(printf '%s\n' "$out" | sed -n 's/^  state: *//p' | head -1)
   held=$(printf '%s\n' "$out" | sed -n 's/^  held: *//p' | head -1)
   blocked=$(printf '%s\n' "$out" | sed -n 's/^  blocked: *//p' | head -1)
+  title=$(printf '%s\n' "$out" | sed -n 's/^  title: *//p' | head -1)
+  case "$title" in
+    \"*\") title=${title#\"}; title=${title%\"} ;;
+  esac
   if [ -z "$state" ]; then
     FM_BACKLOG_ROW_ERROR="tasks-axi show $id returned no state"
     return 1
   fi
   FM_BACKLOG_ROW_RESULT=found
   FM_BACKLOG_ROW_STATE="$state ${held:-no} ${blocked:-no}"
+  FM_BACKLOG_ROW_TITLE=$title
   return 0
 }
 

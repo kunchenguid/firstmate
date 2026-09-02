@@ -9,9 +9,9 @@
 # is additionally serialized by the existing state/.spawn-<task>.lock and the
 # shared named-session Herdr presentation lock, in that order.
 #
-# A visible title is discovery only. Cleanup requires the exact current
-# "└ <concise-task> · p:<22-char-token>" grammar, one token occurrence across
-# the named-session snapshot, exactly one matching home-local journal, one tab,
+# A visible title is discovery only. Cleanup requires a title ending in the
+# exact " · p:<22-char-token>" grammar, one token occurrence across the
+# named-session snapshot, exactly one matching home-local journal, one tab,
 # one pane, absent task metadata, no registered agent, and a process proof that
 # the pane contains only one idle recognized shell with no child process. A
 # version 2 journal must also bind the exact workspace, tab, and pane.
@@ -43,12 +43,12 @@ fm_herdr_cleanup_warn() {
 fm_herdr_cleanup_title_token() { # <workspace-title>
   local title=$1 prefix token rest
   case "$title" in
-    '└ '*' · p:'*) ;;
+    *' · p:'*) ;;
     *) return 1 ;;
   esac
   token=${title##*' · p:'}
   prefix=${title%" · p:$token"}
-  [ "$prefix" != "$title" ] && [ -n "${prefix#'└ '}" ] || return 1
+  [ "$prefix" != "$title" ] && [ -n "$prefix" ] || return 1
   [ "${#token}" -eq 22 ] || return 1
   case "$token" in *[!A-Za-z0-9_-]*) return 1 ;; esac
   rest=${title#*p:}
@@ -63,7 +63,7 @@ fm_herdr_cleanup_home_identity() {
 }
 
 fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
-  local title=$1 session=$2 home_real=$3 journal id expected journal_home
+  local title=$1 session=$2 home_real=$3 journal id journal_home
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
     [ -f "$journal" ] && [ ! -L "$journal" ] || continue
@@ -76,9 +76,16 @@ fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
       [ "$journal_home" = "$home_real" ] \
         && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || continue
     fi
-    expected=$(fm_backend_herdr_projection_workspace_label \
-      "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
-    [ "$expected" = "$title" ] || continue
+    # Matched by the exact 22-char token suffix rather than a recomputed full
+    # label: the crew_label and backlog title that shape the current label's
+    # prefix live outside this journal (state/<id>.meta, the backlog), so a
+    # v1 attempt journal has neither, and a title can change after creation.
+    # The token is the durable, non-authoritative-but-effectively-unique
+    # correlator both formats always carry.
+    case "$title" in
+      *" · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID") ;;
+      *) continue ;;
+    esac
     printf '%s\t%s\t%s\n' "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
   done
 }

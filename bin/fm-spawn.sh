@@ -2060,10 +2060,16 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 # a live pane. The authoritative mutation still runs under the meta lock below.
 BACKLOG_TRANSITION=0
 BACKLOG_ROW_STATE=
+# Best-effort backlog title for the herdr presentation crew label
+# (bin/backends/herdr.sh's fm_backend_herdr_projection_workspace_label);
+# empty when this gate does not apply, which that builder treats as "fall
+# back to the task id" per its own contract.
+TASK_TITLE=
 if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   BACKLOG_TRANSITION=1
   if fm_backlog_row_probe "$DATA" "$ID"; then
     BACKLOG_ROW_STATE=$FM_BACKLOG_ROW_STATE
+    TASK_TITLE=$FM_BACKLOG_ROW_TITLE
   elif [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
     echo "error: task $ID has no backlog item in this home, so dispatching it would leave a worker no record owns; add it first (tasks-axi add $ID '<title>' --kind $KIND) and re-run" >&2
     exit 1
@@ -2146,7 +2152,9 @@ case "$BACKEND" in
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    CREW_LABEL=
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+      CREW_LABEL=$(fm_backend_herdr_projection_crew_label_allocate "$STATE" "$HARNESS")
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
@@ -2220,7 +2228,8 @@ case "$BACKEND" in
             spawn_herdr_presentation_order_lock_release
           else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label \
+              "$ID" "$HERDR_PROJECTION_ID" "$CREW_LABEL" "$TASK_TITLE")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
@@ -2915,6 +2924,11 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    # Written only on the fresh spawn that allocated it (relaunch never
+    # re-enters the herdr case block, so CREW_LABEL is unset there and the
+    # previously recorded crew_label= line survives untouched through
+    # preserve_relaunch_meta below instead of being renumbered).
+    [ -z "${CREW_LABEL:-}" ] || echo "crew_label=$CREW_LABEL"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"

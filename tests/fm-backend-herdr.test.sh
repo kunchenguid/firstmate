@@ -2272,6 +2272,77 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
   pass "herdr presentation labels: └ concise-task · p:<full-token> for primary and secondmate children"
 }
 
+test_projection_crew_label_letter_maps_known_and_unknown_harnesses() {
+  local claude codex other empty
+  claude=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_crew_label_letter claude' "$ROOT")
+  codex=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_crew_label_letter codex' "$ROOT")
+  other=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_crew_label_letter opencode' "$ROOT")
+  empty=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_crew_label_letter ""' "$ROOT")
+  [ "$claude" = C ] || fail "claude should map to C: $claude"
+  [ "$codex" = X ] || fail "codex should map to X: $codex"
+  [ "$other" = O ] || fail "an unmapped harness should use its own first letter upper-cased: $other"
+  [ "$empty" = F ] || fail "an empty harness should fall back to F: $empty"
+  pass "herdr crew label letter: claude->C, codex->X, other harnesses use their own first letter, empty falls back to F"
+}
+
+test_projection_label_title_sanitize_collapses_and_caps() {
+  local raw out long
+  raw=$'  fix   the\tthing · now  '
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_label_title_sanitize "$1"' "$ROOT" "$raw")
+  [ "$out" = "fix the thing now" ] \
+    || fail "sanitize should collapse whitespace, drop tabs, drop the separator glyph, and trim: [$out]"
+  long=$(printf 'x%.0s' $(seq 1 90))
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_label_title_sanitize "$1"' "$ROOT" "$long")
+  [ "${#out}" -le 60 ] || fail "sanitize should cap length at 60 characters: ${#out}"
+  pass "herdr crew label title sanitize: collapses whitespace, drops the separator glyph, caps length"
+}
+
+test_projection_workspace_label_new_format_uses_crew_label_and_title() {
+  local out token
+  token='AbCdEfGhIjKlMnOpQrStUv'
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label task-p2 "$1" C7 "fix the queue"' \
+    "$ROOT" "$token")
+  [ "$out" = "C7 fix the queue · p:$token" ] \
+    || fail "current-format label should be <crew-label> <title> · p:<token>: $out"
+  pass "herdr crew label: the current label format opens with the recorded crew_label and the sanitized title"
+}
+
+test_projection_workspace_label_falls_back_to_task_id_when_no_title() {
+  local out token
+  token='AbCdEfGhIjKlMnOpQrStUv'
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label fm-task-p2 "$1" X3 ""' \
+    "$ROOT" "$token")
+  [ "$out" = "X3 task-p2 · p:$token" ] \
+    || fail "an empty title should fall back to the concise task id: $out"
+  pass "herdr crew label: an empty backlog title falls back to the concise task id"
+}
+
+test_projection_crew_label_allocate_increments_per_letter_and_persists() {
+  local dir state c1 c2 x1
+  dir="$TMP_ROOT/crew-label-allocate"; state="$dir/state"; mkdir -p "$state"
+  c1=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-wake-lib.sh"
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_crew_label_allocate "$1" claude
+  ' "$ROOT" "$state")
+  c2=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-wake-lib.sh"
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_crew_label_allocate "$1" claude
+  ' "$ROOT" "$state")
+  x1=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-wake-lib.sh"
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_crew_label_allocate "$1" codex
+  ' "$ROOT" "$state")
+  [ "$c1" = C1 ] || fail "first claude allocation should be C1: $c1"
+  [ "$c2" = C2 ] || fail "second claude allocation should increment to C2: $c2"
+  [ "$x1" = X1 ] || fail "codex keeps its own independent counter, starting at X1: $x1"
+  [ -f "$state/.crew-label-seq-C" ] && [ -f "$state/.crew-label-seq-X" ] \
+    || fail "each letter persists its own counter file under state/"
+  pass "herdr crew label allocate: per-letter monotonic counters persisted under state/"
+}
+
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
   local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order"; mkdir -p "$dir/responses"
@@ -4658,3 +4729,8 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_projection_crew_label_letter_maps_known_and_unknown_harnesses
+test_projection_label_title_sanitize_collapses_and_caps
+test_projection_workspace_label_new_format_uses_crew_label_and_title
+test_projection_workspace_label_falls_back_to_task_id_when_no_title
+test_projection_crew_label_allocate_increments_per_letter_and_persists
