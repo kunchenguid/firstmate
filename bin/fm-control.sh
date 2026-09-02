@@ -37,8 +37,9 @@
 #              positively agent-free recorded endpoint is reused; a positively
 #              missing recorded endpoint is treated as an already-stopped prior
 #              worker rather than receiving lifecycle input. Tmux reconstructs
-#              it through its ordinary creation path; Herdr clearly refuses
-#              until restore exclusion is atomic. Live or ambiguous endpoints
+#              it through new-window -S so a restored same-name window is adopted.
+#              Herdr clearly refuses until restore exclusion is atomic.
+#              Live or ambiguous endpoints
 #              still refuse replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
 #              plus its optional model and effort tokens) exactly as any other

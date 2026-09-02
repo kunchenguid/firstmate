@@ -125,34 +125,69 @@ case "${1:-}" in
       : > "$FM_FAKE_ENDPOINT_REAPPEAR_READY"
       while [ ! -e "$FM_FAKE_ENDPOINT_REAPPEAR_RELEASE" ]; do /bin/sleep 0.01; done
     fi
+    format=
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -F) format=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$format" = '#{window_id}\t#{window_name}' ]; then
+      n=0
+      [ -f "$D/windows" ] || exit 0
+      while IFS= read -r wname; do
+        [ -n "$wname" ] || continue
+        n=$((n + 1))
+        printf '@%s\t%s\n' "$n" "$wname"
+      done < "$D/windows"
+      exit 0
+    fi
     [ -f "$D/windows" ] && cat "$D/windows"
     exit 0 ;;
   has-session) exit 0 ;;
   new-session) exit 0 ;;
   new-window)
     shift
-    name= cwd=
+    name= cwd= select_existing=0
     while [ $# -gt 0 ]; do
       case "$1" in
-        -d|-P|-dP) shift ;;
-        -F) shift 2 ;;
         -t) shift 2 ;;
         -n) name=$2; shift 2 ;;
         -c) cwd=$2; shift 2 ;;
+        -F) shift 2 ;;
+        -*)
+          flags=${1#-}
+          while [ -n "$flags" ]; do
+            ch=${flags%"${flags#?}"}
+            flags=${flags#?}
+            [ "$ch" = S ] && select_existing=1
+          done
+          shift ;;
         *) shift ;;
       esac
     done
     [ -z "${FM_FAKE_CREATE_FAIL:-}" ] || exit 1
-    if [ -n "$name" ] && grep -Fqx "$name" "$D/windows" 2>/dev/null; then
-      echo "error: window already exists" >&2
-      exit 1
+    if [ -n "${FM_FAKE_RESTORE_ON_CREATE:-}" ]; then
+      [ -n "$name" ] && printf '%s\n' "$name" >> "$D/windows"
+      if [ -n "${FM_FAKE_RESTORE_DUPLICATE:-}" ]; then
+        [ -n "$name" ] && printf '%s\n' "$name" >> "$D/windows"
+      fi
+      printf '%s\n' "${FM_FAKE_RESTORE_AGENT:-zsh}" > "$D/command"
+      : > "$D/restored-on-create"
+    fi
+    if [ "$select_existing" = 1 ] && [ -n "$name" ] && grep -Fqx "$name" "$D/windows" 2>/dev/null; then
+      printf '%s\n' "$name" > "$D/adopted"
+      exit 0
     fi
     [ -n "$name" ] && printf '%s\n' "$name" >> "$D/windows"
     [ -n "$cwd" ] && printf '%s' "$cwd" > "$D/cwd"
     printf 'zsh' > "$D/command"
     printf '%s\n' "$name" > "$D/created"
     [ -n "$cwd" ] && printf '%s\n' "$cwd" > "$D/created-cwd"
-    printf '@1\n'
+    n=$(grep -c . "$D/windows" 2>/dev/null || echo 0)
+    printf '@%s\n' "$n"
     exit 0 ;;
   set-window-option) exit 0 ;;
   kill-window)
@@ -239,6 +274,9 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE="${FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE:-}" \
     FM_FAKE_ENDPOINT_REAPPEAR_READY="${FM_FAKE_ENDPOINT_REAPPEAR_READY:-}" \
     FM_FAKE_ENDPOINT_REAPPEAR_RELEASE="${FM_FAKE_ENDPOINT_REAPPEAR_RELEASE:-}" \
+    FM_FAKE_RESTORE_ON_CREATE="${FM_FAKE_RESTORE_ON_CREATE:-}" \
+    FM_FAKE_RESTORE_AGENT="${FM_FAKE_RESTORE_AGENT:-}" \
+    FM_FAKE_RESTORE_DUPLICATE="${FM_FAKE_RESTORE_DUPLICATE:-}" \
     FM_FAKE_NEVER_STARTS="${FM_FAKE_NEVER_STARTS:-}" \
     "$CONTROL" "$@" 2>&1
 }
@@ -249,6 +287,9 @@ run_spawn() {  # <case-dir> <args...>
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_FAKE_CREATE_FAIL="${FM_FAKE_CREATE_FAIL:-}" \
+    FM_FAKE_RESTORE_ON_CREATE="${FM_FAKE_RESTORE_ON_CREATE:-}" \
+    FM_FAKE_RESTORE_AGENT="${FM_FAKE_RESTORE_AGENT:-}" \
+    FM_FAKE_RESTORE_DUPLICATE="${FM_FAKE_RESTORE_DUPLICATE:-}" \
     FM_FAKE_NEVER_STARTS="${FM_FAKE_NEVER_STARTS:-}" \
     "$SPAWN" "$@" 2>&1
 }
@@ -1755,6 +1796,82 @@ test_spawn_relaunch_reconstructs_a_missing_endpoint() {
   pass "fm-spawn --relaunch: a missing recorded endpoint is reconstructed"
 }
 
+test_missing_endpoint_restore_during_select_or_create_adopts_idle_target() {
+  local dir out rc
+  dir=$(new_case missing-restore-idle rl60)
+  add_ship_task "$dir" rl60 claude
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_RESTORE_ON_CREATE=1 FM_FAKE_RESTORE_AGENT=zsh \
+    run_control "$dir" rl60 relaunch --note "restored idle window wins"); rc=$?
+  expect_code 0 "$rc" "a restored idle window at select-or-create should be adopted"$'\n'"$out"
+  [ -e "$dir/fake/adopted" ] || fail "tmux select-or-create should adopt the restored window"
+  [ ! -e "$dir/fake/created" ] \
+    || fail "a restored same-name window must not create a second tmux window"
+  [ "$(grep -c -Fx 'fm-rl60' "$dir/fake/windows")" = 1 ] \
+    || fail "select-or-create must leave exactly one window named fm-rl60"
+  [ "$(meta_field "$dir" rl60 worktree)" = "$dir/wt" ] \
+    || fail "adopting a restored window must keep the recorded worktree"
+  assert_grep "encode launch-brief" "$dir/fake/literal" \
+    "adopting an idle restored window must still launch the replacement agent"
+  pass "fm-control relaunch: restore at tmux select-or-create adopts the idle target"
+}
+
+test_missing_endpoint_restore_during_select_or_create_refuses_live_duplicate() {
+  local dir out rc
+  dir=$(new_case missing-restore-live rl61)
+  add_ship_task "$dir" rl61 claude
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_RESTORE_ON_CREATE=1 FM_FAKE_RESTORE_AGENT=claude \
+    run_control "$dir" rl61 relaunch --note "do not launch into restored live"); rc=$?
+  expect_code 1 "$rc" "a restored live window at select-or-create should refuse"$'\n'"$out"
+  assert_contains "$out" "restored as a live agent" \
+    "the refusal should name the restored live duplicate"
+  [ -e "$dir/fake/adopted" ] || fail "select-or-create should still adopt rather than create a second window"
+  [ ! -e "$dir/fake/created" ] \
+    || fail "a restored live window must not create a duplicate tmux window"
+  [ "$(grep -c -Fx 'fm-rl61' "$dir/fake/windows")" = 1 ] \
+    || fail "refusal must leave exactly one restored window"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "launch must not run into a restored live agent"
+  pass "fm-control relaunch: restore of a live agent at select-or-create refuses a duplicate"
+}
+
+test_missing_endpoint_restore_duplicate_name_refuses_rather_than_picking() {
+  local dir out rc
+  dir=$(new_case missing-restore-dup rl62)
+  add_ship_task "$dir" rl62 claude
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_RESTORE_ON_CREATE=1 FM_FAKE_RESTORE_DUPLICATE=1 FM_FAKE_RESTORE_AGENT=zsh \
+    run_control "$dir" rl62 relaunch --note "do not pick among duplicates"); rc=$?
+  expect_code 1 "$rc" "two same-name restored windows should refuse"$'\n'"$out"
+  assert_contains "$out" "not a unique restored target" \
+    "the refusal should name the non-unique restored window"
+  [ ! -e "$dir/fake/created" ] \
+    || fail "a non-unique restored name must not create another tmux window"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "launch must not run into a non-unique restored window"
+  pass "fm-control relaunch: non-unique restored tmux names refuse rather than picking one"
+}
+
+test_missing_endpoint_restore_idle_launch_failure_keeps_restored_window() {
+  local dir out rc before
+  dir=$(new_case missing-restore-launchfail rl63)
+  add_ship_task "$dir" rl63 claude
+  before=$(cat "$dir/home/state/rl63.meta")
+  mark_endpoint_missing "$dir"
+  out=$(FM_FAKE_RESTORE_ON_CREATE=1 FM_FAKE_RESTORE_AGENT=zsh FM_FAKE_NEVER_STARTS=1 \
+    run_control "$dir" rl63 relaunch --note "restored idle never starts"); rc=$?
+  expect_code 1 "$rc" "readiness failure after adopting a restored window should fail closed"$'\n'"$out"
+  [ "$(cat "$dir/home/state/rl63.meta")" = "$before" ] \
+    || fail "a readiness failure on an adopted window must keep the prior durable record"
+  [ ! -e "$dir/fake/killed" ] \
+    || fail "readiness failure must not destroy a restored window this relaunch did not create"
+  [ "$(grep -c -Fx 'fm-rl63' "$dir/fake/windows")" = 1 ] \
+    || fail "the restored window must remain after readiness failure"
+  [ -d "$dir/wt" ] || fail "readiness failure must not destroy the worktree"
+  pass "fm-control relaunch: launch failure after adopting a restored idle window keeps that window"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1816,3 +1933,7 @@ test_missing_endpoint_launch_failure_removes_unproved_endpoint
 test_missing_endpoint_publication_failure_restores_prior_record
 test_agent_free_endpoint_relaunch_still_reuses_the_pane
 test_spawn_relaunch_reconstructs_a_missing_endpoint
+test_missing_endpoint_restore_during_select_or_create_adopts_idle_target
+test_missing_endpoint_restore_during_select_or_create_refuses_live_duplicate
+test_missing_endpoint_restore_duplicate_name_refuses_rather_than_picking
+test_missing_endpoint_restore_idle_launch_failure_keeps_restored_window

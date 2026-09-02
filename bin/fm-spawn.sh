@@ -31,18 +31,21 @@
 #   agent-free or authoritatively missing on a backend with a recovery-grade
 #   agent-state classifier (tmux or herdr). An agent-free endpoint is reused
 #   when its shell is sitting in the recorded worktree. A missing tmux endpoint
-#   is reconstructed through tmux's ordinary creation path into the same
-#   worktree, then published only after the replacement launch is proved.
+#   is reconstructed through tmux's single-command select-or-create
+#   (new-window -S) into the same worktree, then published only after the
+#   replacement launch is proved. A restored same-name window is adopted
+#   rather than duplicated; a live adopted window still refuses.
 #   Missing Herdr endpoints refuse until restoration and creation can be
 #   excluded atomically.
 #   Under the existing task and control locks it revalidates the complete task
 #   incarnation and backend target immediately before replacement so a
 #   concurrently restored or changed endpoint cannot create a duplicate worker.
 #   Live or ambiguous endpoints still refuse. It clears the previous harness's
-#   per-task wiring before arming the new incarnation. An unpublished
-#   reconstructed endpoint is removed on failure; the worktree is never
-#   destroyed. Herdr, zellij, orca, and cmux missing endpoints remain refused
-#   because they cannot prove a race-free missing-target rebuild is safe.
+#   per-task wiring before arming the new incarnation. An unpublished window
+#   this relaunch created is removed on failure. An adopted restored window is
+#   left in place. The worktree is never destroyed. Herdr, zellij, orca, and
+#   cmux missing endpoints remain refused because they cannot prove a
+#   race-free missing-target rebuild is safe.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -2112,17 +2115,44 @@ spawn_relaunch_revalidate_incarnation() {
 }
 
 spawn_relaunch_reconstruct_tmux() {
-  local recorded_ses wid
+  local recorded_ses result kind wid adopted_state
   recorded_ses=${RELAUNCH_TARGET%%:*}
   if tmux list-windows -t "$recorded_ses" -F '#{window_name}' >/dev/null 2>&1; then
     SES=$recorded_ses
   else
     SES=$(fm_backend_tmux_container_ensure) || return 1
   fi
-  wid=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || return 1
+  result=$(fm_backend_tmux_adopt_or_create_task "$SES" "$W" "$WT") || return 1
+  kind=${result%% *}
+  wid=${result#* }
+  if [ -z "$wid" ] || { [ "$kind" != created ] && [ "$kind" != adopted ]; }; then
+    echo "error: tmux select-or-create for $ID did not return a created or adopted window" >&2
+    return 1
+  fi
   T="$SES:$W"
   WT_TARGET=$wid
-  RELAUNCH_CREATED_TARGET=$T
+  if [ "$kind" = adopted ]; then
+    adopted_state=$(fm_backend_agent_state tmux "$T")
+    case "$adopted_state" in
+      alive)
+        echo "error: task $ID's recorded endpoint was restored as a live agent during reconstruction; refusing to create a duplicate worker" >&2
+        return 1
+        ;;
+      dead)
+        RELAUNCH_CREATED_TARGET=
+        ;;
+      missing)
+        echo "error: tmux select-or-create adopted $T but the window is gone" >&2
+        return 1
+        ;;
+      *)
+        echo "error: adopted endpoint for $ID reads '$adopted_state'; refusing to launch into an unattributed restored window" >&2
+        return 1
+        ;;
+    esac
+  else
+    RELAUNCH_CREATED_TARGET=$T
+  fi
 }
 
 spawn_relaunch_reconstruct_endpoint() {
