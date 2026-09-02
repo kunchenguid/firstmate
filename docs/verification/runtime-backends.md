@@ -178,7 +178,8 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 ### Cleanup endpoint identity
 
-The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a, and its metadata-fixture cells were refreshed on 2026-08-30 for every supported backend, including the current composite Orca worktree-id shape.
+The dedicated tmux cell below is skipped when tmux is absent, so its recorded result stays attributed to the tmux 3.6a run.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -193,7 +194,8 @@ Bounded output from the incident regression:
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - fm-teardown: malformed, ambiguous, duplicated, control-bearing, and inconsistent Orca composite ids refuse before runtime calls
+ok - cleanup identity: valid tmux, Herdr, Zellij, composite/simple Orca, and cmux records validate while every empty backend target refuses
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
 ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
@@ -202,6 +204,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+Only Orca worktree ids use the composite contract; tmux endpoint parsing and the generic single-atom checks for Herdr, Zellij, cmux, and Orca terminal handles remain unchanged.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Composer classification matrix
@@ -293,7 +296,7 @@ The CLI matrix was checked directly:
 | --- | --- | --- |
 | Explicit session routing | `herdr <verb> ... --session <name>` | Reached the named session even while another server was running. |
 | Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
-| Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
+| Keys | `herdr pane send-keys <pane> enter\|escape\|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
@@ -519,7 +522,7 @@ Default-on presentation projection is floored at Herdr 0.8.0.
 The floor's structural signal is the selected running server's protocol number, falling back to the client protocol only when that selected session positively reports no running server, and the release mapping was measured on 2026-08-05 by running each pinned upstream macOS aarch64 release asset's own `status --json` through the guarded lab helper:
 
 | Release | Reported version | Protocol | Carries both upstream focus fixes | Floor verdict |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | v0.7.3 | 0.7.3 | 16 | no | below |
 | v0.7.4 | 0.7.4 | 16 | no | below |
 | v0.7.5 | 0.7.5 | 17 | no | below |
@@ -697,10 +700,12 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
-Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
+Real compatibility evidence was refreshed on 2026-08-30 against the Orca app/runtime version 1.4.192.
 
 ```sh
 orca status --json
+recorded_id=$(sed -n 's/^orca_worktree_id=//p' state/<id>.meta)
+orca worktree show --worktree "id:$recorded_id" --json
 ```
 
 Observed fields:
@@ -708,19 +713,25 @@ Observed fields:
 ```text
 result.runtime.reachable=true
 result.runtime.state=ready
+result.runtime.appVersion=1.4.192
 ```
 
 `orca terminal create --json` returned `result.terminal.handle`.
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
-Speculative bare ids and nested terminal fields were deliberately rejected.
+The current `result.worktree.id` shape was `<repo UUID>::<absolute worktree path>`, and the matching live `orca worktree show` returned that exact recorded path.
+The live terminal record reported the same worktree id and path.
+The earlier single-atom worktree id remains covered as a compatibility form.
+Speculative terminal-id fields remain rejected.
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-control.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+The fake-Orca and endpoint-safety suites cover readiness, registration, composite and simple create response parsing, exact composite-id helper arguments, metadata routing, popup-safe submit, strict composite metadata refusal, and path-matched release refusal.
 
 ## cmux
 
@@ -758,7 +769,7 @@ Current active CLI findings:
 | Fresh readiness | `list-panes --workspace <id> --json --id-format uuids` | Found a brand-new surface before content existed. |
 | Fresh read counterexample | `read-screen` before any write | Returned `internal_error: Failed to read terminal text`. |
 | Literal send | `send --workspace <id> --surface <id> -- <text>` | Left text unsubmitted. |
-| Keys | `send-key ... enter|escape|ctrl-c` | All shared key operations worked. |
+| Keys | `send-key ... enter\|escape\|ctrl-c` | All shared key operations worked. |
 | Nested cwd | `current_directory` plus foreground subshell | Structured cwd froze; the marker-delimited `pwd` probe found the live cwd. |
 | Last surface | `close-surface` on the only surface | Refused with `invalid_state: Cannot close the last surface`. |
 | Last workspace | `close-workspace` on the only workspace in a window | Printed success but left the workspace present. |

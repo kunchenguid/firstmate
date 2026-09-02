@@ -385,20 +385,23 @@ test_harness_kind_capability() {
 }
 
 test_orca_refuses_an_escape_harness_interrupt() {
-  local dir out rc
+  local dir out rc worktree_id
   dir=$(new_case orca-escape)
   add_task "$dir" t1 claude ship orca "term-1"
+  worktree_id="123e4567-e89b-12d3-a456-426614174000::$dir/wt-t1"
   # Orca records its endpoint as terminal=, which endpoint validation requires.
   {
     cat "$dir/home/state/t1.meta"
     echo "terminal=term-1"
-    echo "orca_worktree_id=wt-1"
+    echo "orca_worktree_id=$worktree_id"
   } > "$dir/home/state/t1.meta.new"
   sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
   out=$(run_control "$dir" t1 interrupt); rc=$?
   expect_code 1 "$rc" "an Escape harness on orca should refuse"
-  assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
-  pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
+  assert_contains "$out" "cannot deliver" "a valid composite Orca id should reach the backend key-capability refusal"
+  assert_not_contains "$out" "malformed or inconsistent" \
+    "a current composite Orca id should pass control endpoint validation"
+  pass "fm-control interrupt: composite Orca ids validate before unsupported Escape refuses"
 }
 
 test_unverified_state_backends_refuse_stop_verbs() {

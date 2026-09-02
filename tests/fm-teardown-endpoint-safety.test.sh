@@ -30,7 +30,15 @@ printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
 exit 0
 SH
-  chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse"
+  cat > "$TMP_ROOT/$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf 'orca' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$TMP_ROOT/$dir/fakebin/tmux" "$TMP_ROOT/$dir/fakebin/treehouse" \
+    "$TMP_ROOT/$dir/fakebin/orca"
   printf '%s\n' "$TMP_ROOT/$dir"
 }
 
@@ -190,8 +198,65 @@ test_metadata_lock_serializes_destructive_cleanup() {
   pass "fm-teardown: destructive cleanup serializes with metadata writers"
 }
 
+test_orca_composite_endpoint_refusals_precede_runtime_calls() {
+  local dir id=orca-composite-invalid uuid
+  uuid=123e4567-e89b-12d3-a456-426614174000
+
+  dir=$(make_case orca-bad-uuid)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=not-a-uuid::$dir/worktree"
+  assert_refused_without_mutation "$dir" "$id" "Orca composite id with malformed repository UUID"
+
+  dir=$(make_case orca-relative-path)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$uuid::relative/worktree"
+  assert_refused_without_mutation "$dir" "$id" "Orca composite id with relative path"
+
+  dir=$(make_case orca-ambiguous-id)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$uuid::$dir/worktree::duplicate"
+  assert_refused_without_mutation "$dir" "$id" "Orca composite id with ambiguous delimiter"
+
+  dir=$(make_case orca-path-mismatch)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$uuid::$dir/other-worktree"
+  assert_refused_without_mutation "$dir" "$id" "Orca composite id with inconsistent recorded path"
+
+  dir=$(make_case orca-control-character)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree"$'\033' "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$uuid::$dir/worktree"$'\033'
+  assert_refused_without_mutation "$dir" "$id" "Orca composite id with control character"
+
+  dir=$(make_case orca-duplicate-id)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$uuid::$dir/worktree" \
+    "orca_worktree_id=$uuid::$dir/worktree"
+  assert_refused_without_mutation "$dir" "$id" "duplicated Orca composite id"
+
+  dir=$(make_case orca-invalid-terminal)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term/7" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" \
+    "orca_worktree_id=$uuid::$dir/worktree"
+  assert_refused_without_mutation "$dir" "$id" "Orca composite id with malformed terminal handle"
+
+  pass "fm-teardown: malformed, ambiguous, duplicated, control-bearing, and inconsistent Orca composite ids refuse before runtime calls"
+}
+
 test_supported_backend_endpoint_records_validate() {
-  local dir id backend target
+  local dir id backend target composite_id
   dir=$(make_case valid-backends)
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
@@ -221,11 +286,18 @@ test_supported_backend_endpoint_records_validate() {
   fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Zellij endpoint refused"
 
   id=orca-task
+  composite_id="123e4567-e89b-12d3-a456-426614174000::$dir/worktree"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
-    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9"
-  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid Orca endpoint refused"
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=$composite_id"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid composite Orca endpoint refused"
   [ "$FM_BACKEND_VALIDATED_TARGET" = term-7 ] || fail "Orca validation did not select its terminal"
+
+  id=orca-simple-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-8" \
+    "worktree=$dir/worktree" "project=$dir/project" "backend=orca" "orca_worktree_id=worktree-9"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid simple Orca endpoint refused"
 
   id=cmux-task
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -240,7 +312,7 @@ test_supported_backend_endpoint_records_validate() {
     set -e
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
-  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses"
+  pass "cleanup identity: valid tmux, Herdr, Zellij, composite/simple Orca, and cmux records validate while every empty backend target refuses"
 }
 
 test_tmux_empty_target_refuses_without_invocation() {
@@ -366,6 +438,7 @@ SH
 }
 
 test_invalid_endpoint_records_refuse_before_mutation
+test_orca_composite_endpoint_refusals_precede_runtime_calls
 test_control_lock_contention_refuses_before_mutation
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
