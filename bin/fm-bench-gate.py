@@ -1042,6 +1042,8 @@ def check_allowance(root: Path, plan: dict[str, Any], manifest: dict[str, Any], 
 def probe_command(probe: str, target: str) -> list[str]:
     """The argv the confinement runs. Each probe prints LEAKED on success."""
     script_dir = Path(__file__).resolve().parent
+    if probe == "process_inspection":
+        return [str(script_dir / "fm-bench-probe.sh"), probe]
     return [str(script_dir / "fm-bench-probe.sh"), probe, target]
 
 
@@ -1049,6 +1051,9 @@ def run_probe(
     wrapper: list[str], probe: str, target: str, timeout: int, env: dict[str, str] | None = None
 ) -> tuple[str, str]:
     argv = list(wrapper) + probe_command(probe, target)
+    probe_env = dict(env) if env is not None else dict(os.environ)
+    if probe == "process_inspection":
+        probe_env["PROCESS_INSPECTION_MARKER"] = target
     try:
         proc = subprocess.run(
             argv,
@@ -1056,7 +1061,7 @@ def run_probe(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
-            env=env,
+            env=probe_env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return "inconclusive", f"probe could not run: {exc}"
@@ -1237,6 +1242,19 @@ def probe_entrants(
             )
             continue
         report.ok(f"isolation.{entrant_id}.provision", "private clone, object store, temp, home, and session space recorded")
+
+        entrant_root = Path(str(entrant.get("root"))).resolve()
+        outside_private = [
+            f"{key} ({Path(str(entrant.get(key))).resolve()})"
+            for key in PRIVATE_STORAGE_KEYS
+            if not is_within(Path(str(entrant.get(key))).resolve(), entrant_root)
+        ]
+        report.require(
+            not outside_private,
+            f"isolation.{entrant_id}.private_containment",
+            "every declared private path resolves within this entrant's root",
+            "declared private storage escapes this entrant's proven root: " + ", ".join(outside_private),
+        )
 
         barren = [key for key in PRIVATE_STORAGE_KEYS if not probe_material(Path(str(entrant.get(key))))]
         report.require(
@@ -1646,8 +1664,18 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             report.fail(check, f"grouped files carry no content address: {', '.join(unlisted)}")
             ok = False
             continue
-        bad: list[str] = []
         sample_root = sample.resolve()
+        stored = {
+            path.relative_to(sample).as_posix()
+            for path in sample.rglob("*")
+            if path.is_file() and path.name != "manifest.json"
+        }
+        unexpected = sorted(stored - set(files))
+        if unexpected:
+            report.fail(check, f"archive files are not content-addressed: {', '.join(unexpected)}")
+            ok = False
+            continue
+        bad: list[str] = []
         for relative in sorted(files, key=str):
             if not isinstance(relative, str):
                 bad.append(f"{relative!r} (path is not a string)")
@@ -1696,11 +1724,23 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any]) -> tuple[bool
         return False, "archived evaluator argv must name an executable and an archived evaluator file"
     if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
         return False, "archived evaluator result_hash must be a sha256 digest"
+    files = record.get("files")
+    if not isinstance(files, dict) or argv[1] not in files:
+        return False, "archived evaluator file is not content-addressed in its sample manifest"
     evaluator = (sample / argv[1]).resolve()
     if not is_within(evaluator, sample.resolve()) or not evaluator.is_file():
         return False, "archived evaluator file escapes or is absent from its sample archive"
     try:
-        completed = subprocess.run(argv, cwd=str(sample), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        completed = subprocess.run(
+            argv,
+            cwd=str(sample),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "archived evaluator exceeded the 60-second restore-drill limit"
     except OSError as exc:
         return False, f"archived evaluator could not execute: {exc}"
     if completed.returncode != 0:

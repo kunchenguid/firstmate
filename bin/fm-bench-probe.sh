@@ -8,6 +8,7 @@
 # the access rather than by reading a claim about it.
 #
 # Usage: fm-bench-probe.sh <probe> <target>
+#        PROCESS_INSPECTION_MARKER=<marker> fm-bench-probe.sh process_inspection
 #
 # Probes, each attempting the exact bypass the transcript grep in the original
 # design could not detect:
@@ -33,16 +34,23 @@
 #
 # For the same reason a probe never narrows its evidence to one sample: the
 # storage probes try a bounded set of files rather than only the first, and the
-# process probe reads one line per process and excludes only its own lineage.
+# process probe reads one line per process without placing its marker in argv.
 set -u
 
-if [ "$#" -ne 2 ]; then
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
   echo "usage: fm-bench-probe.sh <probe> <target>" >&2
   exit 2
 fi
 
 PROBE=$1
-TARGET=$2
+if [ "$PROBE" = process_inspection ]; then
+  [ "$#" -eq 1 ] || { echo "usage: PROCESS_INSPECTION_MARKER=<marker> fm-bench-probe.sh process_inspection" >&2; exit 2; }
+  TARGET=${PROCESS_INSPECTION_MARKER:-}
+  [ -n "$TARGET" ] || { echo "error: PROCESS_INSPECTION_MARKER is required for process_inspection" >&2; exit 2; }
+else
+  [ "$#" -eq 2 ] || { echo "usage: fm-bench-probe.sh <probe> <target>" >&2; exit 2; }
+  TARGET=$2
+fi
 
 leaked() { printf 'PROBE LEAKED %s\n' "$1"; exit 0; }
 denied() { printf 'PROBE DENIED %s\n' "$1"; exit 0; }
@@ -114,9 +122,6 @@ case "$PROBE" in
       for entry in /proc/[0-9]*/cmdline; do
         [ -r "$entry" ] || continue
         table_readable=1
-        pid=${entry#/proc/}
-        pid=${pid%/cmdline}
-        [ "$pid" = "$$" ] && continue
         line=$(tr '\0\n\r' '   ' < "$entry" 2>/dev/null || true)
         [ -n "$line" ] || continue
         other_process=1
@@ -124,10 +129,11 @@ case "$PROBE" in
           *"$TARGET"*) leaked "saw another benchmark process in the process table" ;;
         esac
       done
-    elif command -v ps >/dev/null 2>&1 && ps -A -o pid= -o args= >/dev/null 2>&1; then
+    fi
+    if [ "$table_readable" -eq 0 ] && command -v ps >/dev/null 2>&1 \
+      && ps -A -o pid= -o args= >/dev/null 2>&1; then
       table_readable=1
-      while read -r pid line; do
-        [ "$pid" = "$$" ] && continue
+      while read -r _ line; do
         [ -n "$line" ] || continue
         other_process=1
         case "$line" in
