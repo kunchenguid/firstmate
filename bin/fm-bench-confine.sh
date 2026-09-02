@@ -16,14 +16,11 @@
 #   fm-bench-confine.sh --help
 #
 # Mechanisms (--mechanism, default auto):
-#   auto          first available of container, bwrap, sandbox-exec
+#   auto          first available of container, bwrap
 #   container     docker or podman with only --allow paths mounted and its own
 #                 PID namespace; the only mechanism that confines storage,
 #                 filesystem, AND processes on every supported host
 #   bwrap         bubblewrap with --unshare-pid and per-path binds (Linux)
-#   sandbox-exec  macOS seatbelt profile; confines storage and filesystem only,
-#                 so the gate's process-inspection probe stays unproven and the
-#                 launch stays refused until a container is available
 #   none          no confinement; provided so the gate's own regression can
 #                 prove the probe set detects a real leak
 #
@@ -48,7 +45,7 @@ while [ "$#" -gt 0 ]; do
       MECHANISM=$2; shift 2 ;;
     --image) [ "$#" -gt 1 ] || { echo "error: --image requires a reference" >&2; exit 2; }
       IMAGE=$2; shift 2 ;;
-    --list-mechanisms) printf '%s\n' container bwrap sandbox-exec none; exit 0 ;;
+    --list-mechanisms) printf '%s\n' container bwrap none; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; CMD=("$@"); break ;;
     *) echo "error: unexpected argument $1" >&2; exit 2 ;;
@@ -82,8 +79,6 @@ if [ "$MECHANISM" = auto ]; then
     MECHANISM=container
   elif command -v bwrap >/dev/null 2>&1; then
     MECHANISM=bwrap
-  elif command -v sandbox-exec >/dev/null 2>&1; then
-    MECHANISM=sandbox-exec
   else
     echo "error: no confinement mechanism is available on this host" >&2
     exit 2
@@ -140,27 +135,6 @@ case "$MECHANISM" in
       args+=(--setenv "${pair%%=*}" "${pair#*=}")
     done < <(scrubbed_env)
     exec bwrap "${args[@]}" -- "${CMD[@]}"
-    ;;
-  sandbox-exec)
-    command -v sandbox-exec >/dev/null 2>&1 || { echo "error: sandbox-exec is not available" >&2; exit 2; }
-    profile=$(mktemp) || exit 2
-    trap 'rm -f -- "$profile"' EXIT HUP INT TERM
-    env_args=()
-    while IFS= read -r pair; do
-      env_args+=("$pair")
-    done < <(scrubbed_env)
-    {
-      printf '(version 1)\n(deny default)\n(allow process*)\n(allow sysctl-read)\n'
-      printf '(allow mach*)\n(allow signal)\n(allow file-read-metadata)\n'
-      printf '(allow file-read* (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/System") (subpath "/Library") (subpath "/opt") (subpath "/private/etc") (subpath "/private/var/db/dyld") (subpath "/dev")'
-      [ "$EXPOSE_SELF_DIR" -eq 0 ] || printf ' (subpath "%s")' "$SELF_DIR"
-      for dir in "${ALLOW[@]}"; do printf ' (subpath "%s")' "$dir"; done
-      printf ')\n(allow file-write* (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr")'
-      for dir in "${ALLOW[@]}"; do printf ' (subpath "%s")' "$dir"; done
-      printf ')\n'
-    } > "$profile"
-    env -i "${env_args[@]}" sandbox-exec -f "$profile" "${CMD[@]}"
-    exit $?
     ;;
   none)
     exec "${CMD[@]}"

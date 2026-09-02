@@ -1837,48 +1837,61 @@ def confined_evaluator_command(wrapper: list[str], run_root: Path, evaluator: Pa
     return [*(str(run_root) if item == "{root}" else item for item in wrapper), str(evaluator), str(restored)]
 
 
-def rerun_archived_evaluator(
+def validate_archived_evaluator_declaration(
     sample: Path,
     record: dict[str, Any],
     restored_tree: Path,
-    wrapper: list[str],
-) -> tuple[bool, str]:
+) -> tuple[dict[str, Any] | None, str]:
     rerun = record.get("evaluator_rerun")
     if not isinstance(rerun, dict):
-        return False, "archive manifest has no deterministic evaluator rerun"
+        return None, "archive manifest has no deterministic evaluator rerun"
     argv = rerun.get("argv")
     expected = rerun.get("result_hash")
     scored_inputs = rerun.get("scored_inputs")
     if not isinstance(argv, list) or len(argv) != 1 or not isinstance(argv[0], str) or not argv[0]:
-        return False, "archived evaluator argv must name exactly one executable evaluator file"
+        return None, "archived evaluator argv must name exactly one executable evaluator file"
     if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
-        return False, "archived evaluator result_hash must be a sha256 digest"
+        return None, "archived evaluator result_hash must be a sha256 digest"
     if (
         not isinstance(scored_inputs, list)
         or not scored_inputs
         or not all(isinstance(item, str) and item for item in scored_inputs)
     ):
-        return False, "archived evaluator scored_inputs must name at least one restored candidate file"
+        return None, "archived evaluator scored_inputs must name at least one restored candidate file"
     files = record.get("files")
     groups = record.get("groups")
     if not isinstance(files, dict) or argv[0] not in files:
-        return False, "archived evaluator file is not content-addressed in its sample manifest"
+        return None, "archived evaluator file is not content-addressed in its sample manifest"
     if not isinstance(groups, dict) or argv[0] not in (groups.get("capture_and_scoring") or []):
-        return False, "archived evaluator must be declared in the capture_and_scoring evidence group"
+        return None, "archived evaluator must be declared in the capture_and_scoring evidence group"
     evaluator = (sample / argv[0]).resolve()
     if not is_within(evaluator, sample.resolve()) or not evaluator.is_file():
-        return False, "archived evaluator file escapes or is absent from its sample archive"
+        return None, "archived evaluator file escapes or is absent from its sample archive"
     if not os.access(evaluator, os.X_OK):
-        return False, "archived evaluator file is not executable"
+        return None, "archived evaluator file is not executable"
     restored_root = restored_tree.resolve()
     input_paths: list[Path] = []
     for relative in scored_inputs:
         candidate = (restored_tree / relative).resolve()
         if not is_within(candidate, restored_root):
-            return False, f"archived evaluator scored input escapes the restored candidate: {relative}"
+            return None, f"archived evaluator scored input escapes the restored candidate: {relative}"
         if not candidate.is_file():
-            return False, f"archived evaluator scored input is not a restored candidate file: {relative}"
+            return None, f"archived evaluator scored input is not a restored candidate file: {relative}"
         input_paths.append(Path(relative))
+    return {"argv": argv[0], "expected": expected, "input_paths": input_paths}, "archived evaluator declaration validated"
+
+
+def rerun_archived_evaluator(
+    sample: Path,
+    record: dict[str, Any],
+    restored_tree: Path,
+    wrapper: list[str],
+    declaration: dict[str, Any],
+) -> tuple[bool, str]:
+    files = record["files"]
+    evaluator_name = declaration["argv"]
+    expected = declaration["expected"]
+    input_paths = declaration["input_paths"]
     try:
         with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as first_workspace, tempfile.TemporaryDirectory(
             prefix="fm-bench-evaluator-"
@@ -1898,21 +1911,22 @@ def rerun_archived_evaluator(
                 run_roots.append((scratch, run_tree))
             genuine_scratch, genuine_tree = run_roots[0]
             perturbed_scratch, perturbed_tree = run_roots[1]
+            perturbation = os.urandom(32)
             for relative in input_paths:
                 perturbed_input = (perturbed_tree / relative).resolve()
                 if not is_within(perturbed_input, perturbed_tree.resolve()):
                     return False, f"archived evaluator scored input cannot be perturbed inside scratch: {relative}"
                 with perturbed_input.open("ab") as handle:
-                    handle.write(b"\nfm-bench-restore-perturbation\n")
+                    handle.write(perturbation)
             genuine = subprocess.run(
-                confined_evaluator_command(wrapper, genuine_scratch, genuine_scratch / argv[0], genuine_tree),
+                confined_evaluator_command(wrapper, genuine_scratch, genuine_scratch / evaluator_name, genuine_tree),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
                 timeout=60,
             )
             perturbed = subprocess.run(
-                confined_evaluator_command(wrapper, perturbed_scratch, perturbed_scratch / argv[0], perturbed_tree),
+                confined_evaluator_command(wrapper, perturbed_scratch, perturbed_scratch / evaluator_name, perturbed_tree),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
@@ -1952,37 +1966,34 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
         return
     if not samples:
         report.fail("restore.scope", "no sample archive to restore")
-    wrapper, confinement_detail = restore_confinement(root)
-    if wrapper is None:
-        report.fail("restore.confinement", confinement_detail)
-        receipt.unlink(missing_ok=True)
-        return
-    report.ok("restore.confinement", f"archived evaluator runs use the preflight-proven {confinement_detail} confinement")
     selected_samples = samples[:RESTORE_EVALUATOR_SAMPLE_LIMIT]
     selected_names = {sample.name for sample in selected_samples}
+    validated_samples: dict[str, tuple[Path, dict[str, Any], dict[str, Any], Path]] = {}
     reran = 0
-    for sample in samples:
-        check = f"restore.{sample.name}"
-        try:
-            record = load_json(sample / "manifest.json", ARCHIVE_SCHEMA)
-        except GateError as exc:
-            report.fail(check, str(exc))
-            drill_ok = False
-            continue
-        bundles = [
-            name
-            for name in (record.get("groups", {}).get("candidate_bundle_and_projection") or [])
-            if str(name).endswith(".bundle")
-        ]
-        if not bundles:
-            report.fail(check, "no candidate bundle in the archive; a projection alone cannot be rejudged")
-            drill_ok = False
-            continue
-        binding = record.get("tree_binding", {})
-        sample_ok = True
-        restored_trees: list[Path] = []
-        with tempfile.TemporaryDirectory(prefix="fm-bench-restore-") as workdir:
-            work = Path(workdir)
+    with tempfile.TemporaryDirectory(prefix="fm-bench-restore-") as workdir:
+        restore_workspace = Path(workdir)
+        for sample_index, sample in enumerate(samples):
+            check = f"restore.{sample.name}"
+            try:
+                record = load_json(sample / "manifest.json", ARCHIVE_SCHEMA)
+            except GateError as exc:
+                report.fail(check, str(exc))
+                drill_ok = False
+                continue
+            bundles = [
+                name
+                for name in (record.get("groups", {}).get("candidate_bundle_and_projection") or [])
+                if str(name).endswith(".bundle")
+            ]
+            if not bundles:
+                report.fail(check, "no candidate bundle in the archive; a projection alone cannot be rejudged")
+                drill_ok = False
+                continue
+            binding = record.get("tree_binding", {})
+            sample_ok = True
+            restored_trees: list[Path] = []
+            work = restore_workspace / f"sample-{sample_index}"
+            work.mkdir()
             for index, bundle_name in enumerate(bundles):
                 bundle = sample / bundle_name
                 fresh = work / f"repo-{index}"
@@ -2026,25 +2037,55 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                     sample_ok = False
                     continue
                 restored_trees.append(restored_tree)
-            if sample_ok and sample.name in selected_names:
-                reran_ok, rerun_detail = rerun_archived_evaluator(sample, record, restored_trees[0], wrapper)
-            elif sample_ok:
-                reran_ok, rerun_detail = True, "deterministically outside the bounded evaluator sample"
+            if not sample_ok:
+                drill_ok = False
+                continue
+            declaration, declaration_detail = validate_archived_evaluator_declaration(sample, record, restored_trees[0])
+            if declaration is None:
+                report.fail(check, declaration_detail)
+                drill_ok = False
+                continue
+            validated_samples[sample.name] = (sample, record, declaration, restored_trees[0])
+            report.ok(
+                check,
+                "bundle verified, restored into a fresh repository, and rebound to its archived tree; evaluator declaration validated",
+            )
+
+        declarations_ok = report.require(
+            len(validated_samples) == len(samples),
+            "restore.evaluator_declarations",
+            f"all {len(samples)} archived evaluator declarations validated",
+            "every archived sample must carry a valid deterministic evaluator declaration",
+        )
+        drill_ok = drill_ok and declarations_ok
+        if drill_ok:
+            wrapper, confinement_detail = restore_confinement(root)
+            if wrapper is None:
+                report.fail("restore.confinement", confinement_detail)
+                drill_ok = False
             else:
-                reran_ok, rerun_detail = False, "candidate bundle restoration did not complete"
-        if not sample_ok:
-            drill_ok = False
-            continue
-        if not reran_ok:
-            report.fail(check, rerun_detail)
-            drill_ok = False
-            continue
-        if sample.name in selected_names:
-            reran += 1
-        if sample.name in selected_names:
-            report.ok(check, "bundle verified, restored into a fresh repository, and rebound to its archived tree; confined archived evaluator rerun produced a changed perturbed result")
-        else:
-            report.ok(check, "bundle verified, restored into a fresh repository, and rebound to its archived tree")
+                report.ok(
+                    "restore.confinement",
+                    f"archived evaluator runs use the preflight-proven {confinement_detail} confinement",
+                )
+                for sample in selected_samples:
+                    archived_sample, record, declaration, restored_tree = validated_samples[sample.name]
+                    reran_ok, rerun_detail = rerun_archived_evaluator(
+                        archived_sample,
+                        record,
+                        restored_tree,
+                        wrapper,
+                        declaration,
+                    )
+                    if not reran_ok:
+                        report.fail(f"restore.{sample.name}.evaluator_rerun", rerun_detail)
+                        drill_ok = False
+                        continue
+                    reran += 1
+                    report.ok(
+                        f"restore.{sample.name}.evaluator_rerun",
+                        "confined archived evaluator rerun reproduced the genuine result and changed under scored-input perturbation",
+                    )
 
     ok = report.require(
         reran == len(selected_samples) if selected_samples else False,
