@@ -473,13 +473,13 @@ export default function (pi: ExtensionAPI) {
     stagedCaptain: null,
   };
   let currentMainSession: ReadonlyEntries | null = null;
-  // Volatile view of the open processing request: the highest sequence it
-  // presented, how many turns it has opened for that set, whether a
+  // Volatile view of the open processing request: the sequences it presented,
+  // how many turns it has opened for that set, whether a
   // presentation is still pending its run boundary, and whether a copy is
   // queued for the captain's next prompt. The durable truth is the store's
   // processed marker; this only paces re-presentation and resets with the
   // session generation.
-  type ProcessingState = { through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
+  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
@@ -744,9 +744,10 @@ export default function (pi: ExtensionAPI) {
       return true;
     }
     const through = rows[rows.length - 1].seq;
+    const sequences = rows.map((row) => row.seq).join(",");
     if (processing?.pending) return true;
-    if (!processing || processing.through !== through) {
-      processing = { through, triggered: 0, pending: false, nextTurnQueued: false };
+    if (!processing || processing.sequences !== sequences) {
+      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
     }
     // A presentation already sent is consumed by the run it joins or opens;
     // until that run settles, sending a widened or identical copy would hand

@@ -1281,13 +1281,23 @@ const latest = requests().at(-1).message.content;
 if (!latest.includes(`[seq ${seqE}] task-e:`) || !latest.includes(`[seq ${seqF}] task-f:`) || !latest.includes(`through=${seqF}`)) {
   throw new Error(`the widened request did not cover every unprocessed sequence with the highest key: ${latest}`);
 }
+const beforePairRepeat = requests().length;
+runOf();
+if (requests().length !== beforePairRepeat + 1 || requests().at(-1).options.triggerTurn !== true) {
+  throw new Error("the second presentation of the widened sequence set did not open its own turn");
+}
 const partial = await processed.execute("ack-partial", { through: seqE }, undefined, undefined, {});
 if (partial.isError) throw new Error(`partial acknowledgement failed: ${JSON.stringify(partial)}`);
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seqF])) throw new Error(`a partial acknowledgement did not keep the newer sequence open: ${unprocessedSeqs()}`);
 const beforeF = requests().length;
 runOf();
-if (requests().length !== beforeF + 1 || !requests().at(-1).message.content.includes(`[seq ${seqF}] task-f:`)) {
-  throw new Error("the still-open newer sequence was not re-presented");
+if (
+  requests().length !== beforeF + 1 ||
+  requests().at(-1).options.triggerTurn !== true ||
+  requests().at(-1).options.deliverAs !== "followUp" ||
+  !requests().at(-1).message.content.includes(`[seq ${seqF}] task-f:`)
+) {
+  throw new Error("the changed remaining sequence set did not restart its triggered presentation budget");
 }
 const done = await processed.execute("ack-final", { through: seqF }, undefined, undefined, {});
 if (done.isError || unprocessedSeqs().length !== 0) throw new Error("the final acknowledgement did not close the newer sequence");
