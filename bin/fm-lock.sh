@@ -14,11 +14,13 @@
 # physically binds it before probe, claim, lock publication, and verification.
 # It never creates FM_HOME, state, or a missing FM_STATE_OVERRIDE: initialize a
 # canonical primary home first with `fm-home-init.sh <home>`, then run
-# SessionStart. Any state-path identity change during the transaction removes
-# this attempt's own lock and claim from the bound state and refuses rather than
-# following the new target. The ordinary no-argument and status paths retain
-# their prior mkdir and lock behavior for Wake, guards, secondmates, and other
-# callers.
+# SessionStart. Any state-path identity change during the transaction refuses
+# rather than following the new target, and removes from the bound state only
+# this attempt's claim plus a lock this same attempt published; a lock an
+# earlier acquisition of this session already held is left in place, so a
+# refusal never frees the original home for a second session. The ordinary
+# no-argument and status paths retain their prior mkdir and lock behavior for
+# Wake, guards, secondmates, and other callers.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -167,11 +169,23 @@ release_claim_lock() {
 trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 
-remove_own_session_lock() {
+# Set only when THIS invocation published the lock into the bound state, and
+# only when no lock of this session was already there. A lock naming this
+# harness that predates the write belongs to an earlier acquisition of the same
+# session: removing it on refusal would leave the original home unlocked while
+# that session is still running, so a second session could claim it.
+SESSION_LOCK_PUBLISHED=0
+
+session_lock_names_me() {
   local owner
-  [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || return 0
+  [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || return 1
   owner=$(cat "$LOCK" 2>/dev/null || true)
-  [ "$owner" = "$me" ] || return 0
+  [ "$owner" = "$me" ]
+}
+
+remove_own_session_lock() {
+  [ "$SESSION_LOCK_PUBLISHED" -eq 1 ] || return 0
+  session_lock_names_me || return 0
   rm -f "$LOCK" 2>/dev/null || true
 }
 
@@ -183,8 +197,12 @@ refuse_changed_binding() {
 }
 
 publish_session_lock() {
+  local inherited=0
   session_start_binding_current || return 2
-  { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null
+  if session_lock_names_me; then inherited=1; fi
+  { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null || return 1
+  [ "$inherited" -eq 1 ] || SESSION_LOCK_PUBLISHED=1
+  return 0
 }
 
 verify_session_lock_publication() {

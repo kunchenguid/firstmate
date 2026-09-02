@@ -405,6 +405,7 @@ _fm_sessionstart_swap_path() {
 _fm_sessionstart_swap_on_debug() {
   case "$FM_SWAP_STAGE:$1" in
     before-probe:*'probe=$(mktemp'*) _fm_sessionstart_swap_path ;;
+    before-owned-lock-recheck:*'old=$(cat "$LOCK"'*) _fm_sessionstart_swap_path ;;
     after-claim:*CLAIM_LOCK_HELD=1*) _fm_sessionstart_swap_path ;;
     before-lock-publish:*publish_session_lock*) _fm_sessionstart_swap_path ;;
     after-lock-publish:*verify_session_lock_publication*) _fm_sessionstart_swap_path ;;
@@ -444,6 +445,44 @@ test_existing_override_path_replacement_stays_bound() {
     assert_absent "$home/state" "$stage created or claimed an unbound default state directory"
   done
   pass "fm-lock: every existing-state transaction phase stays on one physical binding"
+}
+
+# A refused transaction may only take back what it published itself. When this
+# session already holds the lock from an earlier acquisition, a later refused
+# start that removed it would leave the original home unlocked and claimable by
+# a second session while this one still runs.
+test_owned_lock_survives_existing_override_path_replacement() {
+  local root="$TMP_ROOT/owned-lock-root" home="$TMP_ROOT/owned-lock-home"
+  local state="$TMP_ROOT/owned-lock-state" target="$TMP_ROOT/owned-lock-target"
+  local saved="$TMP_ROOT/owned-lock-saved" hook="$TMP_ROOT/owned-lock.bash-env"
+  local marker="$TMP_ROOT/owned-lock.marker" owner out status=0
+  make_run_primary "$root"
+  mkdir -p "$home/data" "$home/config" "$home/projects" "$state" "$target"
+  out=$(env -u FM_SESSION_START_STAGE_FILE FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-lock.sh" session-start 2>&1) || status=$?
+  expect_code 0 "$status" "the acquisition that establishes this session's lock"
+  assert_present "$state/.lock" "the establishing acquisition published no session lock"
+  owner=$(cat "$state/.lock")
+
+  make_path_swap_bash_env "$hook"
+  status=0
+  out=$(env BASH_ENV="$hook" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$state" FM_SWAP_STAGE=before-owned-lock-recheck \
+    FM_SWAP_HOME="$state" FM_SWAP_TARGET="$target" FM_SWAP_SAVED="$saved" \
+    FM_SWAP_MARKER="$marker" "$ROOT/bin/fm-lock.sh" session-start 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "session-start followed a replacement while this session already held the lock"
+  assert_present "$marker" "the owned-lock replacement did not run"
+  assert_contains "$out" "operate read-only until resolved" \
+    "the owned-lock replacement lost the refusal diagnostic"
+  assert_present "$saved/.lock" "the refusal removed a session lock it never published"
+  [ "$(cat "$saved/.lock")" = "$owner" ] \
+    || fail "the refusal rewrote the session lock an earlier acquisition published"
+  assert_absent "$saved/.lock.acquire" "the refusal retained the transaction claim"
+  assert_absent "$target/.lock" "the owned-lock replacement redirected the session lock"
+  assert_absent "$target/.lock.acquire" "the owned-lock replacement redirected claim cleanup"
+  assert_absent "$home/state" \
+    "the owned-lock replacement created or claimed an unbound default state directory"
+  pass "fm-lock: a refused transaction keeps the lock an earlier acquisition of this session published"
 }
 
 test_existing_noncanonical_override_uses_bound_state_only() {
@@ -1301,6 +1340,7 @@ test_direct_session_start_home_matrix
 test_canonical_home_init_converges_public_entries
 test_home_init_refuses_populated_incomplete_home
 test_existing_override_path_replacement_stays_bound
+test_owned_lock_survives_existing_override_path_replacement
 test_existing_noncanonical_override_uses_bound_state_only
 test_home_init_concurrency_converges
 test_run_clear_and_compact_reemit
