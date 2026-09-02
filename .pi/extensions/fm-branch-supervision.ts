@@ -744,14 +744,13 @@ export default function (pi: ExtensionAPI) {
       return true;
     }
     const through = rows[rows.length - 1].seq;
+    if (processing?.pending) return true;
     if (!processing || processing.through !== through) {
       processing = { through, triggered: 0, pending: false, nextTurnQueued: false };
     }
-    // A presentation already sent for this exact sequence set is consumed by
-    // the run it joins or opens; until that run settles, sending another copy
-    // would only hand the same request to the same run twice. A newer outcome
-    // widens the set and is presented at once, so main learns of it promptly.
-    if (processing.pending) return true;
+    // A presentation already sent is consumed by the run it joins or opens;
+    // until that run settles, sending a widened or identical copy would hand
+    // overlapping requests to the same run.
     const message = { customType: PROCESSING_MESSAGE_TYPE, content: processingRequestInput(rows), display: false };
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;

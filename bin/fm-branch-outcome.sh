@@ -133,7 +133,7 @@ read_processed() {
 
 last_seq() {
   [ -s "$STORE" ] || { printf '0\n'; return 0; }
-  jq -es '
+  jq -Rse '
     def valid:
       type == "object"
       and (
@@ -144,7 +144,10 @@ last_seq() {
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
       and ((.task | type) == "string" and (.wake | type) == "string")
       and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"));
-    . as $rows
+    split("\n")
+    | if .[-1] == "" then .[:-1] else . end
+    | map(fromjson)
+    | . as $rows
     | if reduce range(0; length) as $i
         (true; . and ($rows[$i] | valid and .seq == ($i + 1)))
       then .[-1].seq
@@ -328,11 +331,31 @@ case "$CMD" in
   processed-init)
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
-    if [ ! -e "$PROCESSED" ]; then
-      if ! CURSOR_SEQ=$(read_cursor); then
+    if ! LAST_SEQ=$(last_seq); then
+      fm_lock_release "$LOCK"
+      echo "error: refusing processed initialization because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if ! CURSOR_SEQ=$(read_cursor); then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
+    if [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing processed initialization because the outcome cursor is ahead of the store" >&2
+      exit 1
+    fi
+    if [ -e "$PROCESSED" ]; then
+      if ! PROCESSED_SEQ=$(read_processed); then
         fm_lock_release "$LOCK"
         exit 1
       fi
+      if [ "$PROCESSED_SEQ" -gt "$CURSOR_SEQ" ]; then
+        fm_lock_release "$LOCK"
+        echo "error: refusing processed initialization because the processed marker is ahead of the read cursor" >&2
+        exit 1
+      fi
+    else
       write_processed "$CURSOR_SEQ"
     fi
     fm_lock_release "$LOCK"

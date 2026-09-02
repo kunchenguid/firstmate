@@ -235,6 +235,40 @@ test_outcome_sequence_conflicts_fail_closed() {
   pass "middle sequence conflicts fail closed for every store read and append"
 }
 
+test_outcome_non_jsonl_layout_fails_closed() {
+  local home store snapshot out status
+  home="$TMP_ROOT/store-physical-layout-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  printf '%s\n' \
+    '{' \
+    '  "seq": 1, "epoch": 1, "task": "task-1", "wake": "",' \
+    '  "verdict": "routine", "summary": "pretty printed", "silent": false' \
+    '}' > "$store"
+  snapshot=$(cat "$store")
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "list accepted a multi-line outcome record"
+  assert_contains "$out" "malformed or non-sequential" "multi-line record refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict routine --summary 'must remain unrecorded' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append extended a store containing a multi-line record"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "multi-line layout refusal changed the durable store"
+
+  printf '%s\n' \
+    '{"seq":1,"epoch":1,"task":"task-1","wake":"","verdict":"routine","summary":"first","silent":false}' \
+    '' \
+    '{"seq":2,"epoch":2,"task":"task-2","wake":"","verdict":"captain","summary":"second","silent":false}' \
+    > "$store"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted a blank physical record"
+  assert_contains "$out" "malformed or non-sequential" "blank-record refusal lost its diagnostic"
+  pass "outcome stores require exactly one JSON object per physical line"
+}
+
 test_outcome_processed_marker_is_sequence_bound() {
   local home marker out status
   home="$TMP_ROOT/store-processed-home"
@@ -302,6 +336,11 @@ test_outcome_processed_marker_is_sequence_bound() {
   status=$?
   [ "$status" -ne 0 ] || fail "unprocessed accepted a marker ahead of the read cursor"
   assert_contains "$out" "ahead of the read cursor" "ahead-of-cursor refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "processed-init accepted a marker ahead of the read cursor"
+  assert_contains "$out" "ahead of the read cursor" "processed-init ahead-marker refusal lost its diagnostic"
+  [ "$(cat "$marker")" = 5 ] || fail "refused processed-init rewrote the ahead marker"
 
   # Migration: a home with delivered history and no marker starts processed
   # at its read cursor, so that history is not re-presented; an absent marker
@@ -718,6 +757,7 @@ test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
 test_outcome_sequence_conflicts_fail_closed
+test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease

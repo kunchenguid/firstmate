@@ -1247,8 +1247,9 @@ const before = requests().length;
 runOf();
 if (requests().length !== before) throw new Error("an acknowledged outcome was presented again");
 
-// Two newer captain outcomes in a row: one request covering both, and a
-// partial acknowledgement keeps the newer sequence open and re-presented.
+// Two newer captain outcomes in a row: the second does not overlap a request
+// still pending its run boundary, and the widened request appears at that
+// boundary. A partial acknowledgement keeps the newer sequence open.
 // The replacement session rebuilt the branch, so its report tool is the new
 // session's; the old session's tool is generation-refused by design.
 const stale = await report.execute("captain-stale", { task: "task-e", verdict: "captain", summary: "must be refused" }, undefined, undefined, {});
@@ -1256,15 +1257,22 @@ if (!stale.isError) throw new Error("a replaced branch session's report tool was
 if (!dispatch("signal: after replacement").accepted) throw new Error("branch refused a wake after the replacement");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "replacement branch session");
 const report2 = globalThis.__fmSessions[1].options.customTools.find((tool) => tool.name === "fm_branch_report");
+const beforePair = requests().length;
 const second = await report2.execute("captain-2", { task: "task-e", verdict: "captain", summary: "PR https://example.com/pr/e is ready for review" }, undefined, undefined, {});
 if (second.isError) throw new Error(`second captain report failed: ${JSON.stringify(second)}`);
-const third = await report2.execute("captain-3", { task: "task-f", verdict: "captain", summary: "worker blocked on a missing credential" }, undefined, undefined, {});
-if (third.isError) throw new Error(`third captain report failed: ${JSON.stringify(third)}`);
 const seqE = seq + 1;
 const seqF = seq + 2;
+if (requests().length !== beforePair + 1 || !requests().at(-1).message.content.includes(`[seq ${seqE}] task-e:`)) {
+  throw new Error("the first newer captain outcome did not open its processing request");
+}
+const third = await report2.execute("captain-3", { task: "task-f", verdict: "captain", summary: "worker blocked on a missing credential" }, undefined, undefined, {});
+if (third.isError) throw new Error(`third captain report failed: ${JSON.stringify(third)}`);
+if (requests().length !== beforePair + 1) throw new Error("a widened sequence re-sent while the earlier request was pending");
+runOf();
+if (requests().length !== beforePair + 2) throw new Error("the widened sequence was not presented at the run boundary");
 const latest = requests().at(-1).message.content;
 if (!latest.includes(`[seq ${seqE}] task-e:`) || !latest.includes(`[seq ${seqF}] task-f:`) || !latest.includes(`through=${seqF}`)) {
-  throw new Error(`the request did not cover every unprocessed sequence with the highest key: ${latest}`);
+  throw new Error(`the widened request did not cover every unprocessed sequence with the highest key: ${latest}`);
 }
 const partial = await processed.execute("ack-partial", { through: seqE }, undefined, undefined, {});
 if (partial.isError) throw new Error(`partial acknowledgement failed: ${JSON.stringify(partial)}`);
