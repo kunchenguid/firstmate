@@ -71,8 +71,10 @@
 # before preserving the route for retry. Teardown then discards child work, kills
 # child runtime endpoints, and removes the retired home. Removing a leased home
 # releases its durable treehouse lease so the pool slot is freed,
-# never left leased forever. If the treehouse return fails, teardown leaves the
-# leased home and state in place instead of hiding a still-held lease.
+# never left leased forever. If the treehouse return fails and the pool cannot
+# prove that home's slot is already back in it (see the already-returned
+# convergence below), teardown leaves the leased home and state in place instead
+# of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
