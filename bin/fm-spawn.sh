@@ -30,17 +30,19 @@
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free or authoritatively missing on a backend with a recovery-grade
 #   agent-state classifier (tmux or herdr). An agent-free endpoint is reused
-#   when its shell is sitting in the recorded worktree. A missing endpoint is
-#   reconstructed through that backend's ordinary creation path into the same
+#   when its shell is sitting in the recorded worktree. A missing tmux endpoint
+#   is reconstructed through tmux's ordinary creation path into the same
 #   worktree, then published only after the replacement launch is proved.
+#   Missing Herdr endpoints refuse until restoration and creation can be
+#   excluded atomically.
 #   Under the existing task and control locks it revalidates the complete task
 #   incarnation and backend target immediately before replacement so a
 #   concurrently restored or changed endpoint cannot create a duplicate worker.
 #   Live or ambiguous endpoints still refuse. It clears the previous harness's
 #   per-task wiring before arming the new incarnation. An unpublished
 #   reconstructed endpoint is removed on failure; the worktree is never
-#   destroyed. zellij, orca, and cmux remain refused because they cannot prove
-#   a missing-target rebuild is safe.
+#   destroyed. Herdr, zellij, orca, and cmux missing endpoints remain refused
+#   because they cannot prove a race-free missing-target rebuild is safe.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -1140,7 +1142,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   case "$RELAUNCH_STATE" in
-    dead|missing) ;;
+    dead) ;;
+    missing)
+      if [ "$BACKEND" != tmux ]; then
+        echo "error: backend '$BACKEND' cannot atomically exclude endpoint restoration during missing-endpoint reconstruction; refusing rather than risking a duplicate worker" >&2
+        exit 1
+      fi
+      ;;
     *)
       echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free or authoritatively missing recorded endpoint (stop a live agent first with bin/fm-control.sh $ID exit)" >&2
       exit 1
@@ -2117,36 +2125,9 @@ spawn_relaunch_reconstruct_tmux() {
   RELAUNCH_CREATED_TARGET=$T
 }
 
-spawn_relaunch_reconstruct_herdr() {
-  local container_raw container seeded task_ids
-  HERDR_LABEL_HOME=$FM_HOME
-  HERDR_LAUNCHER_RELATIONSHIP=launcher-home
-  if [ "$KIND" = secondmate ]; then
-    HERDR_LABEL_HOME=$PROJ_ABS
-    HERDR_LAUNCHER_RELATIONSHIP=other-home
-  fi
-  container_raw=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$WT" "$HERDR_LAUNCHER_RELATIONSHIP") || return 1
-  container=${container_raw%%$'\t'*}
-  seeded=${container_raw#*$'\t'}
-  HERDR_SES=${container%%:*}
-  HERDR_WORKSPACE_ID=${container#*:}
-  task_ids=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$container" "$W" "$WT" "$seeded") || return 1
-  read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
-$task_ids
-EOF
-  if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
-    echo "error: herdr did not return a tab/pane id for $W" >&2
-    return 1
-  fi
-  T="$HERDR_SES:$HERDR_PANE_ID"
-  WT_TARGET=$T
-  RELAUNCH_CREATED_TARGET=$T
-}
-
 spawn_relaunch_reconstruct_endpoint() {
   case "$BACKEND" in
     tmux) spawn_relaunch_reconstruct_tmux || return 1 ;;
-    herdr) spawn_relaunch_reconstruct_herdr || return 1 ;;
     *)
       echo "error: backend '$BACKEND' has no safe missing-endpoint reconstruction path; refusing rather than creating an unproved replacement" >&2
       return 1
@@ -2166,6 +2147,10 @@ spawn_relaunch_replace_endpoint() {
       RELAUNCH_CREATED_TARGET=
       ;;
     missing)
+      if [ "$BACKEND" != tmux ]; then
+        echo "error: backend '$BACKEND' cannot atomically exclude endpoint restoration during missing-endpoint reconstruction; refusing rather than risking a duplicate worker" >&2
+        return 1
+      fi
       spawn_relaunch_reconstruct_endpoint || return 1
       ;;
     alive)

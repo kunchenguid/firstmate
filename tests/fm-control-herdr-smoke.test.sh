@@ -12,9 +12,8 @@
 # No real coding agent is launched. herdr's `pane report-agent` is the same
 # registry the adapter reads, so registering and not registering an agent on a
 # plain shell pane exercises exactly the classification the control plane gates
-# on. Missing-endpoint reconstruction launches a throwaway foreground sleeper
-# that registers in that same registry, then proves relaunch rebuilt a pane
-# into the recorded worktree.
+# on. A missing Herdr endpoint is also exercised to prove reconstruction refuses
+# until session restoration can be excluded atomically.
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (bin/fm-herdr-lab.sh; the 2026-07-02 incident). Skips cleanly
@@ -165,30 +164,20 @@ case "$OUT" in
 esac
 pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
 
-# --- missing pane: reconstruct through the ordinary creation path -----------
+# --- missing pane: refuse non-atomic reconstruction -------------------------
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true
 STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
 [ "$STATE" = missing ] || fail "closing the pane should classify it missing, got '$STATE'"
-
-OUT=$(run_control hsmoke relaunch --note "herdr pane gone, resume") \
-  || fail "missing-pane relaunch should reconstruct: $OUT"
+cp "$HOME_DIR/state/hsmoke.meta" "$SCRATCH/meta.before"
+if OUT=$(run_control hsmoke relaunch --note "herdr pane gone, resume" 2>&1); then
+  fail "missing-pane Herdr relaunch should refuse until restore exclusion is atomic: $OUT"
+fi
 case "$OUT" in
-  *"relaunched hsmoke harness=claude from=claude"*) : ;;
-  *) fail "missing-pane relaunch should report the replacement, got: $OUT" ;;
+  *"cannot atomically exclude endpoint restoration"*) : ;;
+  *) fail "missing-pane refusal should name the restore race, got: $OUT" ;;
 esac
-NEW_PANE=$(grep '^herdr_pane_id=' "$HOME_DIR/state/hsmoke.meta" | tail -1 | cut -d= -f2-)
-[ -n "$NEW_PANE" ] || fail "reconstruction must publish a replacement pane id"
-[ "$NEW_PANE" != "$PANE_ID" ] || fail "reconstruction must not reuse the gone pane id"
-[ "$(grep '^worktree=' "$HOME_DIR/state/hsmoke.meta" | tail -1 | cut -d= -f2-)" = "$WT" ] \
-  || fail "reconstruction must keep the recorded worktree"
-[ -f "$WT/keep-me.txt" ] || fail "uncommitted work must survive herdr reconstruction"
-"$LAB_HELPER" run "$SESSION" pane get "$NEW_PANE" >/dev/null 2>&1 \
-  || fail "the reconstructed pane must exist"
-pass "real herdr: a missing pane is reconstructed into the same worktree"
-
-fm_backend_herdr_kill "$SESSION:$NEW_PANE" 2>/dev/null || true
-OUT=$(run_control hsmoke relaunch --note "second herdr recovery") \
-  || fail "repeated missing-pane relaunch should succeed: $OUT"
-[ -f "$WT/keep-me.txt" ] || fail "repeated herdr recovery must keep uncommitted work"
-pass "real herdr: missing-pane reconstruction can run more than once"
+cmp -s "$HOME_DIR/state/hsmoke.meta" "$SCRATCH/meta.before" \
+  || fail "a refused missing-pane relaunch must keep the prior durable record"
+[ -f "$WT/keep-me.txt" ] || fail "a refused missing-pane relaunch must keep uncommitted work"
+pass "real herdr: a missing pane refuses non-atomic reconstruction"

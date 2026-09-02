@@ -36,10 +36,10 @@
 #              - so switching harness is one ordinary use of this verb. A
 #              positively agent-free recorded endpoint is reused; a positively
 #              missing recorded endpoint is treated as an already-stopped prior
-#              worker and reconstructed through the backend's ordinary creation
-#              path rather than sending lifecycle input into a gone target or
-#              refusing before recovery. Live or ambiguous endpoints still
-#              refuse replacement. With no explicit axis, a secondmate
+#              worker rather than receiving lifecycle input. Tmux reconstructs
+#              it through its ordinary creation path; Herdr clearly refuses
+#              until restore exclusion is atomic. Live or ambiguous endpoints
+#              still refuse replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
 #              plus its optional model and effort tokens) exactly as any other
 #              respawn does, while a ship or scout keeps the exact adapter
@@ -86,8 +86,9 @@
 #     classifier (tmux, herdr), because without one the "the agent stopped"
 #     postcondition cannot be proven. zellij, orca, and cmux are refused rather
 #     than reported as successful blind. Missing-endpoint reconstruction is
-#     therefore the same tmux/herdr pair: other spawn-capable backends have no
-#     proven safe missing-target rebuild and stay refused.
+#     supported only for tmux; Herdr refuses until endpoint restoration and tab
+#     creation can be excluded atomically, and the other backends have no proven
+#     safe missing-target rebuild.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts. `exit` still refuses a missing endpoint; `relaunch`
 #     treats that same missing classification as already-stopped so recovery
@@ -455,7 +456,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
-  local state cmd verdict cancel interrupt_result=not-needed
+  local missing_policy=${1:-strict} state cmd verdict cancel interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -464,7 +465,13 @@ do_exit() {
       return 0
       ;;
     alive) ;;
-    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
+    missing)
+      if [ "$missing_policy" = relaunch-after-dead ]; then
+        printf 'already-stopped'
+        return 0
+      fi
+      die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action"
+      ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
@@ -836,11 +843,16 @@ do_relaunch() {
     missing)
       # The recorded target is gone: there is no agent to stop and nothing to
       # send lifecycle input into. Treat that as an already-stopped prior
-      # worker so replacement launch (which reconstructs a new endpoint) can
-      # run. Live, dead, and ambiguous states keep using do_exit.
+      # worker so replacement launch can make the backend-specific recovery
+      # decision. Live, dead, and ambiguous states keep using do_exit.
       exit_result=already-stopped
       ;;
-    dead|alive)
+    dead)
+      export FM_RELAUNCH_STOP_REVALIDATE=1
+      exit_result=$(do_exit relaunch-after-dead)
+      unset FM_RELAUNCH_STOP_REVALIDATE
+      ;;
+    alive)
       exit_result=$(do_exit)
       ;;
     *)

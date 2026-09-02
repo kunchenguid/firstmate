@@ -118,6 +118,9 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows)
+    if [ -n "${FM_RELAUNCH_STOP_REVALIDATE:-}" ] && [ -n "${FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE:-}" ]; then
+      : > "$D/windows"
+    fi
     if [ -n "${FM_RELAUNCH_PRE_REPLACE:-}" ] && [ -n "${FM_FAKE_ENDPOINT_REAPPEAR_READY:-}" ]; then
       : > "$FM_FAKE_ENDPOINT_REAPPEAR_READY"
       while [ ! -e "$FM_FAKE_ENDPOINT_REAPPEAR_RELEASE" ]; do /bin/sleep 0.01; done
@@ -233,6 +236,7 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
     FM_FAKE_CREATE_FAIL="${FM_FAKE_CREATE_FAIL:-}" \
+    FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE="${FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE:-}" \
     FM_FAKE_ENDPOINT_REAPPEAR_READY="${FM_FAKE_ENDPOINT_REAPPEAR_READY:-}" \
     FM_FAKE_ENDPOINT_REAPPEAR_RELEASE="${FM_FAKE_ENDPOINT_REAPPEAR_RELEASE:-}" \
     FM_FAKE_NEVER_STARTS="${FM_FAKE_NEVER_STARTS:-}" \
@@ -1576,6 +1580,23 @@ test_missing_endpoint_relaunch_reconstructs_and_preserves_identity() {
   pass "fm-control relaunch: a missing endpoint is reconstructed into the same worktree"
 }
 
+test_dead_endpoint_disappearing_during_relaunch_stop_still_recovers() {
+  local dir out rc
+  dir=$(new_case dead-disappears rl59)
+  add_ship_task "$dir" rl59 claude
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_FAKE_ENDPOINT_DISAPPEAR_ON_STOP_REVALIDATE=1 \
+    run_control "$dir" rl59 relaunch --note "endpoint disappeared after stop proof"); rc=$?
+  expect_code 0 "$rc" "a proven-dead endpoint that disappears during relaunch stop should recover"$'\n'"$out"
+  [ "$(journal_field "$dir" rl59 prior_endpoint_state)" = dead ] \
+    || fail "the transaction should retain the initial dead-endpoint proof"
+  [ "$(journal_field "$dir" rl59 exit_result)" = already-stopped ] \
+    || fail "the relaunch-only stop should accept dead becoming missing"
+  [ "$(cat "$dir/fake/created")" = "fm-rl59" ] \
+    || fail "the replacement endpoint should be reconstructed"
+  pass "fm-control relaunch: a proven-dead endpoint may disappear before replacement"
+}
+
 test_missing_endpoint_relaunch_preserves_uncommitted_work() {
   local dir head
   dir=$(new_case missing-dirty rl51)
@@ -1786,6 +1807,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_missing_endpoint_relaunch_reconstructs_and_preserves_identity
+test_dead_endpoint_disappearing_during_relaunch_stop_still_recovers
 test_missing_endpoint_relaunch_preserves_uncommitted_work
 test_missing_endpoint_relaunch_repeats_safely
 test_missing_endpoint_reappear_as_live_refuses_duplicate
