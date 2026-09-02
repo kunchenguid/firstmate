@@ -65,7 +65,7 @@ Never pass Cursor `-w` or `--worktree`, which allocates a second copy under `~/.
 The CLI supports repeatable `--add-dir`, but the adapter adds none; positional instructions need no grant to their private directory.
 Example of the ordinary case, which is REFUSED because nobody is watching a scout pane: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high`.
 Pass a grant only when it is true of this launch, because `attended` is an attestation that a person is sitting in the pane and `envelope:<name>` names the outer isolation envelope an audit can go check.
-The grant is per invocation and never ambient, so neither an exported variable nor an earlier launch can exempt a later unattended spawn.
+The grant is per invocation and never ambient, so neither an exported variable nor an earlier attended launch can silently exempt a later unattended spawn.
 A captain who will watch the pane themself adds `--cursor-exemption attended`; a worker running inside the approved routing benchmark adds `--cursor-exemption envelope:routing-benchmark` instead.
 An envelope name is bounded to letters, digits, `.`, `_`, and `-` starting on a letter or digit, so a grant cannot be unauditable or carry a line break into the task record.
 An explicitly passed grant is refused on a non-cursor harness rather than recorded, on the local and remote spawn routes alike, while one inherited from a task's own record is dropped when that task restarts onto another harness.
