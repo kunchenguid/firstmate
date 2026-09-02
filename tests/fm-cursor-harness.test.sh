@@ -22,6 +22,12 @@
 #   5. Cursor is a crewmate/scout adapter only and refuses a secondmate launch.
 set -u
 
+# bin/fm-harness.sh checks agy's marker ahead of every identity below cursor's,
+# so a suite running inside an agy crewmate would otherwise answer `agy` for the
+# claude cases here. Cleared once for the whole file, as the marker's own suite
+# does for the foreign markers it must not inherit.
+unset ANTIGRAVITY_AGENT
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -184,7 +190,7 @@ test_cursor_marker_outranks_inherited_claudecode() {
   out=$(CLAUDECODE=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
   [ "$out" = cursor ] || fail "CLAUDECODE + CURSOR_INVOKED_AS must detect cursor, got '$out'"
   # Both cursor markers stand alone, and neither steals a plain claude session.
-  out=$(env -u CLAUDECODE CURSOR_AGENT=1 "$HARNESS")
+  out=$(env -u CLAUDECODE -u ANTIGRAVITY_AGENT CURSOR_AGENT=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CURSOR_AGENT alone must detect cursor, got '$out'"
   out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"

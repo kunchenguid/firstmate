@@ -18,7 +18,7 @@ set -u
 # versioned muse-bin ancestor these detection cases launch. Drop the ambient
 # markers so the asserted verdict does not depend on which harness launched
 # the suite.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS ANTIGRAVITY_AGENT
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -177,7 +177,7 @@ test_detects_versioned_process_ancestor() {
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
     fm_test_named_interpreter "$dir" "$bin" >/dev/null \
       || fail "no construction on this host yields a running process named '$bin'"
-    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    out=$(env -u CLAUDECODE -u ANTIGRAVITY_AGENT -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
     [ "$out" = muse ] || fail "fm-harness.sh under process '$bin' reported '$out', expected muse"
@@ -194,7 +194,7 @@ test_detection_is_anchored() {
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
     fm_test_named_interpreter "$dir" "$bin" >/dev/null \
       || fail "no construction on this host yields a running process named '$bin'"
-    out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    out=$(env -u CLAUDECODE -u ANTIGRAVITY_AGENT -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
     [ "$out" != muse ] || fail "fm-harness.sh misdetected unrelated process '$bin' as muse"

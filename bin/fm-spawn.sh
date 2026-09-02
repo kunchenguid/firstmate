@@ -2457,36 +2457,47 @@ AGY_TRUST_REGEX='Do you trust the contents of this project|Yes, I trust this fol
 # The ONLY evidence that agy is running its session: one of its own footers,
 # streaming or idle. Readiness is a positive claim, so nothing else may settle
 # it - least of all the dialog's absence, which an empty pane read satisfies
-# just as well as a started session does. spawn_pane_capture answers empty for
-# every backend error, so an empty capture means "no evidence yet" and the poll
-# simply continues to the deadline.
-# The dialog is tested BEFORE the footer, and that order is load-bearing: if agy
-# ever renders a footer beneath an open dialog, answering it is the safe move
-# and the next poll still confirms readiness, while the other order would call a
-# blocked session ready and never send the Enter at all.
+# just as well as a started session does. The read answers empty for every
+# backend error, so an empty capture means "no evidence yet" and the poll simply
+# continues to the deadline.
+# An UNANSWERED dialog pre-empts a footer in the same read, because a blocked
+# session must be answered rather than declared ready. Once it has been
+# answered, a footer settles readiness on its own: the dialog's text may still
+# sit in the capture, and waiting for it to leave would be waiting on a negative.
 AGY_READY_REGEX='esc to cancel|\? for shortcuts'
 
 # What the gate never managed to observe, reported verbatim when it gives up.
 AGY_READY_DETAIL=
 
+# Both backends answer fm_backend_capture with recent OUTPUT rather than a
+# live-screen snapshot, so a wide read keeps re-serving a dialog agy dismissed
+# long ago. The gate therefore reasons about the same window every busy
+# classifier uses: a 40-line read folded to its last 12 non-blank rows.
+agy_screen_tail() {
+  fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null \
+    | grep -v '^[[:space:]]*$' | tail -12
+}
+
 agy_wait_for_ready() {
-  local pane i=0 answered=0 max=${FM_AGY_READY_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  local pane blocked ready i=0 answered=0 max=${FM_AGY_READY_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
   AGY_READY_DETAIL="agy rendered nothing readable in its pane: neither its workspace-trust dialog nor a ready footer ($AGY_READY_REGEX) was ever observed"
   while [ "$i" -lt "$max" ]; do
-    pane=$(spawn_pane_capture)
-    if printf '%s\n' "$pane" | grep -qE "$AGY_TRUST_REGEX"; then
-      # Exactly one Enter, and only while the dialog is still on screen. A
-      # second one would land in the composer of a session that has already
-      # started its turn, submitting an empty message into the brief.
-      if [ "$answered" -eq 0 ]; then
-        if ! spawn_send_key "$T" Enter; then
-          AGY_READY_DETAIL="the Enter answering agy's workspace-trust dialog could not be delivered to the pane"
-          return 1
-        fi
-        answered=1
-        AGY_READY_DETAIL="agy never rendered a ready footer ($AGY_READY_REGEX) after firstmate answered its workspace-trust dialog with one Enter"
+    pane=$(agy_screen_tail)
+    blocked=0
+    ready=0
+    if printf '%s\n' "$pane" | grep -qE "$AGY_TRUST_REGEX"; then blocked=1; fi
+    if printf '%s\n' "$pane" | grep -qE "$AGY_READY_REGEX"; then ready=1; fi
+    if [ "$blocked" -eq 1 ] && [ "$answered" -eq 0 ]; then
+      # Exactly one Enter for the whole gate. A second would land in the
+      # composer of a session that has already started its turn, submitting an
+      # empty message into the brief.
+      if ! spawn_send_key "$T" Enter; then
+        AGY_READY_DETAIL="the Enter answering agy's workspace-trust dialog could not be delivered to the pane"
+        return 1
       fi
-    elif printf '%s\n' "$pane" | grep -qE "$AGY_READY_REGEX"; then
+      answered=1
+      AGY_READY_DETAIL="agy never rendered a ready footer ($AGY_READY_REGEX) after firstmate answered its workspace-trust dialog with one Enter"
+    elif [ "$ready" -eq 1 ]; then
       return 0
     elif [ -n "$pane" ] && [ "$answered" -eq 0 ]; then
       AGY_READY_DETAIL="agy rendered a pane but never a ready footer ($AGY_READY_REGEX), and its workspace-trust dialog never appeared"

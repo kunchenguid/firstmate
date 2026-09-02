@@ -57,7 +57,9 @@ agy_payload() {  # <template> <workspace>
 #
 # FM_FAKE_AGY_AFTER_ENTER names what replaces the dialog once it is answered,
 # and defaults to the idle footer. Setting it to `blank` is the pane read that
-# fails or comes back empty, which is what a backend hiccup looks like.
+# fails or comes back empty, which is what a backend hiccup looks like, and
+# `trust-and-ready` is the capture that still carries the answered dialog above
+# the footer, which is what a recent-output read looks like.
 #
 # FM_FAKE_AGY_PHASE, when set, makes the stub honour launch ORDER: the screen
 # stays empty until the launch line is typed AND submitted. Without it the spawn
@@ -104,6 +106,9 @@ case "${1:-}" in
     case "$target" in
       trust)
         printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
+        ;;
+      trust-and-ready)
+        printf 'Do you trust the contents of this project?\n> Yes, I trust this folder\n\n  >\n? for shortcuts\n'
         ;;
       blank) : ;;
       *) printf '  >\n\n? for shortcuts\n' ;;
@@ -426,6 +431,30 @@ EOF
   pass "an answered dialog that never yields an agy footer fails the spawn instead of passing on an empty pane"
 }
 
+# Both backends answer a capture with recent OUTPUT, not a screen snapshot, so
+# the dialog agy has already dismissed can still sit in the read above the
+# footer that replaced it. Readiness must come from the footer regardless: a
+# gate that waits for the dialog text to LEAVE the capture waits forever and
+# hard-fails a session that started normally.
+test_ready_footer_settles_a_capture_still_carrying_the_dialog() {
+  local rec case_dir home proj wt fakebin agy_home id out enters
+  rec=$(make_spawn_case trust-retained)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_SCREEN=trust FM_FAKE_AGY_AFTER_ENTER=trust-and-ready \
+    FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=6 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    || fail "agy spawn failed although its footer rendered under the answered dialog: $out"
+  enters=$(agy_enters_after_launch "$case_dir/events.log")
+  [ "$enters" -eq 2 ] \
+    || fail "the gate sent $enters Enters after the launch line; expected the launch submit plus exactly one answer"
+  pass "a ready footer settles readiness even while the answered dialog is still in the capture"
+}
+
 # --- the fullyIdle turn-end rule -------------------------------------------
 
 # Drive the INSTALLED hook, not a copy of its logic, so the assertion covers
@@ -665,6 +694,7 @@ test_secondmate_positional_agy_is_refused
 test_trust_dialog_is_answered_exactly_once
 test_spawn_fails_when_agy_never_renders
 test_answered_dialog_alone_does_not_prove_readiness
+test_ready_footer_settles_a_capture_still_carrying_the_dialog
 test_turnend_requires_fully_idle
 test_turnend_requires_registered_token
 test_turnend_never_blocks_the_stop
