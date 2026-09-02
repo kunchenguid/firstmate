@@ -20,7 +20,12 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "WORKTREE_COLLISION: live|stale <resolved shared path> claimed by
+#                 <id> (<detail>, recorded <that record's own worktree=>), ...[ - <path caveat>]".
+#          bin/fm-worktree-collision-lib.sh's header owns that line's
+#          semantics: which kinds exist, what each claimant detail and path
+#          caveat asserts, and why the check only ever detects.
 #          When a RUNNING local secondmate worktree is fast-forwarded to
 #          firstmate's own current default-branch commit, that update is a
 #          purely local fast-forward and never an origin fetch. Remote routes
@@ -160,6 +165,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-worktree-collision-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-worktree-collision-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh disable=SC1091
@@ -1445,6 +1452,12 @@ detect_local_config() {
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
   detect_home_summary_publication
+  # Worktree double-registration check: two or more state/*.meta records
+  # claiming one worktree= path (see bin/fm-worktree-collision-lib.sh). Purely
+  # local reads (meta files, the recorded backend endpoint, and the worktree's
+  # own git state), so it runs unconditionally in every detect pass, including
+  # a lock-refused read-only session.
+  fm_worktree_collision_lines "$STATE"
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle
