@@ -220,6 +220,7 @@ The separate audit of Firstmate-owned probes found that `bin/fm-pr-merge.sh`'s m
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
+The optional `--evidence-archive` scout scaffold adds its Reach contract through `bin/fm-brief.sh`.
 
 ## Dispatch profiles
 

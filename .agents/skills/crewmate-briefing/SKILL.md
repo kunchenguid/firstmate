@@ -11,6 +11,7 @@ metadata:
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 For an ordinary ship or scout brief, use its scaffold as the contract, then replace exactly the two standalone `{TASK}` lines under `# Task` and `# Load-bearing contract` with a clear task description, acceptance criteria, constraints, and necessary context.
 Do not replace inline prose tokens.
+The optional `--evidence-archive` scout variant adds its Reach contract after the evidence-archive section.
 A secondmate charter is not an ordinary brief: it uses `# Charter` and `# Routing scope`, carries no load-bearing bookend, and its authoring stays with `secondmate-provisioning`.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 

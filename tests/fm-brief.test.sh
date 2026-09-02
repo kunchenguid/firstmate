@@ -1196,7 +1196,7 @@ test_all_brief_kinds_delivery_evidence_contracts() {
 }
 
 test_scout_evidence_archive_opt_in() {
-  local home default_id archive_id brief index out status
+  local home default_id archive_id brief archive index doctor_path out status
   home="$TMP_ROOT/evidence-archive-home"
   mkdir -p "$home/data"
   default_id='brief-scout-archive-default'
@@ -1209,11 +1209,30 @@ test_scout_evidence_archive_opt_in() {
     "default scout brief mentioned the opt-in evidence archive"
   assert_no_grep "sources/index.md" "$home/data/$default_id/brief.md" \
     "default scout brief mentioned the opt-in archive index"
+  assert_no_grep '# Reach contract' "$home/data/$default_id/brief.md" \
+    "default scout brief unexpectedly included the reach contract"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-scout-archive-reader alpha --scout --access reader >/dev/null 2>&1 \
+    || fail "plain reader scaffold failed while checking reach-contract scope"
+  assert_no_grep '# Reach contract' "$home/data/brief-scout-archive-reader/brief.md" \
+    "plain reader brief unexpectedly included the reach contract"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='review work' \
+    "$ROOT/bin/fm-brief.sh" brief-scout-archive-secondmate --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate scaffold failed while checking reach-contract scope"
+  assert_no_grep '# Reach contract' "$home/data/brief-scout-archive-secondmate/brief.md" \
+    "secondmate brief unexpectedly included the reach contract"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-scout-archive-ship alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "plain ship scaffold failed while checking reach-contract scope"
+  assert_no_grep '# Reach contract' "$home/data/brief-scout-archive-ship/brief.md" \
+    "ship brief unexpectedly included the reach contract"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$archive_id" alpha --scout --evidence-archive >/dev/null 2>&1; status=$?
   expect_code 0 "$status" "--evidence-archive scout scaffold should exit 0"
   brief="$home/data/$archive_id/brief.md"
   archive="$home/data/$archive_id/sources"
+  doctor_path="$archive/agent-reach-doctor.json"
   index="$archive/index.md"
   assert_present "$archive" "opt-in scout scaffold did not create sources directory"
   assert_present "$index" "opt-in scout scaffold did not create sources/index.md"
@@ -1227,6 +1246,17 @@ test_scout_evidence_archive_opt_in() {
     "opt-in scout brief omitted the data-not-instructions rule"
   assert_grep "Credentials/secrets must never be stored there" "$brief" \
     "opt-in scout brief omitted the credential exclusion"
+  assert_grep '# Reach contract' "$brief" \
+    "opt-in scout brief omitted the reach contract section"
+  # shellcheck disable=SC2016 # Backticks are literal brief markup.
+  assert_grep "First command of the task: \`agent-reach doctor --json > $doctor_path\`." "$brief" \
+    "reach contract omitted the doctor command and JSON evidence path"
+  # shellcheck disable=SC2016 # Backticks are literal brief markup.
+  assert_grep "The report includes an \`AGENT-REACH EVALUATION\` section, and \`$doctor_path\` exists." "$brief" \
+    "archive scout definition of done omitted the reach evaluation requirement"
+  # shellcheck disable=SC2016 # Backticks are literal brief markup.
+  assert_grep 'gh` channel through `gh-axi` only after an agent-reach channel fails' "$brief" \
+    "reach contract conflicts with the shared gh-axi GitHub interface"
   assert_grep "# Evidence archive index" "$index" \
     "opt-in archive index did not identify its purpose"
   assert_grep "provenance" "$index" \
@@ -1268,6 +1298,75 @@ test_scout_evidence_archive_bookend_fill_and_validate() {
       || fail "$access evidence-archive brief failed validate-bookends after fill"
   done
   pass "fm-brief: evidence-archive scout briefs place archive before the closing bookend and survive fill/validate-bookends"
+}
+
+test_evidence_archive_path_safety() {
+  local home escaped symlink_home outside id out status fakebin
+  home="$TMP_ROOT/evidence-archive-path-safety"
+  mkdir -p "$home/data"
+
+  escaped="$TMP_ROOT/escaped-target"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" '../../escaped-target' alpha --scout --evidence-archive 2>&1); status=$?
+  expect_code 1 "$status" "an evidence-archive scaffold must reject a path-traversal task id"
+  assert_absent "$escaped" "a path-traversal task id created an outside archive"
+  assert_contains "$out" "task id" "path-traversal refusal did not identify the task id"
+
+  symlink_home="$TMP_ROOT/symlink-home"
+  ln -s "$home" "$symlink_home"
+  out=$(FM_HOME="$symlink_home" "$ROOT/bin/fm-brief.sh" symlinked-home alpha --scout --evidence-archive 2>&1); status=$?
+  expect_code 1 "$status" "an evidence-archive scaffold must reject a symlinked home"
+  assert_absent "$home/data/symlinked-home" "a symlinked home created an evidence archive"
+  assert_contains "$out" "symlink" "symlinked-home refusal did not identify the unsafe home"
+
+  id=symlinked-sources
+  outside="$TMP_ROOT/sources-outside"
+  mkdir -p "$outside" "$home/data/$id"
+  ln -s "$outside" "$home/data/$id/sources"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --scout --evidence-archive 2>&1); status=$?
+  expect_code 1 "$status" "an evidence-archive scaffold must reject a symlinked sources directory"
+  assert_absent "$outside/index.md" "a symlinked sources directory received archive content"
+  assert_contains "$out" "symlink" "symlinked sources refusal did not identify the unsafe archive"
+
+  id=swap-regression
+  outside="$TMP_ROOT/swap-outside"
+  fakebin="$TMP_ROOT/fake-mktemp-bin"
+  mkdir -p "$outside" "$fakebin"
+  cat > "$fakebin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+real_mktemp=$(PATH=/usr/bin:/bin command -v mktemp)
+stage=$($real_mktemp "$@")
+data=${2%/.fm-brief.XXXXXX}
+ln -s "$FM_BRIEF_SWAP_TARGET" "$data/$FM_BRIEF_SWAP_ID"
+printf '%s\n' "$stage"
+EOF
+  chmod +x "$fakebin/mktemp"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BRIEF_SWAP_DATA="$home/data" \
+    FM_BRIEF_SWAP_ID="$id" FM_BRIEF_SWAP_TARGET="$outside" \
+    "$ROOT/bin/fm-brief.sh" "$id" alpha --scout --evidence-archive 2>&1); status=$?
+  expect_code 1 "$status" "an archive task path swapped after validation must fail closed"
+  assert_absent "$outside/brief.md" "a post-validation task-path swap wrote the brief outside the home"
+  assert_absent "$outside/sources/index.md" "a post-validation task-path swap wrote the archive outside the home"
+  assert_contains "$out" "appeared during finalization" "post-validation task-path swap was not reported"
+  pass "fm-brief.sh: evidence archives reject traversal, symlinked homes, symlinked sources, and swaps"
+}
+
+test_evidence_archive_survives_laboratory_cleanup() {
+  local home lab id archive
+  home="$TMP_ROOT/evidence-archive-retention"
+  lab="$TMP_ROOT/evidence-archive-laboratory"
+  id=evidence-archive-retention
+  mkdir -p "$home/data" "$lab"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --scout --evidence-archive >/dev/null 2>&1 \
+    || fail "evidence-archive retention scaffold failed"
+  archive="$home/data/$id/sources"
+  printf 'disposable laboratory capture\n' > "$lab/capture.txt"
+  printf 'retained archive capture\n' > "$archive/retained.txt"
+  rm -rf "$lab"
+  assert_absent "$lab" "laboratory cleanup did not remove the disposable work area"
+  assert_present "$archive/retained.txt" "laboratory cleanup removed retained evidence"
+  assert_present "$archive/index.md" "laboratory cleanup removed the archive index"
+  pass "fm-brief.sh: evidence archives remain after disposable laboratory cleanup"
 }
 
 # Isolate the generated Engineering bar as a structural section rather than
@@ -1512,7 +1611,7 @@ test_scout_access_reader_scaffold_contract() {
 }
 
 test_scout_access_reader_evidence_archive() {
-  local home id brief index boundary_exceptions plain_exceptions
+  local home id brief index doctor_path boundary_exceptions plain_exceptions
   home="$TMP_ROOT/access-reader-archive-home"
   mkdir -p "$home/data"
   id='access-reader-archive-r1'
@@ -1520,6 +1619,7 @@ test_scout_access_reader_evidence_archive() {
     || fail "reader scout scaffold with --evidence-archive should succeed"
   brief="$home/data/$id/brief.md"
   index="$home/data/$id/sources/index.md"
+  doctor_path="$home/data/$id/sources/agent-reach-doctor.json"
   assert_present "$brief" "reader evidence-archive scaffold did not write the brief"
   assert_present "$index" "reader evidence-archive scaffold did not create sources/index.md"
   grep -qx "Access contract: access=reader" "$brief" \
@@ -1531,6 +1631,9 @@ test_scout_access_reader_evidence_archive() {
     "reader rule 2 did not add the archive to its outside-scratch exception list"
   assert_grep "$home/data/$id/sources/" "$brief" \
     "reader rule 2 did not name the sanctioned archive path"
+  # shellcheck disable=SC2016 # Backticks are literal brief markup.
+  assert_grep "agent-reach doctor --json > $doctor_path" "$brief" \
+    "reader evidence-archive brief did not use the retained archive path"
   # The hard-contract boundary paragraph enumerates the same sanctioned writes
   # as rule 2. When the two lists disagree, a reader obeying the paragraph
   # marked HARD SAFETY CONTRACT archives nothing and the accepted
@@ -1662,6 +1765,8 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_all_brief_kinds_delivery_evidence_contracts
 test_scout_evidence_archive_opt_in
 test_scout_evidence_archive_bookend_fill_and_validate
+test_evidence_archive_path_safety
+test_evidence_archive_survives_laboratory_cleanup
 test_ship_brief_engineering_bar
 test_scout_access_reader_scaffold_contract
 test_scout_access_reader_evidence_archive

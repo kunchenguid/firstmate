@@ -4086,6 +4086,26 @@ test_reader_teardown_skips_pool_return_and_removes_scratch() {
   pass "reader teardown cleans the scratch directory without any treehouse return"
 }
 
+test_reader_teardown_retains_evidence_archive() {
+  local case_dir out rc archive
+  case_dir=$(make_reader_case reader-retains-archive)
+  archive="$case_dir/data/task-x1/sources"
+  mkdir -p "$archive"
+  printf 'source capture\n' > "$archive/capture.txt"
+  printf '# Archive index\n' > "$archive/index.md"
+  set +e
+  out=$(run_reader_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "reader teardown with an evidence archive should complete"
+  assert_contains "$out" "teardown task-x1 complete" "reader teardown did not report archive retention completion"
+  [ ! -d "$READER_TMP/scratch" ] || fail "reader teardown left the scratch directory behind"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "reader teardown left the task record behind"
+  assert_present "$archive/capture.txt" "reader teardown removed retained evidence capture"
+  assert_present "$archive/index.md" "reader teardown removed retained evidence index"
+  pass "reader teardown removes scratch and state while retaining the evidence archive"
+}
+
 test_reader_teardown_fails_loudly_on_grown_checkout() {
   local case_dir out rc
   case_dir=$(make_reader_case reader-violation)
@@ -4428,6 +4448,7 @@ test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_reader_teardown_skips_pool_return_and_removes_scratch
+test_reader_teardown_retains_evidence_archive
 test_reader_teardown_fails_loudly_on_grown_checkout
 test_reader_marker_on_nonscout_meta_refuses
 test_reader_worktree_outside_tasktmp_refuses
