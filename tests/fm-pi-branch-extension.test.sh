@@ -107,6 +107,7 @@ export class DefaultResourceLoader {
 export class SessionManager {
   constructor(file) {
     this.file = file;
+    this.entries = [];
   }
   static create(cwd, dir) {
     globalThis.__fmCreateCount = (globalThis.__fmCreateCount ?? 0) + 1;
@@ -124,6 +125,9 @@ export class SessionManager {
   }
   getSessionFile() {
     return this.file;
+  }
+  getEntries() {
+    return this.entries;
   }
   buildSessionContext() {
     const model = globalThis.__fmRecordedModels?.get(this.file) ?? null;
@@ -155,10 +159,25 @@ export async function createAgentSession(options) {
   if (options.model && (!options.modelRuntime || !options.modelRuntime.getModel(options.model.provider, options.model.id))) {
     throw new Error(`branch runtime cannot use ${options.model.provider}/${options.model.id}`);
   }
+  const persistMessages = (messages) => {
+    const tracked = [...messages];
+    tracked.push = (...items) => {
+      for (const message of items) options.sessionManager.getEntries().push({ type: "message", message });
+      return Array.prototype.push.apply(tracked, items);
+    };
+    return tracked;
+  };
+  let branchMessages = persistMessages(globalThis.__fmInitialBranchMessages ?? []);
+  for (const message of branchMessages) options.sessionManager.getEntries().push({ type: "message", message });
   const session = {
     options,
     ops: [],
-    messages: [],
+    get messages() {
+      return branchMessages;
+    },
+    set messages(messages) {
+      branchMessages = persistMessages(messages);
+    },
     disposed: false,
     async prompt(text) {
       if (globalThis.__fmPromptGate) {
@@ -167,6 +186,7 @@ export async function createAgentSession(options) {
       }
       session.ops.push({ kind: "prompt", text });
       (globalThis.__fmPrompts ??= []).push(text);
+      session.messages.push({ role: "user", content: text });
       await globalThis.__fmOnBranchPrompt?.({ session, text });
     },
     async sendCustomMessage(message, opts) {
@@ -1705,9 +1725,20 @@ fire("session_start", {}, {
     getEntries: () => entries,
   },
 });
+globalThis.__fmInitialBranchMessages = Array.from({ length: 100 }, (_, index) => ({
+  role: index % 2 === 0 ? "user" : "assistant",
+  content: `old context ${index}`,
+  ...(index % 2 === 0 ? {} : { stopReason: "stop" }),
+}));
 let attempt = 0;
 globalThis.__fmOnBranchPrompt = async ({ session }) => {
   attempt += 1;
+  if (attempt === 1) {
+    session.messages = [
+      { role: "assistant", content: "compaction summary", stopReason: "stop" },
+      ...Array.from({ length: 10 }, (_, index) => ({ role: "user", content: `retained ${index}` })),
+    ];
+  }
   if (attempt === 2) {
     const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
     const recorded = await report.execute(

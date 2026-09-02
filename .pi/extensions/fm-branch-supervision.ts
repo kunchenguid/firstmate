@@ -196,14 +196,16 @@ function afkActive(): boolean {
 
 // Pi persists provider failures as ordinary assistant messages and resolves
 // AgentSession.prompt(), so promise rejection alone cannot detect them. Read
-// only the final assistant message produced by this prompt: an earlier error
-// from a prior wake, or a retried error followed by success, is not the
-// current prompt's terminal result.
-function settledPromptProviderError(session: AgentSession, messageOffset: number): string | null {
-  const messages = session.messages;
-  for (let index = messages.length - 1; index >= messageOffset; index -= 1) {
-    const message = messages[index];
-    if (message.role !== "assistant") continue;
+// only the final assistant entry appended by this prompt: unlike the rebuilt
+// in-memory message context, SessionManager entries remain append-only across
+// prompt-preflight compaction.
+function settledPromptProviderError(sessionManager: SessionManager, entryOffset: number): string | null {
+  const entries = sessionManager.getEntries();
+  for (let index = entries.length - 1; index >= entryOffset; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "message") continue;
+    const message = (entry as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
+    if (message?.role !== "assistant") continue;
     if (message.stopReason !== "error") return null;
     return message.errorMessage?.trim() || "assistant settled with stopReason error";
   }
@@ -474,6 +476,7 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
 
 export default function (pi: ExtensionAPI) {
   let branch: AgentSession | null = null;
+  let branchSessionManager: SessionManager | null = null;
   let branchBroken = "";
   let consecutiveProviderErrors = 0;
   // A revision advances only after fm_branch_report has appended successfully,
@@ -902,7 +905,9 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function createBranch(branchGeneration: number): Promise<AgentSession> {
+  async function createBranch(
+    branchGeneration: number,
+  ): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
     // Resolved first, before any session file or prompt work: a model pin Pi
     // cannot honor must fail before this build leaves anything behind. Every
     // branch build goes through here - first wake of a cold start, and the
@@ -1014,7 +1019,7 @@ ${context.command}
     } catch {
       // Pointer write failure only costs cross-restart session reuse.
     }
-    return created.session;
+    return { session: created.session, sessionManager };
   }
 
   async function ensureBranch(expectedGeneration: number): Promise<AgentSession> {
@@ -1027,18 +1032,19 @@ ${context.command}
         const created = await createBranch(expectedGeneration);
         if (buildRevision !== branchSelectionRevision) {
           try {
-            created.dispose();
+            created.session.dispose();
           } catch {}
           continue;
         }
         if (!actingAsOwner(expectedGeneration)) {
           try {
-            created.dispose();
+            created.session.dispose();
           } catch {}
           throw new Error("supervision session was replaced or lost lock ownership");
         }
-        branch = created;
-        return created;
+        branch = created.session;
+        branchSessionManager = created.sessionManager;
+        return created.session;
       } catch (error) {
         if (buildRevision !== branchSelectionRevision) continue;
         if (expectedGeneration === generation && !shuttingDown) {
@@ -1119,11 +1125,13 @@ ${context.command}
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
-        const messageOffset = session.messages.length;
+        const sessionManager = branchSessionManager;
+        if (!sessionManager) throw new Error("supervision branch session has no durable transcript");
+        const entryOffset = sessionManager.getEntries().length;
         await session.prompt(
           `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
         );
-        const providerError = settledPromptProviderError(session, messageOffset);
+        const providerError = settledPromptProviderError(sessionManager, entryOffset);
         if (providerError) {
           consecutiveProviderErrors += 1;
           const detail = `supervision branch provider failed after construction: ${providerError}`;
@@ -1158,6 +1166,7 @@ ${context.command}
     consecutiveProviderErrors = 0;
     const stale = branch;
     branch = null;
+    branchSessionManager = null;
     if (!stale) return;
     branchChain = branchChain
       .then(() => {
@@ -1333,6 +1342,7 @@ ${context.command}
       }
       branch = null;
     }
+    branchSessionManager = null;
   });
 
   // Pi keeps /model and its own thinking selector for the captain's own
