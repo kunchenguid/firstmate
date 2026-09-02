@@ -2110,7 +2110,12 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
       FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    if ! wait_poll_cycle "$state" "$pid"; then
+    # A changed pane hash needs three polls to become stable stale: first sight
+    # records the new hash, second sight increments its stability count, and the
+    # third reaches handle_paused_stale. Each wait proves one whole intervening
+    # cycle, so require two to make the fresh-age assertion non-vacuous even when
+    # the helper removes the beacon before the watcher's first poll.
+    if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
       reap "$pid"; fail "[$name] a freshly declared replacement wait was alarmed instead of absorbed"
     fi
     reap "$pid"
