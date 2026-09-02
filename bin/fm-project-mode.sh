@@ -1,20 +1,42 @@
 #!/usr/bin/env bash
 # Resolve a project's REGISTERED delivery posture from the data/projects.md registry.
-# Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# The default form prints two words to stdout: "<mode> <yolo>" where mode is one
+# of no-mistakes|direct-PR|local-only and yolo is on|off; the --unsynced and
+# --strip-unsynced forms below print their own thing instead.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode and
 # yolo are resolved by firstmate at intake and passed explicitly to
 # bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
-# The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
-# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init), and
-# bin/fm-spawn.sh's advisory registry-deviation notice.
+# The consumers are bin/fm-fleet-sync.sh (skip local-only clones, and via the
+# --unsynced query below, skip +unsynced clones with zero output),
+# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init),
+# secondmate seeding's registry propagation (bin/fm-home-seed.sh,
+# bin/fm-remote-home-seed.sh, bin/fm-remote-home-provision.sh, via the
+# --strip-unsynced filter below), and bin/fm-spawn.sh's advisory
+# registry-deviation notice.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
 #   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
+#   - <name> [<mode> +unsynced] - <desc> (added <date>)  -> <mode>, fleet-sync never touches the clone
+#
+# +yolo and +unsynced are independent optional flag tokens and may appear
+# together in either order after the mode, e.g. "[direct-PR +yolo +unsynced]".
+#
+# +unsynced marks a clone the captain edits and pulls outside firstmate by
+# design: fleet sync skips it exactly like a local-only/no-origin clone, with no
+# fetch, drift check, or report of any kind, at every routine call site. The one
+# exception is bin/fm-teardown.sh's post-landing refresh of a clone firstmate
+# just landed a PR into; bin/fm-fleet-sync.sh's header owns that call-site list
+# and its --force-unsynced override.
+# Query it with `--unsynced <project-name>`, which prints "yes" or "no" and
+# nothing else; it does not participate in the "<mode> <yolo>" output below.
+# +unsynced is a flag of THIS home only: seeding a secondmate home copies the
+# registry line through `--strip-unsynced <registry-line>`, which prints the
+# line with the +unsynced token removed (mode and +yolo untouched), so the
+# child home never inherits a skip the captain set for this home's clone.
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -35,6 +57,8 @@
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
 # Usage: fm-project-mode.sh [--raw] <project-name>
+#        fm-project-mode.sh --unsynced <project-name>
+#        fm-project-mode.sh --strip-unsynced <registry-line>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,42 +67,88 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
 RAW=0
-if [ "${1:-}" = "--raw" ]; then
-  RAW=1
-  shift
-fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
+UNSYNCED_QUERY=0
+case "${1:-}" in
+  --raw) RAW=1; shift ;;
+  --unsynced) UNSYNCED_QUERY=1; shift ;;
+  --strip-unsynced)
+    # Registry-line filter for secondmate seeding: print the given line with the
+    # +unsynced token removed from its flag group, leaving the mode, +yolo, and
+    # the rest of the line byte-identical. An empty flag group left behind (the
+    # line carried no mode) is dropped with it rather than written as "[]".
+    # Any line that is not a "- <name> [<flags>] ..." registry entry is printed
+    # unchanged, so this never rewrites something it does not own.
+    shift
+    printf '%s\n' "${1:?usage: fm-project-mode.sh --strip-unsynced <registry-line>}" | awk '
+      {
+        if (match($0, /\[[^]]*\]/) == 0) { print; next }
+        pre = substr($0, 1, RSTART - 1)
+        post = substr($0, RSTART + RLENGTH)
+        inner = substr($0, RSTART + 1, RLENGTH - 2)
+        if (pre !~ /^[ \t]*-[ \t]+[^ \t]+[ \t]+$/) { print; next }
+        k = split(inner, a, " ")
+        kept = ""
+        for (j = 1; j <= k; j++) if (a[j] != "+unsynced") kept = kept (kept == "" ? "" : " ") a[j]
+        if (kept == "") { sub(/[ \t]+$/, "", pre); print pre post }
+        else print pre "[" kept "]" post
+      }
+    '
+    exit 0
+    ;;
+esac
+NAME=${1:?usage: fm-project-mode.sh [--raw|--unsynced] <project-name>}
 
 if [ ! -f "$REG" ]; then
+  if [ "$UNSYNCED_QUERY" -eq 1 ]; then
+    echo "no"
+    exit 0
+  fi
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
 fi
 
-# awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
+# awk emits "<mode> <yolo> <unsynced>" (one line) or nothing if the project is
+# absent. <mode> and <yolo> keep the exact two-word contract every mechanical
+# caller of the plain/--raw form already relies on; <unsynced> is a third word
+# consumed only by the --unsynced query path below.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
+    mode="no-mistakes"; yolo="off"; unsynced="no";
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo") mode = a[1];
-      for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
+      if (a[1] != "" && a[1] != "+yolo" && a[1] != "+unsynced") mode = a[1];
+      for (j=1; j<=k; j++) {
+        if (a[j]=="+yolo") yolo="on";
+        if (a[j]=="+unsynced") unsynced="yes";
+      }
     }
-    print mode, yolo; exit
+    print mode, yolo, unsynced; exit
   }
 ' "$REG")
 
 if [ -z "$parsed" ]; then
+  if [ "$UNSYNCED_QUERY" -eq 1 ]; then
+    echo "no"
+    exit 0
+  fi
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
 fi
 
-mode=${parsed%% *}
-yolo=${parsed##* }
+read -r mode yolo unsynced <<EOF
+$parsed
+EOF
+
+if [ "$UNSYNCED_QUERY" -eq 1 ]; then
+  case "$unsynced" in yes) echo yes ;; *) echo no ;; esac
+  exit 0
+fi
+
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;

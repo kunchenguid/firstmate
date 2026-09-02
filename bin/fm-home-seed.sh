@@ -15,7 +15,10 @@
 #       project list, and omitting both still fails loudly. A project-less seed
 #       refuses a home with project clones or project-registry entries, so it
 #       never converts populated homes in place. The charter brief
-#       is copied to data/charter.md, newly cloned no-mistakes projects are
+#       is copied to data/charter.md, each cloned project's registry line is
+#       copied into the seeded home's data/projects.md with its "+unsynced"
+#       token stripped (bin/fm-project-mode.sh owns that grammar) because the
+#       flag describes this home's own clone, newly cloned no-mistakes projects are
 #       initialized, an ignored .fm-secondmate-parent binding is published before
 #       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
@@ -667,7 +670,11 @@ registry_line_for_project() {
   [ -f "$DATA/projects.md" ] || return 1
   line=$(awk -v n="$project" '$1=="-" && $2==n { print; exit }' "$DATA/projects.md")
   [ -n "$line" ] || return 1
-  printf '%s\n' "$line"
+  # "+unsynced" says THIS home leaves that clone to the captain; the seeded
+  # home gets its own fresh clone and must sync it normally, so the token is
+  # stripped on the way out (mode and +yolo propagate unchanged).
+  # bin/fm-project-mode.sh owns that grammar.
+  "$FM_ROOT/bin/fm-project-mode.sh" --strip-unsynced "$line"
 }
 
 project_mode_in_home() {

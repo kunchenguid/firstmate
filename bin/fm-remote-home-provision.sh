@@ -221,6 +221,11 @@ EOF
   fm_project_origin_safe "$ORIGIN" || die "project $NAME origin is not an accepted clone URL: $ORIGIN"
   case "$MODE" in no-mistakes|direct-PR) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
   case "$REGISTRY_LINE" in "- $NAME "*) ;; *) die "project $NAME registry line is malformed" ;; esac
+  # This host publishes what it writes rather than trusting the sender, so the
+  # parent-home-only "+unsynced" token is stripped here too: the clone below is
+  # this home's own and must sync normally. bin/fm-project-mode.sh owns the
+  # grammar; mode and +yolo pass through untouched.
+  REGISTRY_LINE=$("$SCRIPT_DIR/fm-project-mode.sh" --strip-unsynced "$REGISTRY_LINE")
   DEST="$FM_HOME/projects/$NAME"
   if [ -e "$DEST" ] || [ -L "$DEST" ]; then
     [ -d "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST/.git" ] \

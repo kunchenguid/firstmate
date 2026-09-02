@@ -685,6 +685,48 @@ test_no_mistakes_origin_remote_allows() {
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
+# The post-landing refresh is the ONE fm-fleet-sync.sh call site allowed past a
+# "+unsynced" registry flag (bin/fm-project-mode.sh's header owns that grammar):
+# firstmate just landed a PR into this project, so its clone must still catch
+# up, while the routine single-project form leaves the same clone untouched.
+test_teardown_refresh_syncs_an_unsynced_flagged_project() {
+  local case_dir rc landed routine
+  case_dir=$(make_case nm-unsynced-refresh)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  mkdir -p "$case_dir/data"
+  printf '%s\n' '- project [no-mistakes +unsynced] - test project (added 2026-08-30)' \
+    > "$case_dir/data/projects.md"
+  # Advance origin/main behind the clone's back: only a refresh that really runs
+  # can move the clone's own main onto it.
+  git clone -q "$case_dir/origin.git" "$case_dir/_landed"
+  git -C "$case_dir/_landed" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "landed by another route"
+  git -C "$case_dir/_landed" push -q origin main
+  landed=$(git -C "$case_dir/_landed" rev-parse HEAD)
+  rm -rf "$case_dir/_landed"
+
+  # Baseline: the ordinary single-project form still skips it silently.
+  routine=$(FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_PROJECTS_OVERRIDE="$case_dir" "$ROOT/bin/fm-fleet-sync.sh" "$case_dir/project" 2>/dev/null)
+  [ -z "$routine" ] || fail "nm-unsynced-refresh: the routine refresh reported the flagged clone: $routine"
+  [ "$(git -C "$case_dir/project" rev-parse main)" != "$landed" ] \
+    || fail "nm-unsynced-refresh: the routine refresh synced the flagged clone"
+
+  set +e
+  FM_DATA_OVERRIDE="$case_dir/data" FM_PROJECTS_OVERRIDE="$case_dir" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-unsynced-refresh: teardown should succeed"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$landed" ] \
+    || fail "nm-unsynced-refresh: teardown's post-landing refresh skipped the +unsynced clone"
+  grep -F 'project: synced' "$case_dir/stdout" >/dev/null \
+    || fail "nm-unsynced-refresh: teardown did not report the forced refresh"
+  pass "teardown's post-landing refresh syncs a +unsynced project the routine refresh skips"
+}
+
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
@@ -2611,6 +2653,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_teardown_refresh_syncs_an_unsynced_flagged_project
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes

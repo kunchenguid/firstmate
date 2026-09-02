@@ -118,7 +118,7 @@ git -C "$PARENT/projects/alpha" commit -qm init
 git -C "$PARENT/projects/alpha" remote add origin "file://$TMP_ROOT/alpha.git"
 git -C "$PARENT/projects/alpha" push -q -u origin main
 cat > "$PARENT/data/projects.md" <<EOF
-- alpha [direct-PR] - alpha project (added 2026-08-02)
+- alpha [direct-PR +unsynced] - alpha project (added 2026-08-02)
 EOF
 printf 'codex\n' > "$PARENT/config/secondmate-harness"
 printf 'tmux\n' > "$PARENT/config/backend"
@@ -652,6 +652,12 @@ assert_contains "$out" "home=remote-mac:$REMOTE_HOME" "remote seed did not repor
 assert_grep 'host: remote-mac; root:' "$PARENT/data/secondmates.md" "registry did not record the remote host dimension"
 assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not publish the identity marker"
 assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
+# The +unsynced flag is this home's own operational choice, so the remote home's
+# registry gets the line without it while the delivery mode carries over.
+assert_no_grep '+unsynced' "$REMOTE_HOME/data/projects.md" "the +unsynced flag propagated to the remote home"
+assert_grep '- alpha [direct-PR] - alpha project' "$REMOTE_HOME/data/projects.md" \
+  "the propagated alpha line was rewritten beyond dropping +unsynced"
+assert_grep '+unsynced' "$PARENT/data/projects.md" "remote seeding removed +unsynced from this home's own registry"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
 assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \

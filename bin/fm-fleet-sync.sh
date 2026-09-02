@@ -12,7 +12,15 @@
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
-# and fetch failures.
+# and fetch failures. A project registry-flagged "+unsynced" (see
+# bin/fm-project-mode.sh's header) is skipped even more quietly: no fetch, no
+# drift check, and no output at all, because the captain edits and pulls that
+# clone directly outside firstmate by design. That skip covers every routine
+# call site - the bootstrap sweep, the session-start deferred network stage,
+# and an ordinary single-project invocation. The single exception is
+# bin/fm-teardown.sh's post-landing refresh, which passes --force-unsynced so
+# the clone firstmate just landed a PR into is still brought up to date; that
+# flag exists for that one call site only and requires the single-project form.
 # A candidate under projects/ must be the root of its own work tree: git discovery
 # walks up, so a plain nested directory would otherwise resolve to the enclosing
 # repository (the firstmate checkout) and be synced under that directory's label.
@@ -25,6 +33,7 @@
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
+#        fm-fleet-sync.sh --force-unsynced <project-dir-or-name>   (teardown only)
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
 # this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
@@ -45,6 +54,20 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
+
+# --force-unsynced: refresh a "+unsynced" clone anyway. Reserved for
+# bin/fm-teardown.sh's post-landing refresh of the project firstmate just landed
+# a PR into; requiring the single-project form keeps every sweep - which is what
+# the captain flagged the clone to be left out of - unable to force it.
+FORCE_UNSYNCED=0
+if [ "${1:-}" = --force-unsynced ]; then
+  FORCE_UNSYNCED=1
+  shift
+  [ $# -eq 1 ] || {
+    echo "fm-fleet-sync.sh: --force-unsynced needs exactly one project" >&2
+    exit 2
+  }
+fi
 
 # Bounded recovery for an orphaned .git/packed-refs.lock. A git ref rewrite
 # (fetch --prune, branch -D, pack-refs) killed after creating the lock but before
@@ -300,6 +323,16 @@ report_stuck() {
 sync_project() {
   PROJ=$1
   label=$(project_label)
+
+  # A captain-flagged "+unsynced" project (data/projects.md, resolved via
+  # fm-project-mode.sh --unsynced) is edited and pulled outside firstmate by
+  # design. Skip it before any other check, with zero output either way, so it
+  # is never fetched, never drift-checked, and never reported as STUCK. Only
+  # teardown's post-landing refresh (--force-unsynced) syncs it anyway.
+  if [ "$FORCE_UNSYNCED" -eq 0 ] \
+    && [ "$("$FM_ROOT/bin/fm-project-mode.sh" --unsynced "$label" 2>/dev/null || echo no)" = "yes" ]; then
+    return 0
+  fi
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"

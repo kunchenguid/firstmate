@@ -408,6 +408,86 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
+# The --unsynced query is its own mechanical contract (bin/fm-fleet-sync.sh is
+# the consumer): it answers yes/no on stdout and nothing else, never warns, and
+# never disturbs the two-word posture the other callers read.
+test_project_mode_answers_the_unsynced_query() {
+  local home bare proj out err
+  home="$TMP_ROOT/project-mode-unsynced/home"
+  bare="$TMP_ROOT/project-mode-unsynced/bare"
+  mkdir -p "$home/data" "$bare/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- plainproj [no-mistakes] - fixture (added 2026-01-01)
+- legacyproj - fixture (added 2026-01-01)
+- flaggedproj [no-mistakes-prod-only +unsynced] - fixture (added 2026-01-01)
+- yolofirst [direct-PR +yolo +unsynced] - fixture (added 2026-01-01)
+- unsyncedfirst [direct-PR +unsynced +yolo] - fixture (added 2026-01-01)
+EOF
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced flaggedproj 2>/dev/null)
+  [ "$out" = "yes" ] || fail "a +unsynced registry line did not answer yes (got '$out')"
+  for proj in yolofirst unsyncedfirst; do
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced "$proj" 2>/dev/null)
+    [ "$out" = "yes" ] || fail "+unsynced alongside +yolo did not answer yes for $proj (got '$out')"
+  done
+
+  for proj in plainproj legacyproj; do
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced "$proj" 2>/dev/null)
+    [ "$out" = "no" ] || fail "an unflagged project answered the unsynced query wrong (got '$out' for $proj)"
+  done
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced ghostproj 2>/dev/null)
+  [ "$out" = "no" ] || fail "an unregistered project did not answer no (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --unsynced ghostproj 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "the unsynced query warned about an unregistered project: $err"
+
+  out=$(FM_HOME="$bare" "$PROJECT_MODE" --unsynced flaggedproj 2>/dev/null)
+  [ "$out" = "no" ] || fail "a missing registry did not answer no (got '$out')"
+  err=$(FM_HOME="$bare" "$PROJECT_MODE" --unsynced flaggedproj 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "the unsynced query warned about a missing registry: $err"
+
+  # The flag is invisible to the posture callers, in either token order.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" flaggedproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "+unsynced leaked into the mechanical posture (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw unsyncedfirst 2>/dev/null)
+  [ "$out" = "direct-PR on" ] || fail "+unsynced ahead of +yolo broke the raw posture (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" unsyncedfirst 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a +unsynced token was mistaken for an unknown mode: $err"
+  pass "fm-project-mode: --unsynced answers yes/no only, and the flag never disturbs the posture output"
+}
+
+# --strip-unsynced is the propagation half of the same grammar: secondmate
+# seeding copies a registry line into the seeded home through this filter, which
+# must drop only the +unsynced token and leave the mode, +yolo, and the rest of
+# the line byte-identical.
+test_project_mode_strips_unsynced_for_propagation() {
+  local out
+  out=$("$PROJECT_MODE" --strip-unsynced '- alpha [direct-PR +yolo +unsynced] - alpha project (added 2026-01-01)')
+  [ "$out" = '- alpha [direct-PR +yolo] - alpha project (added 2026-01-01)' ] \
+    || fail "--strip-unsynced did not keep the mode and +yolo intact (got '$out')"
+
+  out=$("$PROJECT_MODE" --strip-unsynced '- alpha [direct-PR +unsynced +yolo] - alpha project (added 2026-01-01)')
+  [ "$out" = '- alpha [direct-PR +yolo] - alpha project (added 2026-01-01)' ] \
+    || fail "--strip-unsynced mishandled the reversed token order (got '$out')"
+
+  out=$("$PROJECT_MODE" --strip-unsynced '- solo [+unsynced] - only flag (added 2026-01-01)')
+  [ "$out" = '- solo - only flag (added 2026-01-01)' ] \
+    || fail "--strip-unsynced left an empty flag group behind (got '$out')"
+
+  # Lines the token does not appear in survive untouched, including the legacy
+  # no-bracket form and a description that happens to contain brackets.
+  out=$("$PROJECT_MODE" --strip-unsynced '- beta [no-mistakes-prod-only] - fixture (added 2026-01-01)')
+  [ "$out" = '- beta [no-mistakes-prod-only] - fixture (added 2026-01-01)' ] \
+    || fail "--strip-unsynced rewrote an unflagged line (got '$out')"
+  out=$("$PROJECT_MODE" --strip-unsynced '- gamma - legacy fixture (added 2026-01-01)')
+  [ "$out" = '- gamma - legacy fixture (added 2026-01-01)' ] \
+    || fail "--strip-unsynced rewrote a legacy no-bracket line (got '$out')"
+  out=$("$PROJECT_MODE" --strip-unsynced '- delta [no-mistakes +unsynced] - see [handbook] (added 2026-01-01)')
+  [ "$out" = '- delta [no-mistakes] - see [handbook] (added 2026-01-01)' ] \
+    || fail "--strip-unsynced disturbed brackets in the description (got '$out')"
+  pass "fm-project-mode: --strip-unsynced removes only the +unsynced token from a propagated line"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -417,4 +497,6 @@ test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
+test_project_mode_answers_the_unsynced_query
+test_project_mode_strips_unsynced_for_propagation
 echo "# all fm-task-delivery tests passed"
