@@ -2252,6 +2252,9 @@ mode=no-mistakes
 spawn_gen=new-generation
 EOF
     mv "$tmp" "$RACE_META"
+    printf 'needs-decision[replacement]: replacement-only decision https://github.com/acme/firstmate/pull/999\n' > "$RACE_STATUS"
+    mkdir -p "$(dirname "$RACE_REPORT")"
+    printf 'replacement-only report\n' > "$RACE_REPORT"
   fi
   # The old endpoint disappeared while a replacement reused the same target.
   exit 1
@@ -2263,20 +2266,30 @@ SH
   json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_NOW_EPOCH=1783792800 NET_LOG="$home/net.log" \
     RACE_ONCE="$home/relaunch-once" RACE_META="$home/state/generation-race.meta" \
-    RACE_WORKTREE="$worktree" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    RACE_STATUS="$home/state/generation-race.status" \
+    RACE_REPORT="$home/data/generation-race/report.md" RACE_WORKTREE="$worktree" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
     || fail "fleet snapshot failed during endpoint generation race"
   printf '%s' "$json" | jq -e '
     .tasks[] | select(.id == "generation-race")
     | .spawn_gen == "old-generation"
+      and .current_state.state == "unknown"
       and .endpoint.exists == null
       and .endpoint.agent_alive == "unknown"
       and .endpoint.status == "unknown"
-  ' >/dev/null || fail "replacement endpoint state crossed task generations: $json"
-  pass "reused endpoint state is discarded when task generation changes"
+      and .pr.url == null
+      and .paths.status_log.present == false
+      and .paths.report.present == false
+      and .hints.pending_decision == false
+      and .hints.open_decisions == []
+      and .hints.scout_report_present == false
+      and .hints.last_event_text == ""
+  ' >/dev/null || fail "replacement live state crossed task generations: $json"
+  pass "reused live state is discarded when task generation changes"
 }
 
 test_large_local_snapshot_composes_under_five_seconds_without_projection_drift() {
-  local home fakebin worktree real_cp serial parallel parallel_file snapshot_pid started elapsed i
+  local home fakebin worktree serial parallel parallel_file snapshot_pid started elapsed i
   home=$(make_home large-local-snapshot)
   worktree="$home/projects/shared-worktree"
   fm_git_init_commit "$worktree"
@@ -2290,27 +2303,7 @@ if [ "$*" = "axi status" ] && [ "${FAKE_NM_DELAY:-0}" = 1 ]; then
 fi
 exit 0
 SH
-  real_cp=$(command -v cp)
-  cat > "$fakebin/cp" <<'SH'
-#!/usr/bin/env bash
-"$REAL_CP" "$@" || exit
-if [ "${FAKE_REPLACE_AFTER_COPY:-0}" = 1 ]; then
-  for arg in "$@"; do
-    if [ "$arg" = "$FAKE_REPLACE_META" ]; then
-      cat > "$FAKE_REPLACE_META" <<EOF
-window=fixture:local-1
-worktree=$FAKE_REPLACEMENT_WORKTREE
-project=firstmate
-harness=claude
-kind=scout
-mode=scout
-EOF
-      break
-    fi
-  done
-fi
-SH
-  chmod +x "$fakebin/no-mistakes" "$fakebin/cp"
+  chmod +x "$fakebin/no-mistakes"
 
   {
     printf '## In flight\n'
@@ -2335,13 +2328,11 @@ SH
     i=$((i + 1))
   done
 
-  serial=$(REAL_CP="$real_cp" FAKE_NM_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
+  serial=$(FAKE_NM_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
   started=$(date +%s)
   parallel_file="$home/parallel-snapshot.json"
-  REAL_CP="$real_cp" FAKE_REPLACE_AFTER_COPY=1 \
-    FAKE_REPLACE_META="$home/state/local-1.meta" \
-    FAKE_REPLACEMENT_WORKTREE="$home/projects/replacement-not-created" \
-    FAKE_NM_DELAY=1 FAKE_NM_SIGNAL="$home/nm-started" FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 \
+  FAKE_NM_DELAY=1 FAKE_NM_SIGNAL="$home/nm-started" \
+    FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 \
     run "$home" "$fakebin" --json > "$parallel_file" &
   snapshot_pid=$!
   i=0
@@ -2354,9 +2345,6 @@ SH
     wait "$snapshot_pid" 2>/dev/null || true
     fail "concurrent local snapshot never began a current-state read"
   fi
-  # The cp fixture replaces local-1 immediately after its captured generation is
-  # copied, before observation workers start. Current state must use that captured
-  # metadata too, rather than crossing into the replacement task generation.
   wait "$snapshot_pid" || fail "concurrent local snapshot failed"
   parallel=$(<"$parallel_file")
   elapsed=$(( $(date +%s) - started ))

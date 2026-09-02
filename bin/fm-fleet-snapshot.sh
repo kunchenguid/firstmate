@@ -232,10 +232,10 @@ bool_json() {
   if [ "$1" = 1 ]; then printf 'true'; else printf 'false'; fi
 }
 
-path_present_json() {  # <path>
-  local present=0
-  [ -e "$1" ] && present=1
-  jq -n --arg path "$1" --argjson present "$(bool_json "$present")" \
+path_present_json() {  # <contract-path> [<observed-path>]
+  local path=$1 observed=${2:-$1} present=0
+  [ -e "$observed" ] && present=1
+  jq -n --arg path "$path" --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present}'
 }
 
@@ -284,8 +284,8 @@ crew_state_json() {  # <id> [<captured-meta>]
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
 }
 
-status_event_json() {  # <status-log>
-  local log=$1 present=0 raw='' verb='' note=''
+status_event_json() {  # <observed-status-log> [<contract-path>]
+  local log=$1 path=${2:-$1} present=0 raw='' verb='' note=''
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
@@ -293,7 +293,7 @@ status_event_json() {  # <status-log>
     note=$(status_line_note "$raw")
   fi
   jq -n \
-    --arg path "$log" \
+    --arg path "$path" \
     --arg raw "$raw" \
     --arg verb "$verb" \
     --arg note "$note" \
@@ -480,6 +480,18 @@ snapshot_wait_current_reads() {  # <pid>...
   return "$rc"
 }
 
+snapshot_capture_optional() {  # <source> <destination>
+  local source=$1 destination=$2
+  [ -f "$source" ] || return 0
+  cp -- "$source" "$destination" && return 0
+  # Teardown may remove an optional observation after the existence check.
+  if [ ! -e "$source" ]; then
+    rm -f -- "$destination"
+    return 0
+  fi
+  return 1
+}
+
 snapshot_task_generation_is_current() {  # <captured-meta> <id>
   local captured_meta=$1 id=$2 current_meta captured_gen current_gen captured_contents current_contents
   current_meta="$STATE/$id.meta"
@@ -498,43 +510,60 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 }
 
 prefetch_task_observations() {  # <meta> <id>
-  local meta=$1 id=$2 remote_host current_file endpoint_file current_pid current_rc=0
+  local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
+  local status_log status_capture report_path report_capture
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
-  if [ -n "$remote_host" ]; then
-    jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
-      > "$current_file" || return 1
-    printf 'endpoint_exists=null\nagent_alive=unknown\n' > "$endpoint_file"
-    return 0
+  status_log="$STATE/$id.status"
+  status_capture="$SNAPSHOT_TASK_DIR/$id.status"
+  report_path="$DATA/$id/report.md"
+  report_capture="$SNAPSHOT_TASK_DIR/$id.report"
+
+  snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
+  if [ "$generation_current" = 1 ]; then
+    snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
+    snapshot_capture_optional "$report_path" "$report_capture" || current_rc=1
   fi
 
-  crew_state_json "$id" "$meta" > "$current_file" &
-  current_pid=$!
-  kind=$(meta_value "$meta" kind)
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
-  if [ "$generation_current" = 1 ] && [ -n "$target" ]; then
-    if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
-      endpoint_exists=true
-    else
-      endpoint_exists=false
+  if [ -n "$remote_host" ]; then
+    jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
+      > "$current_file" || current_rc=1
+    agent_alive=unknown
+  elif [ "$generation_current" = 1 ]; then
+    crew_state_json "$id" "$meta" > "$current_file" &
+    current_pid=$!
+    kind=$(meta_value "$meta" kind)
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$target" ]; then
+      if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+        endpoint_exists=true
+      else
+        endpoint_exists=false
+      fi
+      if [ "$kind" = secondmate ]; then
+        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+      fi
     fi
-    if [ "$kind" = secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
-    fi
+  else
+    jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
+      > "$current_file" || current_rc=1
+    agent_alive=unknown
   fi
-  # Targets are reusable (notably tmux's fm-<id> window). Revalidate after the
-  # probes so teardown/relaunch cannot attribute the replacement generation's
-  # endpoint state to the captured task.
+
+  [ -z "$current_pid" ] || wait "$current_pid" || current_rc=1
+  # All mutable observations must belong to the metadata generation captured in
+  # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
+    rm -f -- "$status_capture" "$report_capture"
+    jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
+      > "$current_file" || current_rc=1
     endpoint_exists=null
     agent_alive=unknown
   fi
   printf 'endpoint_exists=%s\nagent_alive=%s\n' "$endpoint_exists" "$agent_alive" > "$endpoint_file" || current_rc=1
-  wait "$current_pid" || current_rc=1
   return "$current_rc"
 }
 
@@ -626,8 +655,8 @@ task_json_lines() {
       backend=$(fm_backend_of_meta "$meta")
       target=$(fm_backend_target_of_meta "$meta")
     fi
-    status_log="$STATE/$id.status"
-    report_path="$DATA/$id/report.md"
+    status_log="$SNAPSHOT_TASK_DIR/$id.status"
+    report_path="$SNAPSHOT_TASK_DIR/$id.report"
     pr=$(meta_value "$meta" pr)
     pr_source=meta
     if [ -z "$pr" ]; then
@@ -644,7 +673,7 @@ task_json_lines() {
       snapshot_task_cleanup
       return 1
     }
-    event_json=$(status_event_json "$status_log")
+    event_json=$(status_event_json "$status_log" "$STATE/$id.status")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     read -r current_state current_source < <(
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
@@ -702,9 +731,9 @@ task_json_lines() {
       return 1
     }
     [ -f "$report_path" ] && report_present=1 || report_present=0
-    meta_json=$(path_present_json "$original_meta")
+    meta_json=$(path_present_json "$original_meta" "$meta")
     status_json=$event_json
-    report_json=$(path_present_json "$report_path")
+    report_json=$(path_present_json "$DATA/$id/report.md" "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
       home_json=$(jq -n --arg path "$home" '{path:$path,present:null}')
