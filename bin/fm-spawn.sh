@@ -847,6 +847,23 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  # Before the per-task lock is released, and after the orca recovery record
+  # above: that record names the root, and a root already removed here is a
+  # silent no-op at teardown. The lock ordering is the load-bearing part. This
+  # root can still be adopted by another spawn of the same id, because
+  # fm_task_tmp_create accepts an existing directory this user owns so a
+  # relaunch can reuse its own root. Releasing the lock first would let a
+  # waiting same-id spawn take the lock, adopt this very directory, and then
+  # have it deleted underneath it, leaving a live agent with a TMPDIR and
+  # GOTMPDIR that no longer exist - the same "never delete a live task's
+  # scratch" rule the removal path exists to keep. Holding the lock across the
+  # removal makes adoption and removal mutually exclusive. Only this task's own
+  # root is touched, through the same validation teardown uses, and a refusal or
+  # failure only reports - it never changes the abort's status.
+  if [ "$TASK_TMP_ABORT_CLEANUP" = 1 ]; then
+    TASK_TMP_ABORT_CLEANUP=0
+    fm_task_tmp_remove "$ID" "${TASK_TMP:-}" || true
+  fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -872,14 +889,6 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
-  fi
-  # Last, so the orca recovery record above is written first: that record names
-  # the root, and a root already removed here is a silent no-op at teardown. Only
-  # this task's own root is touched, through the same validation teardown uses,
-  # and a refusal or failure only reports - it never changes the abort's status.
-  if [ "$TASK_TMP_ABORT_CLEANUP" = 1 ]; then
-    TASK_TMP_ABORT_CLEANUP=0
-    fm_task_tmp_remove "$ID" "${TASK_TMP:-}" || true
   fi
   return "$status"
 }
