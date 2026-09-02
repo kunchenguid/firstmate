@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# fm-timing-lib.sh - the single owner of the deferred network stage's elapsed-time
-# instrumentation.
+# fm-timing-lib.sh - the single owner of elapsed-time instrumentation for
+# session-start stages and the deferred network stage.
 #
 # Sourced, never executed.
 #
-# WHY THIS EXISTS. The deferred stage (bin/fm-startup-network.sh) publishes one
+# WHY THIS EXISTS. Session start and the deferred network stage each publish one
 # aggregate started/finished pair, so a run that took a minute could not be
-# attributed to a phase, a host, or a clone without re-running it by hand under
-# manual tracing. These helpers record per-step elapsed times as the run happens,
-# so the next slow run is answerable from the durable record alone.
+# attributed to a stage, a phase, a host, or a clone without re-running it by
+# hand under manual tracing. These helpers record per-step elapsed times as the
+# run happens, so the next slow run is answerable from the durable record alone.
 #
 # OFF BY DEFAULT, AND INERT. Every helper is a no-op unless FM_TIMING_LOG names a
 # file. Nothing here talks to the network, waits, locks, or changes control flow:
@@ -136,10 +136,12 @@ fm_timing_record() {  # <scope> <name> <start-ms> [detail]
 
 # Render a recorded run for a human. Prints nothing at all when the file is
 # missing or holds no record, so an uninstrumented or empty run adds no output.
-fm_timing_render() {  # <file>
-  local file=$1
+# Optional <heading> replaces the default deferred-network title; session start
+# passes its own so a truncation banner does not call these network checks.
+fm_timing_render() {  # <file> [heading]
+  local file=$1 title=${2:-TIMINGS - where the deferred network checks spent their time (ms):}
   [ -n "$file" ] && [ -s "$file" ] || return 0
-  awk -F'\t' '
+  awk -F'\t' -v title="$title" '
     $1 != "v1" || NF < 5 { next }
     {
       records++
@@ -149,7 +151,7 @@ fm_timing_render() {  # <file>
     }
     END {
       if (records == 0) exit 0
-      print "TIMINGS - where the deferred network checks spent their time (ms):"
+      print title
       for (i = 1; i <= records; i++) {
         label = name[i]
         if (detail[i] != "") label = label " " detail[i]

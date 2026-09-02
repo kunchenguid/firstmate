@@ -55,7 +55,10 @@
 #          directly to redo the stage by hand from the lock-owning harness.
 #        fm-startup-network.sh harvest --pid <pid>
 #          Print the digest's NETWORK CHECKS section and release the inline-print
-#          claim. Called by bin/fm-session-start.sh, not by hand.
+#          claim. Called by bin/fm-session-start.sh, not by hand. Snapshots
+#          without waiting on the publication lock, so a completed worker's
+#          acknowledgement loop cannot consume the remaining session-start
+#          deadline.
 #        fm-startup-network.sh report
 #          Print the current state and report without changing anything, then the
 #          last run's per-step elapsed times. This is the ONLY command that prints
@@ -92,8 +95,8 @@
 #                             run too, where a partial record is the answer.
 #                             Diagnostic only: nothing reads it to make a
 #                             decision, and losing it never downgrades a run.
-#   .startup-network.lock     serializes publication, harvest acknowledgement,
-#                             and the wake decision.
+#   .startup-network.lock     serializes publication and the worker's wake
+#                             decision. Harvest snapshots without waiting on it.
 #
 # The whole stage is bounded by FM_STARTUP_NETWORK_TIMEOUT (default 120s), one
 # aggregate deadline replacing the per-call unboundedness that used to be able to
@@ -257,6 +260,10 @@ EOF
     --generation "$generation" \
     >/dev/null 2>&1 </dev/null &
   worker_pid=$!
+  # Git Bash job control can keep `start` attached to that worker until it
+  # exits, which put the wait back on the session-start lock stage. Disown
+  # before leaving monitor mode so start returns while the worker runs.
+  disown "$worker_pid" 2>/dev/null || true
   if ! write_atomic "$STATUS_FILE" <<EOF
 state=running
 pid=$worker_pid
@@ -342,6 +349,12 @@ EOF
       [ "$claim_live" -eq 1 ] || rm -f "$CLAIM_FILE" 2>/dev/null || true
     fi
     if [ "$claim_live" -eq 0 ]; then
+      # Harvest writes delivered without this lock. Recheck before waking so a
+      # snapshot that printed the result cannot also enqueue it.
+      if [ -f "$DELIVERED_FILE" ]; then
+        fm_lock_release "$PUBLISH_LOCK"
+        return 0
+      fi
       if report_requires_wake "$state"; then
         fm_wake_append check startup-network \
           "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
@@ -567,10 +580,30 @@ print_state() {
 }
 
 cmd_harvest() {  # <pid>
-  local pid=$1 generation state claim_record claim_generation claim_pid
-  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  local pid=$1 generation state claim_record claim_generation claim_pid snapshot
+  # Lock-free snapshot: status and report are write_atomic, and waiting on
+  # PUBLISH_LOCK let a completed worker's 0.1s acknowledgement loop consume
+  # the remaining session-start deadline. One cat of the status file is a
+  # whole generation or the previous one, never a torn mix, so print and
+  # acknowledgement use the same view. Write delivered before dropping the
+  # claim so the worker cannot treat a missing claim as "nobody will print
+  # this" while acknowledgement is still in flight.
+  snapshot=$(cat "$STATUS_FILE" 2>/dev/null || true)
+  status_get() {
+    printf '%s\n' "$snapshot" | sed -n "s/^$1=//p" | tail -1
+  }
   generation=$(status_get generation)
-  # Another session's live claim is left alone; the worker reaps a dead one.
+  state=$(status_get state)
+  print_state
+  case "$state" in
+    done|timeout|failed)
+      if [ "$(status_get report_published)" != 0 ]; then
+        # Existence is the acknowledgement. Harvest must not wait on the
+        # publication lock or create sibling temps while a worker may hold it.
+        printf '%s\n' "${generation:-delivered}" > "$DELIVERED_FILE" 2>/dev/null || true
+      fi
+      ;;
+  esac
   if [ -f "$CLAIM_FILE" ]; then
     claim_record=$(cat "$CLAIM_FILE" 2>/dev/null || true)
     IFS=$'\t' read -r claim_generation claim_pid <<EOF
@@ -581,15 +614,6 @@ EOF
       rm -f "$CLAIM_FILE" 2>/dev/null || true
     fi
   fi
-  state=$(status_get state)
-  print_state
-  case "$state" in
-    done|timeout|failed) [ "$(status_get report_published)" = 0 ] || write_atomic "$DELIVERED_FILE" <<EOF || true
-delivered
-EOF
-      ;;
-  esac
-  fm_lock_release "$PUBLISH_LOCK"
 }
 
 cmd_wait() {  # <seconds>

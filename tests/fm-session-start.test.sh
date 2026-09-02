@@ -505,18 +505,30 @@ SH
 # Drop every harness env marker from bin/fm-harness.sh detect_own so the
 # surrounding interactive shell cannot leak past the suite's fake ps harness.
 # Markers today: CLAUDECODE (claude), PI_CODING_AGENT plus FM_PI_HARNESS
-# (Pi family), GROK_AGENT (grok).
+# (Pi family), GROK_AGENT (grok), and Copilot CLI's COPILOT_CLI /
+# COPILOT_LOADER_PID / COPILOT_AGENT_SESSION_ID (those short-circuit ancestry
+# onto the native Windows loader).
+# Force comm/args/ppid through the fake `ps` on PATH: Git Bash and Linux both
+# expose /proc, and reading it would ignore that fake table.
 # codex and opencode have no env markers (ancestry only). Without this, a local
-# claude/pi/grok session fails cases that pin a different fake harness while CI
-# (no ambient markers) still passes.
+# claude/pi/grok/copilot session fails cases that pin a different fake harness
+# while CI (no ambient markers) still passes.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT -u COPILOT_CLI -u COPILOT_LOADER_PID \
+      -u COPILOT_AGENT_SESSION_ID -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID \
+      -u HERDR_WORKSPACE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+      FM_PROC_ROOT_OVERRIDE="${FM_PROC_ROOT_OVERRIDE:-$home/no-proc}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u COPILOT_CLI -u COPILOT_LOADER_PID -u COPILOT_AGENT_SESSION_ID \
+      -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID \
+      -u HERDR_WORKSPACE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+      FM_PROC_ROOT_OVERRIDE="${FM_PROC_ROOT_OVERRIDE:-$home/no-proc}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -525,7 +537,11 @@ run_session_start() {
 run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   local home=$1 root=$2 path=$3
   shift 3
-  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+  env -u CLAUDECODE -u GROK_AGENT -u COPILOT_CLI -u COPILOT_LOADER_PID \
+    -u COPILOT_AGENT_SESSION_ID -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID \
+    -u HERDR_WORKSPACE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+    FM_PROC_ROOT_OVERRIDE="${FM_PROC_ROOT_OVERRIDE:-$home/no-proc}" \
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
@@ -535,6 +551,10 @@ run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-sessio
   local harness=$1 home=$2 root=$3 path=$4
   shift 4
   env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u COPILOT_CLI -u COPILOT_LOADER_PID -u COPILOT_AGENT_SESSION_ID \
+    -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID \
+    -u HERDR_WORKSPACE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    FM_PROC_ROOT_OVERRIDE="${FM_PROC_ROOT_OVERRIDE:-$home/no-proc}" \
     FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
@@ -700,7 +720,7 @@ write_pi_loaded_markers() {
 # --- context digest: absent vs empty vs present -----------------------------
 
 test_context_digest_absent_empty_present() {
-  local rec root home fakebin out
+  local rec root home fakebin out waited=0
   rec=$(new_world context-digest)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -713,6 +733,14 @@ EOF
   # secondmates.md, captain-shared.md, and learnings.md deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  # Publication is launched off the blocking digest, so wait for the ledger
+  # rather than requiring the refresh to finish before session start returns.
+  waited=0
+  while [ ! -s "$home/state/home-summary.json" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
 
   jq -e --arg home "$home" '
     .schema == "fm-secondmate-home-summary.v1"
@@ -1053,7 +1081,12 @@ SH
       assert_not_contains "$out" "NOTICE: auto-detected herdr runtime" \
         "an explicit Herdr home should not be reported as auto-detected"
     else
-      out=$(TMUX='' HERDR_ENV=1 BASH_ENV="$mask" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+      out=$(TMUX='' HERDR_ENV=1 BASH_ENV="$mask" \
+        env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+        -u COPILOT_CLI -u COPILOT_LOADER_PID -u COPILOT_AGENT_SESSION_ID \
+        FM_PROC_ROOT_OVERRIDE="${FM_PROC_ROOT_OVERRIDE:-$home/no-proc}" \
+        FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+        "$SESSION_START")
       assert_contains "$out" "NOTICE: auto-detected herdr runtime (HERDR_ENV=1)" \
         "session start did not preserve the Herdr runtime auto-detection fallback"
     fi
@@ -1824,7 +1857,10 @@ EOF
     _ "$ROOT/bin/fm-timeout-lib.sh")
   [ "$mechanism" = bash ] || fail "the forced pure-Bash timeout fixture selected '$mechanism'"
 
-  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=3 FM_STARTUP_NETWORK_TIMEOUT=2 \
+  # 20s still truncates on the hanging git in bootstrap, but is long enough for
+  # lock-stage setup on slow Git Bash hosts where 3s expired before any stage
+  # breadcrumb was written.
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=20 FM_STARTUP_NETWORK_TIMEOUT=2 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "a truncated session start must still exit 0 so the session can open"
@@ -1832,13 +1868,24 @@ EOF
   assert_contains "$out" "LOCK" "the truncated digest lost a stage that had completed"
   assert_contains "$out" "STARTUP TRUNCATED - SESSION START HIT ITS" "a truncated session start did not say so"
   assert_contains "$out" "RUNTIME BOUND" "the truncation banner did not name the bound it hit"
-  assert_contains "$out" 'stopped during the "bootstrap" stage' "the truncation banner did not name the incomplete stage"
+  assert_contains "$out" 'cumulative deadline expired while the "bootstrap" stage was current' \
+    "the truncation banner did not name the stage that was current when the deadline expired"
+  assert_contains "$out" "current breadcrumb, not a measured bottleneck" \
+    "the truncation banner treated the breadcrumb as a measured bottleneck"
+  assert_not_contains "$out" "slow stage" "the truncation banner called the breadcrumb the slow stage"
+  assert_not_contains "$out" "stopped during the" "the truncation banner still used the old stopped-during wording"
   assert_contains "$out" "RECONCILE these stages" "the truncation banner did not tell the agent what to reconcile"
   assert_contains "$out" "wake-queue supervision-instructions read-once fleet-state network-checks context next-step" \
     "the truncation banner did not list every stage that never ran"
   assert_not_contains "$out" "NEXT STEP" "a truncated digest claimed to have reached its closing reminder"
   assert_absent "$home/state/.session-start-complete" \
     "a truncated startup recorded itself as complete"
+  assert_present "$home/state/.session-start.timings" \
+    "a truncated startup left no recorded stage timings"
+  assert_grep $'v1\tstage\tlock\t' "$home/state/.session-start.timings" \
+    "a truncated startup recorded no elapsed time for the completed lock stage"
+  assert_contains "$out" "TIMINGS - session-start stages completed before the bound" \
+    "the truncation banner did not print the recorded stage timings"
 
   # The bound must reach the whole process group: a hung grandchild that
   # outlives the digest would keep holding whatever the digest was waiting on.
@@ -1852,12 +1899,31 @@ EOF
   stray=$(pgrep -f "$fakebin/git" 2>/dev/null | wc -l | tr -d ' ')
   [ "$stray" -eq 0 ] || fail "the runtime bound left $stray hung subprocess(es) behind"
 
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/git"
+  status=0
+  # 180s covers Git Bash hosts where lock plus bootstrap already take ~30s
+  # and the remaining digest still has to run after the hung git is replaced.
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_SESSION_START_TIMEOUT=180 FM_STARTUP_NETWORK_TIMEOUT=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  expect_code 0 "$status" "a rerun after truncation must still exit 0"
+  assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START HIT ITS" \
+    "a rerun after truncation still reported itself truncated"
+  assert_contains "$out" "NEXT STEP" "a rerun after truncation lost its closing reminder"
+  assert_present "$home/state/.session-start-complete" \
+    "a recovered startup did not record itself as complete"
+  assert_grep $'v1\tstage\tnext-step\t' "$home/state/.session-start.timings" \
+    "a recovered startup omitted next-step-stage timing"
+
   status=0
   FM_TIMEOUT_MECHANISM_OVERRIDE=bash bash -c \
     '. "$1"; fm_run_timed 2 bash -c "exit 137"' _ "$ROOT/bin/fm-timeout-lib.sh" || status=$?
   expect_code 137 "$status" "pure-Bash natural command exit 137"
 
-  pass "the pure-Bash watchdog bounds session start, kills its hung grandchild, and emits the truncation contract"
+  pass "the pure-Bash watchdog bounds session start, kills its hung grandchild, and recovers on rerun"
 }
 
 test_portable_timeout_escalates_term_resistant_process() {
@@ -1907,8 +1973,30 @@ EOF
   # banner as the condition that voids it, and that mention is not a banner.
   assert_not_contains "$out" "STARTUP TRUNCATED - SESSION START HIT ITS" \
     "a digest that finished in time reported itself truncated"
+  assert_not_contains "$out" "TIMINGS - session-start" \
+    "a digest that finished in time printed diagnostic stage timings"
   assert_contains "$out" "NEXT STEP" "a digest that finished in time lost its closing reminder"
   assert_absent "${TMPDIR:-/tmp}/fm-session-start-stage" "the stage breadcrumb leaked a fixed-name file"
+  assert_present "$home/state/.session-start.timings" \
+    "a healthy startup left no recorded stage timings"
+  assert_grep $'v1\tstage\tlock\t' "$home/state/.session-start.timings" \
+    "a healthy startup omitted lock-stage timing"
+  assert_grep $'v1\tstage\tbootstrap\t' "$home/state/.session-start.timings" \
+    "a healthy startup omitted bootstrap-stage timing"
+  assert_grep $'v1\tstage\twake-queue\t' "$home/state/.session-start.timings" \
+    "a healthy startup omitted wake-queue-stage timing"
+  assert_grep $'v1\tstage\tsupervision-instructions\t' "$home/state/.session-start.timings" \
+    "a healthy startup omitted supervision-instructions-stage timing"
+  assert_grep $'v1\tstage\tread-once\t' "$home/state/.session-start.timings" \
+    "a healthy startup omitted read-once-stage timing"
+  assert_grep $'v1\tstage\tfleet-state\t' "$home/state/.session-start.timings" \
+    "a healthy startup omitted fleet-state-stage timing"
+  assert_grep $'v1\tstage\tnetwork-checks\t' "$home/state/.session-start.timings" \
+    "a healthy startup omitted network-checks-stage timing"
+  assert_grep $'v1\tstage\tcontext\t' "$home/state/.session-start.timings" \
+    "a healthy startup omitted context-stage timing"
+  assert_grep $'v1\tstage\tnext-step\t' "$home/state/.session-start.timings" \
+    "a healthy startup omitted next-step-stage timing"
 
   pass "a session start inside its budget prints no truncation banner"
 }
@@ -1966,6 +2054,7 @@ SH
 
   # shellcheck disable=SC2016 # $$ must expand in the launched shell, not here.
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u COPILOT_CLI -u COPILOT_LOADER_PID -u COPILOT_AGENT_SESSION_ID \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     bash -c 'export FM_FAKE_HARNESS_PID=$$; exec "$1" 8 "$2"' _ "$nest" "$SESSION_START")
 
@@ -2002,6 +2091,7 @@ EOF
   append_wake "$home/state" signal task-r "done: queued after the re-emit too" || fail "seed second wake failed"
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u COPILOT_CLI -u COPILOT_LOADER_PID -u COPILOT_AGENT_SESSION_ID \
     "$SESSION_START" --reemit)
 
   assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not label itself"
@@ -2221,6 +2311,7 @@ EOF
 
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u COPILOT_CLI -u COPILOT_LOADER_PID -u COPILOT_AGENT_SESSION_ID \
     "$SESSION_START" --reemit)
 
   # A re-emit skips the sweeps because it ALREADY ran them, not because it lacks
@@ -2236,6 +2327,7 @@ EOF
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
   readonly_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u COPILOT_CLI -u COPILOT_LOADER_PID -u COPILOT_AGENT_SESSION_ID \
     "$SESSION_START" --reemit)
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true

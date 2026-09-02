@@ -57,14 +57,46 @@ fm_session_process_ppid() {  # <pid>
 # publishes the native loader PID and a session id to every child tool. Accept
 # that bridge only when every marker is well formed and the native process table
 # still identifies that exact Windows PID as copilot.exe.
+# Cached across calls in this process: session start used to pay a full
+# `ps -W` (every Windows process) once per lock, ancestry, and liveness check.
+_FM_COPILOT_WINPID=
+_FM_COPILOT_WINPID_RC=
 fm_copilot_windows_pid_matches() {  # <native-windows-pid>
-  local pid=$1 command
+  local pid=$1 image
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  command=$(LC_ALL=C ps -W 2>/dev/null | awk -v p="$pid" '
+  if [ "$pid" = "${_FM_COPILOT_WINPID:-}" ]; then
+    return "${_FM_COPILOT_WINPID_RC:-1}"
+  fi
+  _FM_COPILOT_WINPID=$pid
+  _FM_COPILOT_WINPID_RC=1
+  # Prefer a single-pid query. Unfiltered `ps -W` lists every Windows process
+  # and was a multi-second Git Bash spawn on the session-start lock path.
+  # Fall back to `ps -W` when tasklist misses (including Copilot fixture PIDs
+  # that exist only in the fake process table).
+  if command -v tasklist.exe >/dev/null 2>&1; then
+    image=$(MSYS_NO_PATHCONV=1 tasklist.exe /FI "PID eq $pid" /FO CSV /NH 2>/dev/null \
+      | tr -d '\r' \
+      | awk -F, '{ gsub(/"/, ""); print $1; exit }')
+    case "$image" in
+      copilot.exe)
+        _FM_COPILOT_WINPID_RC=0
+        return 0
+        ;;
+      ''|INFO:*)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  fi
+  image=$(LC_ALL=C ps -W 2>/dev/null | awk -v p="$pid" '
     NR > 1 && $4 == p { print $NF; exit }
   ') || return 1
-  case "$command" in
-    copilot.exe|*\\copilot.exe|*/copilot.exe) return 0 ;;
+  case "$image" in
+    copilot.exe|*\\copilot.exe|*/copilot.exe)
+      _FM_COPILOT_WINPID_RC=0
+      return 0
+      ;;
   esac
   return 1
 }

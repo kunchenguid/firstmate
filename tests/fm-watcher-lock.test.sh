@@ -427,6 +427,88 @@ test_lock_late_claim_loses_after_recreate() {
   pass "late original claimant cannot claim a recreated lock"
 }
 
+lock_steal_depth() {
+  local path=$1 n=0
+  while [ -e "$path.steal" ] || [ -L "$path.steal" ]; do
+    path="$path.steal"
+    n=$((n + 1))
+    [ "$n" -gt 64 ] && break
+  done
+  printf '%s\n' "$n"
+}
+
+make_stale_steal_chain() {  # <lockdir> <depth> <dead-pid>
+  local lockdir=$1 depth=$2 dead=$3 path i=0
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  path=$lockdir
+  while [ "$i" -lt "$depth" ]; do
+    path="$path.steal"
+    mkdir "$path"
+    printf '%s\n' "$dead" > "$path/pid"
+    i=$((i + 1))
+  done
+}
+
+test_lock_stale_steal_hierarchy_converges_without_growing() {
+  local dir state lockdir dead depth rc holder
+  dir=$(make_case lock-steal-flatten)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  make_stale_steal_chain "$lockdir" 8 "$dead"
+  depth=$(lock_steal_depth "$lockdir")
+  [ "$depth" -eq 8 ] || fail "fixture steal depth was $depth, not 8"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "stale steal hierarchy was not reclaimed (rc=$rc)"
+  depth=$(lock_steal_depth "$lockdir")
+  [ "$depth" -eq 0 ] || fail "reclaim left a steal hierarchy of depth $depth"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "released lock was still present after converging reclaim"
+
+  make_stale_steal_chain "$lockdir" 8 "$dead"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    sleep 30
+  ' _ "$LIB" "$lockdir" &
+  holder=$!
+  sleep 0.2
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  depth=$(lock_steal_depth "$lockdir")
+  [ "$depth" -le 8 ] || fail "killed reclaim grew the steal hierarchy to depth $depth"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    sleep 30
+  ' _ "$LIB" "$lockdir" &
+  holder=$!
+  sleep 0.2
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  depth=$(lock_steal_depth "$lockdir")
+  [ "$depth" -le 8 ] || fail "a second killed reclaim grew the steal hierarchy to depth $depth"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "lock did not converge after killed reclaim attempts (rc=$rc)"
+  depth=$(lock_steal_depth "$lockdir")
+  [ "$depth" -eq 0 ] || fail "final reclaim left steal depth $depth"
+  pass "stale recursive-lock recovery converges without growing the hierarchy"
+}
+
 test_lock_paused_mid_acquire_claim_fails_during_steal() {
   local dir state lockdir out pid
   dir=$(make_case lock-paused-claim-steal)
@@ -1152,6 +1234,7 @@ test_lock_msys_publication_preserves_owner_identity
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
+test_lock_stale_steal_hierarchy_converges_without_growing
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace

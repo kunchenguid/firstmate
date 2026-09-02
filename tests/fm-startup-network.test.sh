@@ -691,6 +691,72 @@ GITHUB_TOKEN=ghp_supersecretvalue" \
   pass "fm-startup-network: the timing artifact cannot carry a command line or forge records"
 }
 
+# Harvest must snapshot a finished result without waiting on the publication
+# lock. The completed worker's acknowledgement loop reacquires that lock every
+# 0.1s; holding it continuously is the worst case of that loop and is what used
+# to consume the remaining session-start deadline.
+test_harvest_stays_bounded_while_ack_loop_holds_the_lock() {
+  local rec home root log claimant worker_pid holder flag status=0 output i
+  local before_wake after_wake started elapsed
+  rec=$(new_world harvest-bounded-ack)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  flag="$home/state/.test-lock-held"
+  sleep 30 &
+  claimant=$!
+  FM_SESSION_START_TIMEOUT=15 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='ack-loop harvest result' \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the claimed worker never published"
+  worker_pid=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")
+
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$STATE/.startup-network.lock" || exit 1
+    printf held > "$2"
+    sleep 20
+    fm_lock_release "$STATE/.startup-network.lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$flag" &
+  holder=$!
+  status=0
+  i=0
+  while [ ! -s "$flag" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$flag" ] || fail "the test holder never acquired the publication lock"
+
+  before_wake=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
+  started=$(date +%s)
+  output=$(run_stage "$home" "$root" harvest --pid "$claimant") || status=$?
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 8 ] \
+    || fail "harvest waited on the publication lock while the acknowledgement loop held it (${elapsed}s)"
+  expect_code 0 "$status" "harvest behind a held publication lock"
+  assert_contains "$output" "ack-loop harvest result" \
+    "lock-free harvest did not print the finished result"
+  [ -s "$home/state/.startup-network.delivered" ] \
+    || fail "lock-free harvest did not durably acknowledge the result it printed"
+  after_wake=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
+  [ "$after_wake" = "$before_wake" ] \
+    || fail "lock-free harvest queued a new wake after acknowledging the result: $after_wake"
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+  i=0
+  while kill -0 "$worker_pid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! kill -0 "$worker_pid" 2>/dev/null \
+    || fail "the worker did not settle after lock-free harvest acknowledged its result"
+  pass "fm-startup-network: harvest stays bounded while the completed worker holds the ack lock"
+}
+
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
@@ -708,5 +774,6 @@ test_lock_takeover_stays_read_only_while_a_sweep_holds_the_lease
 test_records_share_one_origin_so_offsets_form_a_timeline
 test_timings_are_published_and_only_the_on_demand_report_prints_them
 test_a_bounded_run_still_publishes_the_timings_it_managed_to_record
+test_harvest_stays_bounded_while_ack_loop_holds_the_lock
 test_the_timing_artifact_cannot_carry_a_command_line_or_forge_records
 echo "# fm-startup-network.test.sh: all assertions passed"

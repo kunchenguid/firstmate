@@ -173,10 +173,13 @@
 # digest neither waits for it nor orphans it unbounded. The
 # child writes the digest straight to this script's stdout, so everything it
 # emitted before the bound was hit is already delivered; the parent then prints
-# a loud STARTUP TRUNCATED banner naming the stage that did not finish and the
-# sections that were therefore never emitted, and still exits 0. The child
-# records its progress in FM_SESSION_START_STAGE_FILE, which is also the flag
-# that tells a child it is the child - the parent never recurses.
+# a loud STARTUP TRUNCATED banner naming the stage that was current when the
+# deadline expired and the sections that were therefore never emitted, and still
+# exits 0. That named stage is a breadcrumb, not a measured bottleneck; the child
+# records per-stage elapsed times in state/.session-start.timings so a rerun can
+# inspect what actually ran. The child records its progress in
+# FM_SESSION_START_STAGE_FILE, which is also the flag that tells a child it is
+# the child - the parent never recurses.
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
 # the digest never runs without the same hard bound and process-group cleanup.
 #
@@ -257,14 +260,34 @@ done
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
 SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+SESSION_START_TIMINGS="$STATE/.session-start.timings"
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
   printf '%s\n' "$1" > "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
 }
 
+enter_stage() {  # <stage-name>: breadcrumb plus elapsed timing for the prior stage
+  if [ -n "${CURRENT_STAGE:-}" ] && [ -n "${STAGE_STARTED_MS:-}" ]; then
+    fm_timing_record stage "$CURRENT_STAGE" "$STAGE_STARTED_MS"
+  fi
+  CURRENT_STAGE=$1
+  STAGE_STARTED_MS=$(fm_timing_now_ms)
+  stage "$1"
+}
+
+finish_stages() {
+  if [ -n "${CURRENT_STAGE:-}" ] && [ -n "${STAGE_STARTED_MS:-}" ]; then
+    fm_timing_record stage "$CURRENT_STAGE" "$STAGE_STARTED_MS"
+  fi
+  CURRENT_STAGE=
+  STAGE_STARTED_MS=
+}
+
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-timing-lib.sh
+. "$SCRIPT_DIR/fm-timing-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
@@ -311,18 +334,32 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
     printf '\n%s\n' "$BAR"
     printf '●  STARTUP TRUNCATED - SESSION START HIT ITS %ss RUNTIME BOUND\n' "$SESSION_START_BUDGET"
-    printf '●  It stopped during the "%s" stage, so everything above is COMPLETE\n' "$SESSION_START_LAST_STAGE"
-    printf '●  only up to that point.\n'
+    printf '●  The cumulative deadline expired while the "%s" stage was current,\n' "$SESSION_START_LAST_STAGE"
+    printf '●  so everything above is COMPLETE only up to that point.\n'
+    printf '●  The named stage is the current breadcrumb, not a measured bottleneck.\n'
     printf '●  RECONCILE these stages before acting on anything they would have shown:\n'
     printf '●    %s\n' "${SESSION_START_PENDING% }"
     printf '●  Rerun bin/fm-session-start.sh now to finish taking the helm. If it truncates\n'
-    printf '●  again, raise FM_SESSION_START_TIMEOUT and report the slow stage - a stage that\n'
-    printf '●  cannot finish inside the bound is a fleet problem, not a reporting detail.\n'
+    printf '●  again, raise FM_SESSION_START_TIMEOUT and inspect the recorded stage timings at\n'
+    printf '●    %s\n' "$SESSION_START_TIMINGS"
     printf '%s\n' "$BAR"
+    if [ -s "$SESSION_START_TIMINGS" ]; then
+      fm_timing_render "$SESSION_START_TIMINGS" \
+        "TIMINGS - session-start stages completed before the bound (ms):"
+    fi
   fi
   rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
   exit 0
 fi
+
+# Breadcrumb and timing start before the remaining setup probes, so a bound that
+# expires while those probes are still running names lock rather than unknown.
+mkdir -p "$STATE" 2>/dev/null || true
+fm_timing_start "$SESSION_START_TIMINGS"
+# Stage timings are recorded in this process. Do not export the log path to
+# the deferred network worker or bootstrap children; those own their own files.
+export -n FM_TIMING_LOG FM_TIMING_EPOCH_MS 2>/dev/null || true
+enter_stage lock
 
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
@@ -338,15 +375,6 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
-
-# One tasks-axi compatibility verdict per session start. The probe costs three
-# tasks-axi subprocesses and this digest needs the same answer twice - here for
-# the backlog listing and again inside the fm-bootstrap.sh child, which reports
-# an incompatible build as MISSING. Computing it once and handing it to that
-# child collapses six subprocesses to three. fm-tasks-axi-lib.sh owns both reuse
-# layers and the one-hop consumption rule that keeps the verdict out of any
-# agent's environment.
-if fm_tasks_axi_compatible; then TASKS_AXI_COMPATIBLE=1; else TASKS_AXI_COMPATIBLE=0; fi
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
@@ -620,7 +648,6 @@ else
   section "SESSION START - $FM_HOME"
 fi
 # --- 1. lock -----------------------------------------------------------
-stage lock
 subsection "LOCK"
 LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
 LOCK_RC=$?
@@ -642,7 +669,10 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
   }
 fi
-REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
+# The lock file is the harness pid fm-lock.sh just verified. Walking ancestry
+# again here repeated the Windows Git Bash process-table probes already paid
+# to acquire the lock.
+REBUILDING_SESSION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
 print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
 
 if [ "$READ_ONLY" -eq 0 ]; then
@@ -652,9 +682,12 @@ if [ "$READ_ONLY" -eq 0 ]; then
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
   # A full locked start publishes this home's current structured summary.
   # Publication is side-band and best-effort, so it can never change the
-  # session-start result. A context re-emit is not another session start.
+  # session-start result: launch it without waiting. Waiting on the 60s
+  # refresh bound used to consume the remaining digest deadline. A context
+  # re-emit is not another session start.
   if [ "$REEMIT" -eq 0 ]; then
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
   fi
   # Every network call this session start owes is launched HERE, detached and
   # bounded, so it runs concurrently with the whole digest below instead of in
@@ -674,7 +707,18 @@ fi
 # FM_BOOTSTRAP_NETWORK=skip on every path: bootstrap's own network half is what
 # the deferred stage above is running right now, and running it twice would both
 # re-block this digest and race the worker's sweeps against themselves.
-stage bootstrap
+# One tasks-axi compatibility verdict per session start. The probe costs three
+# tasks-axi subprocesses and this digest needs the same answer twice - here for
+# the backlog listing and again inside the fm-bootstrap.sh child, which reports
+# an incompatible build as MISSING. Computing it once and handing it to that
+# child collapses six subprocesses to three. fm-tasks-axi-lib.sh owns both reuse
+# layers and the one-hop consumption rule that keeps the verdict out of any
+# agent's environment. It runs as the first bootstrap work, not during lock,
+# so lock-stage setup does not pay those Git Bash forks before the digest has
+# even printed its header, and a bound that expires during the probe names
+# bootstrap rather than lock.
+enter_stage bootstrap
+if fm_tasks_axi_compatible; then TASKS_AXI_COMPATIBLE=1; else TASKS_AXI_COMPATIBLE=0; fi
 subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
@@ -708,7 +752,7 @@ fi
 # authority, and another session may be actively handling it. It still runs
 # fm-guard.sh directly with non-mutating advisory text, so the same alarms
 # surface without repair commands.
-stage wake-queue
+enter_stage wake-queue
 subsection "WAKE QUEUE"
 if [ "$READ_ONLY" -eq 1 ]; then
   QLEN=0
@@ -744,7 +788,7 @@ else
 fi
 
 # --- 4. supervision operating instructions ----------------------------------
-stage supervision-instructions
+enter_stage supervision-instructions
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
@@ -777,7 +821,7 @@ fi
 # next turn from re-reading everything the digest just printed. Because it now
 # arrives BEFORE its subject, it also names the one condition that voids it -
 # a stage that never ran, which the truncation banner names by stage.
-stage read-once
+enter_stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
@@ -805,7 +849,7 @@ EOF
 # --- 6. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
 # truncated tail must never take.
-stage fleet-state
+enter_stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
@@ -885,7 +929,7 @@ fi
 # worker started at step 1 has had the whole composition above to finish in. It
 # is a NON-BLOCKING read either way - whatever the worker has published by now is
 # printed, and whatever it has not is named as not yet confirmed.
-stage network-checks
+enter_stage network-checks
 section "NETWORK CHECKS"
 if [ "$READ_ONLY" -eq 1 ]; then
   printf 'skipped (read-only session) - GitHub authentication, project clone refresh,\n'
@@ -901,7 +945,7 @@ fi
 # session, already governed by config/startup-memory-budget, and recoverable
 # with one targeted read, so it is the cheapest thing for a truncated tail to
 # take (see this file's ORDERING note).
-stage context
+enter_stage context
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
@@ -910,7 +954,7 @@ print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, 
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
 # --- 9. closing reminder -----------------------------------------------
-stage next-step
+enter_stage next-step
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'
@@ -967,4 +1011,5 @@ if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   fi
 fi
 
+finish_stages
 exit 0

@@ -13,6 +13,8 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 make_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
+  # Fixture PIDs are invisible to native tasklist.exe; identity then falls
+  # through to this `ps -W` table, which is also the portable Linux path.
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
