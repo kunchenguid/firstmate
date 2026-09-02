@@ -66,8 +66,9 @@ reset() {
 
 reset
 out=$("$RELABEL" no-such-task 2>&1); rc=$?
-[ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "no task record" \
-  || fail "an unknown task id should refuse with a clear error"
+if [ "$rc" -ne 1 ] || ! printf '%s' "$out" | grep -q "no task record"; then
+  fail "an unknown task id should refuse with a clear error"
+fi
 pass "fm-crew-relabel: an unknown task id refuses with a clear error"
 
 reset
@@ -88,15 +89,17 @@ pass "fm-crew-relabel: a herdr task with no crew_label is a silent no-op"
 reset
 write_meta incomplete "crew_label=X1"
 out=$("$RELABEL" incomplete 2>&1); rc=$?
-[ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "no recorded herdr_session/herdr_workspace_id" \
-  || fail "crew_label with no session/workspace should refuse: rc=$rc out=[$out]"
+if [ "$rc" -ne 1 ] || ! printf '%s' "$out" | grep -q "no recorded herdr_session/herdr_workspace_id"; then
+  fail "crew_label with no session/workspace should refuse: rc=$rc out=[$out]"
+fi
 pass "fm-crew-relabel: crew_label with no recorded herdr_session/herdr_workspace_id refuses"
 
 reset
 write_meta task-p2 "crew_label=X1" "herdr_session=fmtest" "herdr_workspace_id=w1"
 out=$("$RELABEL" task-p2 2>&1); rc=$?
-[ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "no valid presentation journal" \
-  || fail "a task with no journal should refuse: rc=$rc out=[$out]"
+if [ "$rc" -ne 1 ] || ! printf '%s' "$out" | grep -q "no valid presentation journal"; then
+  fail "a task with no journal should refuse: rc=$rc out=[$out]"
+fi
 pass "fm-crew-relabel: a task with no presentation journal refuses"
 
 reset
@@ -116,6 +119,7 @@ write_journal task-p2 AbCdEfGhIjKlMnOpQrStUv
 export FM_TEST_HERDR_RENAME_FAIL=1
 out=$("$RELABEL" task-p2 2>&1); rc=$?
 unset FM_TEST_HERDR_RENAME_FAIL
-[ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q "herdr workspace rename failed" \
-  || fail "a failed herdr rename call should propagate as a refusal: rc=$rc out=[$out]"
+if [ "$rc" -ne 1 ] || ! printf '%s' "$out" | grep -q "herdr workspace rename failed"; then
+  fail "a failed herdr rename call should propagate as a refusal: rc=$rc out=[$out]"
+fi
 pass "fm-crew-relabel: a failed herdr workspace rename call is reported as a refusal"
