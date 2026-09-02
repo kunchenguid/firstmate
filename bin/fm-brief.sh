@@ -437,6 +437,8 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command - issues close through
+   the PR body's \`closes #N\` on merge, and the project board is not used.
 
 $INBOX_SECTION
 
