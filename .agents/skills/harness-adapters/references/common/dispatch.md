@@ -16,7 +16,7 @@ The inherited dispatch file applies the same best-fit profiles there.
 
 ## Owners
 
-`../../../bin/fm-spawn.sh` owns launch, autonomy, concrete flags, task-kind compatibility, and worker turn-end wiring.
+`../../../bin/fm-spawn.sh` owns launch, autonomy, concrete flags, and worker turn-end wiring, and asks `fm_control_harness_supports_kind` in `../../../bin/fm-control-lib.sh`, the one owner of task-kind compatibility.
 Natural-language rules stay with firstmate, while scripts receive concrete axes.
 
 `../../../bin/fm-busy-lib.sh` owns semantic busy trust.

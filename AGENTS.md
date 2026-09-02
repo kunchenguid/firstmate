@@ -197,14 +197,8 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
 The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `cursor`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
-`cursor` is refused for every ordinary unattended kind (ship, scout, and secondmate), because its `--auto-review` classifier can park the pane on a prompt nobody is there to answer while the pane still reads as busy, so route unattended work to `codex` or `claude` instead.
-It stays available for exactly two cases, each requiring the per-spawn flag `--cursor-exemption attended` (a person is in the pane) or `--cursor-exemption envelope:<name>` (a worker governed by the named, separately proven outer isolation envelope).
-The flag is deliberately per invocation rather than an exported variable, so one attended launch cannot silently exempt a later unattended spawn, and the grant is recorded as `cursor_exemption=` in the task's meta for audit.
-An envelope name must be letters, digits, `.`, `_`, or `-` starting on a letter or digit, and an explicitly passed grant is refused outright on a non-cursor harness on the local and remote spawn routes alike rather than recorded where a later relaunch onto cursor could read it back.
-A grant only inherited from a task's own record is dropped rather than refused when that task restarts onto a non-cursor harness, so a harness switch away from cursor succeeds and silently discards the grant.
-Across a relaunch or a `--secondmate` spawn, the two paths that restart an existing task from its own record, an `envelope:<name>` grant is inherited and an `attended` one never is, while a fresh ship or scout spawn always requires the flag.
-Automatic liveness recovery reaches only a REMOTE cursor secondmate; a local one is reported as an unverified harness and needs an explicit relaunch.
-The control plane evaluates a relaunch against the grant that will really be in force, so an unexemptable task is refused before its agent is stopped.
+`cursor` is refused for every ordinary unattended kind (ship, scout, and secondmate) and stays available only through the per-spawn `--cursor-exemption attended` or `--cursor-exemption envelope:<name>` grant, so route ordinary unattended work to `codex` or `claude`.
+Each harness's complete task-kind boundary, including cursor's grant mechanics, inheritance, and audit rules, is owned by its harness reference in `harness-adapters`, with `fm_control_harness_supports_kind` in `bin/fm-control-lib.sh` enforcing it on every spawn and before a relaunch stops the running agent.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
