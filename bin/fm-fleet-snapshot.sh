@@ -203,8 +203,8 @@ FM_SNAPSHOT_CACHE_DIR used when the live read fails, is invalid, or consumes the
 budget. A home with neither a valid ledger nor a valid cached copy is reported
 unreadable with the reason; collection never computes a summary in that home.
 Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
-(default 10 seconds); a read that hits the bound reports state unknown. Independent
-local reads run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8).
+(default 10 seconds); a read that hits the bound reports state unknown. Local task
+observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8).
 Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
@@ -547,6 +547,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line rc
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local decision_line decision_verb
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -587,14 +588,15 @@ task_json_lines() {
     fi
 
     current_file="$SNAPSHOT_TASK_DIR/$id.json"
-    current_json=$(cat "$current_file") || {
+    current_json=$(<"$current_file") || {
       snapshot_task_cleanup
       return 1
     }
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
-    current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
-    current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+    read -r current_state current_source < <(
+      printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
+    )
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -624,8 +626,16 @@ task_json_lines() {
       [ splits("\n") | select(length > 0)
         | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
         | select(. != null) ]')
-    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
-    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
+    pending_decision=0
+    blocked_event=0
+    while IFS= read -r decision_line || [ -n "$decision_line" ]; do
+      decision_verb=${decision_line#*$'\t'}
+      decision_verb=${decision_verb%%$'\t'*}
+      case "$decision_verb" in
+        needs-decision) pending_decision=1 ;;
+        blocked) blocked_event=1 ;;
+      esac
+    done <<< "$open_decisions_tsv"
 
     endpoint_exists=null
     agent_alive=not_checked
