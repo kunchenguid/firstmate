@@ -99,6 +99,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+- `fm-spawn.sh` then refuses again unless that pane's shell proves it is reading command lines, because a shell that silently drops the leading bytes of the first send would launch a corrupted command instead of failing.
+  [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns which sends are gated, the poll budget knobs, and the exact refusal wording.
 
 ## Capability matrix
 

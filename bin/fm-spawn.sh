@@ -134,6 +134,55 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Before the first text line goes into a pane, the spawn proves that pane's
+#   shell is actually reading command lines: it sends a marker command and waits
+#   for the file only a byte-exact delivery can create, because a shell still
+#   sourcing its rc files silently eats the leading bytes of the first send. Both
+#   first-send points are gated - `treehouse get`, and the launch environment
+#   that follows treehouse's new subshell or opens a relaunch, secondmate, or
+#   Orca spawn - and a pane that never answers refuses the spawn rather than
+#   launching into a possibly corrupted command. FM_SPAWN_READY_POLLS (default
+#   300), FM_SPAWN_READY_INTERVAL (default 0.1s), and FM_SPAWN_READY_RESEND_EVERY
+#   (default every 10 polls) tune that budget, and a zero or non-numeric value
+#   for any of the three falls back to that knob's own default rather than
+#   bricking every spawn; FM_SPAWN_READY_BYPASS=1 is a test-fixture escape hatch
+#   for suites whose fake backend has no shell behind it, never for a live home.
+#   The marker command is sent unquoted so no truncation can strand the pane's
+#   shell in a quote continuation, and discards its own stderr so that probes a
+#   blocked shell drains after the gate has already passed and removed the probe
+#   directory leave no failure debris on the pane ahead of the guarded command.
+#   The probe directory is created under TMPDIR when that root both accepts a
+#   temp directory and yields a plain absolute marker path, and otherwise under
+#   the same fixed /tmp root TASK_TMP uses, with one stderr notice naming which
+#   of the two it failed; only a /tmp that fails the same way refuses the spawn,
+#   before any probe is sent and naming that local fault rather than the pane.
+#   A probe the backend cannot even deliver refuses on the SEND CHANNEL rather
+#   than spending the poll budget and blaming the pane: two CONSECUTIVE send
+#   failures name the endpoint, a lone hiccup between delivered probes does not,
+#   and on zellij and cmux - the only adapters that define it - a reported
+#   uncleared input line is terminal on sight.
+#   The gate sends no interrupt of its own, on either gated path. It is
+#   not interrupt-free end to end, though: the zellij and cmux send_text_line
+#   adapters clear their own failed submit with C-c, and gating both first sends
+#   roughly doubles the number of send_text_line calls that can reach that
+#   pre-existing adapter path. Every refusal the probe loop itself raises names
+#   the window and says whether it survives, and the gate removes nothing itself,
+#   so on every flat layout that pane is still there afterwards. Such a refusal
+#   also names the task record, because the second gate runs after that record is
+#   published and no refusal retracts it: it names $STATE/<id>.meta and says the
+#   record stands, and it prescribes no remedy on any path, because whether that
+#   record is now orphaned or still describes a live task is not knowable here.
+#   Absence of --relaunch does not make it a fresh record: bin/fm-bootstrap.sh's
+#   secondmate liveness respawn and bin/fm-remote-secondmate-control.sh both
+#   re-launch over a pre-existing record without that flag.
+#   Known residuals on the herdr presentation-projection path: both gates run
+#   while this session's presentation-order lock is held, so an unresponsive pane
+#   can add up to two full poll budgets to that hold window; and the shared
+#   spawn-abort cleanup closes the exact projected task pane on any nonzero exit
+#   before the launch literal lands, this gate's refusal included, so there the
+#   named window is already gone rather than left for inspection. A concurrent
+#   herdr spawn that cannot acquire the lock meanwhile takes the same documented
+#   path it already does, warning once and falling back to the flat layout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -727,6 +776,7 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_READY_DIR=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -753,6 +803,14 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+# Sole owner of readiness-probe scratch removal, defined here so the EXIT trap
+# below can call it from any exit point in this script.
+spawn_ready_cleanup() {
+  [ -n "$SPAWN_READY_DIR" ] || return 0
+  rm -rf "$SPAWN_READY_DIR" 2>/dev/null || true
+  SPAWN_READY_DIR=
 }
 
 spawn_abort_cleanup() {
@@ -860,6 +918,7 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  spawn_ready_cleanup
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -2345,6 +2404,198 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
+# Shell-readiness gate for the FIRST text line sent into a pane.
+# This script's header owns the contract: which sends are gated, the knobs and
+# their defaults, the refusal rules, and the bypass. What follows is only the
+# rationale a maintainer changing this code needs and cannot read off the header.
+#
+# Seen live on herdr under load (2026-08-17): the leading 't' of `treehouse get`
+# was swallowed three times running, the pane ran `reehouse get`, and the
+# worktree was never entered - silently, with nothing on firstmate's side to
+# notice. A sacrificial leading space was rejected as only a mitigation: it buys
+# exactly as many bytes as spaces are sent.
+#
+# `touch` is load-bearing, not incidental. The command word cannot survive ANY
+# head truncation - every prefix loss turns it into some other word, the shell
+# reports command-not-found, and the marker stays absent - so the marker exists
+# only after one byte-exact line was received AND executed at a live prompt. That
+# is the same condition which makes the NEXT send safe, which is what makes this
+# a fix rather than padding.
+#
+# The verdict comes from the filesystem, never from rendered pane output, so it
+# holds identically on every send-capable backend and carries no per-harness
+# assumption at all: the gate runs strictly before the launch command, so no
+# harness has started yet. That is why no new per-harness evidence is owed here.
+#
+# FM_SPAWN_READY_BYPASS takes the same shape and the same reasoning as
+# bin/fm-gate-refuse-lib.sh's FM_GATE_REFUSE_BYPASS: nearly every suite in this
+# repo drives the real fm-spawn.sh against a FAKE backend whose send channel has
+# no shell behind it at all, so no marker can ever appear there and the gate
+# would time out on fixtures that are not testing a shell. tests/lib.sh exports
+# the bypass for those, and tests/fm-spawn-first-send.test.sh strips it to verify
+# the gate itself. No portable CI lane proves the gate's premise against a real
+# shell: the tmux and herdr smoke suites never invoke this script at all, and
+# every suite that drives it unbypassed against a REAL backend is classified
+# real-herdr-gated or live-harness-optin, which portable lanes exclude and which
+# exit early anyway without herdr, jq, treehouse, or cmux. The one unbypassed
+# suite portable lanes do run is tests/fm-spawn-first-send.test.sh, whose backend
+# is a fake modelling a byte-lossy shell, so it covers the gate's logic and not
+# its premise. So "a live pane shell executes the marker touch, and this script
+# observes that marker" is unproven against any real shell there; follow-up task
+# spawn-ready-live-backend-evidence owns closing that.
+
+# spawn_ready_probe_dir <root>: mktemp one probe directory under <root> and echo
+# it. Separate from the caller so the preferred root and the known-safe fallback
+# root run the exact same validation. The two failure modes are distinct causes
+# an operator has to act on differently, so they get distinct statuses: 1 means
+# mktemp itself could not create a directory there (missing, read-only, full),
+# 2 means the path it produced cannot be carried by an unquoted probe line.
+spawn_ready_probe_dir() {  # <root>
+  local dir
+  dir=$(mktemp -d "$1/fm-spawn-ready.XXXXXX") || return 1
+  case "$dir/ready" in
+    [!/]*|*[!A-Za-z0-9._/+:@-]*)
+      rm -rf "$dir" 2>/dev/null || true
+      return 2
+      ;;
+  esac
+  printf '%s\n' "$dir"
+}
+
+spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
+  local target=$1 about=$2 marker polls interval resend_every root i=0 sends=0
+  local probe_rc=0 send_status=0 send_failures=0 aftermath
+  [ "${FM_SPAWN_READY_BYPASS:-}" != 1 ] || return 0
+  # Every refusal below ends with the same clause, built once here so the three
+  # cannot drift apart. The gate itself removes nothing, but a refusal is a
+  # nonzero exit, and on the herdr presentation-projection path the shared
+  # spawn-abort cleanup then closes the exact projected task pane - so promise
+  # the pane is there to inspect only where it actually still is.
+  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    aftermath="window $T is closed by this spawn's abort cleanup, so it is not left behind for you to inspect"
+  else
+    aftermath="inspect window $T, which survives this refusal and is left for you to clean up"
+  fi
+  # The second gate runs after the task record is published, and a refusal does
+  # not retract it. Whether that record is now orphaned or still describes a live
+  # task is not knowable here: --relaunch adopts an existing one, and both
+  # bin/fm-bootstrap.sh's secondmate liveness respawn and
+  # bin/fm-remote-secondmate-control.sh re-launch over a pre-existing one without
+  # that flag. So state the fact and prescribe nothing.
+  if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+    aftermath="$aftermath; task $ID's record $STATE/$ID.meta is published and this refusal does not retract it"
+  fi
+  polls=${FM_SPAWN_READY_POLLS:-300}
+  interval=${FM_SPAWN_READY_INTERVAL:-0.1}
+  resend_every=${FM_SPAWN_READY_RESEND_EVERY:-10}
+  # Fail closed on a misconfigured knob rather than let one brick spawning: a
+  # zero or non-numeric poll count would refuse every spawn without sending a
+  # single probe while the message blamed the pane, a zero resend stride would
+  # divide by zero, and a non-numeric interval would kill sleep. Each falls back
+  # to its own documented default.
+  [ "$polls" -ge 1 ] 2>/dev/null || polls=300
+  [ "$resend_every" -ge 1 ] 2>/dev/null || resend_every=10
+  case "$interval" in
+    ''|.|*[!0-9.]*|*.*.*) interval=0.1 ;;
+    *[1-9]*) : ;;
+    *) interval=0.1 ;;
+  esac
+  # The probe line carries the marker path UNQUOTED on purpose. A quoted line
+  # can lose enough leading bytes to leave the pane's shell holding one
+  # unbalanced quote, and from that PS2 continuation every later probe adds an
+  # even number of quotes, so the parity never returns and no probe ever runs.
+  # Unquoted, every head truncation still degrades to a word the shell cannot
+  # run, which is the property this gate depends on. That only holds while the
+  # path itself needs no quoting, and TMPDIR is inherited from whoever launched
+  # this spawn - so an unusable TMPDIR falls back to the same fixed /tmp root
+  # TASK_TMP already uses rather than failing a spawn over the caller's
+  # environment. Only a /tmp that also cannot yield a plain path refuses.
+  root=${TMPDIR:-/tmp}
+  SPAWN_READY_DIR=$(spawn_ready_probe_dir "$root") || probe_rc=$?
+  if [ "$probe_rc" -ne 0 ] && [ "$root" != /tmp ]; then
+    if [ "$probe_rc" -eq 2 ]; then
+      echo "notice: shell-readiness probe root $root cannot yield a plain absolute marker path; falling back to /tmp for task $ID" >&2
+    else
+      echo "notice: shell-readiness probe root $root does not accept a temp directory; falling back to /tmp for task $ID" >&2
+    fi
+    probe_rc=0
+    SPAWN_READY_DIR=$(spawn_ready_probe_dir /tmp) || probe_rc=$?
+  fi
+  if [ "$probe_rc" -ne 0 ] || [ -z "$SPAWN_READY_DIR" ]; then
+    if [ "$probe_rc" -eq 2 ]; then
+      echo "error: no shell-readiness probe directory for task $ID: /tmp yields no plain absolute marker path, so the probe line cannot be sent without shell quoting" >&2
+    else
+      echo "error: no shell-readiness probe directory for task $ID: mktemp could not create one under /tmp - check that it exists, is writable, and has free space" >&2
+    fi
+    return 1
+  fi
+  marker="$SPAWN_READY_DIR/ready"
+  while [ "$i" -lt "$polls" ]; do
+    if [ $((i % resend_every)) -eq 0 ]; then
+      # Every resend after the first submits a bare Enter, so a prior attempt
+      # left half-typed on the input line is flushed as its own failing command
+      # instead of being concatenated onto this one. A healthy first probe never
+      # pays it.
+      #
+      # Deliberately NOT C-c, even though a bare Enter cannot escape a PS2
+      # continuation. The probe line is unquoted and carries no character that
+      # opens one - its only metacharacter is the trailing stderr redirect, whose
+      # target is /dev/null - so no truncation of the gate's OWN line can produce
+      # a continuation, which was C-c's only justification. Against that, C-c is a real SIGINT to whatever
+      # holds the pane's foreground: `treehouse get` can still be running at the
+      # second gate, because the settle loop below accepts a transiently settled
+      # non-project path before the shell catches up with its cd, and a relaunch
+      # endpoint is only required to be agent-free, not idle at a prompt.
+      # Interrupting either would let this gate pass over a half-created
+      # worktree - worse than the silent corruption it exists to prevent.
+      # Accepted residual: a genuinely partial line from some other cause can
+      # leave continuation state a bare Enter cannot clear. That rare liveness
+      # edge is traded away rather than risk signalling productive work, and the
+      # bounded budget still turns it into a loud refusal, never a corrupt spawn.
+      [ "$sends" -eq 0 ] || spawn_send_key "$target" Enter || true
+      send_status=0
+      spawn_send_text_line "$target" "touch $marker 2>/dev/null" || send_status=$?
+      sends=$((sends + 1))
+      # A send channel that reports failure is not a pane that will not answer,
+      # and burning the whole budget would report the wrong cause. Only zellij
+      # and cmux define status 2 as "input could not be cleared" (orca returns 2
+      # for invalid JSON or an ok:false response, which says nothing about the
+      # input line), so that terminal reading is scoped to those two. Every other
+      # failure gets one bounded retry on the next stride.
+      #
+      # The count is CONSECUTIVE, reset by any successful send. A pane eating
+      # leading bytes for many strides is this gate's whole target scenario, and
+      # one transient channel hiccup at its start must not combine with an
+      # unrelated one much later into a send-channel abort - the refusal has to
+      # name the fault that is actually happening.
+      if [ "$send_status" -ne 0 ]; then
+        send_failures=$((send_failures + 1))
+        if [ "$send_status" -eq 2 ] && { [ "$BACKEND" = zellij ] || [ "$BACKEND" = cmux ]; }; then
+          spawn_ready_cleanup
+          echo "error: shell-readiness probe input could not be cleared on $target for task $ID; refusing to send '$about' - $aftermath" >&2
+          return 1
+        fi
+        if [ "$send_failures" -ge 2 ]; then
+          spawn_ready_cleanup
+          echo "error: the send channel for task $ID's endpoint $target failed the shell-readiness probe $send_failures times in a row (last status $send_status), so probes are no longer reaching the pane; refusing to send '$about' - the endpoint's send path is failing, not its shell; $aftermath" >&2
+          return 1
+        fi
+      else
+        send_failures=0
+      fi
+    fi
+    if [ -e "$marker" ]; then
+      spawn_ready_cleanup
+      return 0
+    fi
+    i=$((i + 1))
+    sleep "$interval"
+  done
+  spawn_ready_cleanup
+  echo "error: task $ID's pane shell never confirmed it can read a command line ($sends probes over $polls polls at ${interval}s on $target); refusing to send '$about' into a pane that may silently drop its leading bytes; $aftermath" >&2
+  return 1
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -2421,6 +2672,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  spawn_await_shell_ready "$WT_TARGET" 'treehouse get' || exit 1
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -3037,6 +3289,12 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
+#
+# Gated again rather than once per spawn. On the ordinary path `treehouse get`
+# above handed the pane to a NEW subshell that sources its own rc files, so
+# readiness proven before that send says nothing about this one; on every other
+# path (relaunch, secondmate, orca) this line IS the spawn's first send.
+spawn_await_shell_ready "$T" 'the launch environment' || exit 1
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped

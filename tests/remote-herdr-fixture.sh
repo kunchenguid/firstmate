@@ -16,6 +16,10 @@
 # registered agent once anything has been typed into it, and submitting starts
 # one turn: the next agent read reports working and the pane settles back to
 # idle, which is the native transition the adapter confirms a submit with.
+
+# It also models just enough of the pane's SHELL for `pane run` to execute the
+# marker command fm-spawn's first-send readiness gate waits on; without that the
+# remote launch would stall on a pane that can never answer.
 #
 # Usage:
 #   . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
@@ -108,6 +112,24 @@ case "${1:-} ${2:-}" in
     else
       printf '{"error":{"code":"agent_not_found","message":"%s"}}\n' "$pane"
     fi
+    ;;
+  "pane run")
+    # Model the pane's SHELL for the one command shape fm-spawn's first-send
+    # readiness gate turns on (bin/fm-spawn.sh, spawn_await_shell_ready): a real
+    # pane executes the delivered line, and the gate's entire verdict is whether
+    # the marker file that line creates appears. Strictly additive - no fixture
+    # state changes here, so every other assertion in these suites is unaffected.
+    # This is a pane WRITE, so it honours the send-fail flag exactly as pane
+    # send-text and pane send-keys do; an endpoint a test has made unreachable
+    # must not answer the readiness probe.
+    [ ! -f "$SEND_FAIL" ] || exit 1
+    case "${4:-}" in
+      "touch /"*)
+        delivered=${4#touch }
+        delivered=${delivered% 2>/dev/null}
+        : > "$delivered" 2>/dev/null || true
+        ;;
+    esac
     ;;
   "session list"*)
     printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s"},{"name":"fm-remote","running":true,"socket_path":"%s"}]}\n' "$SOCKET" "$SOCKET" ;;
