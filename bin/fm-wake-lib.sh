@@ -809,6 +809,20 @@ fm_lock_try_acquire() {
     return 0
   fi
 
+  # A create failure with NO lock present at all is not contention: the owner
+  # dir or its pid file could not be created (a $STATE that went read-only or
+  # full), or a symlink race was lost. Everything below reclaims an EXISTING
+  # stale owner, and it does that through a helper lock at "$lockdir.steal"
+  # taken via this same function - so when creation is impossible, every level
+  # fails identically and the "steal" recursion walks ".steal", ".steal.steal",
+  # ... without end. That turns a bounded "try" into an unbounded hang for
+  # every caller, including ones holding a task's control lock. There is no
+  # owner to reclaim here, so refuse and let the caller decide - a contract
+  # every caller already handles.
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 1
+  fi
+
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
   # $() forks a subshell whose BASHPID is not this frame's pid.
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)

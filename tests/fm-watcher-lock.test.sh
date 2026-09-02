@@ -308,6 +308,52 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   pass "live steal mutex is not reclaimed"
 }
 
+# Regression: fm_lock_try_acquire is a bounded "try", but its stale-owner
+# recovery takes a helper lock at "$lockdir.steal" through this same function.
+# When the containing directory accepts no new entries at all - a state dir
+# that went read-only or full - every level fails identically at the same
+# mktemp, so the recovery recursed on ".steal", ".steal.steal", ... and never
+# returned. Callers that already hold another lock while acquiring (the forced
+# discard record in bin/fm-teardown.sh holds the task control lock) then hung
+# instead of refusing, and no writability probe can close that window: the
+# directory can be sealed after the probe passes and before the acquire. So
+# the acquire itself must return promptly - both when no lock is present and
+# when a reclaimable-looking stale one is.
+test_lock_try_acquire_refuses_when_lock_cannot_be_created() {
+  local dir state bound rc dead
+  dir=$(make_case lock-unwritable-dir)
+  state="$dir/state"
+  bound=$(command -v timeout || command -v gtimeout || true)
+  [ -n "$bound" ] || { pass "unwritable lock dir: skipped, no timeout available to bound the run"; return 0; }
+
+  mkdir -p "$state/sealed-empty" "$state/sealed-stale/.contend.lock"
+  dead=$(dead_pid)
+  printf '%s\n' "$dead" > "$state/sealed-stale/.contend.lock/pid"
+  chmod a-w "$state/sealed-empty" "$state/sealed-stale"
+
+  rc=0
+  # shellcheck disable=SC2016  # $1/$2 are the bounded child's positional args.
+  FM_STATE_OVERRIDE="$state" "$bound" 15 bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$state/sealed-empty/.contend.lock" || rc=$?
+  [ "$rc" -ne 124 ] || fail "acquire on an unwritable dir hung instead of refusing"
+  [ "$rc" -eq 1 ] || fail "acquire on an unwritable dir returned $rc, expected a plain refusal"
+
+  rc=0
+  # shellcheck disable=SC2016  # $1/$2 are the bounded child's positional args.
+  FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" "$bound" 15 bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$state/sealed-stale/.contend.lock" || rc=$?
+  chmod u+w "$state/sealed-empty" "$state/sealed-stale"
+  [ "$rc" -ne 124 ] || fail "acquire of an unreclaimable stale lock hung instead of refusing"
+  [ "$rc" -eq 1 ] || fail "acquire of an unreclaimable stale lock returned $rc, expected a plain refusal"
+  [ "$(cat "$state/sealed-stale/.contend.lock/pid" 2>/dev/null || true)" = "$dead" ] \
+    || fail "stale lock pid was clobbered by a refused acquire"
+  pass "an uncreatable lock is refused promptly instead of recursing on .steal forever"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1114,6 +1160,7 @@ test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
+test_lock_try_acquire_refuses_when_lock_cannot_be_created
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate

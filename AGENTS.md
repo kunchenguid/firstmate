@@ -136,6 +136,7 @@ state/               runtime records and signals; gitignored
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
   .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .writing-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
+  .discarded-pipeline-commits.log .discarded-pipeline-commits.lock  fleet-wide append-only record of each forced teardown that discarded unlanded or unverified no-mistakes pipeline work (size-capped), and the lock serializing its append-plus-rotate critical section across concurrent teardowns of different tasks; deliberately not keyed to the task id teardown erases, so it is the only surviving trace of that work; never delete it
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
