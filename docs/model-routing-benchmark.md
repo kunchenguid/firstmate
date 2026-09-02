@@ -22,7 +22,7 @@ A gate that cannot obtain its evidence refuses; an unproven denial is never trea
 | `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, finite positive per-dimension mutation calibration, and exactly one bound capture record for every planned candidate head are all required. |
 | `manifest-build` / `manifest-check` | The original run, judge, capture, and cost arithmetic did not add up, and cost and elapsed time were tie-breakers while unmeasurable. Every count is now derived, and cost is low/base/high arithmetic rather than a quoted range. |
 | `promote-evaluate` | Only a six-of-six paired sweep with the predeclared margin, no blocker-class failure, and no regression against the baseline veto is eligible, and the captain still gives the word. |
-| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup. Every evidence file and the executed evaluator must be content-addressed beneath its own sample directory, every bundle and archived evaluator is rerun by the drill, and cleanup is authorised only while the receipt still matches the current evidence and manifest bytes. |
+| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup. Every evidence file and the executable evaluator must be content-addressed beneath its own sample directory, the evaluator consumes a materialised restored candidate tree from scratch storage, and cleanup is authorised only while the archive verifies both before and after the rerun. |
 | `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. A preflight that refuses or stops for the captain also revokes any receipt already on disk, so evidence degrading outside the plan cannot leave a stale clearance standing. |
 
 ## Where the refusal actually bites
@@ -52,8 +52,8 @@ Because a denial against an empty directory proves nothing, every declared priva
 The gate also resolves each clone's `objects/info/alternates` itself.
 An alternate is a second object database bound into the clone, so an entrant whose alternate escapes its own private storage is reachable by a route no probe walking the sibling root would ever visit; that alternate is refused and handed to the sibling probes as a target.
 
-The process probe passes its marker through the confinement environment rather than command-line arguments.
-That keeps the probe and its wrapper lineage from impersonating a sibling while the positive control still reports a genuinely visible marker process as a leak.
+The process probe reads its marker from material written inside the entrant's permitted private session path.
+The marker value never crosses a gate-created process argv, including the confinement wrapper, while the positive control still reports a genuinely visible sibling marker process as a leak.
 
 ## The two captain-stop conditions
 

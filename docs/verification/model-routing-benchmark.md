@@ -34,8 +34,8 @@ ok - enforced isolation (container) denies file, worktree, object, unreachable-o
 ok - the same confinement still lets an entrant work in its own private clone
 ```
 
-The restore portion of `tests/fm-bench-gate.test.sh` executes only an evaluator listed in each sample's content-addressed files map and compares the SHA-256 of its output to the archived result hash.
-It also proves that an absolute path, a parent traversal, a symlink escape, an unlisted evidence file, an unaddressed evaluator, a changed manifest binding, and a changed evaluator result all refuse before cleanup can be authorised.
+The restore portion of `tests/fm-bench-gate.test.sh` executes only an executable evaluator listed in each sample's content-addressed capture-and-scoring evidence group, gives it a materialised restored candidate tree from scratch storage, and compares the SHA-256 of its output to the archived result hash.
+It also proves that an absolute path, a parent traversal, a symlink escape, an unlisted evidence file, an arbitrary command, an unaddressed evaluator, a changed manifest binding, a changed evaluator result, and an archive mutation during the rerun all refuse before cleanup can be authorised.
 
 The same run under `--mechanism none` refuses with all seven probe classes reported `PROBE LEAKED`, which is what proves the probes are not vacuous.
 
@@ -54,7 +54,7 @@ An earlier probe revision treated a missing tool as a denial, so this image clea
 Each probe now measures the underlying capability by whatever means the environment offers - reading the object bytes directly when `git` is absent, reading `/proc/*/cmdline` rather than asking `ps` - and reports `PROBE INCONCLUSIVE` when it has no means at all.
 The gate refuses on inconclusive, so a confinement whose image simply lacks a tool can no longer look like enforced isolation.
 
-The process probe reads `/proc` one file at a time and emits one line per process while receiving its marker through the environment instead of its own command line.
+The process probe reads `/proc` one file at a time and emits one line per process while reading its marker from private material instead of passing the marker through any gate-created argv.
 An earlier revision concatenated every `cmdline` into a single line, so the self-exclusion deleted the entire table and an image without `ps` reported a denial while the whole host process table was readable.
 Measured on Linux in `debian:stable-slim`, which ships no `ps`, with a sibling process running in the same PID namespace:
 
@@ -64,7 +64,7 @@ PROBE LEAKED saw another benchmark process in the process table
 ```
 
 The same command against the concatenating revision reported `PROBE DENIED only this probe's own process is visible`.
-`tests/fm-bench-gate.test.sh` covers this on any host with a `/proc` filesystem, first with a sibling process running and then without, so neither a self-match nor an always-denied probe can clear isolation.
+`tests/fm-bench-gate.test.sh` holds a probe at its process-table read and confirms the marker is absent from every visible launch argv before proving both the no-sibling denial and genuine-sibling leak paths.
 
 ## What this does not establish
 

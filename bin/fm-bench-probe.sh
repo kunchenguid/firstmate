@@ -8,7 +8,7 @@
 # the access rather than by reading a claim about it.
 #
 # Usage: fm-bench-probe.sh <probe> <target>
-#        PROCESS_INSPECTION_MARKER=<marker> fm-bench-probe.sh process_inspection
+#        PROCESS_INSPECTION_MARKER_FILE=<path> fm-bench-probe.sh process_inspection
 #
 # Probes, each attempting the exact bypass the transcript grep in the original
 # design could not detect:
@@ -44,9 +44,9 @@ fi
 
 PROBE=$1
 if [ "$PROBE" = process_inspection ]; then
-  [ "$#" -eq 1 ] || { echo "usage: PROCESS_INSPECTION_MARKER=<marker> fm-bench-probe.sh process_inspection" >&2; exit 2; }
-  TARGET=${PROCESS_INSPECTION_MARKER:-}
-  [ -n "$TARGET" ] || { echo "error: PROCESS_INSPECTION_MARKER is required for process_inspection" >&2; exit 2; }
+  [ "$#" -eq 1 ] || { echo "usage: PROCESS_INSPECTION_MARKER_FILE=<path> fm-bench-probe.sh process_inspection" >&2; exit 2; }
+  TARGET=$(cat "${PROCESS_INSPECTION_MARKER_FILE:-}" 2>/dev/null || true)
+  [ -n "$TARGET" ] || { echo "error: PROCESS_INSPECTION_MARKER_FILE must name readable marker material" >&2; exit 2; }
 else
   [ "$#" -eq 2 ] || { echo "usage: fm-bench-probe.sh <probe> <target>" >&2; exit 2; }
   TARGET=$2
