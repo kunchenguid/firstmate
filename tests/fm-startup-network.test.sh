@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-startup-network.test.sh - behavior tests for bin/fm-startup-network.sh,
-# the deferred network stage a session start launches instead of running its
-# network work on the blocking path.
+# the deferred startup stage a session start launches instead of running its
+# network work or inactive-outcome scan on the blocking path.
 #
 # The session-start suite proves the digest no longer waits and that the deferred
 # sweeps still land. This suite pins the stage's own contract, whose whole job is
@@ -15,13 +15,15 @@
 #   - the aggregate bound turns a wedged sweep into an actionable line
 #   - an abandoned `running` record is reported as needing a rerun rather than
 #     staying "in progress" forever
-#   - single-flight: a second `start` never launches a competing worker
+#   - phase-aware single-flight: a covering worker is reused, while a later
+#     locked request supersedes an in-flight probe-only worker
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-startup-network-tests)
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
 
@@ -343,6 +345,43 @@ EOF
   pass "fm-startup-network: an actionable state=done report still queues a wake"
 }
 
+test_deferred_invalid_secondmate_markers_queue_durable_findings() {
+  local kind rec home root log target report err seq generation
+  for kind in malformed symlink; do
+    rec=$(new_world "deferred-invalid-marker-$kind")
+    IFS='|' read -r home root log <<EOF
+$rec
+EOF
+    printf '%s\n' $$ > "$home/state/.lock"
+    if [ "$kind" = malformed ]; then
+      printf '../other-home\n' > "$home/.fm-secondmate-home"
+    else
+      target="$TMP_ROOT/deferred-invalid-marker-$kind/marker-target"
+      printf 'mate\n' > "$target"
+      ln -s "$target" "$home/.fm-secondmate-home"
+    fi
+
+    FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 1
+    assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+      "$kind marker finding was swallowed by the deferred startup stage"
+    report=$(run_stage "$home" "$root" report)
+    assert_contains "$report" "(silent - no problems found)" \
+      "$kind marker fixture unexpectedly depended on the network report"
+
+    err="$home/drain.err"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" >/dev/null 2> "$err"
+    seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+    generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+    [ -n "$seq" ] && [ -n "$generation" ] \
+      || fail "$kind marker wake did not issue a durable acknowledgement"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" \
+      --ack-through "$seq" --recovery-generation "$generation" >/dev/null
+    assert_no_grep 'inactive-reconcile-diagnostic:invalid-secondmate-home' "$home/state/.wake-queue" \
+      "$kind marker wake could not be acknowledged"
+  done
+  pass "fm-startup-network: deferred invalid secondmate markers produce durable wakes"
+}
+
 # The worker outlives the command that launched it. If another session took the
 # lock meanwhile, running the mutating sweeps would sweep underneath that
 # session, so they are refused - and the refusal is reported, not silent.
@@ -432,6 +471,35 @@ EOF
     "NETWORK_CHECKS: the deferred check worker stopped before publishing" \
     "a record that outlived the stage bound still read as in progress"
   pass "fm-startup-network: an abandoned run reports as needing a rerun, never as in progress forever"
+}
+
+test_locked_start_is_not_satisfied_by_an_inflight_probe() {
+  local rec home root log waited=0
+  rec=$(new_world probe-then-locked)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  printf '../other-home\n' > "$home/.fm-secondmate-home"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=6 \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid $$
+  while ! grep -Fq 'detect_only=1' "$log" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  assert_grep 'network=only detect_only=1' "$log" \
+    "the probe-only worker was not in flight before the locked request"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" wait 30 >/dev/null \
+    || fail "the locked request never published"
+  assert_grep 'network=only detect_only=0' "$log" \
+    "the in-flight probe-only worker suppressed the locked sweeps"
+  assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+    "the in-flight probe-only worker suppressed the locked inactive scan"
+  pass "fm-startup-network: locked requests supersede in-flight probe-only workers"
 }
 
 # Two session opens in quick succession must not run the same mutating sweeps
@@ -698,9 +766,11 @@ test_a_claimant_crash_after_publish_still_queues_the_wake
 test_a_report_publication_failure_is_failed_and_still_wakes
 test_a_successful_result_never_queues_a_wake
 test_an_actionable_successful_result_still_queues_a_wake
+test_deferred_invalid_secondmate_markers_queue_durable_findings
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun
+test_locked_start_is_not_satisfied_by_an_inflight_probe
 test_start_is_single_flight
 test_start_reserves_its_generation_before_returning
 test_new_lock_owner_does_not_reuse_the_previous_owners_worker

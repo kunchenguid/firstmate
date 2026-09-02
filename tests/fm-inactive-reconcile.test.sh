@@ -187,6 +187,8 @@ test_invalid_secondmate_marker_blocks_routing() {
       || fail "$kind secondmate marker did not surface the blocked terminal obligation"
     [ "$(outcome_count "$MATE" pending)" = 0 ] \
       || fail "$kind secondmate marker created a main-home pending receipt"
+    [ "$(wake_count "$MATE" 'inactive-reconcile-diagnostic:invalid-secondmate-home')" = 1 ] \
+      || fail "$kind secondmate marker diagnostic was not durably queued"
     ! grep -Fq 'inactive-outcome:' "$MATE/state/.wake-queue" 2>/dev/null \
       || fail "$kind secondmate marker routed a captain presentation wake"
     [ -f "$MATE/state/child.meta" ] && [ -f "$MATE/state/child.status" ] \
