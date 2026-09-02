@@ -65,6 +65,7 @@
 #   (ag) same copy listed twice (ambiguous)         -> REFUSE
 #   (ah) malformed pool listing                     -> REFUSE
 #   (ai) unreadable pool listing                    -> REFUSE
+#   (al) entry omitting the lease/process fields    -> REFUSE (proves nothing)
 #   (aj) ordinary non-lock error, pool available    -> REFUSE (wrong signature)
 #   (ak) copy owned by another home's clone         -> REFUSE (cross-home)
 set -u
@@ -72,6 +73,8 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
@@ -2934,6 +2937,35 @@ test_malformed_pool_listing_refuses() {
   pass "a malformed pool listing proves nothing and still refuses cleanup"
 }
 
+# An entry that names the exact copy as available but never reports its lease and
+# process fields has not OBSERVED them empty - it has not reported them at all, so
+# it cannot prove the copy is unleased and idle.
+test_pool_entry_without_lease_and_process_fields_refuses() {
+  local case_dir rc wt_canon
+  case_dir=$(make_case already-returned-partial-entry)
+  write_meta "$case_dir" no-mistakes ship
+  land_task_branch_on_origin "$case_dir"
+  add_status_aware_treehouse "$case_dir"
+  wt_canon=$(cd "$case_dir/wt" && pwd -P)
+  printf '[{"name":"1","path":"%s","status":"available","flavor":"git"}]\n' "$wt_canon" \
+    > "$case_dir/pool.json"
+
+  set +e
+  FM_FAKE_TH_STATUS_FILE="$case_dir/pool.json" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "already-returned-partial-entry: an entry that never reports lease or process state must refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "already-returned-partial-entry: teardown deleted task records on an entry that proved no lease or process state"
+  assert_grep "in treehouse's own shape" "$case_dir/stderr" \
+    "already-returned-partial-entry: teardown did not explain the refusal"
+  assert_not_contains "$(cat "$case_dir/stderr")" "already returned before this cleanup ran" \
+    "already-returned-partial-entry: teardown converged on an entry that never observed the required state"
+  pass "a pool entry that never reports lease or process state proves nothing and refuses cleanup"
+}
+
 test_unreadable_pool_listing_refuses() {
   local case_dir rc
   case_dir=$(make_case already-returned-unreadable)
@@ -3075,6 +3107,7 @@ test_live_process_on_an_available_slot_refuses
 test_missing_target_in_pool_listing_refuses
 test_duplicate_pool_entries_for_the_same_copy_refuse
 test_malformed_pool_listing_refuses
+test_pool_entry_without_lease_and_process_fields_refuses
 test_unreadable_pool_listing_refuses
 test_ordinary_treehouse_return_error_still_refuses
 test_another_homes_copy_is_never_treated_as_returned

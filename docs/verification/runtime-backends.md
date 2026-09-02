@@ -332,6 +332,7 @@ ok - an available slot that still lists a live process refuses cleanup
 ok - a pool listing that never names the recorded copy still refuses cleanup
 ok - an ambiguous pool listing naming the same copy twice still refuses cleanup
 ok - a malformed pool listing proves nothing and still refuses cleanup
+ok - a pool entry that never reports lease or process state proves nothing and refuses cleanup
 ok - an unreadable pool listing proves nothing and still refuses cleanup
 ok - an ordinary non-lock treehouse return failure still aborts even when the pool looks available
 ok - a copy whose repository is another home's clone is never treated as this task's returned copy

@@ -131,7 +131,9 @@
 # Anything weaker keeps the abort: a generic `not managed` with no matching listing
 # entry, a substring or basename resemblance, several matching entries, an `in-use`
 # or leased slot, a copy owned by another firstmate home's clone, a missing jq, or a
-# failed, empty, or malformed listing. Every one of those retains all task records.
+# failed, empty, or malformed listing. An entry that omits any of those five fields,
+# or reports one with a type treehouse does not use, is malformed for this purpose
+# and proves nothing rather than reading as empty. Each retains all task records.
 # The proof is read-only and, when it holds, authorizes exactly one thing: skipping a
 # return that already happened. It performs no further worktree mutation, never
 # retries the return, never resets, removes, prunes, or claims any copy, and never
@@ -1445,32 +1447,44 @@ teardown_treehouse_already_returned() {  # <dir> <cd_dir> <label>
 $entries
 EOF
 
-  if [ "$matches" -eq 1 ]; then
-    # One field per line: an empty lease id or holder must stay empty rather than
-    # collapse into its neighbour, which a tab-separated record would do.
-    hit_fields=$(printf '%s' "$listing" | jq -r --argjson slot "$hit_index" '
-      .[$slot]
-      | [ (.status // ""),
-          (.lease_id // ""),
-          (.lease_holder // ""),
-          (if .leased_at == null then "" else "leased-at" end),
-          ((.processes // []) | length | tostring) ]
-      | .[]') || hit_fields=
-    {
-      IFS= read -r hit_state
-      IFS= read -r hit_lease_id
-      IFS= read -r hit_lease_holder
-      IFS= read -r hit_leased_at
-      IFS= read -r hit_procs
-    } <<EOF
-$hit_fields
-EOF
-  fi
-
   if [ "$matches" -ne 1 ]; then
     echo "teardown: $label return reported $dir is not managed by this pool, and the pool listing from $cd_dir names that exact copy $matches times (exactly one is required), so it cannot be proven already returned; aborting" >&2
     return 1
   fi
+
+  # Every field must be PRESENT and carry treehouse's own type, so an entry that
+  # never reports a lease or a process list proves nothing rather than reading as
+  # proven-empty. One field per line: an empty lease id or holder must stay empty
+  # rather than collapse into its neighbour, which a tab-separated record would do.
+  hit_fields=$(printf '%s' "$listing" | jq -r --argjson slot "$hit_index" '
+    .[$slot]
+    | select(has("status") and has("lease_id") and has("lease_holder")
+             and has("leased_at") and has("processes"))
+    | select((.status | type) == "string"
+             and (.lease_id | type) == "string"
+             and (.lease_holder | type) == "string"
+             and (.leased_at == null or (.leased_at | type) == "string")
+             and (.processes | type) == "array")
+    | [ .status,
+        .lease_id,
+        .lease_holder,
+        (if .leased_at == null then "" else "leased-at" end),
+        (.processes | length | tostring) ]
+    | .[]') || hit_fields=
+  if [ -z "$hit_fields" ]; then
+    echo "teardown: $label return reported $dir is not managed by this pool, and the pool listing from $cd_dir does not report that copy's status, lease and process fields in treehouse's own shape, so it cannot be proven already returned; aborting" >&2
+    return 1
+  fi
+  {
+    IFS= read -r hit_state
+    IFS= read -r hit_lease_id
+    IFS= read -r hit_lease_holder
+    IFS= read -r hit_leased_at
+    IFS= read -r hit_procs
+  } <<EOF
+$hit_fields
+EOF
+
   if [ "$hit_state" != available ] \
      || [ -n "$hit_lease_id" ] || [ -n "$hit_lease_holder" ] || [ -n "$hit_leased_at" ] \
      || [ "$hit_procs" != 0 ]; then
