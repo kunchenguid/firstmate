@@ -49,7 +49,8 @@
 # a no-mistakes PR after first green, and reconfirm CI. A direct-PR brief opens
 # with gh-axi pr create --base <branch>. A local-only brief records that same
 # base as the landing target that bin/fm-merge-local.sh reads. A scout brief
-# only records the freshen base. --secondmate refuses the flag.
+# records the freshen base as the same `Base branch contract:` line spawn
+# reads from Definition of done. --secondmate refuses the flag.
 # --branch-name <name> replaces every generated `fm/<task-id>` crew branch
 # (checkout command, push-rule text, local-only done line) with that name.
 # The name must pass `git check-ref-format --branch`. When omitted, scaffolds
@@ -409,7 +410,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, $SETUP_HEAD.$BASE_BRANCH_CONTRACT
+You are in a disposable git worktree of $REPO, $SETUP_HEAD.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -445,7 +446,7 @@ The report must stand alone: what you did, what you found, the evidence (command
 If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
-If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.$BASE_BRANCH_CONTRACT
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0

@@ -857,6 +857,15 @@ test_base_branch_worker_steps() {
     "--base-branch scout brief must name the freshen base in Setup"
   assert_grep "Base branch contract: base_branch=develop" "$brief" \
     "--base-branch scout brief must record its freshen base contract"
+  awk '
+    /^# Definition of done[[:space:]]*$/ { dod=1 }
+    /^Base branch contract: base_branch=develop$/ {
+      found=1
+      if (!dod) exit 2
+    }
+    END { if (!found) exit 1 }
+  ' "$brief" \
+    || fail "--base-branch scout brief must record its contract in Definition of done"
   assert_no_grep "gh-axi pr edit" "$brief" \
     "scout --base-branch must not add a PR retarget step"
 

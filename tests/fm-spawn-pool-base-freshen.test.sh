@@ -629,6 +629,34 @@ test_base_branch_contract_refuses_mismatch() {
   pass "ship and scout base contracts refuse conflicting spawn flags"
 }
 
+test_scout_base_branch_contract_agrees_and_records() {
+  local rec id out status current_develop current_main
+  id='pool-scout-base-branch-agree-r10'
+  rec=$(make_case scout-base-branch-agree "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b develop
+  printf 'only on develop\n' > "$CASE_DIR/publisher/develop-only.txt"
+  git -C "$CASE_DIR/publisher" add develop-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm develop-tip
+  git -C "$CASE_DIR/publisher" push --quiet origin develop
+  scaffold_scout_brief "$id" develop
+
+  out=$(run_spawn "$id" --scout --base-branch develop)
+  status=$?
+  expect_code 0 "$status" "scout spawn --base-branch should accept a matching generated contract"
+  assert_contains "$out" "spawned $id" "scout spawn did not report success with a matching base contract"
+  current_develop=$(git -C "$POOL_DIR" rev-parse origin/develop)
+  current_main=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current_develop" ] \
+    || fail "scout spawn --base-branch develop did not refresh to origin/develop"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$current_main" ] \
+    || fail "scout spawn --base-branch develop refreshed to origin/main"
+  assert_grep 'base_branch=develop' "$HOME_DIR/state/$id.meta" \
+    "scout spawn did not record the named analysis base"
+  pass "scout spawn honors a matching --base-branch contract from Definition of done"
+}
+
 test_base_branch_contract_uses_last_line() {
   local rec id brief out status
   id='pool-base-branch-last-line-r8'
@@ -880,6 +908,7 @@ test_base_branch_ref_fetch_failure_refuses_local_fallback
 test_missing_base_branch_refuses_without_default_fallback
 test_base_branch_refused_on_relaunch_secondmate_and_orca
 test_base_branch_contract_refuses_mismatch
+test_scout_base_branch_contract_agrees_and_records
 test_base_branch_contract_uses_last_line
 test_base_branch_contract_uses_last_dod_heading
 test_base_branch_contract_ignores_progress_note
