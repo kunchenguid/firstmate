@@ -167,6 +167,10 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __ADDDIRS__  sandbox grants for the ONLY paths the brief lets a worker write
+#                  outside its worktree: state/ (the status file every kind appends)
+#                  plus data/<task-id>/ for a scout's report. Trailing space
+#                  included, empty when the harness needs no grant.
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -1232,11 +1236,18 @@ launch_template() {
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # codex runs sandboxed (-s workspace-write) with no escalation path (-a never),
+    # so every write the brief asks for outside the worktree must be granted
+    # explicitly or the model just sees "operation not permitted" and cannot ask.
+    # __ADDDIRS__ carries exactly the brief-permitted paths and nothing else; see
+    # the placeholder note above. Measured: without it a codex crewmate cannot
+    # append its own status file, which is the ONLY way it can report done,
+    # blocked, or needs-decision, so it is mute to the control plane.
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never __ADDDIRS__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never __ADDDIRS__-c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1260,7 +1271,12 @@ launch_template() {
     # would otherwise block every spawn, since each task gets a fresh worktree
     # path cursor has never seen, and it is also what loads the project hooks.
     # --auto-review --sandbox enabled replaces the former blanket --yolo bypass
-    # with a sandboxed, auto-reviewing autonomy posture. --workspace pins the
+    # with a sandboxed, auto-reviewing autonomy posture, so cursor needs the same
+    # __ADDDIRS__ grant codex does: measured without it, cursor's sandbox refused
+    # the status-file append and its auto-review classifier then parked the turn
+    # on a manual approval prompt, which an unattended crewmate can never clear.
+    # --add-dir adds writable roots; --workspace still pins the single project
+    # root that state/<id>.cursor-session binds the busy fold to. --workspace pins the
     # exact worktree. -w/--worktree is deliberately never passed: it allocates a
     # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
     # isolation contract. The binary is resolved rather than named because
@@ -1269,7 +1285,7 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __ADDDIRS____MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2956,6 +2972,15 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+# The sandbox grant is derived from the brief, not from convenience: bin/fm-brief.sh
+# permits a worker exactly two writes outside its worktree, the status file at
+# state/<id>.status (every kind) and, for a scout only, data/<id>/report.md. Grant
+# those two directories and nothing else - never $FM_HOME itself, which also holds
+# every other task's worktree, record, and config.
+ADDDIRS="--add-dir $(shell_quote "$STATE") "
+if [ "$KIND" = scout ]; then
+  ADDDIRS="$ADDDIRS--add-dir $(shell_quote "$DATA/$ID") "
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -2966,6 +2991,7 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__ADDDIRS__/$ADDDIRS}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;

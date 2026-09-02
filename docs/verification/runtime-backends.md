@@ -966,7 +966,38 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 | Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
 
 The `Workspace trust` and `Autonomy` rows record what the `--yolo` flag itself does, measured when that flag was still the launch default.
-`bin/fm-spawn.sh` now launches cursor with `--trust --auto-review --sandbox enabled` instead; that posture is measured under [Crewmate autonomy and the status-file write contract](#crewmate-autonomy-and-the-status-file-write-contract).
+`bin/fm-spawn.sh` now launches cursor with `--trust --auto-review --sandbox enabled` instead; the active [Crewmate autonomy and the status-file write contract](#crewmate-autonomy-and-the-status-file-write-contract) record distinguishes its completed readings from the required refresh after each launch-posture change.
+
+### Crewmate autonomy and the status-file write contract
+
+`tests/fm-crewmate-autonomy-live-e2e.test.sh` is the opt-in real-harness guard for the launch and write contract.
+Run it after a harness upgrade or a `bin/fm-spawn.sh` launch-template change:
+
+```sh
+FM_CREWMATE_AUTONOMY_LIVE=1 tests/fm-crewmate-autonomy-live-e2e.test.sh
+```
+
+The guard creates a private `fm-lab-` Herdr session and a lab `FM_HOME` below `$HOME`, never the default session or `/tmp`.
+It first sends no key and reports whether the harness reached its composer without a dialog, then submits one prompt asking the crewmate itself to append its status file and a scout report while attempting one ungranted sibling path.
+The lab home matters because Codex's `workspace-write` sandbox permits `/tmp` and `$TMPDIR` by default, which would make a status-file write there vacuous.
+
+#### Recorded readings, 2026-09-02
+
+These readings were taken in isolated `fm-lab-` sessions on macOS aarch64 with Herdr 0.8.2.
+
+| Harness and version | Unattended launch reading | Status-file write reading |
+| --- | --- | --- |
+| Claude Code 2.1.258 | Not unattended in a fresh worktree: the workspace-trust dialog appeared before the composer under both `--dangerously-skip-permissions` and `--permission-mode auto`. | The crewmate appended its status file successfully after the trust choice was accepted, with Claude reporting `Allowed by auto mode classifier`. |
+| Codex CLI 0.152.1 | Not unattended in a fresh worktree: a directory-trust dialog and then `Hooks need review` appeared before the composer. | Before the narrow `--add-dir` correction, the crewmate's status append failed with `operation not permitted`; the corrected launch has not yet been measured through the guard. |
+| Cursor Agent 2026.08.31-4057e58 | Reached an empty composer under `--trust --auto-review --sandbox enabled` with no key sent. | Not yet measured through the guard. |
+
+The current Codex and Cursor templates add only the directories `bin/fm-brief.sh` permits outside the task worktree: `state/` for every worker, plus that scout's `data/<id>/` report directory.
+The guard must show both allowed writes succeed and an append to an ungranted sibling directory fails before this table can claim the correction preserves a narrow sandbox boundary.
+The guard also checks that Cursor still records the task worktree as its exact workspace identity after the added writable roots.
+
+An earlier guard iteration accidentally installed Codex CLI 0.152.1 over 0.150.1 when Enter landed on its update modal.
+Version 0.150.1 remains on disk, and the guard now waits for an empty composer to remain settled for ten seconds and uses Escape to dismiss an update offer before it can submit a prompt.
+Compatibility evidence for Codex 0.152.1 currently covers launch and composer classification only; a focused successful submit remains unrecorded.
 
 ### End-to-end
 

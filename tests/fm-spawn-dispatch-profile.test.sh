@@ -434,6 +434,51 @@ test_codex_omits_invalid_max_effort() {
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
 
+# codex runs sandboxed with no escalation path, so anything the brief tells a
+# worker to write outside its worktree has to be granted at launch or the model
+# just sees "operation not permitted". These two cases pin the grant to exactly
+# what bin/fm-brief.sh permits, in both directions: the paths must be there, and
+# the firstmate home itself must NOT be.
+test_codex_ship_grants_only_the_brief_permitted_state_dir() {
+  local rec id out status launch
+  id=profile-codex-grant-z30
+  rec=$(make_spawn_case profile-codex-grant codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex ship spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--add-dir '$HOME_DIR/state'" \
+    "codex ship launch did not grant the state dir the status file lives in"
+  assert_not_contains "$launch" "--add-dir '$HOME_DIR/data" \
+    "codex ship launch must not grant a scout report dir a crewmate never writes"
+  assert_not_contains "$launch" "--add-dir '$HOME_DIR'" \
+    "codex launch must never grant the whole firstmate home"
+  pass "codex crewmate is granted exactly the state dir its status file needs"
+}
+
+test_codex_scout_also_grants_its_own_report_dir() {
+  local rec id out status launch
+  id=profile-codex-scout-grant-z31
+  rec=$(make_spawn_case profile-codex-scout-grant codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "codex scout spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--add-dir '$HOME_DIR/state'" \
+    "codex scout launch did not grant the state dir the status file lives in"
+  assert_contains "$launch" "--add-dir '$HOME_DIR/data/$id'" \
+    "codex scout launch did not grant the one data dir its report lives in"
+  assert_not_contains "$launch" "--add-dir '$HOME_DIR/data'" \
+    "codex scout launch must grant its own data dir, not every task's"
+  assert_not_contains "$launch" "--add-dir '$HOME_DIR'" \
+    "codex launch must never grant the whole firstmate home"
+  pass "codex scout is granted its own report dir alongside the state dir"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -806,6 +851,8 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
+test_codex_ship_grants_only_the_brief_permitted_state_dir
+test_codex_scout_also_grants_its_own_report_dir
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

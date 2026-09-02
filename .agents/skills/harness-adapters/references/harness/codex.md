@@ -10,6 +10,8 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Exit command | `/quit`; its slash popup needs about one second between text and Enter, which the shared submit path used by the control plane handles. |
 | Interrupt | Single Escape. |
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
+| Autonomy | `-s workspace-write -a never`: sandboxed to the worktree, with no approval path to escalate out of it; `../../../bin/fm-spawn.sh` owns the exact flags. |
+| Sandboxed writes | `workspace-write` normally refuses writes outside the worktree, and `-a never` leaves the model no way to ask, so the paths the brief permits outside it are granted with `--add-dir`; `../../../docs/verification/runtime-backends.md` owns the measurement under "Crewmate autonomy and the status-file write contract". `workspace-write` grants `/tmp` and `$TMPDIR` by default, so a write measured there proves nothing. |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
