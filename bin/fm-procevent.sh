@@ -960,9 +960,10 @@ EOF
   # concurrent reconcile must never publish a capture whose receipt seam has
   # not spoken - is preserved by the staged outcome and its generation note:
   # publish_result declines a generation whose seam is still owed (marker
-  # present, seam-ran marker absent), and recover_receipt_seams reclaims the
-  # seam only after this runner's claim is gone. The feed writes its verdict
-  # atomically, so recovery after a death here reads a whole outcome or none.
+  # present, seam-ran marker absent), and recover_receipt_seams leaves a
+  # generation staged under this runner's own claim token to this runner. The
+  # feed writes its verdict atomically, so recovery after a death here reads a
+  # whole outcome or none.
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ "$extension_owner" -eq 1 ]; then
     durable="./$durable"
@@ -1147,7 +1148,10 @@ staged_receipt_outcome() {  # <source-id> <sequence>
 # not exist until some round journals one - that says the obligation is live.
 # It runs before this cycle publishes anything or starts any replacement
 # runner, so the seam still speaks for the poll that produced the capture,
-# never for one a replacement has since armed.
+# never for one a replacement has since armed. A replacement already running
+# does not hold it back either: a live claim owns only the generation it staged
+# under its own token, so an older generation's owed verdict is recovered while
+# that replacement polls rather than waiting on a poll that may never end.
 recover_receipt_seams() {
   local result id adapter seq outcome staged claim_state live_token registered
   while IFS= read -r result; do
@@ -1171,27 +1175,46 @@ recover_receipt_seams() {
       # A generation whose runner can still reach its own seam owns it: that
       # runner runs it between its capture and its publication, and recovery
       # stepping in now would present a half-kept verdict. The claim is the
-      # liveness fact, and only a claim whose LEADER is gone is recoverable
+      # liveness fact, and a claim whose LEADER is gone is always recoverable
       # here: a gone claim (1), and equally the crash cut (3), where the leader
       # is dead and only its owned group survives. That leader can never run
       # its seam, and the reap that stops its group drops the whole staging
       # set, so deferring 3 would destroy the verdict it had already recorded.
-      # A held or terminal-marked claim (0, 2, 4) is still left to its runner.
       # The seam-ran re-check above stays, so a runner that completed its seam
       # while this reconcile waited on the lock is still respected.
       fm_procevent_claim_state_locked "$id"
       claim_state=$?
-      case "$claim_state" in
-        1|3) ;;
-        *) fm_procevent_source_lock_release "$id"; continue ;;
-      esac
+      live_token=
+      case "$claim_state" in 0|4) live_token=$FM_PROCEVENT_CLAIM_TOKEN ;; esac
       # The dead generation's own outcome belongs to that claim's staging set
       # and is dropped with the rest of it when the claim is reaped. A set the
       # live claim no longer names - a runner that released its own claim on
       # the way out, or a generation a reclaim has already replaced - has no
       # reaper left, so once the seam it owed has spoken this drops that set
       # itself rather than leaking a private verdict nothing will ever clean.
+      # It is also what says whether a live claim owns this generation at all:
+      # a runner stages its verdict under its OWN claim token, so a verdict
+      # named for another token is one no live runner can ever consume.
       outcome=$(staged_receipt_outcome "$id" "$seq") || outcome=
+      case "$claim_state" in
+        1|3) ;;
+        0|4)
+          # A held or terminal-marked claim is left to its runner only for the
+          # generation that runner itself staged. A replacement that reclaimed
+          # a dead claim inherits the source, never the older generation's
+          # owed seam: deferring to it would leave that round unacknowledged
+          # and its capture undeliverable for as long as the replacement polls,
+          # which a managed poll can do indefinitely.
+          if [ -z "$outcome" ] || [ -z "$live_token" ] \
+            || [ "$outcome" = "$(staging_file "$id" "$live_token.rcpt")" ]; then
+            fm_procevent_source_lock_release "$id"
+            continue
+          fi
+          ;;
+        # An unreadable claim (2) proves nothing about who owns what, so the
+        # generation is left to its runner exactly as before.
+        *) fm_procevent_source_lock_release "$id"; continue ;;
+      esac
       staged=
       if [ "$registered" -eq 0 ]; then
         # A retired source has no poll left to prove anything new, so the only

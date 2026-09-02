@@ -1194,4 +1194,77 @@ grep -qs "procevent lavish $RECEIPT_SID 1" "$H20/state/.wake-queue" \
   || fail "the recovered round was never announced to a handler"
 pass "explicit retirement preserves a verdict its receipt seam still owes"
 
+# --- a live replacement never holds back an older generation's owed verdict ---
+# The replacement runner that takes over a source after a crash claims it for
+# its own poll, and a managed poll can stay in that claim indefinitely. The
+# older generation's staged verdict is not that runner's to consume: it was
+# staged under the dead claim's token, so deferring to the live claim leaves
+# that round unacknowledged and its capture declined by publication for as long
+# as the replacement polls.
+H21=$(make_home h21)
+RECEIPT_HOME=$H21
+ART21="$TMP_ROOT/deck21.html"
+printf '<h1>deck</h1>\n' > "$ART21"
+RECEIPT_SID=$(run_lavish "$H21" source-id "$ART21")
+tasks_in "$H21" add deck-alpha "Alpha call" --kind ship --repo sample --body 'Alpha plan.' >/dev/null
+run_captain "$H21" hold deck-alpha --reason "alpha choice pending" >/dev/null
+install_stub
+stub_feedback false "$(choice_row 2 deck-alpha go 'Alpha')"
+run_captain "$H21" bind "$RECEIPT_SID" >/dev/null
+run_lavish "$H21" arm "$ART21" >/dev/null
+journal="$H21/state/procevent/$RECEIPT_SID.receipts"
+result="$H21/state/procevent-inbox/$RECEIPT_SID.1.result"
+reconcile_once
+wait_i=0
+while [ ! -e "$result" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+wait_seam "$H21" "$RECEIPT_SID" 1
+wait_claim_free
+[ -e "$result" ] || fail "the submitted round was never captured"
+# The replacement runner blocks inside its own poll, so its claim stays live
+# for the whole recovery below - exactly the managed poll that can outlast any
+# number of reconcile cycles.
+: > "$STUB_HOLD"
+held_calls_before=$(stub_calls)
+reconcile_once
+claim="$FM_PROCEVENT_CLAIM_ROOT/$RECEIPT_SID.claim"
+wait_i=0
+while [ ! -e "$claim" ] && [ "$wait_i" -lt 100 ]; do sleep 0.2; wait_i=$((wait_i + 1)); done
+[ -e "$claim" ] || fail "the replacement runner never claimed the source"
+wait_i=0
+while [ "$(stub_calls)" -le "$held_calls_before" ] && [ "$wait_i" -lt 100 ]; do
+  sleep 0.1
+  wait_i=$((wait_i + 1))
+done
+[ "$(stub_calls)" -gt "$held_calls_before" ] \
+  || fail "the replacement runner never started the poll it stays claimed for"
+live_leader=$(sed -n '2p' "$claim")
+live_token=$(sed -n '3p' "$claim")
+[ -n "$live_token" ] || fail "could not read the live replacement's claim token"
+[ "$live_token" != dead-token ] || fail "fixture invalid: the live claim reused the dead token"
+# Roll the durable state back to the instant the crashed generation left it:
+# its verdict staged under the claim token the replacement has since replaced,
+# and no record that any seam ever saw that round.
+rm -f "$journal" "$H21/state/procevent-inbox/$RECEIPT_SID.1.receipted"
+staged="$H21/state/procevent/.$RECEIPT_SID.dead-token.rcpt.output"
+printf 'fed 0\nclosed: deck-alpha\n' > "$staged"
+printf '%s\t%s\n' "$RECEIPT_SID" 1 > "$staged.gen"
+chmod 0600 "$staged" "$staged.gen"
+reconcile_until grep -qs '^saved' "$journal" \
+  || fail "a live replacement's poll stranded the verdict an older generation staged"
+[ "$(awk -F '\t' '$1 == "received" { print $4 }' "$journal")" = 1 ] \
+  || fail "the recovered round lost its answer count"
+[ "$(awk -F '\t' '$1 == "saved" && $2 == 1 { print $4 }' "$journal")" = 1 ] \
+  || fail "recovery lost the save the older generation had recorded"
+# The recovery happened with that replacement still polling, not after it ended.
+kill -0 "$live_leader" 2>/dev/null \
+  || fail "fixture invalid: the replacement runner exited before the recovery"
+[ -e "$claim" ] || fail "fixture invalid: the live claim was gone before the recovery"
+text=$(run_lavish "$H21" receipt-text "$RECEIPT_SID")
+assert_contains "$text" "saved 1 of 1" "the recovered round never reached the visible receipt"
+assert_absent "$staged" "recovery left the superseded generation's verdict staged"
+assert_absent "$staged.gen" "recovery left the superseded generation's note staged"
+rm -f "$STUB_HOLD"
+wait_claim_free
+pass "a live replacement's claim never strands an older generation's owed verdict"
+
 printf '\nall Lavish receipt tests passed\n'
