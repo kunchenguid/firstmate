@@ -2103,7 +2103,7 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
 # so a forgotten wait cannot rot invisibly.
 test_live_declared_wait_churn_honors_the_resurface_throttle() {
   local spec name status_line dir state fakebin out capture_file statusf window key
-  local sig round wakes bare text throttle
+  local sig round wakes bare text throttle replacement
   for spec in \
     'paused-pipeline-churn|paused: waiting on the validation run to finish' \
     'captain-held-churn|captain-held [key=route]: awaiting the captain on the routing call'
@@ -2143,6 +2143,34 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
       [ -e "$throttle" ] || fail "[$name] pane churn cleared the re-surface throttle"
       round=$((round + 1))
     done
+
+    # A direct wait-to-wait transition starts a NEW declaration even though the
+    # same window remains parked. Its first sight must not inherit the previous
+    # declaration's throttle, or an unrelated replacement wait can stay silent
+    # for nearly the whole old cadence window.
+    case "$name" in
+      paused-pipeline-churn) replacement='paused: waiting on the replacement validation run' ;;
+      captain-held-churn) replacement='captain-held [key=release]: awaiting the captain on the release call' ;;
+    esac
+    printf '%s\n' "$replacement" >> "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+    printf 'replacement wait, elapsed 1s' > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+      || fail "[$name] a replacement declared wait inherited the previous wait's re-surface throttle"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 1 ] || fail "[$name] replacement declared wait produced $wakes first wakes instead of one"
+    [ "$bare" -eq 1 ] || fail "[$name] replacement declared wait changed the wake identity: $(cat "$state/.wake-queue")"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the replacement wait's first surface"
+
+    printf 'replacement wait, elapsed 2s' > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+      || fail "[$name] replacement wait re-alarmed inside its own re-surface window"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 0 ] || fail "[$name] replacement wait re-alarmed $wakes time(s) inside its own re-surface window"
 
     # End of the window: the wait must re-surface exactly once, on the same plain
     # identity as before, so absorbing churn never becomes silence.

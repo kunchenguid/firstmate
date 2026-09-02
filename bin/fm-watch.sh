@@ -697,16 +697,18 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # absorb can rot invisibly. <age> is how long the current absorb has held and
 # <throttle> is the per-window marker whose mtime records the last re-surface, so
 # once past PAUSE_RESURFACE_SECS the pane wakes once per window rather than every
-# poll. Shared by the declared-pause absorb and the worktree-write deferral so the
-# two cadences cannot drift apart; each caller owns its own marker and reason.
+# poll. An optional <scope> binds that cadence to its current declaration; callers
+# without a scoped declaration keep the timestamp body. Shared by the
+# declared-pause absorb and the worktree-write deferral so the two cadences cannot
+# drift apart; each caller owns its own marker and reason.
 # Returns without waking while either the absorb or the throttle is inside the
 # window; wake() itself exits the cycle, exactly as it does inline.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
-  local win=$1 throttle=$2 age=$3 reason=$4
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
+  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-}
   [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
   [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fm_wake_append stale "$win" "$reason" || exit 1
-  date +%s > "$throttle"
+  if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
   wake "$reason"
 }
 
@@ -818,7 +820,7 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -835,7 +837,8 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)"
+  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -994,13 +997,17 @@ pause_state_class() {  # <window> <task>
 # that really fires - a throttle written by the wake it should have prevented, or
 # read after that wake was already appended, bounds nothing.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declared=1 throttled=1
+  local win=$1 h=$2 key task last declaration='' declared=1 throttled=1
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     declared=0
-    [ "$(age_of "$STATE/.paused-resurfaced-$key")" -ge "$PAUSE_RESURFACE_SECS" ] || throttled=0
+    declaration="declared:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
+    if [ "$(cat "$STATE/.paused-resurfaced-$key" 2>/dev/null || true)" = "$declaration" ] \
+      && [ "$(age_of "$STATE/.paused-resurfaced-$key")" -lt "$PAUSE_RESURFACE_SECS" ]; then
+      throttled=0
+    fi
   fi
   if [ "$throttled" -ne 0 ]; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
@@ -1011,7 +1018,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if [ "$declared" -eq 0 ]; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-rechecked-$key"
-    [ "$throttled" -eq 0 ] || date +%s > "$STATE/.paused-resurfaced-$key"
+    [ "$throttled" -eq 0 ] || printf '%s' "$declaration" > "$STATE/.paused-resurfaced-$key"
   else
     clear_pause_state "$key"
   fi
