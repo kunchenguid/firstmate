@@ -257,6 +257,7 @@ test_orca_worktree_id_shape_is_validated_without_relaxing_other_backends() {
     "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::orca/workspaces/fm/wt" \
     "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::" \
     "/orca/workspaces/fm/wt::/orca/workspaces/fm/wt" \
+    "::/orca/workspaces/fm/wt" \
     "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/orca/workspaces/fm/wt/" \
     "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/orca/workspaces//fm/wt" \
     "4a2f8e1c-9d3b-4f57-b0a6-2c7e15d9f8a3::/orca/workspaces/fm/../escape"; do
