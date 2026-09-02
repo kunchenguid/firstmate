@@ -15,6 +15,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 PF="$ROOT/bin/fm-public-followup.sh"
 EMIT="$ROOT/bin/fm-public-followup-emit.sh"
@@ -24,12 +26,18 @@ PROMOTE="$ROOT/bin/fm-promote.sh"
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 TMP_ROOT=$(fm_test_tmproot fm-public-followup)
 PF_TEST_NOW=1787539200
+PF_TEST_LOCK_HOLDER=
 
 # The remote-route cases drive the real remote job worker, which outlives the
 # command that staged its job. Stop it before the shared fixture cleanup runs,
 # and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
 pf_test_cleanup() {
   local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
+  if [ -n "$PF_TEST_LOCK_HOLDER" ]; then
+    kill "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
+    wait "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
+    PF_TEST_LOCK_HOLDER=
+  fi
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
     [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
@@ -2383,6 +2391,22 @@ run_pf_remote() {  # <home> <args...>
     "$PF" "$@"
 }
 
+run_pf_remote_timed() {  # <seconds> <home> <args...>
+  local seconds=$1 home=$2
+  shift 2
+  fm_run_timed "$seconds" env \
+    PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FAKE_CURL_LOG="${FAKE_CURL_LOG:-}" \
+    FAKE_FOLLOWUP_CODE="${FAKE_FOLLOWUP_CODE:-200}" \
+    FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" \
+    FM_SSH_BIN="$REMOTE_FIXTURE_SSH" \
+    FM_FAKE_SSH_MODE="${FM_FAKE_SSH_MODE:-normal}" \
+    FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_FIXTURE_ROOT/bin/fm-remote-entrypoint.sh" \
+    FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    FM_REMOTE_JOB_STATE_ROOT="$REMOTE_FIXTURE_JOBS" \
+    "$PF" "$@"
+}
+
 # The reported failure: a public loop whose work lived in a REMOTE secondmate
 # home could never be closed. Its registration carries no local path, so the
 # legacy-link clear that every close runs first had nothing to act on and refused
@@ -2599,22 +2623,26 @@ test_remote_retire_refuses_unacquirable_lock_without_hanging() {
   # the acquire can never succeed and only a bound can end the wait.
   sleep 300 &
   holder=$!
+  PF_TEST_LOCK_HOLDER=$holder
   lock="$remote/state/.meta-work-lock.lock"
   mkdir -p "$lock"
   printf '%s\n' "$holder" > "$lock/pid"
 
   started=$(date +%s)
   rc=0
-  EXPECT_OUT=$(run_pf_remote "$home" retire pf-remote-lock --reason "lock held" --force 2>&1) || rc=$?
+  EXPECT_OUT=$(run_pf_remote_timed 30 "$home" retire pf-remote-lock --reason "lock held" --force 2>&1) || rc=$?
   elapsed=$(( $(date +%s) - started ))
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
+  PF_TEST_LOCK_HOLDER=
   rm -rf "$lock"
 
+  [ "$rc" -ne 124 ] \
+    || fail "the guarded clear exceeded the test harness deadline"
   [ "$rc" -ne 0 ] || fail "retire must refuse when the metadata lock cannot be acquired"
-  # The bound is what this case exists to prove. An unbounded wait never returns
-  # at all, so any completion under a generous ceiling is the observable proof.
-  [ "$elapsed" -lt 120 ] \
+  # The bound is what this case exists to prove. An unbounded wait reaches the
+  # independent harness deadline instead of this observable refusal.
+  [ "$elapsed" -lt 30 ] \
     || fail "the guarded clear did not return promptly; it waited ${elapsed}s for an unacquirable lock"
   assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
     "an unacquirable lock must use the retained reconciliation refusal"
