@@ -1144,5 +1144,5 @@ No live guard is registered for this fact, because nothing in Firstmate reads ha
 A harness that stopped honoring `TMPDIR` would simply keep its scratch outside the task root: teardown still removes exactly the one recorded temp root, still refuses anything else, and still succeeds.
 The portable regressions for the removal itself are in `tests/fm-gotmp.test.sh`, which covers teardown's removal of its own task's root including a live sibling task in a reused worktree slot that must survive, the ownership refusals, and the creation guard.
 Both sides of the flag are pinned in `tests/fm-spawn-dispatch-profile.test.sh`: absent, the launch carries no `TMPDIR=` prefix while `GOTMPDIR` still ships; present, the prefix names this task's own root.
-The enabled launch pin is also asserted in `tests/fm-kimi-harness.test.sh`.
+The enabled launch pin is also asserted in `tests/fm-kimi-harness.test.sh`, which drives a real spawn through the creation refusal and through the aborted-spawn cleanup: an abort before the task record is published removes a root that spawn created itself, and leaves a root it only found already present, because that one can be a live task's own.
 Forced secondmate retirement removes each retired child's own root the same way, and `tests/fm-teardown.test.sh` holds that path against a live sibling home whose task carries the same id.
