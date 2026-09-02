@@ -445,7 +445,7 @@ fi
 # The one rule for naming a LOCAL default branch at runtime, shared by every
 # fallback that has to fall back to one so their wording cannot drift apart.
 IFS= read -r -d '' LOCAL_DEFAULT_RULE <<EOF || true
-   Read \`git symbolic-ref --quiet --short refs/remotes/origin/HEAD\`. If it names a branch, that name with the leading \`origin/\` dropped IS \`<default>\`: confirm the local branch exists with \`git rev-parse --verify <default>\`, and if it does not, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
+   Read \`git symbolic-ref --quiet refs/remotes/origin/HEAD\`. If it names a ref, that ref with the leading \`refs/remotes/origin/\` dropped IS \`<default>\`: confirm the local branch exists with \`git rev-parse --verify refs/heads/<default>\`, and if it does not, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
    Only when that ref is absent entirely may \`<default>\` be the local \`main\` or \`master\`, confirmed the same way. Never substitute \`main\`, \`master\`, or whatever branch happens to be checked out for a default branch this clone is missing, and append the same \`blocked:\` line and stop if none of these resolves.
 EOF
 LOCAL_DEFAULT_RULE=${LOCAL_DEFAULT_RULE%$'\n'}
@@ -456,7 +456,7 @@ build_base_freshness_section() {  # <step-number>
   if [ -n "$BASE_UNRESOLVED_REASON" ] && [ "$BASE_POLICY" = 'origin-then-local' ]; then
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
-   Try origin first: run \`git remote set-head origin --auto\`, then read \`git symbolic-ref --quiet --short refs/remotes/origin/HEAD\` and drop the leading \`origin/\` to get \`<default>\`.
+   Try origin first: run \`git remote set-head origin --auto\`, then read \`git symbolic-ref --quiet refs/remotes/origin/HEAD\` and drop the leading \`refs/remotes/origin/\` to get \`<default>\`.
    If that names a branch, refresh the remote exactly once BEFORE verifying or comparing its tracking ref - the fetch is what creates a pruned or never-fetched \`origin/<default>\`:
    \`git fetch origin --quiet\`
    If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
@@ -472,7 +472,7 @@ EOF
   elif [ -n "$BASE_UNRESOLVED_REASON" ] && [ "$BASE_POLICY" = origin ]; then
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
-   Determine \`<default>\` with \`git remote set-head origin --auto\` then \`git symbolic-ref --quiet --short refs/remotes/origin/HEAD\`, dropping the leading \`origin/\`. Never substitute whatever branch happens to be checked out.
+   Determine \`<default>\` with \`git remote set-head origin --auto\` then \`git symbolic-ref --quiet refs/remotes/origin/HEAD\`, dropping the leading \`refs/remotes/origin/\`. Never substitute whatever branch happens to be checked out.
    If you cannot determine it, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
    Then refresh the remote exactly once and measure:
    \`git fetch origin --quiet\`

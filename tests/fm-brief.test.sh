@@ -529,6 +529,72 @@ test_ambiguous_origin_head_still_resolves_the_real_default_branch() {
   pass "fm-brief.sh: an ambiguous origin/HEAD abbreviation still resolves the real default branch"
 }
 
+# The runtime local-default rule is generated worker-facing output that a
+# crewmate executes verbatim, so it is held to the same standard as the
+# scaffold-side resolution. Reading origin/HEAD through the ambiguity-dependent
+# `--short` form and then confirming a bare `<default>` let the remote-tracking
+# ref satisfy a guard meant to prove a LOCAL branch exists, so a local-only
+# worker measured zero against origin while its local default was ahead.
+# shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
+test_runtime_local_default_rule_resolves_a_local_branch_not_a_tracking_ref() {
+  local home stale worktree setup symbolic_cmd strip_prefix verify_cmd count_cmd
+  local head_ref resolved_default count tracking_ref
+  tracking_ref='remotes/origin/develop'
+  home="$TMP_ROOT/runtime-local-rule-home"
+  stale="$BRIEF_PROJECTS/stale-local-default"
+  worktree="$TMP_ROOT/stale-local-default-worktree"
+  mkdir -p "$home/data"
+
+  [ ! -d "$BRIEF_PROJECTS/unresolvable-stale" ] || fail "fixture leak: unresolvable-stale must not resolve"
+
+  fm_git_init_commit "$stale"
+  git -C "$stale" branch -M develop
+  fm_git_add_origin "$stale" "$stale.origin.git"
+  git -C "$stale" fetch --quiet origin
+  git -C "$stale" remote set-head origin --auto >/dev/null
+  git -C "$stale" tag origin/develop
+  printf '%s\n' 'the local default advances' >> "$stale/README.md"
+  git -C "$stale" add README.md
+  git -C "$stale" commit -qm 'local develop advances'
+  printf '%s\n' 'the local default advances again' >> "$stale/README.md"
+  git -C "$stale" add README.md
+  git -C "$stale" commit -qm 'local develop advances again'
+  git -C "$stale" worktree add --quiet --detach "$worktree" refs/remotes/origin/develop
+  [ "$(git -C "$stale" symbolic-ref --quiet --short refs/remotes/origin/HEAD)" = 'remotes/origin/develop' ] \
+    || fail "fixture did not make the --short abbreviation of origin/HEAD ambiguous"
+  [ "$(git -C "$worktree" rev-list --count "$(git -C "$worktree" merge-base HEAD develop)..develop")" -eq 2 ] \
+    || fail "fixture worktree is not two commits behind its local default branch"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" runtime-local unresolvable-stale --mode local-only >/dev/null 2>&1 \
+    || fail "an unresolvable local-only label must not fail the scaffold"
+  setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$home/data/runtime-local/brief.md")
+
+  symbolic_cmd=$(printf '%s\n' "$setup" | sed -n 's/^.*Read `\(git symbolic-ref [^`]*\)`.*$/\1/p' | head -1)
+  strip_prefix=$(printf '%s\n' "$setup" | sed -n 's/^.*with the leading `\([^`]*\)` dropped.*$/\1/p' | head -1)
+  verify_cmd=$(printf '%s\n' "$setup" | sed -n 's/^.*exists with `\(git rev-parse --verify [^`]*\)`.*$/\1/p' | head -1)
+  count_cmd=$(printf '%s\n' "$setup" | sed -n 's/^   `\(git rev-list --count .*\)`$/\1/p' | head -1)
+  [ -n "$symbolic_cmd" ] || fail "the runtime rule stopped telling the worker how to read origin/HEAD"
+  [ -n "$strip_prefix" ] || fail "the runtime rule stopped naming the prefix to strip from origin/HEAD"
+  [ -n "$verify_cmd" ] || fail "the runtime rule stopped telling the worker how to confirm the local branch"
+  [ -n "$count_cmd" ] || fail "the runtime rule stopped emitting its zero-count command"
+
+  head_ref=$(cd "$worktree" && eval "$symbolic_cmd") \
+    || fail "the emitted origin/HEAD read failed against the fixture"
+  resolved_default=${head_ref#"$strip_prefix"}
+  [ "$resolved_default" = develop ] \
+    || fail "the emitted rule resolved \`$resolved_default\` instead of the real default branch develop"
+  (cd "$worktree" && eval "${verify_cmd//<default>/$resolved_default}" >/dev/null 2>&1) \
+    || fail "the emitted confirmation rejected the real local default branch"
+  (cd "$worktree" && eval "${verify_cmd//<default>/$tracking_ref}" >/dev/null 2>&1) \
+    && fail "the emitted confirmation accepted a remote-tracking ref as the local default branch"
+
+  count=$(cd "$worktree" && eval "${count_cmd//<default>/$resolved_default}") \
+    || fail "the emitted zero-count command failed against the fixture"
+  [ "$count" -eq 2 ] \
+    || fail "the emitted check measured $count against the local default branch instead of 2"
+  pass "fm-brief.sh: the runtime local-default rule resolves a local branch, never a tracking ref"
+}
+
 # The generated brief must not contradict itself: a local-only task whose Setup
 # rebases onto `release` cannot tell the worker firstmate merges into `main`.
 # shellcheck disable=SC2016 # Literal brief text: the backticks and $(...) must stay unexpanded.
@@ -662,7 +728,7 @@ test_scout_fallback_fetches_before_verifying_and_degrades_like_the_resolved_path
   [ "$fetch_line" -lt "$verify_line" ] \
     || fail "the scout fallback verifies origin/<default> before the fetch that would create it"
 
-  assert_contains "$unresolved_setup" 'that name with the leading `origin/` dropped IS `<default>`' \
+  assert_contains "$unresolved_setup" 'that ref with the leading `refs/remotes/origin/` dropped IS `<default>`' \
     "the scout local degradation does not name the branch origin/HEAD points at"
   assert_contains "$unresolved_setup" 'Only when that ref is absent entirely may `<default>` be the local `main` or `master`' \
     "the scout local degradation offered main/master without gating on an absent origin/HEAD"
@@ -1227,6 +1293,7 @@ test_missing_origin_head_never_relabels_the_current_branch
 test_non_root_directory_never_resolves_to_its_enclosing_repo
 test_absent_local_ref_for_origin_default_never_substitutes_another_branch
 test_ambiguous_origin_head_still_resolves_the_real_default_branch
+test_runtime_local_default_rule_resolves_a_local_branch_not_a_tracking_ref
 test_local_only_rule_names_the_resolved_default_branch
 test_scout_local_fallback_uses_kind_neutral_wording
 test_unresolved_scout_fallback_degrades_to_a_local_default
