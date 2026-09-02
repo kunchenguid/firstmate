@@ -51,8 +51,11 @@ When starting no-mistakes, make \`--intent\` preserve all relevant content from 
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
+- ask-user findings: escalate to firstmate (rule 6) and stop, with one narrow self-resolution exception.
+  You may answer a finding yourself, with no firstmate round trip, only when every condition holds: severity \`warning\` (any higher severity always escalates); proposed action \`auto-fix\` (the pipeline applies the fix, never you); every touched file already changed by this branch's diff against its merge base; the fix only restores or completes behavior already accepted in the brief or a later firstmate instruction, adding no new guarantee, threat model, subsystem, abstraction, compatibility surface, state machine, monitoring requirement, or framework; not destructive, irreversible, or security-sensitive; and the first finding in its causal theme this run.
+  If any condition is unmet or you are unsure, escalate to firstmate (rule 6) and stop - never self-approve on uncertainty.
+  A self-resolved finding still appends one \`resolved: [key=...]\` status line naming the finding id, the six conditions you judged met, and the response you sent, so firstmate can audit it from the status log.
+  Everything else goes to firstmate, which applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.

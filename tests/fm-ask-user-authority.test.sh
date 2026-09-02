@@ -16,9 +16,28 @@ test_primary_and_secondmate_instruction_generation() {
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$BRIEF" authority-worker sample --mode no-mistakes >/dev/null 2>&1
   ship="$home/data/authority-worker/brief.md"
-  assert_grep 'ask-user findings are never yours to answer' "$ship" \
-    "generated implementation brief lets the worker own an ask-user decision"
-  assert_grep "Firstmate applies \`ask-user-authority\` and obtains any required captain decision" "$ship" \
+  assert_grep 'ask-user findings: escalate to firstmate (rule 6) and stop, with one narrow self-resolution exception' "$ship" \
+    "generated implementation brief lost the escalate-to-firstmate default for ask-user findings"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'severity `warning` (any higher severity always escalates)' "$ship" \
+    "generated implementation brief self-resolution exception lost the warning-severity bound"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'proposed action `auto-fix` (the pipeline applies the fix, never you)' "$ship" \
+    "generated implementation brief self-resolution exception lost the auto-fix bound"
+  assert_grep "every touched file already changed by this branch's diff against its merge base" "$ship" \
+    "generated implementation brief self-resolution exception lost the in-diff bound"
+  assert_grep 'never self-approve on uncertainty' "$ship" \
+    "generated implementation brief self-resolution exception lost the uncertainty escalation"
+  assert_grep 'not destructive, irreversible, or security-sensitive' "$ship" \
+    "generated implementation brief self-resolution exception lost the captain-boundary reserve"
+  assert_grep 'the first finding in its causal theme this run' "$ship" \
+    "generated implementation brief self-resolution exception lost the first-in-theme bound"
+  assert_grep 'resolved: [key=...]' "$ship" \
+    "generated implementation brief self-resolution exception lost the audit status line"
+  assert_no_grep 'ask-user findings are never yours to answer' "$ship" \
+    "generated implementation brief retained the unbounded never-answer rule"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'which applies `ask-user-authority` and obtains any required captain decision' "$ship" \
     "generated implementation brief bypasses the primary authority owner"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'NEVER pass `--yes` (or `-y`) to `no-mistakes axi run` or `no-mistakes axi respond`' "$ship" \
