@@ -1174,6 +1174,21 @@ expect_code 1 "$status" "an archive evidence file without a content address is r
 assert_contains "$out" "archive files are not content-addressed" "the archive rejects unlisted evidence"
 pass "every archived evidence file is content-addressed"
 
+BENCH="$TMP_ROOT/archive-nested-manifest"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-nested-manifest"
+python3 - "$BENCH" <<'PY'
+import sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+(sample / ".evidence").mkdir()
+(sample / ".evidence" / "manifest.json").write_text("not addressed\n")
+PY
+out=$(run_gate "$BENCH" archive-verify) && status=0 || status=$?
+expect_code 1 "$status" "a nested manifest-named evidence file without a content address is refused"
+assert_contains "$out" ".evidence/manifest.json" "the archive addresses nested manifest-named evidence by path"
+pass "only the sample manifest itself is exempt from content addressing"
+
 BENCH="$TMP_ROOT/archive-unlisted-evaluator"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-unlisted-evaluator"
@@ -1201,14 +1216,18 @@ from pathlib import Path
 sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
-record["evaluator_rerun"] = {"argv": ["cat", "capture.json"], "result_hash": hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()}
+(sample / "scoring.sh").write_text("#!/bin/sh\ncat capture.json\n")
+(sample / "scoring.sh").chmod(0o755)
+record["files"]["scoring.sh"] = hashlib.sha256((sample / "scoring.sh").read_bytes()).hexdigest()
+record["groups"]["capture_and_scoring"] = ["capture.json", "scoring.sh"]
+record["evaluator_rerun"] = {"argv": ["scoring.sh"], "result_hash": hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()}
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "an archived-file echo cannot stand in for a restored-tree evaluator"
-assert_contains "$out" "exactly one executable evaluator file" "the rerun contract rejects an arbitrary command invocation"
+assert_contains "$out" "invariant under a perturbed restored candidate" "the rerun contract proves evaluator dependence on restored content"
 assert_absent "$BENCH/archive/restore-drill.json" "a no-op evaluator writes no cleanup receipt"
-pass "the restore drill requires an executable evaluator over restored candidate content"
+pass "the restore drill refuses an executable evaluator that ignores restored content"
 
 BENCH="$TMP_ROOT/archive-scratch-evaluator"
 write_plan "$BENCH"
@@ -1218,13 +1237,25 @@ import hashlib, json, sys
 from pathlib import Path
 sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "scoring.py"
-scoring.write_text(scoring.read_text().replace("tree = Path(sys.argv[1])", "Path('scratch-only.txt').write_text('scratch\\n')\ntree = Path(sys.argv[1])"))
+scoring.write_text("""#!/usr/bin/env python3
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+Path('scratch-only.txt').write_text('scratch\\n')
+tree = Path(sys.argv[1])
+payload = {"candidate_sha256": hashlib.sha256((tree / "work.txt").read_bytes()).hexdigest(), "pixel": 0.003, "scratch_marker": Path("scratch-only.txt").read_text().strip()}
+print(json.dumps(payload, sort_keys=True))
+""")
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
 record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256((json.dumps({"candidate_sha256": hashlib.sha256((record["sample"] + "\n").encode()).hexdigest(), "pixel": 0.003, "scratch_marker": "scratch"}, sort_keys=True) + "\n").encode()).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) || fail "an evaluator that writes scratch output must not dirty its archive: $out"
+assert_contains "$out" "changed perturbed result" "the scratch-writing evaluator ran against both restored candidates"
 first_sample=$(find "$BENCH/archive" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1)
 assert_absent "$first_sample/scratch-only.txt" "evaluator scratch output never reaches the certified archive"
 out=$(run_gate "$BENCH" cleanup-gate) || fail "a scratch-only evaluator must leave cleanup authorised: $out"

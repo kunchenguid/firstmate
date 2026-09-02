@@ -34,8 +34,8 @@ ok - enforced isolation (container) denies file, worktree, object, unreachable-o
 ok - the same confinement still lets an entrant work in its own private clone
 ```
 
-The restore portion of `tests/fm-bench-gate.test.sh` executes only an executable evaluator listed in each sample's content-addressed capture-and-scoring evidence group, gives it a materialised restored candidate tree from scratch storage, and compares the SHA-256 of its output to the archived result hash.
-It also proves that an absolute path, a parent traversal, a symlink escape, an unlisted evidence file, an arbitrary command, an unaddressed evaluator, a changed manifest binding, a changed evaluator result, and an archive mutation during the rerun all refuse before cleanup can be authorised.
+The restore portion of `tests/fm-bench-gate.test.sh` executes only an executable evaluator listed in each sample's content-addressed capture-and-scoring evidence group, compares its genuine restored-tree output hash to the archived result hash, and requires a different successful output from a scratch-only perturbation of that restored tree.
+It also proves that an absolute path, a parent traversal, a symlink escape, an unlisted evidence file including nested `manifest.json`, an arbitrary command, an evaluator that ignores restored content, an unaddressed evaluator, a changed manifest binding, a changed evaluator result, and an archive mutation during the rerun all refuse before cleanup can be authorised.
 
 The same run under `--mechanism none` refuses with all seven probe classes reported `PROBE LEAKED`, which is what proves the probes are not vacuous.
 
