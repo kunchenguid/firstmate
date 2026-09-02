@@ -53,6 +53,10 @@ agy_payload() {  # <template> <workspace>
 # FM_FAKE_AGY_SCREEN names what agy shows once its launch line is submitted:
 #   ready (default) - a pre-trusted workspace already on agy's idle footer
 #   trust           - blocked on the workspace-trust dialog until an Enter lands
+#   trust-tall      - blocked on the dialog, but the frame is taller than the
+#                     bottom rows: the footer is bottom-anchored while the
+#                     dialog sits further up, so a gate that reads only the tail
+#                     of the capture sees the footer and misses the dialog
 #   blank           - nothing renders at all, the case where the gate gives up
 #
 # FM_FAKE_AGY_AFTER_ENTER names what replaces the dialog once it is answered,
@@ -106,6 +110,12 @@ case "${1:-}" in
     case "$target" in
       trust)
         printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
+        ;;
+      trust-tall)
+        printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
+        i=0
+        while [ "$i" -lt 14 ]; do printf '  workspace row %s\n' "$i"; i=$((i + 1)); done
+        printf '\n  >\n? for shortcuts\n'
         ;;
       trust-and-ready)
         printf 'Do you trust the contents of this project?\n> Yes, I trust this folder\n\n  >\n? for shortcuts\n'
@@ -455,6 +465,31 @@ EOF
   pass "a ready footer settles readiness even while the answered dialog is still in the capture"
 }
 
+# agy's footer is bottom-anchored by construction while the trust dialog is a
+# modal further up the same frame, so a gate that reads only the bottom rows of
+# the capture can see the footer without ever seeing the dialog it must answer.
+# That reports a successful launch for a session still blocked on the dialog -
+# the silent hang this gate exists to close, and worse than a loud failure. The
+# gate must therefore read the whole capture it was given; the one-Enter latch,
+# not a narrower read, is what bounds a dialog re-served by a later poll.
+test_trust_dialog_above_the_footer_is_still_answered() {
+  local rec case_dir home proj wt fakebin agy_home id out enters
+  rec=$(make_spawn_case trust-tall)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_SCREEN=trust-tall FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=6 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    || fail "agy spawn failed on a tall frame carrying both the dialog and the footer: $out"
+  enters=$(agy_enters_after_launch "$case_dir/events.log")
+  [ "$enters" -eq 2 ] \
+    || fail "the gate sent $enters Enters after the launch line; expected the launch submit plus exactly one answer to a dialog sitting above the footer"
+  pass "a trust dialog above the footer is answered rather than read past"
+}
+
 # --- the fullyIdle turn-end rule -------------------------------------------
 
 # Drive the INSTALLED hook, not a copy of its logic, so the assertion covers
@@ -495,6 +530,13 @@ EOF
   # Only this one counts.
   agy_fire_hook "$hook" "$(agy_payload "$AGY_STOP_DONE" "$wt")" >/dev/null
   assert_present "$turnend" "a fullyIdle=true Stop did not signal the turn end"
+
+  # The measured payload is compact protojson, but this hook is agy's ONLY
+  # turn-end signal, so it must not depend on that shape: a Stop carrying
+  # newlines has to end the turn rather than silently lose it.
+  rm -f "$turnend"
+  agy_fire_hook "$hook" "$(agy_payload "$AGY_STOP_DONE" "$wt" | jq .)" >/dev/null
+  assert_present "$turnend" "a pretty-printed fullyIdle=true Stop was silently dropped"
   pass "only a fullyIdle=true Stop counts as an agy turn end"
 }
 
@@ -695,6 +737,7 @@ test_trust_dialog_is_answered_exactly_once
 test_spawn_fails_when_agy_never_renders
 test_answered_dialog_alone_does_not_prove_readiness
 test_ready_footer_settles_a_capture_still_carrying_the_dialog
+test_trust_dialog_above_the_footer_is_still_answered
 test_turnend_requires_fully_idle
 test_turnend_requires_registered_token
 test_turnend_never_blocks_the_stop

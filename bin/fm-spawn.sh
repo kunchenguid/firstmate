@@ -2469,20 +2469,11 @@ AGY_READY_REGEX='esc to cancel|\? for shortcuts'
 # What the gate never managed to observe, reported verbatim when it gives up.
 AGY_READY_DETAIL=
 
-# Both backends answer fm_backend_capture with recent OUTPUT rather than a
-# live-screen snapshot, so a wide read keeps re-serving a dialog agy dismissed
-# long ago. The gate therefore reasons about the same window every busy
-# classifier uses: a 40-line read folded to its last 12 non-blank rows.
-agy_screen_tail() {
-  fm_backend_capture "$BACKEND" "$T" 40 "$W" 2>/dev/null \
-    | grep -v '^[[:space:]]*$' | tail -12
-}
-
 agy_wait_for_ready() {
   local pane blocked ready i=0 answered=0 max=${FM_AGY_READY_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
   AGY_READY_DETAIL="agy rendered nothing readable in its pane: neither its workspace-trust dialog nor a ready footer ($AGY_READY_REGEX) was ever observed"
   while [ "$i" -lt "$max" ]; do
-    pane=$(agy_screen_tail)
+    pane=$(spawn_pane_capture)
     blocked=0
     ready=0
     if printf '%s\n' "$pane" | grep -qE "$AGY_TRUST_REGEX"; then blocked=1; fi
@@ -2929,12 +2920,15 @@ EOF
 # Deliberately passive: every path is silent, prints one JSON object, exits zero.
 set +e
 exec 2>/dev/null
-payload=
-IFS= read -r payload
 # agy reads a hook's verdict from stdout and only the literal decision
 # "continue" blocks the stop, so an empty object always lets the agent stop.
-# Printed FIRST so any later failure still leaves valid output behind.
+# Printed FIRST, before stdin is even read, so no later failure and no read
+# that blocks on a stdin the parent has not closed can withhold the verdict.
 printf '{}\n'
+# The WHOLE payload, never one line of it: this hook is agy's only turn-end
+# signal, so a Stop carrying newlines must still be readable rather than
+# silently truncated to its first line.
+payload=\$(cat)
 auth_dir=$sq_agy_auth_dir
 command -v jq >/dev/null 2>&1 || exit 0
 # fullyIdle=true is the ONLY turn end. A false or absent value means agy is

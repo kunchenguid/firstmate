@@ -61,8 +61,8 @@ test_positional_prompt_is_rejected() {
   esac
   out=$("$AGY_BIN" --help 2>&1 || true)
   case "$out" in
-    *"--prompt-interactive"*|*" -i"*) : ;;
-    *) fail "agy $AGY_VERSION no longer advertises -i/--prompt-interactive, which every agy spawn passes the brief through" ;;
+    *" -i,"*|*" -i "*) : ;;
+    *) fail "agy $AGY_VERSION no longer advertises the short -i, which is the exact spelling every agy spawn passes the brief through: $out" ;;
   esac
   CHECKS_RUN=$((CHECKS_RUN + 1))
   pass "agy $AGY_VERSION rejects a positional prompt and still offers -i"
