@@ -86,7 +86,7 @@ usage() {
 
 bounded_uint() {
   local value=$1
-  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  case "$value" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "${#value}" -le "${#MAX_SAFE_SEQ}" ] || return 1
   [ "$value" -le "$MAX_SAFE_SEQ" ]
 }
@@ -285,7 +285,21 @@ case "$CMD" in
     bounded_uint "$THROUGH" || usage
     [ "$#" -eq 2 ] || usage
     fm_lock_acquire_wait "$LOCK"
-    if ! LAST_SEQ=$(last_seq) || [ "$THROUGH" -gt "$LAST_SEQ" ]; then
+    if ! LAST_SEQ=$(last_seq); then
+      fm_lock_release "$LOCK"
+      echo "error: refusing cursor advancement because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if ! CURSOR_SEQ=$(read_cursor); then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
+    if [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing cursor advancement because the outcome cursor is ahead of the store" >&2
+      exit 1
+    fi
+    if [ "$THROUGH" -gt "$LAST_SEQ" ]; then
       fm_lock_release "$LOCK"
       echo "error: refusing cursor advancement beyond a valid stored outcome" >&2
       exit 1

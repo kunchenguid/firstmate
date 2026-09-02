@@ -183,8 +183,12 @@ test_outcome_cursor_corruption_fails_closed() {
     --task task-1 --verdict captain --summary 'captain outcome must remain unread' >/dev/null \
     || fail "captain outcome append failed"
   snapshot=$(cat "$store")
-  printf '1x2\n' > "$home/state/.branch-outcomes-cursor"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 01 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-read accepted a noncanonical sequence"
+  [ ! -e "$home/state/.branch-outcomes-cursor" ] || fail "noncanonical mark-read created a malformed cursor"
 
+  printf '1x2\n' > "$home/state/.branch-outcomes-cursor"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "unread accepted a malformed cursor and skipped an outcome"
@@ -203,6 +207,11 @@ test_outcome_cursor_corruption_fails_closed() {
   status=$?
   [ "$status" -ne 0 ] || fail "unread accepted a cursor beyond the outcome-store tail"
   assert_contains "$out" "cursor is ahead of the store" "ahead-of-store refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-read accepted an existing cursor beyond the store"
+  assert_contains "$out" "cursor is ahead of the store" "mark-read ahead-cursor refusal lost its diagnostic"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 2 ] || fail "refused mark-read changed the ahead cursor"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-2 --verdict captain --summary 'must not remain hidden behind the cursor' 2>&1)
   status=$?
