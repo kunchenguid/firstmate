@@ -66,6 +66,7 @@ import {
   activateEligibleRowsOwner,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
+  readLiveEligibleRows,
   releaseEligibleRowsSnapshot,
   scopeForUnreadWake,
   writeEligibleRowsSnapshot,
@@ -256,15 +257,38 @@ export default function (pi: ExtensionAPI) {
   // One-time per-generation activation work (marker write + stray branch
   // lease cleanup); ownership itself is re-read lazily at every boundary.
   let activatedGeneration = -1;
-  // Serializes branch work: mirror appends and wake turns run strictly in
-  // dispatch order, one at a time (the branch runs drain -> handle -> ack
-  // serially by design).
+  // Serializes accepted branch work: mirror appends and wake turns run
+  // strictly in dispatch order, one at a time (the branch runs drain -> handle
+  // -> ack serially by design). A wake offered while this chain is occupied
+  // remains main-owned instead of joining it.
   let branchChain: Promise<void> = Promise.resolve();
+  // Synchronous capacity signal for the synchronous watcher handoff. A wake
+  // can transfer to the branch only when no prompt or mirror operation is
+  // already on this chain; queued capacity is not ownership.
+  let branchWorkGeneration = generation;
+  let branchWorkPending = 0;
   const pendingMirror: MirrorItem[] = [];
   const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
 
   function generationOwnsLock(expectedGeneration: number): boolean {
     return !shuttingDown && expectedGeneration === generation && lockOwnership() === "owned";
+  }
+
+  function branchHasPendingWork(expectedGeneration: number): boolean {
+    return branchWorkGeneration === expectedGeneration && branchWorkPending > 0;
+  }
+
+  function beginBranchWork(expectedGeneration: number): void {
+    if (branchWorkGeneration !== expectedGeneration) {
+      branchWorkGeneration = expectedGeneration;
+      branchWorkPending = 0;
+    }
+    branchWorkPending += 1;
+  }
+
+  function finishBranchWork(expectedGeneration: number): void {
+    if (branchWorkGeneration !== expectedGeneration) return;
+    branchWorkPending = Math.max(0, branchWorkPending - 1);
   }
 
   function markLoaded(): void {
@@ -595,8 +619,8 @@ ${context.command}
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
-  function enqueueWake(message: string, acceptedGeneration: number): void {
-    branchChain = branchChain
+  function enqueueWake(message: string, acceptedGeneration: number, grantedSeqs: readonly string[]): void {
+    const wakeWork = branchChain
       .then(async () => {
         if (shuttingDown || acceptedGeneration !== generation) {
           throw new Error("supervision session was replaced before handling the accepted wake");
@@ -607,30 +631,23 @@ ${context.command}
         if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
         const scope = scopeForUnreadWake(state, heartbeat);
-        // A newly-arrived main-owned (check-kind) row never bounces this
-        // whole recheck back to main any more - scopeForUnreadWake already
-        // excludes it from eligibleSeqs rather than vetoing the scan, so it
-        // stays queued for main while whatever else is eligible right now
-        // still reaches the branch. A genuinely empty queue, or a queue that
-        // simply has nothing (or nothing further) eligible for the branch
-        // right now, is an ordinary quiet no-op - not a fault, so it is
-        // never reported back to main. Only a scan scopeForUnreadWake itself
-        // marks corrupted (the queue or its metadata could not be read
-        // safely, or - for a heartbeat review - a main-owned row anywhere in
-        // the unread queue, since a heartbeat needs full-fleet context)
-        // still falls back to main.
-        if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) return;
+        // A newly-arrived main-owned (check-kind) row stays queued for main
+        // while the granted task-local rows remain branch-owned. If the exact
+        // granted rows disappear or become ineligible before prompt start,
+        // accepted handling cannot safely begin and falls back once to main.
+        // Only a scan scopeForUnreadWake itself marks corrupted (the queue or
+        // its metadata could not be read safely, or - for a heartbeat review
+        // - a main-owned row anywhere in the unread queue, since a heartbeat
+        // needs full-fleet context).
+        if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) {
+          throw new Error("the granted wake rows disappeared before the branch prompt started");
+        }
         if (scope.corrupted) {
           throw new Error("the unread wake queue could not be read safely");
         }
-        const grant = writeEligibleRowsSnapshot(
-          state,
-          scope.eligibleSeqs,
-          wakeGrantScript,
-          String(acceptedGeneration),
-        );
-        if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
-        if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
+        if (grantedSeqs.some((seq) => !scope.eligibleSeqs.includes(seq))) {
+          throw new Error("the granted wake rows changed before the branch prompt started");
+        }
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         await session.prompt(
@@ -646,13 +663,17 @@ ${context.command}
           await fallbackToMain(message, error instanceof Error ? error.message : String(error));
         } catch {}
       });
+    branchChain = wakeWork.finally(() => {
+      finishBranchWork(acceptedGeneration);
+    });
   }
 
   function enqueueMirrorFlush(): void {
     if (!branch || pendingMirror.length === 0) return;
     const flushGeneration = generation;
     const flushSession = branch;
-    branchChain = branchChain
+    beginBranchWork(flushGeneration);
+    const mirrorWork = branchChain
       .then(async () => {
         if (!actingAsOwner(flushGeneration)) return;
         await flushMirror(flushSession, flushGeneration);
@@ -661,11 +682,14 @@ ${context.command}
         // Mirror items stay queued in pendingMirror on failure; the next wake
         // or flush retries them in order.
       });
+    branchChain = mirrorWork.finally(() => {
+      finishBranchWork(flushGeneration);
+    });
   }
 
   pi.events?.on?.(FM_BRANCH_DISPATCH_EVENT, (data) => {
     const offer = data as BranchDispatchOffer;
-    if (!offer || typeof offer.accept !== "function") return;
+    if (!offer || typeof offer.accept !== "function" || typeof offer.reportAlreadyOwned !== "function") return;
     // Check eligibility before ownership activation so an out-of-scope wake
     // gets neither branch routing nor branch-owned state/lease cleanup side
     // effects.
@@ -673,8 +697,38 @@ ${context.command}
     if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
+    const busy = branchHasPendingWork(generation);
+    // Read the in-flight grant before rescanning the queue: a branch
+    // acknowledgement consumes a granted row from the queue and then the
+    // grant under one lock hold, so this order can never see a row as
+    // uncovered while the in-flight turn still owns it unread.
+    const liveGrantRows = busy ? readLiveEligibleRows(state) : null;
+    const heartbeat = /^heartbeat($|:)/.test(offer.message);
+    const scope = scopeForUnreadWake(state, heartbeat);
+    if (scope.corrupted || scope.eligibleSeqs.length === 0) return;
+    if (busy) {
+      // The unsettled turn cannot begin this offered wake, but when its
+      // live grant already covers every row the wake would drain, that
+      // turn's drain will consume and report them: report the offer as
+      // already owned so the watcher does not also deliver the same
+      // completion to main. Rows outside the grant keep the true busy
+      // fallback to main.
+      if (liveGrantRows && scope.eligibleSeqs.every((seq) => liveGrantRows.includes(seq))) {
+        offer.reportAlreadyOwned();
+      }
+      return;
+    }
+    const acceptedGeneration = generation;
+    const grant = writeEligibleRowsSnapshot(
+      state,
+      scope.eligibleSeqs,
+      wakeGrantScript,
+      String(acceptedGeneration),
+    );
+    if (grant !== "published") return;
+    beginBranchWork(acceptedGeneration);
     offer.accept();
-    enqueueWake(offer.message, generation);
+    enqueueWake(offer.message, acceptedGeneration, scope.eligibleSeqs);
   });
 
   pi.on?.("agent_start", () => {

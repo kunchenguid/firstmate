@@ -99,10 +99,13 @@ export async function createAgentSession(options) {
     ops: [],
     disposed: false,
     async prompt(text) {
+      globalThis.__fmPromptStarted = true;
+      globalThis.__fmPromptStarts = (globalThis.__fmPromptStarts ?? 0) + 1;
+      if (globalThis.__fmPromptAction) await globalThis.__fmPromptAction(text);
       if (globalThis.__fmPromptGate) {
-        globalThis.__fmPromptStarted = true;
         await globalThis.__fmPromptGate;
       }
+      if (globalThis.__fmPromptErrorAfterStart) throw new Error(globalThis.__fmPromptErrorAfterStart);
       session.ops.push({ kind: "prompt", text });
       (globalThis.__fmPrompts ??= []).push(text);
     },
@@ -196,7 +199,7 @@ JS
 # captured main-bound messages.
 DRIVER_PRELUDE=$(cat <<'JS'
 const { spawnSync } = await import("node:child_process");
-const { mkdirSync, writeFileSync } = await import("node:fs");
+const { appendFileSync, mkdirSync, writeFileSync } = await import("node:fs");
 const { pathToFileURL } = await import("node:url");
 
 const home = process.env.FM_HOME;
@@ -251,28 +254,39 @@ const pi = {
 function fire(event, payload, ctx) {
   for (const handler of piHandlers.get(event) ?? []) handler(payload, ctx);
 }
+const dispatchLib = await import(new URL("./lib/fm-branch-dispatch.ts", pathToFileURL(process.env.PLUGIN)).href);
 function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat) {
-  const offer = {
-    message,
-    projects,
-    heartbeat,
-    eligible,
-    accepted: false,
-    accept() {
-      offer.accepted = true;
-    },
-  };
-  return offer;
+  return dispatchLib.createBranchDispatchOffer(message, projects, heartbeat, eligible);
 }
-function dispatch(message, projects, heartbeat, eligible) {
+function dispatch(message, projects, heartbeat, eligible, seq = 1, append = false) {
   const offer = makeOffer(message, projects, heartbeat, eligible);
   if (offer.eligible) {
     const row = offer.heartbeat
-      ? "1\t1\theartbeat\theartbeat\theartbeat\n"
-      : `1\t1\tsignal\tbranch-driver.status\t${message}\n`;
-    writeFileSync(`${home}/state/.wake-queue`, row);
+      ? `1\t${seq}\theartbeat\theartbeat\theartbeat\n`
+      : `1\t${seq}\tsignal\tbranch-driver.status\t${message}\n`;
+    if (append) appendFileSync(`${home}/state/.wake-queue`, row);
+    else writeFileSync(`${home}/state/.wake-queue`, row);
   }
   bus.emit("fm-branch-supervision:dispatch", offer);
+  return offer;
+}
+function dispatchThroughWatcher(message, projects, heartbeat, eligible, seq = 1, append = false) {
+  const offer = dispatch(message, projects, heartbeat, eligible, seq, append);
+  if (!(offer.accepted || offer.alreadyOwned)) {
+    pi.sendUserMessage(`FIRSTMATE WATCHER WAKE: ${message}`, { deliverAs: "followUp" });
+  }
+  return offer;
+}
+function dispatchThroughWatcherPrescanned(message) {
+  // A watcher cycle that closes on a row already sitting unread in the
+  // queue: the caller pre-writes the rows, and this mirrors the watcher's
+  // real delivery decision exactly (suppress main on accepted or
+  // alreadyOwned).
+  const offer = makeOffer(message);
+  bus.emit("fm-branch-supervision:dispatch", offer);
+  if (!(offer.accepted || offer.alreadyOwned)) {
+    pi.sendUserMessage(`FIRSTMATE WATCHER WAKE: ${message}`, { deliverAs: "followUp" });
+  }
   return offer;
 }
 async function settle(predicate, label) {
@@ -313,6 +327,9 @@ writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
 // 1. An accepted wake reaches the branch session, never main.
 const offer = dispatch("signal: task-9 done: PR https://example.com/pr/9 checks green");
 if (!offer.accepted) throw new Error("branch did not accept the wake offer");
+if (readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim() !== "1") {
+  throw new Error("branch accepted before publishing the exact row grant");
+}
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
 const wakePrompt = globalThis.__fmPrompts[0];
 if (!wakePrompt.includes("FIRSTMATE SUPERVISION WAKE: signal: task-9 done")) {
@@ -830,6 +847,81 @@ EOF
   pass "a settled branch turn releases an unacknowledged grant for main replay"
 }
 
+test_immediate_branch_success_acknowledges_exact_rows_once() {
+  local repo home out status
+  repo="$TMP_ROOT/immediate-success-root"
+  home="$TMP_ROOT/immediate-success-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, home, realRoot, sentToMain, mainUserMessages }; })()`);
+const { dispatch, settle, home, realRoot, sentToMain, mainUserMessages } = globalThis.__t;
+const { appendFileSync, existsSync, readFileSync } = await import("node:fs");
+const { spawnSync } = await import("node:child_process");
+
+globalThis.__fmPromptAction = async () => {
+  const drain = spawnSync("bash", [`${realRoot}/bin/fm-wake-drain.sh`], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      FM_HOME: home,
+      FM_STATE_OVERRIDE: `${home}/state`,
+      FM_ROOT_OVERRIDE: realRoot,
+      FM_SUPERVISION_ACTOR: "branch",
+    },
+  });
+  if (drain.status !== 0) throw new Error(`branch drain failed: ${drain.stderr}`);
+  const match = String(drain.stderr).match(/--ack-through (\d+) --recovery-generation ([A-Za-z0-9._-]+)/);
+  if (!match || match[1] !== "1") throw new Error(`branch drain did not bind its exact row: ${drain.stderr}`);
+  const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const result = await report.execute(
+    "immediate-success",
+    { task: "branch-driver", verdict: "captain", summary: "completion handled once" },
+    undefined,
+    undefined,
+    {},
+  );
+  if (result.isError) throw new Error(`branch outcome failed: ${JSON.stringify(result)}`);
+  const ack = spawnSync(
+    "bash",
+    [`${realRoot}/bin/fm-wake-drain.sh`, "--ack-through", match[1], "--recovery-generation", match[2]],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: home,
+        FM_STATE_OVERRIDE: `${home}/state`,
+        FM_ROOT_OVERRIDE: realRoot,
+        FM_SUPERVISION_ACTOR: "branch",
+      },
+    },
+  );
+  if (ack.status !== 0) throw new Error(`branch acknowledgement failed: ${ack.stderr}`);
+};
+
+const offer = dispatch("signal: immediate success");
+if (!offer.accepted) throw new Error("idle branch refused an immediately handleable wake");
+appendFileSync(`${home}/state/.wake-queue`, "2\t2\tcheck\tx-inbox\tcheck: remains main-owned\n");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "successful branch prompt");
+await new Promise((resolve) => setTimeout(resolve, 50));
+const remaining = readFileSync(`${home}/state/.wake-queue`, "utf8");
+if (remaining.includes("\t1\tsignal\t")) throw new Error("branch acknowledgement retained its exact row");
+if (!remaining.includes("\t2\tcheck\t")) throw new Error("branch acknowledgement consumed the main-owned row");
+if (existsSync(`${home}/state/.branch-eligible-rows`)) throw new Error("successful branch handling retained its row grant");
+const outcomes = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n");
+if (outcomes.length !== 1) throw new Error(`branch outcome count changed: ${outcomes.length}`);
+if (sentToMain.length !== 1) throw new Error(`branch outcome merge count changed: ${sentToMain.length}`);
+if (mainUserMessages.length !== 0) throw new Error(`successful branch handling also fell back: ${JSON.stringify(mainUserMessages)}`);
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "immediate branch success must acknowledge only its exact rows without fallback or duplicate outcome: $out"
+  pass "immediate branch success acknowledges exactly its grant with one outcome and no fallback"
+}
+
 test_main_owned_grant_result_falls_back_to_main() {
   local repo home out status
   repo="$TMP_ROOT/main-owned-fallback-root"
@@ -839,14 +931,14 @@ test_main_owned_grant_result_falls_back_to_main() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages }; })()`);
-const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatchThroughWatcher, fire, home, mainUserMessages }; })()`);
+const { dispatchThroughWatcher, fire, home, mainUserMessages } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 
 fire("session_start", {});
-const offer = dispatch("signal: interrupted main claim");
-if (!offer.accepted) throw new Error("eligible wake was not accepted before the ownership recheck");
 writeFileSync(`${home}/state/.main-eligible-rows`, "1\n");
+const offer = dispatchThroughWatcher("signal: interrupted main claim");
+if (offer.accepted) throw new Error("branch accepted a row already claimed by main");
 for (let i = 0; i < 250 && mainUserMessages.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -870,7 +962,7 @@ EOF
   pass "a stale main claim cannot silently suppress later wake delivery"
 }
 
-test_branch_predrain_recheck_noops_already_drained_wake() {
+test_accepted_grant_loss_before_prompt_falls_back_once() {
   local repo home out status
   repo="$TMP_ROOT/predrain-empty-root"
   home="$TMP_ROOT/predrain-empty-home"
@@ -881,37 +973,25 @@ test_branch_predrain_recheck_noops_already_drained_wake() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages }; })()`);
 const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 
 fire("session_start", {});
-let releaseFirst;
-globalThis.__fmPromptGate = new Promise((resolve) => {
-  releaseFirst = resolve;
-});
-if (!dispatch("signal: first queued wake").accepted) throw new Error("first wake was not accepted");
-for (let i = 0; i < 250 && !globalThis.__fmPromptStarted; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
-if (!globalThis.__fmPromptStarted) throw new Error("first branch prompt did not start");
-if (!dispatch("heartbeat", [], true, true).accepted) throw new Error("queued heartbeat was not accepted");
+if (!dispatch("signal: accepted before row loss").accepted) throw new Error("available branch refused the wake");
 writeFileSync(`${home}/state/.wake-queue`, "");
-releaseFirst();
-for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length < 1; i += 1) {
+for (let i = 0; i < 250 && mainUserMessages.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 await new Promise((resolve) => setTimeout(resolve, 50));
-if ((globalThis.__fmPrompts ?? []).length !== 1) {
-  throw new Error(`already-drained wake prompted again: ${JSON.stringify(globalThis.__fmPrompts ?? [])}`);
-}
-if (mainUserMessages.length !== 0) {
-  throw new Error(`already-drained wake fell back to main: ${JSON.stringify(mainUserMessages)}`);
-}
+if ((globalThis.__fmPromptStarts ?? 0) !== 0) throw new Error("branch prompt started after its granted row disappeared");
+if (mainUserMessages.length !== 1) throw new Error(`pre-start failure fallback count changed: ${JSON.stringify(mainUserMessages)}`);
+if (!String(mainUserMessages[0].content).includes("signal: accepted before row loss")) throw new Error("pre-start fallback lost the wake");
+if (existsSync(`${home}/state/.branch-eligible-rows`)) throw new Error("pre-start failure retained its row grant");
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "an already-drained serialized wake must no-op without main fallback: $out"
-  pass "pre-drain eligibility re-check no-ops an already-drained wake"
+  expect_code 0 "$status" "an accepted wake whose grant disappears before prompt start must fall back once: $out"
+  pass "failure before prompt start releases the grant and falls back to main once"
 }
 
 test_branch_mirror_filters_order_and_cursor() {
@@ -1118,24 +1198,27 @@ test_queued_actions_recheck_lock_ownership() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, mainUserMessages }; })()`);
-const { fire, dispatch, settle, home, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatchThroughWatcher, settle, home, mainUserMessages }; })()`);
+const { fire, dispatchThroughWatcher, settle, home, mainUserMessages } = globalThis.__t;
 import { existsSync, unlinkSync } from "node:fs";
 
 let releasePrompt;
 globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
-if (!dispatch("signal: active wake").accepted) throw new Error("first wake was not accepted");
+if (!dispatchThroughWatcher("signal: active wake").accepted) throw new Error("first wake was not accepted");
 await settle(() => globalThis.__fmPromptStarted === true, "blocked first prompt");
-if (!dispatch("signal: queued wake").accepted) throw new Error("queued wake was not accepted");
+if (dispatchThroughWatcher("signal: queued wake", undefined, false, true, 2, true).accepted) {
+  throw new Error("busy branch accepted the queued wake");
+}
 const entries = [{ type: "message", message: { role: "user", content: "queued mirror must stay undelivered" } }];
 fire("turn_end", {}, {
   sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => entries },
 });
 unlinkSync(`${home}/state/.lock`);
 releasePrompt();
-await settle(() => mainUserMessages.length === 1, "lost-ownership fallback");
-if (!mainUserMessages[0].content.includes("FIRSTMATE WATCHER WAKE: signal: queued wake")) {
-  throw new Error(`queued wake did not fall back to main: ${mainUserMessages[0].content}`);
+await settle(() => mainUserMessages.length === 1, "busy-wake main delivery");
+const mainWakes = mainUserMessages.map((entry) => String(entry.content));
+if (mainWakes.filter((message) => message.includes("signal: queued wake")).length !== 1) {
+  throw new Error(`busy queued wake did not reach main exactly once: ${JSON.stringify(mainWakes)}`);
 }
 await new Promise((resolve) => setTimeout(resolve, 25));
 const session = globalThis.__fmSessions[0];
@@ -1147,6 +1230,158 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "queued branch actions must recheck lock ownership: $out"
   pass "queued wakes and mirrors stop mutating branch state after lock ownership is lost"
+}
+
+test_busy_branch_returns_later_completion_to_main_once() {
+  local repo home out status
+  repo="$TMP_ROOT/busy-fallback-root"
+  home="$TMP_ROOT/busy-fallback-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatchThroughWatcher, settle, home, mainUserMessages }; })()`);
+const { dispatchThroughWatcher, settle, home, mainUserMessages } = globalThis.__t;
+import { existsSync, readFileSync } from "node:fs";
+
+let releasePrompt;
+globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
+const first = dispatchThroughWatcher("signal: first completion", undefined, false, true, 1);
+if (!first.accepted) throw new Error("available branch refused the first completion");
+await settle(() => globalThis.__fmPromptStarted === true, "first branch prompt start");
+if (readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim() !== "1") {
+  throw new Error("first prompt did not hold the exact row grant");
+}
+
+const second = dispatchThroughWatcher("signal: second completion", undefined, false, true, 2, true);
+if (second.accepted) throw new Error("busy branch accepted a completion it could not start");
+await settle(() => mainUserMessages.length === 1, "second completion main fallback");
+if (!String(mainUserMessages[0].content).includes("FIRSTMATE WATCHER WAKE: signal: second completion")) {
+  throw new Error(`main fallback lost the second completion: ${JSON.stringify(mainUserMessages)}`);
+}
+if ((globalThis.__fmPrompts ?? []).length !== 0) {
+  throw new Error("the second completion started behind the unsettled first prompt");
+}
+if (readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim() !== "1") {
+  throw new Error("busy fallback changed the first prompt's exact row grant");
+}
+
+releasePrompt();
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "first branch prompt settle");
+await new Promise((resolve) => setTimeout(resolve, 50));
+if (mainUserMessages.length !== 1) throw new Error("the busy completion fell back to main more than once");
+if ((globalThis.__fmPrompts ?? []).length !== 1) throw new Error("the busy completion later started on the branch");
+if (existsSync(`${home}/state/branch-outcomes.jsonl`)) throw new Error("busy fallback fabricated a branch outcome");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a second completion must reach main exactly once while the first branch prompt is unsettled: $out"
+  pass "a busy supervision branch returns a later completion to main exactly once"
+}
+
+test_busy_branch_reports_grant_covered_completion_already_owned() {
+  local repo home out status
+  repo="$TMP_ROOT/busy-covered-root"
+  home="$TMP_ROOT/busy-covered-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatchThroughWatcher, dispatchThroughWatcherPrescanned, settle, home, mainUserMessages }; })()`);
+const { dispatchThroughWatcher, dispatchThroughWatcherPrescanned, settle, home, mainUserMessages } = globalThis.__t;
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+
+let releasePrompt;
+globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
+// Two completions are both unread when the first dispatch scans, so the
+// pre-accept grant covers rows 1 and 2 (the exact incident shape).
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tfirst completion\n");
+appendFileSync(`${home}/state/.wake-queue`, "1\t2\tsignal\tbranch-driver.status\tsecond completion\n");
+const first = dispatchThroughWatcherPrescanned("signal: first completion");
+if (!first.accepted) throw new Error("available branch refused the first completion");
+await settle(() => globalThis.__fmPromptStarted === true, "first branch prompt start");
+if (readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim() !== "1\n2") {
+  throw new Error("first dispatch did not grant both unread completions");
+}
+
+// The successor watcher cycle closes on the second completion while the
+// first prompt is still unsettled: the busy branch must report the offer as
+// already owned so the watcher does not also deliver it to main.
+const second = dispatchThroughWatcherPrescanned("signal: second completion");
+if (second.accepted) throw new Error("busy branch accepted a wake it could not start");
+if (!second.alreadyOwned) throw new Error("busy branch did not report the grant-covered wake as already owned");
+if ((globalThis.__fmPrompts ?? []).length !== 0) {
+  throw new Error("the covered completion started behind the unsettled first prompt");
+}
+if (readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim() !== "1\n2") {
+  throw new Error("the already-owned report changed the in-flight grant");
+}
+
+// A row outside the live grant keeps the true busy fallback to main.
+const third = dispatchThroughWatcher("signal: third completion", undefined, false, true, 3, true);
+if (third.accepted || third.alreadyOwned) throw new Error("busy branch took over a row outside its live grant");
+await settle(() => mainUserMessages.length === 1, "outside-grant busy fallback");
+if (!String(mainUserMessages[0].content).includes("FIRSTMATE WATCHER WAKE: signal: third completion")) {
+  throw new Error(`busy fallback lost the outside-grant completion: ${JSON.stringify(mainUserMessages)}`);
+}
+if (readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim() !== "1\n2") {
+  throw new Error("busy fallback changed the in-flight grant");
+}
+
+releasePrompt();
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "first branch prompt settle");
+await new Promise((resolve) => setTimeout(resolve, 50));
+const wakes = mainUserMessages.map((entry) => String(entry.content));
+if (wakes.filter((message) => message.includes("second completion")).length !== 0) {
+  throw new Error(`the grant-covered completion also reached main: ${JSON.stringify(wakes)}`);
+}
+if (wakes.filter((message) => message.includes("third completion")).length !== 1) {
+  throw new Error(`the outside-grant completion did not stay exactly one main delivery: ${JSON.stringify(wakes)}`);
+}
+if ((globalThis.__fmPrompts ?? []).length !== 1) throw new Error("more than one branch prompt ran");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a grant-covered completion offered while busy must be reported already owned instead of duplicated to main: $out"
+  pass "a busy branch reports a grant-covered completion as already owned instead of duplicating it to main"
+}
+
+test_failure_after_prompt_start_falls_back_once() {
+  local repo home out status
+  repo="$TMP_ROOT/started-failure-root"
+  home="$TMP_ROOT/started-failure-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, home, mainUserMessages }; })()`);
+const { dispatch, settle, home, mainUserMessages } = globalThis.__t;
+import { existsSync } from "node:fs";
+
+globalThis.__fmPromptErrorAfterStart = "synthetic failure after prompt start";
+const offer = dispatch("signal: started completion failure");
+if (!offer.accepted) throw new Error("available branch refused the failure fixture");
+await settle(() => mainUserMessages.length === 1, "post-start main fallback");
+await new Promise((resolve) => setTimeout(resolve, 50));
+if ((globalThis.__fmPromptStarts ?? 0) !== 1) throw new Error("accepted handling did not start exactly once");
+if ((globalThis.__fmPrompts ?? []).length !== 0) throw new Error("failed prompt was recorded as settled");
+if (mainUserMessages.length !== 1) throw new Error("post-start failure fell back more than once");
+if (!String(mainUserMessages[0].content).includes("synthetic failure after prompt start")) {
+  throw new Error(`post-start fallback lost its cause: ${JSON.stringify(mainUserMessages)}`);
+}
+if (existsSync(`${home}/state/.branch-eligible-rows`)) throw new Error("post-start failure retained its row grant");
+if (existsSync(`${home}/state/branch-outcomes.jsonl`)) throw new Error("failed handling fabricated a branch outcome");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "failure after accepted handling starts must release ownership and fall back once: $out"
+  pass "failure after accepted branch handling starts falls back to main once"
 }
 
 test_stale_generation_boundaries_are_side_effect_free() {
@@ -1269,8 +1504,8 @@ test_rebind_remirrors_undelivered_dialog_from_durable_cursor() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home }; })()`);
-const { fire, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, makeOffer, home }; })()`);
+const { fire, makeOffer, home } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1315,16 +1550,7 @@ replacement.default(replacementPi);
 for (const handler of replacementPiHandlers.get("session_start") ?? []) handler({}, ctx);
 for (const handler of replacementPiHandlers.get("turn_end") ?? []) handler({}, ctx);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: after rebind\n");
-const offer = {
-  message: "signal: after rebind",
-  projects: [`${home}/projects/approved`],
-  heartbeat: false,
-  eligible: true,
-  accepted: false,
-  accept() {
-    offer.accepted = true;
-  },
-};
+const offer = makeOffer("signal: after rebind");
 replacementBus.emit("fm-branch-supervision:dispatch", offer);
 if (!offer.accepted) throw new Error("replacement instance refused the wake");
 for (let i = 0; i < 250; i += 1) {
@@ -1555,6 +1781,16 @@ JS
   pass "fm_branch_outcomes hides through ToolExecutionComponent while Calm-off and HTML export stay stock"
 }
 
+if [ "${FM_TEST_ONLY_HANDOFF:-0}" = 1 ]; then
+  test_branch_dispatch_two_stage_filter_and_prefix_contract
+  test_immediate_branch_success_acknowledges_exact_rows_once
+  test_main_owned_grant_result_falls_back_to_main
+  test_accepted_grant_loss_before_prompt_falls_back_once
+  test_busy_branch_returns_later_completion_to_main_once
+  test_failure_after_prompt_start_falls_back_once
+  exit 0
+fi
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
@@ -1563,13 +1799,17 @@ test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_defers_new_main_owned_row
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_settled_branch_prompt_releases_unacknowledged_grant
+test_immediate_branch_success_acknowledges_exact_rows_once
 test_main_owned_grant_result_falls_back_to_main
-test_branch_predrain_recheck_noops_already_drained_wake
+test_accepted_grant_loss_before_prompt_falls_back_once
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
 test_replacement_activation_cleans_leases_and_retries_failure
 test_cold_start_activates_after_lock_acquisition
 test_queued_actions_recheck_lock_ownership
+test_busy_branch_returns_later_completion_to_main_once
+test_busy_branch_reports_grant_covered_completion_already_owned
+test_failure_after_prompt_start_falls_back_once
 test_stale_generation_boundaries_are_side_effect_free
 test_secondary_session_stays_inert
 test_rebind_remirrors_undelivered_dialog_from_durable_cursor

@@ -313,7 +313,12 @@ export default function (pi: ExtensionAPI) {
     const eligible = !isCheckTrigger && scope.eligible;
     const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
-    return offer.accepted;
+    // accepted: the branch owns handling the wake now, including one fallback
+    // to main on a later failure; alreadyOwned: the live grant of its
+    // in-flight turn already covers this wake's eligible rows. Either way the
+    // branch owns the completion, so the watcher suppresses its own main
+    // delivery.
+    return offer.accepted || offer.alreadyOwned;
   }
 
   async function deliverActionableWake(

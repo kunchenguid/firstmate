@@ -6,13 +6,20 @@ import { readdirSync, readFileSync } from "node:fs";
 // pi.events so neither extension imports the other.
 //
 // Contract: the watcher builds one offer per actionable wake and emits it on
-// FM_BRANCH_DISPATCH_EVENT. A live, enabled branch extension calls accept()
+// FM_BRANCH_DISPATCH_EVENT. A live, enabled, IDLE branch extension first
+// publishes the exact identity-bound row grant, then calls accept()
 // SYNCHRONOUSLY inside its handler (the event bus invokes handlers
-// synchronously up to their first await), so after emit returns the watcher
-// reads `accepted`: true means the branch now owns delivering and handling the
-// wake (including its own fallback back to main on a later failure); false
-// means no branch took it and the watcher delivers to main exactly as it did
-// before the branch existed. Watcher-failure alarms are never offered - only
+// synchronously up to their first await). After emit returns, accepted=true
+// therefore means the branch already owns exact durable rows and now owns
+// handling the wake, including one fallback to main on a later failure. A
+// busy branch does not accept eventual serialized capacity: accepted=false
+// leaves delivery with the watcher, which sends it to main exactly as it did
+// before the branch existed - unless the busy branch reports the offer as
+// already owned (alreadyOwned=true), meaning every currently-eligible row of
+// the offered wake is covered by the live grant of its in-flight turn, whose
+// drain will consume and report them; the watcher then suppresses the
+// redundant main delivery instead of duplicating the same completion.
+// Watcher-failure alarms are never offered - only
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
@@ -142,9 +149,31 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 
 // The exact state-relative filename bin/fm-wake-drain.sh reads for a
 // FM_SUPERVISION_ACTOR=branch drain or ack (its header is the single owner of
-// the consume-side contract). Written atomically, immediately before every
-// branch prompt, by writeEligibleRowsSnapshot below.
+// the consume-side contract). Written atomically, when the branch accepts a
+// watcher offer, by writeEligibleRowsSnapshot below; the accepted wake
+// re-verifies those rows immediately before its prompt.
 export const BRANCH_ELIGIBLE_ROWS_FILE = ".branch-eligible-rows";
+
+// Read the live grant rows without taking the queue lock. Every writer
+// replaces or removes the file atomically under that lock, so an unlocked
+// read still observes one whole consistent file; null (absent or
+// structurally invalid) means no live grant and must never be mistaken for
+// an empty one. While the branch's own unsettled work exists, the file names
+// exactly the rows that in-flight turn still owns and will drain:
+// publication verified them against the queue and this generation's owner
+// record, and a branch acknowledgement shrinks the file as it consumes rows
+// (bin/fm-wake-drain.sh consume_actor_rows_locked).
+export function readLiveEligibleRows(state: string): string[] | null {
+  let raw: string;
+  try {
+    raw = readFileSync(`${state}/${BRANCH_ELIGIBLE_ROWS_FILE}`, "utf8");
+  } catch {
+    return null;
+  }
+  const seqs = raw.split(/\r?\n/).filter((line) => line.length > 0);
+  if (seqs.length === 0 || seqs.some((seq) => !/^[0-9]+$/.test(seq))) return null;
+  return seqs;
+}
 
 // Atomically publish the exact row set a branch turn may drain and
 // acknowledge. One sequence number per line - an opaque handoff, never
@@ -217,9 +246,19 @@ export interface BranchDispatchOffer {
   heartbeat: boolean;
   /** True only when at least one currently unread row is safe for branch handling. */
   eligible: boolean;
-  /** Set by accept(); read by the watcher after emit returns. */
+  /** Set by accept() only after an exact branch row grant exists. */
   accepted: boolean;
+  /**
+   * True only when a busy branch reported that every currently-eligible row
+   * of this offered wake is already covered by the live identity-bound grant
+   * of its in-flight turn, whose drain will consume and report them: the
+   * watcher must suppress the main delivery instead of duplicating the same
+   * completion. Never set together with accepted - no new handling starts
+   * and no new grant is written.
+   */
+  alreadyOwned: boolean;
   accept(): void;
+  reportAlreadyOwned(): void;
 }
 
 export function createBranchDispatchOffer(
@@ -234,8 +273,12 @@ export function createBranchDispatchOffer(
     heartbeat,
     eligible,
     accepted: false,
+    alreadyOwned: false,
     accept() {
       offer.accepted = true;
+    },
+    reportAlreadyOwned() {
+      offer.alreadyOwned = true;
     },
   };
   return offer;
