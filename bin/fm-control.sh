@@ -769,6 +769,20 @@ safe_checkpoint() {
 # actually reads. A secondmate's charter is a durable standing document and is
 # never rewritten: a secondmate reconciles its own home's records at startup,
 # so the note stays parent-side audit evidence.
+progress_note_block() {  # <stamp>
+  echo
+  echo "## Progress note ($1)"
+  echo
+  echo "This task was relaunched. Continue from here; the local copy and every"
+  echo "uncommitted change are exactly as the previous worker left them."
+  echo
+  echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
+  echo "each message in numeric order, then mv each handled file into"
+  echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+  echo
+  printf '%s\n' "$NOTE"
+}
+
 record_note() {
   local stamp
   [ -n "$NOTE" ] || return 0
@@ -778,26 +792,14 @@ record_note() {
     ship|scout)
       cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
         || die "could not preserve task $ID's instructions before recording the progress note"
-      {
-        echo
-        echo "## Progress note ($stamp)"
-        echo
-        echo "This task was relaunched. Continue from here; the local copy and every"
-        echo "uncommitted change are exactly as the previous worker left them."
-        echo
-        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
-        echo "each message in numeric order, then mv each handled file into"
-        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
-        echo
-        printf '%s\n' "$NOTE"
-      } >> "$RELAUNCH_BRIEF" \
+      progress_note_block "$stamp" >> "$RELAUNCH_BRIEF" \
         || die "could not append the progress note to task $ID's instructions"
       ;;
   esac
 }
 
 do_relaunch() {
-  local exit_result state note_line local_model_endpoint
+  local exit_result state note_line local_model_endpoint brief_preview brief_fits_status
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -834,6 +836,20 @@ do_relaunch() {
       die "task $ID records kind '$KIND', which has no defined relaunch shape"
       ;;
   esac
+  if [ "$TARGET_HARNESS" = claude-local ] && [ -n "$RELAUNCH_BRIEF" ]; then
+    brief_preview=$(mktemp "${TMPDIR:-/tmp}/fm-control-brief.XXXXXX") \
+      || die "could not stage task $ID's instructions for the claude-local brief check"
+    if ! { cat "$RELAUNCH_BRIEF" && progress_note_block "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$brief_preview"; then
+      rm -f -- "$brief_preview"
+      die "could not stage task $ID's instructions for the claude-local brief check"
+    fi
+    brief_fits_status=0
+    FM_LOCAL_MODEL_ENDPOINT="$local_model_endpoint" "$SCRIPT_DIR/fm-local-model.sh" brief-fits "$TARGET_MODEL" "$brief_preview" >/dev/null \
+      || brief_fits_status=$?
+    rm -f -- "$brief_preview"
+    [ "$brief_fits_status" -eq 0 ] \
+      || die "task $ID's instructions plus this progress note exceed the local model's usable headroom (see above), so relaunching would stop the running worker for a launch that must be refused; the worker was left in place"
+  fi
 
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"

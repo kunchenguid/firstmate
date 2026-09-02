@@ -1730,7 +1730,46 @@ test_claude_local_relaunch_preserved_after_delivery_keeps_the_watcher() {
   pass "fm-spawn relaunch: a preserving exit after delivery keeps the eviction watcher armed"
 }
 
+# The brief-fits gate is the third launch gate fm-spawn runs after the agent is
+# stopped, and record_note grows the brief on every relaunch, so a brief near
+# the allowance crosses it on the relaunch itself. The pre-stop gate therefore
+# judges the brief PLUS the note it is about to append: the brief alone still
+# fits (the contrast), and the relaunch refuses with the brief untouched.
+test_claude_local_relaunch_refuses_before_stop_when_the_note_overflows_the_brief() {
+  local dir brief out rc before
+  dir=$(new_case claude-local-brief rl45)
+  add_claude_local_task "$dir" rl45 loaded
+  brief="$dir/home/data/rl45/brief.md"
+  # Headroom is pinned to 800 tokens, so the 25% allowance is 200 tokens (800
+  # bytes at the bytes/4 estimate): 600 bytes of brief fit alone, and the
+  # progress note block pushes the pair past it.
+  head -c 600 /dev/zero | tr '\0' 'x' > "$brief"
+  FM_LOCAL_MODEL_ENDPOINT="file://$dir/endpoint" FM_LOCAL_MODEL_HARNESS_BASELINE=130272 \
+    "$ROOT/bin/fm-local-model.sh" brief-fits local-coder "$brief" >/dev/null \
+    || fail "fixture: the brief alone must fit the allowance"
+  before=$(cat "$brief")
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=130272 \
+    run_control "$dir" rl45 relaunch --note "one more note on an already full brief"); rc=$?
+  expect_code 1 "$rc" "a relaunch whose note overflows the brief allowance should refuse"$'\n'"$out"
+  case "$out" in
+    *"too large for the local model runtime"*) : ;;
+    *) fail "the refusal did not carry the brief-fits diagnosis: $out" ;;
+  esac
+  case "$out" in
+    *"left in place"*) : ;;
+    *) fail "the refusal did not say the worker was kept: $out" ;;
+  esac
+  ! grep -qx '/exit' "$dir/fake/literal" \
+    || fail "a refused claude-local relaunch stopped the running worker"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the running worker did not survive a refused relaunch"
+  [ "$(cat "$brief")" = "$before" ] \
+    || fail "a refused relaunch appended its progress note to the instructions"
+  pass "fm-control relaunch: a note that overflows the brief allowance refuses before the worker is stopped"
+}
+
 test_claude_local_relaunch_refuses_before_stop_when_the_model_is_unloaded
 test_claude_local_relaunch_refuses_an_armed_pr_poll_before_stop
+test_claude_local_relaunch_refuses_before_stop_when_the_note_overflows_the_brief
 test_claude_local_relaunch_abort_before_the_worker_exists_retires_the_watcher
 test_claude_local_relaunch_preserved_after_delivery_keeps_the_watcher
