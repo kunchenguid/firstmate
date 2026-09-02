@@ -192,6 +192,18 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/planning-room/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planning-room/templates/adversary.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/planning-room/templates/lead.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -465,6 +477,10 @@
     },
     {
       "path": "docs/pi-supervision-branch.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/planning-room.md",
       "audience": "maintainer-architecture"
     },
     {

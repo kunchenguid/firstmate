@@ -133,7 +133,7 @@ test_retries_and_installs_pinned_shellcheck() {
 }
 
 test_maps_all_supported_platform_checksums() {
-  local tmp fakebin destination out url_log uname_s uname_m archive sha
+  local tmp fakebin destination out url_log uname_s uname_m archive _sha
   tmp=$(fm_test_tmproot fm-install-shellcheck-platforms)
   fakebin=$(fm_install_shellcheck_fakebin "$tmp")
   destination="$tmp/bin"
@@ -156,7 +156,7 @@ exit 0
 SH
   chmod +x "$fakebin/curl"
 
-  while IFS=$'\t' read -r uname_s uname_m archive sha; do
+  while IFS=$'\t' read -r uname_s uname_m archive _sha; do
     [ -n "$uname_s" ] || continue
     rm -rf "$destination"
     : > "$url_log"
