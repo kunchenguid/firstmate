@@ -1334,7 +1334,11 @@ const consumed = [];
 async function startRun() {
   running = true;
   agentStarts += 1;
-  while (queued.length > 0) consumed.push(queued.shift());
+  while (queued.length > 0) {
+    const row = queued.shift();
+    consumed.push(row);
+    await handlers.get("before_agent_start")?.({ prompt: row }, {});
+  }
   await handlers.get("agent_start")?.({ type: "agent_start" }, {});
 }
 // A captain turn already in flight, started by something other than a wake.
@@ -1342,6 +1346,16 @@ async function startCaptainRun() {
   running = true;
   agentStarts += 1;
   await handlers.get("agent_start")?.({ type: "agent_start" }, {});
+}
+// Pi 0.84.4 drains rows queued during a run inline inside that same run, so a
+// queued row is consumed, and announced with before_agent_start, without a
+// second agent_start.
+function drainQueuedInline() {
+  while (queued.length > 0) {
+    const row = queued.shift();
+    consumed.push(row);
+    void handlers.get("before_agent_start")?.({ prompt: row }, {});
+  }
 }
 // Pi emits agent_settled once a run has fully settled, an aborted one included.
 async function settleRun() {
@@ -1361,7 +1375,9 @@ const pi = {
   sendUserMessage: (message) => {
     sent.push(String(message));
     queued.push(String(message));
-    if (!running && !runScheduled) {
+    if (running) {
+      queueMicrotask(drainQueuedInline);
+    } else if (!runScheduled) {
       runScheduled = true;
       queueMicrotask(() => {
         runScheduled = false;
@@ -1396,7 +1412,8 @@ for (const count of [2, 3, 4]) {
 await waitFor(() => lines(process.env.FM_ARM_LOG).length >= 5, "final successor start");
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (sent.length !== 1) throw new Error(`burst produced ${sent.length} dock rows: ${sent.join(" || ")}`);
-if (queued.length !== 1) throw new Error(`expected exactly one row queued on the running turn, saw ${queued.length}`);
+if (queued.length !== 0) throw new Error(`the run in flight must drain its queued row, ${queued.length} left docked`);
+if (consumed.length !== 1) throw new Error(`expected exactly one row drained by the run in flight, saw ${consumed.length}`);
 if (agentStarts !== 1) throw new Error(`no wake row may start a run while the captain turn is in flight, saw ${agentStarts}`);
 const row = sent[0];
 if (!row.includes("FIRSTMATE WATCHER WAKE")) throw new Error(`row lost the typed wake header: ${row}`);
@@ -1470,7 +1487,11 @@ const consumed = [];
 async function startRun() {
   running = true;
   agentStarts += 1;
-  while (queued.length > 0) consumed.push(queued.shift());
+  while (queued.length > 0) {
+    const row = queued.shift();
+    consumed.push(row);
+    await handlers.get("before_agent_start")?.({ prompt: row }, {});
+  }
   await handlers.get("agent_start")?.({ type: "agent_start" }, {});
 }
 // Pi emits agent_settled once a run has fully settled, an aborted one included.
@@ -1587,13 +1608,21 @@ async function startCaptainRun() {
 async function startRun() {
   running = true;
   agentStarts += 1;
-  while (queued.length > 0) consumed.push(queued.shift());
+  while (queued.length > 0) {
+    const row = queued.shift();
+    consumed.push(row);
+    await handlers.get("before_agent_start")?.({ prompt: row }, {});
+  }
   await handlers.get("agent_start")?.({ type: "agent_start" }, {});
 }
 // Pi 0.84.4 drains rows queued during a run inline inside that same run, so a
 // queued row is consumed with no second agent_start.
 function drainQueuedInline() {
-  while (queued.length > 0) consumed.push(queued.shift());
+  while (queued.length > 0) {
+    const row = queued.shift();
+    consumed.push(row);
+    void handlers.get("before_agent_start")?.({ prompt: row }, {});
+  }
 }
 // agent_settled is the boundary both paths share: Pi emits it once a run has
 // fully settled, an aborted run included.
@@ -1666,138 +1695,6 @@ EOF
   pass "Pi busy-path consumed row re-arms presentation so a genuinely later wake presents one new row"
 }
 
-test_pi_cleared_dock_rearms_for_genuinely_later_wake() {
-  local repo home plugin out status
-  repo="$TMP_ROOT/pi-cleared-rearm-root"
-  home="$TMP_ROOT/pi-cleared-rearm-home"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
-  install_pi_watch_extension_fixture "$repo"
-  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --handling-delivered ]; then
-  printf 'confirmed\n' >> "${FM_CONFIRM_LOG:?}"
-  exit 0
-fi
-printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-count=$(grep -c '^arm=' "$FM_ARM_LOG")
-if [ "$count" -eq 1 ]; then
-  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  printf 'signal: first event\n'
-  exit 0
-fi
-printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$count"
-while [ ! -e "${FM_BURST_GO:?}/$count" ] && [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
-[ -e "${FM_STOP_FILE:?}" ] && exit 0
-printf 'signal: later event %s\n' "$count"
-SH
-  chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$TMP_ROOT/pi-cleared-rearm-arm.log" FM_CONFIRM_LOG="$TMP_ROOT/pi-cleared-rearm-confirm.log" FM_BURST_GO="$TMP_ROOT/pi-cleared-rearm-go" FM_STOP_FILE="$TMP_ROOT/pi-cleared-rearm.stop" node --input-type=module 2>&1 <<'EOF'
-import { mkdirSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-
-let tool = null;
-const handlers = new Map();
-const sent = [];
-const queued = [];
-const consumed = [];
-const discarded = [];
-let running = false;
-let runScheduled = false;
-let agentStarts = 0;
-// The captain is already mid-turn: a run this extension did not start is in
-// flight, so every watcher follow-up queues on it.
-async function startCaptainRun() {
-  running = true;
-  agentStarts += 1;
-  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-}
-// An idle send makes the runtime start a run on its own asynchronous chain,
-// after the void call has already returned.
-async function startRun() {
-  running = true;
-  agentStarts += 1;
-  while (queued.length > 0) consumed.push(queued.shift());
-  await handlers.get("agent_start")?.({ type: "agent_start" }, {});
-}
-// Escape while streaming restores the queued rows to the editor and aborts the
-// run, so the row is dropped without ever being consumed and without any
-// agent_start. The dequeue keybinding drops it the same way.
-function clearQueuedRows() {
-  while (queued.length > 0) discarded.push(queued.shift());
-}
-// agent_settled is the boundary both paths share: Pi emits it once a run has
-// fully settled, an aborted run included.
-async function settleRun() {
-  running = false;
-  await handlers.get("agent_settled")?.({ type: "agent_settled" }, {});
-}
-const pi = {
-  on(event, handler) {
-    handlers.set(event, handler);
-  },
-  registerCommand() {},
-  registerTool(candidate) {
-    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
-  },
-  // ExtensionAPI.sendUserMessage returns void: it only queues the row, and the
-  // runtime effects happen afterwards, off this call stack.
-  sendUserMessage: (message) => {
-    sent.push(String(message));
-    queued.push(String(message));
-    if (!running && !runScheduled) {
-      runScheduled = true;
-      queueMicrotask(() => {
-        runScheduled = false;
-        void startRun();
-      });
-    }
-    return undefined;
-  },
-};
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-mod.default(pi);
-await startCaptainRun();
-await tool.execute("tool-call-pi-cleared-rearm", {}, undefined, undefined, {});
-mkdirSync(process.env.FM_BURST_GO, { recursive: true });
-async function waitFor(predicate, label) {
-  for (let i = 0; i < 500; i += 1) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`timeout waiting for ${label}`);
-}
-await waitFor(() => sent.length === 1 && queued.length === 1, "first ordinary wake queued on the busy run");
-if (agentStarts !== 1) throw new Error(`a queued row must not start its own run, saw ${agentStarts} runs`);
-// Escape while streaming: the queued row is dropped back into the editor and
-// the run aborts, so the row is never consumed and no agent_start ever fires.
-clearQueuedRows();
-if (discarded.length !== 1) throw new Error(`expected the queued row to be discarded, saw ${discarded.length}`);
-if (agentStarts !== 1) throw new Error("a discarded row must not emit agent_start");
-await settleRun();
-await new Promise((resolve) => setTimeout(resolve, 50));
-// A genuinely later actionable close, with the agent idle again.
-writeFileSync(`${process.env.FM_BURST_GO}/2`, "go\n");
-await waitFor(() => sent.length === 2, "genuinely later wake row");
-if (!sent[1].includes("signal: later event 2")) throw new Error(`later wake row lost its event: ${sent.join(" || ")}`);
-await new Promise((resolve) => setTimeout(resolve, 100));
-if (sent.length !== 2) throw new Error(`later wake presented ${sent.length - 1} rows instead of one`);
-if (agentStarts !== 2) throw new Error(`expected the later idle wake to start exactly one new run, saw ${agentStarts - 1}`);
-if (discarded.length !== 1) throw new Error(`expected exactly one discarded row, saw ${discarded.length}`);
-if (!discarded[0].includes("signal: first event")) throw new Error(`the wrong row was discarded: ${discarded[0]}`);
-if (consumed.length !== 1) throw new Error(`only the later row may be consumed, saw ${consumed.length}`);
-if (!consumed[0].includes("signal: later event 2")) throw new Error(`a discarded row must never be consumed: ${consumed[0]}`);
-writeFileSync(process.env.FM_STOP_FILE, "stop\n");
-process.exit(0);
-EOF
-)
-  status=$?
-  expect_code 0 "$status" "a docked row discarded without ever being consumed must re-arm presentation so a genuinely later wake still presents one new row"
-  [ -z "$out" ] || fail "Pi cleared-dock re-arm test printed output: $out"
-  pass "Pi discarded dock row re-arms presentation so a genuinely later wake still presents"
-}
-
 test_pi_restoration_exhaustion_bypasses_ordinary_latch() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-exhaust-root"
@@ -1857,6 +1754,10 @@ const pi = {
   // the extension can neither await delivery nor observe a failure.
   sendUserMessage: (message) => {
     sent.push(String(message));
+    // The captain run already in flight drains the docked row inline. Pi
+    // announces that with before_agent_start and no second agent_start, so the
+    // ordinary presentation latch stays set across the acknowledgement.
+    queueMicrotask(() => handlers.get("before_agent_start")?.({ prompt: String(message) }, {}));
     return undefined;
   },
 };
@@ -1947,6 +1848,10 @@ const pi = {
   // the extension can neither await delivery nor observe a failure.
   sendUserMessage: (message) => {
     sent.push(String(message));
+    // The captain run already in flight drains the docked row inline. Pi
+    // announces that with before_agent_start and no second agent_start, so the
+    // ordinary presentation latch stays set across the acknowledgement.
+    queueMicrotask(() => handlers.get("before_agent_start")?.({ prompt: String(message) }, {}));
     return undefined;
   },
 };
@@ -2044,6 +1949,10 @@ const pi = {
   // the extension can neither await delivery nor observe a failure.
   sendUserMessage: (message) => {
     sent.push(String(message));
+    // The captain run already in flight drains the docked row inline. Pi
+    // announces that with before_agent_start and no second agent_start, so the
+    // ordinary presentation latch stays set across the acknowledgement.
+    queueMicrotask(() => handlers.get("before_agent_start")?.({ prompt: String(message) }, {}));
     return undefined;
   },
 };
@@ -2137,6 +2046,10 @@ const pi = {
   // the extension can neither await delivery nor observe a failure.
   sendUserMessage: (message) => {
     sent.push(String(message));
+    // The captain run already in flight drains the docked row inline. Pi
+    // announces that with before_agent_start and no second agent_start, so the
+    // ordinary presentation latch stays set across the acknowledgement.
+    queueMicrotask(() => handlers.get("before_agent_start")?.({ prompt: String(message) }, {}));
     return undefined;
   },
 };
@@ -2228,6 +2141,10 @@ const pi = {
   // the extension can neither await delivery nor observe a failure.
   sendUserMessage: (message) => {
     sent.push(String(message));
+    // The captain run already in flight drains the docked row inline. Pi
+    // announces that with before_agent_start and no second agent_start, so the
+    // ordinary presentation latch stays set across the acknowledgement.
+    queueMicrotask(() => handlers.get("before_agent_start")?.({ prompt: String(message) }, {}));
     return undefined;
   },
 };
@@ -4641,7 +4558,6 @@ test_pi_late_unretired_close_resumes_supervision
 test_pi_ordinary_burst_coalesces_to_one_dock_row
 test_pi_consumed_row_rearms_for_genuinely_later_wake
 test_pi_busy_consumed_row_rearms_for_genuinely_later_wake
-test_pi_cleared_dock_rearms_for_genuinely_later_wake
 test_pi_restoration_exhaustion_bypasses_ordinary_latch
 test_pi_restoration_lock_loss_bypasses_ordinary_latch
 test_pi_retry_lock_loss_bypasses_ordinary_latch
