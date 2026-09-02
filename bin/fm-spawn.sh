@@ -2454,12 +2454,24 @@ spawn_harness_fail() {  # <detail>
 # Either line of the dialog proves it: a narrow pane can wrap the question, and
 # the preselected answer is the row the Enter is aimed at anyway.
 AGY_TRUST_REGEX='Do you trust the contents of this project|Yes, I trust this folder'
-# Rendered evidence that this pane is already PAST the dialog: the streaming
-# footer or the idle one. Both are agy's own footers, not composer shapes.
+# The ONLY evidence that agy is running its session: one of its own footers,
+# streaming or idle. Readiness is a positive claim, so nothing else may settle
+# it - least of all the dialog's absence, which an empty pane read satisfies
+# just as well as a started session does. spawn_pane_capture answers empty for
+# every backend error, so an empty capture means "no evidence yet" and the poll
+# simply continues to the deadline.
+# The dialog is tested BEFORE the footer, and that order is load-bearing: if agy
+# ever renders a footer beneath an open dialog, answering it is the safe move
+# and the next poll still confirms readiness, while the other order would call a
+# blocked session ready and never send the Enter at all.
 AGY_READY_REGEX='esc to cancel|\? for shortcuts'
 
+# What the gate never managed to observe, reported verbatim when it gives up.
+AGY_READY_DETAIL=
+
 agy_wait_for_ready() {
-  local pane i=0 answered=0 max=${FM_AGY_READY_POLLS:-60} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  local pane i=0 answered=0 max=${FM_AGY_READY_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  AGY_READY_DETAIL="agy rendered nothing readable in its pane: neither its workspace-trust dialog nor a ready footer ($AGY_READY_REGEX) was ever observed"
   while [ "$i" -lt "$max" ]; do
     pane=$(spawn_pane_capture)
     if printf '%s\n' "$pane" | grep -qE "$AGY_TRUST_REGEX"; then
@@ -2467,15 +2479,17 @@ agy_wait_for_ready() {
       # second one would land in the composer of a session that has already
       # started its turn, submitting an empty message into the brief.
       if [ "$answered" -eq 0 ]; then
-        spawn_send_key "$T" Enter || return 1
+        if ! spawn_send_key "$T" Enter; then
+          AGY_READY_DETAIL="the Enter answering agy's workspace-trust dialog could not be delivered to the pane"
+          return 1
+        fi
         answered=1
+        AGY_READY_DETAIL="agy never rendered a ready footer ($AGY_READY_REGEX) after firstmate answered its workspace-trust dialog with one Enter"
       fi
-    elif [ "$answered" -eq 1 ]; then
-      # The dialog is gone after firstmate answered it: that IS the proof, and
-      # it does not depend on which footer agy renders next.
-      return 0
     elif printf '%s\n' "$pane" | grep -qE "$AGY_READY_REGEX"; then
       return 0
+    elif [ -n "$pane" ] && [ "$answered" -eq 0 ]; then
+      AGY_READY_DETAIL="agy rendered a pane but never a ready footer ($AGY_READY_REGEX), and its workspace-trust dialog never appeared"
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -3242,7 +3256,7 @@ fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = agy ]; then
   if ! agy_wait_for_ready; then
-    spawn_harness_fail "agy neither reached a rendered ready state nor cleared its workspace-trust dialog"
+    spawn_harness_fail "$AGY_READY_DETAIL"
     exit 1
   fi
 fi

@@ -55,6 +55,10 @@ agy_payload() {  # <template> <workspace>
 #   trust           - blocked on the workspace-trust dialog until an Enter lands
 #   blank           - nothing renders at all, the case where the gate gives up
 #
+# FM_FAKE_AGY_AFTER_ENTER names what replaces the dialog once it is answered,
+# and defaults to the idle footer. Setting it to `blank` is the pane read that
+# fails or comes back empty, which is what a backend hiccup looks like.
+#
 # FM_FAKE_AGY_PHASE, when set, makes the stub honour launch ORDER: the screen
 # stays empty until the launch line is typed AND submitted. Without it the spawn
 # lines that precede the launch (`treehouse get`, the TRACEPARENT export) each
@@ -96,7 +100,7 @@ case "${1:-}" in
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   capture-pane)
     [ "$phase" -ge 2 ] || exit 0
-    [ "$phase" -eq 3 ] && target=ready
+    [ "$phase" -eq 3 ] && target=${FM_FAKE_AGY_AFTER_ENTER:-ready}
     case "$target" in
       trust)
         printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
@@ -391,6 +395,37 @@ EOF
   pass "an agy pane that never reaches a ready state fails the spawn loudly"
 }
 
+# Answering the dialog is not evidence that agy started. A pane read that comes
+# back EMPTY - every backend error reads that way, and so does an unresponsive
+# TUI - clears the dialog text from the capture without proving anything, so an
+# Enter that the TUI never consumed would look identical to a resolved dialog.
+# Readiness must therefore rest on a POSITIVE match of agy's own footer, and the
+# spawn must fail naming what was never seen rather than report a launch that
+# left the agent sitting on the dialog.
+test_answered_dialog_alone_does_not_prove_readiness() {
+  local rec case_dir home proj wt fakebin agy_home id out enters
+  rec=$(make_spawn_case trust-then-empty)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_SCREEN=trust FM_FAKE_AGY_AFTER_ENTER=blank \
+    FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=6 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    && fail "agy spawn reported success on an empty pane read after answering the dialog: $out"
+  case "$out" in
+    *"after firstmate answered its workspace-trust dialog"*) : ;;
+    *) fail "the failure did not name the ready footer that was never observed: $out" ;;
+  esac
+  # And still exactly one Enter: a gate that keeps polling must not keep typing.
+  enters=$(agy_enters_after_launch "$case_dir/events.log")
+  [ "$enters" -eq 2 ] \
+    || fail "the gate sent $enters Enters after the launch line while waiting; expected the launch submit plus exactly one answer"
+  pass "an answered dialog that never yields an agy footer fails the spawn instead of passing on an empty pane"
+}
+
 # --- the fullyIdle turn-end rule -------------------------------------------
 
 # Drive the INSTALLED hook, not a copy of its logic, so the assertion covers
@@ -629,6 +664,7 @@ test_secondmate_is_refused
 test_secondmate_positional_agy_is_refused
 test_trust_dialog_is_answered_exactly_once
 test_spawn_fails_when_agy_never_renders
+test_answered_dialog_alone_does_not_prove_readiness
 test_turnend_requires_fully_idle
 test_turnend_requires_registered_token
 test_turnend_never_blocks_the_stop

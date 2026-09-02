@@ -46,9 +46,15 @@ CHECKS_RUN=0
 
 # agy must keep refusing a positional prompt AND keep offering -i, because
 # bin/fm-spawn.sh's launch template depends on both halves.
+# The probe runs from a disposable empty directory, never from the suite's own
+# working copy. The very contract it guards is that agy REFUSES this command,
+# so the case it exists to catch is the one where agy accepts it and starts an
+# autonomous, permission-skipping session in whatever directory it was given.
 test_positional_prompt_is_rejected() {
-  local out
-  out=$("$AGY_BIN" --dangerously-skip-permissions "a positional prompt" 2>&1 </dev/null || true)
+  local out probe_dir
+  probe_dir=$(fm_test_tmproot fm-agy-positional) \
+    || fail "no scratch directory could be created to run the positional-prompt probe outside the repository"
+  out=$(cd "$probe_dir" && "$AGY_BIN" --dangerously-skip-permissions "a positional prompt" 2>&1 </dev/null || true)
   case "$out" in
     *"unexpected argument"*) : ;;
     *) fail "agy $AGY_VERSION no longer rejects a positional prompt, so the launch template's premise changed: $out" ;;

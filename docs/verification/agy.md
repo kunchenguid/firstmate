@@ -136,7 +136,9 @@ Outside `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`, agy as
 A session blocked on this dialog still fires `Stop` hooks with `fullyIdle:false`, which is a second reason the gate matters.
 
 Every crewmate and scout runs in a fresh per-task worktree, so the dialog is the ordinary case rather than an edge one, and an unanswered one is a silent hang: agy never reads the brief, its only `Stop` is ignored by the `fullyIdle` gate, and the busy classifier stays at `unknown agy-unverified`.
-`bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen, returns as soon as it is gone, and fails the spawn loudly when the pane renders neither the dialog nor either footer.
+`bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen.
+Readiness is then settled only by a positive match of one of agy's own footers, never by the dialog's absence: a pane read that fails or comes back empty clears the dialog text without proving that the Enter was ever consumed.
+An empty read is treated as no evidence yet, and the spawn fails loudly at the deadline naming what was never observed.
 That gate is covered by `tests/fm-agy-harness.test.sh` against a rendered pane; the Enter itself was not re-exercised against a live agy in this session, so treat the dialog text above as the measured fact and the gate as the portable regression's contract.
 
 ## Quota
