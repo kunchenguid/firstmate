@@ -129,10 +129,17 @@ const pi = {
   registerCommand() {},
   registerMessageRenderer() {},
   sendMessage() {},
+  // Main is idle throughout this probe, so a send starts a run: Pi raises
+  // before_agent_start with the exact text and then the user message_start.
+  // A send while main streams raises neither at queue time; the sixth probe
+  // below proves that against the real AgentSession.
   async sendUserMessage(content, options) {
     mainUserMessages.push({ content, options: options ?? {} });
     for (const handler of piHandlers.get("before_agent_start") ?? []) {
       await handler({ prompt: content }, sessionCtx);
+    }
+    for (const handler of piHandlers.get("message_start") ?? []) {
+      await handler({ message: { role: "user", content: [{ type: "text", text: content }] } }, sessionCtx);
     }
   },
 };
@@ -331,10 +338,15 @@ const pi = {
   registerCommand() {},
   registerMessageRenderer() {},
   sendMessage() {},
+  // Idle main, as in the first probe: a send starts a run and Pi raises
+  // before_agent_start, then the user message_start.
   async sendUserMessage(content, options) {
     mainUserMessages.push({ content, options: options ?? {} });
     for (const handler of piHandlers.get("before_agent_start") ?? []) {
       await handler({ prompt: content }, sessionCtx);
+    }
+    for (const handler of piHandlers.get("message_start") ?? []) {
+      await handler({ message: { role: "user", content: [{ type: "text", text: content }] } }, sessionCtx);
     }
   },
   getThinkingLevel() {
@@ -778,3 +790,205 @@ if [ "$status" -ne 0 ] || [ "$out" != "DELIVERY_OK" ]; then
   fail "real-SDK visible outcome delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
 pass "real Pi SDK $PI_VERSION immediately renders appendEntry in the active transcript, persists it across reopen, and excludes it from model context"
+
+# Sixth probe: the vendor event contract watcher continuity rests on, against
+# the real AgentSession and ExtensionRunner with the tracked watcher extension
+# loaded through Pi's own resource loader. A wake the extension delivers while
+# main is streaming must join the running run without ever raising
+# before_agent_start, the extension must still start the successor and deliver
+# the next close, and Pi must surface consumption of both the streaming-time
+# and the idle follow-up through the events the extension reads (the user
+# message_start, and before_agent_start for the idle one). The provider is a
+# local fake whose only fetch is intercepted in-process and held open until
+# the follow-up is queued, so no request leaves the machine and no credential
+# is read.
+streamdir="$TMP_ROOT/stream-agent-dir"
+streamhome="$TMP_ROOT/stream-home"
+mkdir -p "$streamdir" "$streamhome/state" "$streamhome/config" "$TMP_ROOT/stream-sessions"
+cat > "$streamdir/models.json" <<'JSON'
+{
+  "providers": {
+    "fm-live-stream": {
+      "baseUrl": "https://fm-live-stream.invalid/v1",
+      "api": "openai-completions",
+      "apiKey": "fm-live-placeholder",
+      "models": [
+        { "id": "fm-live-stream-model", "name": "fm live stream", "contextWindow": 8192, "maxTokens": 512 }
+      ]
+    }
+  }
+}
+JSON
+WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
+  FM_HOME="$streamhome" FM_ROOT_OVERRIDE="$repo" \
+  FM_LIVE_WATCH_LOG="$TMP_ROOT/stream-watch.log" FM_LIVE_WATCH_TRIGGER="$TMP_ROOT/stream-watch.trigger" \
+  FM_LIVE_SESSIONS="$TMP_ROOT/stream-sessions" \
+  PI_CODING_AGENT_DIR="$streamdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/stream-output" 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const home = resolve(process.env.FM_HOME);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const pkg = resolve(process.env.PI_PACKAGE_DIR);
+const { DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, createAgentSession } =
+  await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+
+// The local fake provider: the first completion streams one token and then
+// holds its stream open until the probe releases it; later ones finish at once.
+let completions = 0;
+let releaseStream = () => {};
+const streamHeld = new Promise((release) => {
+  releaseStream = release;
+});
+const chunk = (delta, finish) => `data: ${JSON.stringify({
+  id: "fm-live-stream",
+  object: "chat.completion.chunk",
+  created: 1,
+  model: "fm-live-stream-model",
+  choices: [{ index: 0, delta, finish_reason: finish }],
+  ...(finish ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : {}),
+})}\n\n`;
+globalThis.fetch = async (input) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-live-stream.invalid/")) {
+    throw new Error(`unexpected network request in provider-free guard: ${url}`);
+  }
+  completions += 1;
+  const hold = completions === 1 ? streamHeld : Promise.resolve();
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(encoder.encode(chunk({ role: "assistant", content: "OK" }, null)));
+      await hold;
+      controller.enqueue(encoder.encode(chunk({}, "stop")));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+};
+
+const events = [];
+const userText = (content) => typeof content === "string"
+  ? content
+  : content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+const agentDir = resolve(process.env.PI_CODING_AGENT_DIR);
+const settings = SettingsManager.create(process.cwd(), agentDir);
+const loader = new DefaultResourceLoader({
+  cwd: process.cwd(),
+  agentDir,
+  settingsManager: settings,
+  additionalExtensionPaths: [process.env.WATCH_PLUGIN],
+  extensionFactories: [{
+    name: "fm-event-contract-probe",
+    factory: (pi) => {
+      pi.on("before_agent_start", (event) => {
+        events.push({ type: "before_agent_start", text: event.prompt });
+      });
+      pi.on("message_start", (event) => {
+        if (event.message.role !== "user") return;
+        events.push({ type: "user_message_start", text: userText(event.message.content) });
+      });
+      pi.on("input", (event) => {
+        events.push({ type: "input", text: event.text, source: event.source, streamingBehavior: event.streamingBehavior });
+      });
+      pi.on("agent_settled", () => {
+        events.push({ type: "agent_settled" });
+      });
+    },
+  }],
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+  noContextFiles: true,
+});
+await loader.reload();
+const runtime = await ModelRuntime.create({
+  authPath: `${agentDir}/auth.json`,
+  modelsPath: `${agentDir}/models.json`,
+});
+const registry = new ModelRegistry(runtime);
+await registry.refresh();
+const model = registry.find("fm-live-stream", "fm-live-stream-model");
+if (!model) throw new Error("the real registry did not resolve the local streaming model");
+const { session } = await createAgentSession({
+  cwd: process.cwd(),
+  sessionManager: SessionManager.create(process.cwd(), resolve(process.env.FM_LIVE_SESSIONS)),
+  settingsManager: settings,
+  resourceLoader: loader,
+  modelRuntime: runtime,
+  model,
+  noTools: "builtin",
+});
+
+const armLog = process.env.FM_LIVE_WATCH_LOG;
+const armRows = (prefix) => existsSync(armLog)
+  ? readFileSync(armLog, "utf8").split(/\n/).filter((line) => line.startsWith(prefix)).length
+  : 0;
+const has = (type, text) => events.some((event) => event.type === type && (text === undefined || event.text.includes(text)));
+const settledRuns = () => events.filter((event) => event.type === "agent_settled").length;
+const waitFor = async (predicate, label) => {
+  for (let i = 0; i < 600; i += 1) {
+    const failure = events.find((event) => event.type === "prompt_error");
+    if (failure) throw new Error(`the real session rejected its prompt: ${failure.text}`);
+    if (predicate()) return;
+    await new Promise((tick) => setTimeout(tick, 50));
+  }
+  throw new Error(`timeout waiting for ${label}; events=${JSON.stringify(events)}`);
+};
+
+const armTool = session.getToolDefinition("fm_watch_arm_pi");
+if (!armTool) throw new Error("the real tool registry did not expose fm_watch_arm_pi");
+const armed = await armTool.execute("live-stream-arm", {}, undefined, undefined, {});
+if (!armed.details?.ok) throw new Error(`watcher did not arm: ${JSON.stringify(armed.details)}`);
+await waitFor(() => armRows("arm ") === 1, "initial watcher arm");
+
+// Turn 1: main streams against the held provider stream; the watcher closes
+// mid-turn and the extension delivers its wake while main is busy.
+session.prompt("Reply with exactly the word OK.").catch((error) => {
+  events.push({ type: "prompt_error", text: error instanceof Error ? error.message : String(error) });
+});
+await waitFor(() => completions === 1 && session.isStreaming, "main streaming on the held completion");
+writeFileSync(process.env.FM_LIVE_WATCH_TRIGGER, "signal: live streaming probe\n");
+await waitFor(
+  () => events.some((event) => event.type === "input" && event.source === "extension" && event.streamingBehavior === "followUp" && event.text.includes("signal: live streaming probe")),
+  "the watcher follow-up queued while main streams",
+);
+await waitFor(() => armRows("arm ") === 2, "successor started while main streams");
+if (has("before_agent_start", "signal: live streaming probe")) {
+  throw new Error("Pi raised before_agent_start for a follow-up queued while streaming; the extension must never wait for that");
+}
+releaseStream();
+await waitFor(() => settledRuns() === 1, "the first run to settle");
+if (!has("user_message_start", "signal: live streaming probe")) {
+  throw new Error(`the queued follow-up never joined the run as a user message: ${JSON.stringify(events)}`);
+}
+if (has("before_agent_start", "signal: live streaming probe")) {
+  throw new Error("Pi raised before_agent_start for a queued follow-up when the run reached it");
+}
+if (completions !== 2) throw new Error(`the queued follow-up did not open its own model turn: ${completions} completions`);
+
+// Idle: the successor closes while main is idle, so the next wake starts a run
+// and Pi raises before_agent_start with the exact text, then the user message.
+writeFileSync(process.env.FM_LIVE_WATCH_TRIGGER, "signal: live idle probe\n");
+await waitFor(() => has("before_agent_start", "signal: live idle probe"), "the idle follow-up to raise before_agent_start");
+await waitFor(() => armRows("arm ") === 3, "successor after the idle delivery");
+await waitFor(() => settledRuns() === 2, "the idle run to settle");
+if (!has("user_message_start", "signal: live idle probe")) {
+  throw new Error(`the idle follow-up never reached the run as a user message: ${JSON.stringify(events)}`);
+}
+if (armRows("confirmed ") !== 2) {
+  throw new Error(`the watcher did not confirm both successor deliveries: ${readFileSync(armLog, "utf8")}`);
+}
+session.dispose();
+console.log("STREAM_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/stream-output")
+if [ "$status" -ne 0 ] || [ "$out" != "STREAM_OK" ]; then
+  fail "real-SDK streaming-time watcher delivery guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without before_agent_start, keeps the successor chain, and surfaces consumption of both follow-ups"
