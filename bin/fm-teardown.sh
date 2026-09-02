@@ -2534,6 +2534,19 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
+    # A local secondmate's children ran on this filesystem, so their session
+    # logs are here to harvest. The child's records are read from its own
+    # home, and the row is appended to the ledger of the home running this
+    # cleanup, which is the one that outlives the child home removed below.
+    # This runs BEFORE the worktree release below: while the child still holds
+    # its pooled worktree, no later task can have written a session log into
+    # that slot, which is what lets the scan run to the harvest instant. It
+    # also precedes the status retirement, which deletes the log carrying the
+    # task window and the turn count. Best effort, exactly as at the other
+    # sites: a failure warns and never changes this cleanup's own outcome.
+    FM_STATE_OVERRIDE="$sub_state" FM_DATA_OVERRIDE="$DATA" \
+      "$FM_ROOT/bin/fm-usage-harvest.sh" "$child_id" >/dev/null \
+      || echo "warning: usage harvest for $child_id failed; continuing cleanup" >&2
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2575,15 +2588,6 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
-    # A local secondmate's children ran on this filesystem, so their session
-    # logs are here to harvest. The child's records are read from its own
-    # home, and the row is appended to the ledger of the home running this
-    # cleanup, which is the one that outlives the child home removed below.
-    # Best effort, exactly as at the other retirement sites: a failure warns
-    # and never changes this cleanup's own outcome.
-    FM_STATE_OVERRIDE="$sub_state" FM_DATA_OVERRIDE="$DATA" \
-      "$FM_ROOT/bin/fm-usage-harvest.sh" "$child_id" >/dev/null \
-      || echo "warning: usage harvest for $child_id failed; continuing cleanup" >&2
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" \
@@ -2784,6 +2788,17 @@ fi
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
+# Best-effort fleet usage harvest, placed here for two ordering reasons. It
+# runs BEFORE the worktree release below, so the task still holds its pooled
+# worktree and no later task can have written a session log into that slot,
+# which is what lets the scan run to the harvest instant; and it runs before
+# the status retirement further below, which deletes state/<id>.status and
+# with it the task window and the turn count. It also follows the worktree
+# process reap above, so a runtime's closing write has already landed. A
+# harvest failure must never block teardown or the worktree return.
+"$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
+  || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -2932,12 +2947,6 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-# Best-effort fleet usage harvest runs while the task's state files still
-# exist. It must precede the status retirement below, which deletes
-# state/<id>.status: without that log the harvest has no task window and no
-# turn count. A harvest failure must never block teardown.
-"$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
-  || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \

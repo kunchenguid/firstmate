@@ -82,9 +82,12 @@
 # turn's tool result and its closing assistant entry into the session log
 # after the append returns, and matching at file granularity against
 # completed_at drops the whole log rather than its tail. The harvest instant
-# bounds that extension without an arbitrary grace period: the harvest runs
-# inside this task's own teardown, while the task still holds its worktree, so
-# a later task cannot yet have written into the same pooled worktree slot.
+# bounds that extension without an arbitrary grace period, and teardown is
+# ordered so that bound is safe: bin/fm-teardown.sh runs the harvest BEFORE it
+# returns the worktree to the treehouse pool, on the main path and on the
+# local secondmate child path alike, so the task still holds its pooled
+# worktree and no later occupant of that slot can have written a session log
+# yet. Callers that harvest out of that order forfeit the guarantee.
 # wall_secs, spawned_at and completed_at are unaffected and still rest on the
 # status file.
 # Turn estimate: count of "^working:" lines in the status file.
@@ -135,7 +138,8 @@
 #     is reported provider-qualified as "<provider>/<model>" to match the
 #     model spelling fm-spawn records in the meta, and bare when the record
 #     carries no provider.
-#   harness=cursor, a task with a recorded remote_host (its worker ran on
+#   harness=opencode, harness=grok, harness=kimi, harness=cursor,
+#     harness=muse, a task with a recorded remote_host (its worker ran on
 #     another machine, so its logs are not on this filesystem), an absent log
 #     tree, or no in-window log that yields this task's assistant usage: token
 #     fields are null with source "unavailable". Every harness applies that
@@ -283,9 +287,9 @@ case "$TURNS" in ''|*[!0-9]*) TURNS=0 ;; esac
 # turn, so the harness writes that turn's tool result and closing assistant
 # entry into its own session log after the append returns, and a file-level
 # filter cut at END_EPOCH drops the whole log rather than just its tail. The
-# harvest instant is bounded and owned by this task, because it runs inside
-# this task's own teardown while the task still holds its worktree, so no
-# later task can yet have written into the same pooled worktree slot.
+# harvest instant is a safe bound because teardown runs this harvest before it
+# returns the worktree to the pool, so the task still holds that slot and no
+# later occupant can have written into it yet.
 SCAN_END_EPOCH=$(date +%s 2>/dev/null || printf '%s' "$END_EPOCH")
 case "$SCAN_END_EPOCH" in ''|*[!0-9]*) SCAN_END_EPOCH=$END_EPOCH ;; esac
 [ "$SCAN_END_EPOCH" -ge "$END_EPOCH" ] 2>/dev/null || SCAN_END_EPOCH=$END_EPOCH

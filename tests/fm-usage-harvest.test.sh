@@ -15,8 +15,9 @@
 # parsing it in full, the report's per-model grouping and column sums, the
 # documented harness-switch narrowing, deterministic final-incarnation model
 # attribution, the log scan that reaches the harness's closing write without
-# absorbing a later occupant of the same worktree path, and the harvest of a
-# secondmate's children before a forced cleanup retires them.
+# absorbing a later occupant of the same worktree path, the teardown ordering
+# that keeps that scan bound safe, and the harvest of a secondmate's children
+# before a forced cleanup retires them.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -990,6 +991,102 @@ JSON
   pass "teardown integration: a secondmate's children are harvested before they retire"
 }
 
+# The log scan reaches the harvest instant, and what keeps that bound safe is
+# that teardown harvests while the task still holds its pooled worktree. A
+# treehouse shim writes the NEXT occupant's session log into the same encoded
+# project directory at the moment the worktree is returned to the pool, which
+# is exactly the reachable window a harvest running after the return would
+# absorb: those tokens must not appear in this task's row. The second run
+# proves the harvest stays best effort in its new position, where a failure
+# could otherwise abort teardown before the worktree is ever returned.
+teardown_pool_order_case() {
+  local proj wt id fb state data config out row occupant thlog encoded logdir base
+  id=usageharvpool1
+  proj="$TMP_ROOT/pool-proj"; wt="$TMP_ROOT/pool-wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$TMP_ROOT/pool-fake-claude/$encoded"
+  mkdir -p "$logdir"
+  occupant="$logdir/session-next-occupant.jsonl"
+  thlog="$TMP_ROOT/pool-treehouse.log"
+  fb="$TMP_ROOT/pool-fakebin"
+  mkdir -p "$fb"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/tmux"
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$thlog"
+case "\$1" in
+  return)
+    # The pool hands this slot to another task, which starts writing its own
+    # session log under the same encoded project directory.
+    printf '%s\\n' '{"type":"assistant","message":{"id":"msgOC","model":"next-occupant-model","usage":{"input_tokens":999,"output_tokens":999}}}' \\
+      > "$occupant"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse"
+  state="$TMP_ROOT/pool-state"; config="$TMP_ROOT/pool-config"; data="$TMP_ROOT/pool-data"
+  mkdir -p "$state" "$config" "$data/$id"
+  printf 'scout findings\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" \
+    "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "decisions_reviewed=1" "decision_keys="
+  {
+    printf 'working: scouting\n'
+    printf 'done: report written\n'
+  } > "$state/$id.status"
+  cat > "$logdir/session-own.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgOWN","model":"claude-own","usage":{"input_tokens":31,"output_tokens":6}}}
+JSON
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.55.2\n' "$((base - 500))" >> "$state/$id.meta"
+  touch -t "$(touch_stamp $((base - 100)))" "$logdir/session-own.jsonl"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/pool-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/pool-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/pool-fake-pi" \
+    "$TEARDOWN" "$id" 2>&1)
+  expect_code 0 "$?" "pool-order teardown should succeed"$'\n'"$out"
+  [ -f "$occupant" ] || fail "the treehouse shim never returned the worktree to the pool"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"source":"claude-projects"' "the task's own log was harvested"
+  assert_contains "$row" '"input_tokens":31' \
+    "the next occupant of the returned worktree is not summed into this row"
+  assert_contains "$row" '"model":"claude-own"' \
+    "the next occupant's model does not become this task's model"
+
+  # Same ordering, but the harvest cannot write: teardown must still return the
+  # worktree and still succeed.
+  id=usageharvpool2
+  proj="$TMP_ROOT/pool2-proj"; wt="$TMP_ROOT/pool2-wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  : > "$thlog"
+  data="$TMP_ROOT/pool2-data"
+  # The ledger path is a directory, so every append fails.
+  mkdir -p "$data/$id" "$data/usage-ledger.jsonl"
+  printf 'scout findings\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" \
+    "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "decisions_reviewed=1" "decision_keys="
+  printf 'working: scouting\n' > "$state/$id.status"
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/pool-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/pool-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/pool-fake-pi" \
+    "$TEARDOWN" "$id" 2>&1)
+  expect_code 0 "$?" "teardown must survive a failing harvest in its new position"$'\n'"$out"
+  assert_contains "$out" "warning: usage harvest for $id failed" \
+    "a failing harvest warns rather than aborting teardown"
+  grep -q '^return' "$thlog" \
+    || fail "a failing harvest blocked the worktree return"$'\n'"$(cat "$thlog")"
+  pass "teardown integration: the harvest precedes the worktree return and never blocks it"
+}
+
 teardown_case() {
   local proj wt id fb state data config out
   id=usageharvtd1
@@ -1213,9 +1310,10 @@ JSON
 # harness writes that turn's tool result and its closing assistant entry to the
 # session log AFTER the append returns. Matching logs against the status mtime
 # therefore rejected the whole file and reported a task whose usage was sitting
-# on disk as unavailable. The scan reaches the harvest instant instead, which
-# still excludes a log written after this task released its worktree - the case
-# that matters, because pooled worktree paths are reused by later tasks.
+# on disk as unavailable. The scan reaches the harvest instant instead. What
+# keeps that bound safe is teardown ordering rather than the harvester alone,
+# so the next occupant of a reused worktree path is covered by
+# teardown_pool_order_case rather than here.
 closing_write_case() {
   local id=usageclosingwrite wt="$TMP_ROOT/.no-mistakes/wt-usageclosingwrite"
   local data home state row out now encoded logdir
@@ -1231,17 +1329,11 @@ closing_write_case() {
   cat > "$logdir/session-closing.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgW","model":"claude-test","usage":{"input_tokens":41,"output_tokens":3}}}
 JSON
-  # The same pooled worktree path, occupied by a LATER task whose logs are
-  # written after this harvest: they must never be absorbed into this row.
-  cat > "$logdir/session-next-occupant.jsonl" <<'JSON'
-{"type":"assistant","message":{"id":"msgNX","model":"claude-test","usage":{"input_tokens":999,"output_tokens":999}}}
-JSON
 
   now=$(date +%s)
   printf 'spawn_gen=s%s.4242.5\n' "$((now - 600))" >> "$state/$id.meta"
   touch -t "$(touch_stamp $((now - 60)))" "$state/$id.status"
   touch -t "$(touch_stamp $((now - 5)))" "$logdir/session-closing.jsonl"
-  touch -t "$(touch_stamp $((now + 3600)))" "$logdir/session-next-occupant.jsonl"
 
   out=$("$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "closing-write harvest should succeed"$'\n'"$out"
@@ -1249,13 +1341,13 @@ JSON
   assert_contains "$row" '"source":"claude-projects"' \
     "a log flushed after the last status append is still matched"
   assert_contains "$row" '"input_tokens":41' \
-    "the closing write's usage is summed and the next occupant's is not"
-  assert_contains "$row" '"output_tokens":3' "no later task's output leaks into the row"
+    "the closing write's usage is summed"
+  assert_contains "$row" '"output_tokens":3' "the closing write's output is summed"
   assert_contains "$row" "\"completed_at\":\"$(iso_utc $((now - 60)))\"" \
     "completed_at still rests on the last status append"
   assert_contains "$row" '"wall_secs":540' \
     "wall seconds still measure spawn to last status append, not the harvest"
-  pass "usage harvest: the log scan covers the harness's closing write, not a later task"
+  pass "usage harvest: the log scan covers the harness's closing write"
 }
 
 # --- corrupt lines: one bad line costs that line, not the file --------------
@@ -1419,4 +1511,5 @@ report_no_harness_case
 report_malformed_case
 teardown_status_case
 teardown_child_case
+teardown_pool_order_case
 teardown_case
