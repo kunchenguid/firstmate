@@ -373,13 +373,20 @@ test_ship_project_memory_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  assert_grep "read it before you edit any file and follow it for this task" "$brief" \
+    "ship brief must instruct the crewmate to read and follow the project's own instructions"
+  # shellcheck disable=SC2016 # Backticks and braces are literal brief markup.
+  assert_grep 'Where it conflicts with the task instructions firstmate gave you, append `needs-decision: {the conflict}` and stop' "$brief" \
+    "ship brief must stop and route a project-instruction conflict back to firstmate"
+  assert_grep 'make sure any pull request this task produces links that issue before you report that pull request done' "$brief" \
+    "ship brief must name when a project-mandated issue gets linked"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
     "project-memory contract lost the durable-knowledge bar"
   assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
     "project-memory contract lost pointer-over-copy guidance"
   assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
     "project-memory contract lost the self-governance add-in-same-pass rule"
-  pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+  pass "fm-brief.sh: ship brief carries project-instruction following and the AGENTS.md authoring bar"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {

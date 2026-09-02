@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Single owner of a ship task's mode-specific "Definition of done" block.
-# Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
-# bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
+# Single owner of the contract blocks a ship task carries: the mode-specific
+# "Definition of done" and the project-instructions block.
+# Sourced by bin/fm-brief.sh, which renders them into a generated ship brief, and by
+# bin/fm-promote.sh, which renders them into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract: a promoted
-# no-mistakes worker that never received the ask-user escalation rule or the
-# `--yes` ban is the exact delivery hole this single owner exists to close.
+# no-mistakes worker that never received the ask-user escalation rule, the
+# `--yes` ban, or the project's own agent instructions is the exact delivery hole
+# this single owner exists to close.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
@@ -12,6 +14,22 @@
 # line that bin/fm-spawn.sh checks a ship brief against.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+
+# fm_project_instructions_block prints the block on stdout with no trailing blank
+# line. A project's own committed AGENTS.md or CLAUDE.md binds the work done in
+# it, so every worker that edits files - freshly briefed or promoted in place -
+# must be told to read it and to stop on a conflict rather than choose silently.
+# It also owns the one moment an issue can be linked: firstmate creates or reuses
+# the issue before the spawn, and only the worker is present once a pull request
+# exists, on every delivery mode including the pipeline's.
+fm_project_instructions_block() {
+  cat <<'EOF'
+# Project instructions
+If the project carries its own `AGENTS.md` or `CLAUDE.md`, read it before you edit any file and follow it for this task, including any issue, branch, evidence, and review requirements it states.
+Where it conflicts with the task instructions firstmate gave you, append `needs-decision: {the conflict}` and stop as rule 6 requires, rather than choosing between them yourself.
+If firstmate named an issue for this task, make sure any pull request this task produces links that issue before you report that pull request done.
+EOF
+}
 
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2

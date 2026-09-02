@@ -52,7 +52,9 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
-# Ship tasks include a project-memory section so durable project-intrinsic
+# Ship tasks include a project-instructions section rendered from its single owner
+# (bin/fm-dod-lib.sh, which bin/fm-promote.sh renders too), and a project-memory
+# section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
@@ -394,6 +396,7 @@ case "$MODE" in
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+PROJECT_INSTRUCTIONS=$(fm_project_instructions_block) || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -439,6 +442,8 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 $INBOX_SECTION
+
+$PROJECT_INSTRUCTIONS
 
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.

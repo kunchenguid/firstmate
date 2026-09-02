@@ -2,9 +2,9 @@
 name: project-management
 description: >-
   Agent-only procedure for Firstmate project management.
-  Use before adding, creating, removing, or initializing a project.
+  Use before adding, creating, removing, or initializing a project, and before dispatching into a project that carries its own agent instructions.
   Cloning or registering a project is add intake and uses the same trigger.
-  Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, and outward-consent decisions.
+  Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, outward-consent, and dispatch-time project-instruction decisions.
 user-invocable: false
 metadata:
   internal: true
@@ -12,7 +12,7 @@ metadata:
 
 # project-management
 
-Use this procedure before adding, creating, removing, or initializing a project.
+Use this procedure before adding, creating, removing, or initializing a project, and before dispatching into a project that carries its own agent instructions.
 Cloning or registering a project is add intake and uses the same trigger.
 This skill is the single owner of Firstmate's project-management procedure.
 It does not replace `secondmate-provisioning`, which owns project clones inside persistent secondmate homes.
@@ -81,6 +81,26 @@ cd projects/<name> && no-mistakes init && no-mistakes doctor
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
 Do not create a commit merely because initialization ran.
 If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.
+
+## Carry a project's own agent instructions into dispatch
+
+A project's committed `AGENTS.md`, or the `CLAUDE.md` that points at it, is that project's own contract for work done in it, and it binds firstmate's dispatch as well as the worker's implementation.
+Read it in the clone under `projects/<name>` before dispatching the task.
+Reading it never authorizes changing it: `AGENTS.md` hard rule 1 still forbids firstmate writing a project's own instructions, and a crewmate updates them through the project's selected delivery path.
+
+Separate what those instructions require of the work from what they require of the dispatcher.
+Requirements on the work, such as a named exit criterion and its raw output, an evidence format, a test scope, or a review gate, are task-specific brief content.
+The generated ship brief already tells the crewmate to read and follow the project's own instructions, so name in the brief only what changes this task's scope, acceptance criteria, or required evidence.
+
+Requirements on the dispatcher must be satisfied before the spawn, not left for the worker to discover.
+Where the project mandates an issue-first intake, search that project's open issues with `gh-axi` first and reuse a matching open issue rather than creating a second one for work already tracked.
+Only when no open issue covers the scope, create it with `gh-axi` using the issue form that project names.
+Either way, pass the issue number into the brief so the worker can claim it.
+Linking is not satisfiable before the spawn because no pull request exists yet, so the generated brief's project-instructions block owns that moment and requires the worker to link the named issue from any pull request this task produces.
+Where the project mandates scanning open pull requests for overlapping scope, run that scan and reconcile the overlap under `AGENTS.md` section 7's serialization rules before dispatching.
+
+Never copy a project's rules into firstmate's own instructions, and never carry one project's workflow to another project.
+If a project's instructions conflict with a current captain instruction or a firstmate safety boundary, the captain and the boundary win, and the conflict is reported rather than silently resolved.
 
 ## Remove
 

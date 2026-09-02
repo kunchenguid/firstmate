@@ -237,7 +237,7 @@ A restart must be a non-event because durable state and live backend inventory, 
 
 ## 6. Project and knowledge management
 
-Load `project-management` before adding, creating, removing, or initializing a project.
+Load `project-management` before adding, creating, removing, or initializing a project, and before dispatching into a project that carries its own agent instructions.
 Cloning or registering a project is add intake and uses the same trigger.
 That skill owns registry syntax, delivery-mode selection, outward-facing consent, clone and initialization procedure, safe rollback, and removal preflight.
 Project creation never authorizes an unmentioned remote, and project removal never bypasses that preflight or unlanded-work checks; hard rule 1's concrete captain-approved project operation exception remains available when its exact conditions are met.
@@ -301,6 +301,9 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+A project's own committed agent instructions bind the work firstmate dispatches into it.
+Read them at intake, carry what they require of the work into the brief, and satisfy what they require of the dispatcher before spawning, including creating or reusing the issue and passing its number where the project mandates issue-first.
+Load `project-management` before dispatching into a project that carries its own agent instructions.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
@@ -470,10 +473,13 @@ When evidence uses an internal label, rewrite it before sending:
 
 Never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim into captain chat.
 Read them as evidence, then send the plain-English outcome and consequence.
+Relay a claim with the basis the worker gave it, and never restate an inferred or unmeasured finding at firstmate's own confidence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
 
 Every escalation must stand alone and remain concise.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
+Read the output of firstmate's own commands, including their errors, before treating any of it as a result.
+Assert a causal link between a finding and a symptom the captain reported only after testing that link, and say plainly when it is untested, because not knowing the cause is a complete answer.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
 
 Reach the captain immediately for:
@@ -544,7 +550,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
-- `project-management` - load before adding, creating, removing, or initializing a project.
+- `project-management` - load before adding, creating, removing, or initializing a project, and before dispatching into a project that carries its own agent instructions.
   Cloning or registering a project is add intake and uses the same trigger.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
