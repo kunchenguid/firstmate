@@ -10,7 +10,7 @@
 # `# Definition of done` before an fm-control relaunch marker when that section
 # exists, otherwise the brief prefix before that marker so older one-line
 # records keep working. A marker copied into replaceable {TASK} text does not
-# count: it still sits before the generated Setup line. A relaunch progress
+# count: it still sits before the generated Setup pair. A relaunch progress
 # note is never scanned. When the
 # crew-branch line is absent from that region, this
 # script still uses fm/<id>. When the base-branch line is absent, it still
@@ -66,15 +66,21 @@ default_branch() {
 # Generated contracts live in the last `# Definition of done` before an
 # fm-control relaunch marker. Truncation anchors on the exact generated marker
 # (`## Progress note (ISO-timestamp)` followed by `This task was relaunched.`)
-# only when that marker is not followed by the generated Setup line
-# (`You are in a disposable git worktree of `). A copy inside replaceable
-# {TASK} text therefore cannot hide the generated section, while a real
-# fm-control append after Setup still ends the scan. Heading text alone is
-# not a boundary.
+# only when that marker is not followed by a generated Setup pair
+# (`# Setup` then `You are in a disposable git worktree of `). A copy of
+# the marker or the worktree line alone therefore cannot hide or extend
+# the generated section, while a real fm-control append after Setup still
+# ends the scan. Heading text alone is not a boundary.
 brief_dod_section() {
   awk '
     FNR==NR {
-      if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+      if (pending_setup && /^[[:space:]]*$/) next
+      if (pending_setup) {
+        if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+        pending_setup=0
+        next
+      }
+      if ($0 ~ /^# Setup[[:space:]]*$/) pending_setup=1
       next
     }
     pending_relaunch && /^[[:space:]]*$/ { next }
@@ -101,7 +107,13 @@ brief_dod_section() {
 brief_truncated_prefix() {
   awk '
     FNR==NR {
-      if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+      if (pending_setup && /^[[:space:]]*$/) next
+      if (pending_setup) {
+        if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+        pending_setup=0
+        next
+      }
+      if ($0 ~ /^# Setup[[:space:]]*$/) pending_setup=1
       next
     }
     pending_relaunch && /^[[:space:]]*$/ { next }

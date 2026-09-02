@@ -1834,15 +1834,22 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # may mention the same phrases or headings, and a later progress note must not
 # override them. Truncation anchors on the exact generated marker (`## Progress
 # note (ISO-timestamp)` followed by `This task was relaunched.`) only when that
-# marker is not followed by the generated Setup line (`You are in a disposable
-# git worktree of `). A copy inside replaceable {TASK} text therefore cannot
-# hide the generated section. Heading text alone is not a boundary. When that
+# marker is not followed by a generated Setup pair (`# Setup` then `You are in
+# a disposable git worktree of `). A copy of the marker or the worktree line
+# alone therefore cannot hide or extend the generated section. Heading text
+# alone is not a boundary. When that
 # section is missing, older one-line records are read from the brief prefix
 # before that marker only. bin/fm-merge-local.sh uses the same rule for landing.
 brief_dod_section() {
   awk '
     FNR==NR {
-      if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+      if (pending_setup && /^[[:space:]]*$/) next
+      if (pending_setup) {
+        if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+        pending_setup=0
+        next
+      }
+      if ($0 ~ /^# Setup[[:space:]]*$/) pending_setup=1
       next
     }
     pending_relaunch && /^[[:space:]]*$/ { next }
@@ -1866,7 +1873,13 @@ brief_dod_section() {
 brief_truncated_prefix() {
   awk '
     FNR==NR {
-      if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+      if (pending_setup && /^[[:space:]]*$/) next
+      if (pending_setup) {
+        if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
+        pending_setup=0
+        next
+      }
+      if ($0 ~ /^# Setup[[:space:]]*$/) pending_setup=1
       next
     }
     pending_relaunch && /^[[:space:]]*$/ { next }
