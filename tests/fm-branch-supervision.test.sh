@@ -192,6 +192,12 @@ test_outcome_cursor_corruption_fails_closed() {
   [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1x2 ] || fail "failed unread rewrote the malformed cursor"
   [ "$(cat "$store")" = "$snapshot" ] || fail "failed unread changed the append-only outcome store"
 
+  printf '999999999999999999999999999999999\n' > "$home/state/.branch-outcomes-cursor"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted an out-of-range cursor"
+  assert_contains "$out" "outcome cursor is out of range" "out-of-range cursor refusal lost its diagnostic"
+
   printf '2\n' > "$home/state/.branch-outcomes-cursor"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
   status=$?
@@ -266,7 +272,16 @@ test_outcome_non_jsonl_layout_fails_closed() {
   status=$?
   [ "$status" -ne 0 ] || fail "unread accepted a blank physical record"
   assert_contains "$out" "malformed or non-sequential" "blank-record refusal lost its diagnostic"
-  pass "outcome stores require exactly one JSON object per physical line"
+
+  printf '%s' '{"seq":1,"epoch":1,"task":"task-1","wake":"","verdict":"routine","summary":"unterminated","silent":false}' > "$store"
+  snapshot=$(cat "$store")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'must remain unrecorded' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted an unterminated outcome store"
+  assert_contains "$out" "malformed or non-sequential" "unterminated-store refusal lost its diagnostic"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "failed append changed the unterminated store"
+  pass "outcome stores require terminated single-line JSON records"
 }
 
 test_outcome_processed_marker_is_sequence_bound() {
@@ -341,6 +356,13 @@ test_outcome_processed_marker_is_sequence_bound() {
   [ "$status" -ne 0 ] || fail "processed-init accepted a marker ahead of the read cursor"
   assert_contains "$out" "ahead of the read cursor" "processed-init ahead-marker refusal lost its diagnostic"
   [ "$(cat "$marker")" = 5 ] || fail "refused processed-init rewrote the ahead marker"
+  printf '999999999999999999999999999999999\n' > "$marker"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unprocessed accepted an out-of-range processed marker"
+  assert_contains "$out" "processed marker is out of range" "out-of-range marker refusal lost its diagnostic"
+  [ "$(cat "$marker")" = 999999999999999999999999999999999 ] \
+    || fail "out-of-range marker refusal changed the marker"
 
   # Migration: a home with delivered history and no marker starts processed
   # at its read cursor, so that history is not re-presented; an absent marker

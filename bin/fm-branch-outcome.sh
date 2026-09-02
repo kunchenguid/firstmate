@@ -77,10 +77,18 @@ STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
 LOCK="$STATE/.branch-outcomes.lock"
+MAX_SAFE_SEQ=9007199254740991
 
 usage() {
   echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init | list [--recent <n>] | startup-replay" >&2
   exit 2
+}
+
+bounded_uint() {
+  local value=$1
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#value}" -le "${#MAX_SAFE_SEQ}" ] || return 1
+  [ "$value" -le "$MAX_SAFE_SEQ" ]
 }
 
 json_escape() { # <text> -> escaped JSON string content on stdout
@@ -111,8 +119,12 @@ read_cursor() {
       echo "error: refusing operation because the outcome cursor is malformed" >&2
       return 1
       ;;
-    *) printf '%s\n' "$value" ;;
   esac
+  if ! bounded_uint "$value"; then
+    echo "error: refusing operation because the outcome cursor is out of range" >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
 }
 
 read_processed() {
@@ -127,8 +139,12 @@ read_processed() {
       echo "error: refusing operation because the processed marker is malformed" >&2
       return 1
       ;;
-    *) printf '%s\n' "$value" ;;
   esac
+  if ! bounded_uint "$value"; then
+    echo "error: refusing operation because the processed marker is out of range" >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
 }
 
 last_seq() {
@@ -140,12 +156,13 @@ last_seq() {
         keys == ["epoch", "seq", "summary", "task", "verdict", "wake"]
         or (keys == ["epoch", "seq", "silent", "summary", "task", "verdict", "wake"] and (.silent | type) == "boolean")
       )
-      and ((.seq | type) == "number" and .seq >= 1 and .seq == (.seq | floor))
+      and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
       and ((.task | type) == "string" and (.wake | type) == "string")
       and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"));
-    split("\n")
-    | if .[-1] == "" then .[:-1] else . end
+    if endswith("\n") then split("\n")[:-1]
+    else error("unterminated outcome store")
+    end
     | map(fromjson)
     | . as $rows
     | if reduce range(0; length) as $i
@@ -265,7 +282,7 @@ case "$CMD" in
   mark-read)
     [ "${1:-}" = --through ] || usage
     THROUGH=${2:-}
-    case "$THROUGH" in ''|*[!0-9]*) usage ;; esac
+    bounded_uint "$THROUGH" || usage
     [ "$#" -eq 2 ] || usage
     fm_lock_acquire_wait "$LOCK"
     if ! LAST_SEQ=$(last_seq) || [ "$THROUGH" -gt "$LAST_SEQ" ]; then
@@ -287,7 +304,7 @@ case "$CMD" in
   mark-processed)
     [ "${1:-}" = --through ] || usage
     THROUGH=${2:-}
-    case "$THROUGH" in ''|*[!0-9]*) usage ;; esac
+    bounded_uint "$THROUGH" || usage
     [ "$#" -eq 2 ] || usage
     fm_lock_acquire_wait "$LOCK"
     if ! CURSOR_SEQ=$(read_cursor) || ! PROCESSED_SEQ=$(read_processed); then
