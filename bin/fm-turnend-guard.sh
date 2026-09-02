@@ -51,9 +51,9 @@
 # auto-arm (bin/fm-claude-stop-autoarm.sh), which fires on the same Stop event:
 #   1. a live identity-matched watcher with a fresh beacon allows immediately;
 #   2. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
-#      for the auto-arm to claim this home (state/.claude-autoarm.lock owner
-#      alive, with a supervision decision still open rather than a claim its own
-#      ledger entry or recorded pid-identity already settles as finished) or to
+#      for the auto-arm to claim this home (a live OPEN generation claim in the
+#      state/.claude-autoarm-epoch ledger - fm_autoarm_claim_open - or a legacy
+#      build's lock-holding claim under the legacy abandonment proof) or to
 #      record a fresh actionable exit-2 outcome
 #      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
@@ -210,8 +210,8 @@ fi
 budget_account_current_epoch() {
   local current_epoch outcome old_session old_count old_epoch tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
-  current_epoch=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   initialized=0
   COUNT=0
   if [ -f "$BUDGET_FILE" ]; then
@@ -259,21 +259,29 @@ budget_account_current_epoch() {
 autoarm_owns_recovery() {
   local pid role outcome age
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
-  pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
-  role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-  # A live auto-arm owner is only evidence of ownership while its supervision
-  # decision is still open. Once its own ledger entry records a terminal outcome,
-  # or its recorded pid-identity stops matching the pid holding the lock, the lock
-  # is abandoned, and treating it as ownership is what let a dead watcher go
-  # unnoticed for turn after turn. Fall through instead: the outcome cases below
-  # still cover a claim that finished moments ago, so a genuine handoff is not
+  # A live OPEN generation claim owns recovery: the ledger names a live,
+  # identity-matched owner still arming that is not stuck (fm_autoarm_claim_open
+  # in bin/fm-wake-lib.sh owns that predicate). A finished, dead,
+  # identity-mismatched, or stuck claim deliberately fails it and falls
+  # through, because treating such a claim as ownership is what let a dead
+  # watcher go unnoticed for turn after turn; the outcome cases below still
+  # cover a claim that finished moments ago, so a genuine handoff is not
   # duplicated, while a stale one now reaches the block.
-  if fm_pid_alive "$pid" && [ "$role" = autoarm ] \
-    && ! fm_autoarm_claim_abandoned "$STATE"; then
+  if fm_autoarm_claim_open "$STATE" "$GRACE"; then
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
-  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  # Legacy shim: a pre-generation build's claim holds the owner lock with the
+  # autoarm role for its whole cycle; defer to it under the legacy abandonment
+  # proof so an upgrade mid-session cannot double-arm.
+  pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
+  role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
+  if fm_pid_alive "$pid" && [ "$role" = autoarm ] \
+    && ! fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
+    [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+    return 0
+  fi
+  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
     rewake)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
@@ -305,20 +313,24 @@ terminal_fail_open() {
   [ "$COUNT" -gt "$BLOCK_BUDGET" ] || return 1
   failure_episode_verified || return 1
   [ ! -e "$FAILURE_ALARM" ] || return 1
+  # A live open generation claim is a concurrent recovery decision to step
+  # aside for, exactly like the legacy live-owner case below.
+  fm_autoarm_claim_open "$STATE" "$GRACE" && return 2
   if ! fm_lock_try_acquire "$OWNER_LOCK"; then
     pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
     role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-    # Same abandonment test as autoarm_owns_recovery: a claim whose ledger entry
-    # is already terminal, or whose recorded pid-identity no longer matches the
-    # live pid, is not a concurrent owner to step aside for. Stepping aside for one
-    # here allows the stop silently, and the episode's one attended alarm would
-    # never fire, so clear the abandoned claim and let this decision finish
-    # instead. Failing to clear it re-blocks rather than allowing.
+    # Same legacy abandonment test as autoarm_owns_recovery: a claim whose
+    # ledger entry is already terminal, or whose recorded pid-identity no
+    # longer matches the live pid, is not a concurrent owner to step aside
+    # for. Stepping aside for one here allows the stop silently, and the
+    # episode's one attended alarm would never fire, so clear the abandoned
+    # claim and let this decision finish instead. Failing to clear it
+    # re-blocks rather than allowing.
     if fm_pid_alive "$pid" && [ "$role" = autoarm ] \
-      && ! fm_autoarm_claim_abandoned "$STATE"; then
+      && ! fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
       return 2
     fi
-    fm_autoarm_release_abandoned "$STATE" || return 1
+    fm_autoarm_release_abandoned "$STATE" "$GRACE" || return 1
     fm_lock_try_acquire "$OWNER_LOCK" || return 1
   fi
   if ! fm_lock_set_role "$OWNER_LOCK" terminal-check; then
@@ -352,6 +364,15 @@ terminal_fail_open() {
     fm_lock_release "$OWNER_LOCK"
     return 2
   fi
+  # Re-check for a live open generation claim now that both locks are held: a
+  # claimant that published "arming" between the pre-check above and the lock
+  # acquisition is active recovery, and alarming over it would fire the
+  # episode's one attended fail-open while a continuation is under way.
+  if fm_autoarm_claim_open "$STATE" "$GRACE"; then
+    fm_lock_release "$BUDGET_LOCK"
+    fm_lock_release "$OWNER_LOCK"
+    return 2
+  fi
   if ! (set -C; : > "$FAILURE_ALARM") 2>/dev/null; then
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
@@ -366,7 +387,7 @@ failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
-  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
     failed|failed-suppressed) return 0 ;;
     *) return 1 ;;

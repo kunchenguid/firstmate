@@ -542,12 +542,9 @@ pass "the worker drains bounded output without changing command results"
 
 SIDE_EFFECT="$TMP_ROOT/side-effect"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
-kill -TERM "$WORKER_PID"
-for _ in $(seq 1 100); do
-  [ ! -f "$STATE_ROOT/worker.pid" ] && break
-  sleep 0.05
-done
-assert_absent "$STATE_ROOT/worker.pid" "the worker did not stop before the staged-record tamper"
+fm_remote_job_stop_worker_tree "$WORKER_PID" \
+  || fail "the worker tree did not stop before the staged-record tamper"
+assert_absent "$STATE_ROOT/worker.pid" "the worker did not clear its pid before the staged-record tamper"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-touch-job.sh "$SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
@@ -627,8 +624,11 @@ RECOVERY_REFUSED_RC=$?
 set -e
 [ "$RECOVERY_REFUSED_RC" -ne 0 ] || fail "quarantine recovery ignored a recorded live process"
 assert_present "$RECOVERY_STATE/worker.lock/quarantine" "a live recorded process lost quarantine protection"
-kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
-wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/owner"
+printf 'stale owner identity\n' > "$RECOVERY_JOB/.claim/owner_start"
+printf 'stale supervisor identity\n' > "$RECOVERY_JOB/.claim/supervisor_start"
+chmod 600 "$RECOVERY_JOB/.claim/owner" "$RECOVERY_JOB/.claim/owner_start" \
+  "$RECOVERY_JOB/.claim/supervisor_start"
 HOME="$RECOVERY_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$RECOVERY_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
   > "$TMP_ROOT/recovery-worker.out" 2> "$TMP_ROOT/recovery-worker.err" &
@@ -637,12 +637,16 @@ for _ in $(seq 1 300); do
   [ -f "$RECOVERY_STATE/worker.ready" ] && break
   sleep 0.05
 done
-assert_present "$RECOVERY_STATE/worker.ready" "a stopped quarantined execution did not permit worker recovery"
+assert_present "$RECOVERY_STATE/worker.ready" "a reused supervisor pid did not permit worker recovery"
 assert_absent "$RECOVERY_STATE/worker.lock/quarantine" "recovered worker retained stale quarantine"
+kill -0 "$QUARANTINED_PROCESS_PID" 2>/dev/null \
+  || fail "worker recovery signalled a process whose supervisor identity did not match"
 kill -TERM "$RECOVERY_WORKER_PID"
 wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
-pass "quarantine clears only after recorded execution has stopped"
+kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
+pass "quarantine recovery refuses unverifiable supervisors and ignores reused pids"
 
 # A replacement stops a Linux worker by signalling its whole isolated group, and
 # the supervisor in that group forwards a second stop signal to the same serving

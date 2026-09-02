@@ -15,6 +15,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 PF="$ROOT/bin/fm-public-followup.sh"
 EMIT="$ROOT/bin/fm-public-followup-emit.sh"
@@ -23,6 +25,28 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 TMP_ROOT=$(fm_test_tmproot fm-public-followup)
+PF_TEST_NOW=1787539200
+PF_TEST_LOCK_HOLDER=
+
+# The remote-route cases drive the real remote job worker, which outlives the
+# command that staged its job. Stop it before the shared fixture cleanup runs,
+# and keep that cleanup (tests/lib.sh owns it) rather than replacing the trap.
+pf_test_cleanup() {
+  local pid_file="${REMOTE_FIXTURE_JOBS:-$TMP_ROOT/remote-jobs}/worker.pid" pid
+  if [ -n "$PF_TEST_LOCK_HOLDER" ]; then
+    kill "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
+    wait "$PF_TEST_LOCK_HOLDER" 2>/dev/null || true
+    PF_TEST_LOCK_HOLDER=
+  fi
+  if [ -f "$pid_file" ]; then
+    pid=$(cat "$pid_file" 2>/dev/null) || pid=
+    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  fi
+  fm_test_cleanup
+}
+trap pf_test_cleanup EXIT
+trap 'pf_test_cleanup; exit 130' INT
+trap 'pf_test_cleanup; exit 143' TERM
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
@@ -97,7 +121,20 @@ run_pf() {  # <home> <args...>
   shift
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FAKE_CURL_LOG="${FAKE_CURL_LOG:-}" \
-    FAKE_FOLLOWUP_CODE="${FAKE_FOLLOWUP_CODE:-200}" "$PF" "$@"
+    FAKE_FOLLOWUP_CODE="${FAKE_FOLLOWUP_CODE:-200}" \
+    FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" "$PF" "$@"
+}
+
+# Drive the real script through macOS system bash (3.2.x). /usr/bin/env bash
+# often resolves to a newer bash where empty-array "${arr[@]}" under set -u is
+# a no-op, so this path is what actually guards the 3.2 unbound-variable crash.
+run_pf_sysbash() {  # <home> <args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FAKE_CURL_LOG="${FAKE_CURL_LOG:-}" \
+    FAKE_FOLLOWUP_CODE="${FAKE_FOLLOWUP_CODE:-200}" \
+    FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" /bin/bash "$PF" "$@"
 }
 
 tasks_in() {  # <home> <tasks-axi args...>
@@ -142,7 +179,7 @@ seed_commitment() {
     > "$home/state/x-inbox/$request.json"
   chmod 700 "$home/state/x-inbox"
   chmod 600 "$home/state/x-inbox/$request.json"
-  FM_HOME="$home" bash -c \
+  FM_HOME="$home" FMX_NOW_OVERRIDE="$PF_TEST_NOW" bash -c \
     ". '$ROOT/bin/fm-x-lib.sh'; fmx_context_registry_set '$home/state' '$request' '$platform' 1900" \
     || fail "could not retain the private request context"
 
@@ -172,7 +209,7 @@ seed_repro_commitment() {   # <home> <obligation> <request> <work-home> <work-id
     --expires-at 2026-10-01T00:00:00Z >/dev/null || fail "add failed"
   tasks_in "$home" public-followup bind-work "$obligation" --relation-file "$home/relation.json" >/dev/null \
     || fail "bind-work failed"
-  FM_HOME="$home" bash -c \
+  FM_HOME="$home" FMX_NOW_OVERRIDE="$PF_TEST_NOW" bash -c \
     ". '$ROOT/bin/fm-x-lib.sh'; fmx_context_registry_set '$home/state' '$request' discord 2000" \
     || fail "context retain failed"
   run_pf "$home" register "$obligation" --relation rel-code --work-home "$work_home" \
@@ -622,7 +659,7 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -646,7 +683,7 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   assert_absent "$child/.fm-secondmate-parent" \
     "the legacy env-only binding case must not gain a durable parent record"
 
@@ -755,7 +792,7 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   # No FM_PUBLIC_FOLLOWUP_PRIMARY_HOME at all here: a restart of the secondmate
   # agent that drops the launch-time prefix must still find the real parent
@@ -788,7 +825,7 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   # No parent/state/mate.meta at all: the parent never recorded this secondmate's
   # own agent, so its side of the binding is genuinely missing. A durable LOCAL
   # record naming the real parent path must not be enough on its own to bypass
@@ -826,7 +863,7 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   fm_write_meta "$child/state/work-clean.meta" \
     "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -858,7 +895,7 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   fm_write_meta "$child/state/work-conflict.meta" \
     "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -885,7 +922,7 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
     fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
     fm_write_meta "$child/state/work-child.meta" \
       "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-      "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+      "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
     parent_record="$child/.fm-secondmate-parent"
     case "$case_name" in
       symlink)
@@ -952,7 +989,7 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   pre=${parent_resolved%??????}
   suf=${parent_resolved#"$pre"}
   record="$child/.fm-secondmate-parent"
@@ -990,7 +1027,7 @@ SH
   fm_write_meta "$home/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   rc=0
   out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -1026,7 +1063,7 @@ SH
   fm_write_meta "$child/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -1054,7 +1091,7 @@ test_secondmate_parent_binding_matches_literal_id() {
   fm_write_meta "$parent/state/mate.id.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-literal.meta" \
     "window=firstmate:fm-work-literal" "endpoint_task_id=work-literal" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -1139,13 +1176,18 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
   local home rc
   home=$(make_home cleanup-guard)
   seed_commitment "$home" pf-guard req-guard discord main ship-task
+  tasks_in "$home" add ship-task "ship guarded by its public follow-up" --kind ship >/dev/null \
+    || fail "could not add the guarded ship to its home's backlog"
+  tasks_in "$home" start ship-task >/dev/null \
+    || fail "could not mark the guarded ship In flight"
   fm_write_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/gone" \
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "spawn_gen=public-followup-guard"
 
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -1390,7 +1432,7 @@ test_dropped_baton_now_surfaces_open_loop() {
 
   fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
     "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
   PATH="$parent/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$parent" \
     FM_STATE_OVERRIDE="$parent/state" "$PF" guard-work secondmate:mate pi-rearm-loop-fix-r1 \
@@ -1426,7 +1468,7 @@ test_control_registered_followon_is_guarded() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
     "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     expect_failure "registered follow-on must be guarded" "$TEARDOWN" pi-rearm-loop-fix-r1
@@ -1633,6 +1675,48 @@ EOF
   assert_present "$home/state/public-followup/registry/public-final-retire-b" \
     "successful retry must retain the one claimed destination"
   pass "failed rechain retirement keeps the source claimed by one resumable destination"
+}
+
+test_first_register_succeeds_with_empty_lock_list_under_bash32() {
+  local home err rc
+  [ -x /bin/bash ] || { pass "first register under /bin/bash skipped without /bin/bash"; return 0; }
+  home=$(make_home first-register-empty-locks)
+  jq -n '{request_id:"req-empty-locks", platform:"discord",
+      context_binding:{version:"ctx1", value:"ctx1_req-empty-locks"},
+      public_safe_summary:"first register with an empty lock list",
+      received_at:"2026-07-30T10:00:00Z",
+      followup_expires_at:"2026-08-06T10:00:00Z",
+      reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+  jq -n '{type:"pr-merged", project:"firstmate",
+          required_deliverables:["pr_url"], completion_policy:"all-required"}' \
+    > "$home/expected.json"
+  jq -n '{relation_id:"rel-code", work_ref:{home_id:"main", task_id:"work-empty-locks"},
+      role:"fulfills", required:true, generation:1}' > "$home/relation.json"
+  tasks_in "$home" public-followup add pf-empty-locks \
+    --request-context-file "$home/request.json" --purpose promised-final \
+    --expected-final-file "$home/expected.json" --expires-at 2026-10-01T00:00:00Z >/dev/null \
+    || fail "could not create the public commitment"
+  tasks_in "$home" public-followup bind-work pf-empty-locks \
+    --relation-file "$home/relation.json" >/dev/null \
+    || fail "could not bind work to the public commitment"
+  FM_HOME="$home" FMX_NOW_OVERRIDE="$PF_TEST_NOW" bash -c \
+    ". '$ROOT/bin/fm-x-lib.sh'; fmx_context_registry_set '$home/state' req-empty-locks discord 1900" \
+    || fail "could not retain the private request context"
+
+  err=$(mktemp "$home/register-err.XXXXXX")
+  set +e
+  run_pf_sysbash "$home" register pf-empty-locks --relation rel-code \
+    --work-home main --work-id work-empty-locks --generation 1 >"$home/register.out" 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first register under /bin/bash with an empty lock list failed (exit $rc): $(cat "$err" "$home/register.out")"
+  grep -q 'unbound variable' "$err" \
+    && fail "first register hit an unbound-variable crash under /bin/bash: $(cat "$err")"
+  assert_grep "registered pf-empty-locks main/work-empty-locks" "$home/register.out" \
+    "first register must print the registered line"
+  assert_present "$home/state/public-followup/registry/pf-empty-locks" \
+    "first register must write the registration record"
+  pass "first register succeeds with an empty lock list under /bin/bash"
 }
 
 test_registration_replay_preserves_delivery_and_retirement() {
@@ -1964,13 +2048,18 @@ test_retention_creates_no_false_teardown_refusal() {
   local home home2 rc out registry tmp
   home=$(make_home retain-teardown)
   seed_commitment "$home" pf-retain req-retain discord main ship-retain
+  tasks_in "$home" add ship-retain "ship with a retained delivered registration" --kind ship >/dev/null \
+    || fail "could not add the retained-registration ship to its home's backlog"
+  tasks_in "$home" start ship-retain >/dev/null \
+    || fail "could not mark the retained-registration ship In flight"
   fm_write_meta "$home/state/ship-retain.meta" \
     "window=firstmate:fm-ship-retain" \
     "worktree=$home/projects/gone" \
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "spawn_gen=public-followup-retain"
   emit_terminal "$home" "$home" pf-retain main ship-retain >/dev/null || fail "emit failed"
   run_pf "$home" consume >/dev/null || fail "consume failed"
   FAKE_CURL_LOG="$home/curl.log" run_pf "$home" deliver pf-retain >/dev/null || fail "delivery failed"
@@ -2119,12 +2208,17 @@ test_prechange_registration_is_open_and_unrechainable() {
 test_x_request_teardown_warns_when_final_unposted() {
   local home rc
   home=$(make_home xreq-warn)
+  tasks_in "$home" add linked-task "ship with a legacy Relay request link" --kind ship >/dev/null \
+    || fail "could not add the legacy-link ship to its home's backlog"
+  tasks_in "$home" start linked-task >/dev/null \
+    || fail "could not mark the legacy-link ship In flight"
   fm_write_meta "$home/state/linked-task.meta" \
     "window=firstmate:fm-linked-task" \
     "worktree=$home/projects/gone" \
     "project=$home/projects/sample" \
     "kind=ship" \
     "mode=local-only" \
+    "spawn_gen=public-followup-legacy-link" \
     "x_request=req-legacy-final"
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -2201,6 +2295,402 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   pass "secondmate promotion matches teardown parent resolution"
 }
 
+# --- remote secondmate work homes ---------------------------------------------
+#
+# A REMOTE secondmate route records no local path for its home, because the home
+# only exists on the other machine. Registration therefore stores an empty
+# work_home_path, and every close that must first clear the bound legacy X link
+# has to reach that home over the route's SSH transport instead.
+#
+# The transport is faked at the FM_SSH_BIN process seam and then runs the REAL
+# tracked remote entrypoint against a local "remote" checkout, so the clear that
+# has to happen actually happens: no live host, no network, and no assumption
+# baked into a stub about what the far side would have done.
+
+REMOTE_FIXTURE_ROOT=
+REMOTE_FIXTURE_SSH=
+REMOTE_FIXTURE_JOBS=
+
+# remote_fixture_prepare: build the shared remote checkout and fake ssh once.
+# The remote root is a real git repo holding the real bin/, because both fm-on.sh
+# and the entrypoint refuse anything that is not a genuine tracked executable.
+remote_fixture_prepare() {
+  local fakebin
+  [ -z "$REMOTE_FIXTURE_ROOT" ] || return 0
+  # TMPDIR on macOS carries a trailing slash, and the route validation rejects an
+  # empty path component, so physicalize both fixture paths before registering.
+  REMOTE_FIXTURE_ROOT="$TMP_ROOT/remote-root"
+  mkdir -p "$REMOTE_FIXTURE_ROOT/bin/backends"
+  REMOTE_FIXTURE_ROOT=$(cd "$REMOTE_FIXTURE_ROOT" && pwd -P)
+  mkdir -p "$TMP_ROOT/remote-jobs"
+  REMOTE_FIXTURE_JOBS=$(cd "$TMP_ROOT/remote-jobs" && pwd -P)
+  cp "$ROOT"/bin/fm-*.sh "$REMOTE_FIXTURE_ROOT/bin/"
+  cp "$ROOT"/bin/backends/*.sh "$REMOTE_FIXTURE_ROOT/bin/backends/"
+  chmod +x "$REMOTE_FIXTURE_ROOT/bin"/*.sh
+  printf 'fixture\n' > "$REMOTE_FIXTURE_ROOT/AGENTS.md"
+  git -C "$REMOTE_FIXTURE_ROOT" init -q -b main
+  git -C "$REMOTE_FIXTURE_ROOT" config user.email test@example.com
+  git -C "$REMOTE_FIXTURE_ROOT" config user.name Test
+  git -C "$REMOTE_FIXTURE_ROOT" add AGENTS.md bin
+  git -C "$REMOTE_FIXTURE_ROOT" commit -qm 'tracked remote fixture'
+
+  fakebin=$(fm_fakebin "$TMP_ROOT/remote-transport")
+  cat > "$fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    --) shift; break ;;
+    *) exit 90 ;;
+  esac
+done
+host=$1
+entry=$2
+shift 2
+[ "$host" = remote-mac ] || exit 91
+[ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+case "${FM_FAKE_SSH_MODE:-normal}" in
+  unreachable) exit 255 ;;
+  *) exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
+esac
+SH
+  chmod +x "$fakebin/fake-ssh"
+  REMOTE_FIXTURE_SSH="$fakebin/fake-ssh"
+}
+
+# make_remote_route <home> <secondmate-id>: register a REMOTE secondmate route in
+# <home> and echo the path standing in for that secondmate's home on the far
+# machine. The parent-side task record carries the same route fm-spawn writes.
+# Callers run remote_fixture_prepare first, because this one is used in command
+# substitution and a subshell cannot publish the shared fixture globals.
+make_remote_route() {  # <home> <secondmate-id>
+  local home=$1 id=$2 remote_home
+  remote_home="$TMP_ROOT/$(basename "$home")-remote-$id"
+  mkdir -p "$remote_home/state" "$remote_home/data"
+  remote_home=$(cd "$remote_home" && pwd -P)
+  cat > "$home/data/secondmates.md" <<EOF
+- $id - remote lane (host: remote-mac; root: $REMOTE_FIXTURE_ROOT; home: $remote_home; scope: relay work; projects: firstmate; added 2026-08-02)
+EOF
+  fm_write_meta "$home/state/$id.meta" "kind=secondmate" "home=$remote_home" \
+    "remote_host=remote-mac" "remote_root=$REMOTE_FIXTURE_ROOT"
+  printf '%s\n' "$remote_home"
+}
+
+run_pf_remote() {  # <home> <args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FAKE_CURL_LOG="${FAKE_CURL_LOG:-}" \
+    FAKE_FOLLOWUP_CODE="${FAKE_FOLLOWUP_CODE:-200}" \
+    FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" \
+    FM_SSH_BIN="$REMOTE_FIXTURE_SSH" \
+    FM_FAKE_SSH_MODE="${FM_FAKE_SSH_MODE:-normal}" \
+    FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_FIXTURE_ROOT/bin/fm-remote-entrypoint.sh" \
+    FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    FM_REMOTE_JOB_STATE_ROOT="$REMOTE_FIXTURE_JOBS" \
+    "$PF" "$@"
+}
+
+run_pf_remote_timed() {  # <seconds> <home> <args...>
+  local seconds=$1 home=$2
+  shift 2
+  fm_run_timed "$seconds" env \
+    PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FAKE_CURL_LOG="${FAKE_CURL_LOG:-}" \
+    FAKE_FOLLOWUP_CODE="${FAKE_FOLLOWUP_CODE:-200}" \
+    FMX_NOW_OVERRIDE="${FMX_NOW_OVERRIDE:-$PF_TEST_NOW}" \
+    FM_SSH_BIN="$REMOTE_FIXTURE_SSH" \
+    FM_FAKE_SSH_MODE="${FM_FAKE_SSH_MODE:-normal}" \
+    FM_FAKE_REMOTE_ENTRYPOINT="$REMOTE_FIXTURE_ROOT/bin/fm-remote-entrypoint.sh" \
+    FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+    FM_REMOTE_JOB_STATE_ROOT="$REMOTE_FIXTURE_JOBS" \
+    "$PF" "$@"
+}
+
+# The reported failure: a public loop whose work lived in a REMOTE secondmate
+# home could never be closed. Its registration carries no local path, so the
+# legacy-link clear that every close runs first had nothing to act on and refused
+# forever - leaving the promise permanently open and, on the delivery path,
+# leaving a loop stuck at posted after the public reply had already landed.
+test_remote_secondmate_loop_delivers_and_retires() {
+  local home remote log
+  remote_fixture_prepare
+  home=$(make_home remote-retire)
+  remote=$(make_remote_route "$home" mini-default)
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" pf-remote-close req-remote-close secondmate:mini-default work-remote
+  fm_write_meta "$remote/state/work-remote.meta" \
+    "x_request=req-remote-close" "x_request_ts=1700000000" "x_followups=1"
+
+  # The trap condition, pinned so this case can never go vacuous: a remote route
+  # has no local home path to record, which is exactly what used to dead-end.
+  [ -z "$(sed -n 's/^work_home_path=//p' "$home/state/public-followup/registry/pf-remote-close")" ] \
+    || fail "a remote work home must register with no local path"
+
+  "$EMIT" --home "$home" --obligation pf-remote-close --relation rel-code \
+    --source-home secondmate:mini-default --work-id work-remote --generation 1 \
+    --outcome report-ready --deliverable report_path=data/work-remote/report.md \
+    --outcome-text 'The remote lane finished its investigation.' >/dev/null \
+    || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+
+  FAKE_CURL_LOG="$log" run_pf_remote "$home" deliver pf-remote-close >/dev/null \
+    || fail "delivery must not strand a remote-home loop after the public reply lands"
+  assert_no_grep 'x_request=' "$remote/state/work-remote.meta" \
+    "delivery must clear the legacy X link inside the remote home"
+  [ "$(delivery_state "$home" pf-remote-close)" = posted ] \
+    || fail "a delivered remote-home loop must reach posted"
+
+  run_pf_remote "$home" retire pf-remote-close --reason "handed on by hand" >/dev/null \
+    || fail "retire must be able to close a delivered remote-home loop"
+  assert_present "$home/state/public-followup/retired/pf-remote-close" \
+    "retiring a remote-home loop must record its receipt"
+  assert_absent "$home/state/public-followup/registry/pf-remote-close" \
+    "retiring a remote-home loop must drop its registration"
+  pass "a public loop bound to a remote secondmate home delivers and retires"
+}
+
+# --force governs the unresolved-obligation refusal and nothing else. It never
+# covered the legacy-link clear before this fix and must not start to now: a link
+# still verifiably in place keeps the loop open on either setting.
+test_remote_retire_force_semantics_unchanged() {
+  local home remote
+  remote_fixture_prepare
+  home=$(make_home remote-force)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-remote-open req-remote-open secondmate:mini-default work-open
+  seed_repro_commitment "$home" pf-remote-forced req-remote-forced secondmate:mini-default work-forced
+  fm_write_meta "$remote/state/work-open.meta" \
+    "x_request=req-remote-open" "x_request_ts=1700000000" "x_followups=1"
+  fm_write_meta "$remote/state/work-forced.meta" \
+    "x_request=req-remote-forced" "x_request_ts=1700000000" "x_followups=1"
+
+  expect_failure "an unresolved remote loop must still refuse a plain retire" \
+    run_pf_remote "$home" retire pf-remote-open --reason "not done yet"
+  assert_contains "$EXPECT_OUT" "hide an open public promise" \
+    "the refusal must still be the unresolved-obligation one"
+  assert_present "$home/state/public-followup/registry/pf-remote-open" \
+    "a refused retire must keep the registration"
+  assert_grep 'x_request=req-remote-open' "$remote/state/work-open.meta" \
+    "a refused retire must not touch the remote home's link"
+
+  run_pf_remote "$home" retire pf-remote-forced --reason "discarded" --force >/dev/null \
+    || fail "--force must still discard an unresolved remote-home loop"
+  assert_present "$home/state/public-followup/retired/pf-remote-forced" \
+    "a forced retire must record its receipt"
+  assert_no_grep 'x_request=' "$remote/state/work-forced.meta" \
+    "a forced retire must still clear the remote home's link"
+  pass "--force still covers only the unresolved obligation, not the link clear"
+}
+
+test_remote_retire_refuses_reassigned_route() {
+  local home original replacement log
+  remote_fixture_prepare
+  home=$(make_home remote-reassigned)
+  original=$(make_remote_route "$home" mate)
+  log="$home/curl.log"; : > "$log"
+  seed_repro_commitment "$home" pf-remote-reassigned req-remote-original secondmate:mate work-reused
+  fm_write_meta "$original/state/work-reused.meta" \
+    "x_request=req-remote-original" "x_request_ts=1700000000" "x_followups=1"
+  "$EMIT" --home "$home" --obligation pf-remote-reassigned --relation rel-code \
+    --source-home secondmate:mate --work-id work-reused --generation 1 \
+    --outcome report-ready --deliverable report_path=data/work-reused/report.md \
+    --outcome-text 'The original remote route finished its work.' >/dev/null || fail "emit failed"
+  run_pf "$home" consume >/dev/null || fail "consume failed"
+  FAKE_CURL_LOG="$log" run_pf_remote "$home" deliver pf-remote-reassigned >/dev/null \
+    || fail "delivery through the original remote route must succeed"
+
+  replacement="$TMP_ROOT/remote-replacement-mate"
+  mkdir -p "$replacement/state" "$replacement/data"
+  replacement=$(cd "$replacement" && pwd -P)
+  cat > "$home/data/secondmates.md" <<EOF
+- mate - replacement lane (host: remote-mac; root: $REMOTE_FIXTURE_ROOT; home: $replacement; scope: relay work; projects: firstmate; added 2026-08-03)
+EOF
+  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$replacement" \
+    "remote_host=remote-mac" "remote_root=$REMOTE_FIXTURE_ROOT"
+  fm_write_meta "$replacement/state/work-reused.meta" \
+    "status=working" "x_request=req-remote-replacement" "x_request_ts=1700000000" "x_followups=1"
+
+  expect_failure "retire must not clear a reassigned remote route" \
+    run_pf_remote "$home" retire pf-remote-reassigned --reason "original route retired"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "a mismatched remote identity must use the retained reconciliation refusal"
+  assert_present "$home/state/public-followup/registry/pf-remote-reassigned" \
+    "a mismatched remote identity must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-reassigned" \
+    "a mismatched remote identity must not write a retirement receipt"
+  assert_grep 'x_request=req-remote-replacement' "$replacement/state/work-reused.meta" \
+    "a mismatched remote identity must leave the replacement link untouched"
+  pass "retire fails closed when a remote route is reassigned"
+}
+
+test_remote_retire_refuses_unreadable_state() {
+  local home remote meta rc
+  remote_fixture_prepare
+  home=$(make_home remote-unreadable)
+  remote=$(make_remote_route "$home" mate)
+  seed_repro_commitment "$home" pf-remote-unreadable req-remote-unreadable secondmate:mate work-unreadable
+  meta="$remote/state/work-unreadable.meta"
+  fm_write_meta "$meta" \
+    "status=working" "x_request=req-remote-unreadable" "x_request_ts=1700000000" "x_followups=1"
+  chmod 700 "$remote/state"
+  chmod 000 "$remote/state"
+
+  rc=0
+  EXPECT_OUT=$(run_pf_remote "$home" retire pf-remote-unreadable --reason "cannot verify" --force 2>&1) || rc=$?
+  chmod 700 "$remote/state"
+  [ "$rc" -ne 0 ] || fail "retire must refuse an unreadable remote state (unexpectedly succeeded)"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "an unreadable remote state must use the retained reconciliation refusal"
+  assert_present "$home/state/public-followup/registry/pf-remote-unreadable" \
+    "an unreadable remote state must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-unreadable" \
+    "an unreadable remote state must not write a retirement receipt"
+  assert_grep 'x_request=req-remote-unreadable' "$meta" \
+    "an unreadable remote state must leave the link untouched"
+  pass "retire fails closed when remote state is unreadable"
+}
+
+test_remote_retire_refuses_nonwritable_state() {
+  local home remote meta rc
+  remote_fixture_prepare
+  home=$(make_home remote-nonwritable)
+  remote=$(make_remote_route "$home" mate)
+  seed_repro_commitment "$home" pf-remote-nonwritable req-remote-nonwritable secondmate:mate work-nonwritable
+  meta="$remote/state/work-nonwritable.meta"
+  fm_write_meta "$meta" \
+    "status=working" "x_request=req-remote-nonwritable" "x_request_ts=1700000000" "x_followups=1"
+  chmod 500 "$remote/state"
+
+  rc=0
+  EXPECT_OUT=$(run_pf_remote "$home" retire pf-remote-nonwritable --reason "cannot mutate" --force 2>&1) || rc=$?
+  chmod 700 "$remote/state"
+  [ "$rc" -ne 0 ] || fail "retire must refuse a non-writable remote state (unexpectedly succeeded)"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "a non-writable remote state must use the retained reconciliation refusal"
+  assert_present "$home/state/public-followup/registry/pf-remote-nonwritable" \
+    "a non-writable remote state must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-nonwritable" \
+    "a non-writable remote state must not write a retirement receipt"
+  assert_grep 'x_request=req-remote-nonwritable' "$meta" \
+    "a non-writable remote state must leave the link untouched"
+  pass "retire fails closed when remote state is non-writable"
+}
+
+test_remote_retire_accepts_nonwritable_absence() {
+  local home remote rc
+  remote_fixture_prepare
+  home=$(make_home remote-no-link)
+  remote=$(make_remote_route "$home" mate)
+  seed_repro_commitment "$home" pf-remote-no-link req-remote-no-link secondmate:mate work-no-link
+  fm_write_meta "$remote/state/work-no-link.meta" "status=done"
+  chmod 555 "$remote/state"
+
+  rc=0
+  run_pf_remote "$home" retire pf-remote-no-link --reason "already cleared" --force >/dev/null 2>&1 || rc=$?
+  chmod 700 "$remote/state"
+  [ "$rc" -eq 0 ] || fail "retire must accept an absent link without requiring write access"
+  assert_present "$home/state/public-followup/retired/pf-remote-no-link" \
+    "an absent link must permit a retirement receipt"
+  assert_absent "$home/state/public-followup/registry/pf-remote-no-link" \
+    "an absent link must close the registration"
+  assert_no_grep 'x_request=' "$remote/state/work-no-link.meta" \
+    "an already-cleared remote task must remain unlinked"
+  pass "retire accepts link absence in non-writable remote state"
+}
+
+# The guarded clear runs unattended over the transport, so it must REFUSE rather
+# than wedge when it cannot take the metadata lock. The writability precondition
+# narrows that window but cannot close it: the parent can turn non-writable
+# between that check and lock creation, and a lock held by a live holder is
+# indistinguishable from it at the acquire. The ordinary wait retries forever, so
+# before the bounded acquire this path hung instead of returning the
+# reconciliation refusal, leaving deliver or retire stuck with nothing reported.
+#
+# The state directory is deliberately left WRITABLE here, so a refusal can only
+# come from the bounded lock wait and never from the writability precondition.
+test_remote_retire_refuses_unacquirable_lock_without_hanging() {
+  local home remote meta lock holder rc started elapsed
+  remote_fixture_prepare
+  home=$(make_home remote-lock-bound)
+  remote=$(make_remote_route "$home" mate)
+  seed_repro_commitment "$home" pf-remote-lock req-remote-lock secondmate:mate work-lock
+  meta="$remote/state/work-lock.meta"
+  fm_write_meta "$meta" \
+    "status=working" "x_request=req-remote-lock" "x_request_ts=1700000000" "x_followups=1"
+
+  # A lock held by a genuinely live process: it cannot be reclaimed as stale, so
+  # the acquire can never succeed and only a bound can end the wait.
+  sleep 300 &
+  holder=$!
+  PF_TEST_LOCK_HOLDER=$holder
+  lock="$remote/state/.meta-work-lock.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$holder" > "$lock/pid"
+
+  started=$(date +%s)
+  rc=0
+  EXPECT_OUT=$(run_pf_remote_timed 30 "$home" retire pf-remote-lock --reason "lock held" --force 2>&1) || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  PF_TEST_LOCK_HOLDER=
+  rm -rf "$lock"
+
+  [ "$rc" -ne 124 ] \
+    || fail "the guarded clear exceeded the test harness deadline"
+  [ "$rc" -ne 0 ] || fail "retire must refuse when the metadata lock cannot be acquired"
+  # The bound is what this case exists to prove. An unbounded wait reaches the
+  # independent harness deadline instead of this observable refusal.
+  [ "$elapsed" -lt 30 ] \
+    || fail "the guarded clear did not return promptly; it waited ${elapsed}s for an unacquirable lock"
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "an unacquirable lock must use the retained reconciliation refusal"
+  assert_present "$home/state/public-followup/registry/pf-remote-lock" \
+    "an unacquirable lock must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-lock" \
+    "an unacquirable lock must not write a retirement receipt"
+  assert_grep 'x_request=req-remote-lock' "$meta" \
+    "an unacquirable lock must leave the remote link untouched"
+  pass "the guarded remote clear refuses a lock it cannot acquire instead of hanging"
+}
+
+# fm-on.sh passes ssh's status through, so 255 is unknown remote completion, not
+# proof the clear failed. The close must refuse and retain rather than either
+# claiming the link is gone or reporting a definite failure, so reconciliation
+# lands on the host that actually owns the answer.
+test_remote_unconfirmed_clear_is_unknown_completion() {
+  local home remote
+  remote_fixture_prepare
+  home=$(make_home remote-unknown)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-remote-unknown req-remote-unknown secondmate:mini-default work-unknown
+  fm_write_meta "$remote/state/work-unknown.meta" \
+    "x_request=req-remote-unknown" "x_request_ts=1700000000" "x_followups=1"
+
+  FM_FAKE_SSH_MODE=unreachable \
+    expect_failure "an unconfirmed remote clear must not close the loop" \
+    run_pf_remote "$home" retire pf-remote-unknown --reason "closing" --force
+  assert_contains "$EXPECT_OUT" "could not clear the legacy X link" \
+    "an unconfirmed remote clear must still report the link as unresolved"
+  assert_contains "$EXPECT_OUT" "never confirmed the clear" \
+    "unknown remote completion must be named, not reported as a definite failure"
+  assert_present "$home/state/public-followup/registry/pf-remote-unknown" \
+    "unknown remote completion must retain the registration"
+  assert_absent "$home/state/public-followup/retired/pf-remote-unknown" \
+    "unknown remote completion must not record a retirement receipt"
+  assert_grep 'x_request=req-remote-unknown' "$remote/state/work-unknown.meta" \
+    "an unreachable host must leave the remote link exactly as it was"
+  pass "an unconfirmed remote clear is unknown completion, never a silent close"
+}
+
+# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
+# register regression. The rest of this file is not a 3.2 snapshot suite.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_outcome_text_is_bounded_without_corrupting_characters
 test_restart_e2e_delivers_exactly_once
 test_duplicate_event_and_replay_are_noops
@@ -2239,6 +2729,7 @@ test_rechain_delivers_second_post_on_same_thread
 test_rechain_resumes_after_partial_add
 test_rechain_claims_delivered_source_once
 test_failed_rechain_retirement_keeps_source_claimed
+test_first_register_succeeds_with_empty_lock_list_under_bash32
 test_registration_replay_preserves_delivery_and_retirement
 test_redelivery_does_not_report_retired_loop_open
 test_retire_after_secondmate_home_removal
@@ -2253,3 +2744,11 @@ test_brief_fails_without_typed_deliverable_keys
 test_prechange_registration_is_open_and_unrechainable
 test_x_request_teardown_warns_when_final_unposted
 test_secondmate_promotion_uses_teardown_parent_resolution
+test_remote_secondmate_loop_delivers_and_retires
+test_remote_retire_force_semantics_unchanged
+test_remote_retire_refuses_reassigned_route
+test_remote_retire_refuses_unreadable_state
+test_remote_retire_refuses_nonwritable_state
+test_remote_retire_accepts_nonwritable_absence
+test_remote_retire_refuses_unacquirable_lock_without_hanging
+test_remote_unconfirmed_clear_is_unknown_completion
