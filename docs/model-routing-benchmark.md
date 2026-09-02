@@ -1,0 +1,57 @@
+# Model-routing benchmark gates
+
+Firstmate's three-track model-routing benchmark decides standing routes, so a wrong result changes how every future task is dispatched.
+An independent adversarial review of its design found that its safety properties were promises rather than enforcement, and produced a correction set that must hold before any entrant launches.
+This document owns why each gate exists and where its authority stops.
+Exact flags, schema keys, and directory layout live in `bin/fm-bench-gate.sh`'s header and `--help`, which is their single owner.
+
+## The enforcement principle
+
+Every gate recomputes its own evidence rather than reading a declared verdict.
+Content addresses are recomputed from stored bytes, run and judge counts are derived from the frozen plan, isolation probes are executed inside the declared confinement, and archived bundles are restored into a fresh repository and rebound to their recorded tree.
+A gate that cannot obtain its evidence refuses; an unproven denial is never treated as a denial.
+
+## What each gate enforces
+
+| Gate | The review finding it closes |
+|---|---|
+| `plan-check` | Three packets run twice are not six independent samples; 5/6 and 4/6-plus-margin have uncalibrated false-promotion rates; candidate-specific judge exclusions make candidates incomparable; the specification author must not interpret its own unstated intent; an inconclusive result is "no standing route", never an adaptive ninth sample. |
+| `freeze` / `freeze-check` | Packets, ground truth, scoring code, judge prompts, model tuples, the randomisation seed, and the failure policy are fixed before labels exist, and any later edit is visible. |
+| `provenance-check` | A historical security packet may be replayed only after every original author, reviewer, and judge is positively identified by task, resolved model id, family, and session. "No record found" fails. |
+| `isolation-verify` | Opaque labels and a transcript grep hide metadata but neither prevent nor detect sibling access. The gate runs the exact bypasses the grep missed and requires each to be denied. |
+| `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, mutation calibration, and one bound capture record per candidate head are all required. |
+| `manifest-build` / `manifest-check` | The original run, judge, capture, and cost arithmetic did not add up, and cost and elapsed time were tie-breakers while unmeasurable. Every count is now derived, and cost is low/base/high arithmetic rather than a quoted range. |
+| `promote-evaluate` | Only a six-of-six paired sweep with the predeclared margin, no blocker-class failure, and no regression against the baseline veto is eligible, and the captain still gives the word. |
+| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup. Cleanup is authorised only by a drill that really restored every bundle, and only while the receipt still matches the archive's current bytes. |
+| `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. |
+
+## Where the refusal actually bites
+
+A gate an operator can forget to run is not enforcement.
+`bin/fm-bench-launch-lib.sh` is sourced by `bin/fm-spawn.sh` and refuses any task id under the reserved `bench-` prefix unless a passing preflight receipt exists and still matches `benchmark.json`'s current bytes.
+Editing the plan after a pass invalidates every receipt written against it, so a relaxed threshold or a swapped packet cannot ride an old clearance.
+Task ids outside that prefix cost one string comparison and are otherwise untouched.
+This mirrors the chokepoint pattern in `bin/fm-gate-refuse-lib.sh`, including its documented test-harness hatch.
+
+## Isolation is proven, not declared
+
+`bin/fm-bench-confine.sh` is the control and `bin/fm-bench-probe.sh` is the attack.
+The gate never trusts the mechanism name: it runs each probe unconfined first as a positive control, and only a probe that demonstrably reaches its target can then prove anything by being denied.
+A mechanism this host cannot enforce therefore surfaces as a refused launch naming the concrete unmet requirement, never as a silent downgrade to cooperative isolation.
+
+Only a mechanism with its own PID namespace confines processes as well as storage and filesystem.
+`docs/verification/model-routing-benchmark.md` records the dated per-mechanism result.
+
+## The two captain-stop conditions
+
+Exit code 3 is reserved for a new fact the captain must rule on, and neither may be resolved by substituting a packet or expanding a budget:
+
+- every historical packet in a track fails its contamination check, and
+- the measured high-cost case exceeds the approved cost class.
+
+Everything else is either a pass or an ordinary refusal naming the correction that is not yet met.
+
+## Extending this
+
+A new correction becomes a new check inside `bin/fm-bench-gate.py`, with its refusal message naming the property it protects, plus a case in `tests/fm-bench-gate.test.sh` that proves the check bites.
+A check that cannot be made to fail in a test is not enforcement; add the failing fixture first.
