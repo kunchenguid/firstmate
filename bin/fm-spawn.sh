@@ -3101,6 +3101,10 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    # herdr_task_label is emitted only on a fresh spawn: a relaunch adopts the
+    # recorded tab without renaming it, so the prior meta's recorded label is
+    # still the tab's exact label and survives through preserve_relaunch_meta
+    # (not an owned key), while a recomputed label could diverge from it.
     [ "$RELAUNCH" -eq 1 ] || echo "herdr_task_label=$HERDR_TASK_LABEL"
   fi
   if [ "$BACKEND" = zellij ]; then
