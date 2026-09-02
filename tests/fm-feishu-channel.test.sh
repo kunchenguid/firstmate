@@ -2694,13 +2694,107 @@ env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=rate-lim
 node -e 'const fs=require("fs");const sends=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse).filter(r=>r.type==="send");if(sends.length!==2||sends[1].at-sends[0].at<900||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.msgType!=="post"))process.exit(1)' "$SDK_LOG" \
   || fail "SDK Retry-After mapping shortened the delay, changed UUID, or fell back from Markdown"
 
+RICH_HOME="$TMP_ROOT/rich-post-home"
+RICH_EVENTS="$TMP_ROOT/rich-post-events.json"
+prepare_bound_transport_home "$RICH_HOME"
+printf 'owned\n' > "$RICH_HOME/lock-mode"
+cat > "$RICH_EVENTS" <<'JSON'
+[
+  {"kind":"event","data":{"event_id":"evt_sdk_post_numbered_links","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkRichPost1234","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"\",\"content\":[[{\"tag\":\"text\",\"text\":\"请帮我查看以下 Pearl 详情：\"}],[{\"tag\":\"text\",\"text\":\"1. \"},{\"tag\":\"a\",\"href\":\"https://pearl.example.test/detail/alpha\",\"text\":\"Pearl 详情一\"},{\"tag\":\"text\",\"text\":\" - 检查预算配置\"}],[{\"tag\":\"text\",\"text\":\"2. \"},{\"tag\":\"a\",\"href\":\"https://pearl.example.test/detail/bravo\",\"text\":\"Pearl 详情二\"},{\"tag\":\"text\",\"text\":\" - 检查定向配置\"}],[{\"tag\":\"text\",\"text\":\"3. \"},{\"tag\":\"a\",\"href\":\"https://pearl.example.test/detail/charlie\",\"text\":\"Pearl 详情三\"},{\"tag\":\"text\",\"text\":\" - 检查出价配置\"}],[{\"tag\":\"text\",\"text\":\"请逐一确认后告诉我结果。\"}]]}}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_post_unauthorized_link","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_other1234"},"sender_type":"user"},"message":{"message_id":"om_sdkOtherPost1234","create_time":"31","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"\",\"content\":[[{\"tag\":\"a\",\"href\":\"https://pearl.example.test/detail/not-delivered\",\"text\":\"不得投递\"}]]}}"}}}
+]
+JSON
+env FM_HOME="$RICH_HOME" FM_FEISHU_SDK_MODULE="$MOCK_SDK" FM_FEISHU_SDK_TEST_MODE=1 \
+  FM_FAKE_SDK_EVENTS="$RICH_EVENTS" FM_FEISHU_OUTBOX_POLL_MS=20 \
+  node bin/fm-feishu-transport.mjs run --daemon >"$TMP_ROOT/rich-post.out" 2>"$TMP_ROOT/rich-post.err" &
+RICH_PID=$!
+TEST_DAEMON_PIDS+=("$RICH_PID")
+wait_for_transport_phase "$RICH_HOME" healthy || fail "rich-text transport fixture did not become healthy"
+FM_HOME="$RICH_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_FEISHU_LOCK_STATUS_SCRIPT="$LOCK_SCRIPT" \
+FM_FEISHU_LIFECYCLE_SCRIPT="$LIFECYCLE_SCRIPT" SESSION_FILE="$TRANSPORT_FILE" SESSION_DIR="$TRANSPORT_SESSION" SID="$SID" \
+node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { ingressCounts } from "./bin/fm-feishu-state.mjs";
+import { parseFeishuMarker, registerFeishuNativeChannel } from "./.pi/extensions/lib/fm-feishu-native-channel.ts";
+
+const handlers = new Map();
+const eventChannels = new Map();
+const sends = [];
+const entries = [];
+const pi = {
+  events: {
+    on(channel, handler) {
+      const listeners = eventChannels.get(channel) ?? new Set();
+      listeners.add(handler);
+      eventChannels.set(channel, listeners);
+      return () => listeners.delete(handler);
+    },
+  },
+  on(event, handler) {
+    const listeners = handlers.get(event) ?? [];
+    listeners.push(handler);
+    handlers.set(event, listeners);
+  },
+  registerCommand() {},
+  registerMarkdownTransformer() {},
+  sendUserMessage(content, options) { sends.push({ content, options }); },
+  appendEntry() {},
+};
+const ctx = {
+  mode: "tui",
+  hasUI: true,
+  cwd: process.env.SESSION_DIR,
+  isProjectTrusted: () => true,
+  isIdle: () => true,
+  sessionManager: {
+    getSessionFile: () => process.env.SESSION_FILE,
+    getSessionId: () => process.env.SID,
+    getHeader: () => ({ id: process.env.SID, cwd: process.env.SESSION_DIR }),
+    getEntries: () => entries,
+  },
+  ui: { notify() {}, setStatus() {} },
+};
+const emit = async (name, event = {}) => {
+  for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
+};
+registerFeishuNativeChannel(pi);
+await emit("session_start", { reason: "startup" });
+for (let attempt = 0; attempt < 50 && sends.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+assert.equal(sends.length, 1, "authorized numbered rich-text post did not become exactly one normal Pi user message");
+const delivered = sends[0];
+assert.equal(delivered.options?.deliverAs, "steer", "numbered rich-text post bypassed Pi's normal native steering queue");
+assert.deepEqual(delivered.content.map((part) => part.type), ["text", "text"], "text-only rich post changed the native Pi content shape");
+const expected = [
+  "请帮我查看以下 Pearl 详情：",
+  "1. Pearl 详情一 (https://pearl.example.test/detail/alpha) - 检查预算配置",
+  "2. Pearl 详情二 (https://pearl.example.test/detail/bravo) - 检查定向配置",
+  "3. Pearl 详情三 (https://pearl.example.test/detail/charlie) - 检查出价配置",
+  "请逐一确认后告诉我结果。",
+].join("\n");
+assert.equal(delivered.content[1].text, `\n${expected}`, "Pi delivery lost rich-text order, labels, hrefs, adjacent Chinese text, or meaningful line breaks");
+assert(!JSON.stringify(delivered).includes("ou_captain1234") && !JSON.stringify(delivered).includes("oc_chat1234") && !JSON.stringify(delivered).includes("om_sdkRichPost1234"), "private transport identity leaked into the Pi message");
+const marker = parseFeishuMarker(delivered.content[0].text);
+assert.ok(marker, "rich-text Pi delivery lost its privacy-safe durable marker");
+entries.push({ type: "message", id: "10000001", parentId: null, timestamp: "2026-09-02T00:00:00.000Z", message: { role: "user", content: delivered.content } });
+await emit("message_start", { message: entries[0].message });
+assert.equal(ingressCounts(process.env.FM_HOME).delivered, 1, "rich-text delivery was not durably acknowledged after exact-session observation");
+await new Promise((resolve) => setTimeout(resolve, 600));
+assert.equal(sends.length, 1, "repeated bridge pumps duplicated the numbered rich-text message");
+await emit("session_shutdown", { reason: "test-complete" });
+JS
+kill -TERM "$RICH_PID"
+wait "$RICH_PID"
+untrack_feishu_daemon "$RICH_PID"
+
 SDK_MEDIA_EVENTS="$TMP_ROOT/mock-sdk-media-events.json"
 SDK_RESOURCE_MARK="$TMP_ROOT/mock-sdk-resource-mark"
 cat > "$SDK_MEDIA_EVENTS" <<'JSON'
 [
   {"kind":"event","data":{"event_id":"evt_sdk_post_bad","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkBadPost12","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"bad\",\"content\":[[{\"tag\":\"text\",\"text\":\"ok\"}],\"not-a-paragraph\"]}}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_post_fully_bad","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkFullyBad1234","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"\",\"content\":[\"not-a-paragraph\"]}}"}}},
   {"kind":"event","data":{"event_id":"evt_sdk_post_text_only","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkTextPost12","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"Observed title\",\"content\":[[{\"tag\":\"text\",\"text\":\"first text \"},{\"tag\":\"text\",\"text\":\"second text\"}]],\"content_v2\":[[{\"tag\":\"text\",\"text\":\"first text \"},{\"tag\":\"text\",\"text\":\"second text\"}]]}}"}}},
-  {"kind":"event","data":{"event_id":"evt_sdk_post_unsupported","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkUnsupported12","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"unsupported\",\"content\":[[{\"tag\":\"file\",\"file_key\":\"file_v2_unsupported\"}]]}}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_post_unsupported","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkUnsupported12","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"\",\"content\":[[{\"tag\":\"file\",\"file_key\":\"file_v2_unsupported\"}]]}}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_post_mixed_unsupported","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkMixedPost1234","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"\",\"content\":[[{\"tag\":\"text\",\"text\":\"保留前文 \"},{\"tag\":\"a\",\"text\":\"失效链接\"},{\"tag\":\"text\",\"text\":\" \"},{\"tag\":\"file\",\"file_key\":\"file_v2_not_exposed\"},{\"tag\":\"text\",\"text\":\" \"},{\"tag\":\"img\",\"image_key\":\"../not-exposed\"},{\"tag\":\"text\",\"text\":\" 保留后文\"}]]}}"}}},
   {"kind":"event","data":{"event_id":"evt_sdk_post_en","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkEnPost1234","create_time":"31","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"en_us\":{\"title\":\"english\",\"content\":[[{\"tag\":\"text\",\"text\":\"english body\"},{\"tag\":\"img\",\"image_key\":\"img_v2_sdk_fixture\"}]]}}"}}},
   {"kind":"event","data":{"event_id":"evt_sdk_after_bad","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkAfterBad12","create_time":"32","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"text","content":"{\"text\":\"survived malformed post\"}"}}},
   {"kind":"event","data":{"event_id":"evt_sdk_retry_img","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkRetryImg12","create_time":"33","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"image","content":"{\"image_key\":\"img_v2_flaky_retry\"}"}}},
@@ -2734,13 +2828,18 @@ assert.ok(textOnlyPost, "server-realistic text-only post was not durably accepte
 assert.equal(textOnlyPost.message_type, "post");
 assert.deepEqual(textOnlyPost.content, [{ type: "text", text: "Observed title\nfirst text second text" }], "text-only post title or multiple text elements changed during SDK normalization");
 assert.equal(inbox.filter((event) => event.message_id === "om_sdkTextPost12").length, 1, "SDK replay duplicated the text-only post");
+const partlyMalformed = inbox.find((event) => event.message_id === "om_sdkBadPost12");
+assert.deepEqual(partlyMalformed?.content, [{ type: "text", text: "bad\nok\n[Feishu malformed-paragraph rich-text element unavailable]" }], "one malformed rich-text paragraph erased valid surrounding content or lacked a deterministic safe marker");
+const mixedUnsupported = inbox.find((event) => event.message_id === "om_sdkMixedPost1234");
+assert.deepEqual(mixedUnsupported?.content, [{ type: "text", text: "保留前文 失效链接[Feishu malformed-link rich-text element unavailable] [Feishu file rich-text element unavailable] [Feishu malformed-image rich-text element unavailable] 保留后文" }], "malformed or unsupported rich-text elements erased valid surrounding content or lacked deterministic safe markers");
+assert(!JSON.stringify(mixedUnsupported).includes("file_v2_not_exposed") && !JSON.stringify(mixedUnsupported).includes("../not-exposed"), "rich-text fallback exposed a private resource key");
 const enPost = inbox.find((event) => event.message_id === "om_sdkEnPost1234");
 assert.ok(enPost, "well-formed en_us post was not accepted");
 assert.deepEqual(enPost.content.map((part) => part.type), ["text", "image"], "en_us post text/image order was lost");
 assert.ok(inbox.some((event) => event.message_id === "om_sdkAfterBad12"), "text after a malformed post was not accepted");
 const quarantine = readdirSync(join(stateRoot, "quarantine", "malformed-content")).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(stateRoot, "quarantine", "malformed-content", name), "utf8")));
-const badPost = quarantine.find((record) => record.data?.message_id_hash === sha("om_sdkBadPost12"));
-assert.ok(badPost, "malformed post structure was not quarantined");
+const badPost = quarantine.find((record) => record.data?.message_id_hash === sha("om_sdkFullyBad1234"));
+assert.ok(badPost, "wholly malformed post structure was not quarantined");
 assert.equal(badPost.kind, "malformed-content");
 assert.equal(badPost.data.message_type, "post");
 assert.ok(Number.isSafeInteger(badPost.data.content_size_bytes) && badPost.data.content_size_bytes > 0, "malformed post quarantine lost non-sensitive size metadata");
