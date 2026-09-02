@@ -110,6 +110,19 @@ daemon_lock_held_by_live_daemon() {
   daemon_pid_matches "$pid" "$owner"
 }
 
+# fm_afk_supervision_covered: away-mode supervision is covered only when the
+# durable state/.afk flag is present AND the daemon lock is held by a live
+# daemon. daemon_lock_held_by_live_daemon owns the liveness predicate; this
+# function is the one owner of the flag pairing. A present flag with no live
+# daemon means nobody is supervising, so coverage consumers (the turn-end
+# guard, session-start reconciliation) must treat it as NOT covered - fail
+# closed, never assume coverage that could not be proved - instead of trusting
+# the flag alone.
+fm_afk_supervision_covered() {
+  [ -e "$FM_AFK_STATE/.afk" ] || return 1
+  daemon_lock_held_by_live_daemon
+}
+
 fm_afk_flag_write() {  # <state-dir>
   local state=$1 lock="$1/.cursor-park-owner.lock" pending attempt=0 status=1
   mkdir -p "$state" || return 1

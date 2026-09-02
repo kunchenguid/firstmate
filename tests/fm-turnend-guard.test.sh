@@ -115,6 +115,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-afk-start.sh" "$dir/bin/fm-afk-start.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
@@ -206,6 +207,22 @@ nonexistent_pid() {
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
+}
+
+# The away-mode daemon's lock identity, computed the same way as the watcher's:
+# a real pid plus the identity fm_pid_identity renders, so the shared
+# daemon_lock_held_by_live_daemon predicate can confirm the holder end to end.
+daemon_identity() {
+  local dir=$1 pid=$2
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
+}
+
+record_live_daemon_lock() {
+  local dir=$1 pid=$2 identity
+  identity=$(daemon_identity "$dir" "$pid") || fail "could not identify live daemon holder"
+  mkdir -p "$dir/state/.supervise-daemon.lock"
+  printf '%s\n' "$pid" > "$dir/state/.supervise-daemon.lock/pid"
+  printf '%s\n' "$identity" > "$dir/state/.supervise-daemon.lock/pid-identity"
 }
 
 record_watcher_lock() {
@@ -361,6 +378,69 @@ test_hook_blocks_when_unhealthy_in_primary() {
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
   pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
+}
+
+# Away-mode coverage is the flag PAIRED with a live daemon, never the flag alone
+# (issue #3366). The four tests below drive the flag x daemon-liveness matrix
+# through the real hook and the shared daemon_lock_held_by_live_daemon
+# predicate, with real processes holding the daemon lock.
+
+test_hook_afk_flag_with_live_daemon_keeps_away_guidance() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-live-daemon")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  record_live_daemon_lock "$dir" "$pid"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "hook must still block a blind turn under genuinely covered away mode"
+  assert_contains "$out" "Away mode owns watcher supervision" "covered away mode lost its daemon-ownership repair guidance"
+  assert_not_contains "$out" "$REQUIRED_REASON" "covered away mode must not render the ordinary watcher repair line"
+  pass "fm-turnend-guard: away flag with a live daemon keeps the away-mode repair guidance unchanged"
+}
+
+test_hook_afk_stale_flag_reaches_ordinary_repair() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-stale-flag")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must still block a blind turn when the stale flag claims away mode"
+  assert_contains "$out" "$REQUIRED_REASON" "a stale flag with a dead daemon must reach the ordinary watcher repair line"
+  assert_not_contains "$out" "Away mode owns watcher supervision" "the stale away flag must not render daemon-ownership guidance"
+  pass "fm-turnend-guard: a stale away flag with a dead daemon does not stand down and reaches watcher repair"
+}
+
+test_hook_afk_flag_absent_unchanged() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-absent")
+  : > "$dir/state/task1.meta"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block a blind turn with the away flag absent"
+  assert_contains "$out" "$REQUIRED_REASON" "flag-absent block must keep the ordinary watcher repair line"
+  assert_not_contains "$out" "Away mode owns watcher supervision" "flag-absent block must not render away-mode guidance"
+  pass "fm-turnend-guard: absent away flag leaves the block reason unchanged"
+}
+
+test_hook_afk_liveness_indeterminate_treated_not_covered() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-indeterminate")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  # The daemon lock exists and claims a holder, but its pid record is unusable,
+  # so liveness genuinely cannot be determined from it. Coverage must fail
+  # closed to the ordinary repair path, never assume a supervisor it cannot
+  # prove.
+  mkdir -p "$dir/state/.supervise-daemon.lock"
+  printf 'not-a-pid\n' > "$dir/state/.supervise-daemon.lock/pid"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must still block a blind turn when daemon liveness is indeterminate"
+  assert_contains "$out" "$REQUIRED_REASON" "indeterminate liveness must reach the ordinary watcher repair line"
+  assert_not_contains "$out" "Away mode owns watcher supervision" "indeterminate liveness must not render daemon-ownership guidance"
+  pass "fm-turnend-guard: indeterminate daemon liveness is treated as not covered (fail closed)"
 }
 
 test_hook_blocks_from_fm_home_state() {
@@ -1667,17 +1747,41 @@ test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch() {
 }
 
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
-  local dir out status
+  local dir pid out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-afk")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  record_live_daemon_lock "$dir" "$pid"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "genuinely covered away mode must not use a stale Stop-autoarm failure to fail open"
+  assert_contains "$out" 'Away mode owns watcher supervision' "covered away mode block lost its daemon ownership guidance"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "covered away mode consumed the Stop-autoarm attended alarm"
+  pass "fm-turnend-guard --claude: covered away ownership excludes the Stop-autoarm fail-open"
+}
+
+# The stale-flag half of the same pairing: a present flag with NO live daemon
+# does not own supervision, so it must not suppress the verified attended
+# fail-open either - nobody is supervising, and the session must hear that
+# loudly instead of being told a dead daemon owns the watcher.
+test_hook_claude_mode_stale_afk_flag_reaches_attended_fail_open() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-afk-stale")
   : > "$dir/state/task1.meta"
   : > "$dir/state/.afk"
   seed_claude_failure "$dir"
   seed_claude_budget "$dir" 3
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
-  expect_code 2 "$status" "away mode must not use a stale Stop-autoarm failure to fail open"
-  assert_contains "$out" 'Away mode owns watcher supervision' "away-mode block lost its daemon ownership guidance"
-  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "away mode consumed the Stop-autoarm attended alarm"
-  pass "fm-turnend-guard --claude: away ownership excludes the Stop-autoarm fail-open"
+  expect_code 0 "$status" "a stale flag with a dead daemon must not block away-mode deferral forever"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the attended fail-open lost its loud genuinely-down message"
+  assert_contains "$out" 'Keep this session attended' "the attended fail-open must tell the session to stay attended"
+  [ -f "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "the stale flag suppressed the one-time attended alarm"
+  pass "fm-turnend-guard --claude: a stale away flag with a dead daemon reaches the loud attended fail-open"
 }
 
 test_hook_claude_mode_allow_resets_budget() {
@@ -1765,6 +1869,10 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
+test_hook_afk_flag_with_live_daemon_keeps_away_guidance
+test_hook_afk_stale_flag_reaches_ordinary_repair
+test_hook_afk_flag_absent_unchanged
+test_hook_afk_liveness_indeterminate_treated_not_covered
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_x_mode_only_blocks_in_default_mode
@@ -1817,6 +1925,7 @@ test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
+test_hook_claude_mode_stale_afk_flag_reaches_attended_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary

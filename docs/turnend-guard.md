@@ -43,6 +43,10 @@ Without that proof an unheld lock alarms exactly as it did before, so an unloade
 Under every persistent-watcher harness a live identity-matched watcher with a fresh beacon is still required, so the pull guard keeps the same strict semantics there.
 Its banner names the true failing condition, either a missing live watcher process or a genuinely stale beacon with its real age, and keys the once-per-episode dedup on that condition rather than the beacon mtime.
 
+Away-mode coverage at the guard is never the flag alone: `block_stop` renders the away-mode repair line and the `--claude` attended fail-open stays excluded only when `state/.afk` is present and `fm_afk_supervision_covered` in `bin/fm-afk-start.sh` confirms the away-mode daemon lock is held by a live daemon.
+A present flag with no live daemon, or daemon liveness that cannot be proved, takes the ordinary watcher repair path and counts as not covered.
+Session start pairs the same flag with the same predicate for its AFK presentation, so a stale flag cannot claim coverage across a restart either.
+
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot safely read loop-guard fields.
@@ -159,7 +163,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` open-generation claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, generation and legacy claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the away-mode flag-and-live-daemon coverage matrix, the cooperative `--claude` open-generation claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, generation and legacy claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and stale-beacon alarm, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, Pi-host stand-down without Cursor identity and continued parking when `PI_CODING_AGENT` leaks alongside `CURSOR_AGENT` or `CURSOR_INVOKED_AS`, child-worktree exclusion, and that the adapter never exits 2.

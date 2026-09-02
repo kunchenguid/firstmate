@@ -146,6 +146,14 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# fm-afk-start.sh provides the shared away-mode coverage pairing
+# (fm_afk_supervision_covered: flag present AND daemon_lock_held_by_live_daemon);
+# it is sourceable (BASH_SOURCE guard) and its main does not run on source. It
+# sets `set -eu`, so turn errexit back off immediately to restore this guard's
+# `set -u`-only flow, exactly as bin/fm-afk-launch.sh consumes it.
+# shellcheck source=bin/fm-afk-start.sh
+. "$SCRIPT_DIR/fm-afk-start.sh"
+set +e
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
@@ -174,7 +182,7 @@ fi
 block_stop() {
   local afk x_mode reason rule
   afk=0
-  [ -e "$STATE/.afk" ] && afk=1
+  fm_afk_supervision_covered && afk=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
@@ -385,7 +393,7 @@ terminal_fail_open() {
 
 failure_episode_verified() {
   local outcome
-  [ ! -e "$STATE/.afk" ] || return 1
+  ! fm_afk_supervision_covered || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in

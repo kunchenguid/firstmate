@@ -213,6 +213,43 @@ make_fake_ps_claude() {
   make_fake_ps_harness "$fakebin" claude
 }
 
+# make_fake_ps_with_daemon_identity <fakebin>: the harness ps fake, extended so
+# the daemon-lock identity verification forms (ps -o lstart= -o command=)
+# delegate to the real ps. A real live daemon pid can then be confirmed by
+# fm_pid_identity under the fake toolchain PATH, so the away-mode coverage
+# pairing is exercised against a real process end to end.
+make_fake_ps_with_daemon_identity() {
+  local fakebin=$1
+  make_fake_ps_claude "$fakebin"
+  mv "$fakebin/ps" "$fakebin/ps.harness"
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  *"lstart="*|*"command="*) exec /bin/ps "\$@" ;;
+esac
+exec "$fakebin/ps.harness" "\$@"
+SH
+  chmod +x "$fakebin/ps"
+}
+
+# daemon_identity <state-dir> <pid>: the pid identity the shared
+# daemon_lock_held_by_live_daemon predicate verifies, computed outside the fake
+# toolchain PATH so both the recorded and re-read identity come from real ps.
+daemon_identity() {  # <state-dir> <pid>
+  FM_STATE_OVERRIDE="$1" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$2"
+}
+
+# record_live_daemon_lock <home> <pid>: write the supervise-daemon lock the
+# same way a live daemon does - owner dir, live pid, matching pid-identity.
+record_live_daemon_lock() {  # <home> <pid>
+  local home=$1 pid=$2 identity
+  identity=$(daemon_identity "$home/state" "$pid") || fail "could not identify live away-mode daemon holder"
+  mkdir -p "$home/state/.supervise-daemon.lock"
+  printf '%s\n' "$pid" > "$home/state/.supervise-daemon.lock/pid"
+  printf '%s\n' "$identity" > "$home/state/.supervise-daemon.lock/pid-identity"
+}
+
 make_fake_ps_harness() {
   local fakebin=$1 harness=$2
   cat > "$fakebin/ps" <<'SH'
@@ -2375,8 +2412,38 @@ EOF
 }
 
 test_next_step_afk_delegates_to_daemon() {
-  local rec root home fakebin out
+  local rec root home fakebin out daemon_pid
   rec=$(new_world next-step-afk)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_with_daemon_identity "$fakebin"
+  : > "$home/state/.afk"
+  sleep 60 &
+  daemon_pid=$!
+  record_live_daemon_lock "$home" "$daemon_pid"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+
+  assert_contains "$out" "away-mode supervision is active" "AFK digest did not report away mode"
+  assert_contains "$out" "Away mode is active" "next step did not switch to AFK guidance"
+  assert_contains "$out" "daemon owns the watcher" "next step did not delegate watcher ownership to the daemon"
+  assert_contains "$out" "- Away mode: active" "supervision block did not include active AFK state"
+  assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
+
+  pass "next step delegates watcher ownership to the AFK daemon (flag paired with a live daemon)"
+}
+
+# A stale flag with no live daemon is the lie the away-mode reconciliation
+# exists to catch: session start must present away mode as NOT covered instead
+# of inheriting the flag's silent claim (issue #3366).
+test_afk_stale_flag_does_not_claim_coverage() {
+  local rec root home fakebin out
+  rec=$(new_world afk-stale-flag)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
@@ -2386,13 +2453,12 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "away-mode supervision is active" "AFK digest did not report away mode"
-  assert_contains "$out" "Away mode is active" "next step did not switch to AFK guidance"
-  assert_contains "$out" "daemon owns the watcher" "next step did not delegate watcher ownership to the daemon"
-  assert_contains "$out" "- Away mode: active" "supervision block did not include active AFK state"
-  assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
+  assert_contains "$out" "present but the away-mode daemon is not running" "AFK digest did not expose the stale flag"
+  assert_contains "$out" "away-mode supervision is NOT covered" "AFK digest did not report the lost coverage"
+  assert_contains "$out" "- Away mode: inactive" "supervision block still claimed away-mode coverage from the stale flag"
+  assert_not_contains "$out" "Away mode is active" "next step still delegated ownership to a dead daemon"
 
-  pass "next step delegates watcher ownership to the AFK daemon"
+  pass "a stale away flag cannot claim away-mode supervision at session start"
 }
 
 test_supervision_block_exactly_one_and_pi_diagnostic() {
@@ -2583,6 +2649,7 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_afk_stale_flag_does_not_claim_coverage
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
