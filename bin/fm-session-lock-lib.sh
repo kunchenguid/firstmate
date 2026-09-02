@@ -158,6 +158,20 @@ fm_win_untag_pid() {  # <pid>
   return 1
 }
 
+# True when $1 is a well-formed session-lock identity: a local pid, or a tagged
+# Windows pid. Every reader of state/.lock decides "is this value usable at all"
+# through this one predicate, because the readers are spread across several
+# scripts and a private numeric test in any one of them silently rejects a valid
+# holder - which reads as "startup never completed" and repeats the whole
+# sequence on every clear or compact.
+fm_session_pid_valid() {  # <value>
+  case "$1" in
+    "$FM_WIN_PID_PREFIX"[0-9]*) return 0 ;;
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
 # Windows command paths are backslash-separated and .exe-suffixed, neither of
 # which the path-component matcher above understands. Normalizing here is what
 # keeps that matcher's whole-component safety intact: without it the harness
@@ -313,10 +327,7 @@ fm_harness_pid_alive() {
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid pids pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    "$FM_WIN_PID_PREFIX"[0-9]*) : ;;
-    ''|*[!0-9]*) return 1 ;;
-  esac
+  fm_session_pid_valid "$lock_pid" || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0

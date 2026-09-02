@@ -337,6 +337,41 @@ test_windows_pid_is_never_resolved_as_a_cygwin_pid() {
   pass "session-lock: a tagged Windows pid is never resolved against the Cygwin process table"
 }
 
+test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock() {
+  local dir fakebin identity
+  dir="$TMP_ROOT/win-identity-gates"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # The identity a session writes into the lock is read back by gates spread
+  # across several scripts - startup-completion recording and its clear/compact
+  # validation, the deferred network sweeps, and the Stop auto-arm. Each one
+  # asks only "is this value a usable identity", and each answered that with its
+  # own numeric test, so introducing a second identity shape made every one of
+  # them silently read a valid holder as malformed. The visible cost was a
+  # completion record that was never written, which reads as "startup never
+  # finished" and repeats the whole sequence on every clear or compact. One
+  # predicate owns the question so a third shape can never split them again.
+  identity=$(FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "fixture is vacuous: no identity was published to gate on"
+  lib_eval "$fakebin" "fm_session_pid_valid '$identity'" \
+    || fail "the identity '$identity' this session publishes is rejected by the gates that read it back"
+
+  # A local pid stays equally valid: the Windows shape is additional, not a
+  # replacement, and the same predicate serves both platforms.
+  lib_eval "$fakebin" 'fm_session_pid_valid 700' \
+    || fail "an ordinary local pid was rejected as an invalid lock identity"
+
+  # Still fail closed on the shapes a torn or hand-edited lock produces, and on
+  # a bare tag carrying no pid at all.
+  for bad in '' 'win:' 'win:abc' 'abc' '70 0' '-1'; do
+    if lib_eval "$fakebin" "fm_session_pid_valid '$bad'"; then
+      fail "the malformed lock value '$bad' was accepted as a usable identity"
+    fi
+  done
+  pass "session-lock: a published identity is accepted by every gate that reads the lock"
+}
+
 test_cygwin_ps_without_o_still_resolves_a_local_harness() {
   local dir fakebin got
   dir="$TMP_ROOT/cygwin-local"
@@ -496,6 +531,7 @@ test_competing_version_named_session_is_seen_as_live
 test_windows_session_is_identified_from_its_published_pid
 test_windows_published_pid_is_confirmed_before_it_is_trusted
 test_windows_pid_is_never_resolved_as_a_cygwin_pid
+test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock
 test_cygwin_ps_without_o_still_resolves_a_local_harness
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
