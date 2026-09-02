@@ -604,20 +604,23 @@ fm_write_meta "$REMOTE_HOME/state/rsm.meta" \
   "remote_target=fm-remote:w1:p1"
 cat > "$TMP_ROOT/sshbin/stalled-ssh" <<'SH'
 #!/usr/bin/env bash
+: > "$FM_TEST_SSH_CALLED"
 cat > /dev/null
 sleep 60
 SH
 chmod +x "$TMP_ROOT/sshbin/stalled-ssh"
 started=$(date +%s)
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REMOTE_HOME" \
-  FM_SSH_BIN="$TMP_ROOT/sshbin/stalled-ssh" \
+  FM_SSH_BIN="$TMP_ROOT/sshbin/stalled-ssh" FM_TEST_SSH_CALLED="$TMP_ROOT/stalled-ssh.called" \
   FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
-  FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 FM_SNAPSHOT_SECONDMATE_TIMEOUT=2 \
+  FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 \
   "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/stalled-summary.json" \
   || fail "an unreachable remote home failed the whole producer"
 elapsed=$(( $(date +%s) - started ))
 [ "$elapsed" -lt 40 ] \
-  || fail "the producer waited $elapsed seconds on one unreachable remote home"
+  || fail "the producer waited $elapsed seconds despite skipping remote endpoint state"
+[ ! -e "$TMP_ROOT/stalled-ssh.called" ] \
+  || fail "the producer issued a remote per-task state probe"
 jq -e '
   .schema == "fm-secondmate-home-summary.v1"
   and .valid == false
@@ -627,7 +630,7 @@ jq -e '
   and any(.endpoints[]; .id == "rsm" and .state == "unknown")
 ' "$TMP_ROOT/stalled-summary.json" >/dev/null \
   || fail "an unreachable remote task was not reported as unknown"
-pass "producer bounds each per-task current-state read"
+pass "producer skips remote per-task state probes"
 
 # The watcher's beacon is what the rest of supervision reads as proof it is
 # alive. Publication is side-band, so no matter how long it takes, the beacon

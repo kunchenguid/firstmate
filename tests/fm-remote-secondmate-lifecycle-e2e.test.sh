@@ -1024,8 +1024,13 @@ resolve_ios_pending() {
 }
 resolve_ios_pending
 
-# Structured fleet state comes from each home's own snapshot. The remote host is
-# explicit, and the local route remains alongside it.
+# Structured fleet state comes from each home's published ledger. The remote
+# host is explicit, and the local route remains alongside it.
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LOCAL_HOME" \
+  "$ROOT/bin/fm-home-summary-refresh.sh" >/dev/null \
+  || fail "local fixture did not publish its home ledger"
+remote_env "$ROOT/bin/fm-on.sh" ios fm-home-summary-refresh.sh >/dev/null \
+  || fail "remote fixture did not publish its home ledger"
 SNAPSHOT=$(remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
 if ! printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "ios" and .remote == true and .host == "remote-mac" and .provenance.selected == "structured-home")' >/dev/null; then
   printf 'secondmate projection:\n%s\n' "$(printf '%s' "$SNAPSHOT" | jq '.secondmate_current')" >&2
@@ -1107,9 +1112,11 @@ mv -f "$TMP_ROOT/remote-ios-before-liveness-legacy.meta" "$remote_route_meta"
 rm -f "$TMUX_STATE"
 pass "startup reports alive legacy backends without changing their routes"
 
-# Host loss never creates a local replacement. This legacy fixture has no
-# published ledger to cache, so the structured-home read degrades explicitly;
+# Host loss never creates a local replacement. Remove both the published ledger
+# and its parent-side cache so the structured-home read degrades explicitly;
 # endpoint liveness remains the startup supervisor's concern.
+rm -f -- "$REMOTE_HOME/state/home-summary.json"
+rm -rf -- "$PARENT/state/secondmate-summary-cache"
 launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 rm -rf -- "$PARENT/state/.watch.lock"
 rm -f -- "$PARENT/state/.last-watcher-beat"
@@ -1119,7 +1126,7 @@ assert_contains "$BOOT_UNAVAILABLE" 'SECONDMATE_LIVENESS: secondmate ios: skippe
 UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
 printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "ios"
   and .current.state == "unknown" and .provenance.selected != "structured-home"
-  and (.current.reason | test("failed|timed out")))' >/dev/null \
+  and (.current.reason | test("home ledger.*(timed out|missing|unreadable|invalid)")))' >/dev/null \
   || fail "unreachable no-ledger remote home did not degrade to explicit unknown state"
 printf '%s' "$UNAVAILABLE" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null and .endpoint.agent_alive == "unknown"' >/dev/null \
   || fail "unreachable remote endpoint liveness was not left to supervision"
