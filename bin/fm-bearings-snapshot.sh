@@ -29,6 +29,11 @@
 # gate with its date; a row the canonical snapshot marks prose-deferred
 # (deferred_marker) leaves the default decisions and gates views and is
 # disclosed in omitted[], revealed by --all-decisions / --all-queued.
+# Underway (in_flight) projects every main live worker plus every active child
+# from every readable secondmate ledger, independently of that home's
+# bearings_state. A home classified captain_decision because it has an open
+# captain hold still contributes each working child as its own Underway row;
+# the home row on secondmates[] keeps the decision and gate classification.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
@@ -395,10 +400,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
-     + [ $secondmate_views[]
-         | select(.bearings_state == "active_child_work")
-         | {id,kind:"secondmate",state:.bearings_state,
-            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
+     + [ $secondmate_views[] as $m
+         | $m.active_children[]?
+         | {id:($m.id + "/" + .id),
+            kind:(.kind // "secondmate"),
+            state:(.state // "working"),
+            doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | select(($all_decisions == 1) or (.deferred_marker != true))

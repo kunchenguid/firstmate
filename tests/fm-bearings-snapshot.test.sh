@@ -1739,6 +1739,86 @@ EOF
   pass "counterfactual meta clears main inventory warning and projects the live task"
 }
 
+seed_working_child() {  # <mate-home> <id> <doing>
+  local mate=$1 id=$2 doing=$3
+  mkdir -p "$mate/projects/$id"
+  printf -- '- [ ] %s - %s (repo: sample) (kind: ship) (since 2026-07-13)\n' \
+    "$id" "$doing" >> "$mate/data/backlog.md"
+  fm_write_meta "$mate/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$mate/projects/$id" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" "$id" busy
+  printf 'working: %s\n' "$doing" > "$mate/state/$id.status"
+}
+
+test_active_children_project_independent_of_home_captain_hold() {
+  local home mate fakebin json
+  home=$(make_home underway-hold-parent)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/underway-hold-home"
+  make_valid_secondmate_home busy-hold "$mate"
+  append_secondmate_registry "$home" busy-hold "$mate"
+  fakebin=$(make_fakebin "$home")
+
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+EOF
+  seed_working_child "$mate" child-a "first live child"
+  seed_working_child "$mate" child-b "second live child"
+  cat >> "$mate/data/backlog.md" <<'EOF'
+
+## Queued
+- [ ] release-call - Choose release route (repo: sample) (kind: captain) (hold: pick route A or B) (hold-kind: captain)
+
+## Done
+EOF
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[].id] | sort) == ["busy-hold/child-a", "busy-hold/child-b"]
+      and ([.in_flight[].state] | unique) == ["working"]
+      and ([.in_flight[] | select(.id == "busy-hold")] | length) == 0
+      and ([.decisions_open[] | select(.id == "busy-hold/release-call"
+        and .verb == "captain-hold")] | length) == 1
+      and (.secondmates | any(.id == "busy-hold" and .state == "captain_decision"))
+  ' >/dev/null || fail "a captain hold hid active children from Underway: $json"
+
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] release-call - Choose release route (repo: sample) (kind: captain) (hold: pick route A or B) (hold-kind: captain)
+
+## Done
+EOF
+  rm -f "$mate/state/child-a.meta" "$mate/state/child-a.status" \
+    "$mate/state/child-b.meta" "$mate/state/child-b.status"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[] | select(.id | startswith("busy-hold/"))] | length) == 0
+      and ([.decisions_open[] | select(.id == "busy-hold/release-call")] | length) == 1
+      and (.secondmates | any(.id == "busy-hold" and .state == "captain_decision"))
+  ' >/dev/null || fail "a hold-only home invented Underway rows: $json"
+
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+EOF
+  seed_working_child "$mate" child-a "first live child"
+  seed_working_child "$mate" child-b "second live child"
+  cat >> "$mate/data/backlog.md" <<'EOF'
+
+## Queued
+
+## Done
+EOF
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[].id] | sort) == ["busy-hold/child-a", "busy-hold/child-b"]
+      and ([.decisions_open[] | select(.owner == "busy-hold")] | length) == 0
+      and (.secondmates | any(.id == "busy-hold" and .state == "active_child_work"))
+  ' >/dev/null || fail "active-children-only Underway projection changed: $json"
+  pass "active children reach Underway independently of a home captain hold"
+}
+
 test_mixed_secondmate_roles_partial_state_and_captain_readiness() {
   local home fakebin hibit wheel sshhip ha canonical json
   home=$(make_home mixed-domain-regressions)
@@ -1862,7 +1942,7 @@ EOF
   ' >/dev/null || fail "canonical mixed-domain classification was wrong: $canonical"
   json=$(run "$home" "$fakebin" --json --fields bodies --all-landed)
   printf '%s' "$json" | jq -e '
-    ([.in_flight[].id] | sort) == ["hibit", "home-assistant", "wheel"]
+    ([.in_flight[].id] | sort) == ["hibit/hibit-worker", "home-assistant/prep", "wheel/wheel-worker"]
       and (.decisions_open | any(.id == "sshhip/reviewer-decision"))
       and (.decisions_open | any(.id == "home-assistant/captain-run") | not)
       and (.gates | any(.id == "production-observation" and .owner == "wheel"
@@ -2223,6 +2303,7 @@ test_captains_call_anti_leak
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
+test_active_children_project_independent_of_home_captain_hold
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
