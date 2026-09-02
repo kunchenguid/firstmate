@@ -58,16 +58,17 @@ Reverse-video placeholder remnants and Herdr half-block edges belong to `../../.
 `../../../docs/verification/runtime-backends.md` owns captures.
 Refresh with `FM_HARNESS_LIVENESS_DRIFT=1 ../../../bin/fm-test-run.sh ../../../tests/fm-harness-liveness-drift-live-e2e.test.sh`.
 
-## Worktree boundary
+## Worktree boundary and exemption grants
 
 Firstmate enters its acquired worktree and passes the same absolute path through `--workspace`.
 Never pass Cursor `-w` or `--worktree`, which allocates a second copy under `~/.cursor/worktrees` and breaks isolation.
 The CLI supports repeatable `--add-dir`, but the adapter adds none; positional instructions need no grant to their private directory.
 Example of the ordinary case, which is REFUSED because nobody is watching a scout pane: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high`.
 Pass a grant only when it is true of this launch, because `attended` is an attestation that a person is sitting in the pane and `envelope:<name>` names the outer isolation envelope an audit can go check.
+The grant is per invocation and never ambient, so neither an exported variable nor an earlier launch can exempt a later unattended spawn.
 A captain who will watch the pane themself adds `--cursor-exemption attended`; a worker running inside the approved routing benchmark adds `--cursor-exemption envelope:routing-benchmark` instead.
 An envelope name is bounded to letters, digits, `.`, `_`, and `-` starting on a letter or digit, so a grant cannot be unauditable or carry a line break into the task record.
-An explicitly passed grant is refused on a non-cursor harness rather than recorded, while one inherited from a task's own record is dropped when that task restarts onto another harness.
+An explicitly passed grant is refused on a non-cursor harness rather than recorded, on the local and remote spawn routes alike, while one inherited from a task's own record is dropped when that task restarts onto another harness.
 Across a relaunch or a `--secondmate` respawn, the two paths that restart a task from its own record, an `envelope:<name>` grant is inherited while an `attended` one is not, because the person who attested may be gone by the time stuck-worker recovery relaunches; a fresh spawn always needs the flag.
 Automatic recovery of an enveloped cursor secondmate works on the remote route only, since the local liveness sweep does not act on a cursor endpoint.
 A relaunch that needs a fresh attestation takes the grant on the verb itself: `../../../bin/fm-control.sh <id> relaunch --cursor-exemption attended`.

@@ -1,12 +1,12 @@
 # Muse Code
 
 Verified 2026-08-05 on Muse Code 0.1.0-R708.1, build sha 427a430436.
-The router owns Muse's task-kind boundary.
 
 ## Operating facts
 
 | Fact | Value |
 |---|---|
+| Task kinds | Crewmate and scout ONLY, never a secondmate or primary. `../../../bin/fm-spawn.sh` refuses a `--secondmate` launch, and `fm_control_harness_supports_kind` in `../../../bin/fm-control-lib.sh` owns the rule for the launch owner and the control plane, so an incompatible relaunch is refused before the running agent is stopped. Muse has no primary integration at all: the plugin engine (its only hook surface) is disabled in the default build, the Claude-compatible hook dialect names `asyncRewake` and model reawakening as explicitly unsupported - exactly what a primary's turn-end supervision needs - and no supervision protocol exists under `../../../docs/supervision-protocols/`, so a primary detected as muse falls back to the `unknown` protocol. |
 | Binary | Absolute `muse` from `PATH`, refused if absent; launcher `~/.local/bin/muse` execs versioned `muse-bin-<version>`, so live process name changes on update. |
 | Launch | Positional instructions, like Grok or Pi. |
 | Models | `--model <model>`; only provider `meta`. |
@@ -62,9 +62,8 @@ Native children use per-child worktrees only with opt-in `--subagent-worktree-is
 It excludes `.claude/settings.local.json` because Firstmate writes it, but Muse scratch is worker output and must refuse cleanup when uncommitted.
 Inspect, never force past, that refusal.
 
-## Maturity and primary limit
+## Maturity
 
 Muse 0.1.0 is day-zero beta; its hourly channel poll can replace the binary and process name.
 The captain accepted this, so Firstmate does not set `MUSE_NO_AUTO_UPDATE=1`; a fleet may set it without adapter change.
 Plugins report unavailable unless `MUSE_EXPERIMENTAL_PLUGINS=on`, so busy state uses logs.
-The compatibility dialect explicitly lacks `asyncRewake` and model reawakening; the router owns the resulting primary boundary.
