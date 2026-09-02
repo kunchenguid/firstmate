@@ -37,6 +37,8 @@ Cleanup is refused until the drill has really restored every bundle, and the rec
 Every refusal names the correction it protects.
 Treat it as a diagnostic result, not an obstacle: fix the evidence, never the threshold.
 
+A `preflight` that refuses also revokes the receipt already on disk, so a re-run after evidence degrades holds the entrants rather than leaving an earlier clearance standing.
+
 Specifically, do not "resolve" a refusal by relaxing the plan.
 The launch receipt is bound to `benchmark.json`'s bytes, so editing the plan after a pass invalidates the receipt rather than clearing the entrant, and that binding is the point.
 If a gate looks wrong, the failing case belongs in `tests/fm-bench-gate.test.sh` before the check changes.

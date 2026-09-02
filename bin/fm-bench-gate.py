@@ -127,6 +127,13 @@ REQUIRED_ARCHIVE_GROUPS = (
     "key_and_verdict",
 )
 
+PRIVATE_STORAGE_KEYS = (
+    "private_object_store",
+    "private_tmp",
+    "private_home",
+    "private_session",
+)
+
 ISOLATION_PROBES = (
     "sibling_file_read",
     "sibling_worktree_enumeration",
@@ -1124,10 +1131,9 @@ def check_isolation(root: Path, report: Report, timeout: int) -> None:
         return
 
     protected = [str(item) for item in (record.get("protected_paths") or [])]
-    roots = {str(entrant.get("id", "")): str(entrant.get("root", "")) for entrant in entrants if isinstance(entrant, dict)}
     controls = ProbeControls(str(record.get("leak_marker", "FM_BENCH_")))
     try:
-        probe_entrants(entrants, roots, protected, wrapper, record, controls, report, timeout)
+        probe_entrants(entrants, protected, wrapper, record, controls, report, timeout)
     finally:
         controls.close()
 
@@ -1139,9 +1145,73 @@ def check_isolation(root: Path, report: Report, timeout: int) -> None:
     )
 
 
+def is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def entrant_alternates(root: str) -> list[Path]:
+    found: list[Path] = []
+    base = Path(root)
+    for marker in (
+        base / ".git" / "objects" / "info" / "alternates",
+        base / "objects" / "info" / "alternates",
+    ):
+        if not marker.is_file():
+            continue
+        try:
+            text = marker.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            entry = line.strip()
+            if not entry or entry.startswith("#"):
+                continue
+            path = Path(entry)
+            found.append(path if path.is_absolute() else marker.parent.parent / entry)
+    return found
+
+
+def probe_material(path: Path) -> bool:
+    try:
+        if path.is_file():
+            return True
+        if not path.is_dir():
+            return False
+        for entry in path.rglob("*"):
+            if entry.is_file():
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def check_entrant_alternates(entrant_id: str, entrant: dict[str, Any], report: Report) -> list[Path]:
+    root = Path(str(entrant.get("root"))).resolve()
+    store = Path(str(entrant.get("private_object_store"))).resolve()
+    alternates = entrant_alternates(str(entrant.get("root")))
+    outside = sorted(
+        str(path.resolve())
+        for path in alternates
+        if not is_within(path.resolve(), root) and not is_within(path.resolve(), store)
+    )
+    report.require(
+        not outside,
+        f"isolation.{entrant_id}.alternates",
+        f"{len(alternates)} alternate object stores resolve inside this entrant's own storage"
+        if alternates
+        else "no alternate object store is configured",
+        "the clone reaches an object store outside its own private storage through "
+        f"objects/info/alternates: {', '.join(outside)}",
+    )
+    return alternates
+
+
 def probe_entrants(
     entrants: list[Any],
-    roots: dict[str, str],
     protected: list[str],
     wrapper: list[str],
     record: dict[str, Any],
@@ -1149,14 +1219,14 @@ def probe_entrants(
     report: Report,
     timeout: int,
 ) -> None:
-    for entrant in entrants:
-        if not isinstance(entrant, dict):
-            report.fail("isolation.entrant", "each entrant must be an object")
-            continue
+    provisioned = [entrant for entrant in entrants if isinstance(entrant, dict)]
+    if len(provisioned) != len(entrants):
+        report.fail("isolation.entrant", "each entrant must be an object")
+    for entrant in provisioned:
         entrant_id = str(entrant.get("id", ""))
         missing = [
             key
-            for key in ("id", "root", "private_object_store", "private_tmp", "private_home", "private_session")
+            for key in ("id", "root", *PRIVATE_STORAGE_KEYS)
             if not nonempty_str(entrant.get(key))
         ]
         if missing:
@@ -1167,13 +1237,34 @@ def probe_entrants(
             continue
         report.ok(f"isolation.{entrant_id}.provision", "private clone, object store, temp, home, and session space recorded")
 
-        siblings = sorted(value for key, value in roots.items() if key != entrant_id and value)
+        barren = [key for key in PRIVATE_STORAGE_KEYS if not probe_material(Path(str(entrant.get(key))))]
+        report.require(
+            not barren,
+            f"isolation.{entrant_id}.private_storage",
+            "every declared private store holds material a sibling probe can be tested against",
+            "declared private storage carries nothing a sibling probe could read, so a denial "
+            f"against it would prove nothing: {', '.join(barren)}",
+        )
+        check_entrant_alternates(entrant_id, entrant, report)
+
+        siblings = sorted(
+            (other for other in provisioned if str(other.get("id", "")) != entrant_id and other.get("root")),
+            key=lambda other: str(other.get("root")),
+        )
         targets: list[tuple[str, str]] = []
         for sibling in siblings:
-            targets.append(("sibling_file_read", sibling))
-            targets.append(("sibling_worktree_enumeration", sibling))
-            targets.append(("sibling_object_enumeration", sibling))
-            targets.append(("sibling_unreachable_objects", sibling))
+            sibling_root = str(sibling.get("root"))
+            targets.append(("sibling_file_read", sibling_root))
+            targets.append(("sibling_worktree_enumeration", sibling_root))
+            targets.append(("sibling_object_enumeration", sibling_root))
+            targets.append(("sibling_unreachable_objects", sibling_root))
+            for key in PRIVATE_STORAGE_KEYS:
+                private = Path(str(sibling.get(key, "")))
+                if probe_material(private):
+                    targets.append(("sibling_file_read", str(private)))
+            for alternate in entrant_alternates(sibling_root):
+                if probe_material(alternate):
+                    targets.append(("sibling_file_read", str(alternate)))
         for guarded in protected:
             targets.append(("protected_path_read", guarded))
         # The control marker stands in for a sibling entrant's process: it is a
@@ -1181,6 +1272,7 @@ def probe_entrants(
         targets.append(("process_inspection", "fm-bench-marker"))
         targets.append(("environment_leakage", str(record.get("leak_marker", "FM_BENCH_"))))
 
+        targets = list(dict.fromkeys(targets))
         exercised = {probe for probe, _ in targets}
         entrant_wrapper = [item.replace("{root}", str(entrant.get("root"))) for item in wrapper]
         for probe, target in targets:
@@ -1223,9 +1315,9 @@ def check_evaluator(root: Path, plan: dict[str, Any], report: Report) -> None:
         return
     base = root / "evaluator"
     check_evaluator_lock(base, report)
-    check_evaluator_score_map(base, report)
+    weights = check_evaluator_score_map(base, report)
     check_evaluator_determinism(base, report)
-    check_evaluator_mutations(base, report)
+    check_evaluator_mutations(base, weights, report)
     check_evaluator_captures(base, plan, expected_captures, report)
 
 
@@ -1261,12 +1353,12 @@ def check_evaluator_lock(base: Path, report: Report) -> None:
     )
 
 
-def check_evaluator_score_map(base: Path, report: Report) -> None:
+def check_evaluator_score_map(base: Path, report: Report) -> dict[str, Any] | None:
     try:
         score_map = load_json(base / "score-map.json")
     except GateError as exc:
         report.fail("evaluator.score_map", str(exc))
-        return
+        return None
     missing = [key for key in REQUIRED_SCORE_MAP_KEYS if score_map.get(key) in (None, "", [], {})]
     report.require(
         not missing,
@@ -1277,7 +1369,7 @@ def check_evaluator_score_map(base: Path, report: Report) -> None:
     weights = score_map.get("dimension_weights")
     if not isinstance(weights, dict) or not weights:
         report.fail("evaluator.weights", "dimension_weights must be an object")
-        return
+        return None
     scored = [
         name
         for name in VALIDITY_GATE_DIMENSIONS
@@ -1300,6 +1392,20 @@ def check_evaluator_score_map(base: Path, report: Report) -> None:
         "dimension weights renormalise to 100",
         f"dimension weights sum to {total}, not 100",
     )
+    return weights
+
+
+def scored_dimensions(weights: dict[str, Any] | None) -> set[str]:
+    if not isinstance(weights, dict):
+        return set()
+    return {
+        str(name)
+        for name, value in weights.items()
+        if name not in VALIDITY_GATE_DIMENSIONS
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and float(value) != 0.0
+    }
 
 
 def check_evaluator_determinism(base: Path, report: Report) -> None:
@@ -1335,7 +1441,7 @@ def check_evaluator_determinism(base: Path, report: Report) -> None:
     )
 
 
-def check_evaluator_mutations(base: Path, report: Report) -> None:
+def check_evaluator_mutations(base: Path, weights: dict[str, Any] | None, report: Report) -> None:
     directory = base / "mutations"
     records = sorted(directory.glob("*.json")) if directory.is_dir() else []
     if not records:
@@ -1369,11 +1475,15 @@ def check_evaluator_mutations(base: Path, report: Report) -> None:
             continue
         moved.add(str(dimension))
         report.ok(check, f"{dimension} moved alone")
+    expected = scored_dimensions(weights)
+    uncalibrated = sorted(expected - moved)
     report.require(
-        bool(moved),
+        bool(moved) and not uncalibrated,
         "evaluator.mutations",
-        f"{len(moved)} dimensions calibrated by mutation",
-        "no dimension was proven to respond to its own mutation",
+        f"all {len(moved)} scored dimensions calibrated by mutation",
+        f"scored dimensions never proven to respond to their own mutation: {', '.join(uncalibrated)}"
+        if uncalibrated
+        else "no dimension was proven to respond to its own mutation",
     )
 
 
@@ -1552,16 +1662,16 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
         sample_ok = True
         for bundle_name in bundles:
             bundle = sample / bundle_name
-            verify = run_git(["bundle", "verify", str(bundle)])
-            if verify.returncode != 0:
-                report.fail(check, f"{bundle_name} failed `git bundle verify`")
-                sample_ok = False
-                continue
             with tempfile.TemporaryDirectory(prefix="fm-bench-restore-") as workdir:
                 fresh = Path(workdir) / "repo"
                 init = run_git(["init", "--quiet", "--bare", str(fresh)])
                 if init.returncode != 0:
                     report.fail(check, "could not create a fresh repository for the restore")
+                    sample_ok = False
+                    continue
+                verify = run_git(["bundle", "verify", str(bundle)], cwd=fresh)
+                if verify.returncode != 0:
+                    report.fail(check, f"{bundle_name} failed `git bundle verify`")
                     sample_ok = False
                     continue
                 fetch = run_git(["fetch", "--quiet", str(bundle), "*:refs/restored/*"], cwd=fresh)
@@ -1923,13 +2033,19 @@ def preflight(root: Path, plan: dict[str, Any], report: Report, timeout: int) ->
     check_isolation(root, report, timeout)
     check_evaluator(root, plan, report)
     check_manifest(root, plan, report)
-    if report.captain_stop:
-        print("BENCH_NOTE preflight a captain call is open; entrants stay held")
-    elif report.failed:
-        print("BENCH_NOTE preflight no entrant may launch")
+    receipt = root / "preflight.receipt"
+    if report.captain_stop or report.failed:
+        revoked = receipt.is_file()
+        receipt.unlink(missing_ok=True)
+        if revoked:
+            print("BENCH_NOTE preflight the prior clearance is revoked")
+        if report.captain_stop:
+            print("BENCH_NOTE preflight a captain call is open; entrants stay held")
+        else:
+            print("BENCH_NOTE preflight no entrant may launch")
     else:
         write_json(
-            root / "preflight.receipt",
+            receipt,
             {
                 "schema": RECEIPT_SCHEMA,
                 "verdict": "pass",
