@@ -1698,7 +1698,7 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
         stored = {
             path.relative_to(sample).as_posix()
             for path in sample.rglob("*")
-            if path.is_file() and path.name != "manifest.json"
+            if path.is_file() and path.resolve() != sample_root / "manifest.json"
         }
         unexpected = sorted(stored - set(files))
         if unexpected:
@@ -1775,8 +1775,28 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree
                 destination = scratch / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
-            completed = subprocess.run(
-                [str(scratch / argv[0]), str(restored_tree)],
+            genuine_tree = scratch / "restored-genuine"
+            perturbed_tree = scratch / "restored-perturbed"
+            shutil.copytree(restored_tree, genuine_tree, symlinks=True)
+            shutil.copytree(genuine_tree, perturbed_tree, symlinks=True)
+            perturbable = sorted(
+                (path for path in perturbed_tree.rglob("*") if path.is_file() and not path.is_symlink()),
+                key=lambda path: path.as_posix(),
+            )
+            if not perturbable:
+                return False, "restored candidate has no regular file the evaluator can be proven to consume"
+            with perturbable[0].open("ab") as handle:
+                handle.write(b"\nfm-bench-restore-perturbation\n")
+            genuine = subprocess.run(
+                [str(scratch / argv[0]), str(genuine_tree)],
+                cwd=str(scratch),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=60,
+            )
+            perturbed = subprocess.run(
+                [str(scratch / argv[0]), str(perturbed_tree)],
                 cwd=str(scratch),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1787,11 +1807,15 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree
         return False, "archived evaluator exceeded the 60-second restore-drill limit"
     except OSError as exc:
         return False, f"archived evaluator could not execute: {exc}"
-    if completed.returncode != 0:
-        return False, f"archived evaluator exited {completed.returncode}"
-    actual = sha256_bytes(completed.stdout)
+    if genuine.returncode != 0:
+        return False, f"archived evaluator exited {genuine.returncode} against the genuine restored tree"
+    if perturbed.returncode != 0:
+        return False, f"archived evaluator exited {perturbed.returncode} against the perturbed restored tree"
+    actual = sha256_bytes(genuine.stdout)
     if actual != expected:
         return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}"
+    if perturbed.stdout == genuine.stdout:
+        return False, "archived evaluator output is invariant under a perturbed restored candidate"
     return True, actual
 
 
@@ -1888,7 +1912,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
             report.fail(check, rerun_detail)
             drill_ok = False
             continue
-        report.ok(check, "bundle verified, restored into a fresh repository, and rebound to its archived tree; archived evaluator rerun")
+        report.ok(check, "bundle verified, restored into a fresh repository, and rebound to its archived tree; archived evaluator rerun produced a changed perturbed result")
 
     ok = report.require(
         reran == len(samples) if samples else False,
