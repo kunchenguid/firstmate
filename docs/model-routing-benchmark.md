@@ -19,11 +19,11 @@ A gate that cannot obtain its evidence refuses; an unproven denial is never trea
 | `freeze` / `freeze-check` | Packets, ground truth, scoring code, judge prompts, model tuples, the randomisation seed, and the failure policy are fixed before labels exist, and any later edit is visible. |
 | `provenance-check` | A historical security packet may be replayed only after every original author, reviewer, and judge is positively identified by task, resolved model id, family, and session. "No record found" fails. |
 | `isolation-verify` | Opaque labels and a transcript grep hide metadata but neither prevent nor detect sibling access. The gate runs the exact bypasses the grep missed and requires each to be denied. |
-| `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, mutation calibration, and one bound capture record per candidate head are all required. |
+| `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, per-dimension mutation calibration, and one bound capture record per candidate head are all required. |
 | `manifest-build` / `manifest-check` | The original run, judge, capture, and cost arithmetic did not add up, and cost and elapsed time were tie-breakers while unmeasurable. Every count is now derived, and cost is low/base/high arithmetic rather than a quoted range. |
 | `promote-evaluate` | Only a six-of-six paired sweep with the predeclared margin, no blocker-class failure, and no regression against the baseline veto is eligible, and the captain still gives the word. |
 | `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup. Cleanup is authorised only by a drill that really restored every bundle, and only while the receipt still matches the archive's current bytes. |
-| `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. |
+| `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. A preflight that refuses or stops for the captain also revokes any receipt already on disk, so evidence degrading outside the plan cannot leave a stale clearance standing. |
 
 ## Where the refusal actually bites
 
@@ -41,6 +41,13 @@ A mechanism this host cannot enforce therefore surfaces as a refused launch nami
 
 Only a mechanism with its own PID namespace confines processes as well as storage and filesystem.
 `docs/verification/model-routing-benchmark.md` records the dated per-mechanism result.
+
+No declared path is trusted either.
+Each entrant's private object store, temp, home, and session space is a sibling probe target of its own, so a "private" path that is really a shared subtree is caught by attempting the read rather than by reading the declaration.
+Because a denial against an empty directory proves nothing, every declared private store must hold material the probe reaches unconfined, and a store that holds none is refused by name.
+
+The gate also resolves each clone's `objects/info/alternates` itself.
+An alternate is a second object database bound into the clone, so an entrant whose alternate escapes its own private storage is reachable by a route no probe walking the sibling root would ever visit; that alternate is refused and handed to the sibling probes as a target.
 
 ## The two captain-stop conditions
 

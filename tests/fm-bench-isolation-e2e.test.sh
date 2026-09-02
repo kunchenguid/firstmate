@@ -49,6 +49,11 @@ printf 'K7 -> Fable 5 High\nR2 -> GPT 5.6 Sol High\n' > "$ISO/sealed/key.json"
 # commit, a worktree registry, and an object database a sibling could mine.
 for entrant in e1 e2; do
   mkdir -p "$ISO/$entrant/objects" "$ISO/$entrant/tmp" "$ISO/$entrant/home" "$ISO/$entrant/session"
+  # Each declared private store is probed against every sibling, so it must hold
+  # material the probe can reach unconfined for its denial to mean anything.
+  for private in objects tmp home session; do
+    printf 'private %s material for %s\n' "$private" "$entrant" > "$ISO/$entrant/$private/canary.txt"
+  done
   fm_git_init_commit "$ISO/$entrant" >/dev/null
   printf 'candidate answer from %s\n' "$entrant" > "$ISO/$entrant/answer.txt"
   git -C "$ISO/$entrant" add -A
@@ -101,6 +106,12 @@ done
 assert_contains "$out" "which is reachable without the confinement" \
   "every denial carries its positive control"
 assert_contains "$out" "all 7 probe classes exercised" "no probe class was skipped"
+for label in k7 r2; do
+  assert_contains "$out" "isolation.bench-b1-$label.private_storage ok" \
+    "each declared private store carries probe material"
+  assert_contains "$out" "isolation.bench-b1-$label.alternates ok" \
+    "no clone reaches an object store outside its own private storage"
+done
 assert_not_contains "$out" "PROBE LEAKED" "nothing leaked through the confinement"
 pass "enforced isolation ($MECHANISM) denies file, worktree, object, unreachable-object, sealed-material, process, and environment access"
 

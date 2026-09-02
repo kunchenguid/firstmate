@@ -30,6 +30,10 @@
 # probe therefore measures the underlying capability - reading the object bytes,
 # seeing another command line - by whatever means the environment offers, and
 # gives up loudly when it has none. The gate refuses on inconclusive.
+#
+# For the same reason a probe never narrows its evidence to one sample: the
+# storage probes try a bounded set of files rather than only the first, and the
+# process probe reads one line per process and excludes only its own lineage.
 set -u
 
 if [ "$#" -ne 2 ]; then
@@ -46,12 +50,23 @@ inconclusive() { printf 'PROBE INCONCLUSIVE %s\n' "$1"; exit 0; }
 
 # Read one byte of any regular file under a directory. This is the capability
 # every storage probe is really testing, and it needs no vendor tool.
+#
+# A bounded set of candidates is tried rather than only the first path find
+# returns: a permission-based confinement can deny one file while leaving its
+# siblings readable, and reading any one of them is the leak that matters.
+READABLE_CANDIDATES=64
+
 readable_under() {  # <dir>
-  local found
-  found=$(find "$1" -type f -print 2>/dev/null | head -n 1 || true)
-  [ -n "$found" ] || return 1
-  head -c 1 -- "$found" >/dev/null 2>&1 || return 1
-  printf '%s\n' "$found"
+  local found candidates
+  candidates=$(find "$1" -type f -print 2>/dev/null | head -n "$READABLE_CANDIDATES" || true)
+  [ -n "$candidates" ] || return 1
+  while IFS= read -r found; do
+    [ -n "$found" ] || continue
+    head -c 1 -- "$found" >/dev/null 2>&1 || continue
+    printf '%s\n' "$found"
+    return 0
+  done <<< "$candidates"
+  return 1
 }
 
 case "$PROBE" in
@@ -93,23 +108,35 @@ case "$PROBE" in
     denied "detached sibling objects are unreachable"
     ;;
   process_inspection)
-    listing=
-    if command -v ps >/dev/null 2>&1; then
-      listing=$(ps -A -o args= 2>/dev/null || true)
+    table_readable=0
+    other_process=0
+    if [ -d /proc ]; then
+      for entry in /proc/[0-9]*/cmdline; do
+        [ -r "$entry" ] || continue
+        table_readable=1
+        pid=${entry#/proc/}
+        pid=${pid%/cmdline}
+        [ "$pid" = "$$" ] && continue
+        line=$(tr '\0\n\r' '   ' < "$entry" 2>/dev/null || true)
+        [ -n "$line" ] || continue
+        other_process=1
+        case "$line" in
+          *"$TARGET"*) leaked "saw another benchmark process in the process table" ;;
+        esac
+      done
+    elif command -v ps >/dev/null 2>&1 && ps -A -o pid= -o args= >/dev/null 2>&1; then
+      table_readable=1
+      while read -r pid line; do
+        [ "$pid" = "$$" ] && continue
+        [ -n "$line" ] || continue
+        other_process=1
+        case "$line" in
+          *"$TARGET"*) leaked "saw another benchmark process in the process table" ;;
+        esac
+      done < <(ps -A -o pid= -o args= 2>/dev/null)
     fi
-    if [ -z "$listing" ] && [ -d /proc ]; then
-      # A PID namespace is what actually confines this, and /proc reports it
-      # without needing procps installed in the confinement's image.
-      listing=$(cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\0' ' ' || true)
-    fi
-    [ -n "$listing" ] || inconclusive "no process table could be read; the denial is unproven"
-    # Drop this probe's own invocation and its confinement wrapper: both carry
-    # the target string in their argv, and matching them would report a leak
-    # that is only the probe seeing itself.
-    listing=$(printf '%s\n' "$listing" | grep -v 'fm-bench-probe\.sh' || true)
-    [ -n "$listing" ] || denied "only this probe's own process is visible"
-    printf '%s\n' "$listing" | grep -q -- "$TARGET" \
-      && leaked "saw another benchmark process in the process table"
+    [ "$table_readable" -eq 1 ] || inconclusive "no process table could be read; the denial is unproven"
+    [ "$other_process" -eq 1 ] || denied "only this probe's own process is visible"
     denied "no sibling benchmark process is visible in the process table"
     ;;
   environment_leakage)

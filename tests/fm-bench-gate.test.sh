@@ -467,6 +467,16 @@ expect_code 1 "$status" "a mutation that moves unrelated dimensions is refused"
 assert_contains "$out" "unrelated dimensions moved with zoom_200" "dimensions must be separable"
 pass "a mutation that bleeds into unrelated dimensions is refused"
 
+BENCH="$TMP_ROOT/evaluator-uncalibrated"
+write_plan "$BENCH"
+write_evaluator "$BENCH"
+rm -f "$BENCH/evaluator/mutations/accessibility.json" "$BENCH/evaluator/mutations/responsive.json"
+out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
+expect_code 1 "$status" "one calibrated dimension does not calibrate a seven-dimension score map"
+assert_contains "$out" "never proven to respond to their own mutation" "every scored dimension must be calibrated"
+assert_contains "$out" "accessibility, responsive" "the refusal names the uncalibrated dimensions"
+pass "a scored dimension with no mutation record is refused"
+
 BENCH="$TMP_ROOT/evaluator-scored-gate"
 write_plan "$BENCH"
 write_evaluator "$BENCH"
@@ -582,6 +592,34 @@ assert_contains "$out" "rc=1" "a plan relaxed after the pass invalidates the rec
 assert_contains "$out" "covers a different plan" "the receipt is bound to the plan bytes"
 pass "a threshold relaxed after a passing preflight cannot ride the old receipt"
 
+# The receipt binds only the plan's bytes, so evidence degrading outside the
+# plan would leave a stale clearance standing. A refusing preflight revokes it.
+BENCH="$TMP_ROOT/revoke"
+write_plan "$BENCH"
+write_provenance "$BENCH" A1 cleared
+write_provenance "$BENCH" C1 cleared
+write_evaluator "$BENCH"
+run_gate "$BENCH" manifest-build >/dev/null
+run_gate "$BENCH" freeze >/dev/null
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+digest = hashlib.sha256((bench / "benchmark.json").read_bytes()).hexdigest()
+(bench / "preflight.receipt").write_text(json.dumps({
+    "schema": "fm-bench-preflight-receipt.v1", "verdict": "pass",
+    "plan_sha256": digest, "stages": ["plan"]}, indent=2) + "\n")
+PY
+out=$(guard "bench-b1-k7" "$BENCH")
+assert_contains "$out" "rc=0" "the clearance stands while it matches the plan"
+out=$(run_gate "$BENCH" preflight) && status=0 || status=$?
+expect_code 1 "$status" "a preflight without isolation evidence must refuse"
+assert_contains "$out" "the prior clearance is revoked" "the refusal reports the revocation"
+assert_absent "$BENCH/preflight.receipt" "a refusing preflight removes the receipt it wrote"
+out=$(guard "bench-b1-k7" "$BENCH")
+assert_contains "$out" "rc=1" "the launch guard refuses once the clearance is revoked"
+pass "evidence degrading outside the plan revokes the clearance rather than leaving it standing"
+
 out=$(FM_BENCH_LAUNCH_BYPASS=1 bash -c '
   . "$1/bin/fm-bench-launch-lib.sh"
   fm_refuse_ungated_benchmark_entrant bench-b1-k7 2>&1
@@ -613,6 +651,11 @@ mkdir -p "$ISO/sealed"
 printf 'K7 -> Fable 5 High\n' > "$ISO/sealed/key.json"
 for entrant in e1 e2; do
   mkdir -p "$ISO/$entrant/objects" "$ISO/$entrant/tmp" "$ISO/$entrant/home" "$ISO/$entrant/session"
+  # Each declared private store is a probe target, so it must hold material a
+  # sibling can be proven unable to read; an empty directory proves nothing.
+  for private in objects tmp home session; do
+    printf 'private %s material for %s\n' "$private" "$entrant" > "$ISO/$entrant/$private/canary.txt"
+  done
   fm_git_init_commit "$ISO/$entrant" >/dev/null
   printf 'candidate work %s\n' "$entrant" > "$ISO/$entrant/answer.txt"
   git -C "$ISO/$entrant" add -A
@@ -652,7 +695,70 @@ for probe in sibling_file_read sibling_worktree_enumeration sibling_object_enume
 done
 assert_contains "$out" "PROBE LEAKED enumerated shared objects" "shared-object access is detected, not just named paths"
 assert_contains "$out" "PROBE LEAKED read sealed material" "the sealed key is reachable without confinement"
+# The four declared per-entrant paths are probed, not trusted: a sibling must be
+# proven unable to read each of them.
+for private in objects tmp home session; do
+  assert_contains "$out" "reachable against $ISO/e2/$private" \
+    "the sibling's declared private $private is a probe target"
+done
 pass "all seven sibling-access probes detect a real leak when nothing confines the entrant"
+
+# The process probe must still measure a shared process table when the image
+# ships no ps, which is the case for the container image the gate documents.
+# Reading /proc must yield one line per process: a single concatenated line
+# makes the probe's own self-exclusion delete the whole table and report a
+# denial while every host process is readable.
+if [ -d /proc/1 ]; then
+  MARKER="$TMP_ROOT/fm-bench-marker-entrant"
+  printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$MARKER"
+  chmod +x "$MARKER"
+  "$MARKER" &
+  marker_pid=$!
+  sleep 1
+  out=$("$ROOT/bin/fm-bench-probe.sh" process_inspection fm-bench-marker)
+  kill "$marker_pid" 2>/dev/null
+  wait "$marker_pid" 2>/dev/null
+  assert_contains "$out" "PROBE LEAKED" "a shared process table read through /proc is a leak, not a denial"
+  sleep 1
+  out=$("$ROOT/bin/fm-bench-probe.sh" process_inspection fm-bench-marker)
+  assert_contains "$out" "PROBE DENIED" "the same probe denies once no sibling process is running"
+  pass "the process probe reads /proc without procps and still separates a leak from a denial"
+fi
+
+# A declared private path with nothing readable under it cannot carry a denial.
+BENCH="$TMP_ROOT/iso-barren"
+write_plan "$BENCH"
+write_isolation "$BENCH" none
+mkdir -p "$ISO/barren"
+python3 - "$BENCH/isolation.json" "$ISO/barren" <<'PY'
+import json, sys
+path, barren = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+d["entrants"][0]["private_tmp"] = barren
+json.dump(d, open(path, "w"), indent=2, sort_keys=True)
+PY
+out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
+expect_code 1 "$status" "private storage a probe cannot read carries no denial"
+assert_contains "$out" "isolation.bench-b1-k7.private_storage fail" "the barren private store is named"
+assert_contains "$out" "private_tmp" "the refusal names which declared store is unprovable"
+pass "declared private storage that no probe could read is refused, not trusted"
+
+# An object store reached through .git/objects/info/alternates sits outside every
+# entrant root, so a probe that only walks the sibling root would miss it.
+BENCH="$TMP_ROOT/iso-alternates"
+write_plan "$BENCH"
+write_isolation "$BENCH" none
+mkdir -p "$ISO/shared-objects" "$ISO/e1/.git/objects/info"
+printf 'shared object bytes\n' > "$ISO/shared-objects/canary"
+printf '%s\n' "$ISO/shared-objects" > "$ISO/e1/.git/objects/info/alternates"
+out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
+rm -f "$ISO/e1/.git/objects/info/alternates"
+expect_code 1 "$status" "an alternate object store outside the entrant's storage is refused"
+assert_contains "$out" "isolation.bench-b1-k7.alternates fail" "the escaping alternate is named"
+assert_contains "$out" "objects/info/alternates" "the refusal names the vector"
+assert_contains "$out" "reachable against $ISO/shared-objects" \
+  "the alternate object store is probed as a sibling target"
+pass "an object store reachable through git alternates is caught rather than missed"
 
 # A confinement that scrubs the environment but leaves the filesystem shared
 # earns credit for exactly one probe and still fails the gate.
@@ -805,6 +911,18 @@ assert_present "$BENCH/archive/restore-drill.json" "the drill writes its receipt
 out=$(run_gate "$BENCH" cleanup-gate) || fail "cleanup must pass after a drill: $out"
 assert_contains "$out" "no candidate ships directly" "the disposition is re-asserted at cleanup"
 pass "the restore drill authorises cleanup only after really restoring every bundle"
+
+# The drill must prove the archive against the fresh repository it creates, not
+# against whatever repository the operator happened to be standing in.
+rm -f "$BENCH/archive/restore-drill.json"
+DRILL_CWD="$TMP_ROOT/not-a-repo"
+mkdir -p "$DRILL_CWD"
+git -C "$DRILL_CWD" rev-parse --git-dir >/dev/null 2>&1 \
+  && fail "the drill fixture directory must not be inside a repository"
+out=$(cd "$DRILL_CWD" && run_gate "$BENCH" restore-drill) \
+  || fail "the restore drill must pass from a non-repository directory: $out"
+assert_present "$BENCH/archive/restore-drill.json" "the drill writes its receipt from any directory"
+pass "the restore drill verifies each bundle inside the repository it restores into"
 
 printf 'tampered\n' >> "$BENCH/archive/a-a1-fable-5-high/verdict.md"
 out=$(run_gate "$BENCH" cleanup-gate) && status=0 || status=$?

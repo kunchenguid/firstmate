@@ -10,7 +10,8 @@ bin/fm-test-run.sh tests/fm-bench-isolation-e2e.test.sh
 ```
 
 That test provisions two real entrant clones with detached candidate commits, then runs all seven sibling-access probes inside the declared confinement.
-It refuses a pass that checked nothing: each denial requires a positive control proving the same probe reaches the target unconfined.
+Every probe runs against the sibling's root, against each of its four declared private stores, and against any object store its clone reaches through `objects/info/alternates`.
+It refuses a pass that checked nothing: each denial requires a positive control proving the same probe reaches the target unconfined, so each declared private store must hold material the probe can read without the confinement.
 
 ## Per-mechanism results
 
@@ -46,8 +47,20 @@ MISSING
 ```
 
 An earlier probe revision treated a missing tool as a denial, so this image cleared the gate while enforcing nothing measurable on three probe classes.
-Each probe now measures the underlying capability by whatever means the environment offers - reading the object bytes directly when `git` is absent, reading `/proc/*/cmdline` when `ps` is absent - and reports `PROBE INCONCLUSIVE` when it has no means at all.
+Each probe now measures the underlying capability by whatever means the environment offers - reading the object bytes directly when `git` is absent, reading `/proc/*/cmdline` rather than asking `ps` - and reports `PROBE INCONCLUSIVE` when it has no means at all.
 The gate refuses on inconclusive, so a confinement whose image simply lacks a tool can no longer look like enforced isolation.
+
+The process probe reads `/proc` one file at a time and emits one line per process, then excludes only its own process lineage by PID.
+An earlier revision concatenated every `cmdline` into a single line, so the self-exclusion deleted the entire table and an image without `ps` reported a denial while the whole host process table was readable.
+Measured on Linux in `debian:stable-slim`, which ships no `ps`, with a sibling process running in the same PID namespace:
+
+```
+$ docker run --rm -v "$PWD/bin:/probe:ro" debian:stable-slim /probe/driver.sh
+PROBE LEAKED saw another benchmark process in the process table
+```
+
+The same command against the concatenating revision reported `PROBE DENIED only this probe's own process is visible`.
+`tests/fm-bench-gate.test.sh` covers this on any host with a `/proc` filesystem, first with a sibling process running and then without.
 
 ## What this does not establish
 
