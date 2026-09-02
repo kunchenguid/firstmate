@@ -244,6 +244,24 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Stow nudge (config/stow-nudge)
+
+A Claude primary that holds its home's session lock is nudged, once per stow cycle, to run the internal [`/stow` skill](../.agents/skills/stow/SKILL.md) before its context compacts, instead of relying on the captain to remember the pass.
+The nudge rides the primary turn-end guard: at a turn end the guard would otherwise allow, it measures how far the conversation has grown since the last recorded pass and, when a pass is due, turns that turn end into one continuation carrying `firstmate stow nudge: <measure> since last /stow (threshold <t>); run the /stow pass now`.
+[`turnend-guard.md`](turnend-guard.md#stow-nudge) owns the mechanism, its gates, and why it can never displace a supervision block.
+
+The measure is the session's context size, read from the Claude transcript's newest assistant usage, compared with where it stood when the last pass completed or when this session was first seen.
+The nudge fires when the context has grown 60 percent of the way from that point to the auto-compact window, when the context shrank below that point because the conversation was compacted, or when 3 hours of active session have passed since that point, whichever comes first.
+The default window is 1,000,000 tokens, which is where Claude Code compacts a Fable or Sonnet 5 session that sets no `--autocompact` window; the same environment overrides Claude Code documents, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, are honored when the primary was launched with them.
+[`verification/stow-memory.md`](verification/stow-memory.md#stow-nudge-calibration) records the evidence behind those defaults.
+
+The optional local, gitignored `config/stow-nudge` tunes or disables the nudge for this home.
+It is either the single word `off` or key=value lines: `window=<tokens>` replaces the auto-compact window the measure targets, `percent=<1..99>` replaces the 60 percent growth threshold, and `hours=<n>` replaces the 3 hour horizon.
+Any other content disables the nudge and is reported at session start as a `STOW_NUDGE:` bootstrap diagnostic until corrected.
+The file is per home and is not inherited by secondmate homes, because stow cadence is a property of the home doing the stowing.
+The session-start digest also reports the last recorded pass as a `BOOTSTRAP_INFO:` fact, on every start when that pass is older than the horizon and otherwise only with verbose facts.
+`bin/fm-stow-mark.sh`'s header owns the record format, the exact measure, the gates, and the once-per-cycle marker; the `/stow` skill records each completed pass through it.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

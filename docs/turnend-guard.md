@@ -147,6 +147,16 @@ That hook is deliberately left to a follow-up alongside the deferred `preCompact
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
 
+## Stow nudge
+
+The same Claude `Stop` guard also delivers the automatic `/stow` nudge, so the memory pass rides the existing turn-end machinery rather than a second mechanism.
+At every Stop the `--claude` guard would otherwise allow after its scope check, it runs `bin/fm-stow-mark.sh check` with the payload's `transcript_path` and `session_id`; that script owns the durable last-stow record, the growth measure, and the once-per-cycle marker, and answers exit 3 with the nudge text exactly when a pass is due.
+The guard prints that text to stderr and exits 2, the continuation route a watcher wake also uses, so the model runs the pass in the very next turn; a subsequent Stop finds the cycle already delivered and allows silently until the `/stow` skill records the completed pass.
+The nudge only ever replaces an allow: a supervision block, the bounded re-block progression, and the terminal attended alarm keep their existing exits, so the guard's contract is unchanged and the nudge can never hide an unsupervised turn end.
+It costs no model tokens at routine turn ends because the measure runs inside the hook, from a bounded tail read of the transcript, and it is a silent no-op when the payload carries no transcript path, when the record or the transcript cannot be read, when `config/stow-nudge` disables it, or when the hook did not fire inside the primary session that holds this home's session lock, which is what keeps crewmate, scout, and lock-refused sessions out.
+Codex, OpenCode, Pi, pi-signed, Grok, and Cursor payloads never reach the nudge because it is gated on the `--claude` mode, and only Claude's Stop payload has been verified to carry `transcript_path`; extending it to another harness requires the same verified hook input there.
+[`configuration.md`](configuration.md#stow-nudge-configstow-nudge) owns the operator-facing thresholds and the tuning file, and `bin/fm-stow-mark.sh`'s header owns the exact record and measure.
+
 ## Compatibility limits
 
 - Child crewmate and scout worktrees are outside scope.
@@ -163,6 +173,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Installation refuses before writing unless `python3` with `tomllib` and `jq` are available.
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
+- The stow nudge is delivered only through the Claude `--claude` guard; every other harness integration is a documented no-op for it.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 
 ## Regression coverage
@@ -172,6 +183,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, Pi-host stand-down without Cursor identity and continued parking when `PI_CODING_AGENT` leaks alongside `CURSOR_AGENT` or `CURSOR_INVOKED_AS`, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
+`tests/fm-stow-mark.test.sh` covers the stow nudge: the last-stow record and its binding, the context growth, compaction, and horizon measures, the configuration file, the once-per-cycle guarantee, the lock-owning-primary gate against unowned locks and child worktrees, the no-transcript no-op, and the Claude guard delivering the nudge only on an allow while a supervision block still wins.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
