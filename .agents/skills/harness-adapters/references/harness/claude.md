@@ -53,3 +53,5 @@ Never track it in project `.claude/settings.json`, which is Claude-only and prop
 
 On Claude 2.1.217 the tool presents as `Agent`, and both `Agent` and `Task` worked as deny keys in an A/B with nonsense control.
 `permissions.allow` pre-approves rather than controls availability, so no closed positive allowlist exists.
+
+A crewmate launched with model `fable` runs solo: `../../../bin/fm-spawn.sh` appends `--disallowedTools` to that launch, and any dispatch that wants a Fable crewmate delegating further needs the captain's explicit approval for that exact tree (`FM_FABLE_ALLOW_DELEGATION=1`), per `../../../docs/subagent-guard.md`.

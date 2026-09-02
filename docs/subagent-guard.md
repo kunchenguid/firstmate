@@ -363,6 +363,18 @@ bin/fm-lint.sh
 tests/fm-subagent-pretool-check.test.sh
 ```
 
+## Fable crewmate solo launch (a different boundary)
+
+This guard's crewmate allowance stands: a crewmate delegating inside its own task worktree, including a Sonnet worker forking a Sonnet drafter, remains legitimate and this hook stays inert there (see "Scope" above).
+
+`bin/fm-spawn.sh` additionally launches a `claude` crewmate solo, at the launch boundary rather than this PreToolUse boundary, whenever the resolved model is `fable` (case-insensitive): it appends Claude Code's `--disallowedTools` naming every delegation tool, so a Fable crewmate cannot invoke Agent, Task, Workflow, or their equivalents at all.
+`FM_FABLE_ALLOW_DELEGATION=1` in fm-spawn's environment is the deliberate escape, mirroring `FM_ALLOW_SUBAGENT`'s style: never a default, only for one explicitly captain-approved spawn.
+See `disallowed_tools_flag_for_harness` in `bin/fm-spawn.sh`.
+
+Reason: on 2026-09-02, a `claude --model fable --effort high` crewmate (a read-only scout) used the Agent tool to spawn four Fable teammates; one of those forked four Fable children (fork inherits the parent's model) and another spawned seven `general-purpose` children with no model field, which also inherited Fable.
+The result was 16 simultaneous Fable contexts from one crewmate, roughly 48M cache-read tokens in about 22 minutes, and the five-hour Claude allowance reaching 103% with three teammates dying mid-run.
+This guard's own crewmate allowance did not and should not have fired: the failure was model-scoped runaway self-replication inside a legitimate crewmate, not a primary bypassing the fleet.
+
 ## Known residual gap
 
 The other tracked Claude hook entries in `.claude/settings.json` refuse to run under Grok's Claude-compatible settings loading (docs/turnend-guard.md "Harness integrations"), because Grok already covers each of those events through its own `.grok/hooks/` registration and running both creates a duplicate path.

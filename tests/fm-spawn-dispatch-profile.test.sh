@@ -401,6 +401,59 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
+# 2026-09-02 incident: a claude/fable crewmate used the Agent tool to spawn
+# Fable teammates whose descendants inherited the model, exhausting the
+# five-hour Claude allowance in ~22 minutes. fm-spawn now launches a
+# claude/fable crewmate solo via --disallowedTools.
+test_claude_fable_launches_solo_via_disallowed_tools() {
+  local rec id out status launch
+  id=profile-claude-fable-z2a
+  rec=$(make_spawn_case profile-claude-fable claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model fable --effort high)
+  status=$?
+  expect_code 0 "$status" "claude/fable spawn should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude fable high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--disallowedTools" "claude/fable launch must carry --disallowedTools"
+  assert_contains "$launch" "Agent" "claude/fable --disallowedTools must name Agent"
+  assert_contains "$launch" "Workflow" "claude/fable --disallowedTools must name Workflow"
+  pass "claude/fable launches solo with delegation tools disallowed"
+}
+
+test_claude_non_fable_models_omit_disallowed_tools() {
+  local rec id out status launch model
+  for model in sonnet opus; do
+    id="profile-claude-nonfable-$model-z2b"
+    rec=$(make_spawn_case "profile-claude-nonfable-$model" claude "$id")
+    read_case_record "$rec"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" --effort high)
+    status=$?
+    expect_code 0 "$status" "claude/$model spawn should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_not_contains "$launch" "--disallowedTools" \
+      "claude/$model launch must not carry --disallowedTools"
+  done
+  pass "claude launches on sonnet and opus omit --disallowedTools"
+}
+
+test_claude_fable_allow_delegation_escape_omits_flag() {
+  local rec id out status launch
+  id=profile-claude-fable-allow-z2c
+  rec=$(make_spawn_case profile-claude-fable-allow claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FABLE_ALLOW_DELEGATION=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model fable --effort high)
+  status=$?
+  expect_code 0 "$status" "claude/fable spawn under the escape should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--disallowedTools" \
+    "FM_FABLE_ALLOW_DELEGATION=1 must omit --disallowedTools"
+  pass "FM_FABLE_ALLOW_DELEGATION=1 deliberately omits the solo-launch flag"
+}
+
 test_codex_threads_model_and_effort() {
   local rec id out status launch
   id=profile-codex-z3
@@ -804,6 +857,9 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
+test_claude_fable_launches_solo_via_disallowed_tools
+test_claude_non_fable_models_omit_disallowed_tools
+test_claude_fable_allow_delegation_escape_omits_flag
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort

@@ -38,6 +38,12 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   A claude launch with --model fable (any case) is additionally launched solo:
+#   fm-spawn appends Claude Code's --disallowedTools naming every delegation tool
+#   (Agent, Task, Workflow, fork/teammate equivalents, etc.), so the crewmate
+#   cannot spawn further Fable contexts of its own. Set FM_FABLE_ALLOW_DELEGATION=1
+#   in fm-spawn's environment to omit the flag for one deliberate, captain-approved
+#   spawn; see disallowed_tools_flag_for_harness below and docs/subagent-guard.md.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1231,7 +1237,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG____DISALLOWEDFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1542,6 +1548,39 @@ effort_flag_for_harness() {
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
     # effort flag.
   esac
+}
+
+# Same exact tool names as DELEGATION_TOOLS in
+# tests/fm-subagent-pretool-check.test.sh, which is the inventory owner for
+# Claude Code's delegation-shaped tool surface; keep the two lists in sync.
+FABLE_DISALLOWED_TOOLS='Task,Agent,Workflow,RemoteTrigger,Monitor,ScheduleWakeup,SendMessage,EnterWorktree,ExitWorktree,CronCreate,CronDelete,CronList,TaskCreate,TaskGet,TaskList,TaskUpdate,TaskStop,TaskOutput'
+
+# 2026-09-02 incident: a claude/fable crewmate used the Agent tool to spawn
+# Fable teammates, one of which forked Fable children (fork inherits the
+# parent's model) and another of which spawned general-purpose children with
+# no model field, which ALSO inherited Fable - 16 simultaneous Fable contexts
+# from one crewmate, exhausting the five-hour Claude allowance in ~22 minutes.
+# bin/fm-subagent-pretool-check.sh does not catch this: it guards a genuine
+# PRIMARY home, and a crewmate's linked task worktree is deliberately inert to
+# it (docs/subagent-guard.md) because ordinary crewmate delegation is
+# legitimate. This is a narrower, model-scoped correction at the launch
+# boundary: a claude crewmate launched with model fable never receives Claude
+# Code's own delegation tools, verified against installed claude 2.1.258's
+# `--disallowedTools` (comma or space-separated tool-name list). Comparison is
+# case-insensitive so an alias spelling (Fable, FABLE) cannot bypass it, and
+# only the exact harness=claude, model=fable pair is affected - every other
+# model, including a relaunch onto sonnet or opus, gets no flag at all.
+# FM_FABLE_ALLOW_DELEGATION=1 is the deliberate captain-approved escape,
+# mirroring FM_ALLOW_SUBAGENT's style (bin/fm-subagent-pretool-check.sh):
+# never a default, only ever set for an exact, explicitly authorized task.
+disallowed_tools_flag_for_harness() {
+  local harness=$1 model=$2 lower_model
+  [ "$harness" = claude ] || return 0
+  [ -n "$model" ] || return 0
+  lower_model=$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')
+  [ "$lower_model" = fable ] || return 0
+  [ "${FM_FABLE_ALLOW_DELEGATION:-}" != 1 ] || return 0
+  printf -- '--disallowedTools %s ' "$(shell_quote "$FABLE_DISALLOWED_TOOLS")"
 }
 
 case "$LAUNCH" in
@@ -2957,8 +2996,10 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+DISALLOWEDFLAG=$(disallowed_tools_flag_for_harness "$HARNESS" "$MODEL")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__DISALLOWEDFLAG__/$DISALLOWEDFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
