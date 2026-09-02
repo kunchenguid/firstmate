@@ -2164,7 +2164,7 @@ EOF
 }
 
 test_large_local_snapshot_composes_under_five_seconds_without_projection_drift() {
-  local home fakebin worktree serial parallel started elapsed i
+  local home fakebin worktree serial parallel parallel_file snapshot_pid started elapsed i
   home=$(make_home large-local-snapshot)
   worktree="$home/projects/shared-worktree"
   fm_git_init_commit "$worktree"
@@ -2172,7 +2172,10 @@ test_large_local_snapshot_composes_under_five_seconds_without_projection_drift()
   fakebin=$(make_fakebin "$home")
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-if [ "$*" = "axi status" ] && [ "${FAKE_NM_DELAY:-0}" = 1 ]; then sleep 1; fi
+if [ "$*" = "axi status" ] && [ "${FAKE_NM_DELAY:-0}" = 1 ]; then
+  [ -z "${FAKE_NM_SIGNAL:-}" ] || : > "$FAKE_NM_SIGNAL"
+  sleep 1
+fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
@@ -2202,7 +2205,28 @@ SH
 
   serial=$(FAKE_NM_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
   started=$(date +%s)
-  parallel=$(FAKE_NM_DELAY=1 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 run "$home" "$fakebin" --json)
+  parallel_file="$home/parallel-snapshot.json"
+  FAKE_NM_DELAY=1 FAKE_NM_SIGNAL="$home/nm-started" FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 \
+    run "$home" "$fakebin" --json > "$parallel_file" &
+  snapshot_pid=$!
+  i=0
+  while [ ! -e "$home/nm-started" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if [ ! -e "$home/nm-started" ]; then
+    kill "$snapshot_pid" 2>/dev/null || true
+    wait "$snapshot_pid" 2>/dev/null || true
+    fail "concurrent local snapshot never began a current-state read"
+  fi
+  # Replace mutable publication metadata while current-state reads are in flight.
+  # The composed row must retain the metadata generation paired with its prefetched
+  # observation rather than becoming a ship observation attributed to a scout.
+  fm_write_meta "$home/state/local-1.meta" \
+    "window=fixture:local-1" "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=scout" "mode=scout"
+  wait "$snapshot_pid" || fail "concurrent local snapshot failed"
+  parallel=$(<"$parallel_file")
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -lt 5 ] \
     || fail "five local current-state reads exceeded the local composition target (${elapsed}s)"
@@ -2212,6 +2236,7 @@ SH
     .schema == "fm-bearings.v1"
       and (.in_flight | length) == 5
       and ([.in_flight[].id] | sort) == ["local-1","local-2","local-3","local-4","local-5"]
+      and ([.in_flight[] | select(.id == "local-1" and .kind == "ship")] | length) == 1
   ' >/dev/null || fail "large local snapshot lost a worker row: $parallel"
   pass "large local snapshot stays under five seconds with byte-identical serial and concurrent projections"
 }

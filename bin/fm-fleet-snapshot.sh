@@ -462,11 +462,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 SNAPSHOT_TASK_DIR=
 SNAPSHOT_TASK_METAS=()
+SNAPSHOT_TASK_META_COUNT=0
 
 snapshot_task_cleanup() {
   [ -z "$SNAPSHOT_TASK_DIR" ] || rm -rf -- "$SNAPSHOT_TASK_DIR"
   SNAPSHOT_TASK_DIR=
   SNAPSHOT_TASK_METAS=()
+  SNAPSHOT_TASK_META_COUNT=0
 }
 
 snapshot_wait_current_reads() {  # <pid>...
@@ -515,19 +517,31 @@ prefetch_task_observations() {  # <meta> <id>
 # window rather than five in series, while every command bound remains owned by
 # fm-timeout-lib.sh.
 prefetch_task_current_states() {
-  local meta id active=0 rc=0
+  local meta captured_meta id active=0 index=0 rc=0
   local -a pids=()
   snapshot_task_cleanup
   SNAPSHOT_TASK_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-tasks.XXXXXX") || return 1
+  # Keep the metadata generation that selected each task beside its observations.
+  # Publishers replace metadata atomically, so copying before workers start gives
+  # composition one coherent task manifest even if publication or teardown races it.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    SNAPSHOT_TASK_METAS[${#SNAPSHOT_TASK_METAS[@]}]=$meta
+    id=$(basename "$meta" .meta)
+    captured_meta="$SNAPSHOT_TASK_DIR/$id.meta"
+    cp -- "$meta" "$captured_meta" || {
+      snapshot_task_cleanup
+      return 1
+    }
+    SNAPSHOT_TASK_METAS[SNAPSHOT_TASK_META_COUNT]=$captured_meta
+    SNAPSHOT_TASK_META_COUNT=$((SNAPSHOT_TASK_META_COUNT + 1))
   done
-  for meta in "${SNAPSHOT_TASK_METAS[@]}"; do
+  while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
+    meta=${SNAPSHOT_TASK_METAS[index]}
     id=$(basename "$meta" .meta)
     prefetch_task_observations "$meta" "$id" &
     pids[active]=$!
     active=$((active + 1))
+    index=$((index + 1))
     if [ "$active" -ge "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY" ]; then
       snapshot_wait_current_reads "${pids[@]}" || rc=1
       pids=()
@@ -544,16 +558,19 @@ prefetch_task_current_states() {
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
-  local remote_host remote_root current_file endpoint_file observation_line rc
+  local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
+  local remote_host remote_root current_file endpoint_file observation_line index=0 rc
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local decision_line decision_verb
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   prefetch_task_current_states || return 1
-  for meta in "${SNAPSHOT_TASK_METAS[@]}"; do
+  while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
+    meta=${SNAPSHOT_TASK_METAS[index]}
+    index=$((index + 1))
     id=$(basename "$meta" .meta)
+    original_meta="$STATE/$id.meta"
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
@@ -650,7 +667,7 @@ task_json_lines() {
       return 1
     }
     [ -f "$report_path" ] && report_present=1 || report_present=0
-    meta_json=$(path_present_json "$meta")
+    meta_json=$(path_present_json "$original_meta")
     status_json=$event_json
     report_json=$(path_present_json "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
