@@ -20,6 +20,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
+A second gate, `Hooks need review`, was observed standing between that dialog and the composer whenever Codex hooks are configured, so a Codex spawn can need two answers before it reads its brief; `../../../docs/verification/runtime-backends.md` owns that measurement under "Crewmate autonomy and the status-file write contract".
 
 ## Skill popup
 

@@ -966,7 +966,7 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 | Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
 
 The `Workspace trust` and `Autonomy` rows record what the `--yolo` flag itself does, measured when that flag was still the launch default.
-`bin/fm-spawn.sh` now launches cursor with `--trust --auto-review --sandbox enabled` instead; the active [Crewmate autonomy and the status-file write contract](#crewmate-autonomy-and-the-status-file-write-contract) record distinguishes its completed readings from the required refresh after each launch-posture change.
+`bin/fm-spawn.sh` now launches cursor with `--trust --auto-review --sandbox enabled` plus the brief-permitted `--add-dir` roots instead, and the [Crewmate autonomy and the status-file write contract](#crewmate-autonomy-and-the-status-file-write-contract) record owns the readings for that posture.
 
 ### Crewmate autonomy and the status-file write contract
 
@@ -983,21 +983,51 @@ The lab home matters because Codex's `workspace-write` sandbox permits `/tmp` an
 
 #### Recorded readings, 2026-09-02
 
-These readings were taken in isolated `fm-lab-` sessions on macOS aarch64 with Herdr 0.8.2.
+Measured on macOS aarch64 with Herdr 0.8.2, in an isolated `fm-lab-` session whose lab `FM_HOME` sat under `$HOME`.
+Harness versions under measurement: Claude Code 2.1.258, Codex CLI 0.152.1, Cursor Agent 2026.08.31-4057e58.
 
-| Harness and version | Unattended launch reading | Status-file write reading |
-| --- | --- | --- |
-| Claude Code 2.1.258 | Not unattended in a fresh worktree: the workspace-trust dialog appeared before the composer under both `--dangerously-skip-permissions` and `--permission-mode auto`. | The crewmate appended its status file successfully after the trust choice was accepted, with Claude reporting `Allowed by auto mode classifier`. |
-| Codex CLI 0.152.1 | Not unattended in a fresh worktree: a directory-trust dialog and then `Hooks need review` appeared before the composer. | Before the narrow `--add-dir` correction, the crewmate's status append failed with `operation not permitted`; the corrected launch has not yet been measured through the guard. |
-| Cursor Agent 2026.08.31-4057e58 | Reached an empty composer under `--trust --auto-review --sandbox enabled` with no key sent. | Not yet measured through the guard. |
+Observed output, exit status 0:
 
-The current Codex and Cursor templates add only the directories `bin/fm-brief.sh` permits outside the task worktree: `state/` for every worker, plus that scout's `data/<id>/` report directory.
-The guard must show both allowed writes succeed and an append to an ungranted sibling directory fails before this table can claim the correction preserves a narrow sandbox boundary.
-The guard also checks that Cursor still records the task worktree as its exact workspace identity after the added writable roots.
+```text
+# herdr: herdr 0.8.2
+# lab home: <$HOME>/.fm-crewmate-autonomy-lab-61295 (status files outside the lab worktree)
+# claude: accepted-workspace-trust
+# claude 2.1.258 (Claude Code): NOT unattended - reached its composer only via accepted-workspace-trust (see the record in docs/verification/runtime-backends.md)
+# claude 2.1.258 (Claude Code): ready=accepted-workspace-trust submit=empty reply=landed
+ok - crewmate write contract: claude 2.1.258 (Claude Code) appends its status file and writes its scout report, both outside its worktree
+# claude 2.1.258 (Claude Code): carries no sandbox flag, and did write outside the brief-permitted directories (/Users/npayette/.fm-crewmate-autonomy-lab-61295/denied/claude-61295.status); its posture is an approval classifier, not a filesystem boundary
+# codex: accepted-directory-trust
+# codex: declined-hook-trust
+# codex codex-cli 0.152.1: NOT unattended - reached its composer only via accepted-directory-trust,declined-hook-trust (see the record in docs/verification/runtime-backends.md)
+# codex codex-cli 0.152.1: ready=accepted-directory-trust,declined-hook-trust submit=empty reply=landed
+ok - crewmate write contract: codex codex-cli 0.152.1 appends its status file and writes its scout report, both outside its worktree
+ok - narrow grant: codex codex-cli 0.152.1 is still refused a write outside the two brief-permitted directories
+ok - unattended launch: cursor 2026.08.31-4057e58 reaches an empty composer with no key sent
+# cursor 2026.08.31-4057e58: ready=unattended submit=empty reply=landed
+ok - crewmate write contract: cursor 2026.08.31-4057e58 appends its status file and writes its scout report, both outside its worktree
+ok - workspace binding: cursor 2026.08.31-4057e58 still records the task worktree as its exact workspacePath under the added writable roots
+ok - narrow grant: cursor 2026.08.31-4057e58 is still refused a write outside the two brief-permitted directories
+# checked 3 installed harness(es) on herdr herdr 0.8.2
+```
+
+| Harness and version | Unattended launch | The two brief-permitted writes | An ungranted sibling path |
+| --- | --- | --- | --- |
+| Claude Code 2.1.258 | Not unattended: the workspace-trust dialog stood before the composer and the guard reached it only via `accepted-workspace-trust`. An earlier reading in this work saw the identical dialog under the former `--dangerously-skip-permissions`, so it is not a consequence of `--permission-mode auto`. | Both landed. | Also landed, and is recorded rather than failed: `--permission-mode auto` is an approval classifier, not a filesystem sandbox, so this posture has no grant to keep narrow. |
+| Codex CLI 0.152.1 | Not unattended: a directory-trust dialog and then `Hooks need review` stood before the composer, cleared as `accepted-directory-trust,declined-hook-trust`. | Both landed under `-s workspace-write -a never` plus the two `--add-dir` grants. | Refused, so the grant is proven narrow rather than merely sufficient. |
+| Cursor Agent 2026.08.31-4057e58 | Unattended: an empty composer with no key sent under `--trust --auto-review --sandbox enabled`. | Both landed under the same two `--add-dir` grants. | Refused, so that grant is proven narrow too. |
+
+The granted set is exactly what `bin/fm-brief.sh` permits a worker outside its worktree: `state/` for the status file every worker appends, plus `data/<id>/` for a scout's report.
+Cursor still records the task worktree as its exact `workspacePath` under the added writable roots, so the `state/<id>.cursor-session` binding the busy fold depends on survives the grant.
+
+The `--add-dir` grant is what turns the Codex reading from broken into passing.
+Without it the same guard measured a Codex crewmate's status append failing with `operation not permitted`, and `-a never` left the model no way to ask, so such a worker could not report done, blocked, or needs-decision at all.
 
 An earlier guard iteration accidentally installed Codex CLI 0.152.1 over 0.150.1 when Enter landed on its update modal.
-Version 0.150.1 remains on disk, and the guard now waits for an empty composer to remain settled for ten seconds and uses Escape to dismiss an update offer before it can submit a prompt.
-Compatibility evidence for Codex 0.152.1 currently covers launch and composer classification only; a focused successful submit remains unrecorded.
+Version 0.150.1 remains on disk, and the guard now waits for an empty composer to stay empty for ten seconds and dismisses an update offer with Escape rather than Enter before it can submit anything.
+The run above is also the Codex 0.152.1 compatibility evidence: it launched through the adapter's own posture, the shared composer classifier read `empty` and held it for the full settle window, and the shared submit path returned `empty` with the crewmate's reply landing in the pane.
+
+Not established here: the guard measures claude, codex, and cursor, so neither axis was read for opencode, pi, grok, kimi, or muse.
+Neither is the captain's own fleet covered, because every reading was taken in a throwaway lab home and lab session rather than a real task.
 
 ### End-to-end
 
