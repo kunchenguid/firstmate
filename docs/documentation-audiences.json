@@ -361,6 +361,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/model-routing-benchmark.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
@@ -441,6 +445,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/model-routing-benchmark.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },
@@ -495,6 +503,10 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": ".agents/skills/model-routing-benchmark/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }
