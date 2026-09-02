@@ -380,6 +380,25 @@ test_malformed_outcome_store_fails_closed_without_pi_advice() {
   pass "a genuine outcome-store fault fails closed without Pi-specific restart advice"
 }
 
+test_held_lock_mode_rejects_an_unlocked_caller() {
+  local dir state out
+  dir=$(make_case index-selfheal-held-lock-guard)
+  state="$dir/state"
+  out="$dir/processed-init.out"
+
+  printf '%s\n' '{"seq":1,"epoch":1,"task":"other","wake":"","verdict":"captain","summary":"unrelated"}' \
+    > "$state/branch-outcomes.jsonl"
+
+  if FM_STATE_OVERRIDE="$state" "$OUTCOMES" processed-init --held-lock > "$out" 2>&1; then
+    fail "processed-init accepted --held-lock without parent lock ownership"
+  fi
+  [ ! -e "$state/.branch-outcomes-processed" ] \
+    || fail "unowned held-lock mode mutated the processed marker"
+  [ ! -e "$state/.branch-outcome-index-ready" ] \
+    || fail "unowned held-lock mode published the outcome index"
+  pass "held-lock initialization requires parent ownership of the outcome lock"
+}
+
 test_index_self_heal_runs_under_the_outcome_lock() {
   local dir state busy_out healed_out holder i
   dir=$(make_case index-selfheal-lock)
@@ -478,6 +497,7 @@ test_rejected_decision_line_surfaces_once_through_backstop
 test_missing_index_self_heals_on_first_drain
 test_uncovered_event_surfaces_on_first_drain_without_index
 test_malformed_outcome_store_fails_closed_without_pi_advice
+test_held_lock_mode_rejects_an_unlocked_caller
 test_index_self_heal_runs_under_the_outcome_lock
 test_overbound_routine_event_stays_silent
 test_backstop_output_is_bounded

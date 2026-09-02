@@ -71,9 +71,10 @@
 #   fm-branch-outcome.sh processed-init [--held-lock]
 #     Rebuild the bounded per-task outcome indexes, then create the processed
 #     marker at the current read cursor when it does not exist yet; validate a
-#     present marker without changing it. --held-lock is only for a caller that
-#     already holds $STATE/.branch-outcomes.lock (fm-wake-drain.sh); it skips
-#     the nested acquire so drain's bounded lock wait remains the deadline.
+#     present marker without changing it. --held-lock is only for the direct
+#     child of the process holding $STATE/.branch-outcomes.lock
+#     (fm-wake-drain.sh); it skips the nested acquire so drain's bounded lock
+#     wait remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
@@ -373,12 +374,27 @@ processed_init_locked() {
       return 1
     fi
   else
-    write_processed "$cursor_seq"
+    write_processed "$cursor_seq" || return 1
   fi
   if ! rebuild_outcome_indexes; then
     echo "error: outcome index migration could not be completed safely" >&2
     return 1
   fi
+}
+
+held_lock_owned_by_parent() {
+  local owner pid
+  case "$PPID" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  if [ -L "$LOCK" ]; then
+    owner=$(fm_lock_link_owner "$LOCK" 2>/dev/null) || return 1
+    fm_lock_points_to_owner "$LOCK" "$owner" || return 1
+  elif [ -d "$LOCK" ]; then
+    owner=$LOCK
+  else
+    return 1
+  fi
+  pid=$(cat "$owner/pid" 2>/dev/null) || return 1
+  [ "$pid" = "$PPID" ] && fm_pid_alive "$pid"
 }
 
 CMD=${1:-}
@@ -534,6 +550,9 @@ case "$CMD" in
     [ "$#" -eq 0 ] || usage
     if [ "$HELD_LOCK" -eq 0 ]; then
       fm_lock_acquire_wait "$LOCK"
+    elif ! held_lock_owned_by_parent; then
+      echo "error: --held-lock requires the parent process to own the outcome lock" >&2
+      exit 1
     fi
     if ! processed_init_locked; then
       if [ "$HELD_LOCK" -eq 0 ]; then
