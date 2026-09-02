@@ -69,7 +69,9 @@
 // every rejection to runner.emitError, so a delivery that fails leaves the
 // latch set with no row docked and no run started. It clears at the next run's
 // agent_start or agent_settled, in practice the next captain turn, and the
-// durable queue still holds the event meanwhile.
+// durable queue still holds the event meanwhile. The delivery path still rolls
+// the latch back inside the catch that drops the unconsumed-wake record, so a
+// surface that does report a rejection releases presentation immediately.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";

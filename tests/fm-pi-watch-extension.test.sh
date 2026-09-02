@@ -3008,9 +3008,14 @@ const pi = {
 // The running run reaching a queued follow-up: Pi emits the user message.
 const consumeQueued = (message) =>
   handlers.get("message_start")?.({ message: { role: "user", content: [{ type: "text", text: message }] } }, {});
-const arms = () => existsSync(process.env.FM_ARM_LOG)
-  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm=")).length
-  : 0;
+const armLog = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n")
+  : [];
+const arms = () => armLog().filter((row) => row.startsWith("arm=")).length;
+// Every close confirms the handling handshake of its successor inside the
+// delivery path, just before the follow-up is presented, so this counts the
+// closes that have reached their presentation decision.
+const confirms = () => armLog().filter((row) => row.startsWith("confirmed=")).length;
 async function waitFor(pred, label) {
   for (let i = 0; i < 500; i += 1) {
     if (pred()) return;
@@ -3031,18 +3036,32 @@ await waitFor(() => prompts.length === 1, "first wake delivered while main strea
 if (wakes("signal: streaming chain wake 1") !== 1) throw new Error(`wrong first wake: ${prompts.join(" | ")}`);
 await waitFor(() => arms() === 2, "successor after the streaming-time delivery");
 writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
-await waitFor(() => prompts.length === 2, "second wake delivered while main still streams");
-if (wakes("signal: streaming chain wake 2") !== 1) throw new Error(`wrong second wake: ${prompts.join(" | ")}`);
+// The row docked for the first wake is still pending, so presentation
+// coalescing stands for this close: the chain must still advance without it.
 await waitFor(() => arms() === 3, "successor after the second streaming-time delivery");
+await waitFor(() => confirms() >= 2, "second close reaching its presentation decision");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1 || wakes("signal: streaming chain wake 2") !== 0) {
+  throw new Error(`second streaming close docked its own row: ${prompts.join(" | ")}`);
+}
 if (beforeAgentStarts !== 0) throw new Error(`streaming follow-ups raised before_agent_start ${beforeAgentStarts} times`);
 
-// The run reaches the first queued follow-up; the second is still queued when
-// the captain replaces the session, so only the second rides the handoff.
+// The run reaches the queued follow-up and then settles, which both finishes
+// that record and re-arms presentation for the next streaming-time close.
 consumeQueued(prompts[0]);
+handlers.get("agent_settled")?.({}, {});
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.3`, "close\n");
+await waitFor(() => prompts.length === 2, "third wake delivered while main streams again");
+if (wakes("signal: streaming chain wake 3") !== 1) throw new Error(`wrong third wake: ${prompts.join(" | ")}`);
+await waitFor(() => arms() === 4, "successor after the third streaming-time delivery");
+if (beforeAgentStarts !== 0) throw new Error(`streaming follow-ups raised before_agent_start ${beforeAgentStarts} times`);
+
+// The third wake is still queued when the captain replaces the session, so
+// only it rides the handoff; the consumed and the coalesced ones do not.
 await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
 const handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
-if (handoff.pending.length !== 1 || handoff.pending[0].delivered || !handoff.pending[0].message.includes("signal: streaming chain wake 2")) {
+if (handoff.pending.length !== 1 || handoff.pending[0].delivered || !handoff.pending[0].message.includes("signal: streaming chain wake 3")) {
   throw new Error(`replacement handoff did not carry exactly the unconsumed wake: ${JSON.stringify(handoff)}`);
 }
 streaming = false;
@@ -3050,11 +3069,11 @@ const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?r
 replacementMod.default(pi);
 await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
 await waitFor(() => prompts.length === 3, "replacement replay of the unconsumed wake");
-if (wakes("signal: streaming chain wake 2") !== 2 || wakes("signal: streaming chain wake 1") !== 1) {
+if (wakes("signal: streaming chain wake 3") !== 2 || wakes("signal: streaming chain wake 1") !== 1 || wakes("signal: streaming chain wake 2") !== 0) {
   throw new Error(`replacement replayed the wrong wakes: ${prompts.join(" | ")}`);
 }
 if (beforeAgentStarts !== 1) throw new Error(`idle replay raised before_agent_start ${beforeAgentStarts} times`);
-await waitFor(() => arms() === 4, "replacement arm");
+await waitFor(() => arms() === 5, "replacement arm");
 await waitFor(() => !existsSync(handoffPath), "consumed replay clears its handoff record");
 process.exit(0);
 EOF
