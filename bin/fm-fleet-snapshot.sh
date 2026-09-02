@@ -480,9 +480,26 @@ snapshot_wait_current_reads() {  # <pid>...
   return "$rc"
 }
 
+snapshot_task_generation_is_current() {  # <captured-meta> <id>
+  local captured_meta=$1 id=$2 current_meta captured_gen current_gen captured_contents current_contents
+  current_meta="$STATE/$id.meta"
+  [ -f "$current_meta" ] || return 1
+  captured_gen=$(meta_value "$captured_meta" spawn_gen)
+  if [ -n "$captured_gen" ]; then
+    current_gen=$(meta_value "$current_meta" spawn_gen)
+    [ "$current_gen" = "$captured_gen" ]
+  else
+    # Legacy metadata has no generation token. Exact equality is the strongest
+    # available identity check and still detects ordinary teardown/relaunches.
+    captured_contents=$(<"$captured_meta") || return 1
+    current_contents=$(<"$current_meta") || return 1
+    [ "$current_contents" = "$captured_contents" ]
+  fi
+}
+
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid current_rc=0
-  local kind backend target endpoint_exists=null agent_alive=not_checked
+  local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
@@ -498,7 +515,8 @@ prefetch_task_observations() {  # <meta> <id>
   kind=$(meta_value "$meta" kind)
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$target" ]; then
+  snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
+  if [ "$generation_current" = 1 ] && [ -n "$target" ]; then
     if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
       endpoint_exists=true
     else
@@ -507,6 +525,13 @@ prefetch_task_observations() {  # <meta> <id>
     if [ "$kind" = secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
     fi
+  fi
+  # Targets are reusable (notably tmux's fm-<id> window). Revalidate after the
+  # probes so teardown/relaunch cannot attribute the replacement generation's
+  # endpoint state to the captured task.
+  if ! snapshot_task_generation_is_current "$meta" "$id"; then
+    endpoint_exists=null
+    agent_alive=unknown
   fi
   printf 'endpoint_exists=%s\nagent_alive=%s\n' "$endpoint_exists" "$agent_alive" > "$endpoint_file" || current_rc=1
   wait "$current_pid" || current_rc=1

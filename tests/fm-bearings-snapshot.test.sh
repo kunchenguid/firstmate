@@ -2220,6 +2220,61 @@ SH
   pass "task teardown during metadata capture is omitted without aborting the snapshot"
 }
 
+test_relaunched_task_does_not_inherit_reused_endpoint_state() {
+  local home fakebin worktree json
+  home=$(make_home endpoint-generation-race)
+  worktree="$home/projects/generation-race-not-created"
+  fakebin=$(make_fakebin "$home")
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] generation-race - Generation identity fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/generation-race.meta" \
+    "window=fixture:fm-generation-race" "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "spawn_gen=old-generation"
+  printf 'working: old generation\n' > "$home/state/generation-race.status"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = display-message ]; then
+  if mkdir "$RACE_ONCE" 2>/dev/null; then
+    tmp="$RACE_META.tmp.$$"
+    cat > "$tmp" <<EOF
+window=fixture:fm-generation-race
+worktree=$RACE_WORKTREE
+project=firstmate
+harness=claude
+kind=ship
+mode=no-mistakes
+spawn_gen=new-generation
+EOF
+    mv "$tmp" "$RACE_META"
+  fi
+  # The old endpoint disappeared while a replacement reused the same target.
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_NOW_EPOCH=1783792800 NET_LOG="$home/net.log" \
+    RACE_ONCE="$home/relaunch-once" RACE_META="$home/state/generation-race.meta" \
+    RACE_WORKTREE="$worktree" "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed during endpoint generation race"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "generation-race")
+    | .spawn_gen == "old-generation"
+      and .endpoint.exists == null
+      and .endpoint.agent_alive == "unknown"
+      and .endpoint.status == "unknown"
+  ' >/dev/null || fail "replacement endpoint state crossed task generations: $json"
+  pass "reused endpoint state is discarded when task generation changes"
+}
+
 test_large_local_snapshot_composes_under_five_seconds_without_projection_drift() {
   local home fakebin worktree real_cp serial parallel parallel_file snapshot_pid started elapsed i
   home=$(make_home large-local-snapshot)
@@ -2439,6 +2494,7 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
 }
 
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
+test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_composes_under_five_seconds_without_projection_drift
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
