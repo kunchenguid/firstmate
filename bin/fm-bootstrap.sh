@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "GH_AUTH_UNKNOWN: <what could not be established>",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -48,6 +49,24 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          NEEDS_GH_AUTH means GitHub was reached and the credential is the
+#          established problem: it answered and gh still refused it, or no
+#          credential is configured at all. The operator action is
+#          `gh auth login`.
+#          GH_AUTH_UNKNOWN means the probe established NOTHING - it timed out,
+#          could not reach GitHub, or gh is not installed - so the credential is
+#          neither confirmed nor rejected. The operator action is to check the
+#          network and retry, never to re-authenticate a credential nothing
+#          rejected. `gh auth status` cannot make this distinction itself: it
+#          exits non-zero and reports the token invalid when its own API call
+#          could not complete, and it carries no timeout, so the probe is
+#          hard-bounded here and a failure is disambiguated by whether an HTTP
+#          exchange with GitHub completed. Silence still means confirmed healthy.
+#          docs/verification/github-auth-probe.md records the dated gh-version
+#          evidence those two classifications rest on.
+#          FM_GH_AUTH_TIMEOUT bounds the `gh auth status` probe when it is a
+#          positive integer, otherwise 20s is used; the follow-up reachability
+#          probe is bounded at 10s.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -181,6 +200,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
@@ -1519,6 +1540,75 @@ detect_home_summary_publication() {
   fi
 }
 
+# The GitHub credential probe.
+#
+# `gh auth status` validates the stored credential by calling the GitHub API for
+# every configured account, and it has no bound of its own: pointed at a socket
+# that accepts and never answers, it was still running when a 60s bound killed
+# it. It also exits non-zero and renders "The token in <source> is invalid" when
+# that call could not complete AT ALL, so its exit status cannot tell a rejected
+# credential from an unreachable network. Collapsing both onto NEEDS_GH_AUTH is
+# what made this check report a broken sign-in every session against a healthy
+# credential, which is how an operator learns to ignore it.
+#
+# So bound the probe, and disambiguate a failure with one follow-up that asks a
+# protocol question instead of re-reading gh's prose: did an HTTP exchange with
+# GitHub complete at all? `gh api / -i` prints the response status line when it
+# did. Two independent signals carry the re-authenticate verdict, so no single
+# vendor string is load-bearing:
+#   - an RFC 9112 status line, meaning GitHub answered and gh still refused the
+#     credential; or
+#   - gh's own instruction to run `gh auth login`, meaning no credential exists
+#     to validate.
+# docs/verification/github-auth-probe.md records the dated per-gh-version
+# evidence for every claim above; re-run it after a gh major upgrade.
+# Neither present means the probe established nothing. That is reported as
+# GH_AUTH_UNKNOWN and never as health, because "wait or check your network" and
+# "run gh auth login" are different operator actions and a check that guesses
+# between them is the defect being fixed here.
+GH_AUTH_TIMEOUT_DEFAULT=20
+GH_AUTH_REACH_TIMEOUT=10
+
+gh_auth_bound() {
+  local bound=${FM_GH_AUTH_TIMEOUT:-$GH_AUTH_TIMEOUT_DEFAULT}
+  # Zero is rejected with the malformed values: `timeout 0` and the perl
+  # fallback's `alarm 0` both mean "no deadline", which is the stall this exists
+  # to prevent.
+  case "$bound" in ''|*[!0-9]*|0) bound=$GH_AUTH_TIMEOUT_DEFAULT ;; esac
+  printf '%s\n' "$bound"
+}
+
+# Prints nothing when GitHub confirms the credential, NEEDS_GH_AUTH when the
+# credential is the established problem, and GH_AUTH_UNKNOWN when the probe
+# could not establish either.
+gh_auth_probe() {
+  local bound rc reach
+  if ! command -v gh >/dev/null 2>&1; then
+    # detect_local_tools owns the actionable MISSING: gh line. This one says
+    # only that the credential itself is unconfirmed, so a `only` phase that
+    # never runs that detection cannot read silence here as a healthy login.
+    echo "GH_AUTH_UNKNOWN: gh is not installed, so the credential was not checked"
+    return 0
+  fi
+  bound=$(gh_auth_bound)
+  fm_run_timed "$bound" gh auth status >/dev/null 2>&1 </dev/null
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq 124 ]; then
+    echo "GH_AUTH_UNKNOWN: gh auth status did not answer within ${bound}s"
+    return 0
+  fi
+  reach=$(fm_run_timed "$GH_AUTH_REACH_TIMEOUT" gh api / -i 2>&1 </dev/null)
+  if printf '%s\n' "$reach" | LC_ALL=C grep -q '^HTTP/[0-9]'; then
+    echo "NEEDS_GH_AUTH"
+    return 0
+  fi
+  case "$reach" in
+    *"gh auth login"*) echo "NEEDS_GH_AUTH"; return 0 ;;
+  esac
+  echo "GH_AUTH_UNKNOWN: could not reach GitHub to confirm the credential"
+}
+
 # The order below is the order the diagnostics have always printed in, so a
 # `skip` run is the same output with the network lines removed rather than a
 # reshuffle. `gh auth status` sits between the two local blocks because that is
@@ -1535,7 +1625,7 @@ detect_home_summary_publication() {
 local_phase && detect_local_tools
 if network_phase; then
   __fm_timing_stamp=$(fm_timing_now_ms)
-  gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
+  gh_auth_probe
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config

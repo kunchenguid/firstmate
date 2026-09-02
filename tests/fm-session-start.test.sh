@@ -1464,10 +1464,18 @@ EOF
 # to make directly. Making it pathologically slow is how a test stands in for an
 # unreachable host without touching one: if any part of the blocking path still
 # waits on the network, the digest cannot finish before this does.
+# The `api` arm fails the way an unreachable host does - no response, so no HTTP
+# status line - which is what makes this an unreachable host rather than a
+# credential GitHub actually rejected. It fails fast because only the `auth` arm
+# needs to be slow for this test.
 install_slow_gh() {
   local fakebin=$1 seconds=$2 finished_marker=${3:-}
   cat > "$fakebin/gh" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-}" = api ]; then
+  printf '%s\\n' 'Get "https://api.github.com/": dial tcp: lookup api.github.com: no such host' >&2
+  exit 1
+fi
 if [ "\${1:-}" = auth ]; then
   sleep $seconds
   [ -z '$finished_marker' ] || : > '$finished_marker'
@@ -1596,12 +1604,19 @@ EOF
     "the digest did not name the checks it has not confirmed"
   assert_not_contains "$out" "NEEDS_GH_AUTH" \
     "the digest reported a GitHub-auth verdict it could not yet have"
+  assert_not_contains "$out" "GH_AUTH_UNKNOWN" \
+    "the digest reported the deferred probe's unknown result before that probe finished"
 
   # ... and the work itself still happens, off the blocking path.
   wait_for_network_stage "$home" "$root" 60 \
     || fail "the deferred stage never finished: $(network_stage_report "$home" "$root")"
-  assert_contains "$(network_stage_report "$home" "$root")" "NEEDS_GH_AUTH" \
+  # An unreachable host leaves the credential UNCONFIRMED. It is deliberately not
+  # NEEDS_GH_AUTH: nothing rejected this credential, and telling the operator to
+  # re-authenticate a working login is what taught them to ignore this check.
+  assert_contains "$(network_stage_report "$home" "$root")" "GH_AUTH_UNKNOWN" \
     "the deferred stage lost the GitHub-auth verdict it was deferring"
+  assert_not_contains "$(network_stage_report "$home" "$root")" "NEEDS_GH_AUTH" \
+    "an unreachable host was reported as a credential needing re-authentication"
   assert_contains "$(cat "$log")" "new-window" \
     "the deferred stage lost the dead-secondmate relaunch"
   pass "session start: an unreachable host delays a reported check, not the digest"
