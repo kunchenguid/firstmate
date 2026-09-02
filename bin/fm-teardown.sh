@@ -2774,7 +2774,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # A Herdr close may reposition shared workspace order, so the whole
-# destructive sequence below (worktree return, pane close, record removal)
+# destructive sequence below (pane close, worktree return, record removal)
 # runs under the named-session presentation lock, acquired BEFORE anything is
 # returned or erased: a contended lock refuses here while the isolated copy,
 # every durable record, and the endpoint are all still intact for a plain

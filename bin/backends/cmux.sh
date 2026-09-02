@@ -444,7 +444,8 @@ fm_backend_cmux_target_ready() {  # <target> [expected-label]
 # polling cannot solve this here any more than it could for zellij. Active
 # probe instead: print the surface's `$PWD` with a unique marker (atomically
 # submitted via send_text_line), briefly settle, then capture and read only
-# that marker line. Scoped to fm-spawn.sh's own worktree-discovery poll loop.
+# that marker line. Scoped to fm-spawn.sh's own worktree-cwd confirmation poll
+# loop.
 fm_backend_cmux_current_path() {  # <target> [expected-label]
   local target=$1 expected_label=${2:-} out line marker_begin="__FM_CMUX_CWD_BEGIN__" marker_end="__FM_CMUX_CWD_END__" in_block=0 chunk="" last=""
   fm_backend_cmux_target_ready "$target" "$expected_label" || return 0

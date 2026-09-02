@@ -195,7 +195,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 `fm-spawn.sh` also owns the base-freshness boundary for every fresh ship and scout: no worker starts until its clean task worktree matches the fetched tip of origin's resolved default branch, and any unsafe or unverifiable base stops the spawn.
-On the session-provider backends the copy is leased and refreshed from the spawn process before any pane exists, and the pane is created already inside it, so no worker shell can hold the worktree's git lock while the refresh runs.
+On the session-provider backends the spawn process refreshes the leased or recorded recovery copy before the task endpoint's shell enters it, then creates the pane inside it or moves a reclaimed Herdr pane there, so that shell cannot hold the worktree's git lock while the refresh runs.
 Its header owns the exact order and refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` and `tests/fm-spawn-lease-before-enter.test.sh` own the portable regression coverage.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
