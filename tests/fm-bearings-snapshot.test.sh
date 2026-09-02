@@ -684,9 +684,11 @@ test_secondmate_and_child_bounds_are_disclosed() {
     run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 1
+      and ([.in_flight[].id] | sort) == ["a/child-1", "a/child-2"]
+      and ([.omitted[].surface] | any(test("secondmate a active children omitted by snapshot bound: 1")))
       and ([.omitted[].surface] | any(test("secondmates showing 1 of 2")))
       and ([.omitted[].surface] | any(test("registered secondmates omitted by snapshot bound: 1")))
-  ' >/dev/null || fail "bearings secondmate bound was not disclosed: $json"
+  ' >/dev/null || fail "bearings secondmate or child bound was not disclosed: $json"
   expanded=$(FM_SNAPSHOT_SECONDMATE_CHILDREN=2 FM_BEARINGS_SECONDMATES=1 \
     run "$home" "$fakebin" --json --all-secondmates)
   printf '%s' "$expanded" | jq -e '
@@ -1024,7 +1026,10 @@ test_default_is_bounded_and_local_only() {
   assert_contains "$toon" 'prs: "not_requested' "default must state PR checks were not requested"
   assert_contains "$toon" "live PR discovery + checks,\"--include-prs\"" "omitted must mark the dropped live-PR surface"
   # Valid JSON, correct schema.
-  printf '%s' "$json" | jq -e '.schema == "fm-bearings.v1"' >/dev/null || fail "json schema wrong"
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.in_flight | any(.id == "ship-task" and .repo == "firstmate"))
+  ' >/dev/null || fail "json schema or main Underway repository wrong: $json"
   pass "default output is bounded, local-only, and marks omitted surfaces"
 }
 
@@ -1776,6 +1781,7 @@ EOF
   printf '%s' "$json" | jq -e '
     ([.in_flight[].id] | sort) == ["busy-hold/child-a", "busy-hold/child-b"]
       and ([.in_flight[].state] | unique) == ["working"]
+      and ([.in_flight[].repo] | unique) == ["sample"]
       and ([.in_flight[] | select(.id == "busy-hold")] | length) == 0
       and ([.decisions_open[] | select(.id == "busy-hold/release-call"
         and .verb == "captain-hold")] | length) == 1
