@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# Regression test for the fm-spawn.sh worktree settle loop (bin/fm-spawn.sh,
+# the poll after the pane is created inside the leased worktree).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
-# pane actually settles into the worktree treehouse get moved it to. That stale
-# path still passes the loop's "differs from the project" check and
-# validate_spawn_worktree's "is a real, distinct worktree" check (it IS a real
-# git checkout, just the wrong one), so a naive single-read loop silently
-# records the wrong worktree= in state/<id>.meta. This test simulates that
-# transient-then-settled pane_current_path sequence with a fake tmux and
-# asserts the recorded worktree resolves to the real, settled worktree, never
-# the stale first read.
+# pane actually settles into the worktree it was created in. That stale path
+# is a real git checkout, just the wrong one, so a loop that accepted any
+# plausible worktree would silently record the wrong worktree= in
+# state/<id>.meta. This test simulates that transient-then-settled
+# pane_current_path sequence with a fake tmux and asserts the recorded worktree
+# is the leased, settled worktree, never the stale first read.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -54,7 +52,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  fm_test_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 

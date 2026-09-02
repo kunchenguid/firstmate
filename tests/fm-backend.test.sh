@@ -785,7 +785,12 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in "get --lease") printf '%s\\n' "$wt" ;; esac
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 
@@ -822,7 +827,7 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # (tmux, herdr) reports the OS-level PHYSICALLY-resolved cwd. When the project
 # itself lives under a symlinked prefix (e.g. macOS's /tmp -> /private/tmp),
 # fm-spawn.sh's PROJ_ABS - a logical `cd && pwd` - differs string-for-string
-# from that physical read even before treehouse moves the pane at all, so the
+# from that physical read even before the pane settles in the leased copy, so the
 # worktree-discovery poll used to mistake an UNMOVED pane for one that had
 # already left the project, handing validate_spawn_worktree the project's own
 # directory as "the worktree" and tripping its false isolation refusal.
@@ -855,7 +860,12 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  fm_fake_exit0 "$fb" treehouse
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in "get --lease") printf '%s\\n' "$wt" ;; esac
+exit 0
+SH
+  chmod +x "$fb/treehouse"
   printf '%s\n' "$fb"
 }
 

@@ -48,8 +48,8 @@
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   terminal, so ship/scout Orca spawns never lease a treehouse copy; cmux is a
+#   session provider only, exactly like tmux/herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -138,6 +138,35 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   This script is the one owner of the ORDER of that sequence on every
+#   session-provider backend (tmux, herdr, zellij, cmux): the copy is leased
+#   from this process with `treehouse get --lease` (no pane, no shell), the
+#   refresh above runs on that leased path, and only then is the task pane
+#   created with the leased path as its starting directory. No `treehouse get`
+#   is ever typed into the pane; the one exception is a reclaimed Herdr pane
+#   that already existed, which is sent a plain `cd` into the copy only after
+#   the refresh. A fresh spawn whose durable record still names a pooled copy
+#   (a quarantined Herdr recovery) refreshes that same copy instead of leasing
+#   another, and refuses when its HEAD holds commits no remote has, so a
+#   retry never grows the pool or resets a prior worker's unlanded commits.
+#   The old order (create the pane, enter the copy
+#   from its shell, then refresh) raced a fresh shell's git prompt against the
+#   refresh for the worktree's index.lock under the shared .git/worktrees/, and
+#   refused the spawn every time on a large repository; the worker shell is
+#   simply not in the copy yet when the refresh runs. The pane is then polled
+#   once a second until its live cwd resolves to the leased path before launch;
+#   FM_SPAWN_SETTLE_POLLS bounds that wait (default 60).
+#   When a fresh spawn stops after the lease but BEFORE any backend endpoint
+#   creation has begun with the leased path as its cwd, a clean leased copy is
+#   returned to the pool so a refused launch cannot shrink the pool; a copy
+#   holding uncommitted work stays leased, untouched, and its path is reported.
+#   From the first create call onward the lease is retained: `treehouse return`
+#   terminates every process still inside the copy, so returning it after a
+#   pane, tab, or workspace was opened there would kill a shell the refusal
+#   deliberately left in place (a quarantined Herdr projection, an
+#   inspectable endpoint). A refusal in that window reports the retained path
+#   and its release command, and bin/fm-teardown.sh's `treehouse return`
+#   releases a launched task's lease.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -727,6 +756,9 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_LEASE_RETURN_PENDING=0
+SPAWN_LEASE_WT=
+HERDR_RECLAIMED_PANE=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -837,6 +869,12 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  if [ "$SPAWN_LEASE_RETURN_PENDING" = 1 ]; then
+    SPAWN_LEASE_RETURN_PENDING=0
+    spawn_lease_return_on_abort "$SPAWN_LEASE_WT" || true
+  elif [ "$status" -ne 0 ] && [ -n "$SPAWN_LEASE_WT" ]; then
+    echo "warning: leased copy '$SPAWN_LEASE_WT' is retained because an endpoint may already sit inside it; inspect it, then release it with: (cd '$PROJ_ABS' && treehouse return --force '$SPAWN_LEASE_WT')" >&2
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -1938,6 +1976,93 @@ freshen_spawn_worktree_base() {  # <worktree>
   fi
 }
 
+# Lease a pooled copy of the project from THIS process, with no pane and no
+# shell anywhere near it. `treehouse get --lease` prints exactly the absolute
+# path on stdout; its banners go to stderr and are shown only on failure.
+spawn_lease_pool_worktree() {  # -> prints the leased worktree path
+  local out err_file lines
+  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-spawn-lease.XXXXXX") || return 1
+  if ! out=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$W" 2>"$err_file"); then
+    echo "error: treehouse get --lease failed for project '$PROJ_ABS'; no worker was started" >&2
+    cat "$err_file" >&2 2>/dev/null || true
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
+  lines=$(printf '%s\n' "$out" | grep -c . || true)
+  case "$out" in
+    /*) ;;
+    *) lines=0 ;;
+  esac
+  if [ "$lines" != 1 ] || [ ! -d "$out" ]; then
+    echo "error: treehouse get --lease did not report exactly one existing absolute worktree path for project '$PROJ_ABS' (got '${out:-nothing}'); no worker was started" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# A fresh spawn that stops after leasing but before any endpoint exists hands
+# a CLEAN copy straight back so a refused launch cannot shrink the pool. A copy
+# holding uncommitted work is never reset here: it stays leased (prune cannot
+# recycle it) and its path is reported. The primary checkout is never returned.
+spawn_lease_return_on_abort() {  # <worktree>
+  local worktree=$1 wt_real status
+  [ -n "$worktree" ] || return 0
+  wt_real=$(real_path_or_raw "$worktree")
+  if [ "$wt_real" = "$PROJ_ABS_REAL" ]; then
+    echo "warning: leased path '$worktree' resolves to the primary checkout; not returning it" >&2
+    return 1
+  fi
+  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain 2>/dev/null) || {
+    echo "warning: could not inspect leased copy '$worktree'; leaving it leased - release it with: (cd '$PROJ_ABS' && treehouse return '$worktree')" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    echo "warning: leased copy '$worktree' holds uncommitted work; leaving it leased and untouched - inspect it, then release it with: (cd '$PROJ_ABS' && treehouse return '$worktree')" >&2
+    return 1
+  fi
+  if ! (cd "$PROJ_ABS" && treehouse return --force "$worktree") >/dev/null 2>&1; then
+    echo "warning: could not return leased copy '$worktree' to the pool; release it with: (cd '$PROJ_ABS' && treehouse return --force '$worktree')" >&2
+    return 1
+  fi
+}
+
+# A fresh spawn for a task id whose durable record still names a pooled copy
+# (a quarantined Herdr recovery, a relaunch-shaped resume) reuses that copy
+# rather than leasing a second one per attempt: the record's copy is already
+# this task's lease. Prints the path only when it is a real directory distinct
+# from the primary checkout.
+spawn_prior_record_worktree() {  # -> prints the record's worktree path
+  local prior
+  prior=$(herdr_projection_meta_field_exact "$STATE/$ID.meta" worktree 2>/dev/null) || return 1
+  [ -n "$prior" ] && [ -d "$prior" ] || return 1
+  [ "$(real_path_or_raw "$prior")" != "$PROJ_ABS_REAL" ] || return 1
+  printf '%s\n' "$prior"
+}
+
+# A reused copy is refreshed under the same clean check as a leased one, and
+# additionally refuses when its HEAD carries commits that no remote holds:
+# the refresh would reset those away, and they may be the prior worker's
+# unlanded work.
+spawn_refuse_unpushed_head() {  # <worktree>
+  local worktree=$1 unpushed
+  unpushed=$(git -C "$worktree" log --format=%H --max-count=1 HEAD --not --remotes -- 2>/dev/null) || {
+    echo "error: could not inspect prior copy '$worktree' for unpushed commits; refusing to refresh it" >&2
+    return 1
+  }
+  if [ -n "$unpushed" ]; then
+    echo "error: prior copy '$worktree' for $ID holds commits not on any remote; refusing to refresh over that work - land or discard it first" >&2
+    return 1
+  fi
+}
+
+# The first backend call that opens anything with the leased path as its cwd
+# ends the return-on-abort window (header): from here a refusal retains the
+# lease rather than terminating whatever that call left inside the copy.
+spawn_lease_endpoint_begins() {
+  SPAWN_LEASE_RETURN_PENDING=0
+}
+
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -2067,17 +2192,37 @@ if [ "$RELAUNCH" -eq 1 ]; then
   WT_TARGET=$T
   SES=${T%%:*}
 else
+# Lease and refresh the task copy BEFORE any endpoint exists (header: the pane
+# is created already inside it; nothing else may enter the copy first). Orca
+# owns its own worktree and a secondmate launches in its home, so both keep
+# the project or home path as the pane's starting directory.
+PANE_CWD=$PROJ_ABS
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  if WT=$(spawn_prior_record_worktree); then
+    # The record's own copy: never returned by this spawn, refreshed in place.
+    validate_spawn_worktree "prior record" "(no endpoint created yet)"
+    spawn_refuse_unpushed_head "$WT" || exit 1
+  else
+    WT=$(spawn_lease_pool_worktree) || exit 1
+    SPAWN_LEASE_WT=$WT
+    SPAWN_LEASE_RETURN_PENDING=1
+    validate_spawn_worktree "treehouse get --lease" "(no endpoint created yet)"
+  fi
+  freshen_spawn_worktree_base "$WT" || exit 1
+  PANE_CWD=$WT
+fi
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
-    # non-default tmux config cannot rename the window away from fm-<id> once
-    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
+    # non-default tmux config cannot rename the window away from fm-<id> as soon
+    # as its shell starts in the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    spawn_lease_endpoint_begins
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PANE_CWD") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2134,6 +2279,10 @@ case "$BACKEND" in
           set -e
           case "$HERDR_RECLAIM_STATUS" in
             0)
+              # The reclaimed pane already existed, so it was not created
+              # inside the copy; the settle step below sends it one plain
+              # `cd` there after the refresh (header).
+              HERDR_RECLAIMED_PANE=1
               HERDR_PROJECTED=1
               HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
               HERDR_SEEDED_DEFAULT_TAB_ID=""
@@ -2182,8 +2331,9 @@ case "$BACKEND" in
           else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            spawn_lease_endpoint_begins
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$PANE_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -2236,7 +2386,8 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      spawn_lease_endpoint_begins
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PANE_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2249,7 +2400,8 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    spawn_lease_endpoint_begins
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PANE_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2261,7 +2413,8 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    spawn_lease_endpoint_begins
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PANE_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2297,6 +2450,10 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+# Every session-provider branch above passed through spawn_lease_endpoint_begins
+# before its create call; the lease is retained from here on (header) and only
+# teardown releases a launched task's copy.
+spawn_lease_endpoint_begins
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
@@ -2421,55 +2578,47 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # The copy was leased and refreshed before this pane existed, and the pane
+  # was created with that path as its starting directory. What remains is to
+  # prove the live shell actually sits there before anything is launched.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # Compare physically resolved paths: a symlinked prefix would otherwise make
+  # the pane's OS-level cwd read differ from the leased path string forever.
   #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  candidate=""
-  for _ in $(seq 1 60); do
+  # A brand-new pane can transiently report an unrelated stale path (seen live
+  # on some tmux/WSL setups as another real git checkout entirely) before its
+  # shell settles. Only a read equal to the leased path is accepted, so a stale
+  # read costs one more poll rather than ever being recorded as the worktree.
+  # A reclaimed Herdr pane predates the lease, so it is moved into the copy
+  # with one plain `cd` now that the refresh is already complete; the copy is
+  # still never entered before its refresh.
+  if [ "$HERDR_RECLAIMED_PANE" = 1 ]; then
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
+  fi
+  WT_REAL=$(real_path_or_raw "$WT")
+  settled=0
+  p=
+  for _ in $(seq 1 "${FM_SPAWN_SETTLE_POLLS:-60}"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
-      fi
-    else
-      candidate=""
+    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$WT_REAL" ]; then
+      settled=1
+      break
     fi
     sleep 1
   done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+  if [ "$settled" -ne 1 ]; then
+    echo "error: endpoint $T did not settle in the leased worktree '$WT' (last read '${p:-none}'); refusing to launch outside the refreshed copy. Inspect window $T; the lease is retained - release it with: (cd '$PROJ_ABS' && treehouse return --force '$WT')" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "leased worktree" "$T"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" = orca ]; then
+  # Orca creates its own worktree and terminal; its refresh keeps its existing
+  # place after terminal creation.
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 

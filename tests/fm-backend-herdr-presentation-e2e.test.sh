@@ -24,6 +24,7 @@ TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XX
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
+LEASED_WORKTREES_LOG="$TMP_ROOT/leased-worktrees.log"
 MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
@@ -31,10 +32,11 @@ POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
 mkdir -p "$FAKEBIN"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
+: > "$LEASED_WORKTREES_LOG"
 : > "$MOVE_CALL_LOG"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG LEASED_WORKTREES_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
@@ -131,6 +133,10 @@ case "${1:-} ${2:-}" in
   "workspace create") mutation=workspace-create; mutation_target=$label ;;
   "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
+  # The emptying-close plan removes a lone idle shell through Herdr's
+  # pane-death path instead of an explicit close; its process-info read is the
+  # one CLI call that marks that removal, so audit it as the pane's removal.
+  "pane process-info") mutation=pane-death; mutation_target=$(arg_value --pane "$@" || true) ;;
   "tab focus") mutation=tab-focus ;;
 esac
 refusal_probe=0
@@ -207,7 +213,13 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+# fm-spawn leases the copy from its own process before any pane exists; record
+# every leased path so cleanup can return the ones a deliberately aborted spawn
+# retains for inspection.
+if [ "${1:-} ${2:-}" = "get --lease" ]; then
+  out=$("$REAL_TREEHOUSE" "$@") || exit $?
+  printf '%s\n' "$out" >> "$LEASED_WORKTREES_LOG"
+  printf '%s\n' "$out"
   exit 0
 fi
 exec "$REAL_TREEHOUSE" "$@"
@@ -280,6 +292,7 @@ cleanup_all() {
     "$REAL_TREEHOUSE" return --force "$wt" >/dev/null 2>&1 || true
   done <<EOF
 $RECORDED_WORKTREES
+$(cat "$LEASED_WORKTREES_LOG" 2>/dev/null || true)
 EOF
   if [ "$LAB_READY" -eq 1 ]; then
     PATH="$HERDR_ORIGINAL_PATH" \
@@ -346,7 +359,7 @@ assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name
 assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
   local start=$1 pane_id=$2 expected=$3
   sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v expected="$expected" '
-    $1 == "pane-close" && $4 == pane {
+    ($1 == "pane-close" || $1 == "pane-death") && $4 == pane {
       saw_close = 1
       if ($2 != expected) { bad = 1 }
       else if ($3 == expected) { preserved = 1 }
@@ -830,7 +843,11 @@ FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F 
 assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
 
+# The copy is leased and refreshed before the pane exists, so the post-create
+# abort is armed on the pane's cwd read instead: the wrapper reports a path
+# that is not the leased copy, and a short settle window keeps the wait bounded.
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
+export FM_SPAWN_SETTLE_POLLS=3
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
 spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
@@ -841,17 +858,18 @@ if wait "$ABORT_A_PID"; then ABORT_A_STATUS=0; else ABORT_A_STATUS=$?; fi
 if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
 finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
 finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
-grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed validation failure"
+unset FM_SPAWN_SETTLE_POLLS
+grep -F "did not settle in the leased worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture A did not reach the armed settle failure"
+grep -F "did not settle in the leased worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture B did not reach the armed settle failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  ($1 == "pane-close" || $1 == "pane-death") && $4 == a { print "close-a" }
+  ($1 == "pane-close" || $1 == "pane-death") && $4 == b { print "close-b" }
 ')
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
@@ -1195,6 +1213,10 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  # A reclaim refreshes the record's own copy rather than leasing a second one
+  # (bin/fm-spawn.sh header), so the pool never grows per recovery attempt.
+  [ "$NEW_RESTART_WT" = "$OLD_RESTART_WT" ] \
+    || fail "$RESTART_ID reclaim leased a second copy ($NEW_RESTART_WT) instead of reusing the record's ($OLD_RESTART_WT)"
   [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
     || fail "$RESTART_ID reclaim flattened into a different workspace"
   [ "$NEW_RESTART_PANE" != "$OLD_RESTART_PANE" ] \
@@ -1224,14 +1246,14 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID repeated reclaim changed workspace identity"
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
-    "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+    [ "$NEW_RESTART_WT" = "$PRIOR_RESTART_WT" ] \
+      || fail "$RESTART_ID repeated reclaim leased a second copy instead of reusing the record's"
   fi
 
   teardown_task "$RESTART_ID" "$HOME_DIR" > "$TMP_ROOT/$RESTART_ID-teardown.out" 2> "$TMP_ROOT/$RESTART_ID-teardown.err" \
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
     || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
-  "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
   "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
 done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
