@@ -742,7 +742,7 @@ test_terminal_passed_pr_skipped_claims_no_merge() {
   assert_not_contains "$out" "PR merged" "skipped pr step must not claim a merged PR"
   assert_not_contains "$out" "merged/closed" "skipped pr step must not claim a merged-or-closed PR"
   assert_contains "$out" "PR step skipped" "skipped pr step must say so plainly"
-  assert_contains "$out" "merge state unknown" "skipped pr step must state merge state is unknown to the run"
+  assert_contains "$out" "merge state unknown to the run" "skipped pr step must state merge state is unknown to the run"
   pass "outcome=passed with a skipped pr step does not claim a merge"
 }
 
@@ -837,7 +837,7 @@ test_terminal_passed_ci_skipped_claims_no_merge() {
   assert_contains "$out" "state: done" "passed with a skipped ci step is still a terminal done run"
   assert_not_contains "$out" "merged/closed" "a PR the run never carried past opening must not read as merged"
   assert_contains "$out" "PR opened but ci step skipped" "the step that stopped short must be named"
-  assert_contains "$out" "merge state unknown" "an unproven merge must read as unknown to the run"
+  assert_contains "$out" "merge state unknown to the run" "an unproven merge must read as unknown to the run"
   pass "outcome=passed with a completed pr step but a skipped later step does not claim a merge"
 }
 
@@ -878,7 +878,7 @@ test_terminal_passed_with_pr_as_last_step_claims_no_merge() {
   assert_contains "$out" "source: run-step" "passed with pr as the last step -> run-step source"
   assert_not_contains "$out" "merged/closed" "a pr step with nothing after it must not claim a merged-or-closed PR"
   assert_contains "$out" "no step reported after it" "the missing merge-carrying step must be reported plainly"
-  assert_contains "$out" "merge state unknown" "an unproven merge must read as unknown to the run"
+  assert_contains "$out" "merge state unknown to the run" "an unproven merge must read as unknown to the run"
   pass "outcome=passed with the pr step last and nothing after it does not claim a merge"
 }
 
@@ -918,7 +918,7 @@ test_terminal_passed_without_a_pr_row_claims_no_merge() {
   assert_contains "$out" "source: run-step" "passed with no pr row -> run-step source"
   assert_not_contains "$out" "merged/closed" "an unreported pr step must not claim a merged-or-closed PR"
   assert_contains "$out" "no PR step reported" "an unreported pr step must say so plainly"
-  assert_contains "$out" "merge state unknown" "an unreported pr step must state merge state is unknown to the run"
+  assert_contains "$out" "merge state unknown to the run" "an unreported pr step must state merge state is unknown to the run"
   pass "outcome=passed with no pr step row does not claim a merge"
 }
 

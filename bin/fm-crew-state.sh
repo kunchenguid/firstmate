@@ -367,7 +367,7 @@ nm_passed_pr_detail() {
   step_status=$(nm_step_status pr)
   case "$step_status" in
     completed) ;;
-    skipped)   printf 'run passed, PR step skipped: no PR was opened or merged by the run, merge state unknown to it'; return ;;
+    skipped)   printf 'run passed, PR step skipped: no PR was opened or merged, merge state unknown to the run'; return ;;
     '')        printf 'run passed, no PR step reported: merge state unknown to the run'; return ;;
     *)         printf 'run passed, PR step %s: merge state unknown to the run' "$step_status"; return ;;
   esac
