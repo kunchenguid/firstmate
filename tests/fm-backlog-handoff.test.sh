@@ -665,6 +665,8 @@ SH
 test_local_teardown_preserves_wake_when_home_removal_fails() {
   local home="$TMP_ROOT/teardown-home-fail-main" sub="$TMP_ROOT/teardown-home-fail-sub"
   local fakebin rm_bin="$TMP_ROOT/teardown-home-fail-rm" real_rm corr rc=0 marker rec fail_home
+  local worktree_line recovered
+  local -a claim_backups
   local marker_before="$TMP_ROOT/teardown-home-fail-marker.before"
   local rec_before="$TMP_ROOT/teardown-home-fail-record.before"
   setup_homes "$home" "$sub"
@@ -712,6 +714,42 @@ SH
   assert_present "$home/state/design.meta" "failed teardown removed route metadata"
   assert_grep '- design ' "$home/data/secondmates.md" "failed teardown removed the registry route"
 
+  # The failed removal happened inside the claim retirement, so the retirement
+  # parks: the record keeps every line except worktree=, whose exact value is
+  # preserved in a claim copy beside it, and nothing is restored automatically.
+  # A plain retry must stay parked (bin/fm-worktree-ownership-lib.sh's contract),
+  # so the wake state can only be retired after the deliberate manual recovery
+  # the parked drill prescribes - add back that one line, keeping the rest.
+  assert_no_grep '^worktree=' "$home/state/design.meta" \
+    "the parked retirement automatically restored the home claim"
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_TMUX_WINDOW='firstmate:fm-design' \
+    FM_FAKE_TMUX_LOG="$TMP_ROOT/teardown-home-fail-tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/teardown-home-fail-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" design --force > "$TMP_ROOT/teardown-home-parked.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "a plain retry finished a parked retirement instead of refusing it"
+  assert_present "$sub" "the parked retry removed the receiver home"
+  cmp -s "$marker_before" "$marker" \
+    || fail "the parked retry changed the pending wake marker"
+  cmp -s "$rec_before" "$rec" \
+    || fail "the parked retry changed the pending wake correlation"
+  assert_grep 'Manual recovery drill:' "$TMP_ROOT/teardown-home-parked.out" \
+    "the parked retry did not name the deliberate recovery it requires"
+
+  claim_backups=("$home/state"/.design.meta.worktree-claim-backup.*)
+  [ -f "${claim_backups[0]}" ] \
+    || fail "the parked retirement preserved no claim copy to recover from"
+  worktree_line=$(grep '^worktree=' "${claim_backups[0]}") \
+    || fail "the preserved claim copy records no worktree line"
+  recovered="$home/state/.design.meta.manual-recovery"
+  { grep -v '^worktree=' "$home/state/design.meta"; printf '%s\n' "$worktree_line"; } > "$recovered"
+  chmod 0600 "$recovered"
+  mv -f "$recovered" "$home/state/design.meta"
+
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_FAKE_TMUX_WINDOW='firstmate:fm-design' \
     FM_FAKE_TMUX_LOG="$TMP_ROOT/teardown-home-fail-tmux.log" \
@@ -722,7 +760,7 @@ SH
   assert_absent "$marker" "teardown retry left the pending wake marker"
   assert_absent "$rec" "teardown retry left the pending wake correlation"
   assert_no_grep '- design ' "$home/data/secondmates.md" "teardown retry left the registry route"
-  pass "failed local home removal preserves its wake and a retry retires both"
+  pass "failed local home removal preserves its wake; a plain retry stays parked and deliberate recovery retires both"
 }
 
 # Exact multi-line block extract: header matching key plus following body lines

@@ -832,9 +832,10 @@ test_kill_is_noop_when_session_absent() {
 }
 
 test_teardown_passes_recorded_tab_id_to_zellij_kill() {
-  local dir state data config project fb out status
-  dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
-  mkdir -p "$state" "$data/zghost" "$config" "$project" "$dir/responses"
+  local dir state data config project worktree fb out status
+  dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"; worktree="$dir/worktree"
+  mkdir -p "$state" "$data/zghost" "$config" "$dir/responses"
+  fm_git_worktree "$project" "$worktree" fm/zghost
   printf 'report\n' > "$data/zghost/report.md"
   fm_write_meta "$state/zghost.meta" \
     "window=firstmate:7" \
@@ -843,7 +844,7 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "zellij_session=firstmate" \
     "zellij_tab_id=3" \
     "zellij_pane_id=7" \
-    "worktree=$dir/missing-worktree" \
+    "worktree=$worktree" \
     "project=$project" \
     "kind=scout" \
     "decisions_reviewed=1" \
@@ -851,11 +852,13 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/treehouse"
+  chmod +x "$fb/treehouse"
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
     "$ROOT/bin/fm-teardown.sh" zghost 2>&1 )
   status=$?
-  expect_code 0 "$status" "fm-teardown should succeed for a zellij scout whose worktree is already gone: $out"
+  expect_code 0 "$status" "fm-teardown should succeed for a zellij scout with a proved worktree owner: $out"
   zellij_assert_call_order "$dir/log" $'\x1f''list-panes'$'\x1f''--json' $'\x1f''list-tabs'$'\x1f''--json' \
     "fm-teardown did not verify the recorded zellij_tab_id against the task label"
   assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''3' \
@@ -866,9 +869,10 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
 }
 
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
-  local dir state data config home project fb out status child_title
-  dir="$TMP_ROOT/teardown-zellij-secondmate-child"; state="$dir/state"; data="$dir/data"; config="$dir/config"; home="$dir/secondmate-home"; project="$dir/project"
-  mkdir -p "$state" "$data" "$config" "$home/state" "$home/data" "$home/config" "$home/projects" "$project" "$dir/responses"
+  local dir state data config home project child_worktree fb out status child_title
+  dir="$TMP_ROOT/teardown-zellij-secondmate-child"; state="$dir/state"; data="$dir/data"; config="$dir/config"; home="$dir/secondmate-home"; project="$dir/project"; child_worktree="$dir/child-worktree"
+  mkdir -p "$state" "$data" "$config" "$home/state" "$home/data" "$home/config" "$home/projects" "$dir/responses"
+  fm_git_worktree "$project" "$child_worktree" fm/childz
   printf 'smz\n' > "$home/.fm-secondmate-home"
   fm_write_meta "$state/smz.meta" \
     "window=firstmate:99" \
@@ -889,7 +893,7 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
     "zellij_session=firstmate" \
     "zellij_tab_id=4" \
     "zellij_pane_id=7" \
-    "worktree=$dir/missing-child-worktree" \
+    "worktree=$child_worktree" \
     "project=$project" \
     "kind=scout"
   child_title=$(zellij_expected_scoped_title fm-childz "$home" "$home")
@@ -897,6 +901,8 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
   zellij_tab_response "$dir" 2 4 "$child_title"
   printf '[]\n' > "$dir/responses/3.out"
   fb=$(make_zellij_fakebin "$dir")
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fb/treehouse"
+  chmod +x "$fb/treehouse"
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ROOT_OVERRIDE="$ROOT" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \

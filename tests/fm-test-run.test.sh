@@ -117,6 +117,8 @@ init_changed_fixture_repo() {
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-control-herdr-smoke.test.sh \
+    fm-gate-refuse.test.sh \
+    fm-public-followup.test.sh \
     fm-backend-orca.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
@@ -129,6 +131,7 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
+  : >"$repo/bin/fm-worktree-ownership-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   # A shared helper with no curated family of its own, named by exactly ONE
   # script of the expensive real-Herdr family and consumed by one curated
@@ -156,6 +159,11 @@ init_changed_fixture_repo() {
   : >"$repo/CONTRIBUTING.md"
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
+  # The fixture mirrors a real checkout's dot-directories (.agents, .claude,
+  # .pi), which an operator's own global gitignore commonly lists. Pin this
+  # repo off the host's global excludes so `add .` stages the same baseline on
+  # every machine and the changed-path scan can see those sources change.
+  git -C "$repo" config core.excludesFile /dev/null
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
 }
@@ -295,6 +303,21 @@ test_changed_dependency_selection_and_unmapped_failure() {
     "timeout library selects quota polling coverage"
   git -C "$repo" add bin/fm-timeout-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm timeout-lib-change
+
+  # The worktree ownership proof runs inside bin/fm-teardown.sh, so every suite
+  # that drives a real teardown depends on it - including two whose own subject
+  # is something else entirely and which only pass because their fixtures stamp
+  # owner markers.
+  printf '\n' >>"$repo/bin/fm-worktree-ownership-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
+    "ownership proof selects recursive secondmate teardown coverage"
+  assert_contains "$listed" "tests/fm-gate-refuse.test.sh" \
+    "ownership proof selects the gate-refuse suite whose teardown fixtures depend on it"
+  assert_contains "$listed" "tests/fm-public-followup.test.sh" \
+    "ownership proof selects the public-followup suite whose teardown fixtures depend on it"
+  git -C "$repo" add bin/fm-worktree-ownership-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm ownership-lib-change
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e

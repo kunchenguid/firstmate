@@ -159,6 +159,11 @@ exit 0
 SH
   chmod +x "$home/bin/fm-guard.sh"
   git -C "$home" init -q
+  # A firstmate home carries exactly the files a real one does, and an operator's
+  # own global gitignore commonly lists /AGENTS.md (firstmate's private homes are
+  # gitignored that way). Pin this fixture repo off the host's global excludes so
+  # the seed commit is the same on every machine.
+  git -C "$home" config core.excludesFile /dev/null
   git -C "$home" add AGENTS.md bin/fm-guard.sh
   git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }

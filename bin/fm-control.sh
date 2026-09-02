@@ -44,6 +44,9 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              Before any checkpoint, stop, or worktree mutation, the shared
+#              ownership resolver proves that no other task claims the path and
+#              that its provider binding plus task branch or home marker agree.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -126,6 +129,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-worktree-ownership-lib.sh
+. "$SCRIPT_DIR/fm-worktree-ownership-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -785,6 +790,7 @@ do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
 
+  fm_worktree_ownership_prove "$STATE" "$ID" "$META" || return 1
   require_state_verified_backend relaunch
   resolve_relaunch_profile
 

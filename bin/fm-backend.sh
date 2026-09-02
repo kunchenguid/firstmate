@@ -383,8 +383,43 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
-fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
-  local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
+# A worktree-claim retirement (bin/fm-worktree-ownership-lib.sh) is the one way
+# a live record loses its worktree identity, and its surviving copy is the only
+# remaining record of the path, so name it wherever that loss surfaces. Whether
+# the retirement is RECORDED decides the story, not which namespace the copy
+# happens to sit in: a recorded retirement - by receipt or by quarantined
+# released evidence - means this record holds no path at all and every surviving
+# copy is evidence only. An unrecorded retirement parks instead: no runtime path
+# restores it, and the same manual drill printed by ownership proof names the
+# preserved state and deliberate reconciliation steps.
+fm_backend_report_worktree_claim_backup() {  # <meta-file>
+  local meta=$1 backup evidence retired=1
+  if declare -F fm_worktree_retirement_receipt_present >/dev/null 2>&1 \
+    && fm_worktree_retirement_receipt_present "$meta" >/dev/null 2>&1; then
+    retired=0
+  fi
+  if declare -F fm_worktree_released_evidence_hint >/dev/null 2>&1 \
+    && evidence=$(fm_worktree_released_evidence_hint "$meta" 2>/dev/null) \
+    && [ -n "$evidence" ]; then
+    echo "This record's worktree was already retired and that path may already belong to another task, so a copy of the record it held was quarantined at $evidence. It is evidence of that retirement, never authority over the path, and must never be restored over the record." >&2
+    return 0
+  fi
+  declare -F fm_worktree_claim_backup_hint >/dev/null 2>&1 || return 0
+  backup=$(fm_worktree_claim_backup_hint "$meta" 2>/dev/null) || return 0
+  [ -n "$backup" ] || return 0
+  if [ "$retired" -eq 0 ]; then
+    echo "This record's retirement is recorded, so it holds no worktree and the superseded copy at $backup names a path it no longer owns; it is evidence only and must never be restored over the record." >&2
+    return 0
+  fi
+  if declare -F fm_worktree_interrupted_retirement_manual_drill >/dev/null 2>&1; then
+    echo "An interrupted worktree retirement is parked.$(fm_worktree_interrupted_retirement_manual_drill "$meta")" >&2
+  else
+    echo "An interrupted worktree retirement is parked at $backup; automatic restoration is disabled, so preserve the copy and reconcile the provider outcome manually before any lifecycle action." >&2
+  fi
+}
+
+fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [allow-retired]
+  local meta=$1 id=$2 allow_retired=${3:-} backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
@@ -401,8 +436,17 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     return 1
   }
   worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
-    echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
-    return 1
+    # A retired record legitimately identifies no worktree: its provider step
+    # already released the path. Only cleanup asks to accept that, and it gets
+    # no path to act on either way.
+    if [ "$allow_retired" != allow-retired ] \
+      || ! declare -F fm_worktree_retirement_receipt_present >/dev/null 2>&1 \
+      || ! fm_worktree_retirement_receipt_present "$meta" >/dev/null 2>&1; then
+      echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
+      fm_backend_report_worktree_claim_backup "$meta"
+      return 1
+    fi
+    worktree=
   }
   project=$(fm_backend_meta_exact_value "$meta" project) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous project identity; preserving task state." >&2

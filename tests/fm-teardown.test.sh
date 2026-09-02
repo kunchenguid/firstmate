@@ -175,9 +175,25 @@ SH
   printf '%s\n' "$case_dir"
 }
 
-# Write a meta file for the task. Args: case_dir mode kind
+# Write a meta file for the task exactly as a marker-aware spawn publishes it:
+# the record explicitly promises a marker, names one spawn generation, and the
+# slot carries the matching .fm-task-owner. A record carrying the awareness bit
+# without its marker is the recycled-slot state teardown must refuse.
+# Args: case_dir mode kind
 write_meta() {
   local case_dir=$1 mode=$2 kind=$3
+  write_pre_marker_meta "$case_dir" "$mode" "$kind" \
+    "spawn_gen=test-generation-task-x1" "task_owner_marker=1"
+  [ ! -d "$case_dir/wt" ] || stamp_owner_marker "$case_dir/wt" task-x1
+}
+
+# The same record as it looked before .fm-task-owner existed: it has no explicit
+# marker-awareness bit, so the legacy branch and project-membership fallbacks
+# remain available even when the record already carries the older spawn_gen=.
+# Args: case_dir mode kind [extra-line...]
+write_pre_marker_meta() {
+  local case_dir=$1 mode=$2 kind=$3
+  shift 3
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=firstmate:fm-task-x1" \
     "endpoint_task_id=task-x1" \
@@ -185,7 +201,97 @@ write_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode" \
-    "spawn_gen=teardown-test-task-x1"
+    "$@"
+}
+
+# Stamp a worktree's owner marker exactly as bin/fm-spawn.sh does: excluded
+# from git first, so it never reads as uncommitted work.
+# Args: worktree task-id [spawn-generation]
+stamp_owner_marker() {
+  local wt=$1 id=$2 generation=${3:-test-generation-$2} excl
+  excl=$(git -C "$wt" rev-parse --git-path info/exclude)
+  # A non-linked clone reports this relative to the worktree, not absolutely.
+  case "$excl" in /*) ;; *) excl="$wt/$excl" ;; esac
+  mkdir -p "$(dirname "$excl")"
+  grep -qxF '.fm-task-owner' "$excl" 2>/dev/null \
+    || printf '%s\n' '.fm-task-owner' >> "$excl"
+  {
+    printf '%s\n' 'schema=fm-task-owner.v1'
+    printf 'task_id=%s\n' "$id"
+    printf 'spawn_gen=%s\n' "$generation"
+  } > "$wt/.fm-task-owner"
+}
+
+# A seeded secondmate home for task-x1, the way bin/fm-home-seed.sh leaves one:
+# the record's worktree claim and home= both name it, and its
+# .fm-secondmate-home identity marker is the only thing that proves ownership.
+# The parent's record has moved to its home, so the slot it used to claim is a
+# child's now and must not keep the parent's owner marker.
+# Args: case_dir
+seed_secondmate_home() {
+  local case_dir=$1 home="$1/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  sed -i.bak "s#^worktree=.*#worktree=$home#" "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  rm -f "$case_dir/wt/.fm-task-owner"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+}
+
+# The exact bytes a reissued slot's new holder wrote into its owner marker,
+# recorded at $case_dir/task-b-marker.expected so a caller can prove nothing in
+# this task's teardown or recovery touched them.
+# Args: case_dir
+write_task_b_marker_fixture() {
+  local case_dir=$1
+  {
+    printf '%s\n' 'schema=fm-task-owner.v1'
+    printf '%s\n' 'task_id=task-b'
+    printf '%s\n' 'spawn_gen=test-generation-task-b'
+  } > "$case_dir/task-b-marker.expected"
+}
+
+# A pool return that hands the slot to another task and then reports failure:
+# task-b's marker is in the slot before the failure surfaces, which is the only
+# state a completed handover can produce. Records the exact bytes task-b wrote
+# at $case_dir/task-b-marker.expected so a caller can prove they were untouched.
+# Args: case_dir
+reissue_slot_to_task_b_then_fail() {
+  local case_dir=$1
+  write_task_b_marker_fixture "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'return called\n' >> "$case_dir/treehouse.log"
+cp -- "$case_dir/task-b-marker.expected" "$case_dir/wt/.fm-task-owner"
+echo 'return failed after the pool handed the slot on' >&2
+exit 1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# The durable ownership record fm-spawn publishes before it stamps a slot's
+# owner marker; bin/fm-worktree-ownership-lib.sh owns this path and its format.
+# A prior generation makes it a generation handoff: the record of one exact
+# restamp, from the generation the metadata still names to the one now stamped.
+# Args: case_dir task-id spawn-generation worktree [prior-spawn-generation]
+write_owner_pending_record() {
+  local case_dir=$1 id=$2 generation=$3 worktree=$4 prior=${5:-}
+  {
+    printf '%s\n' 'schema=fm-task-owner-pending.v1'
+    printf 'task_id=%s\n' "$id"
+    printf 'spawn_gen=%s\n' "$generation"
+    printf 'worktree=%s\n' "$worktree"
+    [ -z "$prior" ] || printf 'prior_spawn_gen=%s\n' "$prior"
+  } > "$case_dir/state/.$id.meta.worktree-owner-pending.$generation"
+}
+
+owner_pending_records() {  # <case_dir> <task-id>
+  local case_dir=$1 id=$2 candidate
+  for candidate in "$case_dir/state/.$id.meta.worktree-owner-pending."*; do
+    [ -e "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+  done
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -563,6 +669,19 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+# The same whitelist as make_path_without_lsof, but keeping lsof, so the only
+# tool genuinely absent is jq - which no tmux home declares as a dependency.
+make_path_without_jq() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-jq" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    lsof mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -920,6 +1039,1828 @@ test_content_fallback_refreshes_stale_origin_ref() {
   pass "content fallback refreshes origin default before comparing trees"
 }
 
+test_recycled_worktree_claim_refuses_before_live_work_is_touched() {
+  local case_dir rc
+  case_dir=$(make_case recycled-owner-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" branch -m fm/task-b
+  printf '%s\n' baseline > "$case_dir/wt/live.txt"
+  git -C "$case_dir/wt" add live.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "task B baseline"
+  printf '%s\n' "task B live uncommitted work" > "$case_dir/wt/live.txt"
+  fm_write_meta "$case_dir/state/task-b.meta" \
+    "window=firstmate:fm-task-b" \
+    "endpoint_task_id=task-b" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  printf '%s\n' '[]'
+  exit 0
+fi
+printf 'destructive return reached\n' > "$case_dir/treehouse.log"
+"$REAL_GIT_FOR_TEST" -C "$case_dir/wt" reset --hard HEAD >/dev/null
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "recycled-owner-refusal: teardown of task A must refuse a slot now claimed by task B"
+  assert_contains "$(cat "$case_dir/stderr")" "task-b" \
+    "recycled-owner-refusal: refusal did not name task B's conflicting claim"
+  assert_absent "$case_dir/treehouse.log" \
+    "recycled-owner-refusal: teardown reached the destructive pool return"
+  [ "$(cat "$case_dir/wt/live.txt")" = "task B live uncommitted work" ] \
+    || fail "recycled-owner-refusal: task B's live edit was destroyed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "recycled-owner-refusal: task A's record was removed despite refusal"
+  pass "recycled pooled worktree ownership conflict refuses before touching the live task"
+}
+
+test_task_branch_mismatch_refuses_without_an_owner_marker() {
+  local case_dir rc
+  case_dir=$(make_case branch-owner-refusal)
+  # A genuinely pre-marker record: it names no spawn generation, so the task
+  # branch is still the strongest proof available and a foreign one refuses.
+  write_pre_marker_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" branch -m fm/task-b
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'return reached\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "branch-owner-refusal: another task branch must refuse"
+  assert_contains "$(cat "$case_dir/stderr")" "branch fm/task-b, not task task-x1 branch fm/task-x1" \
+    "branch-owner-refusal: refusal did not name the conflicting branch proof"
+  assert_absent "$case_dir/treehouse.log" \
+    "branch-owner-refusal: branch mismatch still reached return"
+  pass "another task branch refuses when no owner marker proves the recorded owner"
+}
+
+test_normal_return_clears_the_worktree_claim_before_pool_release() {
+  local case_dir rc
+  case_dir=$(make_case normal-return-clears-claim)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  stamp_owner_marker "$case_dir/wt" task-x1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if grep -q '^worktree=' "$case_dir/state/task-x1.meta"; then
+  echo 'worktree claim survived until pool return' >&2
+  exit 23
+fi
+if [ -e "$case_dir/wt/.fm-task-owner" ]; then
+  echo 'owner marker survived until pool return' >&2
+  exit 24
+fi
+printf 'claim and marker cleared before return\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "normal-return-clears-claim: teardown should clear the claim and return the slot"
+  assert_grep "claim and marker cleared before return" "$case_dir/treehouse.log" \
+    "normal-return-clears-claim: pool return did not observe the cleared claim and owner marker"
+  pass "normal pool return clears the owning task's worktree claim and owner marker in the same operation"
+}
+
+test_unbranched_scout_owner_marker_is_proved_and_torn_down() {
+  local case_dir rc
+  case_dir=$(make_case unbranched-scout-owner)
+  write_meta "$case_dir" no-mistakes scout
+  # The exact state every scout works in: detached, with no task branch at all.
+  # Its matching task-and-generation marker is the positive ownership binding.
+  git -C "$case_dir/wt" checkout -q --detach
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  stamp_owner_marker "$case_dir/wt" task-x1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "unbranched-scout-owner: a matching marker must protect a scout with no task branch"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "unbranched-scout-owner: the pool slot was never returned"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "unbranched-scout-owner: teardown left the scout record and endpoint behind"
+  pass "an unbranched scout is positively proved by its task-and-generation owner marker"
+}
+
+test_unbranched_worktree_outside_its_project_still_refuses() {
+  local case_dir foreign rc
+  case_dir=$(make_case unbranched-foreign)
+  foreign="$case_dir/foreign-project"
+  git init -q "$foreign"
+  git -C "$foreign" -c user.email=t@t -c user.name=t commit -q --allow-empty -m foreign
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  git -C "$foreign" worktree add -q --detach "$case_dir/wt" HEAD
+  : > "$case_dir/wt/foreign-work"
+  # Pre-marker, so the project-membership fallback is the proof under test.
+  write_pre_marker_meta "$case_dir" no-mistakes ship
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "unbranched-foreign: an unbranched worktree of another project must refuse"
+  assert_grep "no longer a registered worktree of its project" "$case_dir/stderr" \
+    "unbranched-foreign: the refusal did not name the broken project binding"
+  assert_absent "$case_dir/treehouse.log" \
+    "unbranched-foreign: the refusal still reached the destructive pool return"
+  assert_present "$case_dir/wt/foreign-work" \
+    "unbranched-foreign: the other project's work was destroyed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "unbranched-foreign: the refusal removed the task record"
+  pass "an unbranched worktree that left its project still refuses"
+}
+
+test_vanished_worktree_path_still_releases_the_task_record() {
+  local case_dir rc
+  case_dir=$(make_case vanished-owner)
+  write_meta "$case_dir" no-mistakes ship
+  # A pruned pool slot, or a teardown killed after its provider return: the
+  # record, its endpoint, and its pool slot must still be releasable.
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "vanished-owner: a recorded path that is already gone must not deadlock teardown"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "vanished-owner: teardown left the task record and its endpoint behind"
+  pass "a recorded worktree that is already gone still releases the task record"
+}
+
+test_ownership_proof_stays_conclusive_without_jq() {
+  local case_dir jqless rc
+  command -v jq >/dev/null 2>&1 || { echo "skip - jq is not installed, so its absence proves nothing"; return 0; }
+  case_dir=$(make_case jqless-owner)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then
+  echo 'ownership proof must not inspect treehouse leases' >&2
+  exit 71
+fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+  jqless=$(make_path_without_jq "$case_dir")
+  [ ! -e "$jqless/jq" ] || fail "jqless-owner: the jq-free PATH still exposes jq"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$jqless" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "jqless-owner: jq is not a tmux home's dependency, so its absence must not block teardown"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "jqless-owner: the pool slot was never returned"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "jqless-owner: teardown left the task record and its endpoint behind"
+  pass "ordinary ownership proof neither requires jq nor inspects Treehouse leases"
+}
+
+test_unbranched_worktree_with_uninspectable_project_refuses() {
+  local case_dir rc
+  case_dir=$(make_case unbranched-no-project)
+  mkdir -p "$case_dir/not-a-repo"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/not-a-repo" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  git -C "$case_dir/wt" checkout -q --detach
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  : > "$case_dir/wt/live-work"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "unbranched-no-project: an unbranched worktree with no inspectable project must refuse"
+  assert_grep "is not an inspectable git repository" "$case_dir/stderr" \
+    "unbranched-no-project: the refusal did not name the uninspectable project"
+  assert_absent "$case_dir/treehouse.log" \
+    "unbranched-no-project: the refusal still reached the destructive pool return"
+  assert_present "$case_dir/wt/live-work" \
+    "unbranched-no-project: the unproved worktree's contents were destroyed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "unbranched-no-project: the refusal removed the task record"
+  pass "an unbranched worktree whose project cannot be inspected proves nothing and refuses"
+}
+
+test_unbranched_worktree_marked_for_another_task_refuses() {
+  local case_dir rc
+  case_dir=$(make_case unbranched-recycled)
+  write_meta "$case_dir" no-mistakes ship
+  # The recycled pool slot the intent forbids acting on: task A's record still
+  # claims it, but the slot now carries live task B's ownership marker and A's
+  # branch is gone, so nothing else distinguishes it from A's own workspace.
+  git -C "$case_dir/wt" checkout -q --detach
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  stamp_owner_marker "$case_dir/wt" task-b
+  printf '%s\n' "task B live work" > "$case_dir/wt/live-work"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+"$REAL_GIT_FOR_TEST" -C "$case_dir/wt" clean -qfdx >/dev/null 2>&1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "unbranched-recycled: a slot marked for another task must refuse"
+  assert_grep "marked as task task-b's workspace" "$case_dir/stderr" \
+    "unbranched-recycled: the refusal did not name the marked owner"
+  assert_absent "$case_dir/treehouse.log" \
+    "unbranched-recycled: the refusal still reached the destructive pool return"
+  [ "$(cat "$case_dir/wt/live-work")" = "task B live work" ] \
+    || fail "unbranched-recycled: task B's live work was destroyed"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "unbranched-recycled: the refusal removed the task record"
+  pass "an unbranched pool slot marked for another task refuses before any destructive act"
+}
+
+test_worktree_detached_off_its_task_branch_tip_is_still_torn_down() {
+  local case_dir rc
+  case_dir=$(make_case mid-operation-detached)
+  write_meta "$case_dir" no-mistakes ship
+  # The state a conflicted rebase or a bisect leaves a wedged crewmate in: HEAD
+  # is detached at a commit that is not the task branch tip, while fm/task-x1
+  # still points at the pre-operation tip.
+  wt_commit "$case_dir" "pre-operation tip"
+  git -C "$case_dir/wt" checkout -q --detach HEAD~1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "mid-operation-detached: a HEAD detached off the task branch tip must not deadlock teardown"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "mid-operation-detached: the pool slot was never returned"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "mid-operation-detached: teardown left the task record and its endpoint behind"
+  pass "a worktree detached off its own task branch tip is still proved and torn down"
+}
+
+test_same_task_id_with_a_different_marker_generation_refuses() {
+  local case_dir rc
+  case_dir=$(make_case same-id-recycled-generation)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/wt" checkout -q --detach
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  stamp_owner_marker "$case_dir/wt" task-x1 later-generation-task-x1
+  printf '%s\n' "later spawn live work" > "$case_dir/wt/live-work"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'returned\n' > "$case_dir/treehouse.log"
+"$REAL_GIT_FOR_TEST" -C "$case_dir/wt" clean -qfdx >/dev/null 2>&1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "same-id-recycled-generation: stale generation must refuse"
+  assert_grep "generation later-generation-task-x1, not recorded generation test-generation-task-x1" "$case_dir/stderr" \
+    "same-id-recycled-generation: refusal did not name the generation mismatch"
+  assert_absent "$case_dir/treehouse.log" \
+    "same-id-recycled-generation: generation mismatch still reached pool return"
+  [ "$(cat "$case_dir/wt/live-work")" = "later spawn live work" ] \
+    || fail "same-id-recycled-generation: later spawn work was destroyed"
+  pass "a recycled slot reusing the same task id is distinguished by spawn generation"
+}
+
+# The residual recycled-slot path the owner marker exists to close. The record
+# explicitly promises its owner marker, but the slot's .fm-task-owner is gone: the
+# slot went back to the pool out of band, or a crewmate's `git clean -fdx`
+# removed the marker, which it can because the marker is only info/exclude'd.
+# The slot is a detached scout's now, so it leaves no fm/<id> branch to
+# contradict this record and it is still a registered worktree of the same
+# project - the two legacy fallbacks both say yes to a live worker's slot.
+test_marker_era_record_with_no_marker_refuses_a_reissued_scout_slot() {
+  local case_dir canonical rc
+  case_dir=$(make_case marker-era-no-marker)
+  write_meta "$case_dir" no-mistakes ship
+  canonical=$(CDPATH='' cd -- "$case_dir/wt" && pwd -P)
+  rm -f "$case_dir/wt/.fm-task-owner"
+  git -C "$case_dir/wt" checkout -q --detach
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  printf '%s\n' "scout live work" > "$case_dir/wt/scout-live-work"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+"$REAL_GIT_FOR_TEST" -C "$case_dir/wt" clean -qfdx >/dev/null 2>&1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "marker-era-no-marker: a marker-era record whose marker is gone must refuse"
+  assert_grep "task task-x1's marker-aware record names spawn generation test-generation-task-x1" "$case_dir/stderr" \
+    "marker-era-no-marker: the refusal did not name the task and the generation it records"
+  assert_grep "$canonical/.fm-task-owner is absent" "$case_dir/stderr" \
+    "marker-era-no-marker: the refusal did not name the canonical path and its absent owner marker"
+  assert_absent "$case_dir/treehouse.log" \
+    "marker-era-no-marker: the refusal still reached the destructive pool return"
+  [ "$(cat "$case_dir/wt/scout-live-work")" = "scout live work" ] \
+    || fail "marker-era-no-marker: the unbranched scout holding the reissued slot lost its work"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "marker-era-no-marker: the refusal removed the task record"
+  pass "a marker-era record whose owner marker is gone cannot act on a reissued unbranched slot"
+}
+
+# The same recycled slot, reached through a marker-aware record that says two
+# things about its generation. Two spawn_gen= lines name no single incarnation,
+# so treating that aware record as legacy would hand the branch and project
+# membership fallbacks back the reissued slot the marker exists to protect.
+test_duplicate_spawn_gen_refuses_a_reissued_scout_slot() {
+  local case_dir canonical rc
+  case_dir=$(make_case duplicate-spawn-gen)
+  write_pre_marker_meta "$case_dir" no-mistakes ship \
+    "spawn_gen=test-generation-task-x1" "spawn_gen=test-generation-task-x1-again" \
+    "task_owner_marker=1"
+  canonical=$(CDPATH='' cd -- "$case_dir/wt" && pwd -P)
+  assert_absent "$case_dir/wt/.fm-task-owner" \
+    "duplicate-spawn-gen: the fixture stamped an owner marker the reissued slot would not have"
+  git -C "$case_dir/wt" checkout -q --detach
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  printf '%s\n' "scout live work" > "$case_dir/wt/scout-live-work"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+"$REAL_GIT_FOR_TEST" -C "$case_dir/wt" clean -qfdx >/dev/null 2>&1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "duplicate-spawn-gen: a record naming two spawn generations must refuse"
+  assert_grep "names more than one spawn generation" "$case_dir/stderr" \
+    "duplicate-spawn-gen: the refusal did not name the ambiguous generation"
+  assert_grep "$canonical" "$case_dir/stderr" \
+    "duplicate-spawn-gen: the refusal did not name the canonical worktree"
+  assert_absent "$case_dir/treehouse.log" \
+    "duplicate-spawn-gen: the refusal still reached the destructive pool return"
+  [ "$(cat "$case_dir/wt/scout-live-work")" = "scout live work" ] \
+    || fail "duplicate-spawn-gen: the unbranched scout holding the reissued slot lost its work"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "duplicate-spawn-gen: the refusal removed the task record"
+  pass "a record that names two spawn generations cannot act on a reissued unbranched slot"
+}
+
+# Carrying the awareness key ambiguously is not the same as lacking it. If two
+# values could fall through as legacy, a corrupted new claim could regain the
+# exact project-membership path this explicit bit closes.
+test_duplicate_marker_awareness_never_reopens_legacy_fallback() {
+  local case_dir rc
+  case_dir=$(make_case duplicate-marker-awareness)
+  write_pre_marker_meta "$case_dir" no-mistakes ship \
+    "spawn_gen=test-generation-task-x1" "task_owner_marker=1" "task_owner_marker=1"
+  assert_absent "$case_dir/wt/.fm-task-owner" \
+    "duplicate-marker-awareness: the fixture stamped an owner marker"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "duplicate-marker-awareness: an ambiguous awareness bit must refuse"
+  assert_grep "names more than one task-owner marker-awareness value" "$case_dir/stderr" \
+    "duplicate-marker-awareness: the refusal did not name the ambiguous bit"
+  assert_absent "$case_dir/treehouse.log" \
+    "duplicate-marker-awareness: ambiguity reopened the destructive legacy path"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "duplicate-marker-awareness: the refusal removed the task record"
+  pass "an ambiguous owner-marker awareness bit never becomes legacy"
+}
+
+# A marker-aware record that wrote spawn_gen= and left it empty names no exact
+# incarnation, so it refuses on the same rule as a duplicated generation.
+test_empty_spawn_gen_refuses_a_reissued_scout_slot() {
+  local case_dir rc
+  case_dir=$(make_case empty-spawn-gen)
+  write_pre_marker_meta "$case_dir" no-mistakes ship "spawn_gen=" "task_owner_marker=1"
+  assert_absent "$case_dir/wt/.fm-task-owner" \
+    "empty-spawn-gen: the fixture stamped an owner marker the reissued slot would not have"
+  git -C "$case_dir/wt" checkout -q --detach
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  printf '%s\n' "scout live work" > "$case_dir/wt/scout-live-work"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+"$REAL_GIT_FOR_TEST" -C "$case_dir/wt" clean -qfdx >/dev/null 2>&1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "empty-spawn-gen: a record naming an empty spawn generation must refuse"
+  assert_grep "names an empty spawn generation" "$case_dir/stderr" \
+    "empty-spawn-gen: the refusal did not name the empty generation"
+  assert_absent "$case_dir/treehouse.log" \
+    "empty-spawn-gen: the refusal still reached the destructive pool return"
+  [ "$(cat "$case_dir/wt/scout-live-work")" = "scout live work" ] \
+    || fail "empty-spawn-gen: the unbranched scout holding the reissued slot lost its work"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "empty-spawn-gen: the refusal removed the task record"
+  pass "a record that names an empty spawn generation cannot act on a reissued unbranched slot"
+}
+
+# The other half of that rule: spawn_gen predates .fm-task-owner, so a live
+# pre-upgrade record can carry a generation while lacking the explicit
+# task_owner_marker=1 bit. Nothing migrates that record, and its legacy chain
+# remains untouched. An unbranched checkout still registered to the recorded
+# project is therefore proved by that membership alone.
+test_pre_marker_record_keeps_the_legacy_project_fallback() {
+  local case_dir rc
+  case_dir=$(make_case pre-marker-legacy)
+  write_pre_marker_meta "$case_dir" no-mistakes ship "spawn_gen=pre-upgrade-generation"
+  git -C "$case_dir/wt" checkout -q --detach
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  assert_absent "$case_dir/wt/.fm-task-owner" \
+    "pre-marker-legacy: the fixture is not a pre-marker slot"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "pre-marker-legacy: a pre-marker record must keep its legacy proof"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "pre-marker-legacy: the pool slot was never returned"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "pre-marker-legacy: teardown left the pre-marker record behind"
+  pass "a pre-upgrade record with spawn generation but no awareness bit keeps the legacy fallback"
+}
+
+# The receipt is the only durable proof that the provider step already ran, so
+# it has to outlive every failure up to and including the record removal it
+# certifies. Discarded any earlier, a failed removal leaves a record with no
+# worktree= and no evidence, which every rerun then refuses forever.
+test_retirement_receipt_survives_a_failed_record_removal() {
+  local case_dir real_rm rc
+  case_dir=$(make_case receipt-outlives-remove)
+  write_meta "$case_dir" no-mistakes ship
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+  # Fail exactly the task record's unlink, the way an unwritable state directory
+  # would, after every step before it has already succeeded.
+  real_rm=$(command -v rm)
+  cat > "$case_dir/fakebin/rm" <<EOF
+#!/usr/bin/env bash
+if [ -e "$case_dir/record-removal-fails" ]; then
+  for arg; do
+    [ "\$arg" != "$case_dir/state/task-x1.meta" ] || exit 1
+  done
+fi
+exec "$real_rm" "\$@"
+EOF
+  chmod +x "$case_dir/fakebin/rm"
+  : > "$case_dir/record-removal-fails"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "receipt-outlives-remove: a failing record removal must stop the teardown"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "receipt-outlives-remove: the fixture never reached the pool return it is about"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "receipt-outlives-remove: the fixture did not actually block the record removal"
+  assert_no_grep "worktree=" "$case_dir/state/task-x1.meta" \
+    "receipt-outlives-remove: the record regained a claim on a slot the pool can reissue"
+  assert_present "$case_dir/state/.task-x1.meta.worktree-retired" \
+    "receipt-outlives-remove: the receipt was discarded before the record it certifies"
+
+  rm -f "$case_dir/record-removal-fails"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 0 "$rc" "receipt-outlives-remove: the rerun should finish the teardown"$'\n'"$(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "receipt-outlives-remove: the rerun left the task record behind"
+  assert_absent "$case_dir/state/.task-x1.meta.worktree-retired" \
+    "receipt-outlives-remove: the receipt outlived the record it describes"
+  [ "$(grep -c returned "$case_dir/treehouse.log")" = 1 ] \
+    || fail "receipt-outlives-remove: the rerun returned the pool slot a second time"
+  pass "a retirement receipt outlives a failed record removal so the rerun can finish"
+}
+
+test_owner_marker_carries_a_foreign_branch_checkout() {
+  local case_dir rc
+  case_dir=$(make_case marked-foreign-branch)
+  write_meta "$case_dir" no-mistakes ship
+  # An agent that checked out another task's branch in its OWN leased slot: the
+  # branch attributes the checkout elsewhere, but the slot's owner marker is
+  # the stronger positive binding, so cleanup must still proceed.
+  git -C "$case_dir/wt" branch -m fm/task-b
+  stamp_owner_marker "$case_dir/wt" task-x1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "marked-foreign-branch: this task's own owner marker must carry a foreign branch checkout"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "marked-foreign-branch: the pool slot was never returned"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "marked-foreign-branch: teardown left the task record behind"
+  pass "a foreign branch checkout is carried by this task's own owner marker"
+}
+
+test_owner_marker_is_retired_before_the_pool_return() {
+  local case_dir rc
+  case_dir=$(make_case marker-retired-first)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  stamp_owner_marker "$case_dir/wt" task-x1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+if [ -e "$case_dir/wt/.fm-task-owner" ]; then
+  echo 'owner marker survived until the pool return' >&2
+  exit 26
+fi
+printf 'marker retired before return\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "marker-retired-first: teardown should retire the marker and return the slot"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "marker retired before return" "$case_dir/treehouse.log" \
+    "marker-retired-first: the pool return still saw a marker naming the departing task"
+  pass "the worktree owner marker is retired before the slot can become reusable"
+}
+
+# A failure while retiring the marker happens after worktree= was stripped but
+# before the provider ran. It follows the same parked path: the live marker is
+# untouched, the claim copy survives, and the manual drill names that exact
+# state instead of automatically restoring metadata.
+test_marker_retirement_failure_parks_before_provider_action() {
+  local case_dir rc real_rm
+  local -a claim_backups marker_backups
+  case_dir=$(make_case marker-retirement-fails)
+  write_meta "$case_dir" no-mistakes ship
+  real_rm=$(command -v rm)
+  cat > "$case_dir/fakebin/rm" <<EOF
+#!/usr/bin/env bash
+for arg; do
+  [ "\$arg" != "$case_dir/wt/.fm-task-owner" ] || exit 1
+done
+exec "$real_rm" "\$@"
+EOF
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'provider called\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/rm" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "marker-retirement-fails: marker failure must stop before provider action"
+  assert_present "$case_dir/wt/.fm-task-owner" \
+    "marker-retirement-fails: preparation failure removed the live marker"
+  assert_absent "$case_dir/treehouse.log" \
+    "marker-retirement-fails: provider ran after retirement preparation failed"
+  assert_no_grep "worktree=" "$case_dir/state/task-x1.meta" \
+    "marker-retirement-fails: preparation failure automatically restored the claim"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  marker_backups=("$case_dir/state"/.task-x1.meta.task-owner-backup.*)
+  assert_grep "worktree=$case_dir/wt" "${claim_backups[0]}" \
+    "marker-retirement-fails: preparation failure lost the claim copy"
+  [ ! -e "${marker_backups[0]}" ] \
+    || fail "marker-retirement-fails: a redundant marker backup survived while the marker stayed live"
+  assert_grep "live marker remains at $case_dir/wt/.fm-task-owner" "$case_dir/stderr" \
+    "marker-retirement-fails: the drill misstated the preserved marker state"
+  assert_grep "Manual recovery drill:" "$case_dir/stderr" \
+    "marker-retirement-fails: the refusal omitted deliberate recovery"
+  pass "marker-retirement preparation failure parks before provider action"
+}
+
+# A slot's owner-marker path is inspected read-only BEFORE the claim is touched,
+# so an entry this record cannot prove is its own refuses with the record, the
+# entry, and the slot exactly as they were. No retirement begins, so there is
+# nothing to park and no drill to print: clearing the entry and rerunning is the
+# recovery. These cases are the reachable ones, because a secondmate home is
+# proved by its .fm-secondmate-home identity and never carries a marker of its
+# own, while every crewmate proof already refuses a non-binding marker outright.
+
+# Fails any removal of the secondmate home instead of performing it, so a
+# provider call is visible in $case_dir/provider.log rather than destroying the
+# evidence that it ran.
+# Args: case_dir
+refuse_and_log_secondmate_home_removal() {
+  local case_dir=$1 real_rm
+  real_rm=$(command -v rm)
+  cat > "$case_dir/fakebin/rm" <<EOF
+#!/usr/bin/env bash
+for arg; do
+  case "\$arg" in
+    */secondmate-home)
+      printf 'home removal attempted\n' >> "$case_dir/provider.log"
+      exit 1
+      ;;
+  esac
+done
+exec "$real_rm" "\$@"
+EOF
+  chmod +x "$case_dir/fakebin/rm"
+}
+
+# The exact state a read-only preflight refusal must leave behind: the record
+# still holds its claim, neither half of the retirement was copied aside, and no
+# parked-retirement drill was printed because no retirement ever began. This is
+# the inverse of an interrupted retirement, which parks both copies and prints
+# the drill (see test_marker_retirement_failure_parks_before_provider_action).
+# Args: case_dir home tag [stderr-file]
+assert_marker_preflight_refused_intact() {
+  local case_dir=$1 home=$2 tag=$3 stderr=${4:-$1/stderr}
+  local -a claim_backups marker_backups
+  assert_absent "$case_dir/provider.log" \
+    "$tag: the provider was asked to act on a slot whose marker entry is unprovable"
+  assert_present "$home/.fm-secondmate-home" \
+    "$tag: the refusal removed the secondmate home"
+  assert_grep "worktree=$home" "$case_dir/state/task-x1.meta" \
+    "$tag: the refusal stripped a claim it never proved it could retire"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  [ ! -e "${claim_backups[0]}" ] \
+    || fail "$tag: a read-only refusal left a parked claim copy behind"
+  marker_backups=("$case_dir/state"/.task-x1.meta.task-owner-backup.*)
+  [ ! -e "${marker_backups[0]}" ] \
+    || fail "$tag: a read-only refusal stashed the marker entry as a recovery half"
+  assert_grep "ownership of that path is conflicting or unproved" "$stderr" \
+    "$tag: the refusal never said ownership was unproved"
+  assert_grep "keeps its recorded worktree claim and no copy of it was made" "$stderr" \
+    "$tag: the refusal never told the operator the claim survived intact"
+  assert_no_grep "Manual recovery drill:" "$stderr" \
+    "$tag: a refusal that began no retirement still printed the parked drill"
+}
+
+test_secondmate_retirement_refuses_a_foreign_owner_marker() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-foreign-marker)
+  write_meta "$case_dir" local-only secondmate
+  seed_secondmate_home "$case_dir"
+  home="$case_dir/secondmate-home"
+  write_task_b_marker_fixture "$case_dir"
+  cp -- "$case_dir/task-b-marker.expected" "$home/.fm-task-owner"
+  refuse_and_log_secondmate_home_removal "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "secondmate-foreign-marker: a slot marked for another task must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_marker_preflight_refused_intact "$case_dir" "$home" secondmate-foreign-marker
+  cmp -s "$home/.fm-task-owner" "$case_dir/task-b-marker.expected" \
+    || fail "secondmate-foreign-marker: the refusal touched another task's owner marker"
+  assert_grep "is marked as task task-b's workspace" "$case_dir/stderr" \
+    "secondmate-foreign-marker: the refusal dropped the binding's own reason"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 1 "$rc" "secondmate-foreign-marker: a plain retry must refuse the same way"
+  assert_marker_preflight_refused_intact "$case_dir" "$home" secondmate-foreign-marker \
+    "$case_dir/stderr2"
+  cmp -s "$home/.fm-task-owner" "$case_dir/task-b-marker.expected" \
+    || fail "secondmate-foreign-marker: the retry touched another task's owner marker"
+  pass "a secondmate retirement refuses a slot another task's marker names, claim intact"
+}
+
+# An entry that is not a regular file can be attributed to nobody, so it is the
+# same conflicting-or-unproved ownership as a foreign marker - not "no marker to
+# retire". It keeps its type and target, and is never followed or read through.
+test_secondmate_retirement_refuses_a_non_regular_owner_marker() {
+  local case_dir home rc link_target
+  case_dir=$(make_case secondmate-nonregular-marker)
+  write_meta "$case_dir" local-only secondmate
+  seed_secondmate_home "$case_dir"
+  home="$case_dir/secondmate-home"
+  printf '%s\n' 'not an ownership marker' > "$case_dir/elsewhere"
+  ln -s "$case_dir/elsewhere" "$home/.fm-task-owner"
+  refuse_and_log_secondmate_home_removal "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "secondmate-nonregular-marker: an unattributable marker entry must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_marker_preflight_refused_intact "$case_dir" "$home" secondmate-nonregular-marker
+  [ -L "$home/.fm-task-owner" ] \
+    || fail "secondmate-nonregular-marker: the refusal changed the marker entry's type"
+  link_target=$(readlink "$home/.fm-task-owner")
+  [ "$link_target" = "$case_dir/elsewhere" ] \
+    || fail "secondmate-nonregular-marker: the refusal repointed the marker entry"
+  assert_grep 'not an ownership marker' "$case_dir/elsewhere" \
+    "secondmate-nonregular-marker: the refusal followed the link and rewrote its target"
+  assert_grep "not a regular ownership marker" "$case_dir/stderr" \
+    "secondmate-nonregular-marker: the refusal dropped the binding's own reason"
+  pass "a secondmate retirement refuses a marker entry that is not a regular file"
+}
+
+# A directory at the marker path is the same unattributable entry as a symlink.
+test_secondmate_retirement_refuses_a_directory_owner_marker() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-directory-marker)
+  write_meta "$case_dir" local-only secondmate
+  seed_secondmate_home "$case_dir"
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/.fm-task-owner"
+  printf '%s\n' 'occupant' > "$home/.fm-task-owner/inside"
+  refuse_and_log_secondmate_home_removal "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "secondmate-directory-marker: a directory marker entry must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_marker_preflight_refused_intact "$case_dir" "$home" secondmate-directory-marker
+  [ -d "$home/.fm-task-owner" ] && [ ! -L "$home/.fm-task-owner" ] \
+    || fail "secondmate-directory-marker: the refusal changed the marker entry's type"
+  assert_grep 'occupant' "$home/.fm-task-owner/inside" \
+    "secondmate-directory-marker: the refusal disturbed the directory's contents"
+  assert_grep "not a regular ownership marker" "$case_dir/stderr" \
+    "secondmate-directory-marker: the refusal dropped the binding's own reason"
+  pass "a secondmate retirement refuses a directory at the marker path"
+}
+
+# A regular but incomplete marker names no generation to bind, so it is just as
+# unprovable as a foreign one and must not be stashed or removed.
+test_secondmate_retirement_refuses_a_malformed_owner_marker() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-malformed-marker)
+  write_meta "$case_dir" local-only secondmate
+  seed_secondmate_home "$case_dir"
+  home="$case_dir/secondmate-home"
+  printf '%s\n' 'schema=fm-task-owner.v1' 'task_id=task-x1' > "$case_dir/malformed.expected"
+  cp -- "$case_dir/malformed.expected" "$home/.fm-task-owner"
+  refuse_and_log_secondmate_home_removal "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "secondmate-malformed-marker: an incomplete marker must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_marker_preflight_refused_intact "$case_dir" "$home" secondmate-malformed-marker
+  cmp -s "$home/.fm-task-owner" "$case_dir/malformed.expected" \
+    || fail "secondmate-malformed-marker: the refusal rewrote the marker it could not read"
+  assert_grep "unreadable or incomplete" "$case_dir/stderr" \
+    "secondmate-malformed-marker: the refusal dropped the binding's own reason"
+  pass "a secondmate retirement refuses an unreadable marker without touching it"
+}
+
+# A record too incomplete to name the generation its marker would bind cannot
+# prove ownership either - but nothing here establishes that anyone ELSE owns
+# the path, and the marker names this very task. The refusal must say ownership
+# is unproved and carry the binding's reason, so the operator repairs their own
+# record instead of hunting a reissue that never happened.
+test_retirement_refuses_a_marker_its_own_record_cannot_bind() {
+  local case_dir home rc
+  case_dir=$(make_case secondmate-unprovable-marker)
+  write_meta "$case_dir" local-only secondmate
+  seed_secondmate_home "$case_dir"
+  home="$case_dir/secondmate-home"
+  # A second spawn_gen= line makes the record ambiguous: fm_worktree_meta_probe
+  # reports it as unusable rather than absent, so no exact generation remains.
+  printf '%s\n' 'spawn_gen=test-generation-task-x1-duplicate' >> "$case_dir/state/task-x1.meta"
+  # The marker this record would bind if it named one exact generation. A
+  # secondmate home is not a git worktree, so it carries no exclude file to
+  # stamp against - only the marker bytes matter here.
+  {
+    printf '%s\n' 'schema=fm-task-owner.v1'
+    printf '%s\n' 'task_id=task-x1'
+    printf '%s\n' 'spawn_gen=test-generation-task-x1'
+  } > "$case_dir/own-marker.expected"
+  cp -- "$case_dir/own-marker.expected" "$home/.fm-task-owner"
+  refuse_and_log_secondmate_home_removal "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "secondmate-unprovable-marker: a record that cannot bind its own marker must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_marker_preflight_refused_intact "$case_dir" "$home" secondmate-unprovable-marker
+  cmp -s "$home/.fm-task-owner" "$case_dir/own-marker.expected" \
+    || fail "secondmate-unprovable-marker: the refusal rewrote the marker it could not bind"
+  assert_grep "task metadata has no exact spawn generation" "$case_dir/stderr" \
+    "secondmate-unprovable-marker: the refusal dropped the binding's own reason"
+  assert_no_grep "belongs to another task" "$case_dir/stderr" \
+    "secondmate-unprovable-marker: the refusal asserted another task owns a path nothing attributes to one"
+  pass "a retirement refuses, without blaming another task, when its own record cannot bind its marker"
+}
+
+# The preflight admits an empty slot, but the claim rewrite sits between that
+# check and the marker retirement, so another task's spawn can take the reissued
+# slot inside that window. The recheck must catch it - and must describe the
+# state it is actually in, because by then the claim is already stripped and the
+# retirement is parking, the opposite of a preflight refusal.
+test_marker_recheck_after_the_claim_strip_parks_and_says_so() {
+  local case_dir home rc real_chmod
+  local -a claim_backups marker_backups
+  case_dir=$(make_case marker-recheck-race)
+  write_meta "$case_dir" local-only secondmate
+  seed_secondmate_home "$case_dir"
+  home="$case_dir/secondmate-home"
+  write_task_b_marker_fixture "$case_dir"
+  refuse_and_log_secondmate_home_removal "$case_dir"
+  # Stand in for the concurrent spawn: stamp task-b's marker into the slot while
+  # the claim rewrite is in flight, after the preflight has already admitted it.
+  real_chmod=$(command -v chmod)
+  cat > "$case_dir/fakebin/chmod" <<EOF
+#!/usr/bin/env bash
+for arg; do
+  case "\$arg" in
+    *.worktree-claim-next.*)
+      cp -- "$case_dir/task-b-marker.expected" "$home/.fm-task-owner"
+      ;;
+  esac
+done
+exec "$real_chmod" "\$@"
+EOF
+  "$real_chmod" +x "$case_dir/fakebin/chmod"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "marker-recheck-race: a slot taken mid-retirement must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/provider.log" \
+    "marker-recheck-race: the provider released a slot another task had just taken"
+  cmp -s "$home/.fm-task-owner" "$case_dir/task-b-marker.expected" \
+    || fail "marker-recheck-race: the recheck touched the new holder's marker"
+  marker_backups=("$case_dir/state"/.task-x1.meta.task-owner-backup.*)
+  [ ! -e "${marker_backups[0]}" ] \
+    || fail "marker-recheck-race: the new holder's marker was stashed as a recovery half"
+  # The claim was already stripped, so unlike a preflight refusal this one parks.
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  assert_grep "worktree=$home" "${claim_backups[0]}" \
+    "marker-recheck-race: the parked retirement lost its claim copy"
+  assert_no_grep "worktree=" "$case_dir/state/task-x1.meta" \
+    "marker-recheck-race: the fixture never reached the post-strip recheck"
+  assert_grep "ownership of that path is conflicting or unproved" "$case_dir/stderr" \
+    "marker-recheck-race: the refusal never named the conflicting entry"
+  assert_grep "appeared after the worktree claim in $case_dir/state/task-x1.meta was already cleared" \
+    "$case_dir/stderr" \
+    "marker-recheck-race: the refusal did not say the retirement had already begun"
+  assert_no_grep "keeps its recorded worktree claim" "$case_dir/stderr" \
+    "marker-recheck-race: the refusal claimed an intact record while the claim was stripped"
+  assert_grep "Manual recovery drill:" "$case_dir/stderr" \
+    "marker-recheck-race: a parked retirement omitted its recovery drill"
+  pass "a slot taken between the preflight and the marker retirement parks and reports it"
+}
+
+# The drill's live-entry branch is still reachable, just not from the preflight:
+# a retirement that parked while the slot carried no marker can find a stray
+# entry there by the time an operator reads the drill. It must then name the
+# entry's observed type rather than call the claim legacy or unmarked.
+test_parked_retirement_drill_names_a_stray_entry_at_the_marker_path() {
+  local case_dir home rc
+  local -a claim_backups
+  case_dir=$(make_case parked-stray-marker-entry)
+  write_meta "$case_dir" local-only secondmate
+  seed_secondmate_home "$case_dir"
+  home="$case_dir/secondmate-home"
+  refuse_and_log_secondmate_home_removal "$case_dir"
+
+  # Park a real retirement: nothing is at the marker path, so the preflight
+  # admits the slot, the claim is stripped, and the provider then fails.
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "parked-stray-marker-entry: the failed removal must park the retirement"$'
+'"$(cat "$case_dir/stderr")"
+  assert_present "$case_dir/provider.log" \
+    "parked-stray-marker-entry: the fixture never reached the provider, so nothing parked"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  assert_grep "worktree=$home" "${claim_backups[0]}" \
+    "parked-stray-marker-entry: the parked retirement lost its claim copy"
+  assert_grep "legacy or unmarked claim" "$case_dir/stderr" \
+    "parked-stray-marker-entry: an unmarked slot should read as unmarked while it is empty"
+
+  # A stray entry appears at the marker path afterwards.
+  ln -s "$case_dir/elsewhere" "$home/.fm-task-owner"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 1 "$rc" "parked-stray-marker-entry: the parked record must still refuse"
+  assert_grep "$home/.fm-task-owner is a live symlink, not a regular ownership marker" \
+    "$case_dir/stderr2" \
+    "parked-stray-marker-entry: the drill never reported the stray entry's observed type"
+  assert_grep "do not read, follow, move, or remove it - and stop" "$case_dir/stderr2" \
+    "parked-stray-marker-entry: the drill did not tell the operator to stop"
+  assert_no_grep "legacy or unmarked claim" "$case_dir/stderr2" \
+    "parked-stray-marker-entry: the drill called a live entry an unmarked claim"
+  assert_no_grep "skip marker restoration" "$case_dir/stderr2" \
+    "parked-stray-marker-entry: the drill told the operator no entry was there"
+  [ -L "$home/.fm-task-owner" ] \
+    || fail "parked-stray-marker-entry: the refusal touched the stray entry"
+  pass "a parked retirement's drill names a stray entry that appears at the marker path"
+}
+
+# The same home with no .fm-task-owner at all is the ordinary secondmate slot,
+# and the marker gate must leave it exactly as it was: proved by
+# .fm-secondmate-home alone, released, and its record removed.
+test_secondmate_retirement_releases_a_home_with_no_owner_marker() {
+  local case_dir home rc
+  local -a claim_backups
+  case_dir=$(make_case secondmate-no-marker)
+  write_meta "$case_dir" local-only secondmate
+  seed_secondmate_home "$case_dir"
+  home="$case_dir/secondmate-home"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "secondmate-no-marker: an unmarked secondmate home must still tear down"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$home" "secondmate-no-marker: the secondmate home was never released"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "secondmate-no-marker: teardown left the task record behind"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  [ ! -e "${claim_backups[0]}" ] \
+    || fail "secondmate-no-marker: a completed release left a parked claim copy behind"
+  pass "a secondmate home carrying no owner marker is still released and its record removed"
+}
+
+# The record must stay usable until the whole teardown has succeeded: a step
+# that fails after the pool return still leaves a task a plain rerun can finish.
+test_late_teardown_failure_leaves_a_rerunnable_record() {
+  local case_dir rc
+  case_dir=$(make_case late-failure-rerun)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+  # A malformed status presentation manifest fails status_retire_presentation_task,
+  # which runs long after the pool return and just before the record is removed.
+  printf 'task-x1\tfirstmate:fm-task-x1\tnot-a-number\n' \
+    > "$case_dir/state/.status-presentation-cursor"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "late-failure-rerun: a failing late step must stop the teardown"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "late-failure-rerun: the fixture never reached the pool return it is about"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "late-failure-rerun: a stopped teardown discarded the task record"
+  assert_no_grep "worktree=" "$case_dir/state/task-x1.meta" \
+    "late-failure-rerun: the record regained a claim on a slot the pool can reissue"
+  assert_present "$case_dir/state/.task-x1.meta.worktree-retired" \
+    "late-failure-rerun: no retirement receipt records that the pool return already ran"
+  assert_absent "$case_dir/wt/.fm-task-owner" \
+    "late-failure-rerun: a released pool slot was left marked for the departing task"
+
+  rm -f "$case_dir/state/.status-presentation-cursor"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 0 "$rc" "late-failure-rerun: the rerun should finish the teardown"$'\n'"$(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "late-failure-rerun: the rerun left the task record behind"
+  assert_absent "$case_dir/state/.task-x1.meta.worktree-retired" \
+    "late-failure-rerun: the retirement receipt outlived the record it describes"
+  [ "$(grep -c returned "$case_dir/treehouse.log")" = 1 ] \
+    || fail "late-failure-rerun: the rerun returned the pool slot a second time"
+  pass "a teardown step failing after the pool return leaves a record a rerun can finish"
+}
+
+# A release the provider completed but the state filesystem could not record
+# leaves a copy of the record behind. That copy names a path the pool already
+# owns again, so it must never be discoverable as a restorable claim, and it
+# must still carry the rerun that finishes the record's remaining cleanup.
+test_unrecorded_release_leaves_evidence_a_rerun_can_finish() {
+  local case_dir rc real_mv
+  local -a claim_backups evidence
+  case_dir=$(make_case unrecorded-release)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+  # Fail exactly the receipt's atomic install, the way a state filesystem that
+  # ran out of space would once the pool return has already succeeded. Every
+  # other rename - including the quarantine of the released record - is real.
+  real_mv=$(command -v mv)
+  cat > "$case_dir/fakebin/mv" <<EOF
+#!/usr/bin/env bash
+for arg; do
+  case "\$arg" in
+    *.worktree-retired)
+      echo "mv: cannot move to '\$arg': No space left on device" >&2
+      exit 1
+      ;;
+  esac
+done
+exec "$real_mv" "\$@"
+EOF
+  chmod +x "$case_dir/fakebin/mv"
+  # A malformed presentation manifest then stops the run before the record is
+  # removed, so the unrecorded retirement has to survive to a rerun.
+  printf 'task-x1\tfirstmate:fm-task-x1\tnot-a-number\n' \
+    > "$case_dir/state/.status-presentation-cursor"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "unrecorded-release: the fixture must stop teardown after the pool return"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "unrecorded-release: the fixture never reached the pool return it is about"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  if [ -e "${claim_backups[0]}" ]; then
+    fail "unrecorded-release: a released path stayed discoverable as a restorable claim"
+  fi
+  evidence=("$case_dir/state"/.task-x1.meta.worktree-released.*)
+  if [ ! -e "${evidence[0]}" ]; then
+    fail "unrecorded-release: the released record was not kept as evidence of the release"
+  fi
+  assert_grep "worktree=$case_dir/wt" "${evidence[0]}" \
+    "unrecorded-release: the evidence does not name the path the provider released"
+  assert_grep "${evidence[0]}" "$case_dir/stderr" \
+    "unrecorded-release: the refusal never named where the released record was quarantined"
+
+  rm -f "$case_dir/state/.status-presentation-cursor"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 0 "$rc" "unrecorded-release: the rerun should finish the teardown"$'\n'"$(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "unrecorded-release: the rerun left the task record behind"
+  assert_absent "${evidence[0]}" \
+    "unrecorded-release: the released-record evidence outlived the record it describes"
+  [ "$(grep -c returned "$case_dir/treehouse.log")" = 1 ] \
+    || fail "unrecorded-release: the rerun returned the pool slot a second time"
+  pass "an unrecorded release keeps non-restorable evidence a rerun can finish on"
+}
+
+# A copy of the claim that outlived its own removal describes a path the
+# provider has already taken back. The receipt is what says the retirement
+# completed, so it decides - the copy must not be read as an interruption and
+# must never be offered as something to restore.
+test_receipt_outranks_a_leftover_claim_copy() {
+  local case_dir rc leftover
+  case_dir=$(make_case leftover-claim-copy)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+  printf 'task-x1\tfirstmate:fm-task-x1\tnot-a-number\n' \
+    > "$case_dir/state/.status-presentation-cursor"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "leftover-claim-copy: the fixture must stop teardown after the pool return"
+  assert_present "$case_dir/state/.task-x1.meta.worktree-retired" \
+    "leftover-claim-copy: no retirement receipt records that the return already ran"
+
+  # The retirement was recorded, but its claim copy could not be unlinked.
+  leftover="$case_dir/state/.task-x1.meta.worktree-claim-backup.aB3xY9"
+  printf 'window=firstmate:fm-task-x1\nworktree=%s/wt\n' "$case_dir" > "$leftover"
+
+  rm -f "$case_dir/state/.status-presentation-cursor"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 0 "$rc" "leftover-claim-copy: a recorded retirement must outrank the leftover copy"$'\n'"$(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "leftover-claim-copy: the rerun left the task record behind"
+  assert_absent "$leftover" \
+    "leftover-claim-copy: the superseded claim copy outlived the record it describes"
+  [ "$(grep -c returned "$case_dir/treehouse.log")" = 1 ] \
+    || fail "leftover-claim-copy: the rerun returned the pool slot a second time"
+  pass "a recorded retirement outranks a claim copy that outlived its own removal"
+}
+
+# The slot is the provider's again the instant the return succeeds, so no later
+# failure may hand this record authority over it - even before the task that
+# takes it has stamped its own marker.
+test_retired_record_cannot_act_on_a_reissued_pool_slot() {
+  local case_dir rc
+  case_dir=$(make_case reissued-slot)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  # A pool return resets the slot, so anything the next holder has written is
+  # gone with it - which is what makes a second return destructive.
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' >> "$case_dir/treehouse.log"
+rm -f "$case_dir/wt/next-holder-live.txt"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+  printf 'task-x1\tfirstmate:fm-task-x1\tnot-a-number\n' \
+    > "$case_dir/state/.status-presentation-cursor"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "reissued-slot: the fixture must stop teardown after the pool return"
+
+  # The pool reissues the returned slot. The task taking it is mid-acquisition:
+  # its work is already in the slot, before its own record or owner marker land.
+  printf 'next holder live work\n' > "$case_dir/wt/next-holder-live.txt"
+
+  rm -f "$case_dir/state/.status-presentation-cursor"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 0 "$rc" "reissued-slot: task-x1's rerun should finish its own record"$'\n'"$(cat "$case_dir/stderr2")"
+  [ "$(cat "$case_dir/wt/next-holder-live.txt" 2>/dev/null)" = "next holder live work" ] \
+    || fail "reissued-slot: task-x1's rerun destroyed the work of the task now holding the slot"
+  [ "$(grep -c returned "$case_dir/treehouse.log")" = 1 ] \
+    || fail "reissued-slot: task-x1 returned a slot the pool had already reissued"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "reissued-slot: task-x1's rerun left its own record behind"
+  pass "a record whose slot the provider already reissued can never act on that path again"
+}
+
+# Once a provider call returns anything but confirmed success, teardown parks
+# the retirement instead of retrying through a path whose ownership may have
+# changed. A plain rerun must refuse before a second provider call and repeat
+# the same deliberate manual-recovery drill.
+test_failed_pool_return_parks_before_any_retry() {
+  local case_dir rc
+  local -a claim_backups marker_backups
+  case_dir=$(make_case failed-return-parks)
+  write_meta "$case_dir" no-mistakes ship
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'return called\n' >> "$case_dir/treehouse.log"
+echo 'pool busy' >&2
+exit 1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "failed-return-parks: the provider failure must stop teardown"
+  assert_no_grep "worktree=" "$case_dir/state/task-x1.meta" \
+    "failed-return-parks: teardown automatically restored path authority"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  marker_backups=("$case_dir/state"/.task-x1.meta.task-owner-backup.*)
+  assert_grep "worktree=$case_dir/wt" "${claim_backups[0]}" \
+    "failed-return-parks: the parked retirement lost its claim copy"
+  assert_grep "task_id=task-x1" "${marker_backups[0]}" \
+    "failed-return-parks: the parked retirement lost its marker copy"
+  assert_grep "Automatic restoration is disabled" "$case_dir/stderr" \
+    "failed-return-parks: the refusal did not state the governing policy"
+  assert_grep "Manual recovery drill:" "$case_dir/stderr" \
+    "failed-return-parks: the refusal did not include the deliberate recovery steps"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+  expect_code 1 "$rc" "failed-return-parks: a plain retry must stay parked"
+  [ "$(grep -c 'return called' "$case_dir/treehouse.log")" = 1 ] \
+    || fail "failed-return-parks: a retry invoked the provider again"
+  assert_grep "${claim_backups[0]}" "$case_dir/stderr2" \
+    "failed-return-parks: the retry did not name the preserved claim"
+  assert_grep "${marker_backups[0]}" "$case_dir/stderr2" \
+    "failed-return-parks: the retry did not name the preserved marker"
+  pass "a failed provider return parks one whole retirement before every retry"
+}
+
+# A failed return never triggers a rollback, even when the provider put another
+# owner's marker into the slot before reporting failure. The retirement parks
+# unchanged and the live owner's marker stays byte-identical.
+test_failed_return_never_overwrites_a_reissued_slots_marker() {
+  local case_dir rc
+  local -a claim_backups marker_backups
+  case_dir=$(make_case failed-return-foreign-marker)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  reissue_slot_to_task_b_then_fail "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "failed-return-foreign-marker: a failed return must stop teardown"
+  cmp -s "$case_dir/wt/.fm-task-owner" "$case_dir/task-b-marker.expected" \
+    || fail "failed-return-foreign-marker: teardown rewrote the marker of the task now holding the slot"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "failed-return-foreign-marker: a failed return discarded the task record"
+  assert_no_grep "worktree=" "$case_dir/state/task-x1.meta" \
+    "failed-return-foreign-marker: the record was pointed back at a slot another task now marks"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  marker_backups=("$case_dir/state"/.task-x1.meta.task-owner-backup.*)
+  assert_grep "worktree=$case_dir/wt" "${claim_backups[0]}" \
+    "failed-return-foreign-marker: the parked retirement lost its claim copy"
+  assert_grep "task_id=task-x1" "${marker_backups[0]}" \
+    "failed-return-foreign-marker: the parked retirement lost its marker copy"
+  assert_grep "Manual recovery drill:" "$case_dir/stderr" \
+    "failed-return-foreign-marker: the refusal omitted deliberate recovery"
+  pass "a failed pool return parks without overwriting another task's marker"
+}
+
+# The task branch is the record's own ref, not the slot's, so a rerun that skips
+# an already-completed pool return still has to drop it - otherwise the shared
+# project keeps a ref no surviving record can be attributed to.
+test_retired_rerun_still_drops_the_task_branch() {
+  local case_dir rc
+  case_dir=$(make_case retired-rerun-branch)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+  # Fail only the task-branch delete, so the first run records the retirement and
+  # then stops with the ref still sitting in the shared project.
+  cat > "$case_dir/fakebin/git" <<EOF
+#!/usr/bin/env bash
+real=\${REAL_GIT_FOR_TEST:?}
+if [ -e "$case_dir/branch-drop-fails" ]; then
+  prev=
+  for arg in "\$@"; do
+    if [ "\$prev" = branch ] && [ "\$arg" = -D ]; then
+      echo 'fatal: simulated failure deleting the task branch' >&2
+      exit 1
+    fi
+    prev=\$arg
+  done
+fi
+exec "\$real" "\$@"
+EOF
+  chmod +x "$case_dir/fakebin/git"
+  : > "$case_dir/branch-drop-fails"
+  printf 'task-x1\tfirstmate:fm-task-x1\tnot-a-number\n' \
+    > "$case_dir/state/.status-presentation-cursor"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "retired-rerun-branch: the fixture must stop teardown after the pool return"
+  assert_grep "could not drop task branch fm/task-x1" "$case_dir/stderr" \
+    "retired-rerun-branch: an undeletable task branch was passed over silently"
+  assert_present "$case_dir/state/.task-x1.meta.worktree-retired" \
+    "retired-rerun-branch: no retirement receipt records that the pool return already ran"
+  git -C "$case_dir/project" rev-parse --verify --quiet refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "retired-rerun-branch: the fixture never left the task branch behind to rerun over"
+
+  rm -f "$case_dir/branch-drop-fails" "$case_dir/state/.status-presentation-cursor"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 0 "$rc" "retired-rerun-branch: the rerun should finish the teardown"$'\n'"$(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "retired-rerun-branch: the rerun left the task record behind"
+  if git -C "$case_dir/project" rev-parse --verify --quiet refs/heads/fm/task-x1 >/dev/null 2>&1; then
+    fail "retired-rerun-branch: the task branch outlived the record it belonged to"
+  fi
+  [ "$(grep -c returned "$case_dir/treehouse.log")" = 1 ] \
+    || fail "retired-rerun-branch: the rerun returned the pool slot a second time"
+  pass "a receipt-backed rerun still drops the task branch whose return it skipped"
+}
+
+# Every dirty and unlanded-work gate is scoped to a worktree that still exists,
+# so a record whose recorded path is gone reaches record cleanup with nothing
+# ever having inspected the work. fm/<id> is then the only place that work
+# survives, and dropping the ref there makes it unreachable in the shared repo.
+test_vanished_worktree_teardown_keeps_the_task_branch() {
+  local case_dir rc head
+  case_dir=$(make_case vanished-wt-branch)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  wt_commit "$case_dir" "crew work that was never pushed"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  # The slot is gone and its registration pruned - the exact state in which
+  # `git branch -D` stops refusing "cannot delete branch used by worktree".
+  rm -rf "$case_dir/wt"
+  git -C "$case_dir/project" worktree prune
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "vanished-wt-branch: teardown should finish over a vanished worktree"$'\n'"$(cat "$case_dir/stderr")"
+  git -C "$case_dir/project" rev-parse --verify --quiet refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "vanished-wt-branch: teardown deleted the task branch holding work no gate ever inspected"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$head" ] \
+    || fail "vanished-wt-branch: the surviving task branch no longer holds the crew's commit"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "vanished-wt-branch: the task record outlived its own teardown"
+  assert_grep "task branch fm/task-x1 is retained" "$case_dir/stderr" \
+    "vanished-wt-branch: the retained task branch was passed over in silence"
+  assert_grep "never released it" "$case_dir/stderr" \
+    "vanished-wt-branch: the diagnostic did not say why branch cleanup was skipped"
+  pass "a teardown over a vanished worktree keeps the task branch its unlanded work is on and says so"
+}
+
+# Every dirty and unlanded-work gate inspects the SLOT's HEAD. A crewmate parked
+# at a bisect, a paused rebase, or a plain `git checkout origin/main` leaves a
+# clean tree at a commit every remote already has, so all of those gates pass
+# without ever looking at fm/<id> - which is where the unpushed work is. No
+# --force is involved: the branch is the only surviving copy of those commits.
+test_detached_reachable_head_keeps_the_unpushed_task_branch() {
+  local case_dir rc head
+  case_dir=$(make_case detached-head-branch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "crew work that was never pushed"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" checkout -q --detach origin/main
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "detached-head-branch: a clean detached HEAD must still tear down"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "detached-head-branch: the pool slot was never returned"
+  git -C "$case_dir/project" rev-parse --verify --quiet refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "detached-head-branch: teardown deleted the task branch holding the only copy of unpushed work"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$head" ] \
+    || fail "detached-head-branch: the surviving task branch no longer holds the crew's commit"
+  assert_grep "task branch fm/task-x1 is retained" "$case_dir/stderr" \
+    "detached-head-branch: the retained task branch was passed over in silence"
+  assert_grep "crew work that was never pushed" "$case_dir/stderr" \
+    "detached-head-branch: the diagnostic did not name the commits nothing proved"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "detached-head-branch: the task record outlived its own teardown"
+  pass "a clean detached HEAD never stands in as proof for the task branch's own commits"
+}
+
+# The other half of the same rule: the branch's own commits live on no remote
+# after a squash merge, but this teardown's landed-work gate accepted them, so
+# the ref is contained by that accepted target and is still dropped.
+test_landed_task_branch_is_still_dropped() {
+  local case_dir rc
+  case_dir=$(make_case landed-branch-drop)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "landed-branch-drop: landed content should tear down"$'\n'"$(cat "$case_dir/stderr")"
+  if git -C "$case_dir/project" rev-parse --verify --quiet refs/heads/fm/task-x1 >/dev/null 2>&1; then
+    fail "landed-branch-drop: the task branch survived a teardown that accepted its work as landed"
+  fi
+  pass "a task branch contained in the landed target this teardown accepted is still dropped"
+}
+
+# The other side of that surviving copy: once an operator has restored the
+# marker by hand and a rerun finally removes the authoritative record, the copy
+# describes a record that no longer exists and must not outlive it in state/.
+test_stale_owner_marker_backup_is_swept_with_the_record() {
+  local case_dir stale rc
+  case_dir=$(make_case stale-marker-backup)
+  write_meta "$case_dir" no-mistakes ship
+  # Exactly what an interrupted retirement leaves beside the record until a
+  # deliberate manual recovery and later successful cleanup sweep it.
+  stale="$case_dir/state/.task-x1.meta.task-owner-backup.AbC123"
+  {
+    printf '%s\n' 'schema=fm-task-owner.v1'
+    printf '%s\n' 'task_id=task-x1'
+    printf '%s\n' 'spawn_gen=test-generation-task-x1'
+  } > "$stale"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "stale-marker-backup: teardown should complete"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "stale-marker-backup: the fixture never reached the record removal it is about"
+  assert_absent "$stale" \
+    "stale-marker-backup: the stale owner-marker copy outlived the record it described"
+  pass "a stale owner-marker copy is swept once the task record it described is gone"
+}
+
+# The relaunch side of the same rule. An aborted relaunch that could not put the
+# superseded marker back deliberately keeps its copy and names it, but that copy
+# describes one task record; once that record is gone it is inert clutter with
+# nothing left to recover, and it must not outlive the id it is named for.
+test_aborted_relaunch_prior_marker_copy_is_swept_with_the_record() {
+  local case_dir stale rc
+  case_dir=$(make_case stale-prior-marker)
+  write_meta "$case_dir" no-mistakes ship
+  # Exactly what bin/fm-spawn.sh's stamp rollback leaves behind when the slot's
+  # marker vanished before the aborted relaunch could restore it.
+  stale="$case_dir/state/.task-x1.task-owner-prior.AbC123"
+  {
+    printf '%s\n' 'schema=fm-task-owner.v1'
+    printf '%s\n' 'task_id=task-x1'
+    printf '%s\n' 'spawn_gen=test-generation-task-x1-prior'
+  } > "$stale"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "stale-prior-marker: teardown should complete"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "stale-prior-marker: the fixture never reached the record removal it is about"
+  assert_absent "$stale" \
+    "stale-prior-marker: the aborted relaunch's prior-marker copy outlived its record"
+  pass "an aborted relaunch's prior-marker copy is swept with the record it described"
+}
+
+# Reproduces the operator's remedy for a hung pool return: kill the teardown.
+# Bash runs the EXIT trap on SIGTERM, so fm_worktree_claim_retire_abandon closes
+# a retirement whose provider verdict never arrived - with the record's worktree=
+# line and the slot's owner marker both already off disk. The control lock holds
+# the teardown shell's own pid, which is what makes the signal reach the shell
+# rather than the command substitution wrapped around the provider call.
+# Returns the teardown's exit status.
+# Args: case_dir
+# An optional second argument is shell run inside the provider call, just before
+# the signal, so a caller can put the slot into the state the interruption then
+# leaves unresolved.
+# Args: case_dir [pre-kill-shell]
+interrupt_teardown_inside_the_pool_return() {
+  local case_dir=$1 before=${2:-} rc=0
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' >> "$case_dir/treehouse.log"
+$before
+kill -TERM "\$(cat "$case_dir/state/.control-task-x1.lock/pid")"
+exit 1
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  return "$rc"
+}
+
+# An interrupted provider call has one terminal automatic behavior: preserve
+# the claim and marker copies, leave the record claimless, and print the exact
+# manual drill. A plain retry stays parked and invokes no provider operation.
+test_interrupted_retirement_keeps_and_names_both_recovery_halves() {
+  local case_dir rc
+  local -a claim_backups marker_backups
+  case_dir=$(make_case interrupted-pair)
+  write_meta "$case_dir" no-mistakes ship
+
+  rc=0
+  interrupt_teardown_inside_the_pool_return "$case_dir" || rc=$?
+
+  expect_code 143 "$rc" "interrupted-pair: the fixture must kill teardown inside the pool return"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "interrupted-pair: the fixture never reached the provider call it interrupts"
+  assert_no_grep "worktree=" "$case_dir/state/task-x1.meta" \
+    "interrupted-pair: the claim was never retired, so this is not the state under test"
+  assert_absent "$case_dir/wt/.fm-task-owner" \
+    "interrupted-pair: the owner marker was never retired, so this is not the state under test"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  assert_grep "worktree=$case_dir/wt" "${claim_backups[0]}" \
+    "interrupted-pair: the interrupted retirement kept no recoverable copy of the claim"
+  marker_backups=("$case_dir/state"/.task-x1.meta.task-owner-backup.*)
+  [ -f "${marker_backups[0]}" ] \
+    || fail "interrupted-pair: the only surviving copy of the owner marker was deleted"
+  assert_grep "task_id=task-x1" "${marker_backups[0]}" \
+    "interrupted-pair: the surviving copy is not this task's marker"
+  assert_grep "${claim_backups[0]}" "$case_dir/stderr" \
+    "interrupted-pair: the abandon diagnostic never named the preserved claim"
+  assert_grep "${marker_backups[0]}" "$case_dir/stderr" \
+    "interrupted-pair: the abandon diagnostic never named the preserved marker"
+  assert_grep "Manual recovery drill:" "$case_dir/stderr" \
+    "interrupted-pair: the abandon diagnostic omitted the deliberate recovery steps"
+  assert_grep "no retirement receipt is present" "$case_dir/stderr" \
+    "interrupted-pair: the drill did not report receipt state"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+  expect_code 1 "$rc" "interrupted-pair: a plain retry must remain parked"
+  assert_present "${claim_backups[0]}" \
+    "interrupted-pair: the retry discarded the claim copy"
+  assert_present "${marker_backups[0]}" \
+    "interrupted-pair: the retry discarded the marker copy"
+  [ "$(grep -c returned "$case_dir/treehouse.log")" = 1 ] \
+    || fail "interrupted-pair: the retry invoked the provider again"
+  pass "an interrupted retirement preserves its state and parks every retry"
+}
+
+# The same interruption after another task's marker appears follows exactly the
+# same parked path. No branch inspects or modifies that marker, and a retry still
+# refuses without calling the provider.
+test_interrupted_retirement_over_a_reissued_slot_stays_parked() {
+  local case_dir rc
+  local -a claim_backups marker_backups
+  case_dir=$(make_case interrupted-reissued)
+  write_meta "$case_dir" no-mistakes ship
+  write_task_b_marker_fixture "$case_dir"
+
+  rc=0
+  interrupt_teardown_inside_the_pool_return "$case_dir" \
+    "cp -- \"$case_dir/task-b-marker.expected\" \"$case_dir/wt/.fm-task-owner\"" || rc=$?
+
+  expect_code 143 "$rc" "interrupted-reissued: the fixture must kill teardown inside the pool return"$'\n'"$(cat "$case_dir/stderr")"
+  cmp -s "$case_dir/wt/.fm-task-owner" "$case_dir/task-b-marker.expected" \
+    || fail "interrupted-reissued: the interrupted retirement rewrote the new holder's marker"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  marker_backups=("$case_dir/state"/.task-x1.meta.task-owner-backup.*)
+  assert_grep "worktree=$case_dir/wt" "${claim_backups[0]}" \
+    "interrupted-reissued: the parked claim copy was lost"
+  assert_grep "task_id=task-x1" "${marker_backups[0]}" \
+    "interrupted-reissued: the parked marker copy was lost"
+  assert_grep "Manual recovery drill:" "$case_dir/stderr" \
+    "interrupted-reissued: the interruption omitted deliberate recovery"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 1 "$rc" "interrupted-reissued: a plain retry must stay parked"
+  cmp -s "$case_dir/wt/.fm-task-owner" "$case_dir/task-b-marker.expected" \
+    || fail "interrupted-reissued: the retry rewrote the marker of the task holding the slot"
+  assert_present "${claim_backups[0]}" \
+    "interrupted-reissued: the retry discarded the claim copy"
+  assert_present "${marker_backups[0]}" \
+    "interrupted-reissued: the retry discarded the marker copy"
+  [ "$(grep -c returned "$case_dir/treehouse.log")" = 1 ] \
+    || fail "interrupted-reissued: the retry invoked the provider"
+  pass "an interrupted retirement never touches a later owner's marker and stays parked"
+}
+
+# The printed drill is deliberate operator work, not a runtime restore. After
+# independently establishing that the provider never released the path, an
+# operator copies the marker without consuming its backup and atomically adds
+# only worktree= to the current record. The ordinary retry then proves ownership
+# and sweeps every preserved copy only after confirmed cleanup.
+test_deliberate_manual_recovery_lets_the_rerun_finish() {
+  local case_dir rc tmp worktree_line
+  local -a claim_backups marker_backups
+  case_dir=$(make_case restored-pair)
+  write_meta "$case_dir" no-mistakes ship
+
+  rc=0
+  interrupt_teardown_inside_the_pool_return "$case_dir" || rc=$?
+  expect_code 143 "$rc" "restored-pair: the fixture must kill teardown inside the pool return"$'\n'"$(cat "$case_dir/stderr")"
+
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  marker_backups=("$case_dir/state"/.task-x1.meta.task-owner-backup.*)
+  [ -f "${claim_backups[0]}" ] && [ -f "${marker_backups[0]}" ] \
+    || fail "restored-pair: the interrupted retirement did not preserve both halves"
+  printf '%s\n' 'operator_note=preserve-current-metadata' >> "$case_dir/state/task-x1.meta"
+  cp -p "${marker_backups[0]}" "$case_dir/wt/.fm-task-owner"
+  worktree_line=$(grep '^worktree=' "${claim_backups[0]}")
+  tmp="$case_dir/state/.task-x1.meta.manual-recovery"
+  { grep -v '^worktree=' "$case_dir/state/task-x1.meta"; printf '%s\n' "$worktree_line"; } > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$case_dir/state/task-x1.meta"
+  assert_present "${claim_backups[0]}" \
+    "restored-pair: deliberate recovery consumed the claim backup before cleanup"
+  assert_present "${marker_backups[0]}" \
+    "restored-pair: deliberate recovery consumed the marker backup before cleanup"
+  assert_grep 'operator_note=preserve-current-metadata' "$case_dir/state/task-x1.meta" \
+    "restored-pair: deliberate recovery replaced current metadata wholesale"
+
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+
+  expect_code 0 "$rc" "restored-pair: deliberate recovery should make the ordinary retry provable"$'\n'"$(cat "$case_dir/stderr2")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "restored-pair: the rerun left the task record behind"
+  claim_backups=("$case_dir/state"/.task-x1.meta.worktree-claim-backup.*)
+  [ ! -e "${claim_backups[0]}" ] \
+    || fail "restored-pair: a claim copy outlived the record it described"
+  marker_backups=("$case_dir/state"/.task-x1.meta.task-owner-backup.*)
+  [ ! -e "${marker_backups[0]}" ] \
+    || fail "restored-pair: an owner-marker copy outlived the record it described"
+  pass "deliberate manual recovery preserves current metadata and lets a proved retry finish"
+}
+
+# An interrupted relaunch leaves the marker one generation ahead of the record
+# it is compared against. That is the crash the marker was introduced for, and
+# the restamp publishes a handoff naming exactly that transition for exactly
+# this path, so teardown must read it as the task's own ownership rather than
+# refusing the record forever as a recycled slot.
+test_interrupted_restamp_is_still_provable_ownership() {
+  local case_dir rc
+  case_dir=$(make_case restamp-handoff)
+  write_meta "$case_dir" no-mistakes ship
+  # Durable state a SIGKILL between the restamp and the metadata advance leaves.
+  stamp_owner_marker "$case_dir/wt" task-x1 test-generation-task-x1-next
+  write_owner_pending_record "$case_dir" task-x1 test-generation-task-x1-next \
+    "$case_dir/wt" test-generation-task-x1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "restamp-handoff: an interrupted restamp must stay tearable down"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "restamp-handoff: the pool slot was never returned"
+  assert_absent "$case_dir/wt/.fm-task-owner" \
+    "restamp-handoff: the slot went back to the pool still carrying its owner marker"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "restamp-handoff: the task record outlived its own teardown"
+  [ -z "$(owner_pending_records "$case_dir" task-x1)" ] \
+    || fail "restamp-handoff: the released slot's ownership records outlived the teardown"$'\n'"$(owner_pending_records "$case_dir" task-x1)"
+  pass "an interrupted generation restamp is proved by its handoff and torn down"
+}
+
+# The same skew without the handoff is exactly what the generation check exists
+# to catch - a slot recycled to another incarnation - and must still refuse.
+test_generation_skew_without_a_handoff_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case restamp-no-handoff)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1 test-generation-task-x1-next
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "restamp-no-handoff: an unproved generation skew must refuse"
+  assert_grep "not recorded generation test-generation-task-x1" "$case_dir/stderr" \
+    "restamp-no-handoff: the refusal did not name the generation mismatch"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "restamp-no-handoff: a refused teardown removed the record anyway"
+  assert_present "$case_dir/wt/.fm-task-owner" \
+    "restamp-no-handoff: a refused teardown removed another incarnation's marker"
+  pass "a generation skew no handoff proves is still refused as a recycled slot"
+}
+
+# Teardown retracts by released path, not by its own generation: one crash can
+# leave several incarnations' records, and every one naming the slot just handed
+# back is resolved by that release. A record naming somewhere else is not, so it
+# survives and is reported rather than silently dropped or silently kept.
+test_released_slot_retires_every_ownership_record_naming_it() {
+  local case_dir rc elsewhere
+  case_dir=$(make_case released-pending-sweep)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  elsewhere="$case_dir/other-slot"
+  mkdir -p "$elsewhere"
+  write_owner_pending_record "$case_dir" task-x1 test-generation-task-x1 "$case_dir/wt"
+  write_owner_pending_record "$case_dir" task-x1 test-generation-task-x1-next \
+    "$case_dir/wt" test-generation-task-x1
+  write_owner_pending_record "$case_dir" task-x1 test-generation-elsewhere "$elsewhere"
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "released-pending-sweep: teardown should return the slot"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/.task-x1.meta.worktree-owner-pending.test-generation-task-x1" \
+    "released-pending-sweep: the released slot's own ownership record outlived the release"
+  assert_absent "$case_dir/state/.task-x1.meta.worktree-owner-pending.test-generation-task-x1-next" \
+    "released-pending-sweep: an interrupted restamp's record for the released slot survived it"
+  assert_present "$case_dir/state/.task-x1.meta.worktree-owner-pending.test-generation-elsewhere" \
+    "released-pending-sweep: a record naming a worktree this teardown never released was deleted"
+  assert_grep "$elsewhere" "$case_dir/stderr" \
+    "released-pending-sweep: the surviving ownership record was passed over in silence"
+  pass "a released slot retires every ownership record naming it and reports the rest"
+}
+
+# fm/<id> is the only ref teardown owns; whatever else the crewmate checked out
+# in the slot belongs to the crew, not to cleanup.
+test_pool_return_drops_only_this_tasks_branch() {
+  local case_dir rc
+  case_dir=$(make_case return-keeps-other-branches)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  git -C "$case_dir/wt" checkout -q -b spike/foo
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "return-keeps-other-branches: teardown should return the slot"$'\n'"$(cat "$case_dir/stderr")"
+  git -C "$case_dir/project" rev-parse --verify --quiet refs/heads/spike/foo >/dev/null 2>&1 \
+    || fail "return-keeps-other-branches: teardown deleted a branch that was never this task's"
+  if git -C "$case_dir/project" rev-parse --verify --quiet refs/heads/fm/task-x1 >/dev/null 2>&1; then
+    fail "return-keeps-other-branches: the task branch survived the pool return"
+  fi
+  pass "a pool return drops only fm/<task-id>, never another branch the slot was on"
+}
+
+test_pool_return_drops_the_task_branch_from_the_project() {
+  local case_dir rc
+  case_dir=$(make_case return-drops-branch)
+  write_meta "$case_dir" no-mistakes ship
+  stamp_owner_marker "$case_dir/wt" task-x1
+  # A provider that leaves the slot exactly where it found it - the same shape
+  # the backend conformance fixture models.
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = status ]; then printf '%s\n' '[]'; exit 0; fi
+printf 'returned\n' > "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "return-drops-branch: teardown should return the slot"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "returned" "$case_dir/treehouse.log" \
+    "return-drops-branch: the pool slot was never returned"
+  if git -C "$case_dir/project" rev-parse --verify --quiet refs/heads/fm/task-x1 >/dev/null 2>&1; then
+    fail "return-drops-branch: the task branch survived the pool return"
+  fi
+  pass "a returned pool slot leaves no task branch behind in the shared project"
+}
+
 test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
@@ -1023,6 +2964,10 @@ test_live_index_lock_is_never_removed_and_teardown_refuses() {
   assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
     "live-index-lock: teardown removed a lock with a live holder"
   [ -e "$lock" ] || fail "live-index-lock: live-held lock file was removed"
+  assert_no_grep "worktree=" "$case_dir/state/task-x1.meta" \
+    "live-index-lock: failed provider return automatically restored path authority"
+  assert_grep "Manual recovery drill:" "$case_dir/stderr" \
+    "live-index-lock: the parked retirement omitted deliberate recovery"
   pass "live-held worktree index.lock is never removed and teardown refuses"
 }
 
@@ -1446,8 +3391,8 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   closed="$case_dir/closed"
   : > "$case_dir/state/task-x1.status"
   : > "$case_dir/state/task-x1.turn-ended"
-  # Record every treehouse invocation: the contended-lock refusal must fire
-  # BEFORE the isolated copy is returned, so phase 1 may not invoke it at all.
+  # Record every treehouse invocation: the ownership proof may inspect status,
+  # but the contended-lock refusal must fire before any destructive return.
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
@@ -1484,7 +3429,7 @@ SH
   [ -e "$case_dir/state/task-x1.turn-ended" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the turn-end record"; }
   assert_grep "presentation lock is contended" "$case_dir/stderr" \
     "herdr-orphan-refusal: the pre-return refusal was not explained visibly"
-  if [ -s "$thlog" ]; then
+  if grep -q '^return ' "$thlog"; then
     : > "$release"; fail "herdr-orphan-refusal: the contended refusal still returned the isolated copy: $(cat "$thlog")"
   fi
   [ -d "$case_dir/wt" ] || { : > "$release"; fail "herdr-orphan-refusal: the contended refusal removed the isolated copy"; }
@@ -1504,7 +3449,8 @@ SH
     run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
     || fail "herdr-orphan-refusal: the retry after lock release failed: $(cat "$case_dir/stderr2")"
   [ -e "$closed" ] || fail "herdr-orphan-refusal: the retry never closed the pane under the lock"
-  [ -s "$thlog" ] || fail "herdr-orphan-refusal: the successful retry never returned the isolated copy"
+  assert_grep "return --force" "$thlog" \
+    "herdr-orphan-refusal: the successful retry never returned the isolated copy"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "herdr-orphan-refusal: the successful retry left the metadata behind"
   [ ! -e "$case_dir/state/task-x1.status" ] || fail "herdr-orphan-refusal: the successful retry left the status record behind"
   grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
@@ -1589,7 +3535,7 @@ SH
     || fail "herdr-preflight-$mode: refusal erased the task status record"
   [ -e "$case_dir/state/task-x1.turn-ended" ] \
     || fail "herdr-preflight-$mode: refusal erased the turn-end record"
-  [ ! -s "$thlog" ] || fail "herdr-preflight-$mode: refusal returned the isolated copy"
+  ! grep -q '^return ' "$thlog" || fail "herdr-preflight-$mode: refusal returned the isolated copy"
   [ ! -e "$closed" ] || fail "herdr-preflight-$mode: refusal attempted an unlocked pane close"
 }
 
@@ -1603,9 +3549,8 @@ test_herdr_flat_teardown_preflight_refuses_before_changes() {
 
 configure_secondmate_with_herdr_child() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home"
-  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
-  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  seed_secondmate_home "$case_dir"
+  git -C "$case_dir/wt" branch -m fm/child-herdr
   fm_write_meta "$home/state/child-herdr.meta" \
     "window=childsession:wC:p1" \
     "endpoint_task_id=child-herdr" \
@@ -1674,7 +3619,7 @@ SH
   [ -e "$home/state/child-herdr.meta" ] || fail "herdr-child-preflight: refusal erased the child record"
   [ -e "$home/state/child-herdr.status" ] || fail "herdr-child-preflight: refusal erased child status"
   [ -d "$home" ] || fail "herdr-child-preflight: refusal removed the secondmate home"
-  [ ! -s "$thlog" ] || fail "herdr-child-preflight: refusal returned work before child preflight"
+  ! grep -q '^return ' "$thlog" || fail "herdr-child-preflight: refusal returned work before child preflight"
   [ ! -e "$closed" ] || fail "herdr-child-preflight: refusal attempted a child close"
   assert_grep "nothing was changed" "$case_dir/stderr" \
     "herdr-child-preflight: refusal did not explain its non-mutating boundary"
@@ -1683,9 +3628,7 @@ SH
 
 configure_secondmate_with_tmux_children() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" child child_wt
-  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
-  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  seed_secondmate_home "$case_dir"
   for child in child-a child-b; do
     child_wt="$case_dir/$child-wt"
     git -C "$case_dir/project" worktree add -q -b "fm/$child" "$child_wt" main
@@ -1753,7 +3696,7 @@ SH
     || { : > "$release"; wait "$holder_pid" 2>/dev/null || true; fail "descendant-locks: refusal leaked earlier descendant locks"; }
   [ ! -s "$case_dir/kill.log" ] \
     || { : > "$release"; wait "$holder_pid" 2>/dev/null || true; fail "descendant-locks: refusal killed an endpoint"; }
-  [ ! -s "$case_dir/treehouse.log" ] \
+  ! grep -q '^return ' "$case_dir/treehouse.log" \
     || { : > "$release"; wait "$holder_pid" 2>/dev/null || true; fail "descendant-locks: refusal returned a worktree"; }
   [ -e "$case_dir/state/task-x1.meta" ] && [ -d "$home" ] \
     || { : > "$release"; wait "$holder_pid" 2>/dev/null || true; fail "descendant-locks: refusal removed parent state"; }
@@ -1797,19 +3740,18 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
 
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
-  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  seed_secondmate_home "$case_dir"
   mkdir -p "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
-  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   printf '%s\n' nested-sm > "$nested_home/.fm-secondmate-home"
-  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
   fm_write_meta "$home/state/nested-sm.meta" \
     "window=firstmate:fm-nested-sm" \
     "endpoint_task_id=nested-sm" \
-    "worktree=$case_dir/wt" \
+    "worktree=$nested_home" \
     "project=$case_dir/project" \
     "kind=secondmate" \
     "mode=local-only" \
     "home=$nested_home"
+  git -C "$case_dir/wt" branch -m fm/grandchild-herdr
   fm_write_meta "$nested_home/state/grandchild-herdr.meta" \
     "window=grandchildsession:wG:p1" \
     "endpoint_task_id=grandchild-herdr" \
@@ -2151,7 +4093,7 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
 
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
+[ "\${1:-}" != return ] || printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
 
@@ -2321,7 +4263,7 @@ exit 1
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
+[ "\${1:-}" != return ] || printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
 
@@ -2547,7 +4489,7 @@ exec "$REAL_PS_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf 'returned\n' > "$case_dir/treehouse.log"
+[ "\${1:-}" != return ] || printf 'returned\n' > "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
 
@@ -2583,8 +4525,10 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   # real observed state, not a source-text or line-number correlation.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
-if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
+if [ "\${1:-}" = return ]; then
+  if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
+  if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
+fi
 exit 0
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
@@ -2634,6 +4578,54 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_recycled_worktree_claim_refuses_before_live_work_is_touched
+test_task_branch_mismatch_refuses_without_an_owner_marker
+test_normal_return_clears_the_worktree_claim_before_pool_release
+test_unbranched_scout_owner_marker_is_proved_and_torn_down
+test_unbranched_worktree_outside_its_project_still_refuses
+test_vanished_worktree_path_still_releases_the_task_record
+test_ownership_proof_stays_conclusive_without_jq
+test_unbranched_worktree_with_uninspectable_project_refuses
+test_unbranched_worktree_marked_for_another_task_refuses
+test_worktree_detached_off_its_task_branch_tip_is_still_torn_down
+test_same_task_id_with_a_different_marker_generation_refuses
+test_marker_era_record_with_no_marker_refuses_a_reissued_scout_slot
+test_duplicate_spawn_gen_refuses_a_reissued_scout_slot
+test_duplicate_marker_awareness_never_reopens_legacy_fallback
+test_empty_spawn_gen_refuses_a_reissued_scout_slot
+test_pre_marker_record_keeps_the_legacy_project_fallback
+test_retirement_receipt_survives_a_failed_record_removal
+test_owner_marker_carries_a_foreign_branch_checkout
+test_owner_marker_is_retired_before_the_pool_return
+test_marker_retirement_failure_parks_before_provider_action
+test_secondmate_retirement_refuses_a_foreign_owner_marker
+test_secondmate_retirement_refuses_a_non_regular_owner_marker
+test_secondmate_retirement_refuses_a_directory_owner_marker
+test_secondmate_retirement_refuses_a_malformed_owner_marker
+test_retirement_refuses_a_marker_its_own_record_cannot_bind
+test_marker_recheck_after_the_claim_strip_parks_and_says_so
+test_parked_retirement_drill_names_a_stray_entry_at_the_marker_path
+test_secondmate_retirement_releases_a_home_with_no_owner_marker
+test_late_teardown_failure_leaves_a_rerunnable_record
+test_unrecorded_release_leaves_evidence_a_rerun_can_finish
+test_receipt_outranks_a_leftover_claim_copy
+test_retired_record_cannot_act_on_a_reissued_pool_slot
+test_pool_return_drops_the_task_branch_from_the_project
+test_failed_pool_return_parks_before_any_retry
+test_retired_rerun_still_drops_the_task_branch
+test_failed_return_never_overwrites_a_reissued_slots_marker
+test_stale_owner_marker_backup_is_swept_with_the_record
+test_aborted_relaunch_prior_marker_copy_is_swept_with_the_record
+test_interrupted_retirement_keeps_and_names_both_recovery_halves
+test_interrupted_retirement_over_a_reissued_slot_stays_parked
+test_deliberate_manual_recovery_lets_the_rerun_finish
+test_vanished_worktree_teardown_keeps_the_task_branch
+test_detached_reachable_head_keeps_the_unpushed_task_branch
+test_landed_task_branch_is_still_dropped
+test_interrupted_restamp_is_still_provable_ownership
+test_generation_skew_without_a_handoff_still_refuses
+test_released_slot_retires_every_ownership_record_naming_it
+test_pool_return_drops_only_this_tasks_branch
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds

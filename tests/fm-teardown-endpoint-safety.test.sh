@@ -140,6 +140,9 @@ test_control_lock_contention_refuses_before_mutation() {
 test_metadata_lock_serializes_destructive_cleanup() {
   local dir id=metadata-locked-task lock ready release holder teardown_pid i=0 rc
   dir=$(make_case metadata-lock)
+  rm -rf "$dir/project" "$dir/worktree"
+  fm_git_worktree "$dir/project" "$dir/worktree" "fm/$id"
+  : > "$dir/worktree/sentinel"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=isolated:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
@@ -288,7 +291,7 @@ isolated_tmux_window_exists() {  # <dir> <socket> <session> <window>
 
 test_isolated_tmux_invalid_and_valid_cleanup() {
   local dir socket socket_id session='endpoint safety' target_id=target control=control target=fm-target
-  local prefix_target=fm-prefix prefix_survivor=fm-prefix2 rc
+  local prefix_target=fm-prefix prefix_survivor=fm-prefix2 valid_project valid_worktree rc
   [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
   dir=$(make_case isolated-real)
   socket=dedicated.sock
@@ -345,9 +348,12 @@ SH
   isolated_tmux_window_exists "$dir" "$socket" "$session" "$prefix_survivor" \
     || fail "missing exact target cleanup removed its prefix-matched neighbor"
 
+  valid_project="$dir/valid-project"
+  valid_worktree="$dir/valid-worktree"
+  fm_git_worktree "$valid_project" "$valid_worktree" "fm/$target_id"
   fm_write_meta "$dir/home/state/$target_id.meta" \
     "window=$session:$target" "endpoint_task_id=$target_id" \
-    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
+    "worktree=$valid_worktree" "project=$valid_project" \
     "kind=scout" "mode=no-mistakes"
   env -u TMUX -u TMUX_PANE FM_TEST_TMUX_SOCKET="$socket_id" \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \

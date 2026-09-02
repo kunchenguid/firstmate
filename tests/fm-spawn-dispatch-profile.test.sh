@@ -185,7 +185,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   local rec relative_id absolute_id out status launch home_real linked_home
   relative_id=profile-relative-home-defaults-z1c
   absolute_id=profile-absolute-home-defaults-z1d
-  rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
+  rec=$(make_spawn_case profile-relative-home-defaults pi "$relative_id")
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
 
@@ -208,6 +208,10 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
+  # A second fresh task must use a second slot: reusing the first task's slot is
+  # now correctly refused by the owner marker this test is not about.
+  rec=$(make_spawn_case profile-absolute-home-defaults pi "$absolute_id")
+  read_case_record "$rec"
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
   : > "$LAUNCH_LOG"
@@ -707,15 +711,32 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status proj2 wt2 tmux_base
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
+  # Batch items receive separate Treehouse slots in production. Make that
+  # distinction observable through the shared fake tmux endpoint so the second
+  # fresh spawn never reuses the first item's owner-marked slot.
+  proj2="$CASE_DIR/project-b"
+  wt2="$CASE_DIR/wt-b"
+  fm_git_worktree "$proj2" "$wt2" wt-profile-batch-b
+  tmux_base="$FAKEBIN_DIR/tmux-base"
+  mv "$FAKEBIN_DIR/tmux" "$tmux_base"
+  cat > "$FAKEBIN_DIR/tmux" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *"fm-$id2"*'#{pane_current_path}'*) printf '%s\n' '$wt2'; exit 0 ;;
+esac
+exec '$tmux_base' "\$@"
+EOF
+  chmod +x "$FAKEBIN_DIR/tmux"
+
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+    "$id1=$PROJ_DIR" "$id2=$proj2" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"

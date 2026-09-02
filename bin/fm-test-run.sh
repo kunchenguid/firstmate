@@ -282,7 +282,7 @@ family_for_basename() {
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-pool-base-freshen.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -1233,6 +1233,20 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
+      ;;
+    bin/fm-worktree-ownership-lib.sh)
+      # The shared proof guards teardown across every provider, both relaunch
+      # entry points, and recursive secondmate cleanup. The last two suites
+      # drive bin/fm-teardown.sh end to end and had to stamp owner markers into
+      # their own fixtures to keep passing, so the proof is load-bearing for
+      # them even though neither is about worktree ownership.
+      printf '%s\n' pr-forge
+      printf '%s\n' backend-dispatch
+      printf '%s\n' orca
+      printf '%s\n' zellij
+      printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
+      printf '%s\n' "__script__:fm-public-followup.test.sh"
       ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)

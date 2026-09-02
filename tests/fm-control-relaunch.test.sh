@@ -136,11 +136,30 @@ new_case() {
   printf '%s\n' "$dir"
 }
 
+# The positive ownership binding bin/fm-spawn.sh stamps into a slot it owns,
+# written the same way: excluded from git first, so it never reads as
+# uncommitted work. A record naming a spawn generation always has one.
+# stamp_task_owner_marker <worktree> <task-id> <spawn-generation>
+stamp_task_owner_marker() {
+  local wt=$1 id=$2 generation=$3 excl
+  excl=$(git -C "$wt" rev-parse --git-path info/exclude)
+  # A non-linked clone reports this relative to the worktree, not absolutely.
+  case "$excl" in /*) ;; *) excl="$wt/$excl" ;; esac
+  mkdir -p "$(dirname "$excl")"
+  grep -qxF '.fm-task-owner' "$excl" 2>/dev/null \
+    || printf '%s\n' '.fm-task-owner' >> "$excl"
+  {
+    printf '%s\n' 'schema=fm-task-owner.v1'
+    printf 'task_id=%s\n' "$id"
+    printf 'spawn_gen=%s\n' "$generation"
+  } > "$wt/.fm-task-owner"
+}
+
 # add_ship_task <case-dir> <id> [harness]
 add_ship_task() {
   local dir=$1 id=$2 harness=${3:-claude}
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
-  fm_git_worktree "$proj" "$wt" "task-$id"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$home/data/$id"
   printf '# brief for %s\n\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
   {
@@ -155,7 +174,9 @@ add_ship_task() {
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
     echo "effort=default"
+    echo "spawn_gen=prior-$id"
   } > "$home/state/$id.meta"
+  stamp_task_owner_marker "$wt" "$id" "prior-$id"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
@@ -169,6 +190,8 @@ run_control() {  # <case-dir> <args...>
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
+    FM_FAKE_OWNER_PENDING_MV_FAIL="${FM_FAKE_OWNER_PENDING_MV_FAIL:-}" \
+    FM_FAKE_OWNER_MARKER_MV_FAIL="${FM_FAKE_OWNER_MARKER_MV_FAIL:-}" \
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
@@ -213,17 +236,25 @@ if [ -n "${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" ]; then
     fi
   done
 fi
-if [ -n "${FM_FAKE_META_PUBLISH_MV_FAIL:-}" ]; then
-  for path in "$@"; do
-    [ "$path" != "$FM_FAKE_META_PUBLISH_MV_FAIL" ] || exit 1
-  done
-fi
 source_path=
 target_path=
 for path in "$@"; do
   source_path=$target_path
   target_path=$path
 done
+if [ -n "${FM_FAKE_META_PUBLISH_MV_FAIL:-}" ] \
+   && [ "$target_path" = "$FM_FAKE_META_PUBLISH_MV_FAIL" ]; then
+  exit 1
+fi
+if [ -n "${FM_FAKE_OWNER_PENDING_MV_FAIL:-}" ]; then
+  case "$target_path" in
+    *.meta.worktree-owner-pending.*) exit 1 ;;
+  esac
+fi
+if [ -n "${FM_FAKE_OWNER_MARKER_MV_FAIL:-}" ] \
+   && [ "$target_path" = "$FM_FAKE_OWNER_MARKER_MV_FAIL" ]; then
+  exit 1
+fi
 if [ -n "${FM_FAKE_META_WRITER_TARGET:-}" ] \
    && [ "$target_path" = "$FM_FAKE_META_WRITER_TARGET" ] \
    && grep -q '^x_request=' "$source_path" 2>/dev/null; then
@@ -1174,7 +1205,7 @@ test_secondmate_relaunch_refuses_an_unmarked_home() {
   printf '%s\n' "fm-sm2" > "$dir/fake/windows"
   out=$(run_control "$dir" sm2 relaunch); rc=$?
   expect_code 1 "$rc" "a home marked for another secondmate should refuse"
-  assert_contains "$out" "not marked as its own seeded secondmate home" \
+  assert_contains "$out" "marked for task someone-else, not task sm2" \
     "the refusal should name the identity mismatch"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
   pass "fm-control relaunch: a secondmate home that is not this secondmate's is refused"
@@ -1309,6 +1340,161 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
 
 # --- 6. fm-spawn --relaunch's own refusals -----------------------------------
 
+test_relaunch_refuses_a_recycled_worktree_claimed_by_another_task() {
+  local dir out rc
+  dir=$(new_case recycled-relaunch rl30)
+  add_ship_task "$dir" rl30 claude
+  printf 'zsh' > "$dir/fake/command"
+  cp "$dir/home/state/rl30.meta" "$dir/home/state/live-b.meta"
+  {
+    printf '%s\n' 'window=fmses:fm-live-b'
+    printf '%s\n' 'endpoint_task_id=live-b'
+  } > "$dir/home/state/live-b.meta.tmp"
+  grep -vE '^(window|endpoint_task_id)=' "$dir/home/state/live-b.meta" \
+    >> "$dir/home/state/live-b.meta.tmp"
+  mv "$dir/home/state/live-b.meta.tmp" "$dir/home/state/live-b.meta"
+  printf '%s\n' "live task B edit" > "$dir/wt/live-b.txt"
+
+  out=$(run_control "$dir" rl30 relaunch --note "recover the dead task"); rc=$?
+
+  expect_code 1 "$rc" "relaunch must refuse a worktree now claimed by a live task"
+  assert_contains "$out" "live-b" \
+    "relaunch ownership refusal should name the conflicting live task"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "relaunch ownership refusal must not launch into the recycled worktree"
+  [ "$(cat "$dir/wt/live-b.txt")" = "live task B edit" ] \
+    || fail "relaunch ownership refusal did not preserve task B's live edit"
+
+  : > "$dir/fake/literal"
+  out=$(run_spawn "$dir" rl30 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "direct replacement launch must apply the same ownership refusal"
+  assert_contains "$out" "live-b" \
+    "direct replacement ownership refusal should name the conflicting live task"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "direct replacement ownership refusal must not launch into the recycled worktree"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed recycled-slot relaunch refusal: %s\n' \
+      "$(printf '%s\n' "$out" | grep -m1 REFUSED)"
+  fi
+  pass "relaunch paths refuse before a dead task can act on a recycled live task worktree"
+}
+
+test_relaunch_names_the_backup_holding_an_interrupted_claim_retirement() {
+  local dir backup out rc
+  dir=$(new_case interrupted-claim rl31)
+  add_ship_task "$dir" rl31 claude
+  printf 'zsh' > "$dir/fake/command"
+  # A kill between the claim rewrite and its commit or restore: the record has
+  # lost worktree=, and only the retirement backup still holds it.
+  backup="$dir/home/state/.rl31.meta.worktree-claim-backup.aB3xY9"
+  cp "$dir/home/state/rl31.meta" "$backup"
+  grep -v '^worktree=' "$backup" > "$dir/home/state/rl31.meta"
+
+  out=$(run_control "$dir" rl31 relaunch --note "recover the dead task"); rc=$?
+
+  expect_code 1 "$rc" "a claim stranded in its retirement backup must refuse"
+  assert_contains "$out" "$backup" \
+    "the refusal should name the copy that still holds the recoverable claim"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "a stranded claim must not launch a replacement"
+  assert_grep "worktree=$dir/wt" "$backup" \
+    "the refusal should leave the recoverable claim intact"
+  pass "relaunch names the backup holding an interrupted claim retirement"
+}
+
+test_relaunch_stamps_the_worktree_owner_marker_out_of_git_view() {
+  local dir out rc
+  dir=$(new_case owner-marker rl32)
+  add_ship_task "$dir" rl32 claude
+
+  out=$(run_control "$dir" rl32 relaunch --note "stopped mid-refactor"); rc=$?
+
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  assert_grep 'schema=fm-task-owner.v1' "$dir/wt/.fm-task-owner" \
+    "relaunch did not stamp a versioned worktree owner marker"
+  assert_grep 'task_id=rl32' "$dir/wt/.fm-task-owner" \
+    "relaunch did not stamp the worktree with its own task identity"
+  assert_grep "spawn_gen=$(meta_field "$dir" rl32 spawn_gen)" "$dir/wt/.fm-task-owner" \
+    "relaunch marker generation does not match the published task generation"
+  assert_grep 'task_owner_marker=1' "$dir/home/state/rl32.meta" \
+    "relaunch did not publish the explicit owner-marker awareness bit"
+  [ -z "$(git -C "$dir/wt" status --porcelain)" ] \
+    || fail "the owner marker reads as uncommitted work: $(git -C "$dir/wt" status --porcelain)"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed relaunch owner marker: %s\n' "$(tr '\n' ' ' < "$dir/wt/.fm-task-owner")"
+  fi
+  pass "fm-control relaunch: the worktree carries this task's owner marker, excluded from git"
+}
+
+test_relaunch_pending_publish_failure_does_not_leak_a_prior_marker_backup() {
+  local dir out rc real_mv leftovers
+  dir=$(new_case owner-pending-failure rl42)
+  add_ship_task "$dir" rl42 claude
+  make_mv_failure_stub "$dir"
+  real_mv=$(command -v mv)
+
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_OWNER_PENDING_MV_FAIL=1 \
+    run_control "$dir" rl42 relaunch --note "stopped mid-refactor"); rc=$?
+
+  expect_code 1 "$rc" "a relaunch whose durable marker handoff cannot publish must refuse"
+  assert_grep 'spawn_gen=prior-rl42' "$dir/wt/.fm-task-owner" \
+    "the refused relaunch changed the still-authoritative prior owner marker"
+  leftovers=$(find "$dir/home/state" -maxdepth 1 -type f -name '.rl42.task-owner-prior.*' -print)
+  [ -z "$leftovers" ] || fail "the failed pending write leaked a prior-marker backup: $leftovers"
+  [ -z "$(find "$dir/home/state" -maxdepth 1 -type f -name '.rl42.meta.worktree-owner-pending.*' -print)" ] \
+    || fail "the failed pending write left a published handoff record"
+  pass "fm-control relaunch: a failed handoff publish leaks no prior-marker backup"
+}
+
+test_relaunch_marker_publish_failure_cleans_the_prior_marker_backup() {
+  local dir out rc real_mv leftovers
+  dir=$(new_case owner-marker-failure rl43)
+  add_ship_task "$dir" rl43 claude
+  make_mv_failure_stub "$dir"
+  real_mv=$(command -v mv)
+
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_OWNER_MARKER_MV_FAIL="$dir/wt/.fm-task-owner" \
+    run_control "$dir" rl43 relaunch --note "stopped mid-refactor"); rc=$?
+
+  expect_code 1 "$rc" "a relaunch whose new owner marker cannot publish must refuse"
+  assert_grep 'spawn_gen=prior-rl43' "$dir/wt/.fm-task-owner" \
+    "the failed marker publish did not preserve the prior owner marker"
+  leftovers=$(find "$dir/home/state" -maxdepth 1 -type f -name '.rl43.task-owner-prior.*' -print)
+  [ -z "$leftovers" ] || fail "the failed marker publish leaked a prior-marker backup: $leftovers"
+  [ -z "$(find "$dir/home/state" -maxdepth 1 -type f -name '.rl43.meta.worktree-owner-pending.*' -print)" ] \
+    || fail "the failed marker publish left its durable handoff record"
+  pass "fm-control relaunch: a failed marker publish cleans its prior-marker backup"
+}
+
+test_relaunch_refuses_a_worktree_marked_for_another_task() {
+  local dir out rc
+  dir=$(new_case foreign-marker rl33)
+  add_ship_task "$dir" rl33 claude
+  printf 'zsh' > "$dir/fake/command"
+  # A pool slot that has already been handed to a live task carries that task's
+  # marker; adopting it would put two agents in one copy of the work.
+  {
+    printf '%s\n' 'schema=fm-task-owner.v1'
+    printf '%s\n' 'task_id=live-task-b'
+    printf '%s\n' 'spawn_gen=live-task-b-generation'
+  } > "$dir/wt/.fm-task-owner"
+
+  out=$(run_control "$dir" rl33 relaunch --note "recover the dead task"); rc=$?
+
+  expect_code 1 "$rc" "a worktree marked for another task must refuse relaunch"
+  assert_contains "$out" "marked as task live-task-b's workspace" \
+    "the refusal should name the marked owner"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "a foreign owner marker must not launch a replacement into that worktree"
+  assert_grep 'task_id=live-task-b' "$dir/wt/.fm-task-owner" \
+    "the refused relaunch overwrote the other task's ownership marker"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed foreign-marker relaunch refusal: %s\n' \
+      "$(printf '%s\n' "$out" | grep -m1 "marked as task")"
+  fi
+  pass "fm-control relaunch: a worktree marked for another task is refused before any launch"
+}
+
 test_spawn_relaunch_refuses_a_live_agent() {
   local dir out rc
   dir=$(new_case live rl15)
@@ -1382,7 +1568,11 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close() {
   dir=$(new_case pending-close rl36)
   add_ship_task "$dir" rl36 claude
   meta="$dir/home/state/rl36.meta"
-  printf 'spawn_gen=spawn-pending\n' >> "$meta"
+  # One exact incarnation, named identically by the record, its owner marker,
+  # and the pending close below.
+  sed -i.bak 's#^spawn_gen=.*#spawn_gen=spawn-pending#' "$meta"
+  rm -f "$meta.bak"
+  stamp_task_owner_marker "$dir/wt" rl36 spawn-pending
   cp "$meta" "$dir/meta.before"
   mkdir -p "$dir/wt/.claude"
   printf 'prior wiring\n' > "$dir/wt/.claude/settings.local.json"
@@ -1519,6 +1709,12 @@ test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
+test_relaunch_refuses_a_recycled_worktree_claimed_by_another_task
+test_relaunch_names_the_backup_holding_an_interrupted_claim_retirement
+test_relaunch_stamps_the_worktree_owner_marker_out_of_git_view
+test_relaunch_pending_publish_failure_does_not_leak_a_prior_marker_backup
+test_relaunch_marker_publish_failure_cleans_the_prior_marker_backup
+test_relaunch_refuses_a_worktree_marked_for_another_task
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous

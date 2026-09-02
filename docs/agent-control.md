@@ -98,7 +98,9 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+- The recorded worktree must still be provably this task's own before anything is checkpointed or stopped, through the shared resolver in [`bin/fm-worktree-ownership-lib.sh`](../bin/fm-worktree-ownership-lib.sh).
+  A pool slot already reissued to another task refuses while the current agent is still running, rather than relaunching a worker on top of a live one.
+- `fm-spawn --relaunch` repeats that ownership proof independently and refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent, start outside the copy holding the work, or restamp a slot another task now owns.
 
 ## Capability matrix
 

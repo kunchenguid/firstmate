@@ -167,7 +167,7 @@ add_task() {
   local dir=$1 id=$2 harness=$3 kind=${4:-ship} backend=${5:-tmux}
   local window=${6:-fmses:fm-$id}
   local home="$dir/home" proj="$dir/proj-$id" wt="$dir/wt-$id"
-  fm_git_worktree "$proj" "$wt" "task-$id"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$home/data/$id"
   printf '# brief for %s\n' "$id" > "$home/data/$id/brief.md"
   {

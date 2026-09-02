@@ -977,6 +977,10 @@ test_teardown_conformance_old_vs_new() {
   log_old="$TMP_ROOT/teardown-old.log"; log_new="$TMP_ROOT/teardown-new.log"
   out_old=$(run_teardown_case "$old_bin/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_old" "$state_old" "$data" "$config_old" "$id" 2>&1)
   rc_old=$?
+  # The historical teardown detaches and deletes the branch even though this
+  # fixture's fake Treehouse leaves the worktree in place.
+  # Recreate the production task binding before exercising the current path.
+  git -C "$wt" checkout -q -b "fm/$id"
   out_new=$(run_teardown_case "$ROOT/bin/fm-teardown.sh" "$old_bin" "$fb" "$log_new" "$state_new" "$data" "$config_new" "$id" 2>&1)
   rc_new=$?
 

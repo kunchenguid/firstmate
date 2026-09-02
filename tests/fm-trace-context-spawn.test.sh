@@ -23,11 +23,19 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*)
+    [ "${FM_FAKE_RELAUNCH_DEAD:-0}" = 1 ] && printf 'bash\n' || printf 'firstmate\n'
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
-    [ -z "${FM_FAKE_DUPLICATE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
+    if [ "${FM_FAKE_RELAUNCH_DEAD:-0}" = 1 ]; then
+      printf '%s\n' "${FM_FAKE_RELAUNCH_WINDOW:-}"
+    elif [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
+      printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
+    fi
     exit 0
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
@@ -106,8 +114,18 @@ make_spawn_case() {
 # is decided ONLY by the home's config/trace-context, whether the runner's own
 # environment enables or disables trace context.
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 arg
+  local -a delivery_args
   shift 4
+  delivery_args=(--mode no-mistakes --yolo off)
+  for arg in "$@"; do
+    if [ "$arg" = --relaunch ]; then
+      # Relaunch inherits its recorded delivery contract and refuses an
+      # override, unlike an ordinary first spawn.
+      delivery_args=()
+      break
+    fi
+  done
   : > "$launchlog"
   env -u FM_TRACE_CONTEXT \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
@@ -119,7 +137,7 @@ run_spawn() {
     FM_FAKE_TRACE_METADATA_APPEND_FAIL="${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" \
     FM_FAKE_META_PATH="$home/state/$1.meta" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$@" "${delivery_args[@]}" 2>&1
 }
 
 # Same, but with an explicit FM_TRACE_CONTEXT override, to prove the env decides.
@@ -400,7 +418,8 @@ test_relaunch_reuses_recorded_carrier() {
   # Relaunch the same task: the recorded carrier must be reused verbatim for both
   # the meta and the injected export, so an observer keeps one identity across
   # restarts.
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+  out=$(FM_FAKE_RELAUNCH_DEAD=1 FM_FAKE_RELAUNCH_WINDOW="fm-$CASE_ID" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" --relaunch)
   status=$?
   expect_code 0 "$status" "relaunch spawn should succeed"
   assert_contains "$out" "spawned $CASE_ID" "relaunch spawn should report success"
@@ -534,7 +553,8 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
 
   # Same environment, same task: a relaunch must reuse task A's recorded
   # carrier verbatim, so the per-task boundary never costs recovery identity.
-  out=$(TRACEPARENT="$sm_tp" run_spawn "$sm" "$wt_a" "$fakebin" "$log_a" "$id_a" "$proj_a")
+  out=$(TRACEPARENT="$sm_tp" FM_FAKE_RELAUNCH_DEAD=1 FM_FAKE_RELAUNCH_WINDOW="fm-$id_a" \
+    run_spawn "$sm" "$wt_a" "$fakebin" "$log_a" "$id_a" --relaunch)
   status=$?
   expect_code 0 "$status" "routed task A relaunch should succeed"
   relaunch_tp=$(meta_traceparent "$sm/state/$id_a.meta")
