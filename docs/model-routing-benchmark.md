@@ -22,7 +22,7 @@ A gate that cannot obtain its evidence refuses; an unproven denial is never trea
 | `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, finite positive per-dimension mutation calibration, and exactly one bound capture record for every planned candidate head are all required. |
 | `manifest-build` / `manifest-check` | The original run, judge, capture, and cost arithmetic did not add up, and cost and elapsed time were tie-breakers while unmeasurable. Every count is now derived, and cost is low/base/high arithmetic rather than a quoted range. |
 | `promote-evaluate` | Only a six-of-six paired sweep with the predeclared margin, no blocker-class failure, and no regression against the baseline veto is eligible, and the captain still gives the word. |
-| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup; every evidence file except its sample's own top-level manifest is content-addressed beneath its sample directory, including the executable evaluator; the manifest names the restored candidate files the evaluator scores, independent scratch runs must reproduce the genuine result and change after every declared input is perturbed, and cleanup is authorised only while the archive verifies both before and after the rerun. |
+| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup; every evidence file except its sample's own top-level manifest is content-addressed beneath its sample directory, including the executable evaluator; the manifest names the restored candidate files the evaluator scores, and a deterministic sample is rerun in independent opaque confinements that must reproduce the genuine result and change after every declared input is perturbed; cleanup is authorised only while the archive verifies both before and after the rerun. |
 | `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. A preflight that refuses or stops for the captain also revokes any receipt already on disk, so evidence degrading outside the plan cannot leave a stale clearance standing. |
 
 ## Where the refusal actually bites
@@ -56,6 +56,11 @@ An alternate is a second object database bound into the clone, so an entrant who
 
 The process probe reads its marker from material written inside the entrant's permitted private session path.
 The marker value never crosses a gate-created process argv, including the confinement wrapper, while the positive control still reports a genuinely visible sibling marker process as a leak.
+
+The restore drill treats archived evaluator bytes as untrusted candidate output.
+It restores and rebinds every sample, then selects the first sample in the archive's stable lexical order for the required differential evaluator proof and records that selection in the receipt.
+Both evaluator executions use the same preflight-proven `bin/fm-bench-confine.sh` mechanism with networking disabled, a scrubbed environment, and one independently generated opaque run root as the only writable candidate-data bind.
+The archive and repository are not mounted for the evaluator, and the genuine and perturbed runs expose the same internal layout without a role-bearing path or environment value.
 
 ## The two captain-stop conditions
 

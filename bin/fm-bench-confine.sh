@@ -36,6 +36,7 @@ MECHANISM=auto
 IMAGE=${FM_BENCH_CONFINE_IMAGE:-debian:stable-slim}
 ALLOW=()
 CMD=()
+EXPOSE_SELF_DIR=0
 
 usage() { sed -n '2,/^set -u$/p' "$SELF_DIR/fm-bench-confine.sh" | sed 's/^# \{0,1\}//;$d'; }
 
@@ -56,6 +57,10 @@ done
 
 [ "${#CMD[@]}" -gt 0 ] || { echo "error: no command after --" >&2; exit 2; }
 [ "${#ALLOW[@]}" -gt 0 ] || { echo "error: at least one --allow directory is required" >&2; exit 2; }
+
+case "${CMD[0]}" in
+  "$SELF_DIR"|"$SELF_DIR"/*) EXPOSE_SELF_DIR=1 ;;
+esac
 
 for dir in "${ALLOW[@]}"; do
   [ -d "$dir" ] || { echo "error: --allow path is not a directory: $dir" >&2; exit 2; }
@@ -113,7 +118,7 @@ case "$MECHANISM" in
     for dir in "${ALLOW[@]}"; do
       args+=(--volume "$dir:$dir")
     done
-    args+=(--volume "$SELF_DIR:$SELF_DIR:ro")
+    [ "$EXPOSE_SELF_DIR" -eq 0 ] || args+=(--volume "$SELF_DIR:$SELF_DIR:ro")
     while IFS= read -r pair; do
       args+=(--env "$pair")
     done < <(scrubbed_env)
@@ -126,7 +131,7 @@ case "$MECHANISM" in
     for dir in /usr /bin /sbin /lib /lib64 /etc; do
       [ -e "$dir" ] && args+=(--ro-bind "$dir" "$dir")
     done
-    args+=(--ro-bind "$SELF_DIR" "$SELF_DIR")
+    [ "$EXPOSE_SELF_DIR" -eq 0 ] || args+=(--ro-bind "$SELF_DIR" "$SELF_DIR")
     for dir in "${ALLOW[@]}"; do
       args+=(--bind "$dir" "$dir")
     done
@@ -148,7 +153,7 @@ case "$MECHANISM" in
       printf '(version 1)\n(deny default)\n(allow process*)\n(allow sysctl-read)\n'
       printf '(allow mach*)\n(allow signal)\n(allow file-read-metadata)\n'
       printf '(allow file-read* (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/System") (subpath "/Library") (subpath "/opt") (subpath "/private/etc") (subpath "/private/var/db/dyld") (subpath "/dev")'
-      printf ' (subpath "%s")' "$SELF_DIR"
+      [ "$EXPOSE_SELF_DIR" -eq 0 ] || printf ' (subpath "%s")' "$SELF_DIR"
       for dir in "${ALLOW[@]}"; do printf ' (subpath "%s")' "$dir"; done
       printf ')\n(allow file-write* (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr")'
       for dir in "${ALLOW[@]}"; do printf ' (subpath "%s")' "$dir"; done

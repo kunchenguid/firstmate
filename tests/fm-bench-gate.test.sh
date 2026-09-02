@@ -15,10 +15,25 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 GATE="$ROOT/bin/fm-bench-gate.sh"
+CONFINE="$ROOT/bin/fm-bench-confine.sh"
+IMAGE=${FM_BENCH_CONFINE_IMAGE:-debian:stable-slim}
 TMP_ROOT=$(fm_test_tmproot fm-bench-gate)
 
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; }
 command -v git >/dev/null 2>&1 || { echo "skip: git not found"; exit 0; }
+
+RESTORE_MECHANISM=
+if command -v bwrap >/dev/null 2>&1; then
+  RESTORE_MECHANISM=bwrap
+else
+  for runtime in docker podman; do
+    if command -v "$runtime" >/dev/null 2>&1 && "$runtime" info >/dev/null 2>&1 \
+      && "$runtime" image inspect "$IMAGE" >/dev/null 2>&1; then
+      RESTORE_MECHANISM=container
+      break
+    fi
+  done
+fi
 
 # Every fixture starts from one corrected plan and then breaks exactly one thing,
 # so a refusal is always attributable to the correction under test.
@@ -1052,14 +1067,38 @@ pass "an unprovisioned benchmark is refused before any entrant launches"
 
 # --- archive, restore drill, and the cleanup authority ----------------------
 
-write_archive() {  # <bench-dir> <src-repo>
-  local bench=$1 src=$2
-  python3 - "$bench" "$src" <<'PY'
-import hashlib, json, shutil, subprocess, sys
+write_restore_confinement() {  # <bench-dir> [mechanism]
+  local bench=$1 mechanism=${2:-$RESTORE_MECHANISM}
+  python3 - "$bench" "$CONFINE" "$mechanism" <<'PY'
+import hashlib, json, sys
 from pathlib import Path
 
-bench, src = Path(sys.argv[1]), Path(sys.argv[2])
+bench, confine, mechanism = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+isolation = bench / "isolation.json"
+isolation.write_text(json.dumps({
+    "schema": "fm-bench-isolation.v1",
+    "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
+}, indent=2, sort_keys=True) + "\n")
+(bench / "preflight.receipt").write_text(json.dumps({
+    "schema": "fm-bench-preflight-receipt.v1",
+    "verdict": "pass",
+    "plan_sha256": hashlib.sha256((bench / "benchmark.json").read_bytes()).hexdigest(),
+    "isolation_sha256": hashlib.sha256(isolation.read_bytes()).hexdigest(),
+    "stages": ["isolation"],
+}, indent=2, sort_keys=True) + "\n")
+PY
+}
+
+write_archive() {  # <bench-dir> <src-repo>
+  local bench=$1 src=$2
+  python3 - "$bench" "$src" "$ROOT" <<'PY'
+import hashlib, json, shlex, shutil, subprocess, sys
+from pathlib import Path
+
+bench, src, repo_root = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 plan = json.loads((bench / "benchmark.json").read_text())
+operator_secret = bench / "operator-secret.txt"
+operator_secret.write_text("not evaluator input\n")
 shutil.rmtree(src, ignore_errors=True)
 src.mkdir(parents=True)
 env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(src),
@@ -1108,15 +1147,12 @@ for track_name, candidate, packet in work:
     put("projection.diff", f"neutral projection for {slug}\n")
     put("transcript.md", "redacted transcript\n")
     put("capture.json", '{"pixel":0.003}\n')
-    scoring = """#!/usr/bin/env python3
-import hashlib
-import json
-import sys
-from pathlib import Path
-
-tree = Path(sys.argv[1])
-payload = {"candidate_sha256": hashlib.sha256((tree / "work.txt").read_bytes()).hexdigest(), "pixel": 0.003}
-print(json.dumps(payload, sort_keys=True))
+    scoring = f"""#!/bin/sh
+if [ -r {shlex.quote(str(operator_secret))} ] || [ -r {shlex.quote(str(repo_root / 'bin' / 'fm-bench-gate.py'))} ]; then
+  printf 'unconfined host access\\n'
+  exit 0
+fi
+cat "$1/work.txt"
 """
     put("scoring.py", scoring)
     (out / "scoring.py").chmod(0o755)
@@ -1138,9 +1174,10 @@ print(json.dumps(payload, sort_keys=True))
                          "neutral_tree": tree, "base_tree": base_tree,
                          "patch_hash": hashlib.sha256(slug.encode()).hexdigest()},
         "evaluator_rerun": {"argv": ["scoring.py"], "scored_inputs": ["work.txt"],
-                             "result_hash": hashlib.sha256((json.dumps({"candidate_sha256": hashlib.sha256((slug + "\n").encode()).hexdigest(), "pixel": 0.003}, sort_keys=True) + "\n").encode()).hexdigest()},
+                             "result_hash": hashlib.sha256((slug + "\n").encode()).hexdigest()},
     }, indent=2, sort_keys=True) + "\n")
 PY
+  [ -z "$RESTORE_MECHANISM" ] || write_restore_confinement "$bench"
 }
 
 BENCH="$TMP_ROOT/archive"
@@ -1155,12 +1192,22 @@ expect_code 1 "$status" "cleanup before a restore drill is refused"
 assert_contains "$out" "cleanup stays refused" "cleanup needs a drill first"
 pass "candidate and snapshot cleanup is refused until a restore drill passes"
 
+if [ -n "$RESTORE_MECHANISM" ]; then
 out=$(run_gate "$BENCH" restore-drill) || fail "the restore drill must pass: $out"
 assert_contains "$out" "restored into a fresh repository, and rebound to its archived tree" \
   "each bundle is really restored and rebound"
 assert_present "$BENCH/archive/restore-drill.json" "the drill writes its receipt"
 assert_contains "$out" "changed perturbed result" \
   "the evaluator responds to its declared scored subset rather than the first restored file"
+python3 - "$BENCH" <<'PY' || fail "the receipt must record its bounded deterministic evaluator sample"
+import json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+receipt = json.loads((bench / "archive" / "restore-drill.json").read_text())
+expected = sorted(path.name for path in (bench / "archive").iterdir() if path.is_dir())[:1]
+if receipt.get("evaluator_samples") != expected:
+    raise SystemExit(f"expected evaluator sample {expected}, got {receipt.get('evaluator_samples')}")
+PY
 out=$(run_gate "$BENCH" cleanup-gate) || fail "cleanup must pass after a drill: $out"
 assert_contains "$out" "no candidate ships directly" "the disposition is re-asserted at cleanup"
 pass "the restore drill authorises cleanup only after really restoring every bundle"
@@ -1180,6 +1227,7 @@ out=$(run_gate "$BENCH" cleanup-gate) && status=0 || status=$?
 expect_code 1 "$status" "editing a manifest binding after a drill withdraws cleanup"
 assert_contains "$out" "changed after the restore drill" "the receipt binds manifest bytes as well as evidence files"
 pass "a changed archive manifest withdraws the prior cleanup authority"
+fi
 
 archive_escape_refused() {  # <label> <path-kind>
   local label=$1 kind=$2 bench
@@ -1249,6 +1297,39 @@ expect_code 1 "$status" "a nested manifest-named evidence file without a content
 assert_contains "$out" ".evidence/manifest.json" "the archive addresses nested manifest-named evidence by path"
 pass "only the sample manifest itself is exempt from content addressing"
 
+if [ -z "$RESTORE_MECHANISM" ]; then
+  BENCH="$TMP_ROOT/archive"
+  write_restore_confinement "$BENCH" bwrap
+  out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+  expect_code 1 "$status" "the restore drill must fail closed without a proven confinement"
+  assert_contains "$out" "bwrap is not installed" \
+    "the unavailable confinement requirement is named"
+  assert_absent "$BENCH/archive/restore-drill.json" "an unconfined evaluator run writes no cleanup receipt"
+  pass "restore drill refuses when this host has no enforcing confinement"
+else
+
+BENCH="$TMP_ROOT/archive"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+isolation = bench / "isolation.json"
+record = json.loads(isolation.read_text())
+record["exec_wrapper"][2] = "none"
+isolation.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+receipt = bench / "preflight.receipt"
+record = json.loads(receipt.read_text())
+record["isolation_sha256"] = hashlib.sha256(isolation.read_bytes()).hexdigest()
+receipt.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "the restore drill must reject a non-enforcing wrapper"
+assert_contains "$out" "enforcing confinement mechanism, not none" \
+  "the non-enforcing mechanism cannot execute archived code"
+assert_absent "$BENCH/archive/restore-drill.json" "a non-enforcing wrapper writes no cleanup receipt"
+write_restore_confinement "$BENCH"
+pass "restore drill rejects an unconfined evaluator fallback"
+
 BENCH="$TMP_ROOT/archive-unlisted-evaluator"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-unlisted-evaluator"
@@ -1312,6 +1393,36 @@ assert_contains "$out" "ignored its declared scored inputs" \
 assert_absent "$BENCH/archive/restore-drill.json" "a stateful no-op evaluator writes no cleanup receipt"
 pass "differential evaluator runs use independent scratch state"
 
+BENCH="$TMP_ROOT/archive-self-identifying-evaluator"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-self-identifying-evaluator"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text("""#!/bin/sh
+surface="$PWD:$1:${HOME-}:${TMPDIR-}:${BENCH_PRIVATE_ROOT-}:${BENCH_PRIVATE_HOME-}:${BENCH_PRIVATE_TMP-}"
+case "$surface" in
+  *genuine*) printf 'genuine\\n' ;;
+  *perturbed*) printf 'perturbed\\n' ;;
+  *) printf 'blind\\n' ;;
+esac
+""")
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"blind\n").hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "run paths and environments cannot reveal differential roles"
+assert_contains "$out" "ignored its declared scored inputs" \
+  "opaque roots make a role-sniffing evaluator input-invariant"
+assert_absent "$BENCH/archive/restore-drill.json" "a self-identifying evaluator writes no cleanup receipt"
+pass "differential evaluator runs hide their role in paths and environment"
+
 BENCH="$TMP_ROOT/archive-no-scored-inputs"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-no-scored-inputs"
@@ -1354,21 +1465,16 @@ import hashlib, json, sys
 from pathlib import Path
 sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "scoring.py"
-scoring.write_text("""#!/usr/bin/env python3
-import hashlib
-import json
-import sys
-from pathlib import Path
-
-Path('scratch-only.txt').write_text('scratch\\n')
-tree = Path(sys.argv[1])
-payload = {"candidate_sha256": hashlib.sha256((tree / "work.txt").read_bytes()).hexdigest(), "pixel": 0.003, "scratch_marker": Path("scratch-only.txt").read_text().strip()}
-print(json.dumps(payload, sort_keys=True))
+scoring.write_text("""#!/bin/sh
+printf 'scratch\\n' > scratch-only.txt
+cat "$1/work.txt"
+cat scratch-only.txt
 """)
+scoring.chmod(0o755)
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
 record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
-record["evaluator_rerun"]["result_hash"] = hashlib.sha256((json.dumps({"candidate_sha256": hashlib.sha256((record["sample"] + "\n").encode()).hexdigest(), "pixel": 0.003, "scratch_marker": "scratch"}, sort_keys=True) + "\n").encode()).hexdigest()
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256((record["sample"] + "\nscratch\n").encode()).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) || fail "an evaluator that writes scratch output must not dirty its archive: $out"
@@ -1382,21 +1488,26 @@ BENCH="$TMP_ROOT/archive-post-rerun"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-post-rerun"
 python3 - "$BENCH" <<'PY'
-import hashlib, json, sys
+import hashlib, json, shlex, sys
 from pathlib import Path
 sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "scoring.py"
-scoring.write_text(scoring.read_text().replace("tree = Path(sys.argv[1])", f"Path({str(sample / 'archive-dirty.txt')!r}).write_text('dirty\\n')\ntree = Path(sys.argv[1])"))
+scoring.write_text(f"""#!/bin/sh
+printf 'dirty\\n' > {shlex.quote(str(sample / 'archive-dirty.txt'))}
+cat "$1/work.txt"
+""")
+scoring.chmod(0o755)
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
 record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
-out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
-expect_code 1 "$status" "an evaluator that changes archive evidence during a drill is refused"
-assert_contains "$out" "restore.archive_stability fail" "the drill re-verifies archive bytes after evaluator execution"
-assert_absent "$BENCH/archive/restore-drill.json" "a post-rerun archive change writes no cleanup receipt"
-pass "post-rerun archive verification catches an evaluator that dirties evidence"
+out=$(run_gate "$BENCH" restore-drill) || fail "the confined evaluator must not reach the certified archive: $out"
+dirty_sample=$(find "$BENCH/archive" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1)
+assert_absent "$dirty_sample/archive-dirty.txt" \
+  "the certified archive is outside the evaluator confinement"
+out=$(run_gate "$BENCH" cleanup-gate) || fail "an unreachable archive mutation must leave cleanup authorised: $out"
+pass "confined archived evaluators cannot dirty certified evidence"
 
 BENCH="$TMP_ROOT/archive-evaluator-drift"
 write_plan "$BENCH"
@@ -1453,6 +1564,8 @@ expect_code 1 "$status" "a projection with no bundle cannot be rejudged"
 assert_contains "$out" "cannot be rejudged" "an archive without its bundle fails the drill"
 assert_absent "$BENCH/archive/restore-drill.json" "a failed drill writes no receipt"
 pass "an archive that cannot be rejudged writes no receipt and authorises no cleanup"
+
+fi
 
 # --- the corrected promotion rule -------------------------------------------
 
