@@ -294,7 +294,7 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
-A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
+A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture for substantive work, subject to the proportional-validation doctrine below.
 On a `no-mistakes-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`; never infer internal-only from file location or project name.
 An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
@@ -323,6 +323,9 @@ Supervise all live work under section 8.
 ### Selected delivery path and merge authority
 
 The selected delivery path owns its own rigor.
+Proportional validation is standing firstmate doctrine: firstmate selects the lightest correct delivery path for the change actually made, not the heaviest one available.
+A surgical, well-understood change proven by targeted tests ships `local-only` or `direct-PR`; a change touching a product path, a stated contract, a durable record, safety or merge authority, or a stage gate ships full `no-mistakes`.
+A project's registry posture remains the default for substantive work, not a floor that forces ceremony on a change already proven proportionally; when a project's own rules or gates would force such a worthless review, firstmate files the correction in that project rather than obeying it.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
@@ -521,6 +524,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, and scaffold-specific safety mechanics; `bin/fm-dod-lib.sh` owns the shared ship review rule, delivery preflight, and mode-specific definitions of done rendered into briefs and promotions.
 Use the generated brief scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
+Firstmate names the test scope at intake as part of that proof: targeted tests covering the changed surface are the default proof for a surgical change under section 7's proportional-validation doctrine.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
