@@ -2470,13 +2470,15 @@ spawn_harness_fail() {  # <detail>
 # Both of the dialog's own strings must be present, never the question alone:
 # agy renders the brief as the first message in the same pane, and a brief that
 # quotes the question - this adapter's own does - would otherwise draw an Enter
-# into a session that already started its turn. Only the two strings are
-# required, and nothing about where the answer's row ENDS: the rendered row was
-# observed once, at one width, and a trailing hint or right-aligned status must
-# not defeat detection, because a miss wedges the worker on the modal, which is
-# the failure this Enter exists to prevent.
+# into a session that already started its turn. The affirmative label must be a
+# ROW OF ITS OWN, so the same brief quoting the label inside a sentence cannot
+# satisfy it either. The two failure modes are not symmetric: a row shape this
+# anchor does not match leaves the dialog unanswered and the worker idle for
+# ordinary stuck-worker detection to catch, losing no work, while a looser match
+# sends Enter blind into a TUI where a surplus Enter opens another turn and
+# spends the operator's quota.
 AGY_TRUST_QUESTION_REGEX='Do you trust the contents of this project'
-AGY_TRUST_OPTION_REGEX='Yes, I trust this folder'
+AGY_TRUST_OPTION_REGEX='^[^A-Za-z]*Yes, I trust this folder[^A-Za-z]*$'
 
 # Answering that dialog is the WHOLE launch step. Readiness is deliberately not
 # proven: a capture is recent output on both backends, so it guarantees neither
@@ -2931,9 +2933,11 @@ exec 2>/dev/null
 printf '{}\n'
 # The WHOLE payload, never one line of it: this hook is agy's only turn-end
 # signal, so a Stop carrying newlines must still be readable rather than
-# silently truncated to its first line. The read is BOUNDED rather than a plain
-# cat, so a hook runner that writes the payload without closing stdin cannot
-# park this process until agy's own 10s timeout kills it.
+# silently truncated to its first line. The read is bounded by a WALL CLOCK
+# rather than by an iteration count, because each poll also forks cat and jq and
+# a counted loop therefore stretches with host load. Five seconds leaves the
+# whole hook well inside agy's own 10s timeout even when the writer keeps stdin
+# open and sends nothing.
 auth_dir=$sq_agy_auth_dir
 command -v jq >/dev/null 2>&1 || exit 0
 payload_file=\$(mktemp "\${TMPDIR:-/tmp}/fm-agy-stop.XXXXXXXXXXXX") || exit 0
@@ -2942,13 +2946,12 @@ cat <&3 > "\$payload_file" &
 reader=\$!
 exec 3<&-
 payload=
-i=0
-while [ "\$i" -lt 50 ]; do
+SECONDS=0
+while [ "\$SECONDS" -lt 5 ]; do
   payload=\$(cat "\$payload_file" 2>/dev/null)
   jq -e . >/dev/null 2>&1 <<< "\$payload" && break
   kill -0 "\$reader" 2>/dev/null || break
   sleep 0.1
-  i=\$((i + 1))
 done
 kill "\$reader" 2>/dev/null || true
 wait "\$reader" 2>/dev/null || true

@@ -62,9 +62,9 @@ agy_payload() {  # <template> <workspace>
 #                     trailing hint after its label, which is what a different
 #                     terminal width or a later agy build can render
 #   quoted-dialog   - a started session whose rendered brief QUOTES the dialog's
-#                     question as prose, with no dialog on screen: the capture
-#                     agy draws when the task it was given is about the trust
-#                     dialog itself
+#                     question AND its answer label as prose, with no dialog on
+#                     screen: the capture agy draws when the task it was given is
+#                     about the trust dialog itself
 #   blank           - nothing renders at all, the pane that never starts
 #
 # FM_FAKE_AGY_PHASE, when set, makes the stub honour launch ORDER: the screen
@@ -105,7 +105,7 @@ render_agy() {
       printf 'agy 1.1.24\n\n> Read the brief and follow it exactly.\n'
       printf '  The brief says agy asks this on an untrusted folder:\n'
       printf 'Do you trust the contents of this project?\n'
-      printf '  with Yes preselected, and one Enter resolves it.\n'
+      printf '  and the preselected row reads Yes, I trust this folder.\n'
       printf '\n  >\n? for shortcuts\n'
       ;;
     blank) : ;;
@@ -473,12 +473,13 @@ EOF
 }
 
 # The affirmative row was observed once, at one terminal width, as a marker
-# followed by the label and nothing else. Requiring it to END there would make a
-# trailing hint - a recommendation, a shortcut, a right-aligned status - leave
-# the dialog undetected, and an undetected dialog is the silent wedge the Enter
-# exists to prevent. Detection must therefore survive a row that continues past
-# the label.
-test_trust_dialog_with_a_trailing_hint_is_still_answered() {
+# followed by the label and nothing else, and the anchor pins exactly that. A
+# row that continues past the label is therefore NOT answered, deliberately:
+# that costs an idle worker which ordinary stuck-worker detection catches, with
+# no work lost, where a looser match would send Enter blind into a TUI and a
+# surplus Enter opens another turn and spends quota. This case holds the
+# accepted side of that trade, so a later loosening cannot pass unnoticed.
+test_trust_dialog_with_a_trailing_hint_is_not_answered() {
   local rec case_dir home proj wt fakebin agy_home id out enters
   rec=$(make_spawn_case trust-hinted)
   IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
@@ -486,21 +487,22 @@ $rec
 EOF
   out=$(FM_FAKE_AGY_SCREEN=trust-hinted FM_FAKE_AGY_PHASE="$case_dir/phase" \
     FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_TRUST_POLLS=6 \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_TRUST_POLLS=4 \
     run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
     --mode no-mistakes --yolo off) \
-    || fail "agy spawn failed on a dialog whose rows carry trailing hints: $out"
+    || fail "agy spawn failed rather than leaving an unmatched dialog to stuck-worker detection: $out"
   enters=$(agy_enters_after_launch "$case_dir/events.log")
-  [ "$enters" -eq 2 ] \
-    || fail "the spawn sent $enters Enters after the launch line to a dialog whose answer row carries a trailing hint; expected the launch submit plus exactly one answer"
-  pass "a trust dialog whose answer row continues past its label is still answered"
+  [ "$enters" -eq 1 ] \
+    || fail "the spawn sent $enters Enters after the launch line to a row shape the anchor does not match; expected only the launch submit"
+  pass "a row shape the anchor does not match is left unanswered rather than answered blind"
 }
 
 # agy renders the brief as the first message in the same pane, so a brief that
-# QUOTES the trust dialog puts its question into the very capture the poll
-# reads. Matching the question alone would then fire one Enter into a session
-# that has already started its turn. Both of the dialog's own strings must
-# appear before it counts as being on screen.
+# QUOTES the trust dialog puts its question, and its answer label, into the very
+# capture the poll reads. Either one matched loosely would fire an Enter into a
+# session that has already started its turn, and a surplus Enter on this harness
+# opens another turn and spends quota. The answer label therefore only counts as
+# the dialog when it is a row of its own, which prose never is.
 test_a_brief_quoting_the_dialog_draws_no_enter() {
   local rec case_dir home proj wt fakebin agy_home id out enters
   rec=$(make_spawn_case quoted-dialog)
@@ -598,7 +600,7 @@ EOF
 }
 
 test_turnend_preserves_payload_while_stdin_stays_open() {
-  local rec case_dir home proj wt fakebin agy_home id out hook turnend fifo writer
+  local rec case_dir home proj wt fakebin agy_home id out hook turnend fifo writer silent t0 elapsed
   rec=$(make_spawn_case turnend-open-stdin)
   IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
 $rec
@@ -612,10 +614,32 @@ EOF
   { agy_payload "$AGY_STOP_DONE" "$wt" | jq .; sleep 8; } > "$fifo" &
   writer=$!
   bash "$hook" < "$fifo" >/dev/null
+  # The writer is STILL HOLDING the fifo open. An unbounded reader would have
+  # blocked here until that hold ended, so a live writer is what separates a
+  # bounded accumulator from a plain cat that merely looks the same.
+  kill -0 "$writer" 2>/dev/null \
+    || fail "the hook only returned once the writer released stdin, so its read is not bounded"
   kill "$writer" 2>/dev/null || true
   wait "$writer" 2>/dev/null || true
   assert_present "$turnend" "a complete multi-line Stop was lost while stdin remained open"
-  pass "the bounded hook preserves a complete multi-line payload without stdin EOF"
+
+  # And the bound is a WALL CLOCK, not an iteration count: a writer that holds
+  # stdin open and sends nothing must not keep the hook running long enough for
+  # agy's own 10s hook timeout to kill it mid-turn-end.
+  silent="$case_dir/stop-silent"
+  mkfifo "$silent"
+  sleep 30 > "$silent" &
+  writer=$!
+  t0=$SECONDS
+  bash "$hook" < "$silent" >/dev/null
+  elapsed=$((SECONDS - t0))
+  kill -0 "$writer" 2>/dev/null \
+    || fail "the silent-writer case ended by EOF rather than by the hook's own bound"
+  kill "$writer" 2>/dev/null || true
+  wait "$writer" 2>/dev/null || true
+  [ "$elapsed" -lt 8 ] \
+    || fail "the hook read a silent open stdin for ${elapsed}s, leaving no margin against agy's 10s hook timeout"
+  pass "the bounded hook preserves a complete multi-line payload and returns on a wall clock"
 }
 
 # The hook is global, so it must be a no-op for every agy session that is not a
@@ -883,7 +907,7 @@ test_secondmate_is_refused
 test_secondmate_positional_agy_is_refused
 test_trust_dialog_is_answered_exactly_once
 test_trust_dialog_above_the_footer_is_still_answered
-test_trust_dialog_with_a_trailing_hint_is_still_answered
+test_trust_dialog_with_a_trailing_hint_is_not_answered
 test_a_brief_quoting_the_dialog_draws_no_enter
 test_a_pane_that_never_renders_still_completes_the_spawn
 test_turnend_requires_fully_idle

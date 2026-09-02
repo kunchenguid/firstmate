@@ -78,7 +78,8 @@ Its global hooks live in one shared `hooks.json` keyed by hook name, which is th
 Verified across two runs: the plugin's `Stop` hook fires, and `~/.gemini/config/config.json` is byte-identical before and after (`diff` reported no change), so plugin discovery does not rewrite operator configuration.
 Hook payloads arrive as JSON on **stdin**; the hook's working directory is the directory containing `hooks.json`, never the workspace, so the worktree comes only from `workspacePaths`.
 agy reads the hook's verdict from stdout and only the literal decision `continue` blocks the stop, so the hook prints `{}` first and always exits zero.
-The payload is copied by a background reader while the hook polls the captured bytes for complete JSON, then the reader is stopped after completion or a five-second bound.
+The payload is copied by a background reader while the hook polls the captured bytes for complete JSON, then the reader is stopped on completion or on a five-second WALL-CLOCK bound.
+The bound is wall clock rather than a poll count on purpose: each poll forks `cat` and `jq`, so a counted loop stretches with host load, and a measured run of the counted form took 9.2s on an idle host against the 10s timeout the hook's own `hooks.json` entry sets.
 The portable regression proves that a pretty-printed payload is preserved even when the writer keeps stdin open; that bounded-open-stdin form was not re-exercised against a live agy.
 
 `PreInvocation` and `PostInvocation` fire once per model invocation, not once per turn: 10 of each across 2 turns.
@@ -143,11 +144,13 @@ A session blocked on this dialog still fires `Stop` hooks with `fullyIdle:false`
 
 An unanswered dialog is a silent hang: agy never reads the brief, its only `Stop` is ignored by the `fullyIdle` gate, and the busy classifier stays at `unknown agy-unverified`.
 `bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen, and the poll ends on that Enter, so exactly one is ever delivered.
-What counts as proof is both of the dialog's own strings, the question AND `Yes, I trust this folder`, not the question alone.
-agy renders the brief as the first message in the same pane, so a brief that quotes the question - this adapter's own does - would otherwise draw an Enter into a session that has already started its turn.
-Nothing is required about where the answer's row ends, deliberately.
-What the captured pane showed, at one terminal width and in agy 1.1.24, was the affirmative row rendered as a selection marker followed by the label, the alternative on the next row, and a navigate/confirm hint below.
-That is one observation and the row match has not been re-exercised against a live agy since, so a trailing hint, shortcut marker, or right-aligned status must not be allowed to defeat detection: a miss sends no Enter and wedges the worker on the modal, which is the failure the Enter exists to prevent.
+What counts as proof is both of the dialog's own strings: the question anywhere in the capture, AND `Yes, I trust this folder` as a ROW OF ITS OWN, carrying only non-letters before and after the label.
+What the captured pane showed, at one terminal width and in agy 1.1.24, was exactly that: the affirmative row as a selection marker followed by the label and nothing after it, the alternative on the next row, and a navigate/confirm hint below.
+That is point evidence from one width and one version, not a guarantee about how agy renders the row elsewhere; it has not been re-exercised against a live agy since.
+
+The end anchor is deliberate protection, not incidental strictness.
+agy renders the brief as the first message in the same pane, so a brief about this adapter quotes the question and can quote the label too, and a looser match would draw an Enter into a session that has already started its turn; a surplus Enter on this harness opens another turn and spends the operator's quota.
+The two failure modes are not symmetric, which is why the strict side is the right one to err on: if a future row shape carries a trailing hint or a right-aligned status the anchor does not match, the dialog is simply not answered, the worker sits idle, and ordinary stuck-worker detection catches it with no work lost.
 The match assumes only the plain-text capture both backends serve through `fm_backend_capture`, where tmux's `capture-pane -p` and herdr's default `pane read` carry no escape sequences; the ANSI form is a separate primitive neither this poll nor any other launch gate reads.
 
 How often that dialog actually appears was measured here against fresh lab directories, which is not how the fleet allocates a worktree.
