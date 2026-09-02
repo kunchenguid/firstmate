@@ -62,9 +62,9 @@ agy_payload() {  # <template> <workspace>
 #                     trailing hint after its label, which is what a different
 #                     terminal width or a later agy build can render
 #   quoted-dialog   - a started session whose rendered brief QUOTES the dialog's
-#                     question AND its answer label as prose, with no dialog on
-#                     screen: the capture agy draws when the task it was given is
-#                     about the trust dialog itself
+#                     question AND its answer label mid-sentence, with no dialog
+#                     on screen: the capture agy draws when the task it was given
+#                     is about the trust dialog itself
 #   blank           - nothing renders at all, the pane that never starts
 #
 # FM_FAKE_AGY_PHASE, when set, makes the stub honour launch ORDER: the screen
@@ -499,11 +499,13 @@ EOF
 
 # agy renders the brief as the first message in the same pane, so a brief that
 # QUOTES the trust dialog puts its question, and its answer label, into the very
-# capture the poll reads. Either one matched loosely would fire an Enter into a
-# session that has already started its turn, and a surplus Enter on this harness
-# opens another turn and spends quota. The answer label therefore only counts as
-# the dialog when it is a row of its own, which prose never is.
-test_a_brief_quoting_the_dialog_draws_no_enter() {
+# capture the poll reads. A surplus Enter on this harness opens another turn and
+# spends quota, so the label only counts when letters do not surround it.
+#
+# That is the whole of what the anchor excludes, and this case claims no more:
+# a bullet, numbered, or quoted line carrying the label DOES match, which
+# docs/verification/agy.md records with the counter-examples.
+test_the_label_inside_a_sentence_draws_no_enter() {
   local rec case_dir home proj wt fakebin agy_home id out enters
   rec=$(make_spawn_case quoted-dialog)
   IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
@@ -517,8 +519,8 @@ EOF
     || fail "agy spawn failed against a session whose brief quotes the trust dialog: $out"
   enters=$(agy_enters_after_launch "$case_dir/events.log")
   [ "$enters" -eq 1 ] \
-    || fail "the spawn sent $enters Enters after the launch line into a session whose brief merely quotes the dialog; expected only the launch submit"
-  pass "a brief that quotes the trust dialog never draws the trust Enter"
+    || fail "the spawn sent $enters Enters after the launch line into a session whose brief quotes the answer label mid-sentence; expected only the launch submit"
+  pass "the answer label inside a sentence never draws the trust Enter"
 }
 
 # agy proves no readiness after that Enter, deliberately: a capture is recent
@@ -908,7 +910,7 @@ test_secondmate_positional_agy_is_refused
 test_trust_dialog_is_answered_exactly_once
 test_trust_dialog_above_the_footer_is_still_answered
 test_trust_dialog_with_a_trailing_hint_is_not_answered
-test_a_brief_quoting_the_dialog_draws_no_enter
+test_the_label_inside_a_sentence_draws_no_enter
 test_a_pane_that_never_renders_still_completes_the_spawn
 test_turnend_requires_fully_idle
 test_turnend_preserves_payload_while_stdin_stays_open

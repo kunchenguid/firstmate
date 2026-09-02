@@ -2470,13 +2470,20 @@ spawn_harness_fail() {  # <detail>
 # Both of the dialog's own strings must be present, never the question alone:
 # agy renders the brief as the first message in the same pane, and a brief that
 # quotes the question - this adapter's own does - would otherwise draw an Enter
-# into a session that already started its turn. The affirmative label must be a
-# ROW OF ITS OWN, so the same brief quoting the label inside a sentence cannot
-# satisfy it either. The two failure modes are not symmetric: a row shape this
-# anchor does not match leaves the dialog unanswered and the worker idle for
-# ordinary stuck-worker detection to catch, losing no work, while a looser match
-# sends Enter blind into a TUI where a surplus Enter opens another turn and
-# spends the operator's quota.
+# into a session that already started its turn.
+#
+# What the anchor actually excludes is narrower than a guarantee against the
+# rendered brief, and must not be described as one: it rejects the label with
+# letters around it, and it ACCEPTS the label on a bullet, numbered, or quoted
+# line, because a leading dash, digit, or quote is non-letter text the class
+# absorbs. docs/verification/agy.md carries the counter-examples verbatim.
+#
+# It stays this shape rather than tightening onto a selection marker, which
+# would be guessing at a TUI shape measured once. The two failure modes are not
+# symmetric: a row this anchor misses leaves the dialog unanswered and the
+# worker idle for ordinary stuck-worker detection to catch, losing no work,
+# while a looser match sends Enter blind into a TUI where a surplus Enter opens
+# another turn and spends the operator's quota.
 AGY_TRUST_QUESTION_REGEX='Do you trust the contents of this project'
 AGY_TRUST_OPTION_REGEX='^[^A-Za-z]*Yes, I trust this folder[^A-Za-z]*$'
 

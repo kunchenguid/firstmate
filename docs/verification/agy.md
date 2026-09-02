@@ -31,9 +31,12 @@ ok - agy 1.1.24's global customization root is where the turn-end installer writ
 all fm-agy-surface-live-e2e checks passed against agy 1.1.24
 ```
 
-The suite carries one further check that the run above did not enable: `FM_AGY_TURNEND_LIVE_E2E=1` with `FM_AGY_TURNEND_PAYLOAD` naming a Stop payload captured from a real turn asserts only what the installed hook depends on, namely that `workspacePaths` is still emitted and that `fullyIdle`, when present, is still a boolean.
-Any Stop will do, including one from an interrupted turn: protojson omits default values, so an absent `fullyIdle` is a legitimate `false` rather than a broken contract.
+The suite carries one further check that the run above did not enable: `FM_AGY_TURNEND_LIVE_E2E=1` with `FM_AGY_TURNEND_PAYLOAD` naming a Stop payload captured from a real turn asserts only that agy still emits the `fullyIdle` and `workspacePaths` keys the installed hook parses.
 It spends no turn and says nothing about what those values mean; what a `fullyIdle` value does to a turn is owned by the portable regression below.
+
+What the HOOK tolerates and what this GUARD demands are deliberately different, and conflating them once weakened this check.
+The hook must treat an absent `fullyIdle` as not a turn end, because protojson omits default values; the guard must still demand the key's PRESENCE, because a vendor that drops it is exactly the drift that would silently end every turn-end signal, and every Stop measured here carries the key explicitly, including the interrupted turn.
+The guard was briefly relaxed to accept absence and is restored here.
 
 The portable regression is `tests/fm-agy-harness.test.sh`, which pins the same contracts with no harness installed and carries the captured Stop payloads below as fixtures.
 
@@ -144,13 +147,23 @@ A session blocked on this dialog still fires `Stop` hooks with `fullyIdle:false`
 
 An unanswered dialog is a silent hang: agy never reads the brief, its only `Stop` is ignored by the `fullyIdle` gate, and the busy classifier stays at `unknown agy-unverified`.
 `bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen, and the poll ends on that Enter, so exactly one is ever delivered.
-What counts as proof is both of the dialog's own strings: the question anywhere in the capture, AND `Yes, I trust this folder` as a ROW OF ITS OWN, carrying only non-letters before and after the label.
-What the captured pane showed, at one terminal width and in agy 1.1.24, was exactly that: the affirmative row as a selection marker followed by the label and nothing after it, the alternative on the next row, and a navigate/confirm hint below.
+What counts as proof is both of the dialog's own strings: the question anywhere in the capture, AND `Yes, I trust this folder` on a line carrying only non-letters before and after the label, matched as `^[^A-Za-z]*Yes, I trust this folder[^A-Za-z]*$`.
+What the captured pane showed, at one terminal width and in agy 1.1.24, was the affirmative row as a selection marker followed by the label and nothing after it, the alternative on the next row, and a navigate/confirm hint below.
 That is point evidence from one width and one version, not a guarantee about how agy renders the row elsewhere; it has not been re-exercised against a live agy since.
 
-The end anchor is deliberate protection, not incidental strictness.
-agy renders the brief as the first message in the same pane, so a brief about this adapter quotes the question and can quote the label too, and a looser match would draw an Enter into a session that has already started its turn; a surplus Enter on this harness opens another turn and spends the operator's quota.
-The two failure modes are not symmetric, which is why the strict side is the right one to err on: if a future row shape carries a trailing hint or a right-aligned status the anchor does not match, the dialog is simply not answered, the worker sits idle, and ordinary stuck-worker detection catches it with no work lost.
+State what that anchor does and no more, because agy renders the brief as the first message in the same pane and a brief about this adapter quotes the dialog.
+It EXCLUDES the label when letters surround it, such as `  the row reads Yes, I trust this folder here`.
+It does NOT exclude the label on a bullet, numbered, or quoted line. These three all match, because the leading dash, digit, or quote is non-letter text the character class absorbs:
+
+```
+- Yes, I trust this folder
+1. Yes, I trust this folder
+- "Yes, I trust this folder"
+```
+
+So a brief that lists the dialog's options as bullets while also quoting the question satisfies both regexes, and the poll then sends one Enter into a session that has already started its turn, costing one surplus turn of the operator's quota.
+The anchor is kept at this shape anyway rather than tightened onto the selection marker, because pinning a TUI shape observed once is the larger risk.
+The two failure modes are not symmetric: if a future row shape carries a trailing hint or a right-aligned status the anchor does not match, the dialog is simply not answered, the worker sits idle, and ordinary stuck-worker detection catches it with no work lost.
 The match assumes only the plain-text capture both backends serve through `fm_backend_capture`, where tmux's `capture-pane -p` and herdr's default `pane read` carry no escape sequences; the ANSI form is a separate primitive neither this poll nor any other launch gate reads.
 
 How often that dialog actually appears was measured here against fresh lab directories, which is not how the fleet allocates a worktree.

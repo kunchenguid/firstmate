@@ -126,18 +126,20 @@ test_customization_root_is_where_the_installer_writes() {
   pass "agy $AGY_VERSION's global customization root is where the turn-end installer writes"
 }
 
-# The SHAPE of a Stop payload the operator captured from a real agy turn, held
-# to exactly what the installed hook depends on: workspacePaths present, and
-# fullyIdle a boolean WHEN IT IS THERE. An absent fullyIdle is a legitimate
-# false, because protojson omits default values, so a capture from an
-# interrupted turn or one still waiting on backgrounded work is a normal payload
-# rather than a broken contract. It asserts nothing about what those values MEAN
-# - the fullyIdle rule is owned by the portable regression - and it spends no
-# turn, so the operator supplies the capture.
+# The SHAPE of a Stop payload the operator captured from a real agy turn: the
+# keys fullyIdle and workspacePaths must both still be PRESENT, because those
+# are what the installed hook parses. What the hook tolerates is a different
+# question from what this guard demands: the hook treats an absent fullyIdle as
+# not a turn end, while a vendor that stops emitting the key at all is exactly
+# the drift that would silently end every turn-end signal, so presence is the
+# assertion. Every Stop measured in the lab carried it explicitly, including the
+# interrupted turn. It asserts nothing about what those values MEAN - the
+# fullyIdle rule is owned by the portable regression - and it spends no turn, so
+# the operator supplies the capture.
 test_turn_end_payload_contract() {
   local lab payload
   if [ "${FM_AGY_TURNEND_LIVE_E2E:-0}" != 1 ]; then
-    echo "# skip: set FM_AGY_TURNEND_LIVE_E2E=1 with FM_AGY_TURNEND_PAYLOAD to check a captured Stop payload's shape (any Stop will do; an absent fullyIdle is a valid false)"
+    echo "# skip: set FM_AGY_TURNEND_LIVE_E2E=1 with FM_AGY_TURNEND_PAYLOAD to check a captured Stop payload's shape"
     return 0
   fi
   lab=${FM_AGY_TURNEND_PAYLOAD:-}
@@ -145,12 +147,12 @@ test_turn_end_payload_contract() {
     || fail "FM_AGY_TURNEND_LIVE_E2E=1 requires FM_AGY_TURNEND_PAYLOAD to name a captured Stop payload file from a real agy turn"
   payload=$(cat "$lab")
   command -v jq >/dev/null 2>&1 || fail "jq is required to check the agy Stop payload contract"
-  printf '%s' "$payload" | jq -e '(has("fullyIdle") | not) or (.fullyIdle | type == "boolean")' >/dev/null 2>&1 \
-    || fail "agy $AGY_VERSION Stop payload carries a fullyIdle that is not a boolean; the turn-end gate's '.fullyIdle == true' test can no longer tell a turn end from a pause"
+  printf '%s' "$payload" | jq -e 'has("fullyIdle")' >/dev/null 2>&1 \
+    || fail "agy $AGY_VERSION Stop payload no longer carries fullyIdle; the turn-end gate has no signal to read"
   printf '%s' "$payload" | jq -e 'has("workspacePaths")' >/dev/null 2>&1 \
     || fail "agy $AGY_VERSION Stop payload no longer carries workspacePaths; the hook cannot resolve its task worktree"
   CHECKS_RUN=$((CHECKS_RUN + 1))
-  pass "agy $AGY_VERSION's Stop payload still carries workspacePaths and a boolean-or-absent fullyIdle"
+  pass "agy $AGY_VERSION's Stop payload still carries fullyIdle and workspacePaths"
 }
 
 test_positional_prompt_is_rejected
