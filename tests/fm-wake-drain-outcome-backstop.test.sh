@@ -396,7 +396,28 @@ test_held_lock_mode_rejects_an_unlocked_caller() {
     || fail "unowned held-lock mode mutated the processed marker"
   [ ! -e "$state/.branch-outcome-index-ready" ] \
     || fail "unowned held-lock mode published the outcome index"
-  pass "held-lock initialization requires parent ownership of the outcome lock"
+  pass "held-lock initialization rejects callers outside the lock owner's process tree"
+}
+
+test_held_lock_mode_accepts_a_lock_owner_descendant() {
+  local dir state
+  dir=$(make_case index-selfheal-held-lock-descendant)
+  state="$dir/state"
+
+  printf '%s\n' '{"seq":1,"epoch":1,"task":"other","wake":"","verdict":"captain","summary":"unrelated"}' \
+    > "$state/branch-outcomes.jsonl"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$1"
+    fm_lock_acquire_wait "$STATE/.branch-outcomes.lock" || exit 1
+    trap "fm_lock_release \"$STATE/.branch-outcomes.lock\"" EXIT
+    sh -c '"'"'$1 processed-init --held-lock'"'"' _ "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$OUTCOMES" \
+    || fail "processed-init rejected a descendant of the outcome lock owner"
+  [ -f "$state/.branch-outcome-index-ready" ] \
+    || fail "descendant held-lock initialization did not publish the outcome index"
+  pass "held-lock initialization accepts a descendant of the outcome lock owner"
 }
 
 test_index_self_heal_runs_under_the_outcome_lock() {
@@ -498,6 +519,7 @@ test_missing_index_self_heals_on_first_drain
 test_uncovered_event_surfaces_on_first_drain_without_index
 test_malformed_outcome_store_fails_closed_without_pi_advice
 test_held_lock_mode_rejects_an_unlocked_caller
+test_held_lock_mode_accepts_a_lock_owner_descendant
 test_index_self_heal_runs_under_the_outcome_lock
 test_overbound_routine_event_stays_silent
 test_backstop_output_is_bounded

@@ -71,10 +71,10 @@
 #   fm-branch-outcome.sh processed-init [--held-lock]
 #     Rebuild the bounded per-task outcome indexes, then create the processed
 #     marker at the current read cursor when it does not exist yet; validate a
-#     present marker without changing it. --held-lock is only for the direct
-#     child of the process holding $STATE/.branch-outcomes.lock
-#     (fm-wake-drain.sh); it skips the nested acquire so drain's bounded lock
-#     wait remains the deadline.
+#     present marker without changing it. --held-lock is only for a descendant
+#     of the process holding $STATE/.branch-outcomes.lock (fm-wake-drain.sh may
+#     run its redirected presentation body in a subshell on Bash 3.2); it skips
+#     the nested acquire so drain's bounded lock wait remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
@@ -382,8 +382,8 @@ processed_init_locked() {
   fi
 }
 
-held_lock_owned_by_parent() {
-  local owner pid
+held_lock_owned_by_ancestor() {
+  local owner owner_pid pid parent depth=0
   case "$PPID" in ''|*[!0-9]*|0|1) return 1 ;; esac
   if [ -L "$LOCK" ]; then
     owner=$(fm_lock_link_owner "$LOCK" 2>/dev/null) || return 1
@@ -393,8 +393,24 @@ held_lock_owned_by_parent() {
   else
     return 1
   fi
-  pid=$(cat "$owner/pid" 2>/dev/null) || return 1
-  [ "$pid" = "$PPID" ] && fm_pid_alive "$pid"
+  owner_pid=$(cat "$owner/pid" 2>/dev/null) || return 1
+  fm_pid_alive "$owner_pid" || return 1
+
+  # Bash 3.2 keeps $$ unchanged in a redirected subshell while that subshell's
+  # real pid becomes this script's parent. Walk the bounded live ancestry so
+  # that legitimate drain shape is accepted without trusting an arbitrary
+  # caller merely because it can name or observe the lock owner.
+  pid=$PPID
+  while [ "$depth" -lt 64 ]; do
+    [ "$pid" = "$owner_pid" ] && return 0
+    parent=$(ps -o ppid= -p "$pid" 2>/dev/null) || return 1
+    parent=${parent//[[:space:]]/}
+    case "$parent" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    [ "$parent" != "$pid" ] || return 1
+    pid=$parent
+    depth=$((depth + 1))
+  done
+  return 1
 }
 
 CMD=${1:-}
@@ -550,8 +566,8 @@ case "$CMD" in
     [ "$#" -eq 0 ] || usage
     if [ "$HELD_LOCK" -eq 0 ]; then
       fm_lock_acquire_wait "$LOCK"
-    elif ! held_lock_owned_by_parent; then
-      echo "error: --held-lock requires the parent process to own the outcome lock" >&2
+    elif ! held_lock_owned_by_ancestor; then
+      echo "error: --held-lock requires an ancestor process to own the outcome lock" >&2
       exit 1
     fi
     if ! processed_init_locked; then
