@@ -51,11 +51,9 @@ make_repo_on_branch() {  # <dir> <branch>
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
-# command surface the helper uses: `axi status`, `axi status --run <id>` (the
-# `axi` surface - no runs-listing subcommand exists under it, verified against
-# the real CLI), and the actual top-level run-listing command, `no-mistakes
-# runs --limit N`, which is plain text - no run id, no quoting - serving
-# FM_FAKE_RUNS_LIST verbatim.
+# command surface the helper uses: the bare `axi` home view, `axi status`,
+# `axi status --run <id>`, and the top-level `no-mistakes runs --limit N`
+# listing, which is plain text with no run ID or quoting.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -66,6 +64,8 @@ case "${1:-}" in
   axi)
     shift
     case "${1:-}" in
+      '')
+        printf '%s\n' "${FM_FAKE_AXI_HOME:-}" ;;
       status)
         shift
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
@@ -162,6 +162,7 @@ arm_idle_record() {  # <state-dir> <id>
 reset_fakes() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_AXI_STATUS_RUN=""
+  FM_FAKE_AXI_HOME=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
@@ -170,7 +171,7 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_AXI_HOME FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -513,7 +514,22 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   pass "terminal no-checks ci-monitor marker surfaces done"
 }
 
-test_ci_monitoring_green_then_rearm_stays_working() {
+test_ci_monitoring_trusted_no_ci_surfaces_done() {
+  reset_fakes
+  local d; d=$(new_case ci-trusted-no-ci)
+  make_repo_on_branch "$d/wt" fm/feat-citrustednoci
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-citrustednoci.meta" "window=fm:fm-feat-citrustednoci" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-citrustednoci)"
+  FM_FAKE_CI_LOGS="repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-citrustednoci)
+  assert_contains "$out" "state: done" "trusted no-ci monitor run -> done"
+  assert_contains "$out" "checks green" "trusted no-ci detail reports readiness"
+  assert_not_contains "$out" "state: working" "trusted no-ci monitor must not read as active work"
+  pass "trusted no-ci monitor marker surfaces done"
+}
+
+test_ci_monitoring_green_then_rearm_parks() {
   reset_fakes
   local d; d=$(new_case ci-green-then-rearm)
   make_repo_on_branch "$d/wt" fm/feat-cirearm
@@ -526,13 +542,14 @@ base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cirearm)
-  assert_contains "$out" "state: working" "base-advance rearm marker -> working"
+  assert_contains "$out" "state: parked" "base-advance rearm marker -> parked"
+  assert_contains "$out" "waiting for CI checks" "base-advance rearm names the external wait"
   assert_not_contains "$out" "state: done" "base-advance rearm marker must not read as done"
   assert_not_contains "$out" "checks green" "base-advance rearm marker must not read as checks green"
-  pass "base-advance rearm after green stays working"
+  pass "base-advance rearm after green parks while waiting"
 }
 
-test_ci_monitoring_no_checks_yet_stays_working() {
+test_ci_monitoring_no_checks_yet_parks() {
   reset_fakes
   local d; d=$(new_case ci-nochecks-yet)
   make_repo_on_branch "$d/wt" fm/feat-cinochecksyet
@@ -546,13 +563,14 @@ no CI checks reported yet, waiting for checks to register...
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cinochecksyet)
-  assert_contains "$out" "state: working" "pending no-checks marker -> working"
+  assert_contains "$out" "state: parked" "pending no-checks marker -> parked"
+  assert_contains "$out" "waiting for CI checks" "pending no-checks names the external wait"
   assert_not_contains "$out" "state: done" "pending no-checks marker must not read as done"
   assert_not_contains "$out" "checks green" "pending no-checks marker must not read as checks green"
-  pass "pending no-checks ci-monitor marker stays working"
+  pass "pending no-checks ci-monitor marker parks"
 }
 
-test_ci_monitoring_still_waiting_stays_working() {
+test_ci_monitoring_still_waiting_parks() {
   reset_fakes
   local d; d=$(new_case ci-waiting)
   make_repo_on_branch "$d/wt" fm/feat-ciwait
@@ -561,9 +579,25 @@ test_ci_monitoring_still_waiting_stays_working() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciwait)"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-ciwait)
-  assert_contains "$out" "state: working" "ci step still red -> working"
+  assert_contains "$out" "state: parked" "ci step waiting on results -> parked"
+  assert_contains "$out" "waiting for CI checks" "ci wait names the external dependency"
   assert_not_contains "$out" "checks green" "no green marker present -> no checks-green detail"
-  pass "ci-monitoring run with checks not yet green stays working"
+  pass "ci-monitoring run with checks not yet green parks"
+}
+
+test_ci_monitoring_pending_issues_parks() {
+  reset_fakes
+  local d; d=$(new_case ci-pending-issues)
+  make_repo_on_branch "$d/wt" fm/feat-cipendingissues
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cipendingissues.meta" "window=fm:fm-feat-cipendingissues" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cipendingissues)"
+  FM_FAKE_CI_LOGS="issues detected but checks still pending, waiting for all checks to complete..."
+  local out; out=$(run_crew_state "$d" feat-cipendingissues)
+  assert_contains "$out" "state: parked" "pending-check issues marker -> parked"
+  assert_contains "$out" "waiting for CI checks" "pending-check issues marker names the wait"
+  assert_not_contains "$out" "state: working" "pending-check issues must not appear as remediation"
+  pass "pending-check issues marker parks"
 }
 
 # A later merge-conflict auto-fix round after an earlier green reading must
@@ -587,7 +621,7 @@ EOF
   pass "a fresh issue after an earlier green reading is not masked"
 }
 
-test_ci_ready_done_log_relapse_stays_working() {
+test_ci_ready_done_log_relapse_parks() {
   reset_fakes
   local d; d=$(new_case ci-ready-then-relapse)
   make_repo_on_branch "$d/wt" fm/feat-cireadyrelapse
@@ -602,10 +636,11 @@ CI checks running, waiting for results...
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cireadyrelapse)
-  assert_contains "$out" "state: working" "a stale ready status must not mask a later CI relapse"
+  assert_contains "$out" "state: parked" "a stale ready status must not mask a later CI relapse"
+  assert_contains "$out" "waiting for CI checks" "the later CI wait remains visible"
   assert_contains "$out" "source: run-step" "relapsed ci run remains run-step sourced"
   assert_not_contains "$out" "state: done" "relapsed ci run with stale done log must not read as done"
-  pass "stale checks-green status log does not mask CI relapse"
+  pass "stale checks-green status log does not mask a later CI wait"
 }
 
 test_ci_fixing_after_green_stays_working() {
@@ -684,17 +719,11 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
-# (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
-# routine case once more than one crew validates the same underlying repo
-# concurrently - they share ONE no-mistakes repo registration), so the helper
-# falls back to the real top-level `no-mistakes runs` listing to learn whether
-# THIS branch has an active run of its own. Regression coverage for the
-# 2026-07-02 herdr incident: the old fallback shelled out to `no-mistakes axi`
-# (bare) expecting a `runs[N]{...}:` TOON table that the real CLI never emits
-# (verified against the installed v1.32.2 - the `axi` surface has no
-# runs-listing subcommand at all), so attribution silently failed every time
-# the repo-wide answer was not this crew's own branch.
-test_cross_branch_attribution_via_runs_list() {
+# (e) Cross-branch attribution first resolves this branch's run ID from AXI
+# home's capped structured table. If that table omits the branch, the top-level
+# `no-mistakes runs` fallback can prove a run exists but cannot identify its
+# exact phase, so a coarse active row reports unknown.
+test_cross_branch_coarse_running_phase_is_unknown() {
   reset_fakes
   local d short; d=$(new_case crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-f
@@ -703,6 +732,20 @@ test_cross_branch_attribution_via_runs_list() {
   fm_write_meta "$d/state/feat-f.meta" "window=fm:fm-feat-f" "worktree=$d/wt" "kind=ship"
   # The repo-wide active/most-recent run belongs to a different crew's branch.
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_AXI_HOME="$(cat <<'EOF'
+runs[10]{id,branch,status,head,pr}:
+  01OTHER01,fm/newer-01,running,aaaaaaa,
+  01OTHER02,fm/newer-02,running,aaaaaaa,
+  01OTHER03,fm/newer-03,running,aaaaaaa,
+  01OTHER04,fm/newer-04,running,aaaaaaa,
+  01OTHER05,fm/newer-05,running,aaaaaaa,
+  01OTHER06,fm/newer-06,running,aaaaaaa,
+  01OTHER07,fm/newer-07,running,aaaaaaa,
+  01OTHER08,fm/newer-08,running,aaaaaaa,
+  01OTHER09,fm/newer-09,running,aaaaaaa,
+  01OTHER10,fm/newer-10,running,aaaaaaa,
+EOF
+)"
   # Real `no-mistakes runs` shape: plain text, newest-first, no run id, no
   # quoting - "<status> <branch> <short-sha> <date> [<pr-url>]".
   FM_FAKE_RUNS_LIST="$(cat <<EOF
@@ -711,9 +754,58 @@ test_cross_branch_attribution_via_runs_list() {
 EOF
 )"
   local out; out=$(run_crew_state "$d" feat-f)
-  assert_contains "$out" "state: working" "this branch's own run attributed via the runs list"
-  assert_contains "$out" "source: run-step" "runs-list-resolved run -> run-step source"
-  pass "cross-branch run is attributed via the real runs list"
+  assert_contains "$out" "state: unknown" "coarse running row without exact phase -> unknown"
+  assert_contains "$out" "source: run-step" "coarse running row remains run-step sourced"
+  assert_contains "$out" "exact phase unavailable" "coarse running detail names the missing phase"
+  assert_not_contains "$out" "state: working" "displaced passive monitor must not appear active"
+  assert_not_contains "$out" "state: parked" "unknown coarse phase must not be guessed passive"
+  pass "cross-branch run beyond AXI home cap reports unknown phase"
+}
+
+test_cross_branch_passive_ci_monitor_parks() {
+  reset_fakes
+  local d short; d=$(new_case crossbranch-ci-wait)
+  make_repo_on_branch "$d/wt" fm/feat-cross-ci-wait
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cross-ci-wait.meta" "window=fm:fm-feat-cross-ci-wait" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_AXI_HOME="$(cat <<EOF
+runs[2]{id,branch,status,head,pr}:
+  01OTHER,fm/other-crew,running,aaaaaaa,
+  01TARGET,fm/feat-cross-ci-wait,running,${short},https://github.com/o/r/pull/2
+EOF
+)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_ci_monitoring fm/feat-cross-ci-wait | sed 's/01RUN/01TARGET/')"
+  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  local out; out=$(run_crew_state "$d" feat-cross-ci-wait)
+  assert_contains "$out" "state: parked" "cross-branch passive CI monitor -> parked"
+  assert_contains "$out" "waiting for CI checks" "cross-branch passive CI monitor names the wait"
+  assert_not_contains "$out" "state: working" "cross-branch passive CI monitor must not appear active"
+  pass "cross-branch passive CI monitor parks from exact run status"
+}
+
+test_cross_branch_ci_remediation_stays_working() {
+  reset_fakes
+  local d short; d=$(new_case crossbranch-ci-fixing)
+  make_repo_on_branch "$d/wt" fm/feat-cross-ci-fixing
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cross-ci-fixing.meta" "window=fm:fm-feat-cross-ci-fixing" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_AXI_HOME="$(cat <<EOF
+runs[2]{id,branch,status,head,pr}:
+  01OTHER,fm/other-crew,running,aaaaaaa,
+  01TARGET,fm/feat-cross-ci-fixing,running,${short},https://github.com/o/r/pull/2
+EOF
+)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_ci_monitoring fm/feat-cross-ci-fixing | sed 's/01RUN/01TARGET/')"
+  FM_FAKE_CI_LOGS="issues detected: ci failure - auto-fixing (attempt 1/3)..."
+  local out; out=$(run_crew_state "$d" feat-cross-ci-fixing)
+  assert_contains "$out" "state: working" "cross-branch CI remediation -> working"
+  assert_contains "$out" "ci remediation active" "cross-branch CI remediation names active work"
+  assert_not_contains "$out" "state: parked" "cross-branch CI remediation must not appear passive"
+  pass "cross-branch CI remediation stays working from exact run status"
 }
 
 # The runs list is newest-first; a branch with an OLDER completed run must not
@@ -733,7 +825,7 @@ test_cross_branch_attribution_picks_most_recent_row() {
 EOF
 )"
   local out; out=$(run_crew_state "$d" feat-fq)
-  assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
+  assert_contains "$out" "state: unknown" "most recent running row has unknown exact phase"
   assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
   pass "cross-branch attribution picks the branch's most recent row"
 }
@@ -1264,11 +1356,10 @@ test_missing_meta() {
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
 # coverage). This is the direct regression pair for the 2026-07-02 herdr
-# incident: a validating crew whose bare `axi status` answer belongs to
-# another branch must still be absorbed by the watcher via the runs-list
-# fallback (working), while a crew with genuinely no run anywhere and an idle
-# pane must still surface (the safety property the fix must never widen away).
-test_provably_working_via_runs_list_fallback() {
+# incident: a validating crew whose exact phase is unavailable must not be
+# absorbed as provably working, and a crew with genuinely no run anywhere and
+# an idle pane must still surface.
+test_coarse_running_is_not_provably_working() {
   reset_fakes
   local d short; d=$(new_case provably-working-crossbranch)
   make_repo_on_branch "$d/wt" fm/feat-provable
@@ -1281,9 +1372,10 @@ test_provably_working_via_runs_list_fallback() {
   running    fm/feat-provable ${short}  2026-07-02 22:05
 EOF
 )"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
-    || fail "cross-branch attribution via the runs list was not treated as provably working"
-  pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
+  if PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable; then
+    fail "a coarse running row with unknown phase was treated as provably working"
+  fi
+  pass "crew_is_provably_working rejects a coarse run with unknown phase"
 }
 
 test_not_provably_working_when_stopped() {
@@ -1558,17 +1650,21 @@ test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
-test_ci_monitoring_green_then_rearm_stays_working
-test_ci_monitoring_no_checks_yet_stays_working
-test_ci_monitoring_still_waiting_stays_working
+test_ci_monitoring_trusted_no_ci_surfaces_done
+test_ci_monitoring_green_then_rearm_parks
+test_ci_monitoring_no_checks_yet_parks
+test_ci_monitoring_still_waiting_parks
+test_ci_monitoring_pending_issues_parks
 test_ci_monitoring_green_then_new_issue_stays_working
-test_ci_ready_done_log_relapse_stays_working
+test_ci_ready_done_log_relapse_parks
 test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
-test_cross_branch_attribution_via_runs_list
+test_cross_branch_coarse_running_phase_is_unknown
+test_cross_branch_passive_ci_monitor_parks
+test_cross_branch_ci_remediation_stays_working
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
@@ -1594,7 +1690,7 @@ test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
-test_provably_working_via_runs_list_fallback
+test_coarse_running_is_not_provably_working
 test_not_provably_working_when_stopped
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current

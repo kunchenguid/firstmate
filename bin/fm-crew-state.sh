@@ -28,13 +28,14 @@
 #      gone/dead.
 #   2. Attribute an active or terminal no-mistakes run under the branch, head,
 #      pipeline-custody, and newest-first rules owned by bin/fm-nm-run-lib.sh.
-#      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
-#      awaiting_approval/fix_review -> parked (with gate findings), terminal
+#      The run-step is AUTHORITATIVE: implementation/fix activity -> working,
+#      passive CI/check monitoring -> parked, awaiting_approval/fix_review ->
+#      parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      a ci-step log-tail check distinguishes a passive wait, active remediation,
+#      and checks green, so none is silently reported as generic validation.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -338,15 +339,16 @@ nm_ci_checks_state() {
   log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
+    | grep -E 'CI checks passed|no CI checks reported - still monitoring|repository declares no CI .*treating as all checks passed.*still monitoring|no CI checks reported yet|checks failed|issues detected but checks still pending|manual fix requested|auto-fixing|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
     *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *"manual fix requested"*|*"auto-fixing"*) printf 'fixing' ;;
+    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected but checks still pending"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
 }
-# Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
+# Cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
 # display (verified empirically: querying a worktree with its own active run
@@ -354,18 +356,11 @@ nm_ci_checks_state() {
 # validating crews on the same underlying repo). A crew whose branch genuinely
 # has no run yet therefore sees another branch's answer here.
 #
-# This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
-# expecting a `runs[N]{id,branch,status,...}:` TOON table and re-query the
-# matched id via `axi status --run <id>`. Verified against the real installed
-# CLI (v1.32.2): the `axi` surface exposes only abort/logs/respond/run/status -
-# there is no runs-listing subcommand under `axi` at all, so that table never
-# appears and the lookup was silently dead code; whenever the bare `axi
-# status` answer was not this crew's own branch, attribution always failed and
-# the caller fell straight through to the pane/log fallback below. (The
-# PRIMARY cause of the 2026-07 herdr false-surface incidents turned out to be
-# a separate bug in bin/fm-watch.sh's stale_is_terminal precedence - see that
-# file's history - but this cross-branch path was independently confirmed
-# dead code and is worth having actually work.)
+# The AXI home view exposes recent runs as structured rows with IDs. Resolve
+# this branch there and re-query the exact run so every attribution path has
+# the same step, gate, and CI-monitor detail. Older no-mistakes versions did
+# not expose that table, so the human-oriented top-level runs list remains a
+# coarse compatibility fallback for terminal state and active-run attribution.
 #
 # The real run-listing command is the top-level `no-mistakes runs` (verified:
 # `no-mistakes --help` lists it separately from `axi`). It is plain, human-
@@ -405,6 +400,40 @@ nm_runs_status_for_branch() {  # <branch>
     fi
   done <<< "$out"
   return 0
+}
+
+nm_axi_run_id_for_branch() {  # <branch>
+  local branch=$1 out in_runs=0 row id rest br st sha
+  out=$(nm_run axi)
+  [ -n "$out" ] || return 0
+  while IFS= read -r row; do
+    case "$row" in
+      runs\[*\]\{id,branch,status,head,pr\}:) in_runs=1; continue ;;
+      [![:space:]]*) in_runs=0 ;;
+    esac
+    [ "$in_runs" = 1 ] || continue
+    row=$(trim "$row")
+    id=${row%%,*}
+    rest=${row#*,}
+    br=${rest%%,*}
+    rest=${rest#*,}
+    st=${rest%%,*}
+    rest=${rest#*,}
+    sha=${rest%%,*}
+    br=$(strip_quotes "$br")
+    sha=$(strip_quotes "$sha")
+    [ "$br" = "$branch" ] || continue
+    case "$(strip_quotes "$st")" in
+      completed|failed|cancelled|running|fixing|awaiting_approval|fix_review|ci) ;;
+      *) return 0 ;;
+    esac
+    if ! nm_coarse_head_matches_worktree "$sha"; then
+      fm_nm_head_resolvable "$WT" "$sha" || return 0
+      continue
+    fi
+    strip_quotes "$id"
+    return 0
+  done <<< "$out"
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -452,13 +481,26 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # attribution failed (the CLI is alive and answered) - try the coarse
       # fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
-      # primary call means the CLI itself did not respond, so retrying it
-      # immediately with a second bounded call would just double the wait
-      # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
-        HAVE_RUN=1
-        RUN_SOURCE=coarse
+      # primary call means the CLI itself did not respond, so further bounded
+      # queries would only multiply the wait without improving attribution.
+      run_id=$(nm_axi_run_id_for_branch "$CREW_BRANCH")
+      if [ -n "$run_id" ]; then
+        exact_run=$(nm_run axi status --run "$run_id")
+        exact_branch=$(strip_quotes "$(fm_nm_field "$exact_run" branch)")
+        exact_id=$(strip_quotes "$(fm_nm_field "$exact_run" id)")
+        if [ "$exact_id" = "$run_id" ] && [ "$exact_branch" = "$CREW_BRANCH" ] \
+          && { fm_nm_head_matches_worktree "$WT" "$(strip_quotes "$(fm_nm_field "$exact_run" head)")" \
+            || fm_nm_run_is_pipeline_owned_active "$exact_run"; }; then
+          RUN_OUT=$exact_run
+          HAVE_RUN=1
+        fi
+      fi
+      if [ "$HAVE_RUN" != 1 ]; then
+        COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+        fi
       fi
     fi
   fi
@@ -472,17 +514,19 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
+  RUN_IS_GATE_PARKED=0
   if [ "$RUN_SOURCE" = coarse ]; then
-    # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
+    # No step/gate detail is available from the plain runs list, so an active
+    # row is unknown rather than presumed working or parked. A crew genuinely
+    # parked at a gate still gets full detail once `axi status` reports its own
+    # branch again (e.g.
     # once its own step is the most-recently-touched one), and its own
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced by each supervisor's span classification (fm-classify-lib.sh's
     # status_span_first_actionable) regardless of this coarse-vs-full
     # distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      running)   RUN_STATE=unknown; RUN_DETAIL="background run active; exact phase unavailable" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
@@ -514,6 +558,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       [ -n "$gate" ] || gate=$status
       [ -n "$gate" ] || gate=gate
       RUN_STATE=parked
+      RUN_IS_GATE_PARKED=1
       RUN_DETAIL="parked at $gate"
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
@@ -538,6 +583,15 @@ if [ "$HAVE_RUN" = 1 ]; then
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            elif [ "$CI_LOG_STATE" = fixing ]; then
+              RUN_STATE=working
+              RUN_DETAIL="ci remediation active"
+            elif [ "$CI_LOG_STATE" = not-ready ]; then
+              RUN_STATE=parked
+              RUN_DETAIL="waiting for CI checks"
+            else
+              RUN_STATE=parked
+              RUN_DETAIL="waiting for CI status (monitor log unavailable)"
             fi
             ;;
           fixing)
@@ -548,7 +602,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
+  if { [ "$RUN_SOURCE" = coarse ] || [ "$RUN_STATE" = working ] || { [ "$RUN_STATE" = parked ] && [ "$RUN_IS_GATE_PARKED" != 1 ]; }; } \
+    && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
@@ -560,7 +615,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != fixing ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi
@@ -570,7 +625,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   # stale: the gate resolved and the run resumed or finished.
   case "$LOG_VERB" in
     needs-decision|blocked)
-      if [ "$RUN_STATE" != parked ]; then
+      if [ "$RUN_SOURCE" != coarse ] && [ "$RUN_IS_GATE_PARKED" != 1 ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else
