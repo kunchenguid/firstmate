@@ -291,14 +291,38 @@ case "$CMD" in
       fm_lock_release "$LOCK"
       exit 1
     fi
+    if ! LAST_SEQ=$(last_seq); then
+      fm_lock_release "$LOCK"
+      echo "error: refusing processed advancement because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if [ "$CURSOR_SEQ" -gt "$LAST_SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing processed advancement because the outcome cursor is ahead of the store" >&2
+      exit 1
+    fi
+    if [ "$PROCESSED_SEQ" -gt "$CURSOR_SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing processed advancement because the processed marker is ahead of the read cursor" >&2
+      exit 1
+    fi
     if [ "$THROUGH" -gt "$CURSOR_SEQ" ]; then
       fm_lock_release "$LOCK"
       echo "error: refusing processed advancement beyond the read cursor ($CURSOR_SEQ)" >&2
       exit 1
     fi
-    if [ "$THROUGH" -gt "$PROCESSED_SEQ" ]; then
-      write_processed "$THROUGH"
+    if [ "$THROUGH" -le "$PROCESSED_SEQ" ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing processed advancement because seq $THROUGH is already processed" >&2
+      exit 1
     fi
+    VERDICT=$(jq -r --argjson through "$THROUGH" 'select(.seq == $through) | .verdict' "$STORE")
+    if [ "$VERDICT" != captain ]; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed captain outcome" >&2
+      exit 1
+    fi
+    write_processed "$THROUGH"
     fm_lock_release "$LOCK"
     ;;
   processed-init)
@@ -321,8 +345,16 @@ case "$CMD" in
       shift 2 || usage
     fi
     [ "$#" -eq 0 ] || usage
-    [ -s "$STORE" ] || exit 0
-    tail -n "$RECENT" "$STORE"
+    fm_lock_acquire_wait "$LOCK"
+    if ! last_seq >/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if [ -s "$STORE" ]; then
+      tail -n "$RECENT" "$STORE"
+    fi
+    fm_lock_release "$LOCK"
     ;;
   startup-replay)
     [ "$#" -eq 0 ] || usage

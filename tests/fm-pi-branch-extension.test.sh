@@ -1178,6 +1178,7 @@ await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "routine branch 
 const session = globalThis.__fmSessions[0];
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
 await report.execute("routine", { task: "task-r", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
+const routineSeq = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
 runOf();
 if (requests().length !== 0) throw new Error("a routine outcome opened a processing turn");
 
@@ -1231,6 +1232,11 @@ if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcom
 // Only the sequence-bound acknowledgement closes it.
 const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
+const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});
+if (!routineAck.isError || !routineAck.content.some((item) => item.type === "text" && item.text.includes("not an unprocessed captain outcome"))) {
+  throw new Error(`a routine-sequence acknowledgement was not clearly refused: ${JSON.stringify(routineAck)}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a routine-sequence acknowledgement closed the open captain sequence");
 const tooFar = await processed.execute("ack-too-far", { through: seq + 100 }, undefined, undefined, {});
 if (!tooFar.isError) throw new Error("an acknowledgement beyond the read cursor was accepted");
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a refused acknowledgement moved the marker");

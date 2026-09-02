@@ -227,8 +227,12 @@ test_outcome_sequence_conflicts_fail_closed() {
   status=$?
   [ "$status" -ne 0 ] || fail "append continued after a conflicting middle sequence"
   assert_contains "$out" "malformed or non-sequential" "sequence-conflict append refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --recent 2 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "list exposed rows from a conflicting outcome store"
+  assert_contains "$out" "malformed or non-sequential" "sequence-conflict list refusal lost its diagnostic"
   [ "$(cat "$store")" = "$snapshot" ] || fail "sequence-conflict refusal changed the durable store"
-  pass "middle sequence conflicts fail closed for reads and appends"
+  pass "middle sequence conflicts fail closed for every store read and append"
 }
 
 test_outcome_processed_marker_is_sequence_bound() {
@@ -255,18 +259,26 @@ test_outcome_processed_marker_is_sequence_bound() {
   esac
   assert_not_contains "$out" '"seq":1' "a routine row entered the processing path"
 
-  # The marker never passes the read cursor and never moves backwards.
+  # The marker advances only to a read, currently unprocessed captain row.
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 3 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "mark-processed advanced past the read cursor"
   assert_contains "$out" "beyond the read cursor" "past-cursor refusal lost its diagnostic"
   [ ! -e "$marker" ] || fail "a refused acknowledgement created the processed marker"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-processed accepted a routine sequence"
+  assert_contains "$out" "not an unprocessed captain outcome" "routine-sequence refusal lost its diagnostic"
+  [ ! -e "$marker" ] || fail "a routine-sequence acknowledgement created the processed marker"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 2 || fail "mark-processed failed"
   [ "$(cat "$marker")" = 2 ] || fail "processed marker was not written"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" ] \
     || fail "an acknowledged row stayed unprocessed"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 || fail "backwards mark-processed failed"
-  [ "$(cat "$marker")" = 2 ] || fail "processed marker moved backwards"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-processed accepted an already-processed sequence"
+  assert_contains "$out" "already processed" "already-processed refusal lost its diagnostic"
+  [ "$(cat "$marker")" = 2 ] || fail "refused backwards acknowledgement moved the processed marker"
 
   # Reading the next captain row reopens exactly that row for processing.
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 3 || fail "second mark-read failed"
