@@ -23,7 +23,7 @@ Recorded 2026-09-02 on Darwin 27.0.0.
 |---|---|---|---|---|
 | `container` (Docker 29.7.2, `debian:stable-slim`) | denied | denied | denied | Clears `isolation-verify` |
 | `bwrap` | not measured here (absent on this host) | expected denied via `--unshare-pid` | denied | Unverified; measure before relying on it |
-| `sandbox-exec` (macOS) | filesystem only | not confined | denied | Cannot clear the gate on its own |
+| `sandbox-exec` (macOS) | not measured because its profile aborted before command execution | not measured | not measured | Removed; the wrapper rejects this mechanism |
 | `none` | leaks | leaks | leaks | Present only so the probe set can be proven non-vacuous |
 
 Exact output of the container run:
@@ -35,11 +35,30 @@ ok - enforced isolation (container) denies file, worktree, object, unreachable-o
 ok - the same confinement still lets an entrant work in its own private clone
 ```
 
-The restore portion of `tests/fm-bench-gate.test.sh` restores every sample but confines the differential evaluator proof to the first sample in stable lexical order, which bounds execution cost and records the exercised sample in the cleanup receipt.
-It executes only a content-addressed evaluator from the capture-and-scoring evidence group, compares its genuine restored-tree output hash to the archive, and requires a different successful output after perturbing the manifest's declared scored inputs.
+The restore portion of `tests/fm-bench-gate.test.sh` restores every sample and statically validates every evaluator declaration before loading a confinement or executing archived code.
+It confines differential execution to the first sample in stable lexical order, which bounds execution cost and records the exercised sample in the cleanup receipt without bounding declaration validation.
+It executes only a content-addressed evaluator from the capture-and-scoring evidence group, compares its genuine restored-tree output hash to the archive, and requires a different successful output after perturbing the manifest's declared scored inputs with fresh opaque random bytes.
 The genuine and perturbed executions receive independent opaque roots through the preflight-proven confinement wrapper, with networking disabled and no archive, repository, operator home, or wider user filesystem bind.
-It also proves that a role inferred from path or environment cannot manufacture a difference, and that an absolute path, a parent traversal, a symlink escape, an empty or escaping scored-input declaration, an unlisted evidence file including nested `manifest.json`, an arbitrary command, an evaluator that ignores restored content, an unaddressed evaluator, a changed manifest binding, a changed evaluator result, and an attempted archive mutation all refuse before cleanup can be authorised.
-On a host without `bwrap` or a usable preloaded container image, the portable archive checks still run and the restore fixture instead proves that the drill refuses before executing archived code.
+It also proves that a role or old perturbation marker cannot manufacture a difference, and that an absolute path, a parent traversal, a symlink escape, an empty or escaping scored-input declaration, an unlisted evidence file including nested `manifest.json`, an arbitrary command, an evaluator that ignores restored content, an unaddressed evaluator, a missing declaration on an unexecuted sample, a changed manifest binding, a changed evaluator result, and an archive changed concurrently during replay all refuse before cleanup can be authorised.
+On a host without `bwrap` or a usable preloaded container image, the portable archive and static restore-declaration checks still run, including malformed and unselected-sample declarations, missing bundles, and cleanup receipt withdrawal, while evaluator-execution cases stay gated and a valid drill refuses before executing archived code.
+
+The removed `sandbox-exec` profile was measured on this host with the following command; it exited 134 with `Abort trap: 6` before the evaluator wrote its sentinel.
+
+```
+$ tmpdir=$(mktemp -d); printf '#!/bin/sh\nprintf "ran\\n" > "$1/sentinel"\n' > "$tmpdir/ev.sh"; chmod +x "$tmpdir/ev.sh"; bin/fm-bench-confine.sh --mechanism sandbox-exec --allow "$tmpdir" -- "$tmpdir/ev.sh" "$tmpdir"
+Abort trap: 6
+$ echo $?
+134
+```
+
+The current wrapper makes that unusable mechanism explicit:
+
+```
+$ bin/fm-bench-confine.sh --mechanism sandbox-exec --allow "$PWD" -- /bin/true
+error: unknown mechanism sandbox-exec
+$ echo $?
+2
+```
 
 The same run under `--mechanism none` refuses with all seven probe classes reported `PROBE LEAKED`, which is what proves the probes are not vacuous.
 
