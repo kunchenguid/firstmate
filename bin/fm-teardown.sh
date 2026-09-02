@@ -108,10 +108,10 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
-# Pre-teardown cleanup sequence (runs once every landed/discard-work safety
-# refusal above has already passed, and BEFORE any worktree return, branch
-# delete, or backend kill below - a still-active run or a leaked process may
-# own live work in that worktree):
+# Pre-teardown cleanup sequence runs once every landed/discard-work safety
+# refusal above has already passed. The task's parked run is concluded before
+# its endpoint closes; leaked processes are reaped after that close but before
+# any worktree return or branch delete.
 #   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
 #     be torn down while its no-mistakes pipeline run is still PARKED at a gate
 #     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
@@ -142,6 +142,9 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
+#     When lsof is unavailable, teardown captures a verified tmux pane process
+#     group before closing the endpoint, then reaps that captured group after
+#     the close removes the pane lookup target.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -1644,8 +1647,10 @@ $dir_pids"
   TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
 }
 
-reap_task_backend_process_group() {  # <label>
-  local label=$1 leader leader_start pgid current_pgid own_pgid
+capture_task_backend_process_group() {
+  local leader leader_start pgid current_pgid own_pgid
+  TASK_BACKEND_PGID=
+  command -v lsof >/dev/null 2>&1 && return 0
   if [ "$BACKEND" != tmux ]; then
     echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
     return 0
@@ -1677,12 +1682,27 @@ reap_task_backend_process_group() {  # <label>
   current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
   current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
   [ "$current_pgid" = "$pgid" ] || return 0
+  TASK_BACKEND_PGID=$pgid
+}
+
+reap_task_backend_process_group() {  # <label>
+  local label=$1 pgid=$TASK_BACKEND_PGID own_pgid
+  case "$pgid" in ''|*[!0-9]*|0|1)
+    echo "warning: lsof is unavailable; no verified tmux pane process group was captured for $ID" >&2
+    return 0
+    ;;
+  esac
+  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
+  own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
+  if [ "$pgid" = "$own_pgid" ]; then
+    echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
+    return 0
+  fi
+  kill -0 -- "-$pgid" 2>/dev/null || return 0
   echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
   kill -TERM -- "-$pgid" 2>/dev/null || true
   sleep 1
-  if task_process_identity_matches "$leader" "$leader_start" \
-     && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
-     && kill -0 -- "-$pgid" 2>/dev/null; then
+  if kill -0 -- "-$pgid" 2>/dev/null; then
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
     kill -KILL -- "-$pgid" 2>/dev/null || true
   fi
@@ -2687,6 +2707,7 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
+TASK_BACKEND_PGID=
 if [ "$BACKEND" = herdr ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
@@ -2712,6 +2733,11 @@ else
   else
     BACKLOG_SKIP_REASON=$TEARDOWN_BACKLOG_SKIP_REASON
   fi
+fi
+
+if [ "$KIND" != secondmate ]; then
+  conclude_task_no_mistakes_run "$WT"
+  capture_task_backend_process_group
 fi
 
 # Close the task endpoint BEFORE the worktree process reap and the copy's
@@ -2795,15 +2821,13 @@ if [ "$BACKEND" = herdr ]; then
   fi
 fi
 
-# Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
+# The endpoint is now closed. Fix 2 (see script header) runs before worktree
+# removal because a leaked process can still own live work in this exact
+# worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
-  conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 

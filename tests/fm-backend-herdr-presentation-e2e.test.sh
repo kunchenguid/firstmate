@@ -19,6 +19,7 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit
 
 REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
+REAL_GIT=$(command -v git)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
 FAKEBIN="$TMP_ROOT/fakebin"
@@ -29,6 +30,7 @@ MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
+REFRESH_CWD_CONTROL="$TMP_ROOT/refresh-cwd-control"
 mkdir -p "$FAKEBIN"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
@@ -36,8 +38,8 @@ mkdir -p "$FAKEBIN"
 : > "$MOVE_CALL_LOG"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG LEASED_WORKTREES_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
-export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
+export REAL_HERDR REAL_TREEHOUSE REAL_GIT REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG LEASED_WORKTREES_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL REFRESH_CWD_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -225,6 +227,34 @@ fi
 exec "$REAL_TREEHOUSE" "$@"
 SH
 
+cat > "$FAKEBIN/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -d "$REFRESH_CWD_CONTROL" ]; then
+  wt=$(cat "$REFRESH_CWD_CONTROL/worktree")
+  pane=$(cat "$REFRESH_CWD_CONTROL/pane")
+  has_wt=0
+  has_reset=0
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = -C ] && [ "$arg" = "$wt" ]; then
+      has_wt=1
+    fi
+    [ "$arg" != reset ] || has_reset=1
+    previous=$arg
+  done
+  if [ "$has_wt" = 1 ] && [ "$has_reset" = 1 ]; then
+    pane_json=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "$pane") || exit 97
+    cwd=$(printf '%s' "$pane_json" | jq -r '.result.pane.foreground_cwd // empty')
+    printf '%s\n' "$cwd" > "$REFRESH_CWD_CONTROL/observed"
+    case "$cwd" in
+      "$wt"|"$wt"/*) exit 98 ;;
+    esac
+  fi
+fi
+exec "$REAL_GIT" "$@"
+SH
+
 cat > "$FAKEBIN/herdr-workspace-mover" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -260,7 +290,7 @@ printf 'workspace-move\t%s\t%s\t%s\n' "$before" "$after" "$2" >> "$FOCUS_AUDIT_L
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$status"
 SH
-chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse"
+chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse" "$FAKEBIN/git"
 chmod +x "$FAKEBIN/herdr-workspace-mover"
 export PATH="$FAKEBIN:$PATH"
 export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
@@ -1208,8 +1238,15 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     fail "$RESTART_ID restart fixture unexpectedly retained a registered agent"
   fi
   RECLAIM_FOCUS=$(focus_snapshot)
+  mkdir -p "$REFRESH_CWD_CONTROL"
+  printf '%s\n' "$OLD_RESTART_WT" > "$REFRESH_CWD_CONTROL/worktree"
+  printf '%s\n' "$OLD_RESTART_PANE" > "$REFRESH_CWD_CONTROL/pane"
   spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
     || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
+  RECOVERY_REFRESH_CWD=$(cat "$REFRESH_CWD_CONTROL/observed" 2>/dev/null || true)
+  rm -rf "$REFRESH_CWD_CONTROL"
+  [ "$RECOVERY_REFRESH_CWD" = "$(cd "$PROJECT_DIR" && pwd -P)" ] \
+    || fail "$RESTART_ID refreshed while its restored shell was still in '$RECOVERY_REFRESH_CWD'"
   NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)

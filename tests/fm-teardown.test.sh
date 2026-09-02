@@ -2154,10 +2154,19 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = kill-window ]; then
+  printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
 
   rc=0
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_FAKE_TMUX_LOG="$case_dir/tmux.log" \
   FM_FAKE_NM_ABORT_NOOP=1 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
@@ -2170,6 +2179,8 @@ EOF
     "parked-run-abort-unconfirmed: teardown removed task metadata after refusing"
   assert_absent "$case_dir/treehouse.log" \
     "parked-run-abort-unconfirmed: teardown returned the worktree after refusing"
+  assert_absent "$case_dir/tmux.log" \
+    "parked-run-abort-unconfirmed: teardown closed the endpoint before the run-abort refusal"
   kill -0 "$pid" 2>/dev/null || fail "parked-run-abort-unconfirmed: process reap ran before refusal"
   kill -KILL "$pid" 2>/dev/null || true
   pass "teardown refuses before reap or removal when a task-owned run remains parked"
@@ -2274,7 +2285,7 @@ test_leaked_tasktmp_process_is_reaped() {
 }
 
 test_lsof_absent_reaps_tmux_process_group() {
-  local case_dir rc pid path_without_lsof
+  local case_dir rc pid path_without_lsof first_tmux_call
   case_dir=$(make_case lsof-absent-process-group-reap)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -2289,7 +2300,13 @@ test_lsof_absent_reaps_tmux_process_group() {
   kill -0 "$pid" 2>/dev/null || fail "lsof-absent-process-group-reap: setup sleeper did not start"
   cat > "$case_dir/fakebin/tmux" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$case_dir/tmux.log'
+if [ "\${1:-}" = kill-window ]; then
+  : > '$case_dir/tmux-closed'
+  exit 0
+fi
 if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
+  [ ! -e '$case_dir/tmux-closed' ] || exit 1
   printf '%s\n' '$pid'
 fi
 exit 0
@@ -2307,6 +2324,9 @@ EOF
   fi
   assert_grep "reaping leaked worktree process group" "$case_dir/stderr" \
     "lsof-absent-process-group-reap: teardown did not use the process-group fallback"
+  first_tmux_call=$(sed -n '1p' "$case_dir/tmux.log")
+  assert_contains "$first_tmux_call" "display-message" \
+    "lsof-absent-process-group-reap: tmux group identity was not captured before endpoint close"
   pass "missing lsof falls back to reaping the tmux pane process group"
 }
 

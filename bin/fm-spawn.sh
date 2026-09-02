@@ -149,6 +149,10 @@
 #   (a quarantined Herdr recovery) refreshes that same copy instead of leasing
 #   another, and refuses when its HEAD holds commits no remote has, so a
 #   retry never grows the pool or resets a prior worker's unlanded commits.
+#   Recovery first classifies the recorded endpoint and moves an agent-free
+#   shell back to the primary project before inspecting or refreshing its
+#   recorded copy. The reclaimed replacement likewise starts outside the copy
+#   and enters it only after refresh.
 #   The old order (create the pane, enter the copy
 #   from its shell, then refresh) raced a fresh shell's git prompt against the
 #   refresh for the worktree's index.lock under the shared .git/worktrees/, and
@@ -758,7 +762,11 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 SPAWN_LEASE_RETURN_PENDING=0
 SPAWN_LEASE_WT=
+SPAWN_PRIOR_RECORD_WT=
 HERDR_RECLAIMED_PANE=0
+HERDR_RECOVERY_PREFLIGHTED=0
+HERDR_RECOVERY_ENDPOINT_STATE=
+HERDR_RECOVERY_TARGET=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -2027,17 +2035,56 @@ spawn_lease_return_on_abort() {  # <worktree>
   fi
 }
 
-# A fresh spawn for a task id whose durable record still names a pooled copy
-# (a quarantined Herdr recovery, a relaunch-shaped resume) reuses that copy
-# rather than leasing a second one per attempt: the record's copy is already
-# this task's lease. Prints the path only when it is a real directory distinct
-# from the primary checkout.
-spawn_prior_record_worktree() {  # -> prints the record's worktree path
-  local prior
-  prior=$(herdr_projection_meta_field_exact "$STATE/$ID.meta" worktree 2>/dev/null) || return 1
-  [ -n "$prior" ] && [ -d "$prior" ] || return 1
-  [ "$(real_path_or_raw "$prior")" != "$PROJ_ABS_REAL" ] || return 1
-  printf '%s\n' "$prior"
+# A fresh Herdr recovery reuses a durable record's copy only when the record
+# proves the same task, project, kind, backend, endpoint, and projection
+# journal. An absent record means ordinary leasing; any existing record that
+# cannot establish that identity refuses rather than leasing a second copy or
+# overwriting foreign metadata.
+spawn_prior_record_worktree() {
+  local meta="$STATE/$ID.meta" journal="$STATE/$ID.herdr-presentation"
+  local prior prior_project prior_project_real prior_kind kind_count
+  SPAWN_PRIOR_RECORD_WT=
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    return 1
+  fi
+  fm_backlog_record_present "$meta" "task record" "$STATE" || {
+    echo "error: existing task record for $ID is unsafe: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    return 2
+  }
+  fm_backend_validate_task_endpoint "$meta" "$ID" || return 2
+  prior=$(herdr_projection_meta_field_exact "$meta" worktree 2>/dev/null) || {
+    echo "error: existing task record for $ID has no exact worktree; refusing recovery" >&2
+    return 2
+  }
+  [ -d "$prior" ] && [ "$(real_path_or_raw "$prior")" != "$PROJ_ABS_REAL" ] || {
+    echo "error: existing task record for $ID names an unusable isolated copy '$prior'; refusing recovery" >&2
+    return 2
+  }
+  prior_project=$(herdr_projection_meta_field_exact "$meta" project 2>/dev/null) || {
+    echo "error: existing task record for $ID has no exact project; refusing recovery" >&2
+    return 2
+  }
+  prior_project_real=$(real_path_or_raw "$prior_project")
+  if [ "$prior_project_real" != "$PROJ_ABS_REAL" ]; then
+    echo "error: existing task record for $ID belongs to project '$prior_project', not '$PROJ_ABS'; refusing to reuse or replace its copy" >&2
+    return 2
+  fi
+  kind_count=$(grep -c '^kind=' "$meta" 2>/dev/null || true)
+  case "$kind_count" in
+    0) prior_kind=ship ;;
+    1) prior_kind=$(herdr_projection_meta_field_exact "$meta" kind 2>/dev/null) || prior_kind= ;;
+    *) prior_kind= ;;
+  esac
+  if [ -z "$prior_kind" ] || [ "$prior_kind" != "$KIND" ]; then
+    echo "error: existing task record for $ID has kind '${prior_kind:-ambiguous}', not '$KIND'; refusing recovery" >&2
+    return 2
+  fi
+  if [ "$BACKEND" != herdr ] || [ "$FM_BACKEND_VALIDATED_BACKEND" != herdr ] \
+     || [ ! -f "$journal" ] || [ -L "$journal" ]; then
+    echo "error: existing task record for $ID is not an exact Herdr presentation recovery; refusing to reuse or replace its copy" >&2
+    return 2
+  fi
+  SPAWN_PRIOR_RECORD_WT=$prior
 }
 
 # A reused copy is refreshed under the same clean check as a leased one, and
@@ -2081,6 +2128,8 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   HERDR_RECOVERY_WORKSPACE_ID=""
   HERDR_RECOVERY_TAB_ID=""
   HERDR_RECOVERY_PANE_ID=""
+  HERDR_RECOVERY_ENDPOINT_STATE=""
+  HERDR_RECOVERY_TARGET=""
   old_backend=$(fm_backend_of_meta "$meta")
   old_target=$(fm_backend_target_of_meta "$meta")
   [ -n "$old_target" ] || {
@@ -2121,6 +2170,8 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       return 1
     }
     old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
+    HERDR_RECOVERY_ENDPOINT_STATE=$old_state
+    HERDR_RECOVERY_TARGET=$old_target
     case "$old_state" in
       dead|no-agent) return 0 ;;
       live|unknown)
@@ -2137,6 +2188,45 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       return 1
       ;;
   esac
+}
+
+herdr_projection_recovery_preflight_before_refresh() {
+  local seen settled=0
+  HERDR_LABEL_HOME=$FM_HOME
+  HERDR_LAUNCHER_RELATIONSHIP=launcher-home
+  HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+  HERDR_SES=$(fm_backend_herdr_session)
+  HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+  fm_backend_herdr_server_ensure "$HERDR_SES" || {
+    echo "error: herdr presentation recovery could not ensure its exact named session" >&2
+    return 1
+  }
+  spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+    echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
+    return 1
+  }
+  herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || return 1
+  fm_backend_herdr_projection_recovery_allows_flat \
+    "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || return 1
+  HERDR_RECOVERY_PREFLIGHTED=1
+  [ "$HERDR_RECOVERY_ENDPOINT_STATE" = no-agent ] || return 0
+  fm_backend_herdr_send_text_line "$HERDR_RECOVERY_TARGET" \
+    "cd $(shell_quote "$PROJ_ABS")" || {
+    echo "error: existing Herdr shell for $ID could not be moved out of its recorded copy before refresh" >&2
+    return 1
+  }
+  for _ in $(seq 1 "${FM_SPAWN_SETTLE_POLLS:-60}"); do
+    seen=$(fm_backend_herdr_current_path "$HERDR_RECOVERY_TARGET" || true)
+    if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$PROJ_ABS_REAL" ]; then
+      settled=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$settled" -ne 1 ]; then
+    echo "error: existing Herdr shell for $ID did not leave its recorded copy before refresh (last read '${seen:-none}')" >&2
+    return 1
+  fi
 }
 
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
@@ -2198,15 +2288,22 @@ else
 # the project or home path as the pane's starting directory.
 PANE_CWD=$PROJ_ABS
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  if WT=$(spawn_prior_record_worktree); then
+  if spawn_prior_record_worktree; then
+    WT=$SPAWN_PRIOR_RECORD_WT
     # The record's own copy: never returned by this spawn, refreshed in place.
+    herdr_projection_recovery_preflight_before_refresh || exit 1
     validate_spawn_worktree "prior record" "(no endpoint created yet)"
     spawn_refuse_unpushed_head "$WT" || exit 1
   else
-    WT=$(spawn_lease_pool_worktree) || exit 1
-    SPAWN_LEASE_WT=$WT
-    SPAWN_LEASE_RETURN_PENDING=1
-    validate_spawn_worktree "treehouse get --lease" "(no endpoint created yet)"
+    prior_status=$?
+    if [ "$prior_status" -eq 1 ]; then
+      WT=$(spawn_lease_pool_worktree) || exit 1
+      SPAWN_LEASE_WT=$WT
+      SPAWN_LEASE_RETURN_PENDING=1
+      validate_spawn_worktree "treehouse get --lease" "(no endpoint created yet)"
+    else
+      exit 1
+    fi
   fi
   freshen_spawn_worktree_base "$WT" || exit 1
   PANE_CWD=$WT
@@ -2256,19 +2353,21 @@ case "$BACKEND" in
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
-        fm_backend_herdr_server_ensure "$HERDR_SES" || {
-          echo "error: herdr presentation recovery could not ensure its exact named session" >&2
-          exit 1
-        }
-        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
-          exit 1
-        }
-        if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
-          herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+        if [ "$HERDR_RECOVERY_PREFLIGHTED" != 1 ]; then
+          fm_backend_herdr_server_ensure "$HERDR_SES" || {
+            echo "error: herdr presentation recovery could not ensure its exact named session" >&2
+            exit 1
+          }
+          spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+            echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
+            exit 1
+          }
+          if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+            herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+          fi
+          fm_backend_herdr_projection_recovery_allows_flat \
+            "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
         fi
-        fm_backend_herdr_projection_recovery_allows_flat \
-          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \

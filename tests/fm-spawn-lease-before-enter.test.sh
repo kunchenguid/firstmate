@@ -242,11 +242,37 @@ test_lease_without_a_path_refuses_before_any_endpoint() {
   pass "a lease that yields no usable path refuses before any endpoint exists"
 }
 
+test_foreign_record_copy_is_never_reused() {
+  local rec id out status
+  id='lease-foreign-l7'
+  rec=$(make_case foreign-record "$id")
+  read_case_record "$rec"
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$POOL_DIR" \
+    "project=$CASE_DIR/another-project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn reused a copy recorded for another project"
+  assert_contains "$out" "belongs to project '$CASE_DIR/another-project', not '$PROJECT_DIR'" \
+    "spawn did not explain the foreign-project refusal"
+  assert_no_grep "get --lease" "$TREEHOUSE_LOG" \
+    "spawn leased another copy instead of refusing the foreign task record"
+  assert_no_grep "new-window" "$TMUX_REC" \
+    "spawn created a pane after finding a foreign task record"
+  pass "an existing task record can never lend another project its copy"
+}
+
 test_refresh_completes_before_any_pane_exists
 test_pane_git_lock_cannot_refuse_a_clean_copy
 test_refused_launch_returns_a_clean_lease
 test_refusal_after_create_began_retains_the_lease
 test_dirty_copy_stays_leased_and_untouched
 test_lease_without_a_path_refuses_before_any_endpoint
+test_foreign_record_copy_is_never_reused
 
 echo "# all fm-spawn-lease-before-enter tests passed"
