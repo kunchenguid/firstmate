@@ -153,6 +153,11 @@ const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
 // (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
 // request cannot become an unbounded loop of empty turns.
 const PROCESSING_TRIGGERED_ATTEMPTS = 2;
+// One provider failure falls back immediately but leaves room for a transient
+// outage to recover on the next wake. A second consecutive provider failure
+// latches the branch off so later offers stay on main without paying for
+// another predictably broken branch prompt.
+const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
@@ -187,6 +192,22 @@ function offerEligible(offer: BranchDispatchOffer): boolean {
 
 function afkActive(): boolean {
   return existsSync(afkFlag);
+}
+
+// Pi persists provider failures as ordinary assistant messages and resolves
+// AgentSession.prompt(), so promise rejection alone cannot detect them. Read
+// only the final assistant message produced by this prompt: an earlier error
+// from a prior wake, or a retried error followed by success, is not the
+// current prompt's terminal result.
+function settledPromptProviderError(session: AgentSession, messageOffset: number): string | null {
+  const messages = session.messages;
+  for (let index = messages.length - 1; index >= messageOffset; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant") continue;
+    if (message.stopReason !== "error") return null;
+    return message.errorMessage?.trim() || "assistant settled with stopReason error";
+  }
+  return null;
 }
 
 // One model the runtime can hand back, without importing a model type
@@ -454,6 +475,11 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
 export default function (pi: ExtensionAPI) {
   let branch: AgentSession | null = null;
   let branchBroken = "";
+  let consecutiveProviderErrors = 0;
+  // A revision advances only after fm_branch_report has appended successfully,
+  // so a prompt can prove that it created a durable outcome after claiming its
+  // wake rows without relying on provider text or incidental session shape.
+  let durableReportRevision = 0;
   let mainStreaming = false;
   let shuttingDown = false;
   // Bumps at every session replacement so a stale chain continuation from the
@@ -859,6 +885,7 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
+        durableReportRevision += 1;
         const seq = Number(appended.stdout);
         if (!Number.isSafeInteger(seq) || seq < 1 || !reconcileUnreadOutcomes(toolGeneration)) {
           return {
@@ -992,8 +1019,8 @@ ${context.command}
 
   async function ensureBranch(expectedGeneration: number): Promise<AgentSession> {
     if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
-    if (branch) return branch;
     if (branchBroken) throw new Error(branchBroken);
+    if (branch) return branch;
     while (true) {
       const buildRevision = branchSelectionRevision;
       try {
@@ -1091,9 +1118,22 @@ ${context.command}
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
+        const reportRevisionBeforePrompt = durableReportRevision;
+        const messageOffset = session.messages.length;
         await session.prompt(
           `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
         );
+        const providerError = settledPromptProviderError(session, messageOffset);
+        if (providerError) {
+          consecutiveProviderErrors += 1;
+          const detail = `supervision branch provider failed after construction: ${providerError}`;
+          if (consecutiveProviderErrors >= PROVIDER_ERROR_LATCH_THRESHOLD) branchBroken = detail;
+          throw new Error(detail);
+        }
+        consecutiveProviderErrors = 0;
+        if (durableReportRevision <= reportRevisionBeforePrompt) {
+          throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
+        }
         if (!releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }
@@ -1115,6 +1155,7 @@ ${context.command}
   // corrected pin recover in place.
   function releaseBranchForSelectionChange(): void {
     branchBroken = "";
+    consecutiveProviderErrors = 0;
     const stale = branch;
     branch = null;
     if (!stale) return;
@@ -1241,6 +1282,7 @@ ${context.command}
     currentMainSession = ctx?.sessionManager ?? null;
     shuttingDown = false;
     branchBroken = "";
+    consecutiveProviderErrors = 0;
     generation += 1;
     if (actingAsOwner(generation) && !reconcileUnreadOutcomes(generation)) {
       branchBroken = "could not reconcile unread supervision outcomes into main";

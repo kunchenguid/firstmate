@@ -10,17 +10,21 @@
 # resolves the supervision-branch model pin through the branch's REAL
 # ModelRuntime, so a pin the vendor cannot resolve is proven to refuse the
 # build rather than silently running the branch on main's model. A second
-# probe pins the vendor contract that pin rests on: an explicit model must beat
-# the model a reopened session recorded, proven against a local,
-# never-contacted fake provider. A third probe does the same for the
-# supervision-branch effort pin: Pi's own supported-level list is what the
-# picker offers, Pi's own clamp is what lowers a level a model cannot run, and
-# an explicit thinking level must beat the level a reopened session recorded.
+# branch probe intercepts the incident's post-construction 429 in-process and
+# proves that Pi's normally settled error turn returns the wake to main. The
+# model-precedence probe pins the vendor contract that the model pin rests on:
+# an explicit model must beat the model a reopened session recorded, proven
+# against a local, never-contacted fake provider. The effort-precedence probe
+# does the same for the supervision-branch effort pin: Pi's own supported-level
+# list is what the picker offers, Pi's own clamp is what lowers a level a model
+# cannot run, and an explicit thinking level must beat the level a reopened
+# session recorded.
 #
-# No provider call leaves the machine. The branch probe points
+# No provider call leaves the machine. The first branch probe points
 # PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
-# model resolution stays empty by construction. The precedence probe reads
-# only a local placeholder key for its never-contacted fake provider. Run after
+# model resolution stays empty by construction. The 429 probe intercepts its
+# only request before transport, and the precedence probes read only a local
+# placeholder key for their never-contacted fake provider. Run after
 # every Pi upgrade and before trusting refreshed per-harness evidence
 # (docs/verification/runtime-backends.md).
 set -u
@@ -204,7 +208,144 @@ if [ "$status" -ne 0 ] || [ "$out" != "LIVE_OK" ]; then
 fi
 pass "real Pi SDK $PI_VERSION accepts the branch session construction and preserves an unpromptable wake"
 
-# Second probe: the vendor contract the supervision-branch model pin rests on.
+# Real-SDK Mode 2 guard: a constructed AgentSession receives the c1 429 shape
+# from Pi's real OpenAI-compatible adapter. Fetch is intercepted in-process,
+# so no provider request leaves the machine, but Pi still persists the error
+# assistant message and resolves session.prompt() through its production loop.
+errorhome="$TMP_ROOT/error-home"
+erroragentdir="$TMP_ROOT/error-agent-dir"
+mkdir -p "$errorhome/state" "$errorhome/config" "$erroragentdir"
+cat > "$erroragentdir/models.json" <<'JSON'
+{
+  "providers": {
+    "fm-live-error": {
+      "baseUrl": "https://fm-provider-error.invalid/v1",
+      "api": "openai-completions",
+      "apiKey": "fm-live-placeholder",
+      "models": [
+        { "id": "fm-live-error-model", "name": "fm live error", "contextWindow": 8192, "maxTokens": 512 }
+      ]
+    }
+  }
+}
+JSON
+PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$errorhome" FM_ROOT_OVERRIDE="$ROOT" \
+  PI_CODING_AGENT_DIR="$erroragentdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/error-output" 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const home = resolve(process.env.FM_HOME);
+const approvedProject = `${home}/projects/live-error-probe`;
+mkdirSync(approvedProject, { recursive: true });
+writeFileSync(`${home}/state/live-error-probe.meta`, `project=${approvedProject}\nwindow=fm-live-error-probe\n`);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-error-probe.status\tsignal: c1 429 probe\n");
+let providerRequests = 0;
+globalThis.fetch = async (input) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-provider-error.invalid/")) {
+    throw new Error(`unexpected network request in provider-free guard: ${url}`);
+  }
+  providerRequests += 1;
+  return new Response(
+    JSON.stringify({ error: { message: "Monthly usage limit reached", type: "insufficient_quota" } }),
+    { status: 429, headers: { "content-type": "application/json" } },
+  );
+};
+
+const busHandlers = new Map();
+const bus = {
+  on(channel, handler) {
+    busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of busHandlers.get(channel) ?? []) handler(data);
+  },
+};
+const piHandlers = new Map();
+const mainUserMessages = [];
+const pi = {
+  events: bus,
+  on(event, handler) {
+    piHandlers.set(event, [...(piHandlers.get(event) ?? []), handler]);
+  },
+  registerTool() {},
+  registerCommand() {},
+  registerMessageRenderer() {},
+  sendMessage() {},
+  sendUserMessage(content, options) {
+    mainUserMessages.push({ content, options: options ?? {} });
+  },
+  getThinkingLevel() {
+    return "off";
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const sessionCtx = {
+  model: { provider: "fm-live-error", id: "fm-live-error-model" },
+  sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => [] },
+};
+for (const handler of piHandlers.get("session_start") ?? []) await handler({}, sessionCtx);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const offer = {
+  message: "signal: c1 429 probe",
+  projects: [approvedProject],
+  heartbeat: false,
+  eligible: true,
+  accepted: false,
+  accept() {
+    offer.accepted = true;
+  },
+};
+bus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("real-SDK provider-error wake was not accepted after branch construction");
+for (let i = 0; i < 600 && mainUserMessages.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+if (mainUserMessages.length !== 1) throw new Error("settled real-SDK provider error did not fall back to main");
+const fallback = mainUserMessages[0].content;
+if (!fallback.includes("FIRSTMATE WATCHER WAKE: signal: c1 429 probe") ||
+    !fallback.includes("provider failed after construction") ||
+    !fallback.includes("Monthly usage limit reached")) {
+  throw new Error(`real-SDK fallback did not detect the normally settled 429 turn: ${fallback}`);
+}
+if (mainUserMessages[0].options.deliverAs !== "followUp") {
+  throw new Error("real-SDK provider-error fallback was not delivered as a follow-up");
+}
+if (providerRequests !== 1) throw new Error(`non-retryable 429 made ${providerRequests} provider attempts instead of one`);
+if (existsSync(`${home}/state/.branch-eligible-rows`)) {
+  throw new Error("real-SDK provider-error fallback left the claimed row grant active");
+}
+if (existsSync(`${home}/state/branch-outcomes.jsonl`)) {
+  throw new Error("real-SDK provider error fabricated a durable branch outcome");
+}
+const queue = readFileSync(`${home}/state/.wake-queue`, "utf8");
+if (!queue.includes("\tsignal\tlive-error-probe.status\t")) {
+  throw new Error(`real-SDK provider-error fallback lost the durable wake row: ${queue}`);
+}
+const pointer = readFileSync(`${home}/state/.branch-session`, "utf8").trim();
+const { SessionManager } = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+const persistedContext = SessionManager.open(pointer, `${home}/state/branch-session`).buildSessionContext();
+const persistedError = persistedContext.messages
+  .filter((message) => message.role === "assistant")
+  .at(-1);
+if (persistedError?.stopReason !== "error" || !persistedError.errorMessage?.includes("Monthly usage limit reached")) {
+  throw new Error(`real SessionManager did not restore the settled provider error: ${JSON.stringify(persistedError)}`);
+}
+console.log("ERROR_FALLBACK_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/error-output")
+if [ "$status" -ne 0 ] || [ "$out" != "ERROR_FALLBACK_OK" ]; then
+  fail "real-SDK Pi settled-provider-error guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION returns a post-construction 429 wake to main without losing its durable row"
+
+# Third probe: the vendor contract the supervision-branch model pin rests on.
 # An explicit model must beat the model a reopened session recorded, or a pin
 # would silently stop applying the first time the branch reopens. Proven with
 # a local, never-contacted fake provider with a placeholder key, so no request
@@ -291,7 +432,7 @@ if [ "$status" -ne 0 ] || [ "$out" != "MODEL_OK" ]; then
 fi
 pass "real Pi SDK $PI_VERSION applies an explicit branch model on create and over a reopened session's recorded model"
 
-# Third probe: the vendor contract the supervision-branch EFFORT pin rests on.
+# Fourth probe: the vendor contract the supervision-branch EFFORT pin rests on.
 # Same never-contacted local provider, now declaring models with different
 # reasoning ceilings so Pi's own supported-level list and clamp are exercised
 # for real. The recorded-level case needs a session file on disk, and Pi
@@ -458,7 +599,7 @@ if [ "$status" -ne 0 ] || [ "$out" != "EFFORT_OK" ]; then
 fi
 pass "real Pi SDK $PI_VERSION reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level"
 
-# Fourth probe: the real SDK contract deterministic captain delivery rests on.
+# Fifth probe: the real SDK contract deterministic captain delivery rests on.
 # ExtensionAPI.appendEntry must synchronously insert the registered custom entry
 # into an active InteractiveMode transcript, persist it across SessionManager
 # reopen, and keep it out of model context. No model is selected or prompted.

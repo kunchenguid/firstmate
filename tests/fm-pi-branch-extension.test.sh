@@ -158,6 +158,7 @@ export async function createAgentSession(options) {
   const session = {
     options,
     ops: [],
+    messages: [],
     disposed: false,
     async prompt(text) {
       if (globalThis.__fmPromptGate) {
@@ -590,7 +591,11 @@ import { readFileSync, writeFileSync } from "node:fs";
 writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
 fire("session_start", {}, defaultSessionCtx);
 
-// 1. An accepted wake reaches the branch session, never main.
+// 1. An accepted wake reaches the branch session, never main. Keep the
+// scripted turn open until its durable report below, matching a real Pi prompt
+// whose tool calls complete before session.prompt() settles.
+let finishWakePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
 const offer = dispatch("signal: task-9 done: PR https://example.com/pr/9 checks green");
 if (!offer.accepted) throw new Error("branch did not accept the wake offer");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
@@ -643,6 +648,8 @@ console.log(`CACHE_KEY=${rewriteA.prompt_cache_key}`);
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
 const r1 = await report.execute("call-1", { task: "task-9", verdict: "routine", summary: "worker healthy, no action needed", wake: "signal: working" }, undefined, undefined, {});
 if (r1.isError) throw new Error(`routine report failed: ${JSON.stringify(r1)}`);
+finishWakePrompt();
+globalThis.__fmOnBranchPrompt = undefined;
 if (sentToMain.length !== 1) throw new Error("routine report did not merge exactly one note");
 if (sentToMain[0].message.customType !== "fm-branch-merge") throw new Error("merge note has the wrong custom type");
 if (sentToMain[0].options.triggerTurn) throw new Error("routine idle merge must not trigger a turn");
@@ -1182,12 +1189,17 @@ if (readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() !== 
   throw new Error("the processed marker was not initialized at the read cursor on first reconciliation");
 }
 
-// A routine outcome never opens a processing turn.
+// A routine outcome never opens a processing turn. Keep the scripted prompt
+// open through its report, as the real AgentSession does for tool execution.
+let finishRoutinePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishRoutinePrompt = resolve; });
 if (!dispatch("signal: routine wake").accepted) throw new Error("branch refused the routine wake");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "routine branch prompt");
 const session = globalThis.__fmSessions[0];
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
 await report.execute("routine", { task: "task-r", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
+finishRoutinePrompt();
+globalThis.__fmOnBranchPrompt = undefined;
 const routineSeq = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
 runOf();
 if (requests().length !== 0) throw new Error("a routine outcome opened a processing turn");
@@ -1264,12 +1276,16 @@ if (requests().length !== before) throw new Error("an acknowledged outcome was p
 // session's; the old session's tool is generation-refused by design.
 const stale = await report.execute("captain-stale", { task: "task-e", verdict: "captain", summary: "must be refused" }, undefined, undefined, {});
 if (!stale.isError) throw new Error("a replaced branch session's report tool was accepted");
+let finishReplacementPrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishReplacementPrompt = resolve; });
 if (!dispatch("signal: after replacement").accepted) throw new Error("branch refused a wake after the replacement");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "replacement branch session");
 const report2 = globalThis.__fmSessions[1].options.customTools.find((tool) => tool.name === "fm_branch_report");
 const beforePair = requests().length;
 const second = await report2.execute("captain-2", { task: "task-e", verdict: "captain", summary: "PR https://example.com/pr/e is ready for review" }, undefined, undefined, {});
 if (second.isError) throw new Error(`second captain report failed: ${JSON.stringify(second)}`);
+finishReplacementPrompt();
+globalThis.__fmOnBranchPrompt = undefined;
 const seqE = seq + 1;
 const seqF = seq + 2;
 if (requests().length !== beforePair + 1 || !requests().at(-1).message.content.includes(`[seq ${seqE}] task-e:`)) {
@@ -1628,8 +1644,8 @@ test_settled_branch_prompt_releases_unacknowledged_grant() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, realRoot }; })()`);
-const { dispatch, fire, home, realRoot } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, realRoot, mainUserMessages }; })()`);
+const { dispatch, fire, home, realRoot, mainUserMessages } = globalThis.__t;
 const { spawnSync } = await import("node:child_process");
 const { existsSync } = await import("node:fs");
 
@@ -1641,6 +1657,12 @@ for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length === 0; i += 1) 
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if ((globalThis.__fmPrompts ?? []).length !== 1) throw new Error("branch prompt did not settle");
+for (let i = 0; i < 250 && mainUserMessages.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (mainUserMessages.length !== 1 || !mainUserMessages[0].content.includes("produced no durable outcome")) {
+  throw new Error(`settled prompt without a report did not fall back to main: ${JSON.stringify(mainUserMessages)}`);
+}
 for (let i = 0; i < 250 && existsSync(`${home}/state/.branch-eligible-rows`); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -1660,7 +1682,89 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "settled branch turns must release residual grants for main replay: $out"
-  pass "a settled branch turn releases an unacknowledged grant for main replay"
+  pass "a settled branch turn without a durable outcome falls back and releases its grant for main replay"
+}
+
+test_post_construction_provider_error_falls_back_and_latches_branch() {
+  local repo home out status
+  repo="$TMP_ROOT/provider-error-root"
+  home="$TMP_ROOT/provider-error-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, mainUserMessages, sentToMain }; })()`);
+const { dispatch, fire, settle, home, mainUserMessages, sentToMain } = globalThis.__t;
+import { existsSync } from "node:fs";
+
+const entries = [];
+fire("session_start", {}, {
+  sessionManager: {
+    getSessionFile: () => `${home}/main.jsonl`,
+    getEntries: () => entries,
+  },
+});
+let attempt = 0;
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  attempt += 1;
+  if (attempt === 2) {
+    const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+    const recorded = await report.execute(
+      "healthy-between-errors",
+      { task: "branch-driver", verdict: "routine", summary: "healthy branch turn reset the provider-error streak" },
+      undefined,
+      undefined,
+      {},
+    );
+    if (recorded.isError) throw new Error(`healthy report failed: ${JSON.stringify(recorded)}`);
+    session.messages.push({ role: "assistant", content: [], stopReason: "stop" });
+    return;
+  }
+  session.messages.push({
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "429: Monthly usage limit reached",
+  });
+};
+
+const first = dispatch("signal: c1 provider error");
+if (!first.accepted) throw new Error("first provider-error wake was not accepted after branch construction");
+await settle(() => mainUserMessages.length === 1, "first provider-error fallback");
+if (!mainUserMessages[0].content.includes("FIRSTMATE WATCHER WAKE: signal: c1 provider error") ||
+    !mainUserMessages[0].content.includes("provider failed after construction") ||
+    !mainUserMessages[0].content.includes("429: Monthly usage limit reached")) {
+  throw new Error(`provider-error fallback did not detect the normally settled error turn: ${mainUserMessages[0].content}`);
+}
+if (existsSync(`${home}/state/.branch-eligible-rows`)) {
+  throw new Error("provider-error fallback left the claimed row grant active");
+}
+
+const healthy = dispatch("signal: healthy branch turn");
+if (!healthy.accepted) throw new Error("one provider error latched the branch prematurely");
+await settle(() => attempt === 2 && sentToMain.length === 1, "healthy branch report");
+if (mainUserMessages.length !== 1) throw new Error("a healthy reported turn fell back to main");
+
+const third = dispatch("signal: provider error after reset");
+if (!third.accepted) throw new Error("a successful report did not reset the consecutive provider-error streak");
+await settle(() => mainUserMessages.length === 2, "provider-error fallback after reset");
+const fourth = dispatch("signal: consecutive provider error");
+if (!fourth.accepted) throw new Error("the branch latched before the second consecutive provider error settled");
+await settle(() => mainUserMessages.length === 3, "second consecutive provider-error fallback");
+
+const fifth = dispatch("signal: branch must now defer directly to main");
+if (fifth.accepted) throw new Error("two consecutive provider errors did not latch the broken branch");
+await new Promise((resolve) => setTimeout(resolve, 50));
+if (attempt !== 4 || mainUserMessages.length !== 3) {
+  throw new Error(`latched branch still prompted or emitted its own fallback: attempts=${attempt} fallbacks=${mainUserMessages.length}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a settled provider error must fall back to main and repeated provider failures must latch: $out"
+  pass "post-construction provider errors fall back immediately and repeated failures defer later wakes directly to main"
 }
 
 test_main_owned_grant_result_falls_back_to_main() {
@@ -1721,6 +1825,16 @@ let releaseFirst;
 globalThis.__fmPromptGate = new Promise((resolve) => {
   releaseFirst = resolve;
 });
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  await report.execute(
+    "first-drained-elsewhere",
+    { task: "branch-driver", verdict: "routine", summary: "the accepted wake was already reconciled" },
+    undefined,
+    undefined,
+    {},
+  );
+};
 if (!dispatch("signal: first queued wake").accepted) throw new Error("first wake was not accepted");
 for (let i = 0; i < 250 && !globalThis.__fmPromptStarted; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -2808,9 +2922,15 @@ fire("turn_end", {}, {
 });
 unlinkSync(`${home}/state/.lock`);
 releasePrompt();
-await settle(() => mainUserMessages.length === 1, "lost-ownership fallback");
-if (!mainUserMessages[0].content.includes("FIRSTMATE WATCHER WAKE: signal: queued wake")) {
-  throw new Error(`queued wake did not fall back to main: ${mainUserMessages[0].content}`);
+for (let i = 0; i < 1000 && mainUserMessages.length < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (mainUserMessages.length !== 2) {
+  throw new Error(`every accepted wake without an outcome must return to main after ownership loss: ${JSON.stringify(mainUserMessages)}`);
+}
+if (!mainUserMessages[0].content.includes("FIRSTMATE WATCHER WAKE: signal: active wake") ||
+    !mainUserMessages[1].content.includes("FIRSTMATE WATCHER WAKE: signal: queued wake")) {
+  throw new Error(`ownership-loss fallbacks changed accepted wake order: ${JSON.stringify(mainUserMessages)}`);
 }
 await new Promise((resolve) => setTimeout(resolve, 25));
 const session = globalThis.__fmSessions[0];
@@ -3418,6 +3538,7 @@ test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_settled_branch_prompt_releases_unacknowledged_grant
+test_post_construction_provider_error_falls_back_and_latches_branch
 test_main_owned_grant_result_falls_back_to_main
 test_branch_predrain_recheck_noops_already_drained_wake
 test_branch_mirror_filters_order_and_cursor
