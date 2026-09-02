@@ -24,7 +24,8 @@ Each file also starts with a short header comment.
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval                                           |
 | `fm-review-diff.sh`      | Review a crewmate branch against the authoritative base, with optional `--stat` output                              |
 | `fm-watch-arm.sh`        | Verified per-home watcher re-arm; reports `started`, `healthy`, or `FAILED`; `--restart` relaunches only this home's watcher |
-| `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line |
+| `fm-watch.sh`            | Singleton-safe one-shot watcher; blocks until supervision work is due, queues it durably, then exits with one reason line. Senses staleness on the surface each `state/<id>.meta` records - `agent_status` from one `herdr api snapshot` per cycle, or the pre-cutover pane-text hash for a draining tmux window |
+| `fm-sense-lib.sh`        | What supervision senses, split out of the watcher loop so it can be sourced and tested: the one-call herdr agent-state read, what `unknown` means, and `fm_sense_awaiting_verdict` - the state that keeps a crewmate waiting on its Quarterdeck verdict from being reported as wedged |
 | `fm-supervise-daemon.sh` | Presence-gated sub-supervisor for walk-away (`/afk`) supervision: wraps `fm-watch.sh`, self-handles routine wakes in bash, and escalates only captain-relevant events as one verified, batched, single-line digest prefixed with a sentinel marker |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification sourced by bootstrap and guard         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for `/updatefirstmate` origin pulls and no-fetch local secondmate syncs         |

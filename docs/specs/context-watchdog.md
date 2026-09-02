@@ -6,13 +6,15 @@ restart. Built as a daemon sibling of `fm-supervise-daemon.sh`, reusing its
 plumbing (busy-guard via `fm-tmux-lib.sh`, portable mkdir lock via
 `fm-wake-lib.sh`, `state/` sentinel files).
 
-> **Status note (herdr cutover, 2026-08-28).** This spec still describes a tmux-only
-> watchdog, and that is what is implemented. `fm-ctx-statusline.sh` can only stamp
-> `managed:true` for a pane in firstmate's tmux session, and `fm-context-watch.sh`
-> re-confirms the target through tmux at fire time, so no crewmate spawned into a herdr
-> pane is ever selected for a checkpoint - it simply hits its context ceiling with no
-> handoff written. Until the watchdog is re-sourced onto `bin/fm-herdr.sh`, context on a
-> long-running crewmate is watched by hand (AGENTS.md, "herdr workspace hygiene").
+> **Status note (supervision on herdr, 2026-08-31).** The watchdog is no longer tmux-only.
+> Every fire-time touchpoint - the busy read, the checkpoint delivery and the `/clear` -
+> routes by the surface the pane lives on, and MEASURE stamps `managed:true` for a herdr
+> crewmate through `$FM_HERDR_PANE`, the pin `bin/fm-spawn.sh` puts in its launch string.
+> The thresholds, the fresh-handoff guard, the cooldown and the per-secondmate scoping
+> below are unchanged. Gates w4 and w5 in
+> `docs/specs/2026-08-31-supervision-on-herdr.md` cover the herdr path; G1-G9 below still
+> cover the tmux one, which stays live for the drain. Read every "tmux" in this document
+> as "the surface the pane lives on".
 
 ## Components
 
@@ -31,9 +33,10 @@ plumbing (busy-guard via `fm-tmux-lib.sh`, portable mkdir lock via
    `total_tokens >= 185000` (a margin UNDER the 200k floor — fire before, never
    at, 200k); CREW/SECONDMATE fire at `used_pct >= 50`. On threshold AND
    pane-not-busy: fm-send a checkpoint instruction → poll for the handoff file
-   (bounded) → `tmux send-keys '/clear'`. Never fires on a busy pane (reuses
-   `fm_pane_is_busy`). A cooldown marker stops a just-restarted pane re-firing on
-   its stale sentinel.
+   (bounded) → deliver `/clear` (over herdr for a herdr pane, `tmux send-keys` for
+   a draining one). Never fires on a busy pane (`fm_herdr_is_busy` or
+   `fm_pane_is_busy`, per surface). A cooldown marker stops a just-restarted pane
+   re-firing on its stale sentinel.
 
 3. **HANDOFF** — the target session writes `state/handoff-<window>.md` in the
    context-discipline leave-off format (Goal / Done-green / Frontier /
@@ -88,9 +91,11 @@ recycles the session. This protects both the daemon and `fm-compact-crewmate`.
 
 ## The window key
 
-`<window>` is the sanitized tmux `session:window_name` (`fm_ctx_window_key`),
-which persists across `/clear` — so the statusLine (pre-clear) and the bootstrap
-(post-clear) compute the same key for the same pane and the handoff round-trips.
+`<window>` is the sanitized per-pane identity that persists across `/clear`
+(`fm_ctx_window_key`) — the tmux `session:window_name` for a draining pane, and the
+herdr **pane id** (`$FM_HERDR_PANE`, which is also the address herdr steers by) for a
+crewmate on herdr. Either way the statusLine (pre-clear) and the bootstrap (post-clear)
+compute the same key for the same pane and the handoff round-trips.
 Role is captain iff cwd is `$HOME` or the firstmate home (same heuristic the
 bootstrap already used), else crew.
 
@@ -111,5 +116,7 @@ bootstrap already used), else crew.
   scoped watch on secondmate boot
 - **G9** a STALE pre-existing handoff does NOT trigger `/clear`; only a fresh
   post-checkpoint handoff recycles the session
+- **w4/w5** the same cycle on herdr, end to end from the real statusLine, and the
+  busy-guard holding there (`docs/specs/2026-08-31-supervision-on-herdr.md`)
 - crew launch routes its sentinel to the spawning home (so a secondmate's scoped
   watch sees its crewmates), asserted in the secondmate behavior suite

@@ -52,3 +52,10 @@
 | gate-q9-verify-honours-declared-red | frozen | Quarterdeck honours gates/accepted-red.md, ahead of both models |
 | gate-t1-brief-preflight-rules | green | Brief preflight rules: each rule refuses with the offender named, and the clean brief still passes |
 | gate-t1-brief-preflight-spawn-gate | green | Brief preflight spawn gate: an impossible brief is refused before anything is created |
+| gate-w1-herdr-stale-detected | green | A wedged herdr crewmate raises a stale wake; an idle one does not, and the fleet is read in one snapshot call |
+| gate-w2-tmux-stale-unregressed | green | A wedged pre-cutover tmux crewmate still raises a stale wake, and a pre-seam meta is still read correctly |
+| gate-w3-secondmate-idle-silent | green | An idle kind=secondmate herdr pane raises no stale wake, while an ordinary crewmate in the same state does |
+| gate-w4-ctx-herdr-e2e | green | E2E on herdr: measure -> select -> checkpoint -> fresh handoff -> /clear -> rehydrate |
+| gate-w5-ctx-herdr-busy-guard | green | Busy-guard on herdr: an over-threshold pane that is working does NOT fire |
+| gate-w6-awaiting-verdict-not-stale | green | Awaiting a Quarterdeck verdict is not stale, and a rejected claim still is |
+| gate-w7-afk-escalates-herdr-wedge | green | Away-mode escalates a wedged herdr crewmate instead of dropping it |

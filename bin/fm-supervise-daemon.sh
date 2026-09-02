@@ -107,6 +107,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # source this file for its pure functions) get the corrected composer detection.
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_DAEMON_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-herdr.sh disable=SC1091  # sibling lib sourced at runtime; not a shellcheck input
+. "$FM_DAEMON_DIR/fm-herdr.sh"
 
 # --- tunables ---------------------------------------------------------------
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
@@ -269,8 +271,24 @@ status_is_captain_relevant() {
 }
 
 # task id from a tmux window name "<session>:fm-<id>" -> "<id>"
+# THE META IS THE MAPPING, and it has to be, now that a target can be a herdr
+# pane id. `wZ:p1` has no task id encoded in it at all - the old name-strip
+# returned `p1`, so every marker this daemon keyed for a herdr crewmate was
+# filed under a task that does not exist, and the stale recheck below then read
+# "no window" as "torn down, nothing to escalate" and dropped a wedged crewmate
+# in silence. That path was dormant only while fm-watch could not see a herdr
+# pane; it can now, so the mapping moves to the record fm-spawn actually writes.
+#
+# The name-strip stays as the fallback for the drain: a pre-cutover window is
+# `<session>:fm-<id>`, and its meta may live in a home this process is not
+# looking at.
 window_to_task() {
-  local w=$1 t
+  local w=$1 t meta state
+  state=$(_state_root)
+  meta=$(grep -lFx "window=$w" "$state"/*.meta 2>/dev/null | head -1 || true)
+  if [ -n "$meta" ]; then
+    t=$(basename "$meta" .meta); printf '%s' "$t"; return 0
+  fi
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
@@ -410,7 +428,17 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # strips the harness's composer box borders, so a ghost-only or idle bordered
 # claude composer ("│ > … │") is correctly read as empty, not pending (incidents
 # afk-invx-i5 and composer-robust).
-pane_is_busy() { fm_pane_is_busy "$@"; }        # <window>
+# Routed to the surface the target lives on, for the same reason the context
+# watchdog's guard is: a tmux capture-pane aimed at a herdr pane id resolves to
+# nothing, which reads as "not busy" and turns every away-mode stale recheck on
+# a healthy, working herdr crewmate into a captain escalation.
+pane_is_busy() {  # <target>
+  if fm_herdr_is_pane_id "$1"; then
+    fm_herdr_is_busy "$1"
+    return
+  fi
+  fm_pane_is_busy "$@"
+}
 pane_input_pending() { fm_pane_input_pending "$@"; }  # <target>
 
 escalate_add() {  # <state> <distilled-item>
@@ -556,8 +584,21 @@ housekeeping() {  # <state>
 }
 
 # Find a live fm-* window whose task id matches the given marker key.
+# The inverse of window_to_task, and it asks the same record first. Falling
+# straight through to the tmux enumeration is what made "no window" mean "torn
+# down" for every herdr crewmate.
 window_for_task() {  # <task-key>
-  local key=$1 w t
+  local key=$1 w t meta state
+  state=$(_state_root)
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    t=$(basename "$meta" .meta)
+    [ "$(_stale_key "$t")" = "$key" ] || continue
+    w=$(grep '^window=' "$meta" | tail -1 | cut -d= -f2- || true)
+    [ -n "$w" ] || continue
+    printf '%s' "$w"; return 0
+  done
+  # DRAIN ONLY - a pre-cutover window whose meta this home does not hold.
   for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
     t=$(window_to_task "$w")
     [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # fm-ctx-statusline.sh — MEASURE component of the firstmate context watchdog.
 #
+# The `tmux_target` field keeps its name for compatibility with every sentinel
+# already on disk and every reader of them; it holds a herdr PANE ID for a
+# crewmate spawned onto herdr, and a tmux pane for one still draining.
+#
 # A Claude Code statusLine script: on every render Claude pipes a JSON blob on
 # stdin. We read context_window.used_percentage, context_window.current_usage's
 # token fields, exceeds_200k_tokens, transcript_path, and session_id, then write a
@@ -49,18 +53,14 @@ print(d.get("session_id","") or "")' 2>/dev/null || true)"
   KEY="$(fm_ctx_window_key "${SID:-unknown}")"
 fi
 ROLE="$(fm_ctx_role "$CWD")"
-TARGET="${TMUX_PANE:-}"
 
 # Managed-scope: this GLOBAL statusLine runs in EVERY Claude session, but only
-# firstmate-owned panes (those in the firstmate tmux session) may ever be steered.
-# Stamp managed:true ONLY for those — ad-hoc/personal panes get managed:false and
-# the daemon will skip them. Opt-in by construction.
-SESS=""
-if [ -n "${TMUX_PANE:-}" ]; then
-  SESS=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null) || SESS=""
-fi
+# firstmate-owned panes may ever be steered. Stamp managed:true ONLY for those —
+# ad-hoc/personal panes get managed:false and the daemon will skip them. Opt-in
+# by construction, on whichever surface the pane lives on; the rule and the
+# target it yields have one owner in fm-ctx-lib.sh.
 MANAGED=false
-fm_ctx_session_managed "$SESS" && MANAGED=true
+TARGET="$(fm_ctx_managed_target)" && MANAGED=true
 
 # Parse the measurement + write the sentinel atomically. Python (already a
 # firstmate dependency — see fm-captain-bootstrap.sh) so we need no jq.

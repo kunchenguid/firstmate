@@ -8,15 +8,21 @@
 #   1. fm-send a "checkpoint now: write your leave-off doc to state/handoff-<win>.md
 #      then stop" instruction into the pane.
 #   2. poll until that handoff file exists (bounded by FM_CTX_HANDOFF_TIMEOUT).
-#   3. tmux send-keys '/clear' into the pane (ONLY after the handoff exists — never
-#      wipe a session that has not checkpointed).
+#   3. send '/clear' into the pane (ONLY after the handoff exists — never wipe a
+#      session that has not checkpointed).
 #   4. mark a cooldown so the (now-stale) sentinel does not immediately re-fire.
 #
 # Thresholds live in fm-ctx-lib.sh: CAPTAIN fires at total context >= FM_CTX_CAPTAIN_FLOOR
 # (~185k, a margin UNDER the 200k floor — fire before, never at, 200k);
-# CREW/SECONDMATE fire at used_pct >= FM_CTX_CREW_PCT (~50). The busy-guard reuses
-# fm_pane_is_busy from fm-tmux-lib.sh — the SAME detector the away-mode daemon and
-# fm-send use — so a pane mid-turn is never interrupted.
+# CREW/SECONDMATE fire at used_pct >= FM_CTX_CREW_PCT (~50).
+#
+# ONE SURFACE PER PANE, chosen by what the pane IS, never by ambience. Every
+# fire-time touchpoint - the busy read, the checkpoint delivery, the /clear -
+# routes through bin/fm-herdr.sh for a herdr pane and through the pre-cutover
+# tmux path for a window still draining. The busy-guard is load-bearing on both:
+# on tmux it reuses fm_pane_is_busy, the SAME detector the away-mode daemon and
+# fm-send use; on herdr it reads agent_status directly, so a pane mid-turn is
+# never interrupted on either.
 #
 # The pure decision functions below (fm_ctx_needs_restart / _ctx_eligible /
 # fm_ctx_select / fm_ctx_can_fire) are sourceable and unit-tested; the main loop
@@ -30,6 +36,7 @@
 #   FM_CTX_HANDOFF_POLL      seconds between handoff existence checks (default 2)
 #   FM_CTX_SEND_CMD          override the instruction-send command (testing); receives
 #                            "<target> <message>" appended. Default: bin/fm-send.sh.
+#   FM_CTX_CLEAR_CMD         override the /clear delivery (testing); receives "<target>".
 #   FM_CTX_CAPTAIN_FLOOR / FM_CTX_CREW_PCT   thresholds (see fm-ctx-lib.sh)
 set -u
 
@@ -41,6 +48,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_CTX_DIR/fm-ctx-lib.sh"
 # shellcheck source=bin/fm-tmux-lib.sh disable=SC1091  # sibling lib sourced at runtime; not a shellcheck input
 . "$FM_CTX_DIR/fm-tmux-lib.sh"
+# shellcheck source=bin/fm-herdr.sh disable=SC1091  # sibling lib sourced at runtime; not a shellcheck input
+. "$FM_CTX_DIR/fm-herdr.sh"
 
 POLL_DEFAULT=20
 COOLDOWN_DEFAULT=600
@@ -139,17 +148,56 @@ fm_ctx_target_for() {  # <statedir> <key>
   printf '%s' "$t"
 }
 
-# _ctx_pane_busy: the busy-guard — the SAME detector the away-mode daemon uses.
-_ctx_pane_busy() { fm_pane_is_busy "$1"; }  # <target>
+# _ctx_pane_busy: the busy-guard, routed to the surface the target lives on.
+#
+# THIS GUARD IS LOAD-BEARING: firing on a busy pane interrupts a crewmate
+# mid-turn and then /clears it. On tmux it is the SAME text detector the
+# away-mode daemon and fm-send use. On herdr it is better than that - a real
+# lifecycle read (`agent_status == working`) rather than a regex over rendered
+# text, so a pane whose terminal title merely contains the word "working" is no
+# longer mistaken for one that is.
+_ctx_pane_busy() {  # <target>
+  if fm_herdr_is_pane_id "$1"; then
+    fm_herdr_is_busy "$1"
+    return
+  fi
+  fm_pane_is_busy "$1"
+}
 
-# _ctx_target_in_session: 0 iff <target> resolves, RIGHT NOW, to a live pane in the
-# firstmate tmux session. Defense-in-depth at fire time: even if a sentinel claimed
-# managed:true, we re-confirm the actual pane belongs to firstmate before sending
-# keys. Any tmux error / unresolvable / foreign-session target -> return 1 (never
-# fire on a pane we cannot positively confirm is ours).
-_ctx_target_in_session() {  # <target>
-  local target=$1 sess
+# _ctx_target_in_session: 0 iff <target> is, RIGHT NOW, a pane firstmate owns.
+# Defense-in-depth at fire time: even if a sentinel claimed managed:true, the
+# actual pane is re-confirmed as ours before anything is sent. Anything
+# unresolvable, foreign or unreadable -> return 1 (never fire on a pane we
+# cannot positively confirm is ours).
+#
+# The two surfaces answer that question with different evidence, and the herdr
+# answer is the stronger one. Under tmux, ownership is a SESSION NAME - anything
+# that lands in the `firstmate` session counts. Under herdr it is this home's
+# own RECORD: a meta whose `window=` is exactly this pane and whose `mux=` says
+# herdr, which is the same discriminator fm-send, fm-peek and the watcher route
+# on. A herdr pane the fleet never spawned has no meta, so the captain's own
+# panes - and another home's crewmates - are not ours to steer.
+# The state dir is PASSED, never re-derived from the environment: fm_ctx_can_fire
+# is already holding the one the sentinel came from, and a scoped watch
+# (--scope <home>) or a test seam can make _ctx_state_root's answer a different
+# directory entirely. Re-deriving it here would ask one home's metas about
+# another home's pane, which is how a fire gate silently answers the wrong
+# question.
+_ctx_target_in_session() {  # <statedir> <target>
+  local state=$1 target=$2 sess m
   [ -n "$target" ] || return 1
+  if fm_herdr_is_pane_id "$target"; then
+    # Read LINES, not words: a meta path can contain a space (FM_HOME is a
+    # user-chosen directory), and word-splitting a filename into fragments would
+    # silently answer "not ours" for a pane that is.
+    while IFS= read -r m; do
+      [ -n "$m" ] || continue
+      grep -q '^mux=herdr$' "$m" && return 0
+    done <<EOF
+$(grep -lFx "window=$target" "$state"/*.meta 2>/dev/null)
+EOF
+    return 1
+  fi
   sess=$(tmux display-message -p -t "$target" '#{session_name}' 2>/dev/null) || return 1
   fm_ctx_session_managed "$sess"
 }
@@ -160,7 +208,7 @@ _ctx_target_in_session() {  # <target>
 fm_ctx_can_fire() {  # <statedir> <key> <target>
   local state=$1 key=$2 target=$3
   _ctx_eligible "$state" "$key" || return 1
-  _ctx_target_in_session "$target" || return 1
+  _ctx_target_in_session "$state" "$target" || return 1
   _ctx_pane_busy "$target" && return 1
   return 0
 }
@@ -185,6 +233,23 @@ _ctx_send() {  # <target> <msg>
 }
 
 _ctx_mark_fired() { local state=$1 key=$2; _ctx_now > "$state/.ctx-fired-$key"; }
+
+# _ctx_clear: issue the conversation reset. Best-effort on BOTH surfaces, as the
+# tmux path always was: the handoff is already on disk by the time this runs, so
+# a delivery that cannot be confirmed loses nothing that was not written down.
+_ctx_clear() {  # <target>
+  if [ -n "${FM_CTX_CLEAR_CMD:-}" ]; then
+    eval "$FM_CTX_CLEAR_CMD \"\$1\"" || true
+    return 0
+  fi
+  if fm_herdr_is_pane_id "$1"; then
+    fm_herdr_prompt "$1" '/clear' >/dev/null 2>&1 || true
+    return 0
+  fi
+  tmux send-keys -t "$1" -l '/clear' 2>/dev/null || true
+  tmux send-keys -t "$1" Enter 2>/dev/null || true
+  return 0
+}
 
 # fm_ctx_fire_once: the checkpoint -> wait-for-FRESH-handoff -> /clear sequence for
 # one window. Returns 0 only if a handoff written AFTER this checkpoint appeared and
@@ -226,9 +291,11 @@ fm_ctx_fire_once() {  # <statedir> <key>
     sleep "$step"
     i=$((i + 1))
   done
-  # A fresh handoff exists — safe to recycle the session.
-  tmux send-keys -t "$target" -l '/clear' 2>/dev/null || true
-  tmux send-keys -t "$target" Enter 2>/dev/null || true
+  # A fresh handoff exists — safe to recycle the session. Routed to the surface
+  # the pane lives on: on herdr, `/clear` is submitted as a prompt (the pane is
+  # not busy, so the acknowledged path applies), and the tmux keystrokes are the
+  # pre-cutover path, unchanged.
+  _ctx_clear "$target"
   _ctx_mark_fired "$state" "$key"
   _ctx_log "fire: /clear issued for $key (fresh handoff present)"
   return 0

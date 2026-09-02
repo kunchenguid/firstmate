@@ -462,6 +462,21 @@ fm_herdr_read() {  # <pane> [lines] [source]
   errfile=$(mktemp "${TMPDIR:-/tmp}/fm-herdr-read.XXXXXX")
   if out=$(herdr pane read "$pane" --source "$src" --lines "$lines" --format text 2>"$errfile"); then
     rm -f "$errfile"
+    # A PANE WITH NO AGENT HAS NO `recent`. Verified against herdr 0.8.2: for a
+    # bare shell, `agent read` answers agent_not_found and `pane read --source
+    # recent` then SUCCEEDS with empty output, because the scrollback source is
+    # backed by the agent session. So the read came back looking like a silent
+    # pane while the pane was plainly showing text - which is exactly the
+    # confusion this function's error path exists to prevent, arriving through
+    # the success path instead.
+    #
+    # This does NOT unify the two sources; the header above is still the rule.
+    # `visible` is consulted only where `recent` has no content to give: the
+    # agent path is untouched, and an agent pane's empty `recent` never reaches
+    # here because `agent read` succeeds first.
+    if [ -z "$out" ] && [ "$src" = recent ]; then
+      out=$(herdr pane read "$pane" --source visible --lines "$lines" --format text 2>/dev/null) || out=""
+    fi
     [ -z "$out" ] || printf '%s\n' "$out"
     return 0
   fi
@@ -469,6 +484,24 @@ fm_herdr_read() {  # <pane> [lines] [source]
   rm -f "$errfile"
   echo "fm-herdr: could not read $pane: ${err:-herdr gave no output}" >&2
   return 1
+}
+
+# Is this target a herdr PANE ID, `w<id>:p<id>`? BOTH halves are base-36, not
+# decimal: the pane counter rolls into letters at the tenth pane, so a live
+# server holds `wM:p9` and `wM:pA` side by side, and base-36 here means
+# UPPERCASE - verified against herdr 0.8.2, whose counters read `wM:p9`,
+# `wM:pA`, `wN:p1`, never a lowercase digit.
+#
+# The match is ANCHORED to the shape the binary actually emits, because the same
+# test errs both ways: a glob whose tails are `*` also swallows `work:prod-fix`,
+# `web:pane1` and `wide:print`, which are tmux session:window pairs. Keeping the
+# lowercase words on the tmux side is what stops herdr verbs being aimed at them.
+#
+# ONE OWNER. fm_herdr_resolve asks this, and so does the context watchdog's
+# fire-time confirmation; a second copy of the pattern is how the two would come
+# to disagree about the same pane.
+fm_herdr_is_pane_id() {  # <target>
+  [[ $1 =~ ^w[0-9A-Z]+:p[0-9A-Z]+$ ]]
 }
 
 fm_herdr_cwd() {  # <pane>
@@ -677,22 +710,10 @@ fm_herdr_resolve() {  # <window-or-target> <state-dir>
         mux=$(grep '^mux=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
         if [ "$mux" = herdr ]; then FM_HERDR_DRAIN=0; else FM_HERDR_DRAIN=1; fi
       else
-        # A herdr pane id is `w<id>:p<id>`, and BOTH halves are base-36, not
-        # decimal: the pane counter rolls into letters at the tenth pane, so a
-        # live server holds `wM:p9` and `wM:pA` side by side. Matching only
-        # digits sent every pane past the ninth down the tmux path, at a session
-        # that does not exist - peek and steer broke for exactly the crewmates a
-        # busy fleet has most of. Anything else with a colon is a tmux
-        # session:window, which is drain-only.
-        #
-        # The match is ANCHORED to the shape the binary actually emits, because
-        # the same test errs both ways: a glob whose tails are `*` also swallows
-        # `work:prod-fix`, `web:pane1` and `wide:print`, which are tmux
-        # session:window pairs, and sends herdr verbs at them. Base-36 here
-        # means UPPERCASE - verified against herdr 0.8.2, whose counters read
-        # `wM:p9`, `wM:pA`, `wN:p1`, never a lowercase digit - so the lowercase
-        # words that make a plausible tmux session stay on the drain path.
-        if [[ $want =~ ^w[0-9A-Z]+:p[0-9A-Z]+$ ]]; then
+        # Anything else with a colon is a tmux session:window, which is
+        # drain-only. The shape rule itself lives in fm_herdr_is_pane_id, which
+        # the context watchdog's fire-time confirmation asks too.
+        if fm_herdr_is_pane_id "$want"; then
           FM_HERDR_DRAIN=0
         else
           FM_HERDR_DRAIN=1

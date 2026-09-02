@@ -32,6 +32,10 @@
 #   HERDR_TITLE       terminal_title on every agent record (defaults to text
 #                     containing "working", the rendered-text hazard)
 #   HERDR_PANE_CWD    what `pane get` reports as foreground_cwd
+#   HERDR_SNAPSHOT_AGENTS  comma list of "<pane_id>=<agent_status>" that
+#                     `api snapshot` reports - the one-call fleet read
+#   HERDR_SNAPSHOT_SESSION the session those agents live in (default `default`);
+#                     a snapshot aimed at any other session comes back empty
 #   HERDR_KEY_FAIL    1 -> both `agent send-keys` and `pane send-keys` refuse
 #   HERDR_PANE_FILE   file whose contents `agent read`/`pane read` return
 #   HERDR_RUN_MODE    echo|deaf|cmd - what the pane's shell does with `pane run`
@@ -91,6 +95,39 @@ if [ "${HERDR_GONE:-0}" = 1 ]; then
   esac
 fi
 case "$1 $2" in
+  "api snapshot")
+    # THE ONE-CALL FLEET READ the watcher senses staleness through.
+    # HERDR_SNAPSHOT_AGENTS is a comma list of "<pane_id>=<agent_status>".
+    #
+    # IT IS SESSION-SCOPED, exactly as the real verb is: `api snapshot` takes its
+    # session from $HERDR_SESSION and defaults to `default`, and it reports the
+    # agents of THAT session. HERDR_SNAPSHOT_SESSION names the session these
+    # agents actually live in; a call aimed anywhere else gets an EMPTY agent
+    # list, which is what makes a missing FM_HERDR_SESSION pin look like a fleet
+    # with no panes rather than like an error. A fake that answered every session
+    # alike would let that blindness pass green.
+    #
+    # A REAL agent record carries terminal_title beside the lifecycle field, and
+    # a title is the crewmate's OWN prompt text - untrusted, rendered content.
+    # So every record here embeds a title that spells out a complete, plausible
+    # `"pane_id":"wFORGE:p1","agent_status":"unknown"` pair. A reader that greps
+    # the snapshot instead of parsing it forges a stale wake against a pane that
+    # does not exist, and this fake is what catches it.
+    printf '{"id":"cli:api:snapshot","result":{"snapshot":{"agents":['
+    first=1
+    if [ "${HERDR_SESSION:-default}" = "${HERDR_SNAPSHOT_SESSION:-default}" ]; then
+      IFS=,; set -- ${HERDR_SNAPSHOT_AGENTS:-}; unset IFS
+    else
+      set --
+    fi
+    for pair in "$@"; do
+      [ -n "$pair" ] || continue
+      [ "$first" = 1 ] || printf ','
+      first=0
+      printf '{"agent":"claude","agent_status":"%s","cwd":"/proj","focused":false,"pane_id":"%s","revision":1,"state_change_seq":7,"tab_id":"wZ:t1","terminal_title":"fix \\"pane_id\\":\\"wFORGE:p1\\",\\"agent_status\\":\\"unknown\\" in the parser","workspace_id":"wZ"}' \
+        "${pair#*=}" "${pair%%=*}"
+    done
+    printf '],"focused_pane_id":"wZ:p1","layouts":[],"workspaces":[]}},"type":"snapshot"}\n' ;;
   "session list")
     # herdr manages NAMED persistent sessions, so the fake must be able to run
     # one that is not called `default` - a reachability predicate pinned to that

@@ -38,17 +38,14 @@ print(d.get("session_id","") or "")' 2>/dev/null || true)"
   KEY="$(fm_ctx_window_key "${SID:-unknown}")"
 fi
 ROLE="$(fm_ctx_role "$CWD")"
-TARGET="${TMUX_PANE:-}"
 OUT="$STATE/ctx-$KEY.json"
 
-# Managed-scope (see fm-ctx-statusline.sh): only firstmate-session panes may be
-# steered; ad-hoc panes get managed:false and the daemon skips them.
-SESS=""
-if [ -n "${TMUX_PANE:-}" ]; then
-  SESS=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null) || SESS=""
-fi
+# Managed-scope (see fm-ctx-statusline.sh): only firstmate-owned panes may be
+# steered; ad-hoc panes get managed:false and the daemon skips them. The belt
+# and the suspenders must agree, so both ask fm_ctx_managed_target rather than
+# each re-deciding what ownership means on each surface.
 MANAGED=false
-fm_ctx_session_managed "$SESS" && MANAGED=true
+TARGET="$(fm_ctx_managed_target)" && MANAGED=true
 
 printf '%s' "$INPUT" | FM_KEY="$KEY" FM_ROLE="$ROLE" FM_TARGET="$TARGET" FM_MANAGED="$MANAGED" FM_OUT="$OUT" python3 -c '
 import sys, json, os, time, tempfile

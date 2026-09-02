@@ -28,12 +28,15 @@ FM_CTX_INJECT_CAP="${FM_CTX_INJECT_CAP:-10000}"          # max chars injected in
 # The MEASURE statusLine is GLOBAL (~/.claude/settings.json), so EVERY Claude
 # session on the machine — including Stone's ad-hoc/personal ones — writes a
 # ctx-<window>.json sentinel into firstmate's state/. The watchdog must NEVER
-# /clear a session it does not own. The reliable, opt-in-by-construction signal
-# for "firstmate owns this pane" is the tmux SESSION: fm-spawn.sh launches every
-# crew/secondmate window (`fm-<id>`) AND the captain (Cortana) inside the single
-# firstmate tmux session. So a pane is managed iff its tmux session is
-# FM_TMUX_SESSION. Ad-hoc panes live in other sessions → not managed → never
-# touched. (Override for nested/renamed deployments or tests.)
+# /clear a session it does not own, so ownership is opt-in by construction on
+# each surface (fm_ctx_managed_target is the one place that decides):
+#   * tmux  - the pane's SESSION. fm-spawn.sh launched every pre-cutover
+#             crew/secondmate window (`fm-<id>`) AND the captain (Cortana) inside
+#             the single firstmate tmux session, so a pane is managed iff its
+#             session is FM_TMUX_SESSION. Ad-hoc panes live in other sessions.
+#   * herdr - $FM_HERDR_PANE, injected by fm-spawn.sh into the launch string of a
+#             pane it created. Nothing else sets it.
+# (Override FM_TMUX_SESSION for nested/renamed deployments or tests.)
 FM_TMUX_SESSION="${FM_TMUX_SESSION:-firstmate}"
 
 # fm_ctx_sanitize_key: make a tmux target / arbitrary label safe as a filename
@@ -45,11 +48,14 @@ fm_ctx_sanitize_key() {  # <raw>
   printf '%s' "$s"
 }
 
-# fm_ctx_window_key: resolve a STABLE per-pane key that survives a /clear (the tmux
-# window persists across the conversation reset, so the statusline-before-clear and
-# the bootstrap-after-clear compute the same key from the same pane).
+# fm_ctx_window_key: resolve a STABLE per-pane key that survives a /clear, so the
+# statusline-before-clear and the bootstrap-after-clear compute the same key from
+# the same pane and the handoff round-trips. Both surfaces have such an identity:
+# a tmux window persists across the conversation reset, and so does a herdr PANE
+# ID - which is also the address herdr itself steers by.
 # Priority: FM_CTX_WINDOW override (tests) > tmux session:window via $TMUX_PANE >
-# the caller-supplied fallback (e.g. session_id) > "unknown".
+# the herdr pane id pinned into the session by fm-spawn ($FM_HERDR_PANE) > the
+# caller-supplied fallback (e.g. session_id) > "unknown".
 fm_ctx_window_key() {  # [fallback]
   local fallback="${1:-}" w
   if [ -n "${FM_CTX_WINDOW:-}" ]; then
@@ -59,8 +65,41 @@ fm_ctx_window_key() {  # [fallback]
     w=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_name}' 2>/dev/null) || w=""
     if [ -n "$w" ]; then fm_ctx_sanitize_key "$w"; return 0; fi
   fi
+  if [ -n "${FM_HERDR_PANE:-}" ]; then
+    fm_ctx_sanitize_key "$FM_HERDR_PANE"; return 0
+  fi
   if [ -n "$fallback" ]; then fm_ctx_sanitize_key "$fallback"; return 0; fi
   printf 'unknown'
+}
+
+# fm_ctx_managed_target: the target a sentinel should steer, and whether
+# firstmate may steer it at all - the MEASURE side of "the watchdog owns this
+# pane". Prints the target; returns 0 when it is managed, 1 otherwise.
+#
+# The statusLine is GLOBAL, so EVERY Claude session on the machine writes a
+# sentinel into some firstmate state dir. Ownership must therefore be OPT-IN BY
+# CONSTRUCTION on both surfaces, and on both it is:
+#   * tmux  - the pane is in firstmate's tmux session (FM_TMUX_SESSION), which is
+#             where fm-spawn put every pre-cutover crewmate and the captain;
+#   * herdr - $FM_HERDR_PANE is set, which ONLY bin/fm-spawn.sh injects, into the
+#             launch string of a pane it created for the fleet. A captain's own
+#             herdr pane inherits nothing and so is never managed.
+# The daemon re-confirms the herdr half against this home's metas at fire time,
+# so a stale or forged pin cannot by itself get a pane steered.
+fm_ctx_managed_target() {
+  local sess=""
+  if [ -n "${TMUX_PANE:-}" ]; then
+    printf '%s' "$TMUX_PANE"
+    sess=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null) || sess=""
+    fm_ctx_session_managed "$sess"
+    return
+  fi
+  if [ -n "${FM_HERDR_PANE:-}" ]; then
+    printf '%s' "$FM_HERDR_PANE"
+    return 0
+  fi
+  printf ''
+  return 1
 }
 
 # fm_ctx_role: captain iff the pane's cwd is $HOME or the firstmate home — the same

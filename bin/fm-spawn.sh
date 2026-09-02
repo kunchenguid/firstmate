@@ -602,9 +602,17 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 # print NEEDS_HERDR_SERVER while the captain's pinned session is plainly up, and
 # `fm_herdr_require` would then stop every spawn it tried.
 sq_session=$(shell_quote "$(fm_herdr_session)")
+# FM_HERDR_PANE is the session's own address, and it rides here for the same
+# reason HERDR_SESSION does: nothing in this process reaches the agent. The
+# context watchdog's MEASURE half (bin/fm-ctx-lib.sh, fm_ctx_managed_target) has
+# no other way to learn which pane it is in - herdr sets no environment variable
+# in a pane - so without this pin every herdr crewmate stamps managed:false and
+# is never selected for a compaction checkpoint. That is not a degraded path: it
+# simply hits its context ceiling and dies with no handoff written.
+sq_pane=$(shell_quote "$T")
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home HERDR_SESSION=$sq_session $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home HERDR_SESSION=$sq_session FM_HERDR_PANE=$sq_pane $LAUNCH"
 else
   # Crew/scout: pin the launched session's FM_HOME to the SPAWNING home so its context
   # sentinels (ctx-<key>.json, written by the global statusLine/stop-hook) land in THIS
@@ -615,7 +623,7 @@ else
   # is its worktree, never the home, so it stays role=crew. Operational overrides are
   # cleared (as for secondmates) so the session resolves state purely from FM_HOME.
   sq_home=$(shell_quote "$FM_HOME")
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home HERDR_SESSION=$sq_session $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home HERDR_SESSION=$sq_session FM_HERDR_PANE=$sq_pane $LAUNCH"
 fi
 # Never type a launch command into a shell that has not proven it is ready.
 # Inferring readiness from a cwd change is what left two secondmates as dead

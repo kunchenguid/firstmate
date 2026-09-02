@@ -3,7 +3,9 @@
 # Blocks until supervision work is due, then exits printing one reason line:
 #   signal: <file>...     a crewmate wrote a status line or a turn-end hook fired; signals
 #                         landing within FM_SIGNAL_GRACE of each other coalesce into one wake
-#   stale: <window>       a crewmate pane stopped changing and shows no busy signature
+#   stale: <window>       a crewmate stopped without reporting - a herdr agent whose
+#                         status is `unknown`, or a pre-cutover tmux pane that stopped
+#                         changing and shows no busy signature
 #   check: <script>: <out> a per-task check script (e.g. merged-PR poll) produced output
 #   heartbeat              fleet review due; starts at FM_HEARTBEAT and backs off to FM_HEARTBEAT_MAX
 # For normal supervision, re-arm after each wake by running bin/fm-watch-arm.sh
@@ -19,6 +21,8 @@ mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-sense-lib.sh
+. "$SCRIPT_DIR/fm-sense-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -82,22 +86,21 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-window_kind() {
-  local w=$1 meta mw kind
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    mw=$(grep '^window=' "$meta" | cut -d= -f2- || true)
-    [ "$mw" = "$w" ] || continue
-    kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
-    [ -n "$kind" ] || kind=ship
-    echo "$kind"
-    return 0
-  done
-  echo unknown
-}
-
-recorded_windows() {
-  local meta w seen=
+# Every direct report this home records, with the four facts the stale sense
+# needs: the target, the surface that minted it (mux=herdr, or absent for a
+# pre-cutover tmux window still draining), its kind, and its task id. Read from
+# the meta and nothing else - the same discriminator fm-send and fm-peek route
+# on, so one crewmate can never be observed through another's verbs.
+# NO FIELD IS EVER EMPTY, and that is not tidiness. TAB is IFS *whitespace*, so
+# `IFS=<tab> read` COLLAPSES a run of tabs and an empty middle field simply
+# vanishes - every later field then shifts left by one. A meta with no `mux=`
+# line (the whole drain) read its kind as its mux and its id as its kind, which
+# silently sent every secondmate down the ordinary stale path. So `mux` is
+# normalised here to the routing answer itself: `herdr` means herdr, and
+# anything else - including absent - means the pre-cutover drain, which is
+# exactly the rule fm_herdr_resolve applies.
+recorded_targets() {  # -> "<window>\t<mux>\t<kind>\t<id>"
+  local meta w mux kind id seen=
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     w=$(grep '^window=' "$meta" | cut -d= -f2- || true)
@@ -106,7 +109,12 @@ recorded_windows() {
       *"|$w|"*) continue ;;
     esac
     seen="$seen|$w|"
-    printf '%s\n' "$w"
+    mux=$(grep '^mux=' "$meta" | tail -1 | cut -d= -f2- || true)
+    [ "$mux" = herdr ] || mux=tmux
+    kind=$(grep '^kind=' "$meta" | tail -1 | cut -d= -f2- || true)
+    [ -n "$kind" ] || kind=ship
+    id=$(basename "$meta" .meta)
+    printf '%s\t%s\t%s\t%s\n' "$w" "$mux" "$kind" "$id"
   done
 }
 
@@ -233,38 +241,106 @@ EOF
     wake "$reason"
   fi
 
-  # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
-  # signature means the crewmate finished, is waiting, or is wedged. Each distinct
-  # stale state is reported once (.stale-* remembers the hash already reported).
-  while IFS= read -r w; do
+  # Layer 1 backbone: "the crewmate stopped without reporting".
+  #
+  # ONE loop, TWO senses, chosen by what the meta records - never by the shape
+  # of the target and never by ambience, exactly as fm-send and fm-peek route.
+  # A herdr crewmate's lifecycle state is READ (`agent_status`); a pre-cutover
+  # tmux window's is still INFERRED from two identical pane hashes with no busy
+  # footer. The bookkeeping around both is identical and shared below, so the
+  # coalescing, the once-per-distinct-state reporting (.stale-*) and the durable
+  # wake queue behave the same whichever sense produced the observation.
+  #
+  # The herdr snapshot is fetched at most ONCE per cycle, and only when this
+  # home actually has a herdr crewmate, so the cost is O(1) at any fleet width
+  # and zero for a home that has none.
+  snap=""; snap_tried=0
+  while IFS=$(printf '\t') read -r w mux kind id; do
+    [ -n "$w" ] || continue
     # A secondmate idling on its own watcher is healthy. Its parent supervises
     # it through status writes and heartbeats, not pane-idle staleness.
-    [ "$(window_kind "$w")" = secondmate ] && continue
-    tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
-    h=$(printf '%s' "$tail40" | hash_pane)
+    [ "$kind" = secondmate ] && continue
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
     sf="$STATE/.stale-$key"
-    prev=$(cat "$hf" 2>/dev/null || true)
-    if [ "$h" = "$prev" ]; then
-      n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
-      echo "$n" > "$cf"
+    obs=""; stopped=0
+    if [ "$mux" = herdr ]; then
+      if [ "$snap_tried" = 0 ]; then
+        snap_tried=1
+        snap=$(fm_sense_herdr_statuses) || snap=""
+      fi
+      st=$(fm_sense_herdr_status "$w" "$snap")
+      # No row means herdr knows of no agent in that pane. That is orphan
+      # territory - deliberately not sensed here - and an unreachable herdr
+      # produces the same emptiness, so both stay silent rather than inventing
+      # a wake nobody can act on.
+      #
+      # RAISING NOTHING IS NOT THE SAME AS REMEMBERING NOTHING. Whatever episode
+      # was in progress is over: herdr no longer knows of an agent there. So the
+      # bookkeeping is reset before continuing, which is what keeps the relaunch
+      # path honest - `stuck-crewmate-recovery` restarts an agent IN THE SAME
+      # PANE, and a pane briefly holding no agent is exactly what that looks
+      # like. Carrying the old suppressor across it would let a crewmate that
+      # wedges, is relaunched, and wedges again come back to a marker that still
+      # says "already reported" and stay invisible.
+      if [ -z "$st" ]; then
+        rm -f "$hf" "$cf" "$sf"
+        continue
+      fi
+      obs=$st
+      fm_sense_herdr_is_stopped "$st" && stopped=1
+    else
+      # DRAIN ONLY - the pre-cutover sense, unchanged. Delete this branch when
+      # fm_herdr_drain_pending reports no pre-cutover meta is left in any home.
+      tail40=$(tmux capture-pane -p -t "$w" -S -40 2>/dev/null) || continue
+      obs=$(printf '%s' "$tail40" | hash_pane)
       # Busy match runs on the last 6 non-blank lines only (the TUI footer area,
       # where every verified harness renders its busy indicator) so busy-looking
       # strings in displayed content cannot suppress stale detection.
-      if [ "$n" -ge 2 ] && ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
-        if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
+      if ! printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"; then
+        stopped=1
+      fi
+    fi
+    prev=$(cat "$hf" 2>/dev/null || true)
+    if [ "$obs" = "$prev" ]; then
+      n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$cf"
+      if [ "$n" -ge 2 ] && [ "$stopped" = 1 ]; then
+        if [ "$(cat "$sf" 2>/dev/null || true)" != "$obs" ]; then
+          # AWAITING A VERDICT IS NOT WEDGED. A crewmate that appended `done:`
+          # and is waiting on the Quarterdeck (or on the captain, once its
+          # verdict escalated or hit the attempt cap) has reported; calling that
+          # "stopped without reporting" is what told the captain a branch was
+          # stalled four times across 2026-08-28..31 while its fix was already
+          # committed and mutation-tested. Suppression writes NOTHING to
+          # .stale-*: the moment the ball returns to the crewmate - a `reject:`
+          # relayed, and the pane still not moving - the very next cycle wakes.
+          if fm_sense_awaiting_verdict "$STATE" "$id"; then
+            continue
+          fi
           fm_wake_append stale "$w" "stale: $w" || exit 1
-          printf '%s' "$h" > "$sf"
+          printf '%s' "$obs" > "$sf"
           wake "stale: $w"
         fi
       fi
     else
-      printf '%s' "$h" > "$hf"
+      # THE OBSERVATION CHANGED, SO THE EPISODE ENDED - and the suppressor has to
+      # end with it. .stale-* remembers "this exact stalled state was already
+      # reported"; under tmux that was a content HASH, so a fresh wedge always
+      # carried a fresh value and the marker aged out by accident. A herdr
+      # observation is CATEGORICAL: it is the literal `unknown` every time. A
+      # crewmate that wedged, was relaunched into the same pane by
+      # `stuck-crewmate-recovery`, and wedged again would then match the marker
+      # left by its FIRST wedge and be suppressed for the life of the pane -
+      # exactly one wake per pane, ever. Clearing here is the whole fix, and it
+      # is right on both surfaces: the marker means "already reported THIS
+      # episode", and this branch is where an episode ends.
+      printf '%s' "$obs" > "$hf"
       echo 0 > "$cf"
+      rm -f "$sf"
     fi
-  done < <(recorded_windows)
+  done < <(recorded_targets)
 
   # Heartbeat: firstmate reviews the whole fleet at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

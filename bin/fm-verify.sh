@@ -75,6 +75,17 @@ mkdir -p "$DATA/$ID"
 
 MAX=${FM_VERIFY_MAX_ATTEMPTS:-3}
 
+# A verify cycle is IN FLIGHT from here until this process exits, whichever way
+# it exits. Supervision reads this marker (bin/fm-sense-lib.sh) so that a
+# crewmate sitting idle on a `done:` claim while the Quarterdeck re-proves it is
+# recognised as awaiting a verdict rather than reported to the captain as
+# stalled. Written once and removed on EXIT, so it is a fact rather than an
+# inference; a verifier killed outright leaves one behind, which is why the
+# reader also ages it out.
+VERIFYING="$STATE/$ID.verifying"
+: > "$VERIFYING" 2>/dev/null || true
+trap 'rm -f "$VERIFYING" 2>/dev/null || true' EXIT
+
 # Already at the cap before this run? Straight to the captain, no more spins.
 if [ "$(fm_verdict_reject_count "$STATE" "$ID")" -ge "$MAX" ]; then
   fm_verdict_append "$STATE" "$ID" escalate "attempt cap reached ($MAX rejects); captain decision required"
