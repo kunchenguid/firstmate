@@ -31,6 +31,7 @@ FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
 REFRESH_CWD_CONTROL="$TMP_ROOT/refresh-cwd-control"
+REFRESH_REF_RACE_CONTROL="$TMP_ROOT/refresh-ref-race-control"
 mkdir -p "$FAKEBIN" "$TMP_ROOT/pane-death-watches"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
@@ -39,7 +40,7 @@ mkdir -p "$FAKEBIN" "$TMP_ROOT/pane-death-watches"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_GIT REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG LEASED_WORKTREES_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
-export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL REFRESH_CWD_CONTROL TMP_ROOT
+export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL REFRESH_CWD_CONTROL REFRESH_REF_RACE_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -254,6 +255,30 @@ SH
 cat > "$FAKEBIN/git" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -d "$REFRESH_REF_RACE_CONTROL" ]; then
+  wt=$(cat "$REFRESH_REF_RACE_CONTROL/worktree")
+  has_wt=0
+  has_fetch=0
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = -C ] && [ "$arg" = "$wt" ]; then
+      has_wt=1
+    fi
+    [ "$arg" != fetch ] || has_fetch=1
+    previous=$arg
+  done
+  if [ "$has_wt" = 1 ] && [ "$has_fetch" = 1 ]; then
+    count=0
+    [ ! -f "$REFRESH_REF_RACE_CONTROL/fetch-count" ] || count=$(cat "$REFRESH_REF_RACE_CONTROL/fetch-count")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$REFRESH_REF_RACE_CONTROL/fetch-count"
+    if [ "$count" -eq 2 ]; then
+      origin=$(cat "$REFRESH_REF_RACE_CONTROL/origin")
+      replacement=$(cat "$REFRESH_REF_RACE_CONTROL/replacement")
+      "$REAL_GIT" --git-dir="$origin" update-ref refs/heads/recovery-landed "$replacement" || exit 96
+    fi
+  fi
+fi
 if [ -d "$REFRESH_CWD_CONTROL" ]; then
   wt=$(cat "$REFRESH_CWD_CONTROL/worktree")
   pane=$(cat "$REFRESH_CWD_CONTROL/pane")
@@ -1314,6 +1339,21 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
       || fail "$RESTART_ID removed its inspectable recovery pane after refusing unlanded work"
     git -C "$OLD_RESTART_WT" push --quiet origin HEAD:refs/heads/recovery-landed
+    mkdir -p "$REFRESH_REF_RACE_CONTROL"
+    printf '%s\n' "$OLD_RESTART_WT" > "$REFRESH_REF_RACE_CONTROL/worktree"
+    printf '%s\n' "$PROJECT_DIR.origin.git" > "$REFRESH_REF_RACE_CONTROL/origin"
+    git -C "$OLD_RESTART_WT" rev-parse origin/main > "$REFRESH_REF_RACE_CONTROL/replacement"
+    if spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-ref-race-refuse.out" 2> "$TMP_ROOT/$RESTART_ID-ref-race-refuse.err"; then
+      fail "$RESTART_ID recovery reset HEAD after its remote reachability changed during refresh"
+    fi
+    grep -F "holds commits not on any remote" "$TMP_ROOT/$RESTART_ID-ref-race-refuse.err" >/dev/null 2>&1 \
+      || fail "$RESTART_ID did not recheck remote reachability after the final fetch: $(cat "$TMP_ROOT/$RESTART_ID-ref-race-refuse.err")"
+    [ "$(git -C "$OLD_RESTART_WT" rev-parse HEAD)" = "$RESTART_UNLANDED" ] \
+      || fail "$RESTART_ID reset HEAD after the final fetch invalidated its earlier remote reachability"
+    [ "$(cat "$REFRESH_REF_RACE_CONTROL/fetch-count")" -ge 2 ] \
+      || fail "$RESTART_ID ref-race fixture did not span the precheck and refresh fetches"
+    rm -rf "$REFRESH_REF_RACE_CONTROL"
+    git -C "$OLD_RESTART_WT" push --quiet origin HEAD:refs/heads/recovery-relocated
   fi
   RECLAIM_FOCUS=$(focus_snapshot)
   mkdir -p "$REFRESH_CWD_CONTROL"
@@ -1372,6 +1412,10 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
 done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
+if [ "${FM_HERDR_PRESENTATION_RECOVERY_ONLY:-0}" = 1 ]; then
+  pass "real Herdr lab: recovery-focused validation completed"
+  exit 0
+fi
 
 # A secondmate child binds and reclaims only inside its own home and parent.
 CROSS_RESTART_ID=wheel-child-resume

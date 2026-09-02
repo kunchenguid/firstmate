@@ -1601,17 +1601,22 @@ $out
 EOF
 }
 
-task_process_identity() {  # <pid>
-  local pid=$1 proc_root stat_line starttime value
+task_process_birth_identity() {  # <pid>
+  local pid=$1 proc_root stat_line starttime
   local -a stat_fields
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  if [ -r "$proc_root/$pid/stat" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
-    printf 'starttime=%s\n' "$starttime"
+  [ -r "$proc_root/$pid/stat" ] || return 1
+  stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+  read -r -a stat_fields <<< "${stat_line##*)}"
+  [ "${#stat_fields[@]}" -ge 20 ] || return 1
+  starttime=${stat_fields[19]}
+  case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+  printf 'starttime=%s\n' "$starttime"
+}
+
+task_process_identity() {  # <pid>
+  local pid=$1 value
+  if task_process_birth_identity "$pid"; then
     return 0
   fi
   value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
@@ -1624,6 +1629,12 @@ task_process_identity() {  # <pid>
 task_process_identity_matches() {  # <pid> <identity>
   local current
   current=$(task_process_identity "$1") || return 1
+  [ "$current" = "$2" ]
+}
+
+task_process_birth_identity_matches() {  # <pid> <identity>
+  local current
+  current=$(task_process_birth_identity "$1") || return 1
   [ "$current" = "$2" ]
 }
 
@@ -1658,7 +1669,7 @@ task_backend_process_group_has_captured_member() {
   while [ "$i" -lt "${#TASK_BACKEND_MEMBER_PIDS[@]}" ]; do
     pid=${TASK_BACKEND_MEMBER_PIDS[$i]}
     identity=${TASK_BACKEND_MEMBER_IDENTITIES[$i]}
-    if task_process_identity_matches "$pid" "$identity" \
+    if task_process_birth_identity_matches "$pid" "$identity" \
        && task_process_group_matches "$pid" "$pgid"; then
       return 0
     fi
@@ -1699,8 +1710,8 @@ capture_task_backend_process_group() {
     return 0
     ;;
   esac
-  leader_start=$(task_process_identity "$leader") || {
-    echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
+  leader_start=$(task_process_birth_identity "$leader") || {
+    echo "warning: lsof is unavailable; no strong birth identity is available for the tmux pane process group for $ID" >&2
     return 0
   }
   pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || pgid=""
@@ -1723,8 +1734,8 @@ capture_task_backend_process_group() {
   task_pid_list_contains "$members" "$leader" || return 0
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
-    identity=$(task_process_identity "$pid") || continue
-    task_process_identity_matches "$pid" "$identity" || continue
+    identity=$(task_process_birth_identity "$pid") || continue
+    task_process_birth_identity_matches "$pid" "$identity" || continue
     task_process_group_matches "$pid" "$pgid" || continue
     TASK_BACKEND_MEMBER_PIDS+=("$pid")
     TASK_BACKEND_MEMBER_IDENTITIES+=("$identity")

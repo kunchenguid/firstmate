@@ -666,6 +666,25 @@ FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 Observed guarantees: pending composer input refused injection and raised one alert; idle Pi accepted one marked escalation; the return gate refused ordinary work while a live blocker remained; resolving the blocker allowed the return flow.
 The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+## Lease-before-create ordering
+
+The current session-provider order was reverified on 2026-09-02 on macOS 26.6.2 arm64 with Treehouse 2.3.0, tmux 3.6b, Herdr 0.8.2, and jq 1.7.1.
+
+```sh
+tests/fm-spawn-lease-before-enter.test.sh
+tests/fm-backend-tmux-smoke.test.sh
+tests/fm-backend-herdr-smoke.test.sh
+FM_HERDR_PRESENTATION_RECOVERY_ONLY=1 tests/fm-backend-herdr-presentation-e2e.test.sh
+tests/fm-backend-zellij-smoke.test.sh
+tests/fm-backend-cmux-smoke.test.sh
+```
+
+The portable spawn regression completed with `# all fm-spawn-lease-before-enter tests passed`, including a pane-created git lock that could not race the already-complete refresh.
+The real tmux guard completed through `ok - real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing`.
+The real Herdr adapter guard completed through `ok - real herdr: list_live discovers a live task tab by fm-<id> label`, and the recovery-focused projection guard completed through `ok - real Herdr lab: recovery-focused validation completed` after exercising same-copy reclaim, failed remote refresh, stale-ref pruning, and a remote-reachability change between the precheck and final refresh fetch.
+Zellij and cmux were not installed on this host, and their real guards reported `skip: zellij not found` and `skip: cmux CLI not found on PATH or at the bundle path` respectively.
+Their current lease-before-create order remains covered by the portable spawn regression rather than claimed as fresh live evidence.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
@@ -684,8 +703,8 @@ All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; t
 | Close | `close-tab-by-id <id>` | Removed the live task pane and tab together. |
 | Failure exit | actions against missing targets | Returned exit 0, requiring structural preflight and output-shape validation. |
 
-`pane_cwd` stayed frozen when a foreground subshell changed directory.
-The marker-delimited `pwd` probe returned the live nested cwd and is covered by the real smoke.
+`pane_cwd` stayed frozen when a foreground subshell changed directory in the previous enter-after-create implementation.
+That nested-cwd probe no longer describes current spawn: `fm-spawn.sh` now creates the tab with the already-refreshed leased path as its starting cwd.
 The focus mitigation restored the previously active tab after `new-tab`, with the unavoidable narrow race documented in the operator guide.
 
 ```sh
@@ -693,7 +712,8 @@ tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
 ```
 
-The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
+The earlier real lifecycle smoke proved spawn, metadata, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
+The 2026-09-02 host had no installed Zellij, so the current lease-before-create path has portable regression coverage above but no newer live Zellij claim.
 
 ## Orca
 

@@ -1939,8 +1939,20 @@ EOF
   printf '%s' "$lines" >&2
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+spawn_refuse_unpushed_head_after_fetch() {  # <worktree>
+  local worktree=$1 unpushed
+  unpushed=$(git -C "$worktree" log --format=%H --max-count=1 HEAD --not --remotes -- 2>/dev/null) || {
+    echo "error: could not inspect prior copy '$worktree' for unpushed commits; refusing to refresh it" >&2
+    return 1
+  }
+  if [ -n "$unpushed" ]; then
+    echo "error: prior copy '$worktree' for $ID holds commits not on any remote; refusing to refresh over that work - land or discard it first" >&2
+    return 1
+  fi
+}
+
+freshen_spawn_worktree_base() {  # <worktree> [protect-unpushed-head]
+  local worktree=$1 protect_unpushed_head=${2:-0} default target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -1973,6 +1985,9 @@ freshen_spawn_worktree_base() {  # <worktree>
       echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
     fi
     return 1
+  fi
+  if [ "$protect_unpushed_head" = 1 ]; then
+    spawn_refuse_unpushed_head_after_fetch "$worktree" || return 1
   fi
   if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
@@ -2093,19 +2108,12 @@ spawn_prior_record_worktree() {
 # the refresh would reset those away, and they may be the prior worker's
 # unlanded work.
 spawn_refuse_unpushed_head() {  # <worktree>
-  local worktree=$1 unpushed
+  local worktree=$1
   if ! git -C "$worktree" fetch --quiet --prune origin; then
     echo "error: could not fetch and prune origin for prior copy '$worktree'; refusing to inspect or refresh it" >&2
     return 1
   fi
-  unpushed=$(git -C "$worktree" log --format=%H --max-count=1 HEAD --not --remotes -- 2>/dev/null) || {
-    echo "error: could not inspect prior copy '$worktree' for unpushed commits; refusing to refresh it" >&2
-    return 1
-  }
-  if [ -n "$unpushed" ]; then
-    echo "error: prior copy '$worktree' for $ID holds commits not on any remote; refusing to refresh over that work - land or discard it first" >&2
-    return 1
-  fi
+  spawn_refuse_unpushed_head_after_fetch "$worktree"
 }
 
 # The first backend call that opens anything with the leased path as its cwd
@@ -2292,9 +2300,11 @@ else
 # owns its own worktree and a secondmate launches in its home, so both keep
 # the project or home path as the pane's starting directory.
 PANE_CWD=$PROJ_ABS
+FRESHEN_PROTECT_UNPUSHED_HEAD=0
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   if spawn_prior_record_worktree; then
     WT=$SPAWN_PRIOR_RECORD_WT
+    FRESHEN_PROTECT_UNPUSHED_HEAD=1
     # The record's own copy: never returned by this spawn, refreshed in place.
     herdr_projection_recovery_preflight_before_refresh || exit 1
     validate_spawn_worktree "prior record" "(no endpoint created yet)"
@@ -2310,7 +2320,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       exit 1
     fi
   fi
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$FRESHEN_PROTECT_UNPUSHED_HEAD" || exit 1
   PANE_CWD=$WT
 fi
 case "$BACKEND" in
