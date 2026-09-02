@@ -71,6 +71,8 @@ repository_valid() {
       owner=${repository%%/*}
       name=${repository#*/}
       [ -n "$owner" ] && [ -n "$name" ] && [ "$name" != "$repository" ] || return 1
+      [ "$owner" != . ] && [ "$owner" != .. ] || return 1
+      [ "$name" != . ] && [ "$name" != .. ] || return 1
       case "$name" in */*) return 1 ;; esac
       ;;
     *) return 1 ;;

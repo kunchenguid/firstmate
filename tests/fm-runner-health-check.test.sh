@@ -448,6 +448,12 @@ test_target_validation_refuses_unsafe_or_ambiguous_values() {
   env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check toolroll "$LABEL" >/dev/null 2>&1 || status=$?
   expect_code 2 "$status" "repository without owner exit"
   status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check './repo' "$LABEL" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "dot repository owner exit"
+  status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check 'owner/..' "$LABEL" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "dot repository name exit"
+  status=0
   env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check "$REPOSITORY" 'label with spaces' >/dev/null 2>&1 || status=$?
   expect_code 2 "$status" "unsafe label exit"
   status=0
