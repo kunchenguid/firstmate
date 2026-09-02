@@ -57,9 +57,13 @@
 # `workspace close`. It retires the non-authoritative journal only when a
 # read-only token correlation agrees with that endpoint and pane closure is
 # confirmed. Otherwise the journal stays quarantined for manual inspection.
-# Projected closes share the presentation-order lock, refuse to close the
-# captain's active tab, and restore the exact response-derived pre-close tab
-# if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
+# Projected closes share the presentation-order lock and never close an active
+# view blindly. Normal teardown restores the exact journal-bound parent
+# Firstmate tab before closing an active completed-task presentation. If that
+# safe target cannot be proved, teardown returns an action-free deferred result
+# before removing the isolated copy or durable task records. A task-incarnation
+# marker makes repeated unsafe retries quiet, and a static journal binding plus
+# structured pane-not-found lets a retry finish after a prior confirmed close.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, locks each
@@ -2351,6 +2355,12 @@ teardown_herdr_require_prerequisites() {  # <task-id>
     fm_backend_herdr_workspace_presence_state \
     fm_backend_herdr_endpoint_confirmed_gone \
     fm_backend_herdr_explicit_close_pane_confirmed \
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+    fm_backend_herdr_projection_endpoint_matches_journal \
+    fm_backend_herdr_projection_focus_safe_target \
+    fm_backend_herdr_projection_focus_snapshot \
+    fm_backend_herdr_projection_journal_binding_matches \
+    fm_backend_herdr_projection_safe_focus_target \
     fm_backend_herdr_presentation_session_lock_path; do
     if ! declare -F "$prerequisite" >/dev/null 2>&1; then
       echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
@@ -2424,6 +2434,34 @@ $session	$lock_path"
   done
   echo "error: herdr session presentation lock is contended for $task_id; nothing was changed - rerun teardown once the contention clears" >&2
   return 1
+}
+
+teardown_herdr_defer_marker_matches() {  # <marker> <spawn-gen> <session> <pane>
+  local marker=$1 spawn_gen=$2 session=$3 pane=$4 expected actual
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  expected=$(printf 'spawn_gen=%s\nsession=%s\npane=%s' "$spawn_gen" "$session" "$pane")
+  actual=$(cat "$marker" 2>/dev/null) || return 1
+  [ "$actual" = "$expected" ]
+}
+
+teardown_herdr_defer() {  # <marker> <spawn-gen> <session> <pane> <task-id>
+  local marker=$1 spawn_gen=$2 session=$3 pane=$4 task_id=$5 tmp
+  if teardown_herdr_defer_marker_matches "$marker" "$spawn_gen" "$session" "$pane"; then
+    return 0
+  fi
+  tmp=$(umask 077; mktemp "$STATE/.$task_id.herdr-cleanup-deferred.XXXXXX") || {
+    echo "error: could not record the action-free Herdr cleanup deferral for $task_id; all task data was retained" >&2
+    return 1
+  }
+  if ! printf 'spawn_gen=%s\nsession=%s\npane=%s\n' \
+      "$spawn_gen" "$session" "$pane" > "$tmp" \
+    || ! fm_backlog_atomic_transition publish "$tmp" "$marker" \
+      "Herdr cleanup deferral record" "$STATE"; then
+    rm -f "$tmp"
+    echo "error: could not record the action-free Herdr cleanup deferral for $task_id; all task data was retained" >&2
+    return 1
+  fi
+  printf 'teardown %s deferred safely: no verified Firstmate focus target is available; the active Herdr presentation and all task data were retained for a later cleanup retry.\n' "$task_id"
 }
 
 preflight_firstmate_home_herdr_children() {  # <home>
@@ -2691,11 +2729,85 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_DEFER_MARKER="$STATE/$ID.herdr-cleanup-deferred"
+HERDR_PRESENTATION_CLOSE_CANDIDATE=0
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_STATIC_BINDING=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_WORKSPACE=
+HERDR_PRESENTATION_TAB=
+HERDR_PRESENTATION_PANE=
+HERDR_PRESENTATION_SAFE_FOCUS=
+HERDR_PRESENTATION_FOCUS=
+HERDR_PRESENTATION_CLOSE_CONFIRMED=0
+HERDR_PRESENTATION_SPAWN_GEN=$(meta_value "$META" spawn_gen)
 if [ "$BACKEND" = herdr ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+  if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+    HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+    HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+    HERDR_PRESENTATION_TAB=$(meta_value "$META" herdr_tab_id)
+    HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+    if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+       && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+       && [ -n "$HERDR_PRESENTATION_TAB" ] \
+       && [ -n "$HERDR_PRESENTATION_PANE" ] \
+       && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ]; then
+      HERDR_PRESENTATION_CLOSE_CANDIDATE=1
+      if fm_backend_herdr_projection_journal_binding_matches \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+        "$FM_HOME" "$HERDR_PRESENTATION_WORKSPACE" \
+        "$HERDR_PRESENTATION_TAB" "$HERDR_PRESENTATION_PANE"; then
+        HERDR_PRESENTATION_STATIC_BINDING=1
+      fi
+      if fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+        HERDR_PRESENTATION_CLOSE_CONFIRMED=1
+        [ "$HERDR_PRESENTATION_STATIC_BINDING" != 1 ] \
+          || HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+      elif fm_backend_herdr_projection_endpoint_matches_journal \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+        "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+        HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+        HERDR_PRESENTATION_SAFE_FOCUS=$(
+          fm_backend_herdr_projection_safe_focus_target \
+            "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+            "$FM_HOME" "$HERDR_PRESENTATION_WORKSPACE" \
+            "$HERDR_PRESENTATION_TAB" "$HERDR_PRESENTATION_PANE" \
+            2>/dev/null || true
+        )
+        HERDR_PRESENTATION_FOCUS=$(
+          fm_backend_herdr_projection_focus_snapshot \
+            "$HERDR_PRESENTATION_SESSION" 2>/dev/null || true
+        )
+        if [ -z "$HERDR_PRESENTATION_SAFE_FOCUS" ] \
+           && { [ -z "$HERDR_PRESENTATION_FOCUS" ] \
+             || [ "${HERDR_PRESENTATION_FOCUS#*$'\t'}" = "$HERDR_PRESENTATION_TAB" ]; }; then
+          teardown_herdr_defer \
+            "$HERDR_PRESENTATION_DEFER_MARKER" "$HERDR_PRESENTATION_SPAWN_GEN" \
+            "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" "$ID" \
+            || exit 1
+          exit 0
+        fi
+      else
+        HERDR_PRESENTATION_FOCUS=$(
+          fm_backend_herdr_projection_focus_snapshot \
+            "$HERDR_PRESENTATION_SESSION" 2>/dev/null || true
+        )
+        if [ -z "$HERDR_PRESENTATION_FOCUS" ] \
+           || [ "${HERDR_PRESENTATION_FOCUS#*$'\t'}" = "$HERDR_PRESENTATION_TAB" ]; then
+          teardown_herdr_defer \
+            "$HERDR_PRESENTATION_DEFER_MARKER" "$HERDR_PRESENTATION_SPAWN_GEN" \
+            "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" "$ID" \
+            || exit 1
+          exit 0
+        fi
+      fi
+    fi
+  fi
 fi
 
 BACKLOG_CLOSED=0
@@ -2707,9 +2819,6 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   }
   BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
-  fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
-    "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" \
-    || { echo "error: the pending backlog close for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); retaining every durable task record" >&2; exit 1; }
 else
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
@@ -2733,6 +2842,60 @@ fi
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+
+# A projected Herdr pane is closed before its isolated copy is returned. The
+# full live binding is re-proved at the focus handoff itself; a late active-tab
+# race returns the same action-free defer as the preflight above. A prior close
+# that was confirmed before a later failure skips this mutation on retry.
+if [ "$HERDR_PRESENTATION_CLOSE_CANDIDATE" = 1 ] \
+   && [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" != 1 ]; then
+  HERDR_PRESENTATION_FOCUS=$(
+    fm_backend_herdr_projection_focus_snapshot \
+      "$HERDR_PRESENTATION_SESSION" 2>/dev/null || true
+  )
+  if [ -z "$HERDR_PRESENTATION_FOCUS" ] \
+     || [ "${HERDR_PRESENTATION_FOCUS#*$'\t'}" = "$HERDR_PRESENTATION_TAB" ]; then
+    HERDR_PRESENTATION_SAFE_FOCUS=$(
+      fm_backend_herdr_projection_focus_safe_target \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+        "$FM_HOME" "$HERDR_PRESENTATION_WORKSPACE" \
+        "$HERDR_PRESENTATION_TAB" "$HERDR_PRESENTATION_PANE" \
+        2>/dev/null || true
+    )
+    if [ -z "$HERDR_PRESENTATION_SAFE_FOCUS" ]; then
+      teardown_herdr_defer \
+        "$HERDR_PRESENTATION_DEFER_MARKER" "$HERDR_PRESENTATION_SPAWN_GEN" \
+        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" "$ID" \
+        || exit 1
+      exit 0
+    fi
+  fi
+  HERDR_PRESENTATION_CLOSE_STATUS=0
+  fm_backend_herdr_projection_close_pane_focus_preserving \
+    "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" \
+    || HERDR_PRESENTATION_CLOSE_STATUS=$?
+  if [ "$HERDR_PRESENTATION_CLOSE_STATUS" -eq 3 ]; then
+    teardown_herdr_defer \
+      "$HERDR_PRESENTATION_DEFER_MARKER" "$HERDR_PRESENTATION_SPAWN_GEN" \
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" "$ID" \
+      || exit 1
+    exit 0
+  fi
+  if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+    echo "error: herdr pane $T for $ID is not confirmed gone after projected cleanup; retaining every durable task record, the presentation journal, and the isolated copy" >&2
+    exit 1
+  fi
+  HERDR_PRESENTATION_CLOSE_CONFIRMED=1
+fi
+if [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" = 1 ]; then
+  rm -f "$HERDR_PRESENTATION_DEFER_MARKER"
+fi
+
+if [ "$BACKLOG_CLOSED" = 1 ]; then
+  fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+    "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" \
+    || { echo "error: the pending backlog close for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); retaining every durable task record" >&2; exit 1; }
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -2781,44 +2944,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   }
 fi
 
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
-fi
-
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  # The presentation lock was acquired before the worktree return above; a
-  # contended lock already refused this teardown while everything was intact.
-  if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
-    # stderr is deliberately NOT discarded here. This is the highest-frequency
-    # projected-close call site, and the helper's only stderr output is a real
-    # warning - unverifiable workspace.move support, a refused focus-unsafe
-    # close, an unconfirmed repositioned-workspace removal, or a failed exact
-    # restore.
-    # Swallowing them left a wrong active workspace with no operator-visible
-    # signal at all. The close stays non-fatal exactly as before: the presence
-    # gate below is what decides whether any durable record may be removed.
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
-  else
-    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
-  fi
+if [ "$HERDR_PRESENTATION_CLOSE_CANDIDATE" = 1 ]; then
+  [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" = 1 ] \
+    || { echo "error: projected herdr cleanup reached worktree return without a confirmed pane close for $ID; retaining every durable task record" >&2; exit 1; }
 elif [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
@@ -2887,7 +3015,7 @@ rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.copilot-prompt-submitted" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
-  "$STATE/$ID.reconcile-nudged"
+  "$STATE/$ID.reconcile-nudged" "$HERDR_PRESENTATION_DEFER_MARKER"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

@@ -38,8 +38,10 @@
 # therefore serializes under the session lock, repositions a doomed workspace
 # behind the focused one when needed, and ends its verified lone idle shell
 # so Herdr removes the emptied workspace through the focus-preserving
-# pane-death path, with the exact pre-close tab restore as the backstop and a
-# refusal to close the active tab itself.
+# pane-death path, with the exact pre-close tab restore as the backstop. When a
+# completed projection itself is active, normal teardown may first restore the
+# exact journal-bound parent Firstmate tab. Without that proof, cleanup defers
+# without closing the active view.
 #
 # Target string shape: "<herdr-session>:<pane-id>", e.g. "default:w1:p2" (the
 # pane id itself contains a colon; the session is always the FIRST field, the
@@ -857,6 +859,25 @@ fm_backend_herdr_projection_focus_snapshot() {  # <session>
   printf '%s\t%s' "$workspace" "$tab"
 }
 
+# fm_backend_herdr_projection_focus_exact: focus one exact workspace/tab
+# snapshot only after tab.get proves the tab still belongs to that workspace,
+# then verify the resulting active workspace and tab. Silent; callers own the
+# operation-specific warning or deferral wording.
+fm_backend_herdr_projection_focus_exact() {  # <session> <snapshot>
+  local session=$1 target=$2 workspace tab info
+  [ -n "$target" ] || return 1
+  workspace=${target%%$'\t'*}
+  tab=${target#*$'\t'}
+  [ -n "$workspace" ] && [ -n "$tab" ] && [ "$workspace" != "$tab" ] || return 1
+  [ "$(fm_backend_herdr_projection_focus_snapshot "$session" 2>/dev/null || true)" != "$target" ] || return 0
+  info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" '
+    .result.tab.workspace_id == $workspace and .result.tab.tab_id == $tab
+  ' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_cli "$session" tab focus "$tab" >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_herdr_projection_focus_snapshot "$session" 2>/dev/null || true)" = "$target" ]
+}
+
 # fm_backend_herdr_projection_focus_restore: verify that one presentation
 # mutation preserved the exact active workspace and tab captured immediately
 # before it.
@@ -900,10 +921,11 @@ fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation
 }
 
 # fm_backend_herdr_projection_close_pane_focus_preserving: close one exact
-# response-derived projection pane without leaving the captain focused
+# response-derived projection pane without leaving the active client focused
 # anywhere else.
-# If the target belongs to the active tab, exact tab preservation is
-# impossible, so cleanup refuses instead of changing focus.
+# If the target belongs to the active tab, it returns 3 silently as an
+# action-free defer and closes nothing. A caller that owns a stronger binding
+# may move focus first, but this close never trusts a cached focus target.
 # When the close would empty the target workspace, Herdr 0.7.5's explicit
 # close moves focus to the workspace's neighbor, so the close is planned by
 # fm_backend_herdr_emptying_close_plan: reposition the doomed workspace
@@ -917,10 +939,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
-  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
-    echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe pane close" >&2
-    return 1
-  }
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 3
   active_tab=${before#*$'\t'}
   info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
     echo "warning: herdr presentation cleanup could not verify the exact pane; refusing focus-unsafe pane close" >&2
@@ -934,8 +953,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     return 1
   fi
   if [ "$target_tab" = "$active_tab" ]; then
-    echo "warning: herdr presentation cleanup target is the captain's active tab; refusing a close that cannot preserve focus" >&2
-    return 1
+    return 3
   fi
   if [ -n "$required_agent_state" ]; then
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
@@ -2377,6 +2395,88 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
     and .result.panes[0].pane_id == $pane
     and .result.panes[0].tab_id == $tab
   ' >/dev/null 2>&1
+}
+
+# fm_backend_herdr_projection_journal_binding_matches: prove that one version-2
+# journal agrees exactly with the current task, physical home, and endpoint.
+# This static binding remains useful after a confirmed close removes the live
+# workspace, while granting no authority to focus or close anything by itself.
+fm_backend_herdr_projection_journal_binding_matches() {  # <session> <journal> <task-id> <home> <workspace> <tab> <pane>
+  local session=$1 journal=$2 id=$3 home=$4 workspace=$5 tab=$6 pane=$7
+  local canonical_home expected_parent
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || return 1
+  canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || return 1
+  expected_parent=$(FM_HOME="$home" fm_backend_herdr_workspace_label)
+  [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$canonical_home" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$workspace" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$tab" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$pane" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" = "$expected_parent" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "fm-$id" ]
+}
+
+# fm_backend_herdr_projection_safe_focus_target: print one exact parent
+# Firstmate workspace/tab snapshot only when the static journal binding and
+# complete live projected shape agree. The journal is only a hint: every field
+# used for focus is revalidated against the named session before this function
+# returns it.
+fm_backend_herdr_projection_safe_focus_target() {  # <session> <journal> <task-id> <home> <workspace> <tab> <pane>
+  local session=$1 journal=$2 id=$3 home=$4 workspace=$5 tab=$6 pane=$7
+  local list target parent_tab info
+  fm_backend_herdr_projection_journal_binding_matches \
+    "$session" "$journal" "$id" "$home" "$workspace" "$tab" "$pane" \
+    || return 1
+  fm_backend_herdr_projection_live_binding_matches \
+    "$session" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+    "$workspace" "$tab" "$pane" \
+    "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
+    "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
+    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" \
+    "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" || return 1
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  target=$(printf '%s' "$list" | jq -r \
+    --arg parent "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
+    --arg label "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" '
+      [.result.workspaces[]?
+        | select(.workspace_id == $parent and .label == $label)]
+      | select(length == 1)
+      | .[0]
+      | select((.active_tab_id | type) == "string" and (.active_tab_id | length) > 0)
+      | [.workspace_id, .active_tab_id]
+      | @tsv
+    ' 2>/dev/null) || return 1
+  [ -n "$target" ] || return 1
+  parent_tab=${target#*$'\t'}
+  info=$(fm_backend_herdr_cli "$session" tab get "$parent_tab" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e \
+    --arg parent "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
+    --arg tab "$parent_tab" '
+      .result.tab.workspace_id == $parent and .result.tab.tab_id == $tab
+    ' >/dev/null 2>&1 || return 1
+  printf '%s' "$target"
+}
+
+# fm_backend_herdr_projection_focus_safe_target: focus the journal-bound parent
+# Firstmate tab, then repeat the complete proof after focus. A parent rename,
+# topology change, or active-tab change at either boundary refuses the handoff.
+fm_backend_herdr_projection_focus_safe_target() {  # <session> <journal> <task-id> <home> <workspace> <tab> <pane>
+  local session=$1 journal=$2 id=$3 home=$4 workspace=$5 tab=$6 pane=$7
+  local target revalidated
+  target=$(
+    fm_backend_herdr_projection_safe_focus_target \
+      "$session" "$journal" "$id" "$home" "$workspace" "$tab" "$pane"
+  ) || return 1
+  fm_backend_herdr_projection_focus_exact "$session" "$target" || return 1
+  revalidated=$(
+    fm_backend_herdr_projection_safe_focus_target \
+      "$session" "$journal" "$id" "$home" "$workspace" "$tab" "$pane"
+  ) || return 1
+  [ "$revalidated" = "$target" ] || return 1
+  [ "$(fm_backend_herdr_projection_focus_snapshot "$session" 2>/dev/null || true)" = "$target" ] \
+    || return 1
+  printf '%s' "$target"
 }
 
 fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>

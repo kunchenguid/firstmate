@@ -1427,7 +1427,7 @@ test_projection_close_restores_exact_prior_focus() {
   pass "herdr presentation focus: exact pane close restores the exact prior workspace and tab"
 }
 
-test_projection_close_refuses_active_tab() {
+test_projection_close_defers_active_tab_silently() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-focus-active-refusal"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -1438,12 +1438,12 @@ test_projection_close_refuses_active_tab() {
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "cleanup must refuse when exact active-tab preservation is impossible"
-  assert_contains "$out" "target is the captain's active tab" \
-    "active-tab cleanup refusal did not explain the focus-safety boundary"
+  [ "$status" -eq 3 ] || fail "cleanup must return the action-free deferral result when exact active-tab preservation is impossible"
+  [ -z "$out" ] \
+    || fail "active-tab cleanup helper emitted user-facing noise instead of leaving policy to its caller: $out"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
-    "active-tab cleanup refusal still closed the pane"
-  pass "herdr presentation focus: cleanup refuses rather than close the captain's active tab"
+    "active-tab cleanup deferral still closed the pane"
+  pass "herdr presentation focus: cleanup silently defers rather than close the active tab"
 }
 
 test_projection_close_reports_focus_restore_failure() {
@@ -2239,7 +2239,7 @@ test_endpoint_confirmed_gone_gates_on_structured_presence() {
   pass "endpoint confirmed-gone: only structured not-found permits record removal and ambiguous identity refuses"
 }
 
-test_projection_seeded_prune_refuses_active_tab() {
+test_projection_seeded_prune_defers_active_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-seeded-focus-active-refusal"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2253,12 +2253,12 @@ test_projection_seeded_prune_refuses_active_tab() {
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w9 w9:t1 focus-preserving' "$ROOT" 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "projected seeded pruning must refuse the active tab"
-  assert_contains "$out" "target is the captain's active tab" \
-    "projected seeded prune did not explain its active-tab refusal"
+  [ "$status" -eq 3 ] || fail "projected seeded pruning must return the action-free active-tab deferral"
+  [ -z "$out" ] \
+    || fail "projected seeded prune helper emitted user-facing noise instead of leaving policy to its caller: $out"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
-    "projected seeded prune closed the captain's active tab"
-  pass "herdr presentation focus: projected seeded pruning refuses the active tab"
+    "projected seeded prune closed the active tab"
+  pass "herdr presentation focus: projected seeded pruning defers the active tab"
 }
 
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
@@ -4785,7 +4785,7 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
-test_projection_close_refuses_active_tab
+test_projection_close_defers_active_tab_silently
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary
 test_projection_close_emptying_after_focus_uses_pane_death_without_move
@@ -4807,7 +4807,7 @@ test_kill_emptying_non_focused_uses_pane_death
 test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_refuses_when_presentation_lock_is_unavailable
-test_projection_seeded_prune_refuses_active_tab
+test_projection_seeded_prune_defers_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_workspace_move_capability_rejects_unusable_transport
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order

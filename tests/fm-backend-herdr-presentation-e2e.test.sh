@@ -257,6 +257,28 @@ chmod +x "$FAKEBIN/herdr-workspace-mover"
 export PATH="$FAKEBIN:$PATH"
 export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 
+path_without_no_mistakes() {
+  local dir filtered='' separator=''
+  local -a path_parts=()
+  IFS=: read -r -a path_parts <<< "$PATH"
+  for dir in "${path_parts[@]}"; do
+    if [ -x "$dir/no-mistakes" ] \
+       || [ -x "$dir/no-mistakes.exe" ] \
+       || [ -x "$dir/no-mistakes.cmd" ]; then
+      continue
+    fi
+    filtered="${filtered}${separator}${dir}"
+    separator=:
+  done
+  printf '%s' "$filtered"
+}
+
+TEARDOWN_PATH=$(path_without_no_mistakes)
+[ -n "$TEARDOWN_PATH" ] || fail "could not build a teardown PATH without no-mistakes"
+if PATH="$TEARDOWN_PATH" command -v no-mistakes >/dev/null 2>&1; then
+  fail "teardown test isolation still exposes no-mistakes"
+fi
+
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 # This suite runs against its own isolated lab session, so a Herdr pane
@@ -420,7 +442,7 @@ spawn_secondmate_task() {
 
 teardown_task() {  # <id> <home>
   local id=$1 home=$2
-  FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  PATH="$TEARDOWN_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force
@@ -505,7 +527,8 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/order-fail" "$HOME_DIR/data/fm-hibit-resume-r1" \
   "$HOME_DIR/data/wheelhouse-healing-r1"
 mkdir -p "$HOME_DIR/data/active-seeded" "$HOME_DIR/data/abort-a" "$HOME_DIR/data/abort-b" \
-  "$HOME_DIR/data/lock-contended" "$HOME_DIR/data/default-on"
+  "$HOME_DIR/data/lock-contended" "$HOME_DIR/data/default-on" \
+  "$HOME_DIR/data/active-cleanup-safe" "$HOME_DIR/data/active-cleanup-deferred"
 touch "$HOME_DIR/state/.last-watcher-beat"
 # Presentation spaces are on by default, so the flat baseline below opts out
 # explicitly; the projected cases each restate the setting they exercise.
@@ -522,6 +545,8 @@ printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
 printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
 printf 'Projection lock contention fixture.\n' > "$HOME_DIR/data/lock-contended/brief.md"
 printf 'Projection default-on fixture.\n' > "$HOME_DIR/data/default-on/brief.md"
+printf 'Projection active cleanup safe-focus fixture.\n' > "$HOME_DIR/data/active-cleanup-safe/brief.md"
+printf 'Projection active cleanup deferred fixture.\n' > "$HOME_DIR/data/active-cleanup-deferred/brief.md"
 make_project "$PROJECT_DIR"
 
 # Keep one ordinary primary task live so the durable firstmate workspace is
@@ -531,7 +556,9 @@ spawn_task anchor "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/anchor.out" 2> "$TMP_R
 ANCHOR_META="$HOME_DIR/state/anchor.meta"
 remember_meta_worktree "$ANCHOR_META" >/dev/null
 FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
-[ -n "$FIRSTMATE_WSID" ] || fail "anchor metadata did not record the firstmate workspace"
+FIRSTMATE_TAB=$(grep '^herdr_tab_id=' "$ANCHOR_META" | cut -d= -f2-)
+[ -n "$FIRSTMATE_WSID" ] && [ -n "$FIRSTMATE_TAB" ] \
+  || fail "anchor metadata did not record the firstmate workspace and tab"
 
 # The same task id and project run once opted out and once projected, so
 # Treehouse commands and metadata can be compared after normalizing endpoint
@@ -672,7 +699,7 @@ ACTIVE_SEEDED_FOCUS_START=$(focus_audit_line_count)
 if spawn_task active-seeded "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/active-seeded.out" 2> "$TMP_ROOT/active-seeded.err"; then
   fail "active seeded-tab projection should refuse the prune"
 fi
-grep -F "target is the captain's active tab" "$TMP_ROOT/active-seeded.err" >/dev/null 2>&1 \
+grep -F "seeded-tab prune refused a focus-unsafe close" "$TMP_ROOT/active-seeded.err" >/dev/null 2>&1 \
   || fail "active seeded-tab projection did not report its exact refusal"
 ACTIVE_SEEDED_WSID=$(cat "$ACTIVE_SEEDED_CONTROL/workspace")
 ACTIVE_SEEDED_TAB=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-tab")
@@ -711,6 +738,119 @@ assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture cleanup"
 assert_cleanup_focus_preserved "$ACTIVE_SEEDED_CLEANUP_FOCUS_START" "$ACTIVE_SEEDED_PANE" "$CAPTAIN_FOCUS"
 rm -f "$HOME_DIR/state/active-seeded.herdr-presentation"
 pass "real Herdr lab: active seeded-tab pruning refuses the exact pane and preserves exact focus"
+
+spawn_task active-cleanup-safe "$HOME_DIR" "$PROJECT_DIR" \
+  > "$TMP_ROOT/active-cleanup-safe.out" 2> "$TMP_ROOT/active-cleanup-safe.err" \
+  || fail "active cleanup safe-focus spawn failed: $(cat "$TMP_ROOT/active-cleanup-safe.err")"
+ACTIVE_CLEANUP_SAFE_META="$HOME_DIR/state/active-cleanup-safe.meta"
+ACTIVE_CLEANUP_SAFE_WT=$(remember_meta_worktree "$ACTIVE_CLEANUP_SAFE_META")
+ACTIVE_CLEANUP_SAFE_TAB=$(grep '^herdr_tab_id=' "$ACTIVE_CLEANUP_SAFE_META" | cut -d= -f2-)
+ACTIVE_CLEANUP_SAFE_PANE=$(grep '^herdr_pane_id=' "$ACTIVE_CLEANUP_SAFE_META" | cut -d= -f2-)
+ACTIVE_CLEANUP_SAFE_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
+lab tab focus "$ACTIVE_CLEANUP_SAFE_TAB" >/dev/null \
+  || fail "could not focus the completed safe-focus presentation"
+assert_focus_is "$(grep '^herdr_workspace_id=' "$ACTIVE_CLEANUP_SAFE_META" | cut -d= -f2-)/$ACTIVE_CLEANUP_SAFE_TAB" \
+  "active cleanup safe-focus fixture"
+teardown_task active-cleanup-safe "$HOME_DIR" \
+  > "$TMP_ROOT/active-cleanup-safe-teardown.out" 2> "$TMP_ROOT/active-cleanup-safe-teardown.err" \
+  || fail "active cleanup with a safe Firstmate view failed: $(cat "$TMP_ROOT/active-cleanup-safe-teardown.err")"
+assert_focus_is "$FIRSTMATE_WSID/$FIRSTMATE_TAB" "active cleanup safe Firstmate restoration"
+lab pane get "$ACTIVE_CLEANUP_SAFE_PANE" >/dev/null 2>&1 \
+  && fail "active cleanup with a safe Firstmate view left the task pane alive"
+[ ! -e "$ACTIVE_CLEANUP_SAFE_META" ] \
+  || fail "active cleanup with a safe Firstmate view retained the task record"
+sed -n "$((ACTIVE_CLEANUP_SAFE_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" \
+  | grep -F $'return\t--force\t'"$ACTIVE_CLEANUP_SAFE_WT" >/dev/null 2>&1 \
+  || fail "active cleanup with a safe Firstmate view did not return the isolated copy"
+pass "real Herdr lab: active completed-task cleanup restores the exact parent Firstmate tab and completes"
+
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not restore the independent focus fixture after safe active cleanup"
+assert_focus_is "$CAPTAIN_FOCUS" "post-safe active cleanup restoration"
+
+spawn_task active-cleanup-deferred "$HOME_DIR" "$PROJECT_DIR" \
+  > "$TMP_ROOT/active-cleanup-deferred.out" 2> "$TMP_ROOT/active-cleanup-deferred.err" \
+  || fail "active cleanup deferred spawn failed: $(cat "$TMP_ROOT/active-cleanup-deferred.err")"
+ACTIVE_CLEANUP_DEFERRED_META="$HOME_DIR/state/active-cleanup-deferred.meta"
+ACTIVE_CLEANUP_DEFERRED_WT=$(remember_meta_worktree "$ACTIVE_CLEANUP_DEFERRED_META")
+ACTIVE_CLEANUP_DEFERRED_WSID=$(grep '^herdr_workspace_id=' "$ACTIVE_CLEANUP_DEFERRED_META" | cut -d= -f2-)
+ACTIVE_CLEANUP_DEFERRED_TAB=$(grep '^herdr_tab_id=' "$ACTIVE_CLEANUP_DEFERRED_META" | cut -d= -f2-)
+ACTIVE_CLEANUP_DEFERRED_PANE=$(grep '^herdr_pane_id=' "$ACTIVE_CLEANUP_DEFERRED_META" | cut -d= -f2-)
+ACTIVE_CLEANUP_DEFERRED_JOURNAL="$HOME_DIR/state/active-cleanup-deferred.herdr-presentation"
+ACTIVE_CLEANUP_DEFERRED_PARENT=$(grep '^parent_workspace_id=' "$ACTIVE_CLEANUP_DEFERRED_JOURNAL" | cut -d= -f2-)
+sed -i.bak 's/^parent_workspace_id=.*/parent_workspace_id=missing-parent/' "$ACTIVE_CLEANUP_DEFERRED_JOURNAL"
+rm -f "$ACTIVE_CLEANUP_DEFERRED_JOURNAL.bak"
+lab tab focus "$ACTIVE_CLEANUP_DEFERRED_TAB" >/dev/null \
+  || fail "could not focus the completed deferred presentation"
+ACTIVE_CLEANUP_DEFERRED_FOCUS="$ACTIVE_CLEANUP_DEFERRED_WSID/$ACTIVE_CLEANUP_DEFERRED_TAB"
+assert_focus_is "$ACTIVE_CLEANUP_DEFERRED_FOCUS" "active cleanup deferred fixture"
+ACTIVE_CLEANUP_DEFERRED_STATUS_SIZE=$(wc -c < "$HOME_DIR/state/active-cleanup-deferred.status" 2>/dev/null || printf 0)
+ACTIVE_CLEANUP_DEFERRED_STATUS_SIZE=$(printf '%s' "$ACTIVE_CLEANUP_DEFERRED_STATUS_SIZE" | tr -d '[:space:]')
+ACTIVE_CLEANUP_DEFERRED_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
+teardown_task active-cleanup-deferred "$HOME_DIR" \
+  > "$TMP_ROOT/active-cleanup-deferred-teardown.out" 2> "$TMP_ROOT/active-cleanup-deferred-teardown.err" \
+  || fail "active cleanup without a safe focus target was not action-free: $(cat "$TMP_ROOT/active-cleanup-deferred-teardown.err")"
+grep -F "deferred safely" "$TMP_ROOT/active-cleanup-deferred-teardown.out" >/dev/null 2>&1 \
+  || fail "active cleanup deferral did not report its action-free result"
+assert_focus_is "$ACTIVE_CLEANUP_DEFERRED_FOCUS" "active cleanup deferred focus"
+lab pane get "$ACTIVE_CLEANUP_DEFERRED_PANE" >/dev/null 2>&1 \
+  || fail "active cleanup deferral removed the exact task pane"
+[ -e "$ACTIVE_CLEANUP_DEFERRED_META" ] && [ -e "$ACTIVE_CLEANUP_DEFERRED_JOURNAL" ] \
+  || fail "active cleanup deferral erased the retained task identity"
+[ -d "$ACTIVE_CLEANUP_DEFERRED_WT" ] \
+  || fail "active cleanup deferral returned the isolated copy"
+if sed -n "$((ACTIVE_CLEANUP_DEFERRED_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" \
+    | grep -F $'return\t--force\t'"$ACTIVE_CLEANUP_DEFERRED_WT" >/dev/null 2>&1; then
+  fail "active cleanup deferral returned the isolated copy"
+fi
+[ ! -e "$HOME_DIR/state/decision-bindings" ] \
+  || fail "active cleanup deferral created a captain-decision binding"
+[ ! -e "$HOME_DIR/state/active-cleanup-deferred.backlog-close" ] \
+  || fail "active cleanup deferral staged completion while retaining the task"
+CURRENT_DEFERRED_STATUS_SIZE=$(wc -c < "$HOME_DIR/state/active-cleanup-deferred.status" 2>/dev/null || printf 0)
+CURRENT_DEFERRED_STATUS_SIZE=$(printf '%s' "$CURRENT_DEFERRED_STATUS_SIZE" | tr -d '[:space:]')
+[ "$CURRENT_DEFERRED_STATUS_SIZE" = "$ACTIVE_CLEANUP_DEFERRED_STATUS_SIZE" ] \
+  || fail "active cleanup deferral created a captain-facing status event"
+
+teardown_task active-cleanup-deferred "$HOME_DIR" \
+  > "$TMP_ROOT/active-cleanup-deferred-repeat.out" 2> "$TMP_ROOT/active-cleanup-deferred-repeat.err" \
+  || fail "repeated active cleanup deferral was not action-free: $(cat "$TMP_ROOT/active-cleanup-deferred-repeat.err")"
+[ ! -s "$TMP_ROOT/active-cleanup-deferred-repeat.out" ] \
+  && [ ! -s "$TMP_ROOT/active-cleanup-deferred-repeat.err" ] \
+  || fail "repeated active cleanup deferral generated recurring user-facing noise"
+assert_focus_is "$ACTIVE_CLEANUP_DEFERRED_FOCUS" "repeated active cleanup deferred focus"
+lab pane get "$ACTIVE_CLEANUP_DEFERRED_PANE" >/dev/null 2>&1 \
+  || fail "repeated active cleanup deferral removed the exact task pane"
+[ -d "$ACTIVE_CLEANUP_DEFERRED_WT" ] && [ -e "$ACTIVE_CLEANUP_DEFERRED_META" ] \
+  || fail "repeated active cleanup deferral changed retained work"
+if sed -n "$((ACTIVE_CLEANUP_DEFERRED_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" \
+    | grep -F $'return\t--force\t'"$ACTIVE_CLEANUP_DEFERRED_WT" >/dev/null 2>&1; then
+  fail "repeated active cleanup deferral returned the isolated copy"
+fi
+[ ! -e "$HOME_DIR/state/decision-bindings" ] \
+  || fail "repeated active cleanup deferral created a captain-decision binding"
+CURRENT_DEFERRED_STATUS_SIZE=$(wc -c < "$HOME_DIR/state/active-cleanup-deferred.status" 2>/dev/null || printf 0)
+CURRENT_DEFERRED_STATUS_SIZE=$(printf '%s' "$CURRENT_DEFERRED_STATUS_SIZE" | tr -d '[:space:]')
+[ "$CURRENT_DEFERRED_STATUS_SIZE" = "$ACTIVE_CLEANUP_DEFERRED_STATUS_SIZE" ] \
+  || fail "repeated active cleanup deferral generated recurring status noise"
+pass "real Herdr lab: no safe focus target yields an idempotent action-free defer with no captain-decision artifact"
+
+sed -i.bak "s/^parent_workspace_id=.*/parent_workspace_id=$ACTIVE_CLEANUP_DEFERRED_PARENT/" \
+  "$ACTIVE_CLEANUP_DEFERRED_JOURNAL"
+rm -f "$ACTIVE_CLEANUP_DEFERRED_JOURNAL.bak"
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not move focus before retiring the deferred fixture"
+teardown_task active-cleanup-deferred "$HOME_DIR" \
+  > "$TMP_ROOT/active-cleanup-deferred-final.out" 2> "$TMP_ROOT/active-cleanup-deferred-final.err" \
+  || fail "deferred active cleanup did not complete after safe focus returned: $(cat "$TMP_ROOT/active-cleanup-deferred-final.err")"
+assert_focus_is "$CAPTAIN_FOCUS" "deferred cleanup final retry"
+lab pane get "$ACTIVE_CLEANUP_DEFERRED_PANE" >/dev/null 2>&1 \
+  && fail "deferred cleanup final retry left the task pane alive"
+[ ! -e "$ACTIVE_CLEANUP_DEFERRED_META" ] \
+  || fail "deferred cleanup final retry retained the task record"
+sed -n "$((ACTIVE_CLEANUP_DEFERRED_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" \
+  | grep -F $'return\t--force\t'"$ACTIVE_CLEANUP_DEFERRED_WT" >/dev/null 2>&1 \
+  || fail "deferred cleanup final retry did not return the isolated copy"
 
 LOCK_CONTENTION_READY="$TMP_ROOT/lock-contention-ready"
 LOCK_CONTENTION_RELEASE="$TMP_ROOT/lock-contention-release"
