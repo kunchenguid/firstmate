@@ -3382,6 +3382,7 @@ seed_captured_procevent_result() {  # <dir>
 # per-cycle reconcile it launches resolves the same home's state.
 procevent_watch_bg() {  # <dir> <out>
   local dir=$1 out=$2
+  dir=$(cd "$dir" && pwd -P) || return 1
   PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
     FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &

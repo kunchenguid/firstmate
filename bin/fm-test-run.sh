@@ -638,6 +638,7 @@ tests/fm-voice-relay.test.sh 28699
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7381
 tests/fm-wake-drain-open-decisions-cursor.test.sh 20629
 tests/fm-wake-drain-open-decisions.test.sh 6240
+tests/fm-wake-drain-outcome-backstop.test.sh 15182
 tests/fm-wake-drain-unread-status.test.sh 35078
 tests/fm-wake-queue.test.sh 56674
 tests/fm-watch-arm.test.sh 58528
