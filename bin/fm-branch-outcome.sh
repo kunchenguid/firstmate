@@ -194,8 +194,13 @@ print_unread() {
 }
 
 advance_cursor() { # <seq>
-  local through=$1 cursor tmp
-  cursor=$(read_cursor)
+  local through=$1 cursor processed tmp
+  cursor=$(read_cursor) || return 1
+  processed=$(read_processed) || return 1
+  if [ "$processed" -gt "$cursor" ]; then
+    echo "error: refusing cursor advancement because the processed marker is ahead of the read cursor" >&2
+    return 1
+  fi
   [ "$through" -gt "$cursor" ] || return 0
   tmp=$(mktemp "$STATE/.branch-outcomes-cursor.XXXXXX")
   printf '%s\n' "$through" > "$tmp"
@@ -304,7 +309,10 @@ case "$CMD" in
       echo "error: refusing cursor advancement beyond a valid stored outcome" >&2
       exit 1
     fi
-    advance_cursor "$THROUGH"
+    if ! advance_cursor "$THROUGH"; then
+      fm_lock_release "$LOCK"
+      exit 1
+    fi
     fm_lock_release "$LOCK"
     ;;
   unprocessed)
@@ -426,7 +434,10 @@ case "$CMD" in
         printf '%s\n' "$VISIBLE"
       fi
       LAST=$(record_seq "$(printf '%s\n' "$REPLAYABLE" | tail -n 1)")
-      [ -z "$LAST" ] || advance_cursor "$LAST"
+      if [ -n "$LAST" ] && ! advance_cursor "$LAST"; then
+        fm_lock_release "$LOCK"
+        exit 1
+      fi
     fi
     fm_lock_release "$LOCK"
     ;;

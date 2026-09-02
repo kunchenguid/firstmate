@@ -221,6 +221,38 @@ test_outcome_cursor_corruption_fails_closed() {
   pass "malformed and ahead-of-store cursor state fail closed before any outcome can be skipped"
 }
 
+test_cursor_advancement_refuses_ahead_processed_marker() {
+  local home cursor marker out status
+  home="$TMP_ROOT/store-ahead-processed-home"
+  mkdir -p "$home/state"
+  cursor="$home/state/.branch-outcomes-cursor"
+  marker="$home/state/.branch-outcomes-processed"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'already read' >/dev/null || fail "first routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict routine --summary 'replayable second' >/dev/null || fail "second routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-3 --verdict routine --summary 'replayable third' >/dev/null || fail "third routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 || fail "fixture mark-read failed"
+  printf '3\n' > "$marker"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 3 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mark-read legitimized an ahead processed marker"
+  assert_contains "$out" "processed marker is ahead of the read cursor" "mark-read ahead-marker refusal lost its diagnostic"
+  [ "$(cat "$cursor")" = 1 ] || fail "refused mark-read advanced the cursor"
+  [ "$(cat "$marker")" = 3 ] || fail "refused mark-read changed the processed marker"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "startup replay legitimized an ahead processed marker"
+  assert_contains "$out" "processed marker is ahead of the read cursor" "startup replay ahead-marker refusal lost its diagnostic"
+  [ "$(cat "$cursor")" = 1 ] || fail "refused startup replay advanced the cursor"
+  [ "$(cat "$marker")" = 3 ] || fail "refused startup replay changed the processed marker"
+  pass "cursor advancement refuses to legitimize an ahead processed marker"
+}
+
 test_outcome_sequence_conflicts_fail_closed() {
   local home store snapshot out status
   home="$TMP_ROOT/store-sequence-conflict-home"
@@ -787,6 +819,7 @@ test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
+test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
