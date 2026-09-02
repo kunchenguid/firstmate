@@ -14,7 +14,12 @@ import { readdirSync, readFileSync } from "node:fs";
 // handling the wake, including one fallback to main on a later failure. A
 // busy branch does not accept eventual serialized capacity: accepted=false
 // leaves delivery with the watcher, which sends it to main exactly as it did
-// before the branch existed. Watcher-failure alarms are never offered - only
+// before the branch existed - unless the busy branch reports the offer as
+// already owned (alreadyOwned=true), meaning every currently-eligible row of
+// the offered wake is covered by the live grant of its in-flight turn, whose
+// drain will consume and report them; the watcher then suppresses the
+// redundant main delivery instead of duplicating the same completion.
+// Watcher-failure alarms are never offered - only
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
@@ -148,6 +153,27 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 // branch prompt, by writeEligibleRowsSnapshot below.
 export const BRANCH_ELIGIBLE_ROWS_FILE = ".branch-eligible-rows";
 
+// Read the live grant rows without taking the queue lock. Every writer
+// replaces or removes the file atomically under that lock, so an unlocked
+// read still observes one whole consistent file; null (absent or
+// structurally invalid) means no live grant and must never be mistaken for
+// an empty one. While the branch's own unsettled work exists, the file names
+// exactly the rows that in-flight turn still owns and will drain:
+// publication verified them against the queue and this generation's owner
+// record, and a branch acknowledgement shrinks the file as it consumes rows
+// (bin/fm-wake-drain.sh consume_actor_rows_locked).
+export function readLiveEligibleRows(state: string): string[] | null {
+  let raw: string;
+  try {
+    raw = readFileSync(`${state}/${BRANCH_ELIGIBLE_ROWS_FILE}`, "utf8");
+  } catch {
+    return null;
+  }
+  const seqs = raw.split(/\r?\n/).filter((line) => line.length > 0);
+  if (seqs.length === 0 || seqs.some((seq) => !/^[0-9]+$/.test(seq))) return null;
+  return seqs;
+}
+
 // Atomically publish the exact row set a branch turn may drain and
 // acknowledge. One sequence number per line - an opaque handoff, never
 // reclassified by the consumer. A main-owned result means the competing main
@@ -221,7 +247,17 @@ export interface BranchDispatchOffer {
   eligible: boolean;
   /** Set by accept() only after an exact branch row grant exists. */
   accepted: boolean;
+  /**
+   * True only when a busy branch reported that every currently-eligible row
+   * of this offered wake is already covered by the live identity-bound grant
+   * of its in-flight turn, whose drain will consume and report them: the
+   * watcher must suppress the main delivery instead of duplicating the same
+   * completion. Never set together with accepted - no new handling starts
+   * and no new grant is written.
+   */
+  alreadyOwned: boolean;
   accept(): void;
+  reportAlreadyOwned(): void;
 }
 
 export function createBranchDispatchOffer(
@@ -236,8 +272,12 @@ export function createBranchDispatchOffer(
     heartbeat,
     eligible,
     accepted: false,
+    alreadyOwned: false,
     accept() {
       offer.accepted = true;
+    },
+    reportAlreadyOwned() {
+      offer.alreadyOwned = true;
     },
   };
   return offer;

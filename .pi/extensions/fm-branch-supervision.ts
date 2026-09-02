@@ -66,6 +66,7 @@ import {
   activateEligibleRowsOwner,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
+  readLiveEligibleRows,
   releaseEligibleRowsSnapshot,
   scopeForUnreadWake,
   writeEligibleRowsSnapshot,
@@ -688,7 +689,7 @@ ${context.command}
 
   pi.events?.on?.(FM_BRANCH_DISPATCH_EVENT, (data) => {
     const offer = data as BranchDispatchOffer;
-    if (!offer || typeof offer.accept !== "function") return;
+    if (!offer || typeof offer.accept !== "function" || typeof offer.reportAlreadyOwned !== "function") return;
     // Check eligibility before ownership activation so an out-of-scope wake
     // gets neither branch routing nor branch-owned state/lease cleanup side
     // effects.
@@ -696,10 +697,27 @@ ${context.command}
     if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
-    if (branchHasPendingWork(generation)) return; // main retains delivery while branch work is unsettled
+    const busy = branchHasPendingWork(generation);
+    // Read the in-flight grant before rescanning the queue: a branch
+    // acknowledgement consumes a granted row from the queue and then the
+    // grant under one lock hold, so this order can never see a row as
+    // uncovered while the in-flight turn still owns it unread.
+    const liveGrantRows = busy ? readLiveEligibleRows(state) : null;
     const heartbeat = /^heartbeat($|:)/.test(offer.message);
     const scope = scopeForUnreadWake(state, heartbeat);
     if (scope.corrupted || scope.eligibleSeqs.length === 0) return;
+    if (busy) {
+      // The unsettled turn cannot begin this offered wake, but when its
+      // live grant already covers every row the wake would drain, that
+      // turn's drain will consume and report them: report the offer as
+      // already owned so the watcher does not also deliver the same
+      // completion to main. Rows outside the grant keep the true busy
+      // fallback to main.
+      if (liveGrantRows && scope.eligibleSeqs.every((seq) => liveGrantRows.includes(seq))) {
+        offer.reportAlreadyOwned();
+      }
+      return;
+    }
     const acceptedGeneration = generation;
     const grant = writeEligibleRowsSnapshot(
       state,

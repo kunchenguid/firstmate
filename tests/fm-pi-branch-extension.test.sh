@@ -254,18 +254,9 @@ const pi = {
 function fire(event, payload, ctx) {
   for (const handler of piHandlers.get(event) ?? []) handler(payload, ctx);
 }
+const dispatchLib = await import(new URL("./lib/fm-branch-dispatch.ts", pathToFileURL(process.env.PLUGIN)).href);
 function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat) {
-  const offer = {
-    message,
-    projects,
-    heartbeat,
-    eligible,
-    accepted: false,
-    accept() {
-      offer.accepted = true;
-    },
-  };
-  return offer;
+  return dispatchLib.createBranchDispatchOffer(message, projects, heartbeat, eligible);
 }
 function dispatch(message, projects, heartbeat, eligible, seq = 1, append = false) {
   const offer = makeOffer(message, projects, heartbeat, eligible);
@@ -281,7 +272,19 @@ function dispatch(message, projects, heartbeat, eligible, seq = 1, append = fals
 }
 function dispatchThroughWatcher(message, projects, heartbeat, eligible, seq = 1, append = false) {
   const offer = dispatch(message, projects, heartbeat, eligible, seq, append);
-  if (!offer.accepted) {
+  if (!(offer.accepted || offer.alreadyOwned)) {
+    pi.sendUserMessage(`FIRSTMATE WATCHER WAKE: ${message}`, { deliverAs: "followUp" });
+  }
+  return offer;
+}
+function dispatchThroughWatcherPrescanned(message) {
+  // A watcher cycle that closes on a row already sitting unread in the
+  // queue: the caller pre-writes the rows, and this mirrors the watcher's
+  // real delivery decision exactly (suppress main on accepted or
+  // alreadyOwned).
+  const offer = makeOffer(message);
+  bus.emit("fm-branch-supervision:dispatch", offer);
+  if (!(offer.accepted || offer.alreadyOwned)) {
     pi.sendUserMessage(`FIRSTMATE WATCHER WAKE: ${message}`, { deliverAs: "followUp" });
   }
   return offer;
@@ -1278,6 +1281,75 @@ EOF
   pass "a busy supervision branch returns a later completion to main exactly once"
 }
 
+test_busy_branch_reports_grant_covered_completion_already_owned() {
+  local repo home out status
+  repo="$TMP_ROOT/busy-covered-root"
+  home="$TMP_ROOT/busy-covered-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatchThroughWatcher, dispatchThroughWatcherPrescanned, settle, home, mainUserMessages }; })()`);
+const { dispatchThroughWatcher, dispatchThroughWatcherPrescanned, settle, home, mainUserMessages } = globalThis.__t;
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+
+let releasePrompt;
+globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
+// Two completions are both unread when the first dispatch scans, so the
+// pre-accept grant covers rows 1 and 2 (the exact incident shape).
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tfirst completion\n");
+appendFileSync(`${home}/state/.wake-queue`, "1\t2\tsignal\tbranch-driver.status\tsecond completion\n");
+const first = dispatchThroughWatcherPrescanned("signal: first completion");
+if (!first.accepted) throw new Error("available branch refused the first completion");
+await settle(() => globalThis.__fmPromptStarted === true, "first branch prompt start");
+if (readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim() !== "1\n2") {
+  throw new Error("first dispatch did not grant both unread completions");
+}
+
+// The successor watcher cycle closes on the second completion while the
+// first prompt is still unsettled: the busy branch must report the offer as
+// already owned so the watcher does not also deliver it to main.
+const second = dispatchThroughWatcherPrescanned("signal: second completion");
+if (second.accepted) throw new Error("busy branch accepted a wake it could not start");
+if (!second.alreadyOwned) throw new Error("busy branch did not report the grant-covered wake as already owned");
+if ((globalThis.__fmPrompts ?? []).length !== 0) {
+  throw new Error("the covered completion started behind the unsettled first prompt");
+}
+if (readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim() !== "1\n2") {
+  throw new Error("the already-owned report changed the in-flight grant");
+}
+
+// A row outside the live grant keeps the true busy fallback to main.
+const third = dispatchThroughWatcher("signal: third completion", undefined, false, true, 3, true);
+if (third.accepted || third.alreadyOwned) throw new Error("busy branch took over a row outside its live grant");
+await settle(() => mainUserMessages.length === 1, "outside-grant busy fallback");
+if (!String(mainUserMessages[0].content).includes("FIRSTMATE WATCHER WAKE: signal: third completion")) {
+  throw new Error(`busy fallback lost the outside-grant completion: ${JSON.stringify(mainUserMessages)}`);
+}
+if (readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim() !== "1\n2") {
+  throw new Error("busy fallback changed the in-flight grant");
+}
+
+releasePrompt();
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "first branch prompt settle");
+await new Promise((resolve) => setTimeout(resolve, 50));
+const wakes = mainUserMessages.map((entry) => String(entry.content));
+if (wakes.filter((message) => message.includes("second completion")).length !== 0) {
+  throw new Error(`the grant-covered completion also reached main: ${JSON.stringify(wakes)}`);
+}
+if (wakes.filter((message) => message.includes("third completion")).length !== 1) {
+  throw new Error(`the outside-grant completion did not stay exactly one main delivery: ${JSON.stringify(wakes)}`);
+}
+if ((globalThis.__fmPrompts ?? []).length !== 1) throw new Error("more than one branch prompt ran");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a grant-covered completion offered while busy must be reported already owned instead of duplicated to main: $out"
+  pass "a busy branch reports a grant-covered completion as already owned instead of duplicating it to main"
+}
+
 test_failure_after_prompt_start_falls_back_once() {
   local repo home out status
   repo="$TMP_ROOT/started-failure-root"
@@ -1432,8 +1504,8 @@ test_rebind_remirrors_undelivered_dialog_from_durable_cursor() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home }; })()`);
-const { fire, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, makeOffer, home }; })()`);
+const { fire, makeOffer, home } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1478,16 +1550,7 @@ replacement.default(replacementPi);
 for (const handler of replacementPiHandlers.get("session_start") ?? []) handler({}, ctx);
 for (const handler of replacementPiHandlers.get("turn_end") ?? []) handler({}, ctx);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: after rebind\n");
-const offer = {
-  message: "signal: after rebind",
-  projects: [`${home}/projects/approved`],
-  heartbeat: false,
-  eligible: true,
-  accepted: false,
-  accept() {
-    offer.accepted = true;
-  },
-};
+const offer = makeOffer("signal: after rebind");
 replacementBus.emit("fm-branch-supervision:dispatch", offer);
 if (!offer.accepted) throw new Error("replacement instance refused the wake");
 for (let i = 0; i < 250; i += 1) {
@@ -1745,6 +1808,7 @@ test_replacement_activation_cleans_leases_and_retries_failure
 test_cold_start_activates_after_lock_acquisition
 test_queued_actions_recheck_lock_ownership
 test_busy_branch_returns_later_completion_to_main_once
+test_busy_branch_reports_grant_covered_completion_already_owned
 test_failure_after_prompt_start_falls_back_once
 test_stale_generation_boundaries_are_side_effect_free
 test_secondary_session_stays_inert

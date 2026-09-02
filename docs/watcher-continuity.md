@@ -67,6 +67,7 @@ Every presented row is claimed to exactly one actor under the durable queue lock
 Main records its presented set in `state/.main-eligible-rows`.
 A branch grant is published through `bin/fm-wake-grant.sh` under that same lock in `state/.branch-eligible-rows`, bound to the live branch process and extension generation recorded in `state/.branch-eligible-owner`, and publication is refused if main already claimed any requested row.
 The branch publishes that exact grant before synchronously accepting the watcher offer, and it accepts no further offer while a prompt or mirror operation is unsettled, so acceptance proves current ownership and capacity rather than eventual serialized capacity.
+A busy branch instead reports an offered wake whose eligible rows its live grant already covers as already owned, and the watcher suppresses that main delivery because the in-flight turn's drain will present those rows; rows outside the live grant keep the single main fallback.
 A main drain validates that owner evidence under the queue lock and reclaims the grant when its process is gone or its identity no longer matches.
 A main drain claims every currently unclaimed row and excludes an active branch grant from both presentation and acknowledgement.
 Its `--ack-through <SEQ>` deletes only claimed main rows at or below the cutoff, while a branch acknowledgement deletes only claimed branch rows at or below its cutoff.
