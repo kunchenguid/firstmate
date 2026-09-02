@@ -1279,6 +1279,42 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
     fail "$RESTART_ID restart fixture unexpectedly retained a registered agent"
   fi
+  if [ "$RESTART_ID" = wheelhouse-healing-r1 ]; then
+    RESTART_ORIGIN=$(git -C "$OLD_RESTART_WT" remote get-url origin)
+    RESTART_HEAD=$(git -C "$OLD_RESTART_WT" rev-parse HEAD)
+    git -C "$OLD_RESTART_WT" remote set-url origin "file://$TMP_ROOT/missing-recovery-origin.git"
+    if spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-fetch-refuse.out" 2> "$TMP_ROOT/$RESTART_ID-fetch-refuse.err"; then
+      fail "$RESTART_ID recovery succeeded without refreshing origin refs"
+    fi
+    grep -F "could not fetch and prune origin for prior copy '$OLD_RESTART_WT'" "$TMP_ROOT/$RESTART_ID-fetch-refuse.err" >/dev/null 2>&1 \
+      || fail "$RESTART_ID did not refuse at the recovery ref-refresh gate: $(cat "$TMP_ROOT/$RESTART_ID-fetch-refuse.err")"
+    [ "$(git -C "$OLD_RESTART_WT" rev-parse HEAD)" = "$RESTART_HEAD" ] \
+      || fail "$RESTART_ID moved HEAD after recovery ref refresh failed"
+    git -C "$OLD_RESTART_WT" remote set-url origin "$RESTART_ORIGIN"
+
+    printf 'unlanded recovery work\n' > "$OLD_RESTART_WT/recovery-unlanded.txt"
+    git -C "$OLD_RESTART_WT" add recovery-unlanded.txt
+    git -C "$OLD_RESTART_WT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm 'unlanded recovery fixture'
+    RESTART_UNLANDED=$(git -C "$OLD_RESTART_WT" rev-parse HEAD)
+    git -C "$OLD_RESTART_WT" update-ref refs/remotes/origin/recovery-stale "$RESTART_UNLANDED"
+    [ -z "$(git -C "$OLD_RESTART_WT" ls-remote origin refs/heads/recovery-stale)" ] \
+      || fail "$RESTART_ID stale-ref fixture unexpectedly exists on origin"
+    [ -z "$(git -C "$OLD_RESTART_WT" log --format=%H --max-count=1 HEAD --not --remotes --)" ] \
+      || fail "$RESTART_ID stale-ref fixture did not mask the unlanded commit before recovery"
+    if spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-unlanded-refuse.out" 2> "$TMP_ROOT/$RESTART_ID-unlanded-refuse.err"; then
+      fail "$RESTART_ID recovery reset a commit hidden by a stale remote-tracking ref"
+    fi
+    grep -F "holds commits not on any remote" "$TMP_ROOT/$RESTART_ID-unlanded-refuse.err" >/dev/null 2>&1 \
+      || fail "$RESTART_ID did not refuse the commit exposed by pruning stale refs: $(cat "$TMP_ROOT/$RESTART_ID-unlanded-refuse.err")"
+    [ "$(git -C "$OLD_RESTART_WT" rev-parse HEAD)" = "$RESTART_UNLANDED" ] \
+      || fail "$RESTART_ID reset the unlanded recovery commit"
+    grep -F 'unlanded recovery work' "$OLD_RESTART_WT/recovery-unlanded.txt" >/dev/null 2>&1 \
+      || fail "$RESTART_ID discarded the unlanded recovery worktree content"
+    lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
+      || fail "$RESTART_ID removed its inspectable recovery pane after refusing unlanded work"
+    git -C "$OLD_RESTART_WT" push --quiet origin HEAD:refs/heads/recovery-landed
+  fi
   RECLAIM_FOCUS=$(focus_snapshot)
   mkdir -p "$REFRESH_CWD_CONTROL"
   printf '%s\n' "$OLD_RESTART_WT" > "$REFRESH_CWD_CONTROL/worktree"

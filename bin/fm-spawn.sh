@@ -147,8 +147,9 @@
 #   that already existed, which is sent a plain `cd` into the copy only after
 #   the refresh. A fresh spawn whose durable record still names a pooled copy
 #   (a quarantined Herdr recovery) refreshes that same copy instead of leasing
-#   another, and refuses when its HEAD holds commits no remote has, so a
-#   retry never grows the pool or resets a prior worker's unlanded commits.
+#   another, and fetches and prunes its remote refs before refusing when its
+#   HEAD holds commits no remote has, so a retry never grows the pool or resets
+#   a prior worker's unlanded commits.
 #   Recovery first classifies the recorded endpoint and moves an agent-free
 #   shell back to the primary project before inspecting or refreshing its
 #   recorded copy. The reclaimed replacement likewise starts outside the copy
@@ -2093,6 +2094,10 @@ spawn_prior_record_worktree() {
 # unlanded work.
 spawn_refuse_unpushed_head() {  # <worktree>
   local worktree=$1 unpushed
+  if ! git -C "$worktree" fetch --quiet --prune origin; then
+    echo "error: could not fetch and prune origin for prior copy '$worktree'; refusing to inspect or refresh it" >&2
+    return 1
+  fi
   unpushed=$(git -C "$worktree" log --format=%H --max-count=1 HEAD --not --remotes -- 2>/dev/null) || {
     echo "error: could not inspect prior copy '$worktree' for unpushed commits; refusing to refresh it" >&2
     return 1
