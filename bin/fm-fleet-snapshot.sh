@@ -461,10 +461,12 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 SNAPSHOT_TASK_DIR=
+SNAPSHOT_TASK_METAS=()
 
 snapshot_task_cleanup() {
   [ -z "$SNAPSHOT_TASK_DIR" ] || rm -rf -- "$SNAPSHOT_TASK_DIR"
   SNAPSHOT_TASK_DIR=
+  SNAPSHOT_TASK_METAS=()
 }
 
 snapshot_wait_current_reads() {  # <pid>...
@@ -519,6 +521,9 @@ prefetch_task_current_states() {
   SNAPSHOT_TASK_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-tasks.XXXXXX") || return 1
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
+    SNAPSHOT_TASK_METAS[${#SNAPSHOT_TASK_METAS[@]}]=$meta
+  done
+  for meta in "${SNAPSHOT_TASK_METAS[@]}"; do
     id=$(basename "$meta" .meta)
     prefetch_task_observations "$meta" "$id" &
     pids[active]=$!
@@ -546,8 +551,7 @@ task_json_lines() {
   local open_decisions_tsv open_decisions_json
 
   prefetch_task_current_states || return 1
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
+  for meta in "${SNAPSHOT_TASK_METAS[@]}"; do
     id=$(basename "$meta" .meta)
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
