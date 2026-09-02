@@ -31,6 +31,9 @@ ok - agy 1.1.24's global customization root is where the turn-end installer writ
 all fm-agy-surface-live-e2e checks passed against agy 1.1.24
 ```
 
+The suite carries one further check that the run above did not enable: `FM_AGY_TURNEND_LIVE_E2E=1` with `FM_AGY_TURNEND_PAYLOAD` naming a Stop payload captured from a real turn asserts only that agy still emits the `fullyIdle` and `workspacePaths` keys the installed hook parses.
+It spends no turn and says nothing about what those values mean; what a `fullyIdle` value does to a turn is owned by the portable regression below.
+
 The portable regression is `tests/fm-agy-harness.test.sh`, which pins the same contracts with no harness installed and carries the captured Stop payloads below as fixtures.
 
 ## Turn end: the `fullyIdle` contract

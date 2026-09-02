@@ -665,6 +665,58 @@ EOF
   pass "the agy hook always lets the stop proceed, on every payload shape"
 }
 
+# The installed hook reads its Stop payload with jq, and `select(.fullyIdle ==
+# true)` is an exact test no substring match could stand in for. A spawn that
+# installed the hook anyway would arm a turn-end signal that can never fire, so
+# it refuses instead - the same contract as the Kimi installer, and it must
+# leave the operator's own agy customization root untouched when it does.
+test_spawn_refuses_without_jq() {
+  local rec case_dir home proj wt fakebin agy_home id shim dir entry out rc saved_ifs
+  rec=$(make_spawn_case nojq)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  command -v jq >/dev/null 2>&1 \
+    || fail "this host has no jq at all, so the missing-jq refusal could not be provoked"
+
+  # A PATH that mirrors this host's real one MINUS jq, so the refusal below is
+  # provoked by jq's absence alone and not by some other tool going missing.
+  shim="$case_dir/nojq-path"
+  mkdir -p "$shim"
+  saved_ifs=$IFS
+  IFS=:
+  for dir in $PATH; do
+    IFS=$saved_ifs
+    if [ -d "$dir" ]; then
+      for entry in "$dir"/*; do
+        [ -f "$entry" ] && [ -x "$entry" ] || continue
+        [ -e "$shim/${entry##*/}" ] || ln -s "$entry" "$shim/${entry##*/}" 2>/dev/null || true
+      done
+    fi
+    IFS=:
+  done
+  IFS=$saved_ifs
+  rm -f "$shim/jq"
+  PATH="$shim" command -v jq >/dev/null 2>&1 \
+    && fail "jq is still resolvable on the probe PATH, so this case would prove nothing"
+
+  rc=0
+  out=$(PATH="$shim" run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an agy spawn installed a turn-end hook it had no jq to run"
+  case "$out" in
+    *"requires jq"*) : ;;
+    *) fail "the missing-jq refusal did not name jq as the reason: $out" ;;
+  esac
+  assert_absent "$agy_home/plugins/fm-turn-end/fm-turn-end.sh" \
+    "the missing-jq refusal still wrote a hook that could never fire"
+  assert_absent "$agy_home/fm-turn-end.d" \
+    "the missing-jq refusal still wrote into the agy registry"
+  assert_absent "$wt/.fm-agy-turnend" \
+    "the missing-jq refusal still dropped a worktree pointer"
+  pass "an agy spawn refuses without jq and installs nothing"
+}
+
 test_teardown_retires_the_hook_wiring() {
   local rec case_dir home proj wt fakebin agy_home id out token
   rec=$(make_spawn_case teardown)
@@ -800,6 +852,7 @@ test_fresh_output_over_a_stale_footer_still_settles_readiness
 test_turnend_requires_fully_idle
 test_turnend_requires_registered_token
 test_turnend_never_blocks_the_stop
+test_spawn_refuses_without_jq
 test_teardown_retires_the_hook_wiring
 test_busy_signature_is_registered_and_distinct
 test_worker_state_is_unknown_never_idle
