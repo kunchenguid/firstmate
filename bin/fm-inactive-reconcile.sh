@@ -8,10 +8,18 @@
 # This is an adjunct to the existing watcher poll loop and session-start path,
 # not a watcher, daemon, PR poll, or forge client of its own.
 # `scan` evaluates at most once per FM_INACTIVE_RECONCILE_SECS (default 900,
-# valid 60..1800) per home, except that --startup performs the same cheap scan
-# immediately during a locked session start. Each scan has an aggregate
-# FM_INACTIVE_RECONCILE_BUDGET_SECS bound (default 10, valid 1..30) and resumes
-# after its last visited child on the next scan.
+# valid 60..1800) per home, except that --startup performs the same scan
+# immediately in the locked session start's deferred worker. Each scan uses an
+# aggregate FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
+# resumes after its last visited child on the next scan.
+# The scan enforces that budget itself through a whole-second deadline, and the
+# first due child of every scan is always visited with at least a one-second
+# state-read bound: whole-second arithmetic can otherwise round a small budget
+# to zero mid-scan, and an invocation that exits having visited nothing would
+# advance the durable cursor past a child it never examined. A process-group
+# kill one second after the budget remains as a backstop for a scan wedged in
+# an unbounded wait (for example a live-held wake-queue lock), so the clean
+# deadline path is not racing its own backstop.
 #
 # It considers only a direct ordinary crewmate whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
@@ -193,29 +201,27 @@ queue_key_exists() { # <key>
   printf '%s\n' "$queued" | grep -Fx -- "$key" >/dev/null 2>&1
 }
 
+publish_actionable() { # <key> <payload>
+  local key=$1 payload=$2
+  queue_key_exists "$key" && return 1
+  fm_wake_append check "$key" "$payload" || return 2
+  printf 'actionable: %s\n' "$payload"
+}
+
 queue_notice_once() { # <record> <key> <payload>
-  local record=$1 key=$2 payload=$3 notified
+  local record=$1 key=$2 payload=$3 notified rc=0
   notified=$(record_value "$record" notice_emitted)
   [ "$notified" = 1 ] && return 1
-  if queue_key_exists "$key"; then
+  publish_actionable "$key" "$payload" || rc=$?
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
     record_field_set "$record" notice_emitted 1 || return 2
-    return 1
   fi
-  fm_wake_append check "$key" "$payload" || return 2
-  record_field_set "$record" notice_emitted 1 || return 2
-  printf 'actionable: %s\n' "$payload"
-  return 0
+  return "$rc"
 }
 
 queue_presentation() { # <record> <fingerprint> <payload>
-  local record=$1 fingerprint=$2 payload=$3 key
-  key="inactive-outcome:$fingerprint"
-  if queue_key_exists "$key"; then
-    return 1
-  fi
-  fm_wake_append check "$key" "$payload" || return 2
-  printf 'actionable: %s\n' "$payload"
-  return 0
+  local record=$1 fingerprint=$2 payload=$3
+  publish_actionable "inactive-outcome:$fingerprint" "$payload"
 }
 
 last_activity_age() { # <meta> <status> <turn-ended>
@@ -358,6 +364,13 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
       mark_reported "$RECORD_PENDING" || return 1
     else
       payload="inactive terminal outcome needs parent report: child=$id state=$state"
+      # A home seeded without its parent binding cannot report upward at all,
+      # and every later terminal outcome fails the same way for the same
+      # reason. Name the missing binding so the diagnostic points at the repair
+      # instead of reading as one report that happened to fail.
+      if ! fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent"; then
+        payload="$payload (missing or unreadable parent binding .fm-secondmate-parent)"
+      fi
       queue_notice_once "$RECORD_PENDING" "inactive-reconcile:$fingerprint" "$payload" || true
     fi
     return 0
@@ -377,8 +390,13 @@ reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   return "$rc"
 }
 
+# SCAN_FIRST_VISIT_PENDING is armed by scan() before its passes. The deadline
+# below is whole-second arithmetic, so a small budget can quantize to zero
+# between the deadline computation and these checks; without the guaranteed
+# first visit, such a scan would return 3 having examined no child at all while
+# write_scan_marker had already advanced the cursor past the skipped child.
 scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
-  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id remaining rc
+  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id remaining rc first
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -387,9 +405,19 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
       after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
       through) [ -n "$cursor" ] && [[ "$id" > "$cursor" ]] && continue ;;
     esac
-    [ "$(date +%s)" -lt "$deadline" ] || return 3
+    first=0
+    if [ "${SCAN_FIRST_VISIT_PENDING:-0}" -eq 1 ]; then
+      first=1
+      SCAN_FIRST_VISIT_PENDING=0
+    fi
+    if [ "$first" -eq 0 ]; then
+      [ "$(date +%s)" -lt "$deadline" ] || return 3
+    fi
     write_scan_marker "$id" || return 1
     remaining=$((deadline - $(date +%s)))
+    if [ "$first" -eq 1 ] && [ "$remaining" -lt 1 ]; then
+      remaining=1
+    fi
     [ "$remaining" -gt 0 ] || return 3
     reconcile_direct_child "$id" "$meta" "$self" "$remaining" || {
       rc=$?
@@ -415,11 +443,13 @@ scan() {
     marker_rc=$?
     self=''
     if [ "$marker_rc" -ne 1 ]; then
-      printf 'actionable: inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker\n'
+      publish_actionable "inactive-reconcile-diagnostic:invalid-secondmate-home" \
+        "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
       return 0
     fi
   fi
   deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
+  SCAN_FIRST_VISIT_PENDING=1
   scan_pass "$cursor" after "$deadline" "$self" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then
     scan_pass "$cursor" through "$deadline" "$self" || rc=$?
@@ -461,7 +491,11 @@ case "$mode" in
       --startup) startup=1 ;;
       *) printf 'usage: fm-inactive-reconcile.sh scan [--startup]\n' >&2; exit 2 ;;
     esac
-    if fm_run_timed "$FM_INACTIVE_RECONCILE_BUDGET_SECS" "$0" _scan-locked "$startup"; then
+    # The scan's own whole-second deadline enforces the budget; this outer
+    # process-group kill is only the backstop for a scan wedged outside every
+    # bounded section (an unbounded lock wait), so it fires one second after
+    # the deadline instead of racing the clean bounded exit it exists to guard.
+    if fm_run_timed $((FM_INACTIVE_RECONCILE_BUDGET_SECS + 1)) "$0" _scan-locked "$startup"; then
       :
     elif [ "$?" -ne 124 ]; then
       exit 1

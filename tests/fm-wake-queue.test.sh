@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-wake-queue.test.sh - wake-queue losslessness (the queue safety matrix):
-# concurrent append/drain, bounded structural enrichment, interruption safety,
-# signal catch-up while no watcher runs, stale/check enqueue-before-suppressor
+# concurrent append/drain, bounded structural enrichment and presentation-lock
+# waits, interruption safety, signal catch-up while no watcher runs, stale/check enqueue-before-suppressor
 # ordering, atomic double-drain, duplicate collapse, and liveness assertion.
 # Nothing is lost and nothing is double-consumed. General watcher/lock liveness
 # lives in fm-watcher-lock.test.sh; daemon classification/injection in
@@ -13,6 +13,7 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+GRANT="$ROOT/bin/fm-wake-grant.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
@@ -85,7 +86,7 @@ test_signal_catchup_without_running_watcher() {
 }
 
 test_stale_enqueue_before_suppressor() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig
+  local dir state fakebin out drain_out capture_file window key pane_hash
   dir=$(make_case stale)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -100,8 +101,7 @@ test_stale_enqueue_before_suppressor() {
   # to its current signature so the per-poll signal scan does not pre-empt the
   # stale wake with a signal wake.
   printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stale.status"); else sig=$(stat -c '%s:%Y' "$state/stale.status"); fi
-  printf '%s' "$sig" > "$state/.seen-stale_status"
+  prime_status_seen "$state" "$state/stale.status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -120,7 +120,7 @@ test_stale_enqueue_before_suppressor() {
 # the queue-safety invariant - enqueue the stale wake BEFORE advancing the .stale-*
 # suppressor - so a watcher killed between the two never swallows the surfaced finish.
 test_not_working_stale_enqueue_before_suppressor() {
-  local dir state fakebin out drain_out capture_file window key pane_hash sig
+  local dir state fakebin out drain_out capture_file window key pane_hash
   dir=$(make_case stale-stopped)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -133,8 +133,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   # Non-terminal status (no captain-relevant verb); prime .seen-* so the per-poll
   # signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$state/stopped.status"); else sig=$(stat -c '%s:%Y' "$state/stopped.status"); fi
-  printf '%s' "$sig" > "$state/.seen-stopped_status"
+  prime_status_seen "$state" "$state/stopped.status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -162,9 +161,6 @@ test_check_output_is_queued() {
   out="$dir/watch.out"
   drain_out="$dir/drain.out"
   check_file="$state/task.check.sh"
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
-  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
   cat > "$check_file" <<'SH'
 #!/usr/bin/env bash
 printf 'merged: https://example.test/pr/1\n'
@@ -235,6 +231,208 @@ test_drain_dedupes_obvious_duplicates() {
 # plain drain-and-handle turn that runs no other supervision script. It must warn
 # when work is in flight with no live watcher, and stay silent right after a
 # normal fire from a live watcher with a fresh beacon, so it never false-alarms.
+test_secondmate_foreign_queue_stall_is_one_shot_and_read_only() {
+  local dir state sub fakebin out row_before row_after stall_count
+  dir=$(make_case secondmate-foreign-stall)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state" "$sub/data" "$sub/bin"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" > "$sub/state/.wake-queue"
+  row_before="$dir/foreign-before"
+  row_after="$dir/foreign-after"
+  cp "$sub/state/.wake-queue" "$row_before"
+  fakebin="$dir/fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' "${FM_FAKE_TMUX_WINDOW:-}" ;;
+  capture-pane) cat "${FM_FAKE_TMUX_CAPTURE:-/dev/null}" ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  out="$dir/watch.out"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$out" 2> "$dir/watch.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$out" >/dev/null \
+    || fail "an aged foreign row did not wake the parent checkpoint: $(cat "$out"); err=$(cat "$dir/watch.err"); meta=$(cat "$state/mate.meta"); foreign=$(cat "$sub/state/.wake-queue")"
+  [ -s "$state/.wake-queue" ] || fail "the parent notification was not durable"
+  stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
+  [ "$stall_count" -eq 1 ] || fail "the first parent checkpoint did not publish exactly one stall notification"
+
+  cmp -s "$row_before" "$sub/state/.wake-queue" \
+    || fail "foreign queue row changed during read-only stall detection"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "parent drain failed after the stall notification"
+  ack_drain_err "$state" "$dir/drain.err" \
+    || fail "parent stall notification could not be acknowledged"
+
+  sleep 1
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/watch-second.out" 2> "$dir/watch-second.err" || true
+  [ ! -s "$state/.wake-queue" ] || {
+    stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
+    [ "$stall_count" -eq 0 ] || fail "repeated checkpoint re-published the same stall notification"
+  }
+  cp "$sub/state/.wake-queue" "$row_after"
+  cmp -s "$row_before" "$row_after" || fail "foreign queue changed after idempotent re-check"
+
+  : > "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/watch-empty.out" 2> "$dir/watch-empty.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-empty.out" >/dev/null \
+    || fail "an empty foreign queue produced a stall notification"
+
+  printf '%s\t8\tcheck\thealthy\tcheck: healthy row\n' "$(date +%s)" > "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=60 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/watch-healthy.out" 2> "$dir/watch-healthy.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-healthy.out" >/dev/null \
+    || fail "a healthy foreign queue produced a stall notification"
+  pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
+}
+
+test_secondmate_stall_marker_rejects_symlink() {
+  local dir state sub fakebin marker outside expected
+  dir=$(make_case secondmate-stall-marker-symlink)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" > "$sub/state/.wake-queue"
+  outside="$dir/outside"
+  expected='must remain unchanged'
+  printf '%s\n' "$expected" > "$outside"
+  marker="$state/.secondmate-wake-stall-mate"
+  ln -s "$outside" "$marker"
+  fakebin="$dir/fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  capture-pane) : ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 \
+    > "$dir/watch.out" 2> "$dir/watch.err" || true
+  [ "$(cat "$outside")" = "$expected" ] || fail "stall marker write followed an unsafe symlink"
+  [ -L "$marker" ] || fail "stall marker write replaced rather than rejected an unsafe path"
+  [ ! -s "$state/.wake-queue" ] || fail "unsafe stall marker path still published a parent notification"
+  pass "secondmate stall markers reject symlinks without touching their targets"
+}
+
+test_acknowledged_stall_publication_survives_pre_marker_crash() {
+  local dir state sub fakebin out epoch row_before
+  dir=$(make_case secondmate-stall-crash)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state" "$sub/data"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  epoch=$(( $(date +%s) - 10 ))
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
+  row_before="$dir/foreign-before"
+  cp "$sub/state/.wake-queue" "$row_before"
+  append_wake "$state" check "secondmate-wake-loop-mate-$epoch-7" \
+    "check: secondmate wake-loop stalled: mate=mate row=7 age=10s" \
+    || fail "could not seed the pre-marker crash publication"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "pre-marker crash publication could not be drained"
+  ack_drain_err "$state" "$dir/drain.err" \
+    || fail "pre-marker crash publication could not be acknowledged"
+
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$out" 2> "$dir/watch.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "an acknowledged publication was duplicated after the pre-marker crash state"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "the replacement watcher re-published an acknowledged stall notification"
+  cmp -s "$row_before" "$sub/state/.wake-queue" \
+    || fail "pre-marker crash recovery changed the foreign queue row"
+  pass "stall publication acknowledgement closes the pre-marker crash window"
+}
+
+test_empty_prefix_mate_preserves_other_mate_receipt() {
+  local dir state empty stalled fakebin epoch row_before round
+  dir=$(make_case secondmate-prefix-receipt)
+  state="$dir/state"
+  empty="$dir/ios"
+  stalled="$dir/ios-ui"
+  mkdir -p "$empty/state" "$stalled/state"
+  printf 'ios\n' > "$empty/.fm-secondmate-home"
+  printf 'ios-ui\n' > "$stalled/.fm-secondmate-home"
+  printf 'window=firstmate:fm-ios\nkind=secondmate\nhome=%s\n' "$empty" > "$state/ios.meta"
+  printf 'window=firstmate:fm-ios-ui\nkind=secondmate\nhome=%s\n' "$stalled" > "$state/ios-ui.meta"
+  : > "$empty/state/.wake-queue"
+  epoch=$(( $(date +%s) - 10 ))
+  printf '%s\t9\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$stalled/state/.wake-queue"
+  row_before="$dir/foreign-before"
+  cp "$stalled/state/.wake-queue" "$row_before"
+  append_wake "$state" check "secondmate-wake-loop-ios-ui-$epoch-9" \
+    "check: secondmate wake-loop stalled: mate=ios-ui row=9 age=10s" \
+    || fail "could not seed the ios-ui stall publication"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "ios-ui stall publication could not be drained"
+  ack_drain_err "$state" "$dir/drain.err" \
+    || fail "ios-ui stall publication could not be acknowledged"
+
+  fakebin="$dir/fakebin"
+  round=1
+  while [ "$round" -le 2 ]; do
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='' \
+      FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+      FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 \
+      > "$dir/watch-$round.out" 2> "$dir/watch-$round.err" || true
+    ! grep -F 'secondmate wake-loop stalled' "$dir/watch-$round.out" >/dev/null \
+      || fail "empty ios queue erased ios-ui idempotency on checkpoint $round"
+    round=$((round + 1))
+  done
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "overlapping mate ids re-published the acknowledged ios-ui stall"
+  cmp -s "$row_before" "$stalled/state/.wake-queue" \
+    || fail "overlapping mate receipt checks changed the foreign row"
+  pass "empty prefix mate cleanup preserves another mate's stall receipt"
+}
+
 test_drain_asserts_watcher_liveness() {
   local dir state err identity
   dir=$(make_case drain-liveness)
@@ -318,21 +516,11 @@ SH
   pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
 }
 
-test_enrichment_caps_and_status_file_failures() {
-  local dir state out fake_perl_log perl_bin i raw_count annotation_bytes annotation_count oversized_lines perl_reads
-  dir=$(make_case caps)
+test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
+  local dir state out i raw_count expected
+  dir=$(make_case complete-enrichment)
   state="$dir/state"
   out="$dir/drain.out"
-  fake_perl_log="$dir/perl.log"
-  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
-  cat > "$dir/fakebin/perl" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = -MFcntl=:DEFAULT ]; then
-  printf 'read\n' >> "$FM_WAKE_ENRICH_PERL_LOG"
-fi
-exec "$FM_WAKE_ENRICH_REAL_PERL" "$@"
-SH
-  chmod +x "$dir/fakebin/perl"
   awk 'BEGIN { printf "done: "; for (i = 0; i < 20000; i++) printf "x"; printf "\n" }' > "$state/huge.status"
   append_wake "$state" signal huge.status "signal: huge" || fail "huge status wake append failed"
   i=1
@@ -350,28 +538,28 @@ SH
   chmod 000 "$state/unreadable.status"
   append_wake "$state" signal unreadable.status "signal: unreadable" || fail "unreadable status wake append failed"
 
-  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_PERL_LOG="$fake_perl_log" \
-    FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
-    || fail "capped enrichment drain failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "complete enrichment drain failed"
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
-  grep '^wake annotation:.*\[truncated\]$' "$out" >/dev/null || fail "per-item/input truncation marker was not emitted"
-  grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(global enrichment byte cap\)$' "$out" >/dev/null \
-    || fail "global omitted-annotation marker was not emitted"
-  annotation_bytes=$(LC_ALL=C awk '/^wake annotation:/ { bytes += length($0) + 1 } END { print bytes + 0 }' "$out")
-  [ "$annotation_bytes" -le 8192 ] || fail "global annotation output exceeded 8192 bytes ($annotation_bytes)"
-  oversized_lines=$(LC_ALL=C awk '/^wake annotation: latest/ && length($0) + 1 > 2048 { count++ } END { print count + 0 }' "$out")
-  [ "$oversized_lines" -eq 0 ] || fail "a per-item annotation exceeded 2048 bytes"
-  annotation_count=$(grep -c '^wake annotation: latest' "$out" || true)
-  [ "$annotation_count" -lt 9 ] || fail "global cap did not omit any of the nine readable status annotations"
-  perl_reads=$(wc -l < "$fake_perl_log" | tr -d ' ')
-  [ "$perl_reads" -eq 8 ] || fail "enrichment read cap allowed $perl_reads safe reads instead of 8"
-  grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(enrichment read cap\)$' "$out" >/dev/null \
-    || fail "enrichment read-cap omission marker was not emitted"
+
+  expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
+  grep -Fx "$expected" "$out" >/dev/null \
+    || fail "the oversized unread status line was truncated or omitted"
+  i=1
+  while [ "$i" -le 8 ]; do
+    expected="wake annotation: latest wake-EVENT observed at drain, not current state: many-$i.status: $(cat "$state/many-$i.status")"
+    grep -Fx "$expected" "$out" >/dev/null \
+      || fail "readable status many-$i was truncated or omitted"
+    i=$((i + 1))
+  done
+  if grep -E '^wake annotation:.*(truncated|omitted)' "$out" >/dev/null; then
+    fail "complete unread annotation output still reported dropped content"
+  fi
   if grep -E ': (empty|missing|malformed|unreadable)\.status:' "$out" >/dev/null; then
     fail "missing, unreadable, malformed, or empty status file produced an annotation"
   fi
-  pass "bounded reads and per-item/global caps fail open with explicit truncation and omission markers"
+  pass "every readable unread status line is annotated in full while invalid status files preserve their raw wakes"
 }
 
 wait_for_file_text() {  # <file> <fixed-text>
@@ -409,6 +597,209 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" || fail "follow-up drain after concurrent append failed"
   grep -F "$(printf '\tsignal\tnext.status\t')" "$out2" >/dev/null || fail "concurrent append was not left for the next drain"
   pass "slow annotation releases the append lock and a deleted status file fails open"
+}
+
+# Per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement").
+# Drives a MIXED queue snapshot - an unacked main-only check row alongside two
+# task-local rows the Pi supervision branch was granted - directly against
+# the real bin/fm-wake-drain.sh, independent of the Pi SDK. This is the core
+# safety property: a scoped actor's ack must never remove a row outside its
+# own eligible snapshot, no matter that row's sequence number relative to
+# what the actor presents or acks itself. Do not regress it.
+test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
+  local dir state out err sequence generation count
+  dir=$(make_case actor-scope)
+  state="$dir/state"
+
+  append_wake "$state" check "some-poll.check.sh" "check: some-poll.check.sh: merged" \
+    || fail "main-only append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  append_wake "$state" stale "fm-window" "stale: fm-window" || fail "stale append failed"
+
+  # The extension's own job (fm-branch-dispatch.ts) is granting exactly the
+  # two task-local rows; this test drives the bash consume contract those
+  # sequence numbers gate, independent of the Pi SDK.
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" actor-scope || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish actor-scope 2 3 || fail "branch grant publication failed"
+
+  out="$dir/branch-drain.out"
+  err="$dir/branch-drain.err"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$out" 2> "$err" \
+    || fail "branch-scoped drain failed: $(cat "$err")"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "branch drain omitted its eligible signal row"
+  grep -Fq "$(printf '\tstale\tfm-window\t')" "$out" || fail "branch drain omitted its eligible stale row"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" && fail "branch drain presented the main-owned row"
+
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "branch drain omitted its acknowledgement boundary"
+  [ "$sequence" -eq 3 ] || fail "branch ack cutoff must be the max ELIGIBLE seq (3), got $sequence"
+
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch-scoped ack failed"
+
+  # The core no-swallow property: the main-only row - seq 1, BELOW the
+  # branch's own ack cutoff of 3 - must still be there.
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$state/.wake-queue" \
+    || fail "branch's scoped ack swallowed a main-owned row below its own cutoff"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$state/.wake-queue" \
+    && fail "branch's own eligible signal row was not consumed"
+  grep -Fq "$(printf '\tstale\tfm-window\t')" "$state/.wake-queue" \
+    && fail "branch's own eligible stale row was not consumed"
+
+  # Main's own later, ordinary (unscoped) drain sees exactly what remains.
+  out="$dir/main-drain.out"
+  err="$dir/main-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
+  count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
+  [ "$count" -eq 1 ] || fail "main's later drain should see exactly the one remaining main-owned row: $(cat "$out")"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" || fail "main's later drain lost the main-owned row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "main's drain omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "main's ack failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the main-owned row survived main's own ack"
+
+  pass "a branch-actor scoped ack never swallows an unacked main-owned row, and main's later drain sees exactly what remains"
+}
+
+test_main_drain_excludes_rows_already_granted_to_branch() {
+  local dir state out err sequence generation
+  dir=$(make_case main-excludes-branch-grant)
+  state="$dir/state"
+
+  append_wake "$state" check "some-poll.check.sh" "check: some-poll.check.sh: merged" \
+    || fail "main-only append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" main-excludes || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish main-excludes 2 || fail "branch grant publication failed"
+
+  out="$dir/main-drain.out"
+  err="$dir/main-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" || fail "main drain omitted its main-owned row"
+  ! grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "main drain presented a branch-granted row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ "$sequence" = 1 ] && [ -n "$generation" ] || fail "main acknowledgement did not bind only its presented row"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "main acknowledgement failed"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$state/.wake-queue" \
+    || fail "main acknowledgement consumed the branch-granted row"
+
+  out="$dir/branch-drain.out"
+  err="$dir/branch-drain.err"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$out" 2> "$err" \
+    || fail "branch drain failed: $(cat "$err")"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "branch lost its granted row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "branch acknowledgement left its handled row queued"
+  [ ! -e "$state/.branch-eligible-rows" ] || fail "branch acknowledgement retained its completed grant"
+
+  pass "main drain and acknowledgement exclude an active branch grant"
+}
+
+test_branch_grant_refuses_rows_already_claimed_by_main() {
+  local dir state rc
+  dir=$(make_case branch-refuses-main-claim)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" \
+    || fail "main presentation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" branch-refuses || fail "branch owner activation failed"
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish branch-refuses 1 || rc=$?
+  [ "$rc" -eq 3 ] || fail "branch grant did not report the existing main ownership: rc=$rc"
+  [ ! -e "$state/.branch-eligible-rows" ] || fail "refused branch grant published an ownership snapshot"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$dir/main.out" \
+    || fail "the main owner did not present its claimed row"
+
+  pass "branch grant cannot take a row already claimed by main"
+}
+
+test_actor_filter_precedes_same_key_deduplication() {
+  local dir state main_sequence main_generation branch_sequence branch_generation
+  dir=$(make_case actor-dedup-order)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: branch version" || fail "branch row append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" actor-dedup || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish actor-dedup 1 || fail "branch grant publication failed"
+  append_wake "$state" signal "task-a.status" "signal: main version" || fail "main row append failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || fail "main drain failed"
+  [ "$(awk -F '\t' '$3 == "signal" { print $2 }' "$dir/main.out")" = 2 ] \
+    || fail "main did not present its same-key claimed row"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
+    || fail "branch drain failed"
+  [ "$(awk -F '\t' '$3 == "signal" { print $2 }' "$dir/branch.out")" = 1 ] \
+    || fail "global deduplication hid the branch's older same-key row"
+
+  main_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/main.err")
+  main_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err")
+  branch_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/branch.err")
+  branch_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$main_sequence" --recovery-generation "$main_generation" \
+    || fail "main same-key acknowledgement failed"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$branch_sequence" --recovery-generation "$branch_generation" \
+    || fail "branch same-key acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "same-key actor rows remained stranded"
+
+  pass "actor ownership filtering precedes same-key deduplication"
+}
+
+test_main_reclaims_a_grant_whose_branch_owner_exited() {
+  local dir state owner sequence generation
+  dir=$(make_case stale-branch-owner)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  sleep 30 &
+  owner=$!
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$owner" stale-owner || {
+    kill "$owner" 2>/dev/null || true
+    fail "branch owner activation failed"
+  }
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish stale-owner 1 || {
+    kill "$owner" 2>/dev/null || true
+    fail "branch grant publication failed"
+  }
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || fail "main reclaim drain failed"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$dir/main.out" \
+    || fail "main did not reclaim the dead branch owner's row"
+  [ ! -e "$state/.branch-eligible-rows" ] && [ ! -e "$state/.branch-eligible-owner" ] \
+    || fail "dead branch ownership evidence survived reclaim"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/main.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err")
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "reclaimed row acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "reclaimed branch row remained queued"
+
+  pass "main reclaims rows granted to an exited branch owner"
+}
+
+# A branch-actor drain or ack without a snapshot is a wiring bug, never
+# "nothing eligible": it must refuse loudly rather than silently draining or
+# acking nothing.
+test_branch_actor_without_eligible_snapshot_refuses() {
+  local dir state
+  dir=$(make_case actor-no-snapshot)
+  state="$dir/state"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
+  if FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" >/dev/null 2>"$dir/err"; then
+    fail "a branch-actor drain with no eligible-row snapshot must refuse, not silently drain"
+  fi
+  grep -q "no branch-eligible row snapshot" "$dir/err" || fail "the refusal did not name the missing snapshot: $(cat "$dir/err")"
+  [ -s "$state/.wake-queue" ] || fail "the refused drain must leave the queue untouched"
+  pass "a branch-actor drain with no eligible-row snapshot refuses loudly instead of draining nothing"
 }
 
 test_wake_publish_requires_atomic_recovery_evidence() {
@@ -483,8 +874,11 @@ test_legacy_generationless_wake_is_adopted() {
   pass "wake drain: generation-less legacy wakes are adopted and acknowledged"
 }
 
-test_stale_recovery_generation_is_rejected() {
-  local dir state first_err replay_err sequence generation newer_marker newer_sequence newer_generation rc
+# Pin the recovery acknowledgement contract from docs/watcher-continuity.md at
+# the queue-library boundary.
+test_stale_recovery_generation_cannot_touch_a_newer_episode() {
+  local dir state first_err replay_err sequence generation handling_marker
+  local newer_marker newer_sequence newer_generation rc
   dir=$(make_case stale-recovery-generation)
   state="$dir/state"
 
@@ -498,35 +892,63 @@ test_stale_recovery_generation_is_rejected() {
   [ -n "$sequence" ] && [ -n "$generation" ] \
     || fail "first drain did not emit a generation-bound acknowledgement"
 
-  append_wake "$state" check second 'check: newer recovery generation' \
-    || fail "newer generation wake append failed"
-  newer_marker=$(cat "$state/.watcher-down")
-  [ "${newer_marker##*:}" != "$generation" ] \
-    || fail "new durable publication did not advance the recovery generation"
+  append_wake "$state" check second 'check: same episode' \
+    || fail "first same-episode wake append failed"
+  append_wake "$state" check third 'check: same episode again' \
+    || fail "second same-episode wake append failed"
+  handling_marker=$(cat "$state/.watcher-down")
+  [ "${handling_marker##*:}" = "$generation" ] \
+    || fail "repeated publications replaced the outstanding recovery generation"
 
-  set +e
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation" > "$dir/stale-ack.out" 2> "$dir/stale-ack.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "stale acknowledgement consumed a newer recovery generation"
-  [ "$(cat "$state/.watcher-down")" = "$newer_marker" ] \
-    || fail "stale acknowledgement changed the newer recovery marker"
+    --recovery-generation "$generation" > "$dir/handled-ack.out" 2> "$dir/handled-ack.err" \
+    || fail "a publication during handling invalidated the printed acknowledgement"
+  ! grep "$(printf '\tcheck\tfirst\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the handled row was not consumed"
   grep "$(printf '\tcheck\tsecond\t')" "$state/.wake-queue" >/dev/null \
-    || fail "stale acknowledgement removed the newer durable wake"
+    || fail "a row above the acknowledged sequence was consumed"
+  grep "$(printf '\tcheck\tthird\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the second row above the acknowledged sequence was consumed"
+  case "$(cat "$state/.watcher-down")" in
+    pending:*) ;;
+    *) fail "an episode with rows still queued was retired" ;;
+  esac
 
+  # Retire that episode, then let a genuinely newer one open.
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
-    || fail "newer generation could not be re-drained"
+    || fail "remaining wake could not be re-drained"
   replay_err="$dir/replay.err"
   grep "$(printf '\tcheck\tsecond\t')" "$dir/replay.out" >/dev/null \
-    || fail "newer generation wake did not re-surface"
+    || fail "remaining wake did not re-surface"
+  grep "$(printf '\tcheck\tthird\t')" "$dir/replay.out" >/dev/null \
+    || fail "second remaining wake did not re-surface"
   newer_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
   newer_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$newer_sequence" \
     --recovery-generation "$newer_generation" \
-    || fail "newer recovery generation could not be acknowledged"
-  [ ! -s "$state/.wake-queue" ] || fail "newer acknowledgement left durable wakes queued"
-  pass "wake drain: stale acknowledgement cannot consume a newer recovery generation"
+    || fail "the handled episode could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledgement left durable wakes queued"
+
+  append_wake "$state" check fourth 'check: newer recovery generation' \
+    || fail "newer generation wake append failed"
+  newer_marker=$(cat "$state/.watcher-down")
+  [ "${newer_marker##*:}" != "$generation" ] \
+    || fail "a retired episode did not open a new recovery generation"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" > "$dir/stale-ack.out" 2> "$dir/stale-ack.err" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "a stale acknowledgement failed instead of degrading safely: $(cat "$dir/stale-ack.err")"
+  if ! grep -F 'WAKE_ACK_REQUIRED' "$dir/stale-ack.err" >/dev/null \
+    || ! grep -F 're-run' "$dir/stale-ack.err" >/dev/null; then
+    fail "a stale acknowledgement did not name its own remedy: $(cat "$dir/stale-ack.err")"
+  fi
+  [ "$(cat "$state/.watcher-down")" = "$newer_marker" ] \
+    || fail "a stale acknowledgement retired the newer recovery episode"
+  grep "$(printf '\tcheck\tfourth\t')" "$state/.wake-queue" >/dev/null \
+    || fail "a stale acknowledgement consumed the newer durable wake"
+  pass "wake drain: a stale acknowledgement cannot retire or consume a newer recovery episode"
 }
 
 test_recovery_ack_failure_is_reported() {
@@ -557,8 +979,10 @@ SH
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "recovery acknowledgement failure was reported as success"
-  grep -F 'recovery generation is stale or could not be acknowledged safely' "$dir/drain.err" >/dev/null \
+  grep -F 'recovery episode could not be retired safely' "$dir/drain.err" >/dev/null \
     || fail "recovery acknowledgement failure had no explicit diagnostic"
+  grep -F 'WAKE_ACK_REQUIRED' "$dir/drain.err" >/dev/null \
+    || fail "recovery acknowledgement failure did not name its own remedy"
   [ "$(cat "$state/.watcher-down")" = "pending:handling:$generation" ] \
     || fail "failed acknowledgement corrupted the pending recovery marker"
 
@@ -626,6 +1050,403 @@ test_interruption_before_and_after_raw_commit() {
   pass "interruptions preserve durable rows until post-handling acknowledgement"
 }
 
+# The guarded self-announced status append (fm_wake_status_append_self_announced)
+# and the seen-signature gate it shares with the watcher's signal scan. Both
+# directions of the dedup contract are pinned through the real library
+# functions: a fully announced file plus the home's own bookkeeping close stays
+# announced (no wake), while ANY unannounced byte - a pending foreign line, a
+# missing marker, a later different note - reads as wake-worthy.
+test_self_announced_append_guards() {
+  local dir state status
+  dir=$(make_case self-announced-append)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  # FIRST status change: a fresh file with no marker is unannounced (wakes).
+  printf 'working: first line\n' > "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a never-announced status file read as already announced"
+
+  # Prime the marker to current (the watcher just surfaced/absorbed everything).
+  prime_status_seen "$state" "$status" || fail "could not prime the seen marker"
+
+  # A self-announced bookkeeping close on a fully announced file is suppressed.
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: closed by this home' \
+    || fail "self-announced append on an announced file was not suppressed (rc=$?)"
+  grep -Fq 'resolved [key=k1]: answered: closed by this home' "$status" \
+    || fail "the suppressed close was not appended"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the self-announced close left unannounced bytes behind"
+
+  # A later DIFFERENT note from any other writer still wakes.
+  printf 'needs-decision [key=k2]: a new decision\n' >> "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a later different note on the same task read as already announced"
+
+  # With that foreign line pending, a bookkeeping close must NOT advance the
+  # marker over it: the close appends but the file stays wake-worthy.
+  local rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: second close' || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over pending foreign bytes did not fail toward waking (rc=$rc)"
+  grep -Fq 'resolved [key=k1]: answered: second close' "$status" \
+    || fail "the fail-toward-waking close was not appended"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a close over pending foreign bytes swallowed the pending wake"
+
+  # UTF-8 close on an announced file: byte accounting must hold for multibyte.
+  prime_status_seen "$state" "$status" || fail "could not re-prime the seen marker"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    "$(printf 'resolved [key=k2]: answered: caf\xc3\xa9 rentr\xc3\xa9e')" \
+    || fail "a multibyte self-announced close was not suppressed (rc=$?)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "multibyte byte accounting broke the self-announce guard"
+
+  pass "self-announced appends suppress only their own bytes and fail toward waking"
+}
+
+# A trap that fires inside a lock's critical section abandons the holding
+# frame, and the exit path then re-acquires the same lock (a TERM inside a
+# recovery-marker section is the reproduced case: the watcher's reap wedged
+# forever spinning against its own pid). The same-process re-acquire must
+# reclaim the abandoned hold, while a SUBSHELL still waits on its parent's
+# live hold exactly as before.
+test_self_held_lock_reclaims_instead_of_deadlocking() {
+  local dir state rc
+  dir=$(make_case self-held-lock)
+  state="$dir/state"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    fm_lock_try_acquire "$lock" || exit 11
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 12
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "self-held lock was not reclaimed cleanly (rc=$rc)"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture2.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    ( fm_lock_try_acquire "$lock" && exit 13; exit 0 ) || exit 13
+    fm_lock_release "$lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a subshell reclaimed its parent's live hold (rc=$rc)"
+  pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
+}
+
+# A bounded waiter acquires in a helper process, but the caller must own the
+# lock once contention clears so it can safely hold and release the critical
+# section itself.
+test_bounded_lock_handoff_after_contention() {
+  local dir state lock holder_pid waiter_pid i recorded_pid real_sleep sleep_log
+  dir=$(make_case bounded-lock-handoff)
+  state="$dir/state"
+  lock="$state/.fixture.lock"
+  sleep_log="$dir/waiter-sleeps"
+  real_sleep=$(command -v sleep) || fail "sleep is unavailable for the handoff fixture"
+  cat > "$dir/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_HANDOFF_SLEEP_LOG"
+exec "$FM_HANDOFF_REAL_SLEEP" "$@"
+SH
+  chmod +x "$dir/fakebin/sleep"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/holder.ready" "$dir/release-holder" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "handoff fixture holder never acquired its lock"; }
+
+  PATH="$dir/fakebin:$PATH" FM_HANDOFF_SLEEP_LOG="$sleep_log" FM_HANDOFF_REAL_SLEEP="$real_sleep" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait_bounded "$2" 5 || exit 11
+    current=${BASHPID:-$$}
+    printf "%s\n" "$current" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    [ "$(cat "$2/pid" 2>/dev/null || true)" = "$current" ] || exit 12
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/waiter.ready" "$dir/release-waiter" &
+  waiter_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && ! grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1 \
+    || { kill "$holder_pid" "$waiter_pid" 2>/dev/null || true; fail "bounded helper never entered its contended wait"; }
+  [ ! -e "$dir/waiter.ready" ] \
+    || { kill "$holder_pid" "$waiter_pid" 2>/dev/null || true; fail "bounded waiter bypassed a live holder"; }
+
+  : > "$dir/release-holder"
+  wait "$holder_pid" || { kill "$waiter_pid" 2>/dev/null || true; fail "fixture holder did not release cleanly"; }
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/waiter.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/waiter.ready" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded waiter did not acquire after contention cleared"; }
+  recorded_pid=$(cat "$dir/waiter.ready")
+  [ "$recorded_pid" = "$waiter_pid" ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$waiter_pid" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock ownership to its caller"; }
+
+  : > "$dir/release-waiter"
+  wait "$waiter_pid" || fail "caller could not release its handed-off lock"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "handed-off lock remained after caller release"
+  pass "bounded acquire hands ownership to the waiting caller after contention"
+}
+
+# A live-but-stuck presentation lock must not strand the executable drain. The
+# presentation remains retriable on the next pass, while the separate queue
+# mutation lock keeps its blocking all-or-nothing acknowledgement contract.
+test_live_presentation_holder_is_deadlined_without_weakening_ack() {
+  local dir state status queue_out queue_err first_out first_err second_out second_err replay_out replay_err
+  local queue_holder presentation_holder ack_holder i start elapsed rc advisory_count
+  dir=$(make_case presentation-lock-deadline)
+  state="$dir/state"
+  status="$state/task.status"
+  queue_out="$dir/queue.out"
+  queue_err="$dir/queue.err"
+  first_out="$dir/first.out"
+  first_err="$dir/first.err"
+  second_out="$dir/second.out"
+  second_err="$dir/second.err"
+  replay_out="$dir/replay.out"
+  replay_err="$dir/replay.err"
+
+  printf 'needs-decision [key=fixture]: presentation remains retriable\n' > "$status"
+  append_wake "$state" signal task.status "signal: $status" \
+    || fail "could not seed the presentation-deadline wake"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    printf "ready\n" > "$3"
+    exec sleep 30
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue.lock" "$dir/queue.ready" &
+  queue_holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/queue.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/queue.ready" ] \
+    || { kill "$queue_holder" 2>/dev/null || true; fail "queue holder never acquired its lock"; }
+
+  start=$(date +%s)
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
+    "$DRAIN" > "$queue_out" 2> "$queue_err" \
+    || { kill "$queue_holder" 2>/dev/null || true; fail "bounded queue presentation drain failed"; }
+  elapsed=$(( $(date +%s) - start ))
+  [ "$elapsed" -le 4 ] \
+    || { kill "$queue_holder" 2>/dev/null || true; fail "queue lock delayed the drain for ${elapsed}s"; }
+  advisory_count=$(grep -Fc \
+    "WAKE DRAIN SKIPPED: queue lock remains held by live pid $queue_holder" \
+    "$queue_out" || true)
+  [ "$advisory_count" -eq 1 ] \
+    || { kill "$queue_holder" 2>/dev/null || true; fail "queue deadline did not emit exactly one holder advisory"; }
+  [ ! -s "$queue_err" ] \
+    || { kill "$queue_holder" 2>/dev/null || true; fail "queue deadline leaked helper-process diagnostics"; }
+  if grep "$(printf '\tsignal\t')" "$queue_out" >/dev/null \
+    || grep -F 'WAKE_ACK_REQUIRED:' "$queue_err" >/dev/null; then
+    kill "$queue_holder" 2>/dev/null || true
+    fail "contended queue lock allowed a partial drain"
+  fi
+  grep "$(printf '\tsignal\t')" "$state/.wake-queue" >/dev/null \
+    || { kill "$queue_holder" 2>/dev/null || true; fail "contended queue lock changed the durable wake"; }
+
+  kill "$queue_holder" 2>/dev/null || true
+  wait "$queue_holder" 2>/dev/null || true
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    printf "ready\n" > "$3"
+    exec sleep 30
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.status-presentation-lock" "$dir/presentation.ready" &
+  presentation_holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/presentation.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/presentation.ready" ] \
+    || { kill "$presentation_holder" 2>/dev/null || true; fail "presentation holder never acquired its lock"; }
+
+  start=$(date +%s)
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
+    "$DRAIN" > "$first_out" 2> "$first_err" \
+    || { kill "$presentation_holder" 2>/dev/null || true; fail "bounded presentation drain failed"; }
+  elapsed=$(( $(date +%s) - start ))
+  [ "$elapsed" -le 4 ] \
+    || { kill "$presentation_holder" 2>/dev/null || true; fail "presentation lock delayed the drain for ${elapsed}s"; }
+  advisory_count=$(grep -Fc \
+    "STATUS PRESENTATION SKIPPED: lock remains held by live pid $presentation_holder" \
+    "$first_out" || true)
+  [ "$advisory_count" -eq 1 ] \
+    || { kill "$presentation_holder" 2>/dev/null || true; fail "presentation deadline did not emit exactly one holder advisory"; }
+  if grep -v '^WAKE_ACK_REQUIRED:' "$first_err" | grep . >/dev/null; then
+    kill "$presentation_holder" 2>/dev/null || true
+    fail "presentation deadline leaked helper-process diagnostics"
+  fi
+  grep "$(printf '\tsignal\t')" "$first_out" >/dev/null \
+    || { kill "$presentation_holder" 2>/dev/null || true; fail "bounded presentation dropped the durable wake row"; }
+  if grep -F 'task.status: needs-decision [key=fixture]' "$first_out" >/dev/null; then
+    kill "$presentation_holder" 2>/dev/null || true
+    fail "contended presentation emitted status content without its cursor lock"
+  fi
+
+  kill "$presentation_holder" 2>/dev/null || true
+  wait "$presentation_holder" 2>/dev/null || true
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
+    "$DRAIN" > "$second_out" 2> "$second_err" || fail "presentation retry failed"
+  grep -F 'task.status: needs-decision [key=fixture]: presentation remains retriable' "$second_out" >/dev/null \
+    || fail "the next presentation pass did not surface the skipped status"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    printf "ready\n" > "$3"
+    exec sleep 30
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue.lock" "$dir/ack.ready" &
+  ack_holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/ack.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/ack.ready" ] \
+    || { kill "$ack_holder" 2>/dev/null || true; fail "acknowledgement holder never acquired the queue lock"; }
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    shift
+    fm_run_timed 1 "$@"
+  ' _ "$ROOT/bin/fm-timeout-lib.sh" "$DRAIN" \
+    --ack-through "$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$second_err")" \
+    --recovery-generation "$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$second_err")" \
+    > "$dir/ack-held.out" 2> "$dir/ack-held.err" || rc=$?
+  [ "$rc" -eq 124 ] \
+    || { kill "$ack_holder" 2>/dev/null || true; fail "held acknowledgement lock did not retain blocking semantics (rc=$rc)"; }
+
+  kill "$ack_holder" 2>/dev/null || true
+  wait "$ack_holder" 2>/dev/null || true
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$replay_err" \
+    || fail "drain after the interrupted acknowledgement failed"
+  grep "$(printf '\tsignal\t')" "$replay_out" >/dev/null \
+    || fail "the held acknowledgement lock allowed a partial consume"
+  ack_drain_err "$state" "$replay_err" \
+    || fail "the intact wake could not be acknowledged after contention cleared"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged presentation fixture remained queued"
+  pass "presentation lock waits are bounded and retriable without weakening acknowledgement atomicity"
+}
+
+test_malformed_presentation_lock_reports_acquire_failure() {
+  local dir state status out err
+  dir=$(make_case malformed-presentation-lock)
+  state="$dir/state"
+  status="$state/task.status"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+
+  printf 'needs-decision [key=fixture]: malformed lock remains retriable\n' > "$status"
+  append_wake "$state" signal task.status "signal: $status" \
+    || fail "could not seed the malformed-lock wake"
+  : > "$state/.status-presentation-lock"
+
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
+    "$DRAIN" > "$out" 2> "$err" || fail "malformed-lock drain failed"
+  grep -F 'wake drain: status presentation lock could not be acquired safely' "$err" >/dev/null \
+    || fail "malformed presentation lock did not report an acquire failure"
+  if grep -F 'STATUS PRESENTATION SKIPPED: lock remains held by live pid' "$out" >/dev/null; then
+    fail "malformed presentation lock was reported as live-holder contention"
+  fi
+  grep "$(printf '\tsignal\t')" "$out" >/dev/null \
+    || fail "malformed presentation lock dropped the durable wake row"
+  pass "malformed presentation locks report acquire failure instead of contention"
+}
+
+# Drain-time historical annotation staleness: a turn-ended-only wake row must
+# not present an already-announced status line as a new update, while a status
+# file with unannounced bytes keeps its annotation and a direct status row is
+# always annotated. Driven through the real drain executable.
+test_historical_annotation_skips_announced_status() {
+  local dir state out err
+  dir=$(make_case historical-annotation)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+
+  printf 'working: long scout still going\n' > "$state/scout.status"
+  prime_status_seen "$state" "$state/scout.status" \
+    || fail "could not prime the scout seen marker"
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "drain failed"
+  if grep -F 'scout.status: working: long scout still going' "$out" >/dev/null; then
+    fail "a fully announced status line was replayed as a historical annotation"
+  fi
+  grep -F 'scout.turn-ended' "$out" >/dev/null \
+    || fail "suppressing the stale annotation dropped the turn-ended wake row itself"
+  ack_drain_err "$state" "$err" || fail "could not acknowledge the first drain"
+
+  # Unannounced status bytes: the historical annotation is genuinely new
+  # information and must stay.
+  printf 'working: fresh unannounced progress\n' >> "$state/scout.status"
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "second turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "second drain failed"
+  grep -F 'historical / not necessarily the triggering event: scout.status: working: fresh unannounced progress' "$out" >/dev/null \
+    || fail "an unannounced status line lost its historical annotation"
+  ack_drain_err "$state" "$err" || fail "could not acknowledge the second drain"
+
+  # A direct status row is the announcement itself and is always annotated,
+  # even when the seen marker already covers the file.
+  printf 'done: scout finished\n' >> "$state/scout.status"
+  prime_status_seen "$state" "$state/scout.status" \
+    || fail "could not prime the marker for the direct-row leg"
+  append_wake "$state" signal scout.status "signal: $state/scout.status" \
+    || fail "direct status wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "third drain failed"
+  grep -F 'scout.status: done: scout finished' "$out" >/dev/null \
+    || fail "a direct status row lost its annotation"
+  pass "historical annotations replay nothing already announced and keep everything new"
+}
+
+test_self_held_lock_reclaims_instead_of_deadlocking
+test_bounded_lock_handoff_after_contention
+test_live_presentation_holder_is_deadlined_without_weakening_ack
+test_malformed_presentation_lock_reports_acquire_failure
+test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
+test_secondmate_stall_marker_rejects_symlink
+test_acknowledged_stall_publication_survives_pre_marker_crash
+test_empty_prefix_mate_preserves_other_mate_receipt
+test_self_announced_append_guards
+test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -635,10 +1456,16 @@ test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
-test_enrichment_caps_and_status_file_failures
+test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
+test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
+test_main_drain_excludes_rows_already_granted_to_branch
+test_branch_grant_refuses_rows_already_claimed_by_main
+test_actor_filter_precedes_same_key_deduplication
+test_main_reclaims_a_grant_whose_branch_owner_exited
+test_branch_actor_without_eligible_snapshot_refuses
 test_wake_publish_requires_atomic_recovery_evidence
 test_legacy_generationless_wake_is_adopted
-test_stale_recovery_generation_is_rejected
+test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit

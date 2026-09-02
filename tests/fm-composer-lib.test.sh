@@ -9,8 +9,8 @@
 #      (unsafe-for-injection), never `empty`. This is the safety fix.
 #   2. The SAME shell glyph INSIDE a bordered composer box is the harness's own
 #      prompt and still reads `empty` (existing behavior preserved).
-#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), and `⟩` (muse) are a genuine empty
-#      agent composer either way, bordered or bare.
+#   3. The AGENT prompt glyphs `❯` (claude), `›` (codex), `⟩` (muse), and `→`
+#      (cursor) are a genuine empty agent composer either way, bordered or bare.
 #   4. Real unsubmitted text reads `pending`; a known idle placeholder reads
 #      `empty`.
 set -u
@@ -221,14 +221,82 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss() {
   pass "matrix: muse's ⟩ reads empty everywhere and survives losing the styled-glyph signal"
 }
 
+test_matrix_cursor_reverse_video_placeholder_remnant() {
+  # Real idle cursor-agent (2026.08.11-e8db854), captured byte-for-byte from a
+  # live pane: the `→ ` glyph and the placeholder tail are dim (SGR 2), but the
+  # cell under the terminal cursor is REVERSE VIDEO (SGR 0;7). Reverse video is
+  # neither dim nor a dark foreground, so the ghost stripper keeps that one
+  # character and an idle composer reduces to a lone `P`.
+  local row screen plain out stripped
+  row="${ESC}[48;2;21;21;21m ${ESC}[2m→ ${ESC}[0;7m${ESC}[48;2;21;21;21mP"
+  row="${row}${ESC}[0;2m${ESC}[48;2;21;21;21mlan, search, build anything${ESC}[0m"
+  screen=$'transcript\n\n'"$row"
+  plain=$'transcript\n\n  → Plan, search, build anything'
+
+  # NON-VACUOUSNESS: prove the remnant really survives stripping. If the ghost
+  # stripper ever learned SGR 7, `stripped` would be empty and the verdict below
+  # would come from the empty-content path instead, silently retiring the
+  # plain-row branch this case exists to cover.
+  stripped=$(printf '%s' "$row" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var stripped
+  [ "$stripped" = P ] \
+    || fail "cursor's reverse-video remnant must survive ghost stripping as 'P', got '$stripped'"
+
+  assert_screen "cursor idle on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "cursor idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  # An UNSTYLED capture carries no ghost-strip proof, so a bare row matching a
+  # placeholder is indistinguishable from typed text and must stay unknown -
+  # the same degradation every other bare-row placeholder already takes.
+  assert_screen "cursor idle on cmux/orca" unknown "$CAPS_PLAIN" "$plain"
+
+  # The dangerous direction: text a user actually TYPED is uniformly bright, so
+  # stripping leaves it EQUAL to the plain row. Even when that text is exactly
+  # the placeholder, it must stay pending - never a false empty.
+  local typed typed_plain
+  typed="${ESC}[48;2;21;21;21m ${ESC}[2m→ ${ESC}[0m${ESC}[38;2;224;222;244mAdd a follow-up${ESC}[0m"
+  typed_plain=$'transcript\n\n  → Add a follow-up'
+  assert_screen "cursor typed placeholder text stays pending" pending \
+    "$CAPS_STYLED" $'transcript\n\n'"$typed"
+  # Without styling there is no proof either way, so it must not read empty.
+  out=$(fm_composer_classify_screen "$CAPS_PLAIN" "$typed_plain")
+  [ "$out" != empty ] \
+    || fail "an unstyled cursor row matching the placeholder must not read empty, got '$out'"
+  pass "matrix: cursor's reverse-video placeholder remnant reads empty; real typed text stays pending"
+}
+
+test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
+  # Herdr draws a composer's rules with half-block glyphs (▄ above, ▀ below)
+  # rather than the box-drawing family. Without treating those as edges, a bare
+  # composer's WRAP region walks through its own closing rule and swallows the
+  # footer, whose real content turns an idle pane into a false `pending`.
+  # Captured live from a herdr cursor pane.
+  local screen plain out
+  plain=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n  \u2192 Add a follow-up\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
+  # The closing rule must bound the region, so the footer below is not input.
+  fm_composer_row_has_edge " $(printf '\u2580\u2580\u2580')" \
+    || fail "a half-block rule row must count as a structural edge"
+  fm_composer_row_has_edge " $(printf '\u2584\u2584\u2584')" \
+    || fail "the upper half-block rule must count as a structural edge"
+  # Non-vacuousness: the footer rows really are non-blank content that would be
+  # swallowed if the rule did not bound the region.
+  case "$plain" in *"Run Everything"*) : ;; *) fail "fixture lost its footer content" ;; esac
+  ESC_LOCAL=$(printf '\033')
+  screen=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n'"  ${ESC_LOCAL}[2m\u2192 ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
+  [ "$out" = empty ] \
+    || fail "an idle cursor composer inside herdr half-block rules must read empty, got '$out'"
+  pass "matrix: herdr half-block rules bound a bare composer's wrap region"
+}
+
 test_matrix_pi_separated_needs_identity() {
   # Real idle pi: a blank row between two solid rules. The blank row alone is
   # exactly what the strict rule refuses; only structure PLUS a live
-  # idle/done/blocked pi identity proves the composer (herdr's rule, now
+  # idle/done pi identity proves the composer (herdr's rule, now
   # fleet-wide; tmux supplies identity from its foreground-process probe).
-  local screen typed pi_idle pi_working none
+  local screen typed pi_idle pi_working pi_blocked none
   screen=$'transcript\n────────────────────────\n\n────────────────────────\n footer'
   pi_idle=$(printf 'pi\tidle'); pi_working=$(printf 'pi\tworking'); none=$(printf 'zsh\t')
+  pi_blocked=$(printf 'pi\tblocked')
   assert_screen "pi idle with identity" empty "$CAPS_STYLED" "$screen" '' "$pi_idle"
   assert_screen "pi idle on tmux with identity" empty "$CAPS_TMUX" "$screen" 2 "$pi_idle"
   assert_screen "pi idle on zellij" unknown "$CAPS_STYLED_NOID" "$screen"
@@ -239,6 +307,10 @@ test_matrix_pi_separated_needs_identity() {
   assert_screen "pi pair without identity capability" unknown "$CAPS_PLAIN" "$screen"
   # A working pi cannot authorize injection into the blank region.
   assert_screen "working pi defers" unknown "$CAPS_STYLED" "$screen" '' "$pi_working"
+  # A pi parked on an interactive prompt reports `blocked`: it is waiting on a
+  # human keystroke, so the blank region is a menu's, not a free composer's.
+  # Typing there answers the prompt and the text is discarded (issue #2797).
+  assert_screen "blocked pi defers" unknown "$CAPS_STYLED" "$screen" '' "$pi_blocked"
   # The audit's live counterexample: a plain shell running sleep, cursor
   # parked on a blank line between two rules, NO pi process. The permissive
   # rule read this `empty`; identity+structure refuses it.
@@ -543,6 +615,8 @@ test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
+test_matrix_cursor_reverse_video_placeholder_remnant
+test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
@@ -559,3 +633,34 @@ test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
+
+test_queued_enter_verdict_busy_pending_is_empty() {
+  local out
+  out=$(fm_composer_queued_enter_verdict pending busy)
+  [ "$out" = empty ] || fail "busy + proven pending must be queued delivery (empty), got '$out'"
+  pass "fm_composer_queued_enter_verdict: pending + busy returns empty (queued Enter)"
+}
+
+test_queued_enter_verdict_idle_pending_stays_pending() {
+  local out
+  out=$(fm_composer_queued_enter_verdict pending idle)
+  [ "$out" = pending ] || fail "idle + proven pending must stay a genuine swallow, got '$out'"
+  out=$(fm_composer_queued_enter_verdict pending unknown)
+  [ "$out" = pending ] || fail "unknown busy is not proof of a queue, got '$out'"
+  pass "fm_composer_queued_enter_verdict: pending + idle/unknown stays pending"
+}
+
+test_queued_enter_verdict_does_not_convert_other_states() {
+  local state out
+  for state in empty pending-unproven unknown send-failed future-state; do
+    out=$(fm_composer_queued_enter_verdict "$state" busy)
+    [ "$out" = "$state" ] || fail "busy must not convert '$state', got '$out'"
+    out=$(fm_composer_queued_enter_verdict "$state" idle)
+    [ "$out" = "$state" ] || fail "idle must not convert '$state', got '$out'"
+  done
+  pass "fm_composer_queued_enter_verdict: only proven pending is converted"
+}
+
+test_queued_enter_verdict_busy_pending_is_empty
+test_queued_enter_verdict_idle_pending_stays_pending
+test_queued_enter_verdict_does_not_convert_other_states

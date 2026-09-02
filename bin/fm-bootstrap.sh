@@ -11,7 +11,9 @@
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
-#                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "HOME_SUMMARY: <ledger never published|not republished since
+#                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
+#                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -51,7 +53,7 @@
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
-#          1.31.2.
+#          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
 #          build below its floor reports MISSING like no-mistakes, so the operator
@@ -79,36 +81,56 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
+#          BACKLOG_RECONCILE lines report what backlog_record_reconcile could not
+#          settle in THIS home. Every ordinary dispatch and completion now moves
+#          the backlog row inside the script that moves the task's record
+#          (bin/fm-backlog-transition-lib.sh), so this sweep exists for the
+#          crash window inside those scripts and for drift a home was already
+#          carrying: it finishes the authoritative close an interrupted cleanup
+#          recorded, and marks In flight any item this home already owns a worker
+#          for. The worker-record sweep never starts a captain-held or closed
+#          item, and reconciliation never reads or writes another home; the fleet
+#          snapshot's classifier and
+#          bin/fm-secondmate-reconcile.sh's nudge stay as backstops. Replayed
+#          closes and restored In-flight rows print BOOTSTRAP_INFO facts.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          (backlog_record_reconcile, secondmate_sync,
+#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
+#          fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          PR-check artifacts, secondmate homes, pending handoff outboxes,
+#          secondmate homes, pending handoff outboxes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs every sweep exactly as before - this flag
-#          is purely additive.
+#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
-#          alone and run the network half concurrently:
-#            all  (default, and any unrecognized value) - everything, exactly as
-#                 before. Unrecognized values fall back here on purpose: a typo
+#          alone and run the network half off the digest's blocking path:
+#            all  (default, and any unrecognized value) - every local and network
+#                 step. Unrecognized values fall back here on purpose: a typo
 #                 must never silently skip a safety sweep.
 #            skip - every LOCAL step, and none of the network ones. Skips
 #                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
-#                 no version floors, no tangle check, no PR-check migration, no
-#                 x_mode_setup: those already ran on the local pass.
+#                 no version floors, no tangle check, no backlog
+#                 reconciliation, no x_mode_setup: those already ran on the
+#                 local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
 #          detect-only is the read-only `gh auth status` probe on its own.
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
 #          in a detached bounded worker and publishes the result. This file stays
 #          the single owner of every sweep, and the split changes only WHEN each
-#          runs, never WHETHER.
+#          runs, never WHETHER. During the network phase, project clone refresh
+#          overlaps the independent secondmate work. Per-secondmate remote
+#          liveness workers run concurrently and finish before per-secondmate
+#          remote convergence workers run concurrently, because convergence
+#          consumes respawned ids. Worker output is captured separately and
+#          replayed in spawn order; failure to create that private capture
+#          directory selects the sequential fallback.
 #          A relaunch that the liveness sweep performs during an `only` run is
 #          always reported, because a digest composed before that run already
 #          printed the superseded endpoint record.
@@ -132,12 +154,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-cursor-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
@@ -181,6 +207,55 @@ network_sweep_authorized() {
   fi
   echo "NETWORK_CHECKS: fleet lock ownership changed before $label, so this stale worker skipped that sweep"
   return 1
+}
+
+# Concurrent per-item runner for the deferred network sweeps. Each worker's
+# stdout and stderr are captured to private files and replayed in original
+# order after every worker finishes, so concurrent probes cannot interleave
+# or mis-attribute SECONDMATE_LIVENESS / SECONDMATE_SYNC lines. Respawned ids
+# are collected from per-id files because background workers cannot mutate
+# the parent's SECONDMATE_RESPAWNED_IDS.
+bootstrap_parallel_begin() {
+  BOOTSTRAP_PAR_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-bootstrap-par.XXXXXX") || return 1
+  BOOTSTRAP_PAR_N=0
+  FM_BOOTSTRAP_PARALLEL_DIR=$BOOTSTRAP_PAR_DIR
+  export FM_BOOTSTRAP_PARALLEL_DIR
+}
+
+bootstrap_parallel_spawn() {
+  BOOTSTRAP_PAR_N=$((BOOTSTRAP_PAR_N + 1))
+  (
+    "$@"
+  ) >"$BOOTSTRAP_PAR_DIR/$BOOTSTRAP_PAR_N.out" 2>"$BOOTSTRAP_PAR_DIR/$BOOTSTRAP_PAR_N.err" &
+  printf '%s\n' "$!" > "$BOOTSTRAP_PAR_DIR/$BOOTSTRAP_PAR_N.pid"
+}
+
+bootstrap_parallel_finish() {
+  local i pid f
+  i=1
+  while [ "$i" -le "$BOOTSTRAP_PAR_N" ]; do
+    pid=$(cat "$BOOTSTRAP_PAR_DIR/$i.pid")
+    wait "$pid" || true
+    i=$((i + 1))
+  done
+  i=1
+  while [ "$i" -le "$BOOTSTRAP_PAR_N" ]; do
+    cat "$BOOTSTRAP_PAR_DIR/$i.out"
+    cat "$BOOTSTRAP_PAR_DIR/$i.err" >&2
+    i=$((i + 1))
+  done
+  for f in "$BOOTSTRAP_PAR_DIR"/respawned.*; do
+    [ -f "$f" ] || continue
+    SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $(tr -d '\n' < "$f")"
+  done
+  rm -rf "$BOOTSTRAP_PAR_DIR"
+  unset FM_BOOTSTRAP_PARALLEL_DIR BOOTSTRAP_PAR_DIR BOOTSTRAP_PAR_N
+}
+
+secondmate_note_respawned() {  # <id>
+  SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $1"
+  [ -n "${FM_BOOTSTRAP_PARALLEL_DIR:-}" ] || return 0
+  printf '%s\n' "$1" > "$FM_BOOTSTRAP_PARALLEL_DIR/respawned.$1"
 }
 
 fleet_sync_origin_backed_project_count() {
@@ -547,17 +622,30 @@ secondmate_sync() {
     return 0
   }
 
+  secondmate_sync_remote_one_timed() {  # <id> <home> <remote-host>
+    local id=$1 home=$2 remote_host=$3 __fm_timing_stamp
+    __fm_timing_stamp=$(fm_timing_now_ms)
+    secondmate_sync_remote_one "$id" "$home" "$remote_host"
+    fm_timing_record secondmate convergence "$__fm_timing_stamp" "$id@$remote_host"
+  }
+
   # Remote routes converge through the generic transport. Their code root and
   # inherited files are authoritative on that host; no local path probe or
   # local fast-forward is attempted for them.
-  local remote_host __fm_timing_stamp
+  local remote_host __fm_timing_stamp parallel=0
+  if bootstrap_parallel_begin; then
+    parallel=1
+  fi
   while IFS='|' read -r id _home _window meta; do
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
-    __fm_timing_stamp=$(fm_timing_now_ms)
-    secondmate_sync_remote_one "$id" "$_home" "$remote_host"
-    fm_timing_record secondmate convergence "$__fm_timing_stamp" "$id@$remote_host"
+    if [ "$parallel" -eq 1 ]; then
+      bootstrap_parallel_spawn secondmate_sync_remote_one_timed "$id" "$_home" "$remote_host"
+    else
+      secondmate_sync_remote_one_timed "$id" "$_home" "$remote_host"
+    fi
   done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+  [ "$parallel" -eq 0 ] || bootstrap_parallel_finish
   return 0
 }
 
@@ -584,8 +672,11 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id remote_host label __fm_timing_stamp
+  local meta id remote_host label __fm_timing_stamp parallel=0
   SECONDMATE_RESPAWNED_IDS=""
+  if bootstrap_parallel_begin; then
+    parallel=1
+  fi
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -595,18 +686,27 @@ secondmate_liveness_sweep() {
     remote_host=$(fm_meta_get "$meta" remote_host)
     label=$id
     [ -z "$remote_host" ] || label="$id@$remote_host"
-    __fm_timing_stamp=$(fm_timing_now_ms)
-    secondmate_liveness_one "$meta" "$id"
-    fm_timing_record secondmate liveness "$__fm_timing_stamp" "$label"
+    if [ "$parallel" -eq 1 ]; then
+      bootstrap_parallel_spawn secondmate_liveness_one_timed "$meta" "$id" "$label"
+    else
+      secondmate_liveness_one_timed "$meta" "$id" "$label"
+    fi
   done
+  [ "$parallel" -eq 0 ] || bootstrap_parallel_finish
   return 0
+}
+
+secondmate_liveness_one_timed() {  # <meta> <id> <label>
+  local meta=$1 id=$2 label=$3 __fm_timing_stamp
+  __fm_timing_stamp=$(fm_timing_now_ms)
+  secondmate_liveness_one "$meta" "$id"
+  fm_timing_record secondmate liveness "$__fm_timing_stamp" "$label"
 }
 
 # One secondmate's liveness check. Split out of the sweep so each is individually
 # timed; every `return` here was a `continue` in the loop and means exactly the
-# same thing - move on to the next secondmate. SECONDMATE_RESPAWNED_IDS stays a
-# global that this appends to, so the sweep's hand-off to secondmate_sync is
-# unchanged.
+# same thing - move on to the next secondmate. Respawned ids are recorded through
+# secondmate_note_respawned so a concurrent sweep can collect them after wait.
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
   local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
@@ -668,7 +768,7 @@ secondmate_liveness_one() {  # <meta> <id>
       dead|missing)
         cause="remote endpoint $agent_state on its configured host"
         if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-          SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+          secondmate_note_respawned "$id"
           report_relaunch "$id" "$cause" "host=$remote_host"
         else
           echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
@@ -705,7 +805,7 @@ secondmate_liveness_one() {  # <meta> <id>
         cause="recorded endpoint confidently missing"
       fi
       if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-        SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
+        secondmate_note_respawned "$id"
         report_relaunch "$id" "$cause" "backend=$backend"
       else
         echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
@@ -763,6 +863,7 @@ install_cmd() {
 manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
+    cursor-agent) echo "https://cursor.com/cli" ;;
     *) return 1 ;;
   esac
 }
@@ -789,7 +890,7 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN=1.31.2
+NO_MISTAKES_MIN=1.46.0
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
 # newest axi tools. It is NOT the minimum feature-introduced version. These floors
@@ -997,7 +1098,7 @@ crew_dispatch_validate() {
     return 0
   fi
   err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","muse"] | index($h);
+    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","muse"] | index($h);
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -1006,7 +1107,7 @@ crew_dispatch_validate() {
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "opencode" or $h == "kimi" then false
+      elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
       else true
       end;
     def profiles($value):
@@ -1082,6 +1183,117 @@ crew_dispatch_validate() {
   fi
 }
 
+# Same-home record reconciliation. Every ordinary dispatch and completion now
+# moves the backlog row inside the script that moves the task's record
+# (bin/fm-backlog-transition-lib.sh), so remaining recovery cases include a
+# process killed mid-transition and drift this home was already carrying. Heal
+# this home's OWN books on its own
+# restart rather than waiting for a parent's cross-home nudge; the fleet
+# snapshot's classifier and bin/fm-secondmate-reconcile.sh's nudge stay as
+# backstops for what this cannot see. Never reads or writes another home.
+backlog_record_reconcile() {
+  local marker meta meta_lock id row label has_record=0 gate_status
+  # A fresh home with no state directory has no physical task records to pair.
+  # Keep bootstrap diagnostics working without creating state just for a no-op.
+  [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
+  if ! fm_backlog_directory_present "$STATE" "state directory"; then
+    echo "error: backlog reconciliation refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    return 2
+  fi
+  if fm_backlog_transition_applies "$CONFIG" "$DATA" "$BOOTSTRAP_BACKLOG_GATE_KIND"; then
+    :
+  else
+    gate_status=$?
+    if [ "$gate_status" -eq 2 ]; then
+      echo "error: backlog reconciliation cannot access configured data directory $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+      return 2
+    fi
+    return 0
+  fi
+  # Keep the wake/lock library's source-time state-directory creation inside
+  # this mutating sweep, so FM_BOOTSTRAP_DETECT_ONLY remains read-only.
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+
+  # Finish any close an interrupted cleanup recorded but never landed.
+  for marker in "$STATE"/*.backlog-close; do
+    [ -e "$marker" ] || [ -L "$marker" ] || continue
+    if ! fm_backlog_record_present "$marker" "pending-close record" "$STATE"; then
+      echo "BACKLOG_RECONCILE: unsafe pending close refused: $FM_BACKLOG_TRANSITION_ERROR"
+      return 2
+    fi
+    label=$(basename "$marker" .backlog-close)
+    meta_lock=$(fm_meta_lock_path "$STATE/$label.meta") || continue
+    fm_lock_try_acquire "$meta_lock" || continue
+    if fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA"; then
+      case "$FM_BACKLOG_CLOSE_REPLAY_RESULT" in
+        closed)
+          echo "BOOTSTRAP_INFO: closed the backlog item for $label that an interrupted cleanup left open"
+          ;;
+        closed_incomplete)
+          echo "BOOTSTRAP_INFO: closed the backlog item for $label after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
+          ;;
+      esac
+    else
+      echo "BACKLOG_RECONCILE: $label: recorded backlog close could not be replayed: $FM_BACKLOG_TRANSITION_ERROR"
+    fi
+    fm_lock_release "$meta_lock"
+  done
+
+  # A home that owns no records has nothing to pair, so it never pays for a
+  # backlog read. A pending close remains authoritative even when replay failed:
+  # the record sweep below must not start that item while its marker survives.
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
+      echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
+      return 2
+    fi
+    has_record=1
+    break
+  done
+  [ "$has_record" = 1 ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
+      echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
+      return 2
+    fi
+    id=$(basename "$meta" .meta)
+    meta_lock=$(fm_meta_lock_path "$meta") || continue
+    fm_lock_try_acquire "$meta_lock" || continue
+    if [ -e "$STATE/$id.backlog-close" ] || [ -L "$STATE/$id.backlog-close" ]; then
+      fm_lock_release "$meta_lock"
+      continue
+    fi
+    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
+      echo "BACKLOG_RECONCILE: $id: post-lock worker record check refused: $FM_BACKLOG_TRANSITION_ERROR"
+      fm_lock_release "$meta_lock"
+      return 2
+    fi
+    if [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
+       && [ "$(fm_meta_get "$meta" cleanup_recovery)" != orca ]; then
+      row=
+      if fm_backlog_row_probe "$DATA" "$id"; then
+        row=$FM_BACKLOG_ROW_STATE
+      elif [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
+        echo "BACKLOG_RECONCILE: $id: worker record exists but its backlog item could not be read: $FM_BACKLOG_ROW_ERROR"
+      fi
+      # Heal only the unambiguous case: a queued row for a record this home
+      # already owns. A held row is the captain's to move, and a closed row is a
+      # contradiction this sweep must not resolve by resurrecting the item.
+      if [ "$row" = "queued no no" ]; then
+        if fm_backlog_start "$DATA" "$id"; then
+          echo "BOOTSTRAP_INFO: marked $id in flight to match the worker this home already owns"
+        else
+          echo "BACKLOG_RECONCILE: $id: worker record exists but its backlog item could not be moved to In flight: $FM_BACKLOG_TRANSITION_ERROR"
+        fi
+      fi
+    fi
+    fm_lock_release "$meta_lock"
+  done
+}
+
 startup_memory_budget_setup() {
   # Primary bootstrap owns default publication. A secondmate is deliberately
   # passive here because its setting must converge from the primary through the
@@ -1110,14 +1322,58 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
-# This is the first mutating sweep at a locked session boundary. It pauses an
-# identity-matched watcher, holds its lock, and neutralizes legacy PR checks
-# before any tool detection or later bootstrap mutation can leave old artifacts
-# runnable. Detect-only sessions never touch state, and the deferred network pass
-# never repeats it: the local pass that ran first already closed that window.
+# This is the first mutating sweep at a locked session boundary. Detect-only
+# sessions never touch state, and the deferred network pass never repeats it:
+# the local pass that ran first already closed that window.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
-  "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
+  BOOTSTRAP_BACKLOG_GATE_KIND=secondmate
+  if [ -e "$STATE" ] || [ -L "$STATE" ]; then
+    if ! fm_backlog_directory_present "$STATE" "state directory"; then
+      echo "error: bootstrap cannot reconcile task state ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+      exit 1
+    fi
+    for BOOTSTRAP_BACKLOG_MARKER in "$STATE"/*.backlog-close; do
+      [ -e "$BOOTSTRAP_BACKLOG_MARKER" ] || [ -L "$BOOTSTRAP_BACKLOG_MARKER" ] || continue
+      if ! fm_backlog_record_present "$BOOTSTRAP_BACKLOG_MARKER" "pending-close record" "$STATE"; then
+        echo "error: bootstrap refused unsafe pending close ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+        exit 1
+      fi
+      BOOTSTRAP_BACKLOG_GATE_KIND=ship
+      break
+    done
+    if [ "$BOOTSTRAP_BACKLOG_GATE_KIND" = secondmate ]; then
+      for BOOTSTRAP_BACKLOG_META in "$STATE"/*.meta; do
+        [ -e "$BOOTSTRAP_BACKLOG_META" ] || [ -L "$BOOTSTRAP_BACKLOG_META" ] || continue
+        if ! fm_backlog_record_present "$BOOTSTRAP_BACKLOG_META" "task record" "$STATE"; then
+          echo "error: bootstrap refused unsafe worker record ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+          exit 1
+        fi
+        if [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" kind)" != secondmate ] \
+           && [ "$(fm_meta_get "$BOOTSTRAP_BACKLOG_META" cleanup_recovery)" != orca ]; then
+          BOOTSTRAP_BACKLOG_GATE_KIND=ship
+          break
+        fi
+      done
+    fi
+  fi
+  if fm_backlog_transition_applies "$CONFIG" "$DATA" "$BOOTSTRAP_BACKLOG_GATE_KIND"; then
+    :
+  else
+    BOOTSTRAP_BACKLOG_GATE_STATUS=$?
+    if [ "$BOOTSTRAP_BACKLOG_GATE_STATUS" -eq 2 ]; then
+      echo "error: bootstrap cannot access configured backlog data directory $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+      exit 1
+    fi
+  fi
   startup_memory_budget_setup
+  if backlog_record_reconcile; then
+    :
+  else
+    BOOTSTRAP_BACKLOG_RECONCILE_STATUS=$?
+    if [ "$BOOTSTRAP_BACKLOG_RECONCILE_STATUS" -eq 2 ]; then
+      exit 1
+    fi
+  fi
 fi
 
 # Local detection: presence, version floors, and configuration. Nothing here
@@ -1175,10 +1431,69 @@ detect_local_config() {
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then
     echo "BOOTSTRAP_INFO: crew harness override active: $crew"
   fi
+  # A configured cursor crew harness needs a cursor executable present, and
+  # cursor ships under EITHER installed name. Resolution runs through the
+  # verified owner rather than a bare `command -v`, so a home that merely has
+  # some unrelated executable named `agent` on PATH is still reported missing
+  # instead of failing at the first spawn.
+  if [ "$crew" = cursor ] && ! fm_cursor_resolve_binary >/dev/null 2>&1; then
+    echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
+  fi
   crew_dispatch_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
+  fi
+  detect_home_summary_publication
+}
+
+# This home's ledger publication is deliberately best-effort: every lifecycle
+# trigger calls it with --best-effort so a failure can never change the result
+# of a session start, a spawn, a teardown, or a watcher poll. That is correct,
+# and it also means a home that never manages to publish says nothing at all -
+# the failures land only in the bounded home-local record nobody reads.
+#
+# So read that same record here, where a session start already looks, and say so
+# once when the evidence is a pattern rather than a blip: the ledger has not
+# been (re)published, and at least FM_HOME_SUMMARY_FAILURE_REPORT attempts have
+# failed since whenever it last was. No new record, no new state, no retry
+# policy - just the existing evidence, surfaced.
+detect_home_summary_publication() {
+  local log="$STATE/.home-summary-refresh.log" ledger="$STATE/home-summary.json"
+  local since='' counted failures last threshold
+  threshold=${FM_HOME_SUMMARY_FAILURE_REPORT:-2}
+  case "$threshold" in ''|*[!0-9]*|0) threshold=2 ;; esac
+  [ -f "$log" ] && [ -r "$log" ] && [ ! -L "$log" ] || return 0
+  if [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ]; then
+    since=$(LC_ALL=C sed -n 's/.*"generated"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      "$ledger" 2>/dev/null | head -1)
+  fi
+  # Publication and failure stamps have whole-second precision, so failures in
+  # the publication's own second remain quiet until a later failure advances
+  # the record. That bounded delay avoids a precision dependency in bootstrap.
+  counted=$(LC_ALL=C awk -v since="$since" '
+    match($0, /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\]/) {
+      stamp = substr($0, 2, RLENGTH - 2)
+      if (since == "" || stamp > since) {
+        n += 1
+        last = substr($0, RLENGTH + 2)
+      } else if (stamp == since) {
+        same_second += 1
+      }
+    }
+    END {
+      if (since != "" && n > 0) n += same_second
+      printf "%d\t%s", n + 0, last
+    }' "$log" 2>/dev/null) || return 0
+  failures=${counted%%$'\t'*}
+  last=${counted#*$'\t'}
+  case "$failures" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$failures" -ge "$threshold" ] || return 0
+  last=$(printf '%s' "$last" | cut -c1-200)
+  if [ -z "$since" ]; then
+    echo "HOME_SUMMARY: this home has never published state/home-summary.json; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
+  else
+    echo "HOME_SUMMARY: state/home-summary.json has not been republished since $since; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
   fi
 }
 
@@ -1189,8 +1504,9 @@ detect_local_config() {
 # Each network owner below is bracketed by an elapsed-time record, so a deferred
 # stage that ran long can be attributed to the phase that spent the time.
 # fm-timing-lib.sh discards the record unless the caller asked for timings, and
-# every sweep is still called directly and in the same order, so nothing about
-# what runs, in what sequence, or what it returns changes.
+# every sweep is still called directly. Per-secondmate remote probes run
+# concurrently; clone refresh overlaps them. Diagnostic lines are replayed in
+# original order so attribution is unchanged.
 # The stamp variable is named for the library rather than `start` on purpose:
 # fleet_sync and others assign plain names like `start` without `local`, and
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
@@ -1204,7 +1520,25 @@ local_phase && detect_local_config
 
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so
-  # those two always run together in the same phase.
+  # those two always run together in the same phase. Clone refresh does not
+  # depend on them, so it starts in the background and overlaps their wall clock.
+  fleet_sync_pid=
+  fleet_sync_out=
+  if network_phase && network_sweep_authorized 'project clone refresh'; then
+    fleet_sync_out=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-fleet.XXXXXX") || fleet_sync_out=
+    if [ -n "$fleet_sync_out" ]; then
+      (
+        __fm_timing_stamp=$(fm_timing_now_ms)
+        fleet_sync
+        fm_timing_record phase fleet-sync "$__fm_timing_stamp"
+      ) >"$fleet_sync_out" 2>&1 &
+      fleet_sync_pid=$!
+    else
+      __fm_timing_stamp=$(fm_timing_now_ms)
+      fleet_sync
+      fm_timing_record phase fleet-sync "$__fm_timing_stamp"
+    fi
+  fi
   if network_phase; then
     if network_sweep_authorized 'dead-secondmate relaunch'; then
       __fm_timing_stamp=$(fm_timing_now_ms)
@@ -1224,10 +1558,10 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
-  if network_phase && network_sweep_authorized 'project clone refresh'; then
-    __fm_timing_stamp=$(fm_timing_now_ms)
-    fleet_sync
-    fm_timing_record phase fleet-sync "$__fm_timing_stamp"
+  if [ -n "$fleet_sync_pid" ]; then
+    wait "$fleet_sync_pid" || true
+    cat "$fleet_sync_out"
+    rm -f "$fleet_sync_out"
   fi
 fi
 local_phase && secondmate_handoff_detect

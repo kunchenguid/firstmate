@@ -113,9 +113,10 @@ outcome_count() { # <home> <suffix>
 }
 
 prime_seen() { # <state> <status>
-  local state=$1 status=$2 sig
-  if [ "$(uname)" = Darwin ]; then sig=$(stat -f '%z:%Fm' "$status"); else sig=$(stat -c '%s:%Y' "$status"); fi
-  printf '%s' "$sig" > "$state/.seen-$(basename "$status" | tr '.' '_')"
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
@@ -186,6 +187,8 @@ test_invalid_secondmate_marker_blocks_routing() {
       || fail "$kind secondmate marker did not surface the blocked terminal obligation"
     [ "$(outcome_count "$MATE" pending)" = 0 ] \
       || fail "$kind secondmate marker created a main-home pending receipt"
+    [ "$(wake_count "$MATE" 'inactive-reconcile-diagnostic:invalid-secondmate-home')" = 1 ] \
+      || fail "$kind secondmate marker diagnostic was not durably queued"
     ! grep -Fq 'inactive-outcome:' "$MATE/state/.wake-queue" 2>/dev/null \
       || fail "$kind secondmate marker routed a captain presentation wake"
     [ -f "$MATE/state/child.meta" ] && [ -f "$MATE/state/child.status" ] \
@@ -404,8 +407,30 @@ test_full_scan_budget_includes_wake_lock_wait() {
   FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   elapsed=$(( $(date +%s) - started ))
   reap "$holder"
-  [ "$elapsed" -le 3 ] || fail "wake lock wait exceeded aggregate scan budget (${elapsed}s)"
+  # The unbounded wake-lock wait is ended by the process-group backstop, which
+  # fires one second after the budget; the bound proves the scan cannot ride
+  # the 30-second lock hold.
+  [ "$elapsed" -le 4 ] || fail "wake lock wait exceeded aggregate scan budget (${elapsed}s)"
   pass "aggregate scan budget includes durable wake operations"
+}
+
+# A secondmate home seeded without its parent binding cannot report ANY terminal
+# outcome upward, and every later one fails for the same reason. The diagnostic
+# has to name the binding, or three weeks of identical failures read as three
+# weeks of unrelated report failures.
+test_missing_parent_binding_names_itself() {
+  local out
+  make_world missing-binding
+  printf 'mate\n' > "$MATE/.fm-secondmate-home"
+  write_child "$MATE" child 'done: PR merged'
+  out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup)
+  case "$out" in
+    *"actionable: inactive terminal outcome needs parent report"*".fm-secondmate-parent"*) ;;
+    *) fail "a missing parent binding did not name itself: $out" ;;
+  esac
+  [ "$(outcome_count "$MATE" reported)" = 0 ] \
+    || fail "an outcome that never reached a parent was recorded as reported"
+  pass "a secondmate home with no parent binding names the missing binding instead of failing quietly"
 }
 
 test_notice_recovery_does_not_duplicate_wake() {
@@ -456,6 +481,7 @@ test_watcher_hook_and_idle_secondmate_exemption
 test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake
+test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 
 echo "all inactive reconciliation tests passed"

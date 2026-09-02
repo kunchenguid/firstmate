@@ -186,6 +186,90 @@ run() {  # <home> <fakebin> <args...>
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
 }
 
+write_remote_home_summary() {  # <remote-home> <generated-epoch>
+  local home=$1 epoch=$2
+  mkdir -p "$home/state"
+  jq -n --arg home "$home" --argjson epoch "$epoch" '{
+    schema:"fm-secondmate-home-summary.v1",
+    generated:"2026-09-01T22:00:00Z",generated_epoch:$epoch,home:$home,
+    valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"no_active_work",
+    active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+    counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]
+  }' > "$home/state/home-summary.json"
+}
+
+make_remote_ledger_fleet() {  # <parent-home> <count>
+  local parent=$1 count=$2 i id remote_home
+  mkdir -p "$parent/data" "$parent/state" "$parent/config" "$parent/projects"
+  : > "$parent/data/backlog.md"
+  : > "$parent/data/secondmates.md"
+  i=1
+  while [ "$i" -le "$count" ]; do
+    id="ledger-$i"
+    remote_home="$TMP_ROOT/remote-ledger-home-$i"
+    mkdir -p "$remote_home/state"
+    remote_home=$(cd "$remote_home" && pwd -P)
+    printf -- '- %s - ledger fixture (host: host-%s; root: /remote/root; home: %s; scope: fixture; projects: sample; added 2026-09-01)\n' \
+      "$id" "$i" "$remote_home" >> "$parent/data/secondmates.md"
+    fm_write_meta "$parent/state/$id.meta" \
+      "kind=secondmate" "mode=secondmate" "harness=pi" \
+      "remote_host=host-$i" "remote_root=/remote/root" "home=$remote_home"
+    write_remote_home_summary "$remote_home" 1000
+    i=$((i + 1))
+  done
+}
+
+make_remote_ledger_ssh() {  # <dir>
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2
+remote_home=$(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$3")
+args=()
+while IFS= read -r -d '' arg; do args+=("$arg"); done \
+  < <(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$4")
+printf '%s\t%s\n' "$remote_home" "${args[0]:-}" >> "$FM_TEST_LEDGER_CALL_LOG"
+if [ -f "$remote_home/state/slow-ledger-read" ]; then
+  sleep 30 &
+  sleeper=$!
+  printf '%s %s\n' "$$" "$sleeper" >> "$FM_TEST_LEDGER_PID_LOG"
+  wait "$sleeper"
+fi
+case "${args[0]:-}" in
+  fm-remote-file.sh)
+    [ -f "$remote_home/state/home-summary.json" ] || exit 1
+    if [ -f "$remote_home/state/unbounded-ledger-read" ]; then
+      yes x
+    else
+      cat "$remote_home/state/home-summary.json"
+    fi
+    ;;
+  fm-fleet-snapshot.sh)
+    [ -f "$remote_home/state/fallback-summary.json" ] || exit 1
+    cat "$remote_home/state/fallback-summary.json"
+    ;;
+  *) exit 91 ;;
+esac
+SH
+  chmod +x "$fb/fake-ssh"
+  printf '%s\n' "$fb"
+}
+
+run_remote_ledger_bearings() {  # <parent-home> <fakebin> <epoch>
+  local parent=$1 fakebin=$2 epoch=$3
+  FM_HOME="$parent" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_TEST_LEDGER_CALL_LOG="$parent/ledger-calls.log" \
+    FM_TEST_LEDGER_PID_LOG="$parent/ledger-pids.log" \
+    FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" \
+    FM_SNAPSHOT_BUDGET=3 FM_SNAPSHOT_NOW_EPOCH="$epoch" \
+    FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$BEARINGS" --json
+}
+
 # End-to-end Domain Alpha regression fixture.
 # The parent event claims Phase 7 started, while the registered home has no child
 # metadata, every sample-rollout item is Done, and only an external legal hold remains.
@@ -492,12 +576,14 @@ test_bad_secondmate_homes_never_revive_parent_work() {
       and (.secondmates | any(.[]; .id == "unreadable" and (.reason | test("invalid home|unreadable"))))
       and (.secondmates | any(.[]; .id == "malformed" and (.reason | contains("unstructured current backlog row"))))
       and (.secondmates | any(.[]; .id == "timedout" and (.reason | contains("timed out"))))
+      and ([.secondmate_reconcile[].id] == ["malformed"])
+      and (.secondmate_reconcile[0].kind == "unstructured_current")
   ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
   pass "missing, invalid, unreadable, malformed, and timed-out homes stay explicit unknowns"
 }
 
 test_oversized_secondmate_summary_stays_strict_unknown() {
-  local home mate fakebin json i
+  local home mate fakebin json legacy i
   home=$(make_home oversized-home)
   mate="$TMP_ROOT/oversized-secondmate-home"
   make_valid_secondmate_home oversized "$mate"
@@ -527,7 +613,14 @@ EOF
       and (.decisions_open | any(.owner == "oversized") | not)
       and (.landed | any(.owner == "oversized") | not)
   ' >/dev/null || fail "oversized summary revived or retained unvalidated surfaces: $json"
-  pass "an oversized secondmate summary retains the strict empty unknown fallback"
+  legacy=$(FM_SNAPSHOT_LEDGER_MODE=off FM_SNAPSHOT_SECONDMATE_MAX_BYTES=512 run "$home" "$fakebin" --json)
+  printf '%s' "$legacy" | jq -e '
+    (.secondmates | any(.id == "oversized" and .state == "unknown"
+      and (.reason | contains("exceeded byte limit"))))
+      and (.in_flight | any(.id == "oversized") | not)
+      and (.landed | any(.owner == "oversized") | not)
+  ' >/dev/null || fail "legacy mode accepted an oversized structured summary: $legacy"
+  pass "oversized summaries stay strict unknown in ledger and compatibility modes"
 }
 
 test_secondmate_and_child_bounds_are_disclosed() {
@@ -735,10 +828,14 @@ EOF
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
-    | .current.state == "unknown"
+    | .current.state == "captain_decision"
       and (.current.reason | contains("live child state has no in-flight backlog item"))
       and (.current.reason | contains("parked=parked"))
-  ' >/dev/null || fail "unowned held child was silently dropped: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"unowned_current",ids:["parked"]}
+      and [.decisions_open[].key] == ["parked"]
+  ' >/dev/null || fail "unowned held child lost its classification or decisions: $canonical"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] done - Done child still in flight (repo: sample) (kind: ship) (since 2026-07-11)
@@ -763,11 +860,14 @@ EOF
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
-    | .current.state == "unknown"
+    | .current.state == "no_active_work"
       and (.current.reason | contains("terminal child state"))
       and (.current.reason | contains("done=done"))
       and (.current.reason | contains("failed=failed"))
-  ' >/dev/null || fail "terminal in-flight child states were silently dropped: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"terminal_in_flight",ids:["done","failed"]}
+  ' >/dev/null || fail "terminal in-flight rows discarded the readable home: $canonical"
   pass "nonprogressing child states are explicit and inconsistent terminal rows invalidate"
 }
 
@@ -970,6 +1070,52 @@ test_superseded_queued_item_dropped_by_default() {
   pass "superseded queued items are dropped by default and restored with --all-queued"
 }
 
+# The collapsed captain-call contract: any due, unblocked captain-held task is
+# Captain's Call whatever its kind; a date-deferred hold is a dated gate until
+# due; a prose-deferred hold leaves the default views with a disclosure; and
+# Recently Landed excludes only what closed while still held for the captain.
+test_collapsed_captain_call_deferral_and_landed() {
+  local home fakebin json
+  home=$(make_home collapsed-call)
+  mkdir -p "$home/data"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] work-gate - Captain-gated ship work (repo: firstmate) (kind: ship) (hold: captain go needed) (hold-kind: captain)
+- [ ] later-call - Deferred captain call (repo: firstmate) (kind: captain) (hold: revisit with the captain) (hold-kind: captain) (hold-until: 2026-08-01)
+- [ ] due-call - Due captain call (repo: firstmate) (kind: captain) (hold: overdue captain choice) (hold-kind: captain) (hold-until: 2026-07-11)
+- [ ] parked-call - Prose-parked captain call (repo: firstmate) (kind: ship) (hold: DEFERRED by captain revisit later) (hold-kind: captain)
+- [ ] external-gate - Externally held work (repo: firstmate) (kind: ship) (hold: upstream release pending) (hold-kind: external)
+
+## Done
+- [x] answered-call - Answered captain question (repo: firstmate) (kind: captain) (done 2026-07-10) (hold: captain choice pending) (hold-kind: captain)
+- [x] shipped-work - Ordinary landed work (repo: firstmate) (kind: ship) (merged 2026-07-10)
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "work-gate"))
+      and (.decisions_open | any(.[]; .id == "due-call"))
+      and (.decisions_open | any(.[]; .id == "later-call") | not)
+      and (.decisions_open | any(.[]; .id == "parked-call") | not)
+      and (.decisions_open | any(.[]; .id == "external-gate") | not)
+      and (.gates | any(.[]; .id == "later-call" and (.reason | startswith("until 2026-08-01"))))
+      and (.gates | any(.[]; .id == "work-gate") | not)
+      and (.gates | any(.[]; .id == "parked-call") | not)
+      and (.gates | any(.[]; .id == "external-gate"))
+      and (.landed | any(.[]; .id == "shipped-work"))
+      and (.landed | any(.[]; .id == "answered-call") | not)
+      and (.omitted | any(.[]; .surface | startswith("captain holds marked deferred")))
+  ' >/dev/null || fail "the collapsed captain-call projection is wrong: $json"
+  json=$(run "$home" "$fakebin" --json --all-decisions --all-queued)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "parked-call"))
+      and (.gates | any(.[]; .id == "parked-call") | not)
+  ' >/dev/null || fail "--all-decisions must reveal the prose-deferred call: $json"
+  pass "captain-held tasks of any kind reach Captain's Call, deferral is honored, and landed excludes answered calls"
+}
+
 test_include_prs_is_the_only_fetch_path() {
   local home fakebin json
   home=$(make_home prs); write_fixture "$home"
@@ -1007,7 +1153,11 @@ test_perl_fallback_bounds_github_call() {
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find; do
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm mkdir chmod mv cp awk; do
+    ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
+  done
+  for cmd in shasum sha256sum; do
+    command -v "$cmd" >/dev/null 2>&1 || continue
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   started=$(date +%s)
@@ -1705,15 +1855,15 @@ EOF
     .secondmate_current.records[] | select(.id == "sshhip")
     | .current.state == "unknown"
       and (.current.reason | contains("in-flight backlog item has no child metadata: ordinary-orphan"))
-      and .provenance.selected != "structured-home"
-      and .invalidity == null
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
-  ' >/dev/null || fail "an unknown child masked a simultaneous ordinary orphan: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"orphan_in_flight",ids:["ordinary-orphan"]}
+      and [.decisions_open[].id] == ["reviewer-decision"]
+      and [.holds[].id] == ["reviewer-decision"]
+      and [.queued[].id] == ["reviewer-decision"]
+      and [.landed[].id] == ["prior-release"]
+      and [.endpoints[].id] == ["unreadable-child"]
+  ' >/dev/null || fail "an ordinary orphan discarded a readable home alongside an unknown child: $canonical"
   sed '/ordinary-orphan/d' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
 
@@ -1725,15 +1875,14 @@ EOF
     .secondmate_current.records[] | select(.id == "sshhip")
     | .current.state == "unknown"
       and (.current.reason | contains("live child state has no in-flight backlog item: unreadable-child=unknown"))
-      and .provenance.selected != "structured-home"
-      and .invalidity == null
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
-  ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"unowned_current",ids:["unreadable-child"]}
+      and [.decisions_open[].id] == ["reviewer-decision"]
+      and [.holds[].id] == ["reviewer-decision"]
+      and [.queued[].id] == ["reviewer-decision"]
+      and [.landed[].id] == ["prior-release"]
+  ' >/dev/null || fail "an unowned unknown child discarded the readable home: $canonical"
   sed '/## In flight/a\
 - [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
     "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
@@ -1811,16 +1960,14 @@ EOF
     "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "hibit")
-    | .current.state == "unknown"
+    | .current.state == "active_child_work"
       and (.current.reason | contains("in-flight backlog item has no child metadata: dogfood-program"))
-      and .provenance.selected != "structured-home"
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
-  ' >/dev/null || fail "an unrecognized worker kind no longer stayed strict: $canonical"
+      and .provenance.selected == "structured-home"
+      and .provenance.trust == "partial-structured"
+      and .invalidity == {kind:"orphan_in_flight",ids:["dogfood-program"]}
+      and [.active_children[].id] == ["hibit-worker"]
+      and [.endpoints[].id] == ["hibit-worker"]
+  ' >/dev/null || fail "an unrecognized worker kind hid the home's live work: $canonical"
   pass "mixed secondmate roles, partial state, and captain readiness project independently"
 }
 
@@ -1894,6 +2041,156 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
+  local parent fakebin json started elapsed i remote_home pid collector_pid sleeper_pid duplicate_base
+  parent=$(make_home concurrent-remote-ledgers)
+  make_remote_ledger_fleet "$parent" 5
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  : > "$parent/ledger-calls.log"
+  : > "$parent/ledger-pids.log"
+
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
+    || fail "a healthy snapshot did not issue exactly one remote file read per home"
+  printf '%s' "$json" | jq -e '
+    (.secondmates | length) == 5
+      and all(.secondmates[]; .freshness == "fresh" and .age_seconds == 100)
+  ' >/dev/null || fail "healthy remote ledgers did not project their generated-epoch ages: $json"
+
+  duplicate_base="$TMP_ROOT/remote-ledger-home-1/state/home-summary.single"
+  cp "$TMP_ROOT/remote-ledger-home-1/state/home-summary.json" "$duplicate_base"
+  cat "$duplicate_base" "$duplicate_base" > "$TMP_ROOT/remote-ledger-home-1/state/home-summary.json"
+  : > "$parent/ledger-calls.log"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    ([.secondmates[] | select(.id == "ledger-1" and .freshness == "cached" and .age_seconds == 100)] | length) == 1
+      and ([.secondmates[] | select(.id != "ledger-1" and .freshness == "fresh")] | length) == 4
+  ' >/dev/null || fail "a multi-document live ledger bypassed the valid cache: $json"
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
+    || fail "rejecting a multi-document live ledger added remote reads"
+  mv "$duplicate_base" "$TMP_ROOT/remote-ledger-home-1/state/home-summary.json"
+
+  : > "$TMP_ROOT/remote-ledger-home-1/state/unbounded-ledger-read"
+  : > "$parent/ledger-calls.log"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    ([.secondmates[] | select(.id == "ledger-1" and .freshness == "cached")] | length) == 1
+      and ([.secondmates[] | select(.id != "ledger-1" and .freshness == "fresh")] | length) == 4
+  ' >/dev/null || fail "an unbounded primary ledger stream consumed the shared collector budget: $json"
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
+    || fail "bounding one faulty primary ledger added remote reads"
+  rm -f "$TMP_ROOT/remote-ledger-home-1/state/unbounded-ledger-read"
+
+  i=1
+  while [ "$i" -le 5 ]; do
+    remote_home="$TMP_ROOT/remote-ledger-home-$i"
+    : > "$remote_home/state/slow-ledger-read"
+    i=$((i + 1))
+  done
+  : > "$parent/ledger-calls.log"
+  : > "$parent/ledger-pids.log"
+  started=$(date +%s)
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 2000)
+  elapsed=$(( $(date +%s) - started ))
+  # The three-second bound covers remote collection, while setup, cache validation,
+  # and projection run outside it. Keep the end-to-end ceiling well below the
+  # fifteen seconds that five serial three-second reads would require, without
+  # treating slower stock-macOS jq/process startup as collector serialization.
+  [ "$elapsed" -lt 12 ] || fail "five wedged remote reads behaved serially despite the shared three-second budget (${elapsed}s)"
+  printf '%s' "$json" | jq -e '
+    (.secondmates | length) == 5
+      and all(.secondmates[]; .freshness == "cached" and .age_seconds == 1000
+        and .provenance == "structured-home-cache")
+      and ([.omitted[] | select(.surface | contains("served from cached home ledger"))] | length) == 5
+  ' >/dev/null || fail "wedged homes did not use and disclose age-labeled cache rows: $json"
+  sleep 0.3
+  while read -r collector_pid sleeper_pid; do
+    for pid in "$collector_pid" "$sleeper_pid"; do
+      [ -n "$pid" ] || continue
+      if kill -0 "$pid" 2>/dev/null; then
+        fail "a cancelled remote ledger collector process survived the total budget (pid $pid)"
+      fi
+    done
+  done < "$parent/ledger-pids.log"
+
+  i=1
+  while [ "$i" -le 5 ]; do
+    remote_home="$TMP_ROOT/remote-ledger-home-$i"
+    remote_home=$(cd "$remote_home" && pwd -P)
+    rm -f "$remote_home/state/slow-ledger-read"
+    write_remote_home_summary "$remote_home" 1990
+    i=$((i + 1))
+  done
+  : > "$TMP_ROOT/remote-ledger-home-1/state/slow-ledger-read"
+  : > "$parent/ledger-calls.log"
+  : > "$parent/ledger-pids.log"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 2000)
+  printf '%s' "$json" | jq -e '
+    ([.secondmates[] | select(.freshness == "fresh" and .age_seconds == 10)] | length) == 4
+      and ([.secondmates[] | select(.id == "ledger-1" and .freshness == "cached"
+        and .age_seconds == 1000 and .provenance == "structured-home-cache")] | length) == 1
+      and ([.omitted[] | select(.surface == "secondmate ledger-1 served from cached home ledger")] | length) == 1
+  ' >/dev/null || fail "one slow home prevented four fresh rows or hid its cache disclosure: $json"
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 5 ] \
+    || fail "the mixed-speed snapshot made more than one remote read per ledger home"
+  pass "remote ledgers collect concurrently under one budget, reuse aged cache, and cancel wedged collectors"
+}
+
+test_a_remote_home_without_any_ledger_uses_the_mixed_fleet_fallback() {
+  local parent fakebin remote_home json oversized trailing bytes max_bytes
+  parent=$(make_home remote-ledger-fallback)
+  make_remote_ledger_fleet "$parent" 1
+  remote_home="$TMP_ROOT/remote-ledger-home-1"
+  cp "$remote_home/state/home-summary.json" "$remote_home/state/fallback-summary.json"
+  rm -f "$remote_home/state/home-summary.json" "$remote_home/state/slow-ledger-read"
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  : > "$parent/ledger-calls.log"
+  : > "$parent/ledger-pids.log"
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | length) == 1
+      and .secondmates[0].state == "no_active_work"
+      and (.omitted | any(.surface == "secondmate ledger-1 used mixed-fleet summary fallback"))
+  ' >/dev/null || fail "a no-ledger remote home did not use and disclose the compatibility fallback: $json"
+  [ "$(wc -l < "$parent/ledger-calls.log" | tr -d ' ')" -eq 2 ] \
+    || fail "the no-ledger home did not perform one file read followed by one compatibility summary"
+
+  cp "$remote_home/state/fallback-summary.json" "$remote_home/state/fallback-summary.base"
+  bytes=$(LC_ALL=C wc -c < "$remote_home/state/fallback-summary.json" | tr -d ' ')
+  max_bytes=$((bytes + 4))
+  printf '\n\n\n\n\n\n\n\n' >> "$remote_home/state/fallback-summary.json"
+  trailing=$(FM_SNAPSHOT_LEDGER_MODE=off FM_SNAPSHOT_SECONDMATE_MAX_BYTES="$max_bytes" \
+    run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$trailing" | jq -e '
+    .secondmates[0].state == "unknown"
+      and (.secondmates[0].reason | contains("exceeded byte limit"))
+  ' >/dev/null || fail "legacy mode ignored trailing bytes beyond the summary bound: $trailing"
+  mv "$remote_home/state/fallback-summary.base" "$remote_home/state/fallback-summary.json"
+
+  cp "$remote_home/state/fallback-summary.json" "$remote_home/state/fallback-summary.single"
+  cat "$remote_home/state/fallback-summary.single" "$remote_home/state/fallback-summary.single" \
+    > "$remote_home/state/fallback-summary.json"
+  trailing=$(FM_SNAPSHOT_LEDGER_MODE=off run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$trailing" | jq -e '
+    .secondmates[0].state == "unknown"
+      and (.secondmates[0].reason | contains("malformed or stale"))
+  ' >/dev/null || fail "legacy mode accepted multiple summary documents: $trailing"
+  mv "$remote_home/state/fallback-summary.single" "$remote_home/state/fallback-summary.json"
+
+  jq '.padding = ("x" * 2048)' "$remote_home/state/fallback-summary.json" \
+    > "$remote_home/state/fallback-summary.next"
+  mv "$remote_home/state/fallback-summary.next" "$remote_home/state/fallback-summary.json"
+  : > "$parent/ledger-calls.log"
+  oversized=$(FM_SNAPSHOT_SECONDMATE_MAX_BYTES=512 run_remote_ledger_bearings "$parent" "$fakebin" 1100)
+  printf '%s' "$oversized" | jq -e '
+    .secondmates[0].state == "unknown"
+      and (.secondmates[0].reason | contains("exceeded byte limit"))
+  ' >/dev/null || fail "an oversized remote compatibility fallback was accepted: $oversized"
+  pass "a mixed-version remote fallback is bounded before validation"
+}
+
+test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
+test_a_remote_home_without_any_ledger_uses_the_mixed_fleet_fallback
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -1932,6 +2229,7 @@ test_include_prs_is_the_only_fetch_path
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
+test_collapsed_captain_call_deferral_and_landed
 test_pr_repository_cap_and_expansion
 test_per_repository_pr_cap_is_disclosed
 test_projection_and_toon_fail_closed

@@ -96,7 +96,7 @@ test_projects_path_scoping() {
     fi
     status=$?
     [ "$status" -ne 0 ] || fail "$label: spawn with missing brief should fail"
-    expected="error: no brief at $home/data/$id/brief.md"
+    expected="error: task $id has no brief at inaccessible data path $home/data/$id/brief.md"
     printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
       || fail "$label: projects/alpha was not resolved through the home before the brief check"
     printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null \
@@ -125,7 +125,7 @@ test_batch_requires_the_shared_delivery_contract() {
   status=$?
   [ "$status" -ne 0 ] || fail "a ship batch without --yolo should exit non-zero"
   printf '%s\n' "$out" | grep -F 'ship spawns require --yolo' >/dev/null \
-    || fail "batch refusal did not name the missing approval posture"
+    || fail "batch refusal did not name the missing merge posture"
   pass "batch dispatch requires the shared ship delivery contract before any pair runs"
 }
 

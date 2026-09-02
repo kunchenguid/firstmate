@@ -56,14 +56,14 @@
 #                still starts and ends with the family's rule glyph is
 #                tolerated, not ambiguity.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
-#                codex `›`, muse `⟩`). The agent glyph is itself the container
+#                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
 #   separated  - pi: content rows between two solid horizontal `─` rules, no
 #                glyph and no side border. Provable only with a live agent
-#                identity reporting an idle/done/blocked pi (herdr `agent
+#                identity reporting an idle/done pi (herdr `agent
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
@@ -72,13 +72,15 @@
 # what a pane shows once its agent has exited to a plain login shell - is a
 # genuine empty agent composer ONLY inside a bordered container. On a bare row
 # it is a dead-shell prompt and classifies `unknown` (never a safe injection
-# target). The AGENT glyphs `❯` (claude), `›` (codex), and `⟩` (U+27E9, muse)
-# are a genuine empty agent composer either way. Both glyph sets are declared
+# target). The AGENT glyphs `❯` (claude), `›` (codex), `⟩` (U+27E9, muse),
+# and `→` (U+2192, cursor) are a genuine empty agent composer either way.
+# Both glyph sets are declared
 # exactly once below; every decision reaches them through the declarations.
 #
 # GHOST/PLACEHOLDER TEXT (task afk-herdr-false-pending): a harness fills an
 # otherwise-empty composer with de-emphasized ghost text - claude's rotating
-# prompt suggestion, codex's idle suggestion, grok's placeholder - which a
+# prompt suggestion, codex's idle suggestion, grok's placeholder, or cursor's
+# idle placeholder - which a
 # plain capture cannot tell apart from text a human typed.
 # fm_composer_strip_ghost is the ONE ANSI-aware extractor of "real typed
 # content": it drops every de-emphasized run - dim/faint (SGR 2) AND a
@@ -272,21 +274,102 @@ fm_composer_strip_ghost() {
   '
 }
 
+
+# --- Delivery-only rendered busy footers (backend-agnostic) -------------------
+#
+# These live here, in the ONE shared composer/delivery owner, rather than in any
+# single backend adapter, because every backend needs them for the SAME job:
+# proving a submitted Enter actually landed. Keeping them in bin/fm-tmux-lib.sh
+# made cursor's signature reachable only from tmux, even though herdr, zellij,
+# cmux, and orca run the same harnesses and face the same acknowledgement
+# problem.
+#
+# This is a DELIVERY guard, deliberately NOT a worker-state source. The semantic
+# busy contract - what firstmate records and supervises on - is owned by
+# bin/fm-busy-lib.sh, which forbids classifying a harness from rendered text.
+# Matching a footer to confirm a keystroke landed is a different question from
+# asking what a worker is doing, and the two must not be conflated.
+# Delivery-only rendered busy footers per harness. claude/codex: "esc to
+# interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
+# Claude's current spinner has a rotating glyph and word, but every active-turn
+# line has an ellipsis followed by a parenthesized elapsed duration. Keep this
+# signature separate from the shared default because that shape is not generic
+# enough to classify arbitrary harness output safely.
+# Kimi's anchored moon-phase spinner is separate because bare moon glyphs in
+# ordinary output must not classify another harness as busy. Leading whitespace is
+# OPTIONAL; whitespace on both sides of the separator is REQUIRED because every
+# captured spinner row had it. A zero-whitespace form has NEVER been observed and
+# is deliberately not matched. The line end is intentionally unanchored because
+# rotating tip text follows and is not required to be present. The idle status
+# bar's lowercase `thinking` label and independently rotating tip text are not
+# busy signals on their own.
+# The full moon-phase set remains locale- and emoji-font-sensitive because Kimi
+# exposes no stable ASCII busy token.
+# The harness-less default is the UNION of the per-harness tokens below, used
+# when a caller has no recorded harness for the pane (the submit cores read the
+# baseline and the post-Enter transition this way). cursor's `ctrl+c to stop` is
+# part of that union for the same reason the others are: without it a cursor
+# submit could never be acknowledged, because cursor parks its terminal cursor
+# outside its composer and the composer verdict is therefore always `unknown`.
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|ctrl\+c to stop'
+FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
+FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
+FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
+FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
+FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+# cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
+# same version rendered both `Working` and `Running` beside its braille spinner
+# in two consecutive turns, while `ctrl+c to stop` was present for the whole
+# turn and absent the instant it ended (verified live, 2026.08.11-e8db854).
+# This is a DELIVERY guard only - it acknowledges a submit and gates away-mode
+# injection. Cursor's recorded worker state comes from its transcript fold in
+# bin/fm-busy-lib.sh, never from this row.
+FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
+FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+
+fm_busy_lines_match() {  # [harness]
+  local harness=${1:-} lines regex
+  IFS= read -r -d '' lines || true
+  if [ -n "${FM_BUSY_REGEX:-}" ]; then
+    regex=$FM_BUSY_REGEX
+  else
+    case "$harness" in
+      claude) regex=$FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT ;;
+      codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
+      opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
+      pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
+      grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
+      kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
+      cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
+      *)
+        # A supplied harness must never borrow another harness's signature.
+        # Register its verified signature explicitly before classifying it busy.
+        regex=
+        ;;
+    esac
+  fi
+  [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
+}
+
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
 # AGENT glyphs are a genuine empty agent composer on any row, bordered or bare.
 # SHELL glyphs are one only INSIDE a composer container; on a bare row they are
 # a dead-shell prompt and must never read `empty`. Newline-separated and
 # consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
 # literal and no entry is ever exposed to pathname expansion.
-FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩')
+FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
 # bordered placeholder and opencode's left-bar hint (which continues with a
-# rotating quoted suggestion, hence the unanchored tail). FM_COMPOSER_IDLE_RE
-# overrides for an unverified harness; matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.'
+# rotating quoted suggestion, hence the unanchored tail). cursor-agent renders
+# two, both anchored: `Plan, search, build anything` in a fresh session and
+# `Add a follow-up` once a turn has completed (verified live on cursor-agent
+# 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
+# matching is case-insensitive.
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything\.\.\.|^Plan, search, build anything$|^Add a follow-up$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -426,6 +509,34 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fm_composer_normalize_trim_var content
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
+  # Ghost stripping can leave a REMNANT of an idle placeholder rather than
+  # emptying it, because a terminal draws the cell under its cursor in reverse
+  # video (SGR 7) - neither dim/faint nor a dark foreground, so that one
+  # character survives a stripper built for the other two. cursor-agent renders
+  # exactly this shape: a dim `Plan, search, build anything` whose first
+  # character is reverse-video, leaving a lone `P` (verified live on
+  # cursor-agent 2026.08.11-e8db854). Judging that remnant on its own reads
+  # `pending` on a genuinely idle pane.
+  # The plain row is the styling-independent signal, so consult it here. This
+  # stays safe in the false-EMPTY direction because it demands the remnant be a
+  # PROPER, strictly shorter substring of a plain row that matches a full
+  # anchored placeholder: real typed text is uniformly bright, so stripping
+  # leaves it EQUAL to the plain row and it falls through to `pending` below.
+  # Typing a strict substring of a placeholder is equally safe - the plain row
+  # is then that substring, which the anchored placeholder pattern cannot match.
+  if [ "$idle_collision" != 1 ] && [ "$styled" = 1 ] && [ -n "$plain_content" ]; then
+    local plain_body=$plain_content plain_glyph=''
+    if fm_composer_leading_prompt_glyph_var plain_glyph "$plain_body"; then
+      plain_body=${plain_body#*"$plain_glyph"}
+    fi
+    fm_composer_normalize_trim_var plain_body
+    if [ "${#content}" -lt "${#plain_body}" ] \
+       && fm_composer_idle_matches "$plain_body" "$idle_re" "$idle_case"; then
+      case "$plain_body" in
+        *"$content"*) printf 'empty'; return 0 ;;
+      esac
+    fi
+  fi
   if [ "$idle_collision" = 1 ]; then
     if [ "$placeholder_position" = 1 ] && [ "$bordered" = 1 ] && [ "$styled" != 1 ]; then
       printf 'empty'; return 0
@@ -704,6 +815,12 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
 
 # fm_composer_row_has_edge: 0 when the trimmed row starts or ends with a
 # box-drawing/edge glyph - a structural row, never an input row.
+# The half-block glyphs are edges too. Herdr draws a composer's top and bottom
+# rules with ▄ and ▀ instead of the box-drawing family, so without them a bare
+# composer's WRAP region walks straight through its own closing rule and
+# swallows the footer below it - which reads as real typed text and turns an
+# idle pane into a false `pending`. Measured live on a herdr cursor pane, where
+# the wrap region ran from the composer row through the model and path rows.
 fm_composer_row_has_edge() {  # <trimmed-row>
   local row=$1
   fm_composer_normalize_trim_var row
@@ -711,7 +828,8 @@ fm_composer_row_has_edge() {  # <trimmed-row>
     '│'*|*'│'|'┃'*|*'┃'|'║'*|*'║'|'╭'*|*'╭'|'╮'*|*'╮'|\
     '┌'*|*'┌'|'┐'*|*'┐'|'╔'*|*'╔'|'╗'*|*'╗'|'┏'*|*'┏'|'┓'*|*'┓'|\
     '╰'*|*'╰'|'╯'*|*'╯'|'└'*|*'└'|'┘'*|*'┘'|'╚'*|*'╚'|'╝'*|*'╝'|\
-    '┗'*|*'┗'|'┛'*|*'┛'|'─'*|*'─'|'━'*|*'━'|'═'*|*'═'|'|'*|*'|'|'+'*|*'+')
+    '┗'*|*'┗'|'┛'*|*'┛'|'─'*|*'─'|'━'*|*'━'|'═'*|*'═'|'|'*|*'|'|'+'*|*'+'|\
+    '▀'*|*'▀'|'▄'*|*'▄'|'▁'*|*'▁'|'▔'*|*'▔')
       return 0
       ;;
   esac
@@ -1181,10 +1299,8 @@ EOF
 # retyping would duplicate it. Proven pending (and pending-unproven) retries
 # consume the budget; any other verdict returns immediately, so `unknown`
 # stays a loud refusal rather than a blind retry into an unreadable pane.
-# tmux keeps its own richer core (bin/fm-tmux-lib.sh: the busy-queued-Enter
-# and idle-baseline turn-started conversions its busy primitive enables), and
-# herdr confirms through native agent-state; both consume the same shared
-# verdict, so no shape knowledge lives in any of the three loops.
+# tmux and herdr keep richer cores that consume this same shared verdict plus
+# fm_composer_queued_enter_verdict; no shape knowledge lives in any loop.
 fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
   local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
   while :; do
@@ -1198,6 +1314,27 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf '%s' "$state"; return 0; }
   done
+}
+
+# fm_composer_queued_enter_verdict: the ONE busy-queued-Enter policy.
+# After Enter retries are spent, convert a structurally proven pending
+# composer given a delivery-busy signal from the adapter:
+#   pending + busy  -> empty   (Enter was accepted and queued; do not re-send)
+#   pending + idle  -> pending (genuine swallow; caller must not assume delivery)
+#   pending + unknown -> pending (unreadable busy is not proof of a queue)
+# Every other composer verdict is returned unchanged, so pending-unproven,
+# empty, and unknown never receive this conversion.
+# Adapters supply their own busy primitive (tmux: fm_pane_is_busy; herdr:
+# native agent_status=working, or a rendered busy footer on an idle native
+# baseline). This function does not read a pane.
+fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
+  local state=$1 busy=${2:-}
+  [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
+  if [ "$busy" = busy ]; then
+    printf 'empty'
+  else
+    printf 'pending'
+  fi
 }
 
 _fm_composer_classify_pi_rows() {  # <screen> <styled>
@@ -1242,7 +1379,11 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done/blocked pi proves an empty composer.
+# live pi state, while only an idle/done pi proves an empty composer. A blocked
+# pi is parked on an interactive prompt waiting for a human keystroke: its menu
+# is drawn above the separator pair, so the composer region looks free while the
+# keys would answer the prompt instead of composing (issue #2797). Structure
+# cannot disprove that, so a blocked pi defers rather than claiming empty.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -1269,7 +1410,7 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
     return 0
   fi
   case "$agent_status" in
-    idle|done|blocked) printf 'empty' ;;
+    idle|done) printf 'empty' ;;
     *) printf 'unknown' ;;
   esac
 }
