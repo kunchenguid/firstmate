@@ -58,10 +58,11 @@ The process probe reads its marker from material written inside the entrant's pe
 The marker value never crosses a gate-created process argv, including the confinement wrapper, while the positive control still reports a genuinely visible sibling marker process as a leak.
 
 The restore drill treats archived evaluator bytes as untrusted candidate output.
-It restores and rebinds every sample and statically validates every sample's evaluator, content address, evidence group, result hash, executable bit, and scored-input paths before any archived code may execute.
+It restores, rebinds, and statically validates each sample in a short-lived workspace, then releases that repository and worktree immediately while retaining only the bounded selection's copied tree for later execution.
 Only differential execution is bounded: the drill selects the first sample in the archive's stable lexical order and records that selection in the receipt.
 Both evaluator executions use the same preflight-proven `bin/fm-bench-confine.sh` mechanism with networking disabled, a scrubbed environment, and one independently generated opaque run root as the only writable candidate-data bind.
 The archive and repository are not mounted for the evaluator, and the genuine and perturbed runs expose the same internal layout without a role-bearing path, environment value, or recognizable perturbation marker.
+A restore-drill attempt revokes its earlier receipt before any check runs, so every refusal leaves cleanup held even when a required restore dependency has disappeared.
 
 ## The two captain-stop conditions
 

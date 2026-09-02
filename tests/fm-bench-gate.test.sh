@@ -1212,6 +1212,20 @@ out=$(run_gate "$BENCH" cleanup-gate) || fail "cleanup must pass after a drill: 
 assert_contains "$out" "no candidate ships directly" "the disposition is re-asserted at cleanup"
 pass "the restore drill authorises cleanup only after really restoring every bundle"
 
+NO_GIT_BIN="$TMP_ROOT/no-git-bin"
+mkdir -p "$NO_GIT_BIN"
+ln -s "$(command -v bash)" "$NO_GIT_BIN/bash"
+ln -s "$(command -v dirname)" "$NO_GIT_BIN/dirname"
+ln -s "$(command -v python3)" "$NO_GIT_BIN/python3"
+out=$(PATH="$NO_GIT_BIN" "$GATE" --bench "$BENCH" restore-drill 2>&1) && status=0 || status=$?
+expect_code 1 "$status" "a drill without git is refused"
+assert_contains "$out" "git is required" "the missing restore dependency is named"
+assert_absent "$BENCH/archive/restore-drill.json" "a refused drill revokes its previous receipt"
+out=$(run_gate "$BENCH" cleanup-gate) && status=0 || status=$?
+expect_code 1 "$status" "cleanup remains refused after a drill loses git"
+assert_contains "$out" "no restore drill receipt" "the stale drill clearance cannot survive a refusal"
+pass "every restore-drill attempt structurally revokes stale clearance"
+
 fi
 
 archive_escape_refused() {  # <label> <path-kind>
@@ -1286,43 +1300,6 @@ out=$("$CONFINE" --mechanism sandbox-exec --allow "$TMP_ROOT" -- /bin/true 2>&1)
 expect_code 2 "$status" "the unusable sandbox-exec mechanism is rejected"
 assert_contains "$out" "unknown mechanism sandbox-exec" "an aborting mechanism cannot be mistaken for confinement"
 pass "the benchmark confinement wrapper rejects sandbox-exec"
-
-BENCH="$TMP_ROOT/archive-binding"
-write_plan "$BENCH"
-write_archive "$BENCH" "$TMP_ROOT/srcrepo-binding"
-python3 - "$BENCH" <<'PY'
-import hashlib, json, sys
-from pathlib import Path
-
-bench = Path(sys.argv[1])
-digests = []
-samples = sorted(path for path in (bench / "archive").iterdir() if path.is_dir())
-for sample in samples:
-    manifest = sample / "manifest.json"
-    record = json.loads(manifest.read_text())
-    value = {
-        "sample": sample.name,
-        "files": record["files"],
-        "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
-    }
-    digests.append(hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest())
-archive_digest = hashlib.sha256("".join(sorted(digests)).encode()).hexdigest()
-(bench / "archive" / "restore-drill.json").write_text(json.dumps({
-    "schema": "fm-bench-restore-drill.v1",
-    "verdict": "pass",
-    "archive_digest": archive_digest,
-    "samples": len(samples),
-    "evaluator_samples": [samples[0].name],
-}, indent=2, sort_keys=True) + "\n")
-manifest = samples[0] / "manifest.json"
-record = json.loads(manifest.read_text())
-record["tree_binding"]["base_tree"] = "f" * 40
-manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
-PY
-out=$(run_gate "$BENCH" cleanup-gate) && status=0 || status=$?
-expect_code 1 "$status" "editing a manifest binding after a drill withdraws cleanup"
-assert_contains "$out" "changed after the restore drill" "the receipt binds manifest bytes as well as evidence files"
-pass "a changed archive manifest portably withdraws cleanup authority"
 
 BENCH="$TMP_ROOT/archive"
 write_restore_confinement "$BENCH" none
@@ -1601,35 +1578,40 @@ PY
 stability_out="$TMP_ROOT/archive-stability.out"
 run_gate "$BENCH" restore-drill >"$stability_out" 2>&1 &
 stability_pid=$!
-stability_running=0
-for _ in $(seq 1 200); do
-  if python3 - "$stability_pid" stability-wait-evaluator.sh <<'PY'
-import subprocess, sys
+if ! python3 - "$stability_pid" stability-wait-evaluator.sh <<'PY'
+import subprocess, sys, time
 
 root = int(sys.argv[1])
 marker = sys.argv[2]
-rows = []
-for line in subprocess.check_output(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "command="], text=True).splitlines():
-    fields = line.strip().split(None, 2)
-    if len(fields) == 3:
-        rows.append((int(fields[0]), int(fields[1]), fields[2]))
-descendants = {root}
-changed = True
-while changed:
-    changed = False
-    for pid, parent, _ in rows:
-        if parent in descendants and pid not in descendants:
-            descendants.add(pid)
-            changed = True
-raise SystemExit(0 if any(pid in descendants and marker in command for pid, _, command in rows) else 1)
+while True:
+    rows = []
+    output = subprocess.check_output(
+        ["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "stat=", "-o", "command="],
+        text=True,
+    )
+    for line in output.splitlines():
+        fields = line.strip().split(None, 3)
+        if len(fields) == 4:
+            rows.append((int(fields[0]), int(fields[1]), fields[2], fields[3]))
+    descendants = {root}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent, _, _ in rows:
+            if parent in descendants and pid not in descendants:
+                descendants.add(pid)
+                changed = True
+    if any(pid in descendants and marker in command for pid, _, _, command in rows):
+        raise SystemExit(0)
+    root_rows = [row for row in rows if row[0] == root]
+    if not root_rows or root_rows[0][2].startswith("Z"):
+        raise SystemExit(1)
+    time.sleep(0.1)
 PY
-  then
-    stability_running=1
-    break
-  fi
-  sleep 0.05
-done
-[ "$stability_running" -eq 1 ] || fail "the archive-stability evaluator never started"
+then
+  wait "$stability_pid" || true
+  fail "the archive-stability evaluator never started"
+fi
 printf 'changed during drill\n' >> "$BENCH/archive/a-a1-fable-5-high/verdict.md"
 wait "$stability_pid" && status=0 || status=$?
 out=$(cat "$stability_out")
@@ -1637,6 +1619,25 @@ expect_code 1 "$status" "an archive change during evaluator replay is refused"
 assert_contains "$out" "restore.archive_stability fail" "the post-rerun digest detects concurrent archive change"
 assert_absent "$BENCH/archive/restore-drill.json" "an unstable archive writes no cleanup receipt"
 pass "the restore drill refuses an archive that changes during replay"
+
+BENCH="$TMP_ROOT/archive-binding"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-binding"
+out=$(run_gate "$BENCH" restore-drill) || fail "the binding fixture needs a genuine drill receipt: $out"
+out=$(run_gate "$BENCH" cleanup-gate) || fail "a genuine drill receipt must authorise cleanup before mutation: $out"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+
+manifest = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+record = json.loads(manifest.read_text())
+record["tree_binding"]["base_tree"] = "f" * 40
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" cleanup-gate) && status=0 || status=$?
+expect_code 1 "$status" "editing a manifest binding after a genuine drill withdraws cleanup"
+assert_contains "$out" "changed after the restore drill" "the gate-written receipt binds manifest bytes"
+pass "a changed archive manifest withdraws genuine cleanup authority"
 
 BENCH="$TMP_ROOT/archive-evaluator-drift"
 write_plan "$BENCH"

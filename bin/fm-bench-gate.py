@@ -1954,24 +1954,25 @@ def rerun_archived_evaluator(
 
 def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
     """Restore each candidate bundle into a fresh repository and rebind its tree."""
+    receipt = root / "archive" / "restore-drill.json"
+    receipt.unlink(missing_ok=True)
     archive_ok, archive_digest = check_archive(root, plan, report)
     if shutil.which("git") is None:
         report.fail("restore.git", "git is required to restore and verify candidate bundles")
         return
     samples = archive_samples(root)
     drill_ok = archive_ok and bool(samples)
-    receipt = root / "archive" / "restore-drill.json"
     if not archive_ok:
-        receipt.unlink(missing_ok=True)
         return
     if not samples:
         report.fail("restore.scope", "no sample archive to restore")
     selected_samples = samples[:RESTORE_EVALUATOR_SAMPLE_LIMIT]
     selected_names = {sample.name for sample in selected_samples}
-    validated_samples: dict[str, tuple[Path, dict[str, Any], dict[str, Any], Path]] = {}
+    selected_validated: dict[str, tuple[Path, dict[str, Any], dict[str, Any], Path]] = {}
+    validated_count = 0
     reran = 0
-    with tempfile.TemporaryDirectory(prefix="fm-bench-restore-") as workdir:
-        restore_workspace = Path(workdir)
+    with tempfile.TemporaryDirectory(prefix="fm-bench-selected-") as selected_workdir:
+        selected_workspace = Path(selected_workdir)
         for sample_index, sample in enumerate(samples):
             check = f"restore.{sample.name}"
             try:
@@ -1992,67 +1993,87 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
             binding = record.get("tree_binding", {})
             sample_ok = True
             restored_trees: list[Path] = []
-            work = restore_workspace / f"sample-{sample_index}"
-            work.mkdir()
-            for index, bundle_name in enumerate(bundles):
-                bundle = sample / bundle_name
-                fresh = work / f"repo-{index}"
-                init = run_git(["init", "--quiet", "--bare", str(fresh)])
-                if init.returncode != 0:
-                    report.fail(check, "could not create a fresh repository for the restore")
-                    sample_ok = False
-                    continue
-                verify = run_git(["bundle", "verify", str(bundle)], cwd=fresh)
-                if verify.returncode != 0:
-                    report.fail(check, f"{bundle_name} failed `git bundle verify`")
-                    sample_ok = False
-                    continue
-                fetch = run_git(["fetch", "--quiet", str(bundle), "*:refs/restored/*"], cwd=fresh)
-                if fetch.returncode != 0:
-                    report.fail(check, f"{bundle_name} could not be fetched into a fresh repository")
-                    sample_ok = False
-                    continue
-                tree = run_git(["rev-parse", f"{binding.get('original_sha')}^{{tree}}"], cwd=fresh)
-                if tree.returncode != 0:
-                    report.fail(check, f"the archived head {binding.get('original_sha')} is not in {bundle_name}")
-                    sample_ok = False
-                    continue
-                restored = tree.stdout.decode("utf-8", "replace").strip()
-                if restored != binding.get("original_tree"):
-                    report.fail(
-                        check,
-                        f"the restored tree {restored[:12]} does not match the archived binding "
-                        f"{str(binding.get('original_tree'))[:12]}",
+            with tempfile.TemporaryDirectory(prefix=f"fm-bench-restore-{sample_index}-") as workdir:
+                work = Path(workdir)
+                for index, bundle_name in enumerate(bundles):
+                    bundle = sample / bundle_name
+                    fresh = work / f"repo-{index}"
+                    init = run_git(["init", "--quiet", "--bare", str(fresh)])
+                    if init.returncode != 0:
+                        report.fail(check, "could not create a fresh repository for the restore")
+                        sample_ok = False
+                        continue
+                    verify = run_git(["bundle", "verify", str(bundle)], cwd=fresh)
+                    if verify.returncode != 0:
+                        report.fail(check, f"{bundle_name} failed `git bundle verify`")
+                        sample_ok = False
+                        continue
+                    fetch = run_git(["fetch", "--quiet", str(bundle), "*:refs/restored/*"], cwd=fresh)
+                    if fetch.returncode != 0:
+                        report.fail(check, f"{bundle_name} could not be fetched into a fresh repository")
+                        sample_ok = False
+                        continue
+                    tree = run_git(["rev-parse", f"{binding.get('original_sha')}^{{tree}}"], cwd=fresh)
+                    if tree.returncode != 0:
+                        report.fail(check, f"the archived head {binding.get('original_sha')} is not in {bundle_name}")
+                        sample_ok = False
+                        continue
+                    restored = tree.stdout.decode("utf-8", "replace").strip()
+                    if restored != binding.get("original_tree"):
+                        report.fail(
+                            check,
+                            f"the restored tree {restored[:12]} does not match the archived binding "
+                            f"{str(binding.get('original_tree'))[:12]}",
+                        )
+                        sample_ok = False
+                        continue
+                    restored_tree = work / f"tree-{index}"
+                    restored_tree.mkdir()
+                    checkout = run_git(
+                        [
+                            "--work-tree",
+                            str(restored_tree),
+                            "checkout",
+                            "--quiet",
+                            "--force",
+                            str(binding.get("original_sha")),
+                            "--",
+                            ".",
+                        ],
+                        cwd=fresh,
                     )
-                    sample_ok = False
+                    if checkout.returncode != 0:
+                        report.fail(
+                            check,
+                            f"the archived head could not materialise a restored candidate tree from {bundle_name}",
+                        )
+                        sample_ok = False
+                        continue
+                    restored_trees.append(restored_tree)
+                if not sample_ok:
+                    drill_ok = False
                     continue
-                restored_tree = work / f"tree-{index}"
-                restored_tree.mkdir()
-                checkout = run_git(
-                    ["--work-tree", str(restored_tree), "checkout", "--quiet", "--force", str(binding.get("original_sha")), "--", "."],
-                    cwd=fresh,
+                declaration, declaration_detail = validate_archived_evaluator_declaration(
+                    sample,
+                    record,
+                    restored_trees[0],
                 )
-                if checkout.returncode != 0:
-                    report.fail(check, f"the archived head could not materialise a restored candidate tree from {bundle_name}")
-                    sample_ok = False
+                if declaration is None:
+                    report.fail(check, declaration_detail)
+                    drill_ok = False
                     continue
-                restored_trees.append(restored_tree)
-            if not sample_ok:
-                drill_ok = False
-                continue
-            declaration, declaration_detail = validate_archived_evaluator_declaration(sample, record, restored_trees[0])
-            if declaration is None:
-                report.fail(check, declaration_detail)
-                drill_ok = False
-                continue
-            validated_samples[sample.name] = (sample, record, declaration, restored_trees[0])
+                validated_count += 1
+                if sample.name in selected_names:
+                    retained_tree = selected_workspace / f"sample-{sample_index}"
+                    shutil.copytree(restored_trees[0], retained_tree, symlinks=True)
+                    selected_validated[sample.name] = (sample, record, declaration, retained_tree)
             report.ok(
                 check,
                 "bundle verified, restored into a fresh repository, and rebound to its archived tree; evaluator declaration validated",
             )
 
         declarations_ok = report.require(
-            len(validated_samples) == len(samples),
+            validated_count == len(samples),
             "restore.evaluator_declarations",
             f"all {len(samples)} archived evaluator declarations validated",
             "every archived sample must carry a valid deterministic evaluator declaration",
@@ -2069,7 +2090,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                     f"archived evaluator runs use the preflight-proven {confinement_detail} confinement",
                 )
                 for sample in selected_samples:
-                    archived_sample, record, declaration, restored_tree = validated_samples[sample.name]
+                    archived_sample, record, declaration, restored_tree = selected_validated[sample.name]
                     reran_ok, rerun_detail = rerun_archived_evaluator(
                         archived_sample,
                         record,
@@ -2104,7 +2125,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
         drill_ok = False
     if drill_ok:
         write_json(
-            root / "archive" / "restore-drill.json",
+            receipt,
             {
                 "schema": DRILL_SCHEMA,
                 "verdict": "pass",
@@ -2115,7 +2136,6 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
         )
         report.ok("restore.receipt", "restore drill receipt written; cleanup may now be authorised")
     else:
-        receipt.unlink(missing_ok=True)
         report.fail("restore.receipt", "no receipt written; the archive is not restorable and cleanup stays refused")
 
 
