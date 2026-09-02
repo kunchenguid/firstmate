@@ -23,6 +23,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 UPDATE="$ROOT/bin/fm-update.sh"
+UPDATE_SKILL="$ROOT/.agents/skills/updatefirstmate/SKILL.md"
+AGENTS="$ROOT/AGENTS.md"
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -269,6 +271,28 @@ test_firstmate_detached_head_skipped() {
   pass "T10 firstmate detached HEAD is skipped"
 }
 
+# The updater itself is unchanged and still stops on divergence; what must not
+# be lost is the PROCEDURE that takes over there. Without one discoverable
+# owner, an inquiry silently becomes an update, an update silently becomes an
+# implementation, and intentional inventoried divergence gets discarded as an
+# obstacle instead of routed through separately authorized adoption and landing.
+test_update_policy_owner_is_discoverable() {
+  assert_grep 'asks what an upstream Firstmate update contains' "$AGENTS" \
+    "AGENTS.md does not load updatefirstmate for a read-only inquiry"
+  assert_grep '## Read-only update inquiry' "$UPDATE_SKILL" \
+    "updatefirstmate does not own read-only inquiry"
+  assert_grep '## Controlled adoption after intentional divergence' "$UPDATE_SKILL" \
+    "updatefirstmate does not own intentional-divergence adoption"
+  assert_grep 'never replay an old local commit as proof' "$UPDATE_SKILL" \
+    "updatefirstmate lost the fresh-reimplementation rule"
+  assert_grep 'exact landed SHAs exist only after a landing' "$UPDATE_SKILL" \
+    "updatefirstmate lost the no-prospective-landed-state rule"
+  # shellcheck disable=SC2016 # The literal Markdown command IS the owner pointer under test.
+  assert_grep 'Only `bin/fm-merge-local.sh <id>` may move local `main`' "$UPDATE_SKILL" \
+    "updatefirstmate does not preserve the single guarded landing path"
+  pass "read-only inquiry, intentional divergence, and guarded landing have one discoverable owner"
+}
+
 test_unsafe_secondmate_home_skipped_before_git_update() {
   local w out bad before
   w=$(new_world t11)
@@ -300,5 +324,6 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_update_policy_owner_is_discoverable
 
 echo "# all fm-update tests passed"

@@ -19,6 +19,10 @@
 # home with a backlog but no compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
+# For a non-forced local-only ship whose physical project is this Firstmate repo,
+# an existing data/firstmate-local-fixes.md is an exact landing receipt: cleanup
+# waits until the full landed task tip appears literally in that regular readable
+# file (see require_self_repo_local_fix_receipt).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -1252,6 +1256,54 @@ canonical_existing_dir() {
   [ -n "$target" ] || return 1
   [ -d "$target" ] || return 1
   ( cd "$target" && pwd -P )
+}
+
+# One extra landed-work gate, ONLY for a non-forced local-only ship whose physical
+# project is this Firstmate repo itself. Such work has no PR and no remote to
+# prove it landed, so the exact landed tip appearing in the local-fix inventory IS
+# the receipt - and it is a receipt that is worth nothing if it can be written
+# after the branch, worktree, and metadata are already gone. Cleanup therefore
+# waits for it. Deliberately narrow: ordinary projects, non-local-only ships, an
+# absent inventory, and explicit --force keep their established behavior, and this
+# never parses or writes inventory prose - it only asks whether the full 40-char
+# tip is literally present in a regular readable file.
+require_self_repo_local_fix_receipt() {
+  local proj_abs root_abs inventory tip default
+  [ "$FORCE" != --force ] || return 0
+  [ "$KIND" = ship ] || return 0
+  [ "$MODE" = local-only ] || return 0
+  proj_abs=$(canonical_existing_dir "$PROJ" 2>/dev/null || true)
+  root_abs=$(canonical_existing_dir "$FM_ROOT" 2>/dev/null || true)
+  [ -n "$proj_abs" ] && [ "$proj_abs" = "$root_abs" ] || return 0
+
+  inventory="$DATA/firstmate-local-fixes.md"
+  if [ ! -e "$inventory" ] && [ ! -L "$inventory" ]; then
+    return 0
+  fi
+  if [ -L "$inventory" ] || [ ! -f "$inventory" ] || [ ! -r "$inventory" ]; then
+    echo "REFUSED: self-repo local-fix inventory is not a regular readable file: $inventory" >&2
+    return 1
+  fi
+
+  tip=$(git -C "$WT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+  [ -n "$tip" ] || {
+    echo "REFUSED: cannot read the landed task tip from $WT; preserving task evidence" >&2
+    return 1
+  }
+  default=$(default_branch) || {
+    echo "REFUSED: cannot determine the self-repo default branch for inventory verification" >&2
+    return 1
+  }
+  # Not landed yet is not this gate's business: the landed-work checks above own
+  # that refusal, and a prospective SHA must never be demanded before a landing.
+  if ! git -C "$PROJ" merge-base --is-ancestor "$tip" "$default" 2>/dev/null; then
+    return 0
+  fi
+  if ! grep -Fq -- "$tip" "$inventory"; then
+    echo "REFUSED: landed self-repo task tip $tip is not recorded in $inventory" >&2
+    echo "Update and verify the canonical local-fix inventory before cleanup." >&2
+    return 1
+  fi
 }
 
 retry_wait_secs_is_valid() {
@@ -2677,6 +2729,8 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+
+require_self_repo_local_fix_receipt || exit 1
 
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)

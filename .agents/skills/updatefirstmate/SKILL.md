@@ -1,9 +1,9 @@
 ---
 name: updatefirstmate
 description: >-
-  Self-update a running firstmate and its secondmates to the latest from origin.
-  Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
-  Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+  Audit or self-update a running firstmate and its secondmates from origin.
+  Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate"), or asks what an upstream update contains and whether firstmate should take it.
+  Inquiry is read-only; a clean update fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate; intentional inventoried local divergence routes to separately authorized controlled adoption and landing instead.
 user-invocable: true
 metadata:
   internal: true
@@ -51,6 +51,30 @@ This touches only the firstmate repo and its own worktrees, never anything under
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
+
+## Read-only update inquiry
+
+A request that asks what changed, whether firstmate should update, or what the update contains authorizes **inspection only**.
+Record the exact clean local default-branch SHA and resolve the exact live upstream default SHA through read-only remote inspection, without running the updater, fetching into the active repository, or moving any ref.
+Compare that exact upstream tree against `data/firstmate-local-fixes.md`, current tool dependencies, supported worker tools, runtime backends, and maintained documentation owners.
+If either baseline moved since an earlier audit, refresh every changed-path conclusion before recommending adoption.
+An inquiry never becomes an update, and an approved update never becomes an implementation.
+
+## Controlled adoption after intentional divergence
+
+The native updater above is unchanged and still stops on divergence.
+When the divergence is clean, fully inventoried in `data/firstmate-local-fixes.md`, and the captain gives a current explicit concrete implementation instruction under `AGENTS.md`'s precedence rule, build one isolated `local-only` candidate rather than writing a second updater.
+
+1. Record exact old local `main`, the exact audited upstream commit, the merge base, the active local fixes, current dependency identities, and home-propagation limits.
+2. Create the candidate from exact upstream, then create one ancestry bridge whose parents include exact upstream and exact old local `main` while its tree still equals exact upstream.
+3. Reimplement only still-required behaviors on the current upstream owners; take upstream directly for anything that retired, and never replay an old local commit as proof it is still needed.
+4. Run every retained regression plus the complete portable tests, lint, documentation audience checks, supported-shell syntax, affected native runtime checks, and `git diff --check`.
+5. Record bridge parents, candidate tip, retained and retired mapping, dependency gaps, rollback plan, and the proposed inventory entries **without** writing landed state - exact landed SHAs exist only after a landing.
+6. Stop if local `main` advances, or if any baseline, dependency, or required check no longer matches the audit.
+
+A validated candidate still requires the current concrete landing authority `AGENTS.md` demands.
+Only `bin/fm-merge-local.sh <id>` may move local `main`, and `data/firstmate-local-fixes.md` must receive the exact landed tip before cleanup.
+Tool installation, upstream publication, rollback-reference retirement, discard, and any destructive or security-sensitive action each remain a separate explicit decision.
 
 ## Safety
 

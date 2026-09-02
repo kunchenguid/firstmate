@@ -664,6 +664,52 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# Self-repo local-only work has no PR and no remote to prove it landed, so the
+# exact landed tip appearing in the local-fix inventory IS the receipt - and a
+# receipt written after the branch, worktree and records are gone is worth
+# nothing. A prefix-only entry must therefore refuse and preserve everything,
+# and the exact full tip must release cleanup.
+test_self_repo_inventory_receipt_blocks_cleanup_until_exact_tip() {
+  local case_dir rc=0 tip prefix
+  case_dir=$(make_case self-repo-receipt)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" 'landed local fix'
+  tip=$(git -C "$case_dir/wt" rev-parse HEAD)
+  prefix=$(printf '%s' "$tip" | cut -c1-12)
+  git -C "$case_dir/project" update-ref refs/heads/main "$tip"
+
+  # The gate fires only when the physical project IS this Firstmate root, so the
+  # fixture makes the project double as the code root.
+  mkdir -p "$case_dir/project/bin" "$case_dir/home" "$case_dir/data"
+  cat > "$case_dir/project/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/project/bin/fm-guard.sh"
+  printf '# Firstmate local fix inventory\n- Prefix only: %s\n' "$prefix" \
+    > "$case_dir/data/firstmate-local-fixes.md"
+
+  FM_ROOT_OVERRIDE="$case_dir/project" FM_HOME="$case_dir/home" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 >"$case_dir/missing.out" 2>"$case_dir/missing.err" || rc=$?
+  expect_code 1 "$rc" "a prefix-only inventory receipt must refuse cleanup"
+  assert_grep "landed self-repo task tip $tip is not recorded" "$case_dir/missing.err" \
+    "the receipt refusal did not name the exact missing tip: $(cat "$case_dir/missing.err")"
+  assert_present "$case_dir/state/task-x1.meta" "the receipt refusal removed task metadata"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "the receipt refusal removed the task branch"
+
+  printf -- '- Exact landed tip: %s\n' "$tip" >> "$case_dir/data/firstmate-local-fixes.md"
+  FM_ROOT_OVERRIDE="$case_dir/project" FM_HOME="$case_dir/home" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 >"$case_dir/recorded.out" 2>"$case_dir/recorded.err" \
+    || fail "self-repo cleanup failed after the exact tip receipt: $(cat "$case_dir/recorded.err")"
+  assert_absent "$case_dir/state/task-x1.meta" "successful receipt cleanup retained task metadata"
+  pass "self-repo local-only cleanup waits for the exact full landed-tip inventory receipt"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2610,6 +2656,7 @@ test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_self_repo_inventory_receipt_blocks_cleanup_until_exact_tip
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
