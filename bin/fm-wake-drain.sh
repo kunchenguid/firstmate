@@ -206,6 +206,14 @@ BRANCH_OUTCOME_INDEX_STATE=ok
 BRANCH_OUTCOME_INDEX_ENDPOINT=
 BRANCH_OUTCOME_INDEX_IDENT=
 STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+outcome_index_ready_ok() { # <ready-path>
+  local seq
+  [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ] || return 1
+  seq=$(LC_ALL=C command cat "$1" 2>/dev/null) || return 1
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+
 load_branch_outcome_index() { # <task>
   local task=$1 path data version seq endpoint ident extra size
   BRANCH_OUTCOME_INDEX_STATE=ok
@@ -245,7 +253,7 @@ EOF
 }
 
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
-  local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready ready_seq
+  local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready
   local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
   [ "$ACTOR" = main ] || return 0
 
@@ -261,18 +269,14 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       return 0
     fi
     ready="$STATE/.branch-outcome-index-ready"
-    if [ ! -f "$ready" ] || [ ! -r "$ready" ] || [ -L "$ready" ]; then
-      fm_lock_release "$lock"
-      printf 'STATUS OUTCOME BACKSTOP SKIPPED: bounded outcome indexes need recovery; restart Pi supervision to repair them.\n'
-      return 0
+    if ! outcome_index_ready_ok "$ready"; then
+      if ! "$SCRIPT_DIR/fm-branch-outcome.sh" processed-init --held-lock >/dev/null 2>&1 \
+        || ! outcome_index_ready_ok "$ready"; then
+        fm_lock_release "$lock"
+        printf 'STATUS OUTCOME BACKSTOP SKIPPED: bounded outcome indexes could not be rebuilt because the outcome store is unsafe; repair it before relying on drain recovery.\n'
+        return 0
+      fi
     fi
-    ready_seq=$(LC_ALL=C command cat "$ready" 2>/dev/null) || ready_seq=
-    case "$ready_seq" in ''|*[!0-9]*)
-      fm_lock_release "$lock"
-      printf 'STATUS OUTCOME BACKSTOP SKIPPED: bounded outcome indexes need recovery; restart Pi supervision to repair them.\n'
-      return 0
-      ;;
-    esac
   fi
 
   STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
