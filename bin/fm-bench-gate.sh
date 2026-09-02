@@ -32,7 +32,7 @@
 #                     confinement and refuse unless every probe is denied
 #   evaluator-verify  environment lock, published score map, zero-weight
 #                     validity gates, two identical dry-runs, mutation
-#                     calibration, and one bound capture record per head
+#                     calibration, and one bound capture record per planned head
 #   manifest-build / manifest-check
 #                     derive the exact run, judge, capture, timing, failure,
 #                     allowance, and low/base/high cost arithmetic from the plan
@@ -43,7 +43,7 @@
 #                     veto to recorded results
 #   archive-verify    recompute every archived content address
 #   restore-drill     restore each bundle into a fresh repository, rebind its
-#                     tree, and write the drill receipt
+#                     tree, rerun its archived evaluator, and write the receipt
 #   cleanup-gate      authorise candidate and snapshot cleanup only from a
 #                     passing drill still bound to the archive as it stands
 #

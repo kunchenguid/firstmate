@@ -19,16 +19,18 @@ A gate that cannot obtain its evidence refuses; an unproven denial is never trea
 | `freeze` / `freeze-check` | Packets, ground truth, scoring code, judge prompts, model tuples, the randomisation seed, and the failure policy are fixed before labels exist, and any later edit is visible. |
 | `provenance-check` | A historical security packet may be replayed only after every original author, reviewer, and judge is positively identified by task, resolved model id, family, and session. "No record found" fails. |
 | `isolation-verify` | Opaque labels and a transcript grep hide metadata but neither prevent nor detect sibling access. The gate runs the exact bypasses the grep missed and requires each to be denied. |
-| `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, per-dimension mutation calibration, and one bound capture record per candidate head are all required. |
+| `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, finite positive per-dimension mutation calibration, and exactly one bound capture record for every planned candidate head are all required. |
 | `manifest-build` / `manifest-check` | The original run, judge, capture, and cost arithmetic did not add up, and cost and elapsed time were tie-breakers while unmeasurable. Every count is now derived, and cost is low/base/high arithmetic rather than a quoted range. |
 | `promote-evaluate` | Only a six-of-six paired sweep with the predeclared margin, no blocker-class failure, and no regression against the baseline veto is eligible, and the captain still gives the word. |
-| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup. Cleanup is authorised only by a drill that really restored every bundle, and only while the receipt still matches the archive's current bytes. |
+| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup. Every archive member must stay beneath its own sample directory, every bundle and archived evaluator is rerun by the drill, and cleanup is authorised only while the receipt still matches the current evidence and manifest bytes. |
 | `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. A preflight that refuses or stops for the captain also revokes any receipt already on disk, so evidence degrading outside the plan cannot leave a stale clearance standing. |
 
 ## Where the refusal actually bites
 
 A gate an operator can forget to run is not enforcement.
 `bin/fm-bench-launch-lib.sh` is sourced by `bin/fm-spawn.sh` and refuses any task id under the reserved `bench-` prefix unless a passing preflight receipt exists and still matches `benchmark.json`'s current bytes.
+Before delivery, the same launch boundary also verifies `isolation.json` against its receipt hash, resolves the matching entrant, requires the actual worktree and every private path to still equal the preflight-proven layout, and wraps the harness command in the same verified confinement argv that the probes cleared.
+An unavailable wrapper or changed path refuses the launch rather than falling back to the ordinary shell command.
 Editing the plan after a pass invalidates every receipt written against it, so a relaxed threshold or a swapped packet cannot ride an old clearance.
 Task ids outside that prefix cost one string comparison and are otherwise untouched.
 This mirrors the chokepoint pattern in `bin/fm-gate-refuse-lib.sh`, including its documented test-harness hatch.

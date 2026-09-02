@@ -89,8 +89,13 @@ fi
 # entrant may see is named here; nothing else crosses the boundary.
 scrubbed_env() {
   printf '%s\n' "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    "HOME=${FM_BENCH_PRIVATE_HOME:-${ALLOW[0]}}" \
-    "TMPDIR=${FM_BENCH_PRIVATE_TMP:-${ALLOW[0]}}" \
+    "HOME=${BENCH_PRIVATE_HOME:-${ALLOW[0]}}" \
+    "TMPDIR=${BENCH_PRIVATE_TMP:-${ALLOW[0]}}" \
+    "BENCH_PRIVATE_ROOT=${BENCH_PRIVATE_ROOT:-${ALLOW[0]}}" \
+    "BENCH_PRIVATE_OBJECT_STORE=${BENCH_PRIVATE_OBJECT_STORE:-${ALLOW[0]}}" \
+    "BENCH_PRIVATE_TMP=${BENCH_PRIVATE_TMP:-${ALLOW[0]}}" \
+    "BENCH_PRIVATE_HOME=${BENCH_PRIVATE_HOME:-${ALLOW[0]}}" \
+    "BENCH_PRIVATE_SESSION=${BENCH_PRIVATE_SESSION:-${ALLOW[0]}}" \
     "LANG=${LANG:-C.UTF-8}" \
     "TERM=dumb"
 }

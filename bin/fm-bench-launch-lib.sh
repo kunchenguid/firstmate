@@ -71,3 +71,73 @@ fm_refuse_ungated_benchmark_entrant() {  # <task-id>
   fi
   return 0
 }
+
+fm_bench_wrap_entrant_launch() {  # <task-id> <worktree> <shell-command>
+  local id=${1-} worktree=${2-} command=${3-} root wrapped isolation_hash receipt_hash
+  case "$id" in
+    bench-*) ;;
+    *) printf '%s' "$command"; return 0 ;;
+  esac
+  [ "${FM_BENCH_LAUNCH_BYPASS:-}" = 1 ] && { printf '%s' "$command"; return 0; }
+  fm_refuse_ungated_benchmark_entrant "$id" || return 1
+  root=${FM_BENCH_ROOT:-}
+  receipt_hash=$(sed -n 's/.*"isolation_sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/preflight.receipt" | head -n 1)
+  isolation_hash=$(fm_bench_sha256_file "$root/isolation.json") || isolation_hash=
+  if [ -z "$receipt_hash" ] || [ -z "$isolation_hash" ] || [ "$receipt_hash" != "$isolation_hash" ]; then
+    echo "error: benchmark entrant $id preflight does not cover the current isolation layout; launch refused" >&2
+    return 1
+  fi
+  wrapped=$(python3 - "$root/isolation.json" "$id" "$worktree" "$command" <<'PY'
+import json
+import os
+import shlex
+import shutil
+import sys
+from pathlib import Path
+
+path, entrant_id, worktree, command = sys.argv[1:]
+try:
+    record = json.loads(Path(path).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"cannot read isolation.json: {exc}")
+wrapper = record.get("exec_wrapper")
+entrants = record.get("entrants")
+if not isinstance(wrapper, list) or not wrapper or not all(isinstance(item, str) and item for item in wrapper):
+    raise SystemExit("isolation.json has no executable confinement wrapper")
+if not isinstance(entrants, list):
+    raise SystemExit("isolation.json has no provisioned entrants")
+entrant = next((item for item in entrants if isinstance(item, dict) and item.get("id") == entrant_id), None)
+if entrant is None:
+    raise SystemExit(f"isolation.json has no entrant {entrant_id}")
+declared_root = Path(str(entrant.get("root", ""))).resolve()
+if not declared_root.is_dir() or Path(worktree).resolve() != declared_root:
+    raise SystemExit("spawn worktree is not the preflight-proven entrant root")
+private = {}
+for key in ("private_object_store", "private_tmp", "private_home", "private_session"):
+    value = entrant.get(key)
+    if not isinstance(value, str) or not value:
+        raise SystemExit(f"entrant {entrant_id} has no {key}")
+    target = Path(value).resolve()
+    if not target.is_dir():
+        raise SystemExit(f"entrant {entrant_id} private path is unavailable: {key}")
+    try:
+        target.relative_to(declared_root)
+    except ValueError:
+        raise SystemExit(f"entrant {entrant_id} private path escapes its proven root: {key}")
+    private[key] = str(target)
+argv = [item.replace("{root}", str(declared_root)) for item in wrapper]
+launcher = argv[0]
+if "/" in launcher:
+    if not Path(launcher).is_file() or not os.access(launcher, os.X_OK):
+        raise SystemExit(f"verified confinement wrapper is unavailable: {launcher}")
+elif shutil.which(launcher) is None:
+    raise SystemExit(f"verified confinement wrapper is unavailable: {launcher}")
+env = [f"BENCH_PRIVATE_ROOT={declared_root}", f"BENCH_PRIVATE_OBJECT_STORE={private['private_object_store']}", f"BENCH_PRIVATE_TMP={private['private_tmp']}", f"BENCH_PRIVATE_HOME={private['private_home']}", f"BENCH_PRIVATE_SESSION={private['private_session']}"]
+print(" ".join(shlex.quote(item) for item in [*env, *argv, "/bin/sh", "-lc", command]))
+PY
+) || {
+    echo "error: benchmark entrant $id cannot use its preflight-proven confinement; launch refused" >&2
+    return 1
+  }
+  printf '%s' "$wrapped"
+}

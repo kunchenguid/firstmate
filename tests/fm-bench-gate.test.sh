@@ -467,6 +467,21 @@ expect_code 1 "$status" "a mutation that moves unrelated dimensions is refused"
 assert_contains "$out" "unrelated dimensions moved with zoom_200" "dimensions must be separable"
 pass "a mutation that bleeds into unrelated dimensions is refused"
 
+BENCH="$TMP_ROOT/evaluator-zero-threshold"
+write_plan "$BENCH"
+write_evaluator "$BENCH"
+python3 - "$BENCH/evaluator/mutations/zoom_200.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["movement_threshold"] = 0
+d["dimension_deltas"]["zoom_200"] = 0
+json.dump(d, open(p, "w"), indent=2, sort_keys=True)
+PY
+out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
+expect_code 1 "$status" "a zero mutation threshold may not calibrate a zero delta"
+assert_contains "$out" "dimension, dimension_deltas, and movement_threshold" "a calibration threshold must be positive"
+pass "a zero mutation threshold cannot create a calibration pass"
+
 BENCH="$TMP_ROOT/evaluator-uncalibrated"
 write_plan "$BENCH"
 write_evaluator "$BENCH"
@@ -476,6 +491,22 @@ expect_code 1 "$status" "one calibrated dimension does not calibrate a seven-dim
 assert_contains "$out" "never proven to respond to their own mutation" "every scored dimension must be calibrated"
 assert_contains "$out" "accessibility, responsive" "the refusal names the uncalibrated dimensions"
 pass "a scored dimension with no mutation record is refused"
+
+BENCH="$TMP_ROOT/evaluator-capture-scope"
+write_plan "$BENCH"
+write_evaluator "$BENCH"
+python3 - "$BENCH/evaluator/captures" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted(Path(sys.argv[1]).glob("*.json"))[0]
+d = json.loads(p.read_text()); d["packet"] = "B7"
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
+expect_code 1 "$status" "capture records must exactly cover planned candidate heads"
+assert_contains "$out" "missing Composer 2.5 on B1" "the missing planned capture is named"
+assert_contains "$out" "unexpected Composer 2.5 on B7" "the unexpected capture is named"
+pass "capture records outside the planned candidate heads are refused"
 
 BENCH="$TMP_ROOT/evaluator-scored-gate"
 write_plan "$BENCH"
@@ -553,6 +584,76 @@ out=$(guard "bench-b1-k7")
 assert_contains "$out" "rc=1" "a benchmark entrant with no benchmark directory is refused"
 assert_contains "$out" "no benchmark directory" "the refusal names the missing requirement"
 pass "the launch guard scopes to benchmark ids and otherwise stays out of the way"
+
+BENCH="$TMP_ROOT/launch-confinement"
+ENTRY_ROOT="$BENCH/entrant"
+write_plan "$BENCH"
+mkdir -p "$ENTRY_ROOT/objects" "$ENTRY_ROOT/tmp" "$ENTRY_ROOT/home" "$ENTRY_ROOT/session"
+python3 - "$BENCH" "$ROOT/bin/fm-bench-confine.sh" "$ENTRY_ROOT" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench, confine, entrant = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+(bench / "isolation.json").write_text(json.dumps({
+    "schema": "fm-bench-isolation.v1",
+    "exec_wrapper": [confine, "--mechanism", "none", "--allow", "{root}", "--"],
+    "entrants": [{"id": "bench-b1-k7", "root": str(entrant),
+                  "private_object_store": str(entrant / "objects"),
+                  "private_tmp": str(entrant / "tmp"),
+                  "private_home": str(entrant / "home"),
+                  "private_session": str(entrant / "session")}],
+}, indent=2, sort_keys=True) + "\n")
+digest = hashlib.sha256((bench / "benchmark.json").read_bytes()).hexdigest()
+isolation_digest = hashlib.sha256((bench / "isolation.json").read_bytes()).hexdigest()
+(bench / "preflight.receipt").write_text(json.dumps({
+    "schema": "fm-bench-preflight-receipt.v1", "verdict": "pass", "plan_sha256": digest,
+    "isolation_sha256": isolation_digest,
+}, indent=2, sort_keys=True) + "\n")
+PY
+out=$(FM_BENCH_ROOT="$BENCH" bash -c '
+  . "$1/bin/fm-bench-launch-lib.sh"
+  fm_bench_wrap_entrant_launch ordinary-crew-task "$2" "printf untouched"
+' _ "$ROOT" "$ENTRY_ROOT") || fail "ordinary launch preparation must be untouched: $out"
+[ "$out" = "printf untouched" ] || fail "ordinary launch preparation changed the launch command"
+wrapped=$(FM_BENCH_ROOT="$BENCH" bash -c '
+  . "$1/bin/fm-bench-launch-lib.sh"
+  fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "printf \"%s|%s|%s\" \"\$BENCH_PRIVATE_ROOT\" \"\$BENCH_PRIVATE_HOME\" \"\$BENCH_PRIVATE_TMP\""
+' _ "$ROOT" "$ENTRY_ROOT") || fail "a benchmark launch must bind the proven confinement"
+out=$(bash -c "$wrapped") || fail "the bound benchmark launch must execute: $out"
+assert_contains "$out" "$ENTRY_ROOT|$ENTRY_ROOT/home|$ENTRY_ROOT/tmp" "the proven private root, home, and temp reach the entrant"
+python3 - "$BENCH/isolation.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["leak_marker"] = "FM_BENCH_CHANGED_"
+json.dump(d, open(p, "w"), indent=2, sort_keys=True)
+PY
+out=$(FM_BENCH_ROOT="$BENCH" bash -c '
+  . "$1/bin/fm-bench-launch-lib.sh"
+  fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "printf unsafe"
+' _ "$ROOT" "$ENTRY_ROOT" 2>&1) && status=0 || status=$?
+expect_code 1 "$status" "a launch may not use an isolation layout changed after preflight"
+assert_contains "$out" "does not cover the current isolation layout" "the preflight binds the isolation layout"
+python3 - "$BENCH/isolation.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["exec_wrapper"][0] = "/missing/benchmark-wrapper"
+json.dump(d, open(p, "w"), indent=2, sort_keys=True)
+PY
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+receipt = bench / "preflight.receipt"
+d = json.loads(receipt.read_text())
+d["isolation_sha256"] = hashlib.sha256((bench / "isolation.json").read_bytes()).hexdigest()
+receipt.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(FM_BENCH_ROOT="$BENCH" bash -c '
+  . "$1/bin/fm-bench-launch-lib.sh"
+  fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "printf unsafe"
+' _ "$ROOT" "$ENTRY_ROOT" 2>&1) && status=0 || status=$?
+expect_code 1 "$status" "a benchmark launch with no verified wrapper is refused"
+assert_contains "$out" "cannot use its preflight-proven confinement" "the launch refuses rather than falling back unconfined"
+pass "benchmark launches bind the preflight-proven confinement while ordinary launches stay unchanged"
 
 BENCH="$TMP_ROOT/launch"
 write_plan "$BENCH"
@@ -869,7 +970,7 @@ for track_name, candidate, packet in work:
     put("projection.diff", f"neutral projection for {slug}\n")
     put("transcript.md", "redacted transcript\n")
     put("capture.json", '{"pixel":0.003}\n')
-    put("scoring.py", "score()\n")
+    put("scoring.py", "from pathlib import Path\nprint(Path('capture.json').read_text().strip())\n")
     put("judging.json", '{"raw":[8,9],"order":["k7","r2"]}\n')
     put("timing.json", '{"operational_s":1200,"session_s":1100}\n')
     put("verdict.md", "label K7 -> candidate\n")
@@ -887,7 +988,8 @@ for track_name, candidate, packet in work:
         "tree_binding": {"original_sha": sha, "original_tree": tree, "neutral_sha": sha,
                          "neutral_tree": tree, "base_tree": base_tree,
                          "patch_hash": hashlib.sha256(slug.encode()).hexdigest()},
-        "evaluator_rerun": {"result_hash": hashlib.sha256((slug + "r").encode()).hexdigest()},
+        "evaluator_rerun": {"argv": ["python3", "scoring.py"],
+                             "result_hash": hashlib.sha256(b'{\"pixel\":0.003}\n').hexdigest()},
     }, indent=2, sort_keys=True) + "\n")
 PY
 }
@@ -912,8 +1014,79 @@ out=$(run_gate "$BENCH" cleanup-gate) || fail "cleanup must pass after a drill: 
 assert_contains "$out" "no candidate ships directly" "the disposition is re-asserted at cleanup"
 pass "the restore drill authorises cleanup only after really restoring every bundle"
 
+BENCH="$TMP_ROOT/archive-binding"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-binding"
+run_gate "$BENCH" restore-drill >/dev/null || fail "the archive binding fixture must drill successfully"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text()); d["tree_binding"]["base_tree"] = "f" * 40
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" cleanup-gate) && status=0 || status=$?
+expect_code 1 "$status" "editing a manifest binding after a drill withdraws cleanup"
+assert_contains "$out" "changed after the restore drill" "the receipt binds manifest bytes as well as evidence files"
+pass "a changed archive manifest withdraws the prior cleanup authority"
+
+archive_escape_refused() {  # <label> <path-kind>
+  local label=$1 kind=$2 bench
+  bench="$TMP_ROOT/archive-escape-$kind"
+  write_plan "$bench"
+  write_archive "$bench" "$TMP_ROOT/srcrepo-escape-$kind"
+  python3 - "$bench" "$kind" <<'PY'
+import hashlib, json, os, sys
+from pathlib import Path
+bench, kind = Path(sys.argv[1]), sys.argv[2]
+sample = sorted((bench / "archive").iterdir())[0]
+external = bench / "external.bundle"
+external.write_bytes((sample / "candidate.bundle").read_bytes())
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+if kind == "absolute":
+    name = str(external)
+elif kind == "parent":
+    target = sample.parent / "external.bundle"
+    target.write_bytes(external.read_bytes())
+    name = "../external.bundle"
+else:
+    name = "escape.bundle"
+    (sample / name).symlink_to(external)
+record["files"].pop("candidate.bundle")
+record["files"][name] = hashlib.sha256(external.read_bytes()).hexdigest()
+record["groups"]["candidate_bundle_and_projection"] = [name, "projection.diff"]
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+  out=$(run_gate "$bench" archive-verify) && status=0 || status=$?
+  expect_code 1 "$status" "$label archive path is refused"
+  assert_contains "$out" "escapes sample archive" "$label path is kept inside its own sample archive"
+}
+
+archive_escape_refused "an absolute" absolute
+archive_escape_refused "a parent traversal" parent
+archive_escape_refused "a symlink" symlink
+pass "external archive evidence paths cannot make an archive self-contained only by declaration"
+
+BENCH="$TMP_ROOT/archive-evaluator-drift"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-evaluator-drift"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text()); d["evaluator_rerun"]["result_hash"] = "0" * 64
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a rerun whose archived evaluator result drifts is refused"
+assert_contains "$out" "archived evaluator result hash" "the drill executes the evaluator instead of trusting its declared hash"
+assert_absent "$BENCH/archive/restore-drill.json" "a failed evaluator rerun writes no cleanup receipt"
+pass "every archive must rerun its evaluator before cleanup"
+
 # The drill must prove the archive against the fresh repository it creates, not
 # against whatever repository the operator happened to be standing in.
+BENCH="$TMP_ROOT/archive"
 rm -f "$BENCH/archive/restore-drill.json"
 DRILL_CWD="$TMP_ROOT/not-a-repo"
 mkdir -p "$DRILL_CWD"
