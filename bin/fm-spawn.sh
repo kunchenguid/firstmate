@@ -2554,8 +2554,9 @@ if [ "$KIND" != secondmate ]; then
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok stays on its isolated rendered-tail
-  # fallback and standalone Kimi stays unknown until fm_busy_kimi_verified
-  # opens, so neither is armed here.
+  # fallback, standalone Kimi stays unknown until fm_busy_kimi_verified opens,
+  # and agy has no usable worker-state source at all, so none of the three is
+  # armed here.
   BUSY_GEN=
   case "$HARNESS" in
     codex*)

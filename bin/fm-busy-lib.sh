@@ -92,11 +92,12 @@
 #      interrupted-turn record stuck busy. Completing the pair needs an
 #      adapter-owned cancellation event that agy does not expose today.
 #
-# On herdr a genuinely streaming agy turn is still positively provable through
-# the native busy arm above, which runs before this one. Everything else is
-# unknown, never idle. bin/fm-composer-lib.sh separately matches `esc to cancel`
-# as a DELIVERY acknowledgement, which is a positive-only signal whose worst
-# case is one extra submit retry; that is not a worker-state source.
+# On herdr a genuinely streaming agy turn is still positively provable, because
+# fm_busy_classify consults herdr's native busy verdict before it reaches the
+# agy arm. Everything the native verdict cannot prove is unknown, never idle.
+# bin/fm-composer-lib.sh separately matches `esc to cancel` as a DELIVERY
+# acknowledgement, a positive-only signal whose worst case is one extra submit
+# retry; that is not a worker-state source.
 #
 # The cursor pull source works the same way and for the same reason: it folds
 # cursor's own durable per-conversation transcript, which brackets each turn
