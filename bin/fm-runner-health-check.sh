@@ -77,7 +77,11 @@ repository_valid() {
       ;;
     *) return 1 ;;
   esac
-  case "$owner$name" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${#owner}" -le 39 ] && [ "${#name}" -le 100 ] || return 1
+  case "$owner" in
+    ''|*[!A-Za-z0-9-]*|-*|*-|*--*) return 1 ;;
+  esac
+  case "$name" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   return 0
 }
 

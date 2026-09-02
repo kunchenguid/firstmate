@@ -454,6 +454,18 @@ test_target_validation_refuses_unsafe_or_ambiguous_values() {
   env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check 'owner/..' "$LABEL" >/dev/null 2>&1 || status=$?
   expect_code 2 "$status" "dot repository name exit"
   status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check 'owner.name/repo' "$LABEL" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "invalid repository owner character exit"
+  status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check '-owner/repo' "$LABEL" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "leading repository owner hyphen exit"
+  status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check 'owner-/repo' "$LABEL" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "trailing repository owner hyphen exit"
+  status=0
+  env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check 'owner--name/repo' "$LABEL" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "doubled repository owner hyphen exit"
+  status=0
   env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" check "$REPOSITORY" 'label with spaces' >/dev/null 2>&1 || status=$?
   expect_code 2 "$status" "unsafe label exit"
   status=0
