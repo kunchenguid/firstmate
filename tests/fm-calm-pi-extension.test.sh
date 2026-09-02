@@ -832,7 +832,6 @@ const operationalMode = {
   // Firstmate both use today.
   getMarkdownTransformers: () => [],
   getMarkdownThemeWithSettings: () => undefined,
-  getMarkdownTransformers: () => [],
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
     : message.content.filter((item) => item.type === "text").map((item) => item.text).join(""),
@@ -3087,7 +3086,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait chrome_reap_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_color_sail_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -3550,6 +3549,16 @@ JS
     chrome_wait=$((chrome_wait + 1))
   done
   kill "$chrome_pid" 2>/dev/null || true
+  # Chrome can retain --headless=new after --dump-dom completes and ignore TERM,
+  # so an unbounded wait can hang after the complete DOM has been captured.
+  chrome_reap_wait=0
+  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_reap_wait" -lt 20 ]; do
+    sleep 0.1
+    chrome_reap_wait=$((chrome_reap_wait + 1))
+  done
+  if kill -0 "$chrome_pid" 2>/dev/null; then
+    kill -9 "$chrome_pid" 2>/dev/null || true
+  fi
   wait "$chrome_pid" 2>/dev/null || true
   grep -Fq '</html>' "$export_dom" 2>/dev/null \
     || fail "could not render calm-mode HTML export DOM"
@@ -3675,16 +3684,19 @@ JS
   # Standard ANSI colors: blue water, yellow boat, no theme/bright/256/RGB escapes.
   tmux -L "$TMUX_SOCKET" capture-pane -p -e -t "$TMUX_SESSION" >"$boat_color_snapshot"
   boat_color_line=$(grep -F '\__/' "$boat_color_snapshot" | head -1)
+  boat_color_sail_line=$(grep -E '<\||\|>' "$boat_color_snapshot" | tail -1)
   [ -n "$boat_color_line" ] || fail "could not capture a colored working-ship row"
   case "$boat_color_line" in
     *'[34m'*) : ;;
     *) fail "the water was not rendered with standard ANSI blue" ;;
   esac
-  case "$boat_color_line" in
+  # tmux can elide the hull's leading SGR when it inherits the sail's yellow
+  # cell state at column zero, so inspect both serialized boat rows.
+  case "$boat_color_sail_line$boat_color_line" in
     *'[33m'*) : ;;
     *) fail "the boat was not rendered with standard ANSI yellow" ;;
   esac
-  case "$boat_color_line" in
+  case "$boat_color_sail_line$boat_color_line" in
     *'[38;2;'*|*'[38;5;'*|*'[9'[0-9]'m'*) fail "the working ship used a non-standard color escape" ;;
     *) : ;;
   esac

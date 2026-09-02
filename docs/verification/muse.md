@@ -1,7 +1,7 @@
 # Verification: the muse (Muse Code) crewmate adapter
 
 Active empirical evidence for firstmate's muse adapter.
-[`.agents/skills/harness-adapters/SKILL.md`](../../.agents/skills/harness-adapters/SKILL.md) owns the operating facts; this record owns how they were established and what is still unproven.
+The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.agents/skills/harness-adapters/SKILL.md) owns the operating facts; this record owns how they were established and what is still unproven.
 
 ## Subject
 

@@ -37,7 +37,7 @@ Real harness credential tests remain opt-in rather than part of default CI.
 
 TraeX is verified on Herdr 0.8.0 for ordinary isolated workers and scouts only.
 `fm-spawn.sh` refuses secondmate and non-Herdr TraeX launches before endpoint creation.
-The [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md#traex-verified-2026-08-11-traecli-020019-internal-edition-herdr-080) reference owns its exact launch, profile, marker, trust, interrupt, exit, and resume facts.
+The [`harness-adapters` TraeX reference](../.agents/skills/harness-adapters/references/harness/traex.md) owns its exact launch, profile, marker, trust, interrupt, exit, and resume facts.
 
 After launch, TraeX uses the generic Herdr agent, pane, process, input, busy-state, kill, supervision, and stale-recovery paths used by ordinary harnesses.
 It has no TraeX-specific readiness state machine, transition journal, completion transaction, watcher scan, or exactly-once guarantee.
@@ -215,6 +215,10 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
+When the selected named server is not running, the adapter launches it without inherited Firstmate home and directory overrides, harness identity markers, or the supervision-model override.
+Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
+An already-running server is reused without restart or environment changes.
+Explicit named-session routing and unrelated launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.

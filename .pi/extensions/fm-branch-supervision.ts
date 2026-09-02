@@ -4,10 +4,15 @@
 // pi process as the captain's MAIN session. The watcher extension offers each
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
-// writes the durable outcome store FIRST (bin/fm-branch-outcome.sh) and then
-// merges an append-only note to main's tail. Main's captain/assistant dialog
-// is mirrored into the branch as read-only fm-main-mirror context at main's
-// turn_end. Pi-only by construction: this file lives in .pi/extensions, so no
+// writes the durable outcome store FIRST (bin/fm-branch-outcome.sh), then
+// persists a sequence-keyed visible record in main's transcript, and for a
+// captain-facing outcome opens one sequence-keyed processing turn on main
+// that stays open until main acknowledges that sequence (see
+// presentUnprocessedOutcomes).
+// Main's captain/assistant dialog is mirrored into the branch as read-only
+// fm-main-mirror context from Pi's
+// before_agent_start prompt and at main's turn_end. Pi-only by construction: this
+// file lives in .pi/extensions, so no
 // other harness ever loads it. Supervision is default-on for every task once
 // this Pi session owns the fleet lock: no captain grant file is required.
 // Away mode (or a broken branch) keeps today's wake-to-main behavior
@@ -35,27 +40,46 @@
 // acknowledgement, so a branch that dies mid-handling re-presents its rows at
 // the next drain exactly as a mid-handling main crash always has.
 //
+// Model and effort selection: supervision is an easier job than main, so the
+// captain can pin a cheaper model AND a shallower reasoning effort for the
+// branch alone with /supervision-model, which picks from Pi's own catalog and
+// Pi's own supported-thinking-level list and persists each choice as one line
+// under this home's config/. docs/configuration.md owns those files'
+// operator-facing schema. The two pins are independent: either, both, or
+// neither may be set. An absent pin makes the branch follow main's own
+// current model or effort, applied explicitly on every build so a reopened
+// branch cannot restore what an earlier pin left in its session.
+//
 // Threat model (captain-decided): the branch's actor identity is
 // CONFUSED-AGENT-GRADE - deterministic spawnHook env injection plus a
 // readonly-variable shell prelude so an accidental override fails loudly
 // inside the branch's own shell. bin/fm-lease-lib.sh documents the grade and
 // its deliberate limits.
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+// Pi exposes pi-ai to extensions as a first-class module in both its Node
+// and compiled-binary loaders, the same standing as pi-tui and typebox
+// below, and aliases this root specifier to its compat entrypoint.
+import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   createBashToolDefinition,
   DefaultResourceLoader,
+  DynamicBorder,
   getAgentDir,
+  keyHint,
+  ModelRuntime,
   SessionManager,
+  ToolExecutionComponent,
   type AgentSession,
   type ExtensionAPI,
+  type ExtensionCommandContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Text } from "@earendil-works/pi-tui";
+import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   type CalmPresentationState,
@@ -72,7 +96,17 @@ import {
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
-import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import {
+  BRANCH_PICKER_MAX_VISIBLE,
+  buildBranchModelItems,
+  filterBranchPickerItems,
+  FOLLOW_MAIN_VALUE,
+  type BranchPickerItem,
+} from "./lib/fm-branch-model-picker.ts";
+import {
+  classifyFirstmateOperationalText,
+  encodeFirstmateOperationalInput,
+} from "./lib/fm-operational-input.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -90,6 +124,8 @@ const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
+const modelPinFile = join(config, "supervision-branch-model");
+const effortPinFile = join(config, "supervision-branch-effort");
 
 // Same tool set in the same order on every request (part of the cached
 // prefix). "bash" resolves to the customTools override below, which injects
@@ -102,10 +138,46 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
+const VISIBLE_OUTCOME_ANCHOR = "⚓";
+const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
+// The processing half of the captain-outcome contract. The visible entry
+// above is the DISPLAY: crash-safe and exact-once. This hidden, typed request
+// is the PROCESSING: it opens the one turn in which main acts on the outcome,
+// and only main's explicit sequence-bound acknowledgement (fm_branch_processed)
+// closes it. An unrelated or empty answer leaves the sequence open, so it is
+// presented again at the end of the next main run and at session start. Pi
+// gives the model only a custom message's `content`, so the request carries
+// its own identity through the typed operational envelope.
+const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
+// Triggered re-presentations per unprocessed sequence set before the request
+// stops opening turns of its own and instead rides the captain's next prompt
+// (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
+// request cannot become an unbounded loop of empty turns.
+const PROCESSING_TRIGGERED_ATTEMPTS = 2;
+// One provider failure falls back immediately but leaves room for a transient
+// outage to recover on the next wake. A second consecutive provider failure
+// latches the branch off so later offers stay on main without paying for
+// another predictably broken branch prompt.
+const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
+const PROCESSING_INSTRUCTION =
+  "This is a supervision processing request delivered automatically by the supervision branch. " +
+  "It was not typed by the captain. " +
+  "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
+  "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
 type LockOwnership = "owned" | "other" | "missing";
+type OutcomeRow = {
+  seq: number;
+  task: string;
+  verdict: Verdict;
+  summary: string;
+  silent: boolean;
+};
+type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
 
 const scriptEnv = {
   ...process.env,
@@ -121,6 +193,105 @@ function offerEligible(offer: BranchDispatchOffer): boolean {
 
 function afkActive(): boolean {
   return existsSync(afkFlag);
+}
+
+// Pi persists provider failures as ordinary assistant messages and resolves
+// AgentSession.prompt(), so promise rejection alone cannot detect them. Read
+// only the final assistant entry appended by this prompt: unlike the rebuilt
+// in-memory message context, SessionManager entries remain append-only across
+// prompt-preflight compaction.
+function settledPromptProviderError(sessionManager: SessionManager, entryOffset: number): string | null {
+  const entries = sessionManager.getEntries();
+  for (let index = entries.length - 1; index >= entryOffset; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "message") continue;
+    const message = (entry as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
+    if (message?.role !== "assistant") continue;
+    if (message.stopReason !== "error") return null;
+    return message.errorMessage?.trim() || "assistant settled with stopReason error";
+  }
+  return null;
+}
+
+// One model the runtime can hand back, without importing a model type
+// directly, and Pi's own reasoning-effort vocabulary taken from the API
+// surface Pi already hands this extension.
+type BranchModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
+type BranchEffort = ReturnType<NonNullable<ExtensionAPI["getThinkingLevel"]>>;
+type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
+type BranchModelResolution = { ok: true; selection: PinnedBranchModel } | { ok: false; reason: string };
+
+// Pi owns the effort vocabulary. The picker's options and every clamp still
+// come from Pi's own getSupportedThinkingLevels/clampThinkingLevel, so this
+// array exists for exactly one job the type system cannot do at runtime:
+// rejecting a hand-edited pin token Pi would not recognize at all. The
+// assertion below fails the tracked strict typecheck against the INSTALLED Pi
+// package (tests/fm-pi-primary-types.test.sh) the moment Pi adds or removes a
+// level, in either direction, so the list cannot drift into a stale Firstmate
+// catalog.
+const BRANCH_EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type DeclaredBranchEffort = (typeof BRANCH_EFFORT_LEVELS)[number];
+const piOwnsTheEffortVocabulary: [DeclaredBranchEffort] extends [BranchEffort]
+  ? [BranchEffort] extends [DeclaredBranchEffort]
+    ? true
+    : never
+  : never = true;
+void piOwnsTheEffortVocabulary;
+
+// The supervision-branch model pin, owned operator-side by
+// docs/configuration.md: one "<provider>/<model-id>" line under this home's
+// config/. An absent, unreadable, or unparseable file means no pin, and the
+// branch then follows main's own model. Only the FIRST "/" separates the two
+// halves, so a provider-qualified model id such as
+// openrouter/anthropic/claude survives.
+function readModelPin(): { provider: string; modelId: string } | null {
+  let stored: string;
+  try {
+    stored = readFileSync(modelPinFile, "utf8");
+  } catch {
+    return null;
+  }
+  const line = (stored.split("\n")[0] ?? "").trim();
+  const separator = line.indexOf("/");
+  if (separator <= 0 || separator >= line.length - 1) return null;
+  return { provider: line.slice(0, separator), modelId: line.slice(separator + 1) };
+}
+
+// The supervision-branch effort pin, owned operator-side by the same
+// docs/configuration.md section: one Pi thinking-level line under this home's
+// config/, independent of the model pin. An absent, unreadable, or
+// unrecognized file means no pin, and the branch then follows main's own
+// effort.
+function readEffortPin(): BranchEffort | null {
+  let stored: string;
+  try {
+    stored = readFileSync(effortPinFile, "utf8");
+  } catch {
+    return null;
+  }
+  const line = (stored.split("\n")[0] ?? "").trim();
+  return (BRANCH_EFFORT_LEVELS as readonly string[]).includes(line) ? (line as BranchEffort) : null;
+}
+
+// Replaces a pin atomically so a failed write leaves the current choice
+// intact rather than claiming persistence (the config/calm precedent).
+function writePinFile(pinFile: string, selection: string): void {
+  mkdirSync(dirname(pinFile), { recursive: true });
+  const temporaryPath = `${pinFile}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, `${selection}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    renameSync(temporaryPath, pinFile);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
+function clearPinFile(pinFile: string): void {
+  rmSync(pinFile, { force: true });
+}
+
+function modelLabel(model: { provider: string; id: string }): string {
+  return `${model.provider}/${model.id}`;
 }
 
 function parentPid(pid: string): string {
@@ -181,15 +352,17 @@ function textOfContent(content: unknown): string {
 // Operational injections (watcher wakes, away-supervisor escalations, launch
 // briefs) are fleet machinery, not captain dialog; the report's volume
 // analysis counts them apart from dialog, and mirroring them would feed the
-// branch its own supervision traffic back. Current injections start with the
-// U+2063 operational prefix; the plain legacy form starts with FIRSTMATE.
+// branch its own supervision traffic back.
 function isOperationalUserText(text: string): boolean {
-  return text.startsWith("⁣") || /^FIRSTMATE[ _]/.test(text);
+  return classifyFirstmateOperationalText(text) !== undefined;
 }
 
 function capMirrorText(text: string): string {
   if (text.length <= MIRROR_MESSAGE_CAP) return text;
-  return `${text.slice(0, MIRROR_MESSAGE_CAP)}\n[mirror truncated at ${MIRROR_MESSAGE_CAP} characters]`;
+  const headLength = Math.ceil(MIRROR_MESSAGE_CAP / 2);
+  const tailLength = MIRROR_MESSAGE_CAP - headLength;
+  const omitted = text.length - MIRROR_MESSAGE_CAP;
+  return `${text.slice(0, headLength)}\n[mirror truncated: ${omitted} characters omitted]\n${text.slice(-tailLength)}`;
 }
 
 function readMirrorCursor(): MirrorCursor {
@@ -212,8 +385,35 @@ function writeMirrorCursor(cursor: MirrorCursor): void {
 
 type ReadonlyEntries = {
   getSessionFile(): string | undefined;
-  getEntries(): Array<{ type: string }>;
+  getEntries(): Array<{ type: string; customType?: string; data?: unknown }>;
 };
+
+function parseOutcomeRow(value: unknown): OutcomeRow | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return null;
+  if (typeof row.task !== "string" || !row.task) return null;
+  if (row.verdict !== "routine" && row.verdict !== "captain") return null;
+  if (typeof row.summary !== "string" || !row.summary) return null;
+  if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
+  const silent = row.silent === true;
+  if (silent && (row.task !== "fleet" || row.verdict !== "routine")) return null;
+  return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
+}
+
+function parseVisibleOutcomeRecord(value: unknown): VisibleOutcomeRecord | null {
+  if (!value || typeof value !== "object" || (value as { version?: unknown }).version !== 1) return null;
+  const row = parseOutcomeRow(value);
+  return row ? { version: 1, ...row } : null;
+}
+
+function sameOutcome(left: OutcomeRow, right: OutcomeRow): boolean {
+  return left.seq === right.seq &&
+    left.task === right.task &&
+    left.verdict === right.verdict &&
+    left.summary === right.summary &&
+    left.silent === right.silent;
+}
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
 // session replacement boundary, so a replacement extension instance
@@ -223,6 +423,10 @@ type ReadonlyEntries = {
 type MirrorCollectionState = {
   collectAnchor: MirrorCursor | null;
   pendingCursor: MirrorCursor | null;
+  // Pi emits before_agent_start before it appends that turn's user message to
+  // SessionManager. The prompt is mirrored from the event immediately, then
+  // this marker suppresses the same persisted entry when turn_end collects it.
+  stagedCaptain: { file: string; index: number; text: string } | null;
 };
 
 function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCollectionState): MirrorItem[] {
@@ -230,8 +434,20 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
   const entries = sessionManager.getEntries();
   const anchor = collection.collectAnchor ?? readMirrorCursor();
   const start = anchor.file === file ? Math.min(anchor.index, entries.length) : 0;
+  let currentCaptainIndex = -1;
+  for (let index = entries.length - 1; index >= start; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "message") continue;
+    const message = (entry as { message?: { role?: string; content?: unknown } }).message;
+    if (message?.role !== "user") continue;
+    const text = textOfContent(message.content).trim();
+    if (!text || isOperationalUserText(text)) continue;
+    currentCaptainIndex = index;
+    break;
+  }
   const items: MirrorItem[] = [];
-  for (const entry of entries.slice(start)) {
+  for (let index = start; index < entries.length; index += 1) {
+    const entry = entries[index];
     if (entry.type !== "message") continue;
     const message = (entry as { message?: { role?: string; content?: unknown } }).message;
     if (!message) continue;
@@ -239,7 +455,20 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
     const text = textOfContent(message.content).trim();
     if (!text) continue;
     if (message.role === "user" && isOperationalUserText(text)) continue;
-    items.push({ tag: message.role === "user" ? "captain" : "main", text: capMirrorText(text) });
+    const staged = collection.stagedCaptain;
+    if (
+      message.role === "user" &&
+      staged?.file === file &&
+      staged.index === index &&
+      staged.text === text
+    ) {
+      collection.stagedCaptain = null;
+      continue;
+    }
+    items.push({
+      tag: message.role === "user" ? "captain" : "main",
+      text: index === currentCaptainIndex ? text : capMirrorText(text),
+    });
   }
   collection.collectAnchor = { file, index: entries.length };
   collection.pendingCursor = collection.collectAnchor;
@@ -247,8 +476,19 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
 }
 
 export default function (pi: ExtensionAPI) {
-  let branch: AgentSession | null = null;
+  type BranchSession = {
+    session: AgentSession;
+    sessionManager: SessionManager;
+    generation: number;
+    selectionRevision: number;
+  };
+  let branch: BranchSession | null = null;
   let branchBroken = "";
+  let consecutiveProviderErrors = 0;
+  // A revision advances only after fm_branch_report has appended successfully,
+  // so a prompt can prove that it created a durable outcome after claiming its
+  // wake rows without relying on provider text or incidental session shape.
+  let durableReportRevision = 0;
   let mainStreaming = false;
   let shuttingDown = false;
   // Bumps at every session replacement so a stale chain continuation from the
@@ -268,7 +508,120 @@ export default function (pi: ExtensionAPI) {
   let branchWorkGeneration = generation;
   let branchWorkPending = 0;
   const pendingMirror: MirrorItem[] = [];
-  const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
+  const mirrorCollection: MirrorCollectionState = {
+    collectAnchor: null,
+    pendingCursor: null,
+    stagedCaptain: null,
+  };
+  let currentMainSession: ReadonlyEntries | null = null;
+  // Volatile view of the open processing request: the sequences it presented,
+  // how many turns it has opened for that set, whether a
+  // presentation is still pending its run boundary, and whether a copy is
+  // queued for the captain's next prompt. The durable truth is the store's
+  // processed marker; this only paces re-presentation and resets with the
+  // session generation.
+  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
+  let processing: ProcessingState | null = null;
+  let processedInitializedGeneration = -1;
+  // One revision for BOTH selections: a model or effort change invalidates an
+  // in-flight branch build exactly the same way.
+  let branchSelectionRevision = 0;
+  // Main's own current model, tracked from the contexts Pi already hands this
+  // extension plus its model_select event, because createBranch runs at wake
+  // time with no context of its own. It is what "follow main" applies.
+  let mainModel: { provider: string; id: string } | null = null;
+
+  // Main's own current effort needs no such tracking: Pi answers it directly
+  // on demand, including at wake time. It throws only when the extension
+  // runtime is unbound or the captured API is stale, which is never a reason
+  // to refuse a wake.
+  function mainEffort(): BranchEffort | undefined {
+    try {
+      return pi.getThinkingLevel?.();
+    } catch {
+      return undefined;
+    }
+  }
+
+  function rememberMainModel(ctx?: { model?: { provider: string; id: string } }): void {
+    if (ctx?.model) mainModel = { provider: ctx.model.provider, id: ctx.model.id };
+  }
+
+  // Resolves one model against the isolated branch runtime using only the
+  // credentials that runtime already holds - the branch runs in the same home
+  // and same user as main, so stored credentials keep their own semantics
+  // (OAuth stays OAuth, an API key stays an API key) and nothing is ever
+  // installed, converted, derived, or overwritten here.
+  async function resolveBranchModel(provider: string, modelId: string): Promise<BranchModelResolution> {
+    const label = `${provider}/${modelId}`;
+    const modelRuntime = await ModelRuntime.create();
+    const model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    if (!model) return { ok: false, reason: `${label} is unavailable to the isolated branch runtime` };
+    if (!modelRuntime.hasConfiguredAuth(provider)) {
+      return { ok: false, reason: `${label} has no configured credentials in the isolated branch runtime` };
+    }
+    return { ok: true, selection: { model, modelRuntime } };
+  }
+
+  async function preparePinnedBranchModel(pin: { provider: string; modelId: string }): Promise<PinnedBranchModel> {
+    const resolved = await resolveBranchModel(pin.provider, pin.modelId);
+    if (!resolved.ok) {
+      throw new Error(`supervision model pin ${resolved.reason} (config/supervision-branch-model)`);
+    }
+    return resolved.selection;
+  }
+
+  // The pin file's CURRENT state decides the model on every branch build,
+  // create and reopen alike, and it overrides Pi's restore of whatever model
+  // a reopened branch session recorded. With a pin, that model. With no pin,
+  // main's own model is applied EXPLICITLY - otherwise clearing the pin would
+  // report that the branch follows main while the reopened session quietly
+  // restored the model an earlier pin left behind. Only when main's model is
+  // genuinely unknown, or the isolated runtime cannot run it, does the build
+  // fall back to passing no override at all, which is the pre-feature
+  // behavior; an unpinned branch is never refused over model choice alone.
+  async function branchModelSelection(): Promise<PinnedBranchModel | undefined> {
+    const pin = readModelPin();
+    if (pin) return preparePinnedBranchModel(pin);
+    if (!mainModel) return undefined;
+    try {
+      const resolved = await resolveBranchModel(mainModel.provider, mainModel.id);
+      return resolved.ok ? resolved.selection : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function effectiveBranchModel(selected: BranchModel | undefined): Promise<BranchModel | undefined> {
+    if (selected) return selected;
+    try {
+      const recorded = readFileSync(sessionPointer, "utf8").trim();
+      if (!recorded || !existsSync(recorded)) return undefined;
+      const context = SessionManager.open(recorded, sessionsDir).buildSessionContext();
+      if (context.messages.length === 0 || !context.model) return undefined;
+      const resolved = await resolveBranchModel(context.model.provider, context.model.modelId);
+      return resolved.ok ? resolved.selection.model : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // The effort pin file's CURRENT state decides the branch's reasoning effort
+  // on every branch build, create and reopen alike, on exactly the model-pin
+  // contract above and for exactly the same reason: a reopened branch session
+  // records the effort it last ran under, so an unpinned branch must apply
+  // main's own effort EXPLICITLY or clearing a pin would silently restore the
+  // level that pin left behind. Pi owns the clamp, so a level the branch's
+  // model does not support becomes that model's nearest supported level
+  // rather than a refusal - the branch is never refused over effort. Only
+  // when main's own effort is unknowable too does the build fall back to
+  // passing no effort override at all, which is the behavior from before this
+  // file existed.
+  function branchEffortSelection(model: BranchModel | undefined): BranchEffort | undefined {
+    const chosen = readEffortPin() ?? mainEffort();
+    if (chosen === undefined) return undefined;
+    return model ? (clampThinkingLevel(model, chosen) as BranchEffort) : chosen;
+  }
 
   function generationOwnsLock(expectedGeneration: number): boolean {
     return !shuttingDown && expectedGeneration === generation && lockOwnership() === "owned";
@@ -355,43 +708,161 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Append-only merge into main. The store row is already durable when this
-  // runs; the note is a cache of it at main's tail. Delivery modes per the
-  // design: routine+idle appends now with no turn, routine+busy appends after
-  // the captain's next prompt, captain-relevant triggers exactly one turn
-  // (queued as a follow-up while main is busy) - that follow-up turn is
-  // itself the captain-visible outcome, so the captain-facing note is
-  // delivered silently (display: false) rather than printed or rendered a
-  // second time; routine notes stay rendered except an explicitly silent
-  // no-change heartbeat. The read cursor advances once the note is handed to
-  // Pi; a crash inside Pi's
-  // own delivery window leaves the outcome durable in the store, where
-  // main's fm_branch_outcomes tool still reads it on demand.
-  function mergeIntoMain(
-    expectedGeneration: number,
-    seq: string,
-    task: string,
-    verdict: Verdict,
-    summary: string,
-    silent: boolean,
-  ): boolean {
-    if (!actingAsOwner(expectedGeneration)) return false;
-    if (verdict === "captain") {
-      const message = { customType: "fm-branch-merge", content: `${task}: ${summary}`, display: false };
-      pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
-    } else {
-      const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${task}: ${summary}`, display: !(task === "fleet" && silent) };
-      if (mainStreaming) {
-        pi.sendMessage(message, { deliverAs: "nextTurn" });
-      } else {
-        pi.sendMessage(message, {});
-      }
+  // A captain outcome is delivered by a durable, rendered session entry, not
+  // by asking main's model to acknowledge a hidden custom message. The store
+  // sequence is the idempotency key: a reload after appendEntry but before
+  // mark-read finds the same record and advances the cursor without appending
+  // a duplicate. A conflicting record for one sequence fails closed.
+  function ensureVisibleCaptainOutcome(row: OutcomeRow): boolean {
+    if (!currentMainSession || row.verdict !== "captain") return false;
+    let matching = false;
+    for (const entry of currentMainSession.getEntries()) {
+      if (entry.type !== "custom" || entry.customType !== VISIBLE_OUTCOME_ENTRY_TYPE) continue;
+      const entrySeq = entry.data && typeof entry.data === "object"
+        ? (entry.data as { seq?: unknown }).seq
+        : undefined;
+      if (entrySeq !== row.seq) continue;
+      const recorded = parseVisibleOutcomeRecord(entry.data);
+      if (!recorded || !sameOutcome(recorded, row)) return false;
+      matching = true;
     }
-    if (/^[0-9]+$/.test(seq)) {
-      if (!actingAsOwner(expectedGeneration)) return false;
-      return runOutcomeScript(["mark-read", "--through", seq]).ok;
+    if (matching) return true;
+    const record: VisibleOutcomeRecord = { version: 1, ...row };
+    try {
+      pi.appendEntry(VISIBLE_OUTCOME_ENTRY_TYPE, record);
+    } catch {
+      return false;
+    }
+    return currentMainSession.getEntries().some((entry) => {
+      if (entry.type !== "custom" || entry.customType !== VISIBLE_OUTCOME_ENTRY_TYPE) return false;
+      const recorded = parseVisibleOutcomeRecord(entry.data);
+      return recorded !== null && sameOutcome(recorded, row);
+    });
+  }
+
+  function deliverRoutineOutcome(row: OutcomeRow): void {
+    const message = {
+      customType: "fm-branch-merge",
+      content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
+      display: !(row.task === "fleet" && row.silent),
+    };
+    if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
+    else pi.sendMessage(message, {});
+  }
+
+  // Captain rows that are read (their visible entry exists) but not yet
+  // acknowledged as processed by main, in sequence order. null means the store
+  // could not be read safely, never "nothing".
+  function readUnprocessedOutcomes(expectedGeneration: number): OutcomeRow[] | null {
+    if (!generationOwnsLock(expectedGeneration)) return null;
+    const listed = runOutcomeScript(["unprocessed"]);
+    if (!listed.ok) return null;
+    const rows: OutcomeRow[] = [];
+    for (const line of listed.stdout.split("\n")) {
+      if (!line) continue;
+      let row: OutcomeRow | null = null;
+      try {
+        row = parseOutcomeRow(JSON.parse(line));
+      } catch {
+        row = null;
+      }
+      if (!row || row.verdict !== "captain") return null;
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  // Encoding shells out, so it can fail on a broken checkout. This file's
+  // failure direction applies: a request that cannot be typed is still
+  // delivered as plain text, because an untyped request main can still act on
+  // beats an outcome that is never processed.
+  function processingRequestInput(rows: OutcomeRow[]): string {
+    const through = rows[rows.length - 1].seq;
+    const listed = rows.map((row) => `[seq ${row.seq}] ${row.task}: ${row.summary}`).join("\n");
+    const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
+    try {
+      return encodeFirstmateOperationalInput("branch-outcome", body);
+    } catch {
+      return body;
+    }
+  }
+
+  // Present every unprocessed captain outcome to main as ONE sequence-keyed
+  // processing request. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
+  // of a given sequence set open a turn of their own (queued as a follow-up
+  // while main is busy); after that the request rides the captain's next
+  // prompt instead, once per run, and a session replacement starts the
+  // triggered budget over. Nothing here advances the processed marker: only
+  // fm_branch_processed does, keyed to the sequence main acknowledges.
+  function presentUnprocessedOutcomes(expectedGeneration: number): boolean {
+    const rows = readUnprocessedOutcomes(expectedGeneration);
+    if (rows === null) return false;
+    if (rows.length === 0) {
+      processing = null;
+      return true;
+    }
+    const through = rows[rows.length - 1].seq;
+    const sequences = rows.map((row) => row.seq).join(",");
+    if (processing?.pending) return true;
+    if (!processing || processing.sequences !== sequences) {
+      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
+    }
+    // A presentation already sent is consumed by the run it joins or opens;
+    // until that run settles, sending a widened or identical copy would hand
+    // overlapping requests to the same run.
+    const message = { customType: PROCESSING_MESSAGE_TYPE, content: processingRequestInput(rows), display: false };
+    if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
+      processing.triggered += 1;
+      processing.pending = true;
+      pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
+    } else if (!processing.nextTurnQueued) {
+      processing.nextTurnQueued = true;
+      processing.pending = true;
+      pi.sendMessage(message, { deliverAs: "nextTurn" });
     }
     return true;
+  }
+
+  // Reconcile in sequence order so the cursor can never cross a captain row
+  // whose visible entry is absent. This is also the reload/crash recovery
+  // path and runs before new branch work is accepted. With `present`, every
+  // captain row that is now read but still unprocessed is handed to main as
+  // one processing request; callers that run inside a main turn (turn_end)
+  // leave presentation to the run boundary (agent_settled) instead, so one
+  // multi-tool run never receives duplicate requests.
+  function reconcileUnreadOutcomes(expectedGeneration: number, present = true): boolean {
+    if (!generationOwnsLock(expectedGeneration)) return false;
+    // One-time migration per generation: a home whose outcomes were all
+    // delivered before the processed marker existed treats them as processed
+    // rather than re-presenting its whole history. Runs before any new row
+    // can be read below, so nothing delivered from here on is ever skipped.
+    if (processedInitializedGeneration !== expectedGeneration) {
+      if (!runOutcomeScript(["processed-init"]).ok) return false;
+      processedInitializedGeneration = expectedGeneration;
+    }
+    const unread = runOutcomeScript(["unread"]);
+    if (!unread.ok) return false;
+    if (unread.stdout) {
+      if (!currentMainSession) return false;
+      for (const line of unread.stdout.split("\n")) {
+        let row: OutcomeRow | null = null;
+        try {
+          row = parseOutcomeRow(JSON.parse(line));
+        } catch {
+          row = null;
+        }
+        if (!row || !generationOwnsLock(expectedGeneration)) return false;
+        if (row.verdict === "captain") {
+          if (!ensureVisibleCaptainOutcome(row)) return false;
+        } else {
+          deliverRoutineOutcome(row);
+        }
+        if (!generationOwnsLock(expectedGeneration)) return false;
+        if (!runOutcomeScript(["mark-read", "--through", String(row.seq)]).ok) return false;
+      }
+    }
+    if (!present) return true;
+    return presentUnprocessedOutcomes(expectedGeneration);
   }
 
   function createReportTool(toolGeneration: number): ToolDefinition {
@@ -399,11 +870,12 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation. verdict captain surfaces it to the captain in one turn; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
-          description: "captain only for what a human must see; routine otherwise",
+          description:
+            "Use captain unconditionally for an outcome that directly answers an explicit captain request, regardless of whether it is healthy, routine, measured, actionable, or requires a decision. Also use captain for work ready for review, captain-only decisions, blockers or failures after recovery is exhausted, needed credentials, and destructive, irreversible, or security-sensitive actions; use routine otherwise.",
         }),
         summary: Type.String({
           description:
@@ -445,22 +917,34 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary, silent)) {
+        durableReportRevision += 1;
+        const seq = Number(appended.stdout);
+        if (!Number.isSafeInteger(seq) || seq < 1 || !reconcileUnreadOutcomes(toolGeneration)) {
           return {
-            content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
+            content: [{ type: "text", text: `recorded seq ${appended.stdout}, but visible delivery or cursor advancement failed` }],
             details: undefined,
             isError: true,
           };
         }
         return {
-          content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
+          content: [{ type: "text", text: `recorded seq ${appended.stdout} and delivered [${verdict}] into main` }],
           details: undefined,
         };
       },
     };
   }
 
-  async function createBranch(branchGeneration: number): Promise<AgentSession> {
+  async function createBranch(
+    branchGeneration: number,
+  ): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
+    // Resolved first, before any session file or prompt work: a model pin Pi
+    // cannot honor must fail before this build leaves anything behind. Every
+    // branch build goes through here - first wake of a cold start, and the
+    // reopen after /new, /resume, /fork, or reload - so resolving the model
+    // and the effort here is what makes the captain's current choices
+    // authoritative on all of them.
+    const pinned = await branchModelSelection();
+    const effort = branchEffortSelection(pinned?.model);
     const prompt = spawnSync("bash", [promptScript], {
       cwd: fmRoot,
       encoding: "utf8",
@@ -550,6 +1034,8 @@ ${context.command}
       resourceLoader: loader,
       tools: [...BRANCH_TOOL_NAMES],
       customTools: [bashTool as unknown as ToolDefinition, createReportTool(branchGeneration)],
+      ...(pinned ? { model: pinned.model, modelRuntime: pinned.modelRuntime } : {}),
+      ...(effort === undefined ? {} : { thinkingLevel: effort }),
     });
     if (!actingAsOwner(branchGeneration)) {
       try {
@@ -562,28 +1048,42 @@ ${context.command}
     } catch {
       // Pointer write failure only costs cross-restart session reuse.
     }
-    return created.session;
+    return { session: created.session, sessionManager };
   }
 
-  async function ensureBranch(expectedGeneration: number): Promise<AgentSession> {
+  async function ensureBranch(expectedGeneration: number): Promise<BranchSession> {
     if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
-    if (branch) return branch;
     if (branchBroken) throw new Error(branchBroken);
-    try {
-      const created = await createBranch(expectedGeneration);
-      if (!actingAsOwner(expectedGeneration)) {
-        try {
-          created.dispose();
-        } catch {}
-        throw new Error("supervision session was replaced or lost lock ownership");
+    if (branch) return branch;
+    while (true) {
+      const buildRevision = branchSelectionRevision;
+      try {
+        const created = await createBranch(expectedGeneration);
+        if (buildRevision !== branchSelectionRevision) {
+          try {
+            created.session.dispose();
+          } catch {}
+          continue;
+        }
+        if (!actingAsOwner(expectedGeneration)) {
+          try {
+            created.session.dispose();
+          } catch {}
+          throw new Error("supervision session was replaced or lost lock ownership");
+        }
+        branch = {
+          ...created,
+          generation: expectedGeneration,
+          selectionRevision: buildRevision,
+        };
+        return branch;
+      } catch (error) {
+        if (buildRevision !== branchSelectionRevision) continue;
+        if (expectedGeneration === generation && !shuttingDown) {
+          branchBroken = error instanceof Error ? error.message : String(error);
+        }
+        throw error;
       }
-      branch = created;
-      return created;
-    } catch (error) {
-      if (expectedGeneration === generation && !shuttingDown) {
-        branchBroken = error instanceof Error ? error.message : String(error);
-      }
-      throw error;
     }
   }
 
@@ -626,7 +1126,8 @@ ${context.command}
           throw new Error("supervision session was replaced before handling the accepted wake");
         }
         if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
-        const session = await ensureBranch(acceptedGeneration);
+        const branchForWake = await ensureBranch(acceptedGeneration);
+        const { session, sessionManager } = branchForWake;
         await flushMirror(session, acceptedGeneration);
         if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
@@ -636,9 +1137,8 @@ ${context.command}
         // granted rows disappear or become ineligible before prompt start,
         // accepted handling cannot safely begin and falls back once to main.
         // Only a scan scopeForUnreadWake itself marks corrupted (the queue or
-        // its metadata could not be read safely, or - for a heartbeat review
-        // - a main-owned row anywhere in the unread queue, since a heartbeat
-        // needs full-fleet context).
+        // its metadata could not be read safely, or an unresolvable task-local
+        // row).
         if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) {
           throw new Error("the granted wake rows disappeared before the branch prompt started");
         }
@@ -650,9 +1150,32 @@ ${context.command}
         }
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
+        const reportRevisionBeforePrompt = durableReportRevision;
+        const entryOffset = sessionManager.getEntries().length;
         await session.prompt(
           `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
         );
+        const providerError = settledPromptProviderError(sessionManager, entryOffset);
+        if (providerError) {
+          const detail = `supervision branch provider failed after construction: ${providerError}`;
+          if (
+            branchForWake.generation === generation &&
+            branchForWake.selectionRevision === branchSelectionRevision
+          ) {
+            consecutiveProviderErrors += 1;
+            if (consecutiveProviderErrors >= PROVIDER_ERROR_LATCH_THRESHOLD) branchBroken = detail;
+          }
+          throw new Error(detail);
+        }
+        if (
+          branchForWake.generation === generation &&
+          branchForWake.selectionRevision === branchSelectionRevision
+        ) {
+          consecutiveProviderErrors = 0;
+        }
+        if (durableReportRevision <= reportRevisionBeforePrompt) {
+          throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
+        }
         if (!releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }
@@ -668,10 +1191,42 @@ ${context.command}
     });
   }
 
+  // A model or effort change applies to the next branch turn without waiting
+  // for /new: the live session is dropped synchronously so nothing enqueued
+  // afterwards can capture it, then disposed in dispatch order behind work
+  // already queued. The branch CONVERSATION is persistent
+  // (state/.branch-session), so the next wake reopens the same conversation
+  // under the new selection. Clearing the broken latch is what lets a
+  // corrected pin recover in place.
+  function releaseBranchForSelectionChange(): void {
+    branchBroken = "";
+    consecutiveProviderErrors = 0;
+    const stale = branch;
+    branch = null;
+    if (!stale) return;
+    branchChain = branchChain
+      .then(() => {
+        stale.session.dispose();
+      })
+      .catch(() => {
+        // Already gone, or disposed by a session replacement first.
+      });
+  }
+
+  function collectCurrentMainDialog(): boolean {
+    if (!currentMainSession) return true;
+    try {
+      pendingMirror.push(...collectMainDialog(currentMainSession, mirrorCollection));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function enqueueMirrorFlush(): void {
     if (!branch || pendingMirror.length === 0) return;
     const flushGeneration = generation;
-    const flushSession = branch;
+    const flushSession = branch.session;
     beginBranchWork(flushGeneration);
     const mirrorWork = branchChain
       .then(async () => {
@@ -697,6 +1252,11 @@ ${context.command}
     if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
+    if (!reconcileUnreadOutcomes(generation)) {
+      branchBroken = "could not reconcile unread supervision outcomes into main";
+      return;
+    }
+    if (!collectCurrentMainDialog()) return;
     const busy = branchHasPendingWork(generation);
     // Read the in-flight grant before rescanning the queue: a branch
     // acknowledgement consumes a granted row from the queue and then the
@@ -731,27 +1291,61 @@ ${context.command}
     enqueueWake(offer.message, acceptedGeneration, scope.eligibleSeqs);
   });
 
+  pi.on?.("before_agent_start", (event, ctx) => {
+    rememberMainModel(ctx);
+    currentMainSession = ctx?.sessionManager ?? null;
+    if (!actingAsOwner() || !currentMainSession || !collectCurrentMainDialog()) return;
+
+    // This event is Pi's authoritative complete current prompt. At this point
+    // SessionManager still contains only the preceding dialog, so relying on
+    // getEntries() here loses the captain request that the next wake may answer.
+    // Stage it verbatim and remember the future persisted index for turn_end's
+    // duplicate suppression. Operational extension injections are not dialog.
+    const prompt = event.prompt.trim();
+    if (!prompt || isOperationalUserText(prompt)) return;
+    const file = currentMainSession.getSessionFile() ?? "";
+    const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
+    pendingMirror.push({ tag: "captain", text: prompt });
+    mirrorCollection.stagedCaptain = { file, index, text: prompt };
+  });
+
   pi.on?.("agent_start", () => {
     mainStreaming = true;
+    // Pi delivers a queued nextTurn copy with the prompt that starts this run,
+    // so a fresh copy may be queued again once this run settles unacknowledged.
+    if (processing) processing.nextTurnQueued = false;
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
   });
+  // The run boundary is where an ignored processing request is detected: every
+  // presentation sent before this point has been consumed by the run that just
+  // settled (a follow-up joins the running turn, a triggered send opens its
+  // own), so any sequence still unprocessed here was answered by something
+  // other than its acknowledgement - an unrelated reply, an empty reply, or a
+  // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", () => {
     mainStreaming = false;
+    if (processing) processing.pending = false;
+    if (!actingAsOwner()) return;
+    presentUnprocessedOutcomes(generation);
   });
 
-  // Mirror at main's turn_end: collect the new captain/assistant dialog into
-  // the volatile queue, then deliver it through the serialized chain so it
-  // lands before any later wake. The durable cursor advances only in
+  // before_agent_start stages Pi's authoritative in-flight prompt before
+  // SessionManager persists it. The dispatch handler then collects any newly
+  // persisted dialog immediately before accepting a wake, so all context joins
+  // the serialized chain before that wake's branch prompt. turn_end remains
+  // the idle-path mirror flush. The durable cursor advances only in
   // flushMirror after the complete pending batch reaches the branch.
   pi.on?.("turn_end", (_event, ctx) => {
+    rememberMainModel(ctx);
+    currentMainSession = ctx.sessionManager;
     if (!actingAsOwner()) return;
-    try {
-      pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
-    } catch {
+    if (!reconcileUnreadOutcomes(generation, false)) {
+      branchBroken = "could not reconcile unread supervision outcomes into main";
       return;
     }
+    if (!collectCurrentMainDialog()) return;
     enqueueMirrorFlush();
   });
 
@@ -762,29 +1356,304 @@ ${context.command}
   // cursor, and releases the branch session; a replacement session_start
   // re-arms, and the next wake reopens the persistent branch from its
   // recorded pointer. Terminal quit simply never fires another session_start.
-  pi.on?.("session_start", () => {
+  pi.on?.("session_start", (_event, ctx) => {
+    rememberMainModel(ctx);
+    currentMainSession = ctx?.sessionManager ?? null;
     shuttingDown = false;
     branchBroken = "";
+    consecutiveProviderErrors = 0;
     generation += 1;
-    actingAsOwner(generation);
+    if (actingAsOwner(generation) && !reconcileUnreadOutcomes(generation)) {
+      branchBroken = "could not reconcile unread supervision outcomes into main";
+    }
+  });
+
+  // Pi emits this for /model, Ctrl+P cycling, and session restore, so it is
+  // the authoritative signal that "follow main" now means a different model.
+  // A model change often follows a quota failure, so an unpinned supervision
+  // branch follows live rather than retaining a model that may no longer work.
+  pi.on?.("model_select", (event) => {
+    const selected = (event as { model?: { provider: string; id: string } }).model;
+    if (!selected) return;
+    const changed = !mainModel || mainModel.provider !== selected.provider || mainModel.id !== selected.id;
+    mainModel = { provider: selected.provider, id: selected.id };
+    if (!changed || readModelPin()) return;
+    branchSelectionRevision += 1;
+    releaseBranchForSelectionChange();
+  });
+
+  // Pi emits this only when main's effort actually changes, so an unpinned
+  // supervision branch follows main's effort live for the same reason it
+  // follows main's model: the captain's current setting, not the level the
+  // branch conversation happens to have recorded, is what supervision should
+  // run at. A pin stays authoritative and is left alone.
+  pi.on?.("thinking_level_select", (event) => {
+    const level = (event as { level?: BranchEffort }).level;
+    if (!level || readEffortPin()) return;
+    branchSelectionRevision += 1;
+    releaseBranchForSelectionChange();
   });
 
   pi.on?.("session_shutdown", () => {
     deactivateEligibleRowsOwner(state, wakeGrantScript, process.pid, String(generation));
     shuttingDown = true;
     generation += 1;
+    processing = null;
     pendingMirror.length = 0;
+    currentMainSession = null;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
+    mirrorCollection.stagedCaptain = null;
     if (branch) {
       try {
-        branch.dispose();
+        branch.session.dispose();
       } catch {
         // Already gone.
       }
       branch = null;
     }
   });
+
+  // Pi keeps /model and its own thinking selector for the captain's own
+  // conversation and exposes no hook an extension can use to open either
+  // picker, so this is the smallest supported equivalent: Pi's own catalog
+  // intersected with the isolated branch runtime, then Pi's own supported
+  // thinking levels for the model just chosen, with no parallel Firstmate
+  // model or effort list. The model step shows that catalog through the same
+  // bounded, searchable SelectList primitive Pi's own /model dialog scrolls
+  // (pickBranchModel below); the effort step's menu is a handful of levels
+  // and stays on Pi's generic selector dialog. The effort step follows the
+  // model step because the model decides which levels exist.
+  pi.registerCommand?.("supervision-model", {
+    description: "Pick the model and reasoning effort Firstmate's Pi supervision branch uses, or follow main's.",
+    handler: async (_args, ctx) => {
+      rememberMainModel(ctx);
+      const pin = readModelPin();
+      const current = pin ? `${pin.provider}/${pin.modelId}` : "follows main";
+      const followMain = `Follow main${ctx.model ? ` (${modelLabel(ctx.model)})` : ""}`;
+      let available: string[];
+      try {
+        const modelRuntime = await ModelRuntime.create();
+        available = ctx.modelRegistry
+          .getAvailable()
+          .filter((model) => modelRuntime.getModel(model.provider, model.id) && modelRuntime.hasConfiguredAuth(model.provider))
+          .map(modelLabel);
+      } catch (error) {
+        ctx.ui.notify(
+          `Could not read the supervision branch models: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+        return;
+      }
+      const picked = await pickBranchModel(
+        ctx,
+        `Supervision branch model (now: ${current})`,
+        buildBranchModelItems(followMain, available, pin ? `${pin.provider}/${pin.modelId}` : null),
+      );
+      if (picked === undefined) return; // cancelled: the current choice stands
+      // Whatever the model step resolves is also the model the effort step
+      // builds its menu from, so it is captured here rather than resolved a
+      // second time through another isolated runtime.
+      let branchModel: BranchModel | undefined;
+      try {
+        if (picked === FOLLOW_MAIN_VALUE) {
+          clearPinFile(modelPinFile);
+        } else {
+          const separator = picked.indexOf("/");
+          if (separator <= 0 || separator >= picked.length - 1) throw new Error(`invalid model selection: ${picked}`);
+          branchModel = (
+            await preparePinnedBranchModel({ provider: picked.slice(0, separator), modelId: picked.slice(separator + 1) })
+          ).model;
+          writePinFile(modelPinFile, picked);
+        }
+      } catch (error) {
+        ctx.ui.notify(
+          `Could not apply or save the supervision branch model: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+        return;
+      }
+      // The model choice is persisted; report it exactly, then run the effort
+      // step on the model the branch will actually use.
+      let modelReport: { message: string; warning: boolean };
+      if (picked !== FOLLOW_MAIN_VALUE) {
+        modelReport = { message: `Supervision branch model: ${picked}.`, warning: false };
+      } else {
+        // Clearing the pin only follows main if main's model can actually be
+        // applied to the branch; say what will really happen rather than
+        // reporting a state that did not take effect.
+        try {
+          const following = mainModel ? await resolveBranchModel(mainModel.provider, mainModel.id) : null;
+          if (following?.ok) branchModel = following.selection.model;
+          modelReport = following?.ok
+            ? {
+                message: `Supervision branch follows main's model (${modelLabel(following.selection.model)}).`,
+                warning: false,
+              }
+            : {
+                message: `Supervision branch pin cleared, but main's model could not be applied (${following ? following.reason : "main's model is not known yet"}); the branch keeps the model its own session recorded until that conversation is replaced.`,
+                warning: true,
+              };
+        } catch (error) {
+          modelReport = {
+            message: `Supervision branch pin cleared, but main's model could not be applied (${error instanceof Error ? error.message : String(error)}); the branch keeps the model its own session recorded until that conversation is replaced.`,
+            warning: true,
+          };
+        }
+      }
+
+      // The model choice is already persisted, so a failing effort step must
+      // never swallow it: the branch still rebinds and the captain still
+      // hears what took effect and what did not.
+      let effortReport: { message: string; warning: boolean };
+      try {
+        effortReport = await pickBranchEffort(ctx, branchModel);
+      } catch (error) {
+        effortReport = {
+          message: `The effort step failed (${error instanceof Error ? error.message : String(error)}); the branch keeps its current effort choice.`,
+          warning: true,
+        };
+      }
+      branchSelectionRevision += 1;
+      releaseBranchForSelectionChange();
+      ctx.ui.notify(
+        `${modelReport.message} ${effortReport.message}`,
+        modelReport.warning || effortReport.warning ? "warning" : "info",
+      );
+    },
+  });
+
+  // Step one of /supervision-model's dialog. Pi's generic extension selector
+  // renders every option at once with no search box, so a real eligible
+  // catalog ran off the top of the terminal; this shows the same rows through
+  // Pi's own SelectList - the bounded, scrolling primitive behind Pi's /model
+  // picker - with Pi's own Input and fuzzy filter above it for search.
+  // Pi's ModelSelectorComponent is deliberately NOT reused: its own selection
+  // handler writes the captain's default model through Pi's settings manager,
+  // which would move main's conversation as a side effect of pinning the
+  // branch, and it has no room for the "follow main" row or for Firstmate's
+  // branch-runtime eligibility filter. Ordering and filtering live in
+  // lib/fm-branch-model-picker.ts; everything here is Pi's own rendering.
+  // Returns the chosen item's value, or undefined when the captain cancels.
+  // Non-TUI modes have no custom component surface, so they keep Pi's generic
+  // selector: overflow is a terminal-rendering problem those modes do not have.
+  async function pickBranchModel(
+    ctx: ExtensionCommandContext,
+    title: string,
+    items: BranchPickerItem[],
+  ): Promise<string | undefined> {
+    if (ctx.mode !== "tui" || typeof ctx.ui.custom !== "function") {
+      const picked = await ctx.ui.select(
+        title,
+        items.map((item) => item.label),
+      );
+      if (picked === undefined) return undefined;
+      return items.find((item) => item.label === picked)?.value;
+    }
+    const picked = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
+      const accent = (text: string) => theme.fg("accent", text);
+      const muted = (text: string) => theme.fg("muted", text);
+      const container = new Container();
+      container.addChild(new DynamicBorder(accent));
+      container.addChild(new Text(accent(theme.bold(title)), 1, 0));
+      const search = new Input();
+      search.focused = true;
+      container.addChild(search);
+      const listContainer = new Container();
+      container.addChild(listContainer);
+      container.addChild(new Text(muted("type to search - up/down navigate - enter select - esc cancel"), 1, 0));
+      container.addChild(new DynamicBorder(accent));
+
+      // SelectList takes its rows at construction, so a new query builds a new
+      // list into the same container rather than mutating the old one.
+      let list = buildList("");
+      function buildList(query: string): SelectList {
+        const rebuilt = new SelectList(filterBranchPickerItems(items, query, fuzzyFilter), BRANCH_PICKER_MAX_VISIBLE, {
+          selectedPrefix: accent,
+          selectedText: accent,
+          description: muted,
+          scrollInfo: muted,
+          noMatch: muted,
+        });
+        rebuilt.onSelect = (item) => done(item.value);
+        rebuilt.onCancel = () => done(null);
+        listContainer.clear();
+        listContainer.addChild(rebuilt);
+        return rebuilt;
+      }
+
+      const navigationKeys = ["tui.select.up", "tui.select.down", "tui.select.confirm", "tui.select.cancel"] as const;
+      return {
+        render: (width: number) => container.render(width),
+        invalidate: () => container.invalidate(),
+        handleInput: (data: string) => {
+          if (navigationKeys.some((key) => keybindings.matches(data, key))) {
+            list.handleInput(data);
+          } else {
+            search.handleInput(data);
+            list = buildList(search.getValue());
+          }
+          tui.requestRender();
+        },
+      };
+    });
+    return picked === null ? undefined : picked;
+  }
+
+  // Step two of /supervision-model, shown after the model pick and driven by
+  // Pi's own supported-level list for the model the branch will now use, so
+  // the menu is the one Pi's own thinking selector would show and keeps no
+  // parallel Firstmate picker catalog. Cancelling leaves the current effort
+  // choice standing; the model pick already made is still applied.
+  async function pickBranchEffort(
+    ctx: { ui: { select: (title: string, options: string[]) => Promise<string | undefined> } },
+    selectedModel: BranchModel | undefined,
+  ): Promise<{ message: string; warning: boolean }> {
+    const branchModel = await effectiveBranchModel(selectedModel);
+    const currentPin = readEffortPin();
+    const current = currentPin ?? "follows main";
+    const main = mainEffort();
+    const followMainEffort = `Follow main${main ? ` (${main})` : ""}`;
+    const levels = branchModel ? getSupportedThinkingLevels(branchModel) : [];
+    const picked = await ctx.ui.select(`Supervision branch effort (now: ${current})`, [followMainEffort, ...levels]);
+    if (picked === undefined) {
+      return { message: describeBranchEffort(currentPin, branchModel), warning: branchModel === undefined };
+    }
+    try {
+      if (picked === followMainEffort) {
+        clearPinFile(effortPinFile);
+      } else if ((BRANCH_EFFORT_LEVELS as readonly string[]).includes(picked)) {
+        writePinFile(effortPinFile, picked);
+      } else {
+        throw new Error(`invalid effort selection: ${picked}`);
+      }
+    } catch (error) {
+      return {
+        message: `The effort choice could not be saved (${error instanceof Error ? error.message : String(error)}). ${describeBranchEffort(currentPin, branchModel)}`,
+        warning: true,
+      };
+    }
+    return {
+      message: describeBranchEffort(readEffortPin(), branchModel),
+      warning: branchModel === undefined,
+    };
+  }
+
+  // Reports the effort the branch will actually run at, never the raw choice:
+  // Pi clamps a level the branch's model does not support, and an unpinned
+  // branch follows main's own effort only when Pi can tell us what that is.
+  function describeBranchEffort(pin: BranchEffort | null, branchModel: BranchModel | undefined): string {
+    if (!branchModel) {
+      return "The effort level the branch will run at cannot be determined because its effective model could not be resolved.";
+    }
+    const chosen = pin ?? mainEffort();
+    if (chosen === undefined) {
+      return "Effort follows main, whose own effort is not known yet, so the branch keeps the effort its own session recorded until that conversation is replaced.";
+    }
+    const applied = clampThinkingLevel(branchModel, chosen) as BranchEffort;
+    if (pin === null) return `Effort follows main (${applied}).`;
+    return applied === pin ? `Effort: ${pin}.` : `Effort: ${pin}, which this model runs at ${applied}.`;
+  }
 
   let calmPresentation: CalmPresentationState = {
     active: false,
@@ -820,6 +1689,43 @@ ${context.command}
       })
       .join("")
       .replace(/\r/g, "");
+  };
+
+  let stockOutcomesPreviewLines: number | null | undefined;
+  const getStockOutcomesPreviewLines = (): number | undefined => {
+    if (stockOutcomesPreviewLines !== undefined) return stockOutcomesPreviewLines ?? undefined;
+    const probeTokens = Array.from(
+      { length: 64 },
+      (_, index) => `FM_OUTCOMES_PREVIEW_PROBE_${String(index).padStart(2, "0")}`,
+    );
+    try {
+      const probeDefinition: ToolDefinition = {
+        name: "fm_outcomes_preview_probe",
+        label: "Preview probe",
+        description: "Preview probe",
+        parameters: Type.Object({}),
+        execute: async () => ({ content: [], details: undefined }),
+      };
+      const probe = new ToolExecutionComponent(
+        probeDefinition.name,
+        "fm-outcomes-preview-probe",
+        {},
+        { showImages: false },
+        probeDefinition,
+        { requestRender() {} } as ConstructorParameters<typeof ToolExecutionComponent>[5],
+        root,
+      );
+      probe.updateResult({
+        content: [{ type: "text", text: probeTokens.join("\n") }],
+        isError: false,
+      });
+      const rendered = probe.render(4096).join("\n");
+      const visibleLines = probeTokens.filter((token) => rendered.includes(token)).length;
+      stockOutcomesPreviewLines = visibleLines > 0 && visibleLines < probeTokens.length ? visibleLines : null;
+    } catch {
+      stockOutcomesPreviewLines = null;
+    }
+    return stockOutcomesPreviewLines ?? undefined;
   };
 
   type OutcomesToolShellState = {
@@ -863,7 +1769,7 @@ ${context.command}
       shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_outcomes")), 0, 0);
       return refreshOutcomesToolShell(shellState, theme, context);
     },
-    renderResult: (result, _options, theme, context) => {
+    renderResult: (result, options, theme, context) => {
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("tool-result")) return new Container();
       const output = result.content
@@ -871,7 +1777,17 @@ ${context.command}
         .map((item) => normalizeOutcomesToolOutput(item.text))
         .join("\n");
       const shellState = context.state as OutcomesToolShellState;
-      shellState.result = output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
+      // Keep each line's ANSI scope independent, matching Pi's stock fallback.
+      // Pi 0.84.4 no longer supplies an implicit reset at multiline boundaries.
+      const lines = output.split("\n");
+      const previewLines = getStockOutcomesPreviewLines();
+      const displayLines = options.expanded || previewLines === undefined ? lines : lines.slice(0, previewLines);
+      const remaining = lines.length - displayLines.length;
+      let renderedOutput = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
+      if (remaining > 0) {
+        renderedOutput += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+      }
+      shellState.result = output ? new Text(renderedOutput, 0, 0) : new Container();
       refreshOutcomesToolShell(shellState, theme, context);
       return new Container();
     },
@@ -893,9 +1809,102 @@ ${context.command}
     },
   });
 
-  // Pi only calls this renderer for a message with display: true, which
-  // mergeIntoMain sets for every routine note except an explicitly silent
-  // fleet heartbeat; captain-facing notes are never printed or rendered here.
+  // Main's only way to close a captain outcome. The acknowledgement is keyed
+  // to the sequence main names, validated by the store (never past the read
+  // cursor, never backwards), and refused outside lock ownership, so neither a
+  // paraphrase, an empty reply, nor a stale generation can mark an outcome
+  // processed.
+  pi.registerTool?.({
+    name: "fm_branch_processed",
+    label: "Acknowledge processed supervision outcomes",
+    description:
+      "Acknowledge that every captain-facing supervision outcome up to a sequence number has been processed by this conversation. Call it exactly once after handling a supervision processing request, with through set to the highest sequence that request listed; an outcome that is not acknowledged is presented again.",
+    promptSnippet: "Acknowledge processed captain-facing supervision outcomes by sequence.",
+    parameters: Type.Object({
+      through: Type.Number({ description: "The highest outcome sequence number this conversation has processed" }),
+    }),
+    renderShell: "self",
+    renderCall: (_args, theme, context) => {
+      if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
+      if (calmHides("assistant-tool-call")) return new Container();
+      const shellState = context.state as OutcomesToolShellState;
+      shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_processed")), 0, 0);
+      return refreshOutcomesToolShell(shellState, theme, context);
+    },
+    renderResult: (result, _options, theme, context) => {
+      if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
+      if (calmHides("tool-result")) return new Container();
+      const output = result.content
+        .filter((item) => item.type === "text")
+        .map((item) => normalizeOutcomesToolOutput(item.text))
+        .join("\n");
+      const shellState = context.state as OutcomesToolShellState;
+      shellState.result = output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
+      refreshOutcomesToolShell(shellState, theme, context);
+      return new Container();
+    },
+    execute: async (_toolCallId, params) => {
+      const raw = (params as { through?: unknown }).through;
+      const through = typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 ? raw : null;
+      if (through === null) {
+        return {
+          content: [{ type: "text", text: "acknowledgement refused: through must be a positive outcome sequence number" }],
+          details: undefined,
+          isError: true,
+        };
+      }
+      if (!actingAsOwner()) {
+        return {
+          content: [{ type: "text", text: "acknowledgement refused: this session does not own the fleet lock" }],
+          details: undefined,
+          isError: true,
+        };
+      }
+      if (!processing || through > processing.through) {
+        return {
+          content: [{ type: "text", text: `acknowledgement refused: seq ${through} was not listed in the active processing request` }],
+          details: undefined,
+          isError: true,
+        };
+      }
+      const marked = runOutcomeScript(["mark-processed", "--through", String(through)]);
+      if (!marked.ok) {
+        return {
+          content: [{ type: "text", text: `acknowledgement refused: ${marked.detail}` }],
+          details: undefined,
+          isError: true,
+        };
+      }
+      const remaining = readUnprocessedOutcomes(generation);
+      if (remaining !== null && remaining.length === 0) processing = null;
+      const open = remaining === null
+        ? "the remaining outcomes could not be read"
+        : remaining.length === 0
+          ? "no captain outcome remains unprocessed"
+          : `${remaining.length} newer captain outcome(s) remain unprocessed (seq ${remaining.map((row) => row.seq).join(", ")}) and will be presented again`;
+      return {
+        content: [{ type: "text", text: `processed through seq ${through}; ${open}` }],
+        details: undefined,
+      };
+    },
+  });
+
+  // Captain outcomes are transcript entries rather than model messages. Their
+  // payload is the durable store row plus a schema version, and the renderer
+  // displays the exact stored summary without asking a model to paraphrase or
+  // acknowledge it.
+  pi.registerEntryRenderer?.(VISIBLE_OUTCOME_ENTRY_TYPE, (entry, _options, theme) => {
+    const record = parseVisibleOutcomeRecord(entry.data);
+    if (!record || record.verdict !== "captain") return undefined;
+    return new Text(
+      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` [seq ${record.seq}] ${record.task}: ${record.summary}`)}`,
+      1,
+      0,
+    );
+  });
+
+  // Pi only calls this renderer for a message with display: true, which every
+  // routine note uses except an explicitly silent fleet heartbeat.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);

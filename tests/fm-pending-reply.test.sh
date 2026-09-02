@@ -327,8 +327,7 @@ seen_gate() {  # <state> <file>: 0 when every byte is already announced
 }
 prime_seen() {  # <state> <file>
   FM_STATE_OVERRIDE="$1" bash -c '
-    . "$1"; sig=$(fm_wake_signal_sig "$3") || exit 1
-    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+    . "$1"; fm_wake_status_mark_current "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
 }
 

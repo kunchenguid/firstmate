@@ -2,19 +2,23 @@
 
 Audience: maintainer verification.
 
-This record supports three active guarantees for promised public replies made through the myfirstmate relay:
+This record supports five active guarantees for promised public replies made through the myfirstmate relay:
 
 1. A promised final reply survives compaction and restart, reconciles from disk alone, and lands in the original thread exactly once.
 2. A home that never opted into the relay pays nothing for any of it.
 3. Delivering a final does not close the public loop: the registration is retained as `state=delivered` until `retire --reason`, session start surfaces an `open-loop` line, and `rechain` can bind follow-on work to the same thread.
+4. A first registration with no registry lock already held succeeds under stock macOS Bash 3.2 with `set -u`.
+5. A public loop whose work lives in a REMOTE secondmate home retires when readable remote state proves no link exists, or after readable and writable remote state clears the matching bound legacy Relay link; unreadable state, a non-writable matching link, an identity mismatch, a metadata lock it cannot acquire within its bound, or unconfirmed completion retains the loop instead of hanging, and `--force` still covers only the unresolved obligation.
 
 [`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
 
 ## Environment
 
-Recorded 2026-08-21 on Darwin 25.5.0 (arm64) with GNU bash 5.3.9, tasks-axi 0.2.5, jq 1.8.1, and ShellCheck 0.11.0 (the version `bin/fm-lint.sh` pins).
+Recorded 2026-09-01 on Darwin 25.5.0 (arm64) with GNU bash 5.3.9, tasks-axi 0.2.5, jq 1.8.1, and ShellCheck 0.11.0 (the version `bin/fm-lint.sh` pins).
+The stock macOS compatibility lane additionally runs the focused first-registration regression with `/bin/bash` 3.2.57 and a real `tasks-axi` installation.
 The relay is a fakebin `curl` in every case, so no public post is ever made; `tasks-axi` and `jq` are the real tools, because stubbing the obligation state machine would verify nothing.
+The remote-route cases fake only the SSH binary at the `FM_SSH_BIN` process seam and then run the real tracked `fm-remote-entrypoint.sh` against a local checkout standing in for the remote one, so the clear that has to reach the remote home actually runs there; no host and no network are involved.
 
 ## Restart end-to-end and regressions
 
@@ -61,6 +65,7 @@ ok - rechain posts the shipped follow-on into the same thread
 ok - rechain resumes the same obligation after an interrupted bind
 ok - concurrent rechains cannot fork one delivered source
 ok - failed rechain retirement keeps the source claimed by one resumable destination
+ok - first register succeeds with an empty lock list under /bin/bash
 ok - registration replay preserves delivered and retired loop states
 ok - redelivery does not report a retired loop as open
 ok - retire closes delivered loops after secondmate home removal
@@ -75,6 +80,14 @@ ok - brief fails explicitly when typed deliverable keys are unavailable
 ok - pre-change registrations are open loops and un-rechainable, never a crash
 ok - teardown reports an unreconciled legacy Relay link
 ok - secondmate promotion matches teardown parent resolution
+ok - a public loop bound to a remote secondmate home delivers and retires
+ok - --force still covers only the unresolved obligation, not the link clear
+ok - retire fails closed when a remote route is reassigned
+ok - retire fails closed when remote state is unreadable
+ok - retire fails closed when remote state is non-writable
+ok - retire accepts link absence in non-writable remote state
+ok - the guarded remote clear refuses a lock it cannot acquire instead of hanging
+ok - an unconfirmed remote clear is unknown completion, never a silent close
 ```
 
 The restart case is the end-to-end proof of guarantee 1.
@@ -86,8 +99,21 @@ It delivers a `report-ready` promised-final, asserts the registration is retaine
 `retire --reason` records its private receipt before removal and is the only close; replayed registration cannot reopen that retired loop.
 The concurrency and interrupted-bind cases verify that one delivered source cannot fork and that retry converges on the same destination obligation.
 A pre-change on-disk record (no `state=`, no `request_context_b64`) is an open loop and un-rechainable rather than a crash.
+The stock macOS Bash lane in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) sets `FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32` and runs `tests/fm-public-followup.test.sh` through real `/bin/bash` 3.2, proving the first `register` path is safe when its registry lock list starts empty.
 
-The existing Relay mention suite (`tests/fm-x-mode.test.sh`) is unchanged by this work.
+The eight remote-route cases are the proof of guarantee 5.
+A remote secondmate home exists only on its own machine, so its registration records no local path, and every close that must first clear the bound legacy Relay link had nothing local to act on.
+The first case pins that empty recorded path so it cannot go vacuous, then drives `deliver` and `retire` end to end and asserts the matching link inside the remote home is actually gone and the retirement receipt is written.
+The second case shows `--force` still governs only the unresolved-obligation refusal: a plain `retire` of an unresolved remote loop is still refused with the remote link untouched, while a forced one closes and clears it.
+The reassignment case replaces a delivered loop's route with a remote home whose reused work ID carries another Relay request and asserts that retirement retains the registration and leaves the replacement link untouched.
+The unreadable-state case makes the remote state directory non-searchable while it still contains a matching link and proves that an unconfirmable path fails closed without mutation.
+The two non-writable-state cases prove that a matching link refuses before lock acquisition because mutation is impossible, while a confirmed absent link succeeds because no mutation is needed.
+The unacquirable-lock case is the proof that the guarded clear refuses rather than wedges.
+It leaves the remote state directory WRITABLE, so the refusal can only come from the bounded lock wait and never from the writability precondition, and holds the metadata lock with a genuinely live process so the lock can never be reclaimed as stale.
+The writability precondition narrows the wedge window but cannot close it, because the parent can turn non-writable between that check and lock creation and a live holder is indistinguishable from it at the acquire; the ordinary unbounded wait retries forever, so before the bounded acquire this path hung with nothing reported instead of returning the reconciliation refusal.
+The case asserts the refusal, the retained registration, the absent receipt, the untouched remote link, and that the call returns at all, which is the observable difference from a wait that never ends.
+The final case makes the transport unreachable and asserts the close is refused with the registration retained, the remote link untouched, and unknown completion named rather than reported as a definite failure.
+A remote home running an older Firstmate copy does not recognize the guarded clear flag and therefore fails closed through the same retained-for-reconciliation message; operators must update that home before retrying, and there is deliberately no unguarded fallback.
 
 ## Relay-disabled zero overhead
 

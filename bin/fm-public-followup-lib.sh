@@ -385,14 +385,14 @@ FM_PF_SURFACED_BASENAME=surfaced
 # The relay poll compares it against the surfaced record so an unconsumed event
 # wakes firstmate once per new event, not once per poll cycle.
 fm_pf_events_signature() {
-  local dir entry names=
+  local dir entry pending_names=
   dir=$(fm_pf_events_dir "$1")
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   for entry in "$dir"/*.json; do
     [ -f "$entry" ] && [ ! -L "$entry" ] || continue
-    names="$names$(basename "$entry")
+    pending_names="$pending_names$(basename "$entry")
 "
   done
-  [ -n "$names" ] || return 1
-  printf '%s' "$names" | LC_ALL=C sort | fm_pf_sha256
+  [ -n "$pending_names" ] || return 1
+  printf '%s' "$pending_names" | LC_ALL=C sort | fm_pf_sha256
 }

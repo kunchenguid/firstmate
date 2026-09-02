@@ -18,9 +18,9 @@
 #                                      pruned)
 #
 # Clear a legacy link without posting:
-#   fm-x-followup.sh --clear <task-id>
+#   fm-x-followup.sh --clear <task-id> [--expect-request <request-id>]
 #     idempotently removes only the X follow-up metadata for a typed terminal
-#     outcome.
+#     outcome. With --expect-request, a present link must match that request.
 #
 # Post (after composing the reply to a file or stdin):
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
@@ -72,13 +72,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
-  echo "usage: fm-x-followup.sh --check <task-id> | --clear <task-id> | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -" >&2
+  echo "usage: fm-x-followup.sh --check <task-id> | --clear <task-id> [--expect-request <request-id>] | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -" >&2
 }
 
 help() {
   cat <<'EOF'
 usage: fm-x-followup.sh --check <task-id>
-       fm-x-followup.sh --clear <task-id>
+       fm-x-followup.sh --clear <task-id> [--expect-request <request-id>]
        fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
        fm-x-followup.sh <task-id> [--image <path>] [--final] -
 
@@ -88,6 +88,8 @@ X-mode-linked task and manage the link's follow-up counter.
 Options:
   --check          Print the request_id when a follow-up is due.
   --clear          Clear only the X follow-up link; never post.
+  --expect-request <request-id>
+                   With --clear, require a present link to match this request.
   --image <path>   Attach one local image file; threaded replies attach it to the opener tweet or message.
   --final          Clear the link after this post regardless of the remaining count.
   --text-file <path>
@@ -117,10 +119,19 @@ case "${1:-}" in
 esac
 
 FINAL=0
+EXPECT_REQUEST_SET=0
+EXPECT_REQUEST=
 if [ "${1:-}" = --clear ]; then
   MODE=clear
   ID=${2:-}
-  if [ -z "$ID" ] || [ "$#" -gt 2 ]; then usage; exit 2; fi
+  if [ "$#" -eq 4 ] && [ "${3:-}" = --expect-request ]; then
+    EXPECT_REQUEST_SET=1
+    EXPECT_REQUEST=${4-}
+  elif [ "$#" -ne 2 ]; then
+    usage
+    exit 2
+  fi
+  if [ -z "$ID" ]; then usage; exit 2; fi
 elif [ "${1:-}" = --check ]; then
   MODE=check
   ID=${2:-}
@@ -157,9 +168,18 @@ case "$ID" in
 esac
 
 META="$STATE/$ID.meta"
+if [ -e "$META" ] || [ -L "$META" ]; then
+  fm_backlog_record_present "$META" "task record" "$STATE" \
+    || { echo "fm-x-followup: unsafe task record in state/$ID.meta" >&2; exit 1; }
+fi
 if [ "$MODE" = clear ]; then
-  fmx_meta_link_clear "$META" \
-    || { echo "fm-x-followup: could not clear the link in state/$ID.meta" >&2; exit 1; }
+  if [ "$EXPECT_REQUEST_SET" -eq 1 ]; then
+    fmx_meta_link_clear "$META" "$EXPECT_REQUEST" \
+      || { echo "fm-x-followup: could not clear the link in state/$ID.meta" >&2; exit 1; }
+  else
+    fmx_meta_link_clear "$META" \
+      || { echo "fm-x-followup: could not clear the link in state/$ID.meta" >&2; exit 1; }
+  fi
   printf '%s\n' "$ID"
   exit 0
 fi

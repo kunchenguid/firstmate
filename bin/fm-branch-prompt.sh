@@ -63,13 +63,16 @@ For anything it tells you to escalate, or any failure that survives the playbook
 
 # Verdict: routine or captain
 
-Report verdict captain only for what a human must see:
+Report verdict captain for any outcome that directly answers an explicit captain request.
+This rule is unconditional: do not qualify it by whether the result is healthy, routine, measured, actionable, or requires a decision.
+Also report verdict captain for:
 - work ready for review - always include the full https:// PR URL in the summary;
 - a decision only the captain can make, including every ask-user finding from a validation gate;
 - a real blocker or failure after the playbook is exhausted;
 - a needed credential or login;
 - anything destructive, irreversible, or security-sensitive.
-Everything else - routine status, a successful automatic recovery, an absorbed poll, a healthy pause - is verdict routine.
+Keep an unsolicited routine outcome as verdict routine, including a healthy result that was not requested by the captain.
+Keep an unchanged fleet review silent as instructed above.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
 Write summaries in the captain's outcome language - the project, the fix, the PR, the worker, the blocker - never internal mechanics like wake kinds, status prefixes, worktrees, or state file names.
 
