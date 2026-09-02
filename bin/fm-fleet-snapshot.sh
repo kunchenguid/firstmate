@@ -111,6 +111,7 @@ esac
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
+FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=${FM_SNAPSHOT_LOCAL_READ_CONCURRENCY:-8}
 FM_SNAPSHOT_BUDGET=${FM_SNAPSHOT_BUDGET:-5}
 FM_SNAPSHOT_CACHE_DIR=${FM_SNAPSHOT_CACHE_DIR:-$STATE/secondmate-summary-cache}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
@@ -143,6 +144,7 @@ case "$FM_SNAPSHOT_SECONDMATES" in
     ;;
 esac
 validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_LOCAL_READ_CONCURRENCY "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY"
 validate_positive_bound FM_SNAPSHOT_BUDGET "$FM_SNAPSHOT_BUDGET"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
@@ -201,8 +203,9 @@ FM_SNAPSHOT_CACHE_DIR used when the live read fails, is invalid, or consumes the
 budget. A home with neither a valid ledger nor a valid cached copy is reported
 unreadable with the reason; collection never computes a summary in that home.
 Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
-(default 10 seconds); a read that hits the bound reports state unknown. Remote
-secondmate endpoint liveness is not probed by this command.
+(default 10 seconds); a read that hits the bound reports state unknown. Independent
+local reads run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8).
+Remote secondmate endpoint liveness is not probed by this command.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -457,13 +460,92 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   ' < "$backlog"
 }
 
+SNAPSHOT_TASK_DIR=
+
+snapshot_task_cleanup() {
+  [ -z "$SNAPSHOT_TASK_DIR" ] || rm -rf -- "$SNAPSHOT_TASK_DIR"
+  SNAPSHOT_TASK_DIR=
+}
+
+snapshot_wait_current_reads() {  # <pid>...
+  local pid rc=0
+  for pid in "$@"; do
+    wait "$pid" || rc=1
+  done
+  return "$rc"
+}
+
+prefetch_task_observations() {  # <meta> <id>
+  local meta=$1 id=$2 remote_host current_file endpoint_file current_pid current_rc=0
+  local kind backend target endpoint_exists=null agent_alive=not_checked
+  remote_host=$(meta_value "$meta" remote_host)
+  current_file="$SNAPSHOT_TASK_DIR/$id.json"
+  endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
+  if [ -n "$remote_host" ]; then
+    jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
+      > "$current_file" || return 1
+    printf 'endpoint_exists=null\nagent_alive=unknown\n' > "$endpoint_file"
+    return 0
+  fi
+
+  crew_state_json "$id" > "$current_file" &
+  current_pid=$!
+  kind=$(meta_value "$meta" kind)
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  if [ -n "$target" ]; then
+    if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+      endpoint_exists=true
+    else
+      endpoint_exists=false
+    fi
+    if [ "$kind" = secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+    fi
+  fi
+  printf 'endpoint_exists=%s\nagent_alive=%s\n' "$endpoint_exists" "$agent_alive" > "$endpoint_file" || current_rc=1
+  wait "$current_pid" || current_rc=1
+  return "$current_rc"
+}
+
+# Current-state and endpoint reads are independent observations. Start each
+# task's pair together so five local workers pay one slow no-mistakes response
+# window rather than five in series, while every command bound remains owned by
+# fm-timeout-lib.sh.
+prefetch_task_current_states() {
+  local meta id active=0 rc=0
+  local -a pids=()
+  snapshot_task_cleanup
+  SNAPSHOT_TASK_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-tasks.XXXXXX") || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    prefetch_task_observations "$meta" "$id" &
+    pids[active]=$!
+    active=$((active + 1))
+    if [ "$active" -ge "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY" ]; then
+      snapshot_wait_current_reads "${pids[@]}" || rc=1
+      pids=()
+      active=0
+    fi
+  done
+  if [ "$active" -gt 0 ]; then
+    snapshot_wait_current_reads "${pids[@]}" || rc=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    snapshot_task_cleanup
+    return 1
+  fi
+}
+
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
-  local remote_host remote_root
+  local remote_host remote_root current_file endpoint_file observation_line rc
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
+  prefetch_task_current_states || return 1
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -500,13 +582,11 @@ task_json_lines() {
       pr_source=absent
     fi
 
-    if [ -n "$remote_host" ]; then
-      # Remote endpoint liveness belongs to supervision. The snapshot never
-      # probes a persistent remote endpoint while assembling parent inventory.
-      current_json=$(jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}')
-    else
-      current_json=$(crew_state_json "$id")
-    fi
+    current_file="$SNAPSHOT_TASK_DIR/$id.json"
+    current_json=$(cat "$current_file") || {
+      snapshot_task_cleanup
+      return 1
+    }
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
@@ -545,21 +625,16 @@ task_json_lines() {
 
     endpoint_exists=null
     agent_alive=not_checked
-    if [ -n "$remote_host" ]; then
-      agent_alive=unknown
-    else
-      if [ -n "$target" ]; then
-        if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
-          endpoint_exists=true
-        else
-          endpoint_exists=false
-        fi
-      fi
-      if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
-      fi
-    fi
-
+    endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
+    while IFS= read -r observation_line || [ -n "$observation_line" ]; do
+      case "$observation_line" in
+        endpoint_exists=*) endpoint_exists=${observation_line#*=} ;;
+        agent_alive=*) agent_alive=${observation_line#*=} ;;
+      esac
+    done < "$endpoint_file" || {
+      snapshot_task_cleanup
+      return 1
+    }
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$meta")
     status_json=$event_json
@@ -648,6 +723,9 @@ task_json_lines() {
           end)
       }'
   done | jq -s 'sort_by(.id)'
+  rc=$?
+  snapshot_task_cleanup
+  return "$rc"
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks
@@ -1179,7 +1257,11 @@ snapshot_collection_cleanup() {
   SNAPSHOT_COLLECT_DIR=
   SNAPSHOT_SUMMARY_FILTER=
 }
-trap snapshot_collection_cleanup EXIT
+snapshot_cleanup() {
+  snapshot_task_cleanup
+  snapshot_collection_cleanup
+}
+trap snapshot_cleanup EXIT
 
 bounded_parent_activities_json() {  # <status-file>
   local f=$1 out rc reason script

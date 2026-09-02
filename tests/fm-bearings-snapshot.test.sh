@@ -2163,6 +2163,59 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_large_local_snapshot_composes_under_five_seconds_without_projection_drift() {
+  local home fakebin worktree serial parallel started elapsed i
+  home=$(make_home large-local-snapshot)
+  worktree="$home/projects/shared-worktree"
+  fm_git_init_commit "$worktree"
+  git -C "$worktree" checkout -qb fm/synthetic-large-local
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = "axi status" ] && [ "${FAKE_NM_DELAY:-0}" = 1 ]; then sleep 1; fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+
+  {
+    printf '## In flight\n'
+    i=1
+    while [ "$i" -le 5 ]; do
+      printf -- '- [ ] local-%s - Synthetic local worker %s (repo: firstmate) (kind: ship)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Queued\n\n## Done\n'
+    i=1
+    while [ "$i" -le 300 ]; do
+      printf -- '- [x] history-%s - Historical completed item %s https://github.com/acme/firstmate/pull/%s (repo: firstmate) (kind: ship) (done 2026-01-01)\n' "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 5 ]; do
+    fm_write_meta "$home/state/local-$i.meta" \
+      "window=fixture:local-$i" "worktree=$worktree" "project=firstmate" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    printf 'working: synthetic fixture\n' > "$home/state/local-$i.status"
+    i=$((i + 1))
+  done
+
+  serial=$(FAKE_NM_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
+  started=$(date +%s)
+  parallel=$(FAKE_NM_DELAY=1 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 run "$home" "$fakebin" --json)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 5 ] \
+    || fail "five local current-state reads exceeded the local composition target (${elapsed}s)"
+  [ "$parallel" = "$serial" ] \
+    || fail "concurrent local observation changed the fm-bearings.v1 projection"
+  printf '%s' "$parallel" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.in_flight | length) == 5
+      and ([.in_flight[].id] | sort) == ["local-1","local-2","local-3","local-4","local-5"]
+  ' >/dev/null || fail "large local snapshot lost a worker row: $parallel"
+  pass "large local snapshot stays under five seconds with byte-identical serial and concurrent projections"
+}
+
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
   local parent fakebin json started elapsed i remote_home pid collector_pid sleeper_pid duplicate_base
   parent=$(make_home concurrent-remote-ledgers)
@@ -2283,6 +2336,7 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+test_large_local_snapshot_composes_under_five_seconds_without_projection_drift
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work

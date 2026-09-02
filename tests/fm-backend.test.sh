@@ -531,7 +531,7 @@ test_backend_validate_spawn_accepts_orca() {
 }
 
 test_meta_get_and_backend_of_meta() {
-  local meta=$TMP_ROOT/meta-get.meta
+  local meta=$TMP_ROOT/meta-get.meta edge=$TMP_ROOT/meta-get-edge.meta
   fm_write_meta "$meta" "window=firstmate:fm-x1" "harness=claude"
   [ "$(fm_meta_get "$meta" window)" = "firstmate:fm-x1" ] || fail "fm_meta_get did not read window="
   [ "$(fm_meta_get "$meta" missing)" = "" ] || fail "fm_meta_get should print nothing for an absent key"
@@ -540,7 +540,11 @@ test_meta_get_and_backend_of_meta() {
   printf 'backend=tmux\n' >> "$meta"
   [ "$(fm_backend_of_meta "$meta")" = tmux ] || fail "fm_backend_of_meta should read an explicit backend=tmux"
 
-  pass "fm_meta_get / fm_backend_of_meta: read key=value, default backend to tmux"
+  printf 'token=first\ntoken=last=value' > "$edge"
+  [ "$(fm_meta_get "$edge" token)" = "last=value" ] \
+    || fail "fm_meta_get did not preserve last-value or no-final-newline semantics"
+
+  pass "fm_meta_get / fm_backend_of_meta: read last key=value and default backend to tmux"
 }
 
 test_resolve_selector_three_forms() {
