@@ -1171,7 +1171,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -2855,7 +2855,8 @@ EOF
       printf '%s\n' "$TURNEND" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.agy-turnend-token"
       sq_agy_auth_dir=$(shell_quote "$AGY_AUTH_DIR")
-      cat > "$AGY_PLUGIN_DIR/fm-turn-end.sh" <<EOF
+      agy_hook_tmp=$(mktemp "$AGY_PLUGIN_DIR/.fm-turn-end.sh.XXXXXXXXXXXX")
+      cat > "$agy_hook_tmp" <<EOF
 #!/usr/bin/env bash
 # Firstmate agy turn-end hook. Managed by bin/fm-spawn.sh.
 # Deliberately passive: every path is silent, prints one JSON object, exits zero.
@@ -2887,10 +2888,15 @@ case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
 touch -- "\$t" 2>/dev/null || true
 exit 0
 EOF
-      chmod +x "$AGY_PLUGIN_DIR/fm-turn-end.sh"
-      printf '{"name":"fm-turn-end"}\n' > "$AGY_PLUGIN_DIR/plugin.json"
+      chmod +x "$agy_hook_tmp"
+      mv -f "$agy_hook_tmp" "$AGY_PLUGIN_DIR/fm-turn-end.sh"
       agy_hook_command=$(json_escape "bash $(shell_quote "$AGY_PLUGIN_DIR/fm-turn-end.sh")")
-      printf '{"fm-turn-end":{"Stop":[{"type":"command","command":"%s","timeout":10}]}}\n' "$agy_hook_command" > "$AGY_PLUGIN_DIR/hooks.json"
+      agy_hooks_tmp=$(mktemp "$AGY_PLUGIN_DIR/.hooks.json.XXXXXXXXXXXX")
+      printf '{"fm-turn-end":{"Stop":[{"type":"command","command":"%s","timeout":10}]}}\n' "$agy_hook_command" > "$agy_hooks_tmp"
+      mv -f "$agy_hooks_tmp" "$AGY_PLUGIN_DIR/hooks.json"
+      agy_plugin_tmp=$(mktemp "$AGY_PLUGIN_DIR/.plugin.json.XXXXXXXXXXXX")
+      printf '{"name":"fm-turn-end"}\n' > "$agy_plugin_tmp"
+      mv -f "$agy_plugin_tmp" "$AGY_PLUGIN_DIR/plugin.json"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-agy-turnend"
       exclude_path '.fm-agy-turnend'
       ;;

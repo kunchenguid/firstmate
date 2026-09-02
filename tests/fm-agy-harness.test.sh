@@ -212,6 +212,22 @@ EOF
   pass "agy refuses a secondmate spawn and says why"
 }
 
+test_secondmate_positional_agy_is_refused() {
+  local rec case_dir home proj wt fakebin agy_home id out
+  rec=$(make_spawn_case secondmate-positional)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_AGY_CONFIG_HOME="$agy_home" fm_test_run_spawn "$home" "$wt" "$fakebin" \
+    "$id" agy --secondmate 2>&1) \
+    && fail "positional agy was accepted for a secondmate spawn"
+  case "$out" in
+    *"crewmate/scout adapter only"*) : ;;
+    *) fail "positional agy secondmate refusal did not name the reason: $out" ;;
+  esac
+  pass "positional agy refuses a secondmate spawn and says why"
+}
+
 # --- the fullyIdle turn-end rule -------------------------------------------
 
 # Drive the INSTALLED hook, not a copy of its logic, so the assertion covers
@@ -447,6 +463,7 @@ test_tmux_process_classification
 test_launch_shape
 test_effort_is_clamped_to_supported_levels
 test_secondmate_is_refused
+test_secondmate_positional_agy_is_refused
 test_turnend_requires_fully_idle
 test_turnend_requires_registered_token
 test_turnend_never_blocks_the_stop
