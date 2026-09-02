@@ -252,6 +252,174 @@ then
 fi
 pass "all supported harness formats join positive and negative tool evidence"
 
+# A candidate runtime installed under the operator's home (every one of them is:
+# ~/.nvm, ~/.local, ~/.bun) must still start. Resolving its own path stats every
+# ancestor, including the home directory node the profile denies, so denying that
+# node outright refuses the runtime at startup before it reads anything.
+if [ "$(uname -s)" = Darwin ] && command -v node >/dev/null 2>&1; then
+  SANDBOX_HOME="$TMP_ROOT/sandbox-home"
+  mkdir -p "$SANDBOX_HOME/.nvm" "$TMP_ROOT/sandbox/runs/current" \
+    "$TMP_ROOT/sandbox/homes/current/origin.git" "$TMP_ROOT/sandbox/workspace"
+  printf 'operator secret\n' >"$SANDBOX_HOME/private-note.txt"
+  printf 'process.stdout.write("runtime-started");\n' >"$SANDBOX_HOME/.nvm/probe.js"
+  if ! HOME="$SANDBOX_HOME" python3 - "$ROOT" "$TMP_ROOT/sandbox" "$SANDBOX_HOME" <<'PY'
+import importlib.util
+import pathlib
+import subprocess
+import sys
+
+root, sandbox, home = (pathlib.Path(value) for value in sys.argv[1:4])
+spec = importlib.util.spec_from_file_location("benchmark", root / "scripts/canonical-guard-benchmark/benchmark.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+worktree = sandbox / "runs/current"
+candidate_home = sandbox / "homes/current"
+origin = candidate_home / "origin.git"
+workspace = sandbox / "workspace"
+
+
+def sandboxed(command, harness=""):
+    argv = module.macos_sandbox_command(command, worktree, origin, candidate_home, workspace, harness)
+    return subprocess.run(argv, cwd=worktree, capture_output=True, text=True)
+
+started = sandboxed(["node", str(home / ".nvm/probe.js")])
+if started.returncode != 0 or started.stdout != "runtime-started":
+    raise SystemExit(f"a runtime under the operator home could not start: rc={started.returncode} {started.stderr[:400]}")
+for granted in module.runtime_scratch_paths("claude", worktree):
+    probe = granted / "sandbox-probe"
+    allowed = sandboxed(["/usr/bin/touch", str(probe)], harness="claude")
+    probe.unlink(missing_ok=True)
+    if allowed.returncode != 0:
+        raise SystemExit(f"a runtime could not create its own scratch dir under {granted}: {allowed.stderr[:200]}")
+    shared_root = granted.parent
+    outside_own = sandboxed(["/usr/bin/touch", str(shared_root / "sibling-trespass")], harness="claude")
+    if outside_own.returncode == 0:
+        (shared_root / "sibling-trespass").unlink(missing_ok=True)
+        raise SystemExit("the profile granted the shared scratch root instead of this run's own child")
+outside = sandboxed(["/usr/bin/touch", "/tmp/canonical-guard-should-not-exist"], harness="claude")
+if outside.returncode == 0:
+    pathlib.Path("/tmp/canonical-guard-should-not-exist").unlink(missing_ok=True)
+    raise SystemExit("the profile allowed writes across the whole temp directory")
+secret = sandboxed(["/bin/cat", str(home / "private-note.txt")])
+if secret.returncode == 0 or "operator secret" in secret.stdout:
+    raise SystemExit("the profile leaked operator-home file content to the candidate")
+listing = sandboxed(["/bin/ls", str(home)])
+if listing.returncode == 0:
+    raise SystemExit("the profile let the candidate list the operator home")
+PY
+  then
+    fail "macOS profile must let a home-installed runtime start while still blinding the operator home"
+  fi
+  pass "macOS profile permits ancestor traversal without exposing the operator home"
+else
+  echo "skip: macOS sandbox profile check needs Darwin and node"
+fi
+
+# A runtime that reads the system trust store rather than bundling CAs cannot
+# validate a certificate in the profile and retries until the run times out, so
+# the environment must name a CA bundle the profile can actually read.
+if ! python3 - "$ROOT" "$TMP_ROOT/sandbox-ca" <<'PY'
+import importlib.util
+import os
+import pathlib
+import subprocess
+import sys
+
+root, sandbox = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("benchmark", root / "scripts/canonical-guard-benchmark/benchmark.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+worktree = sandbox / "runs/current"
+candidate_home = sandbox / "homes/current"
+origin = candidate_home / "origin.git"
+workspace = sandbox / "workspace"
+for path in (worktree, origin, workspace):
+    path.mkdir(parents=True, exist_ok=True)
+
+bundle = module.system_ca_bundle()
+if bundle is None:
+    print("skip: no system CA bundle on this host")
+    raise SystemExit(0)
+environment = module.candidate_environment("codex", candidate_home)
+if environment.get("SSL_CERT_FILE") != bundle:
+    raise SystemExit(f"candidate environment did not name a CA bundle: {environment.get('SSL_CERT_FILE')}")
+if sys.platform == "darwin":
+    argv = module.macos_sandbox_command(["/bin/cat", bundle], worktree, origin, candidate_home, workspace)
+    readable = subprocess.run(argv, cwd=worktree, capture_output=True, text=True)
+    if readable.returncode != 0 or "BEGIN CERTIFICATE" not in readable.stdout:
+        raise SystemExit(f"the named CA bundle is unreadable inside the profile: {readable.stderr[:300]}")
+chosen = module.candidate_environment("codex", candidate_home)
+os.environ["SSL_CERT_FILE"] = "/operator/choice.pem"
+try:
+    if module.candidate_environment("codex", candidate_home).get("SSL_CERT_FILE") != "/operator/choice.pem":
+        raise SystemExit("an operator-chosen CA bundle was overridden")
+finally:
+    os.environ.pop("SSL_CERT_FILE", None)
+PY
+then
+  fail "candidate runs must get a CA bundle the sandbox profile can read"
+fi
+pass "candidate environment names a readable CA bundle without overriding the operator"
+
+# Two runtime dependencies the run profile breaks silently: codex applying its
+# own sandbox inside ours (macOS refuses a nested sandbox_apply, so every command
+# fails while the model still burns tokens), and Claude's credential living in
+# the login keychain, which sits inside the operator home the profile blinds.
+cat >"$FAKEBIN/security" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${1:-}" = find-generic-password ] || exit 1
+if [ "${3:-}" = "Claude Code-credentials" ]; then
+  printf '{"claudeAiOauth":{"accessToken":"fixture-token"}}'
+  exit 0
+fi
+exit 44
+SH
+chmod +x "$FAKEBIN/security"
+if ! PATH="$FAKEBIN:$PATH" python3 - "$ROOT" "$TMP_ROOT/runtime-deps" <<'PY'
+import argparse
+import importlib.util
+import pathlib
+import sys
+
+root, scratch = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("benchmark", root / "scripts/canonical-guard-benchmark/benchmark.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+worktree = scratch / "runs/current"
+candidate_home = scratch / "homes/current"
+for path in (worktree, candidate_home):
+    path.mkdir(parents=True, exist_ok=True)
+
+args = argparse.Namespace(
+    harness="codex", model="fixture-model", effort="high", provider=None,
+    mirror=candidate_home / "origin.git",
+)
+command = module.harness_command(args, worktree, candidate_home, "do the task")
+modes = [command[index + 1] for index, item in enumerate(command) if item == "--sandbox"]
+if modes != ["danger-full-access"]:
+    raise SystemExit(f"codex must not apply a second sandbox inside the run profile: {modes}")
+
+home_credential = pathlib.Path.home() / ".claude/.credentials.json"
+if home_credential.is_file():
+    print("skip: this operator keeps a Claude credential file, so the keychain path is unused")
+    raise SystemExit(0)
+if sys.platform != "darwin":
+    print("skip: keychain credentials are a macOS path")
+    raise SystemExit(0)
+module.copy_candidate_credentials("claude", candidate_home)
+materialised = candidate_home / ".claude/.credentials.json"
+if not materialised.is_file() or "fixture-token" not in materialised.read_text():
+    raise SystemExit("the keychain credential was not materialised into the candidate home")
+if materialised.stat().st_mode & 0o077:
+    raise SystemExit("the materialised credential is group or world readable")
+PY
+then
+  fail "codex must not nest a sandbox and Claude must receive its keychain credential"
+fi
+pass "runtime dependencies the profile blinds are supplied instead of failing mid-run"
+
 cat >"$FAKEBIN/codex" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -548,5 +716,647 @@ done
 jq -e '.max_load == 8 and .timeout_seconds == 30 and (.runs | length) == 14' "$PLAN_WORKSPACE/frozen-plan.json" >/dev/null \
   || fail "freeze did not preserve the complete seven-pair execution design"
 pass "freeze validates and binds the complete paired execution design"
+
+if "$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/valid-plan.json" >/dev/null 2>&1; then
+  fail "freeze silently replaced an already-frozen plan"
+fi
+if "$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/valid-plan.json" --supersede >/dev/null 2>&1; then
+  fail "freeze superseded a plan without a recorded reason"
+fi
+FROZEN_BEFORE=$(jq -r '.frozen_at' "$PLAN_WORKSPACE/frozen-plan.json")
+"$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/valid-plan.json" \
+  --supersede --reason "instrument defect found before any outcome was scored" >/dev/null
+ARCHIVED=$(ls "$PLAN_WORKSPACE/superseded"/*.json)
+jq -e --arg was "$FROZEN_BEFORE" '.frozen_at == $was and (.superseded_reason | length) > 0' "$ARCHIVED" >/dev/null \
+  || fail "the superseded plan was not archived with its reason"
+[ ! -w "$ARCHIVED" ] || fail "the archived plan stayed writable"
+jq -e '.supersedes.reason == "instrument defect found before any outcome was scored"' \
+  "$PLAN_WORKSPACE/frozen-plan.json" >/dev/null || fail "the new plan does not name what it replaced"
+cat >"$TMP_ROOT/plan-verdict.json" <<'JSON'
+{"run_id":"pair-1-guard-on","machine":"clean","semantic":"clean","outcome_class":"never-duplicated","false_fire":false,"ack":false,"review_rounds":0,"scorers":[{"id":"human","verdict":"clean","rationale":"No duplicate."},{"id":"judge","verdict":"clean","rationale":"No duplicate."}],"machine_evidence":{"historical_duplicates":[]}}
+JSON
+mkdir -p "$PLAN_WORKSPACE/bundles/pair-1-guard-on"
+jq '.run_id="pair-1-guard-on" | .stage="matrix" | .gate.firing_count=0 | .gate.firings=[] | .gate.remediation_text_exact=[]' \
+  "$MANIFEST" >"$PLAN_WORKSPACE/bundles/pair-1-guard-on/manifest.json"
+"$BENCH" record-verdict --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/plan-verdict.json" >/dev/null
+if "$BENCH" freeze --workspace "$PLAN_WORKSPACE" --file "$TMP_ROOT/valid-plan.json" \
+    --supersede --reason "too late, an outcome is already known" >/dev/null 2>&1; then
+  fail "freeze superseded a plan after an outcome had been scored"
+fi
+pass "a frozen plan is replaceable only before any outcome exists, and only on the record"
+
+RANK_WORKSPACE="$TMP_ROOT/rank-workspace"
+mkdir -p "$RANK_WORKSPACE/bundles"
+cp "$WORKSPACE/workspace.json" "$RANK_WORKSPACE/workspace.json"
+RUBRIC="$TMP_ROOT/rank-rubric.json"
+cat >"$RUBRIC" <<'JSON'
+{"weights":{"suite":30,"duplicate":15,"equivalence":15,"judged":40},
+ "criteria":[{"id":"Q1","name":"Contract fidelity"},{"id":"Q2","name":"Reads like the neighbours"}]}
+JSON
+RUBRIC_SHA=$(shasum -a 256 "$RUBRIC" | cut -d' ' -f1)
+SUITE_COMMAND="fake-suite run"
+python3 - "$TMP_ROOT" "$RUBRIC_SHA" "$SUITE_COMMAND" <<'PY'
+import json
+import pathlib
+import sys
+
+root, rubric_sha, suite_command = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+
+
+def entry(run_id, model, lane, arm="guard-on", lane_order=1, provider=None):
+    return {
+        "run_id": run_id, "arm": arm, "harness": "codex", "model": model, "provider": provider,
+        "effort": None, "helper_family": "distance-helper", "lane": lane,
+        "lane_order": lane_order, "concurrent_lane_count": 1,
+    }
+
+
+def plan(runs, **overrides):
+    value = {
+        "plan_shape": "ranking", "condition_arm": "guard-on", "rubric_sha256": rubric_sha,
+        "suite_command": suite_command, "ratified_at": "2026-01-01T00:00:00Z", "amendment": "fixture",
+        "prompt_sha256": "a" * 64, "max_load": 8, "timeout_seconds": 30, "runs": runs,
+    }
+    value.update(overrides)
+    return value
+
+
+healthy = [entry("rank-fast", "fixture-fast", "lane-1"), entry("rank-slow", "fixture-slow", "lane-2"), entry("rank-blind", "fixture-blind", "lane-3")]
+cases = {
+    "rank-mixed-arm-plan.json": plan([entry("rank-fast", "fixture-fast", "lane-1"), entry("rank-slow", "fixture-slow", "lane-2", arm="guard-off")]),
+    "rank-repeat-candidate-plan.json": plan([entry("rank-fast", "fixture-fast", "lane-1"), entry("rank-again", "fixture-fast", "lane-2")]),
+    "rank-paired-lane-plan.json": plan([entry("rank-fast", "fixture-fast", "lane-1"), entry("rank-slow", "fixture-slow", "lane-1", lane_order=2)]),
+    "rank-single-candidate-plan.json": plan([entry("rank-fast", "fixture-fast", "lane-1")]),
+    "rank-no-rubric-plan.json": plan(healthy, rubric_sha256="not-a-digest"),
+    "rank-no-suite-plan.json": plan(healthy, suite_command="   "),
+    "rank-bad-shape-plan.json": plan(healthy, plan_shape="freeform"),
+    "rank-valid-plan.json": plan(healthy),
+    # A plan that omits plan_shape must still face the confirmatory slate rules.
+    "rank-unshaped-plan.json": {key: value for key, value in plan(healthy).items() if key != "plan_shape"},
+}
+for name, value in cases.items():
+    (root / name).write_text(json.dumps(value))
+PY
+for refusal in mixed-arm repeat-candidate paired-lane single-candidate no-rubric no-suite bad-shape unshaped; do
+  if "$BENCH" freeze --workspace "$RANK_WORKSPACE" --file "$TMP_ROOT/rank-$refusal-plan.json" >/dev/null 2>&1; then
+    fail "freeze accepted a ranking plan with a $refusal defect"
+  fi
+done
+"$BENCH" freeze --workspace "$RANK_WORKSPACE" --file "$TMP_ROOT/rank-valid-plan.json" >/dev/null
+jq -e '.plan_shape == "ranking" and .condition_arm == "guard-on" and (.runs | length) == 3 and (.runs | map(.arm) | unique | length) == 1' \
+  "$RANK_WORKSPACE/frozen-plan.json" >/dev/null \
+  || fail "freeze did not bind the single-condition ranking slate"
+pass "freeze binds a single-condition ranking slate and refuses arms, repeats, and an unfrozen rubric"
+
+cat >"$FAKEBIN/fake-suite" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${1:-}" = run ] || exit 3
+shift
+[ "$#" -eq 1 ] || exit 4
+case "$1" in
+  probe.test.ts) exit 0 ;;
+  broken.test.ts) exit 1 ;;
+  *) exit 5 ;;
+esac
+SH
+chmod +x "$FAKEBIN/fake-suite"
+rank_bundle() {
+  bundle="$RANK_WORKSPACE/bundles/$1"
+  mkdir -p "$bundle"
+  jq --arg id "$1" --arg model "$2" --argjson tokens "$4" \
+    '.run_id=$id | .model=$model | .stage="matrix" | .arm="guard-on" | .lane="lane-x" | .usage.total_tokens=$tokens
+     | .gate.firing_count=0 | .gate.firings=[] | .gate.remediation_text_exact=[]' \
+    "$WORKSPACE/bundles/smoke-codex/manifest.json" >"$bundle/manifest.json"
+  if [ -n "$3" ]; then
+    path="packages/backend/api/logic/__tests__/$3"
+  else
+    path="packages/backend/api/logic/rank-fixture-module.ts"
+  fi
+  {
+    printf 'diff --git a/%s b/%s\n' "$path" "$path"
+    printf 'new file mode 100644\n--- /dev/null\n+++ b/%s\n' "$path"
+    printf '@@ -0,0 +1,1 @@\n+// generated by the ranking fixture\n'
+  } >"$bundle/final.diff"
+}
+rank_bundle rank-fast fixture-fast probe.test.ts 1000
+rank_bundle rank-slow fixture-slow broken.test.ts 4000
+rank_bundle rank-blind fixture-blind '' null
+if "$BENCH" rank-suite --workspace "$RANK_WORKSPACE" --run-id rank-fast --suite-command 'fake-suite other' >/dev/null 2>&1; then
+  fail "rank-suite ran a command the plan did not freeze"
+fi
+PATH="$FAKEBIN:$PATH" "$BENCH" rank-suite --workspace "$RANK_WORKSPACE" --run-id rank-fast --suite-command "$SUITE_COMMAND" >/dev/null
+PATH="$FAKEBIN:$PATH" "$BENCH" rank-suite --workspace "$RANK_WORKSPACE" --run-id rank-slow --suite-command "$SUITE_COMMAND" >/dev/null
+PATH="$FAKEBIN:$PATH" "$BENCH" rank-suite --workspace "$RANK_WORKSPACE" --run-id rank-blind --suite-command "$SUITE_COMMAND" >/dev/null
+if PATH="$FAKEBIN:$PATH" "$BENCH" rank-suite --workspace "$RANK_WORKSPACE" --run-id rank-fast --suite-command "$SUITE_COMMAND" >/dev/null 2>&1; then
+  fail "rank-suite overwrote an already recorded executable verdict"
+fi
+jq -se '
+  (map(select(.run_id=="rank-fast")) | first) as $fast
+  | (map(select(.run_id=="rank-slow")) | first) as $slow
+  | (map(select(.run_id=="rank-blind")) | first) as $blind
+  | $fast.status == "pass" and $fast.filters == ["probe.test.ts"]
+    and ($fast.test_paths | first | endswith("__tests__/probe.test.ts"))
+    and $slow.status == "fail" and $slow.exit_code == 1
+    and $blind.status == "no-tests" and $blind.test_paths == []
+' "$RANK_WORKSPACE/suite-results.jsonl" >/dev/null \
+  || fail "rank-suite did not execute the frozen suite against each run's own added tests"
+pass "rank-suite replays each captured tree and executes the frozen suite independently"
+
+for run_id in rank-fast rank-slow rank-blind; do
+  jq -n --arg id "$run_id" \
+    '{run_id:$id,machine:"clean",semantic:"clean",outcome_class:"never-duplicated",false_fire:false,ack:false,review_rounds:0,scorers:[{id:"human",verdict:"clean",rationale:"No duplicate."},{id:"judge",verdict:"clean",rationale:"No duplicate."}],machine_evidence:{historical_duplicates:[]}}' \
+    >"$TMP_ROOT/$run_id-rank-verdict.json"
+  "$BENCH" record-verdict --workspace "$RANK_WORKSPACE" --file "$TMP_ROOT/$run_id-rank-verdict.json" >/dev/null
+done
+cat >"$TMP_ROOT/rank-quality.json" <<'JSON'
+{"runs":{
+  "rank-fast":{"Q1":{"score":2,"evidence":"final.diff returns the specified row shape."},"Q2":{"score":2,"evidence":"final.diff follows the neighbouring module layout."}},
+  "rank-slow":{"Q1":{"score":1,"evidence":"final.diff inverts the threshold comparison."},"Q2":{"score":1,"evidence":"final.diff leaves a commented-out branch."}},
+  "rank-blind":{"Q1":{"score":2,"evidence":"final.diff returns the specified row shape."},"Q2":{"score":2,"evidence":"final.diff follows the neighbouring module layout."}}}}
+JSON
+cat >"$TMP_ROOT/rank-quality-missing.json" <<'JSON'
+{"runs":{"rank-fast":{"Q1":{"score":2,"evidence":"only one criterion read."}}}}
+JSON
+cat >"$TMP_ROOT/rank-quality-unevidenced.json" <<'JSON'
+{"runs":{"rank-fast":{"Q1":{"score":2,"evidence":"  "},"Q2":{"score":2,"evidence":"fine."}}}}
+JSON
+cat >"$TMP_ROOT/rank-quality-boolean.json" <<'JSON'
+{"runs":{"rank-fast":{"Q1":{"score":true,"evidence":"a boolean is not a judged score."},"Q2":{"score":2,"evidence":"fine."}}}}
+JSON
+cat >"$TMP_ROOT/rank-quality-float.json" <<'JSON'
+{"runs":{"rank-fast":{"Q1":{"score":1.0,"evidence":"a float is not a judged score."},"Q2":{"score":2,"evidence":"fine."}}}}
+JSON
+cat >"$TMP_ROOT/rank-equivalence.json" <<'JSON'
+{"runs":{"rank-fast":{"comparable":2,"equivalent":2},"rank-slow":{"comparable":2,"equivalent":1}}}
+JSON
+printf '{"weights":{"suite":1,"duplicate":1,"equivalence":1,"judged":1},"criteria":[{"id":"Q1","name":"Swapped"}]}\n' >"$TMP_ROOT/rank-rubric-swapped.json"
+if "$BENCH" rank-scoreboard --workspace "$RANK_WORKSPACE" --markdown "$TMP_ROOT/rank.md" --html "$TMP_ROOT/rank.html" \
+    --rubric "$TMP_ROOT/rank-rubric-swapped.json" --quality "$TMP_ROOT/rank-quality.json" >/dev/null 2>&1; then
+  fail "rank-scoreboard scored against a rubric the plan never froze"
+fi
+for bad in missing unevidenced boolean float; do
+  if "$BENCH" rank-scoreboard --workspace "$RANK_WORKSPACE" --markdown "$TMP_ROOT/rank.md" --html "$TMP_ROOT/rank.html" \
+      --rubric "$RUBRIC" --quality "$TMP_ROOT/rank-quality-$bad.json" >/dev/null 2>&1; then
+    fail "rank-scoreboard accepted a $bad judged read"
+  fi
+done
+"$BENCH" rank-scoreboard --workspace "$RANK_WORKSPACE" --markdown "$TMP_ROOT/rank.md" --html "$TMP_ROOT/rank.html" \
+  --rubric "$RUBRIC" --quality "$TMP_ROOT/rank-quality.json" --equivalence "$TMP_ROOT/rank-equivalence.json" >"$TMP_ROOT/rank.json"
+jq -e '.ranked == 2 and .unranked == 1 and .missing_lanes == 0' "$TMP_ROOT/rank.json" >/dev/null \
+  || fail "rank-scoreboard miscounted ranked, token-blind, and unrun candidates"
+for heading in 'Ranking by quality per million tokens' 'Quality only' 'Executable verdicts' 'Judged code-quality read' \
+  'Run conditions' 'Lanes that produced no scored run' 'Honesty footer'; do
+  assert_grep "$heading" "$TMP_ROOT/rank.md" "ranking scoreboard omitted $heading"
+done
+grep -Eq '^\| 1 \| fixture-fast \|' "$TMP_ROOT/rank.md" \
+  || fail "ranking scoreboard did not rank the cheaper equal-quality candidate first"
+grep -Fq 'fixture-blind' "$TMP_ROOT/rank.md" \
+  || fail "ranking scoreboard dropped the candidate whose runtime reports no tokens"
+if grep -Eq '^\| [0-9]+ \| fixture-blind \|' "$TMP_ROOT/rank.md"; then
+  fail "ranking scoreboard ranked a candidate whose token count it had to invent"
+fi
+assert_grep 'final.diff inverts the threshold comparison' "$TMP_ROOT/rank.md" \
+  "ranking scoreboard omitted the judged evidence line"
+assert_grep 'n=1 per model on one fixed task' "$TMP_ROOT/rank.md" "ranking scoreboard omitted its honesty footer"
+assert_grep 'no comparable pair' "$TMP_ROOT/rank.md" \
+  "ranking scoreboard imputed an equivalence result it never measured"
+[ -s "$TMP_ROOT/rank.html" ] || fail "ranking scoreboard HTML was not generated"
+pass "rank-scoreboard ranks by quality per token and never imputes a missing measurement"
+
+python3 - "$TMP_ROOT" "$RUBRIC_SHA" "$SUITE_COMMAND" <<'PY'
+import json
+import pathlib
+import sys
+
+root, rubric_sha, suite_command = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+
+
+def entry(run_id, model, lane, effort="medium", harness="codex", provider=None):
+    return {
+        "run_id": run_id, "arm": "guard-on", "harness": harness, "model": model, "provider": provider,
+        "effort": effort, "helper_family": "distance-helper", "lane": lane,
+        "lane_order": 1, "concurrent_lane_count": 1,
+    }
+
+
+def wave(runs, **overrides):
+    value = {
+        "wave": "effort-medium", "condition_arm": "guard-on", "rubric_sha256": rubric_sha,
+        "suite_command": suite_command, "ratified_at": "2026-01-02T00:00:00Z",
+        "amendment": "second wave at medium effort", "prompt_sha256": "a" * 64,
+        "max_load": 8, "timeout_seconds": 30, "runs": runs,
+    }
+    value.update(overrides)
+    return value
+
+
+healthy = [entry("wave-fast", "fixture-fast", "wlane-1"), entry("wave-slow", "fixture-slow", "wlane-2")]
+cases = {
+    "wave-reused-id-plan.json": wave([entry("rank-fast", "fixture-fast", "wlane-1")]),
+    "wave-repeat-cell-plan.json": wave([entry("wave-fast", "fixture-fast", "wlane-1", effort=None)]),
+    "wave-no-effort-plan.json": wave([entry("wave-fast", "fixture-fast", "wlane-1", effort="  ")]),
+    "wave-other-prompt-plan.json": wave(healthy, prompt_sha256="b" * 64),
+    "wave-other-rubric-plan.json": wave(healthy, rubric_sha256="c" * 64),
+    "wave-other-suite-plan.json": wave(healthy, suite_command="fake-suite elsewhere"),
+    "wave-unlabelled-plan.json": wave(healthy, wave="../escape"),
+    "wave-valid-plan.json": wave(healthy),
+}
+for name, value in cases.items():
+    (root / name).write_text(json.dumps(value))
+PY
+for refusal in reused-id repeat-cell no-effort other-prompt other-rubric other-suite unlabelled; do
+  if "$BENCH" freeze-wave --workspace "$RANK_WORKSPACE" --file "$TMP_ROOT/wave-$refusal-plan.json" >/dev/null 2>&1; then
+    fail "freeze-wave accepted a wave with a $refusal defect"
+  fi
+done
+"$BENCH" freeze-wave --workspace "$RANK_WORKSPACE" --file "$TMP_ROOT/wave-valid-plan.json" >/dev/null
+[ ! -w "$RANK_WORKSPACE/waves/effort-medium.json" ] || fail "a frozen wave plan stayed writable"
+if "$BENCH" freeze-wave --workspace "$RANK_WORKSPACE" --file "$TMP_ROOT/wave-valid-plan.json" >/dev/null 2>&1; then
+  fail "freeze-wave re-froze a label that already exists"
+fi
+jq -e '.runs | length == 2' "$RANK_WORKSPACE/frozen-plan.json" >/dev/null 2>&1 \
+  && fail "freezing a wave rewrote the already-frozen primary slate"
+jq -e '(.runs | length) == 3 and .plan_shape == "ranking"' "$RANK_WORKSPACE/frozen-plan.json" >/dev/null \
+  || fail "the primary slate changed when a wave was frozen"
+pass "freeze-wave adds a labelled wave without touching the frozen slate"
+
+for run_id in wave-fast wave-slow; do
+  case "$run_id" in
+    wave-fast) rank_bundle "$run_id" fixture-fast probe.test.ts 500 ;;
+    wave-slow) rank_bundle "$run_id" fixture-slow probe.test.ts 8000 ;;
+  esac
+  jq --arg id "$run_id" '.stage="wave" | .wave="effort-medium" | .effort="medium"' \
+    "$RANK_WORKSPACE/bundles/$run_id/manifest.json" >"$TMP_ROOT/$run_id-manifest.json"
+  mv "$TMP_ROOT/$run_id-manifest.json" "$RANK_WORKSPACE/bundles/$run_id/manifest.json"
+  PATH="$FAKEBIN:$PATH" "$BENCH" rank-suite --workspace "$RANK_WORKSPACE" --run-id "$run_id" --suite-command "$SUITE_COMMAND" >/dev/null
+  jq -n --arg id "$run_id" \
+    '{run_id:$id,machine:"clean",semantic:"clean",outcome_class:"never-duplicated",false_fire:false,ack:false,review_rounds:0,scorers:[{id:"human",verdict:"clean",rationale:"No duplicate."},{id:"judge",verdict:"clean",rationale:"No duplicate."}],machine_evidence:{historical_duplicates:[]}}' \
+    >"$TMP_ROOT/$run_id-verdict.json"
+  "$BENCH" record-verdict --workspace "$RANK_WORKSPACE" --file "$TMP_ROOT/$run_id-verdict.json" >/dev/null
+done
+python3 - "$TMP_ROOT/rank-quality.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+document = json.loads(path.read_text())
+for run_id in ("wave-fast", "wave-slow"):
+    document["runs"][run_id] = {
+        "Q1": {"score": 2, "evidence": "final.diff returns the specified row shape."},
+        "Q2": {"score": 1, "evidence": "final.diff drops one unparseable-input guard."},
+    }
+path.write_text(json.dumps(document))
+PY
+"$BENCH" rank-scoreboard --workspace "$RANK_WORKSPACE" --markdown "$TMP_ROOT/rank2.md" --html "$TMP_ROOT/rank2.html" \
+  --rubric "$RUBRIC" --quality "$TMP_ROOT/rank-quality.json" --equivalence "$TMP_ROOT/rank-equivalence.json" >"$TMP_ROOT/rank2.json"
+jq -e '.ranked == 2 and .unranked == 1' "$TMP_ROOT/rank2.json" >/dev/null \
+  || fail "wave runs leaked into the primary ranking counts"
+assert_grep 'Second wave: effort-medium' "$TMP_ROOT/rank2.md" "scoreboard omitted the labelled second wave"
+assert_grep 'Model by effort' "$TMP_ROOT/rank2.md" "scoreboard omitted the model-by-effort comparison"
+assert_grep 'every later wave is reported in its own table and never merged into it' "$TMP_ROOT/rank2.md" \
+  "scoreboard did not disclose that waves stay out of the primary ranking"
+primary_section=$(awk '/^## Ranking by quality per million tokens/,/^## Quality only/' "$TMP_ROOT/rank2.md")
+if printf '%s' "$primary_section" | grep -Fq 'wave-fast'; then
+  fail "a second-wave run appeared inside the primary ranking table"
+fi
+grep -Eq '^\| fixture-fast \| codex \| medium \|' "$TMP_ROOT/rank2.md" \
+  || fail "model-by-effort table lost the medium-effort row"
+pass "a labelled wave reports separately and only joins the primary slate in the effort comparison"
+
+# Review finding 4: an unchecked ranking input does not merely crash, it awards a
+# score share no measurement supports.
+for bad in non-object-runs non-object-row negative oversized fractional; do
+  case "$bad" in
+    non-object-runs) printf '{"runs":[]}\n' ;;
+    non-object-row)  printf '{"runs":{"rank-fast":7}}\n' ;;
+    negative)        printf '{"runs":{"rank-fast":{"comparable":3,"equivalent":-1}}}\n' ;;
+    oversized)       printf '{"runs":{"rank-fast":{"comparable":2,"equivalent":5}}}\n' ;;
+    fractional)      printf '{"runs":{"rank-fast":{"comparable":2.5,"equivalent":1}}}\n' ;;
+  esac >"$TMP_ROOT/rank-eq-$bad.json"
+  if "$BENCH" rank-scoreboard --workspace "$RANK_WORKSPACE" --markdown "$TMP_ROOT/rank-bad.md" \
+      --html "$TMP_ROOT/rank-bad.html" --rubric "$RUBRIC" --quality "$TMP_ROOT/rank-quality.json" \
+      --equivalence "$TMP_ROOT/rank-eq-$bad.json" >/dev/null 2>&1; then
+    fail "rank-scoreboard scored against a $bad equivalence input"
+  fi
+done
+for bad in nonfinite negative-weight wrong-total duplicate-id unsafe-id; do
+  case "$bad" in
+    nonfinite)       printf '{"weights":{"suite":1e999,"duplicate":15,"equivalence":15,"judged":40},"criteria":[{"id":"Q1","name":"A"}]}\n' ;;
+    negative-weight) printf '{"weights":{"suite":-30,"duplicate":15,"equivalence":15,"judged":100},"criteria":[{"id":"Q1","name":"A"}]}\n' ;;
+    wrong-total)     printf '{"weights":{"suite":30,"duplicate":15,"equivalence":15,"judged":10},"criteria":[{"id":"Q1","name":"A"}]}\n' ;;
+    duplicate-id)    printf '{"weights":{"suite":30,"duplicate":15,"equivalence":15,"judged":40},"criteria":[{"id":"Q1","name":"A"},{"id":"Q1","name":"B"}]}\n' ;;
+    unsafe-id)       printf '{"weights":{"suite":30,"duplicate":15,"equivalence":15,"judged":40},"criteria":[{"id":"../escape","name":"A"}]}\n' ;;
+  esac >"$TMP_ROOT/rank-rubric-$bad.json"
+  BAD_SHA=$(shasum -a 256 "$TMP_ROOT/rank-rubric-$bad.json" | cut -d' ' -f1)
+  BAD_WORKSPACE="$TMP_ROOT/rank-workspace-$bad"
+  mkdir -p "$BAD_WORKSPACE/bundles"
+  cp "$WORKSPACE/workspace.json" "$BAD_WORKSPACE/workspace.json"
+  python3 - "$TMP_ROOT/rank-valid-plan.json" "$BAD_WORKSPACE/plan.json" "$BAD_SHA" <<'PY'
+import json
+import pathlib
+import sys
+
+plan = json.loads(pathlib.Path(sys.argv[1]).read_text())
+plan["rubric_sha256"] = sys.argv[3]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(plan))
+PY
+  "$BENCH" freeze --workspace "$BAD_WORKSPACE" --file "$BAD_WORKSPACE/plan.json" >/dev/null
+  if "$BENCH" rank-scoreboard --workspace "$BAD_WORKSPACE" --markdown "$TMP_ROOT/rank-bad.md" \
+      --html "$TMP_ROOT/rank-bad.html" --rubric "$TMP_ROOT/rank-rubric-$bad.json" \
+      --quality "$TMP_ROOT/rank-quality.json" >/dev/null 2>&1; then
+    fail "rank-scoreboard scored against a $bad rubric"
+  fi
+done
+pass "ranking inputs are refused before any published score is computed"
+
+# Review finding 3: a refused replacement must not destroy the active
+# registration, and a slate must not be reshaped once a run has produced output.
+GUARD_WORKSPACE="$TMP_ROOT/freeze-guard-workspace"
+mkdir -p "$GUARD_WORKSPACE/bundles"
+cp "$WORKSPACE/workspace.json" "$GUARD_WORKSPACE/workspace.json"
+"$BENCH" freeze --workspace "$GUARD_WORKSPACE" --file "$TMP_ROOT/valid-plan.json" >/dev/null
+GUARD_SHA_BEFORE=$(shasum -a 256 "$GUARD_WORKSPACE/frozen-plan.json" | cut -d' ' -f1)
+printf '{"ratified_at":"x","amendment":"y","runs":[]}\n' >"$TMP_ROOT/rejected-plan.json"
+if "$BENCH" freeze --workspace "$GUARD_WORKSPACE" --file "$TMP_ROOT/rejected-plan.json" \
+    --supersede --reason "probe with an invalid replacement" >/dev/null 2>&1; then
+  fail "freeze accepted an invalid replacement plan"
+fi
+[ -f "$GUARD_WORKSPACE/frozen-plan.json" ] \
+  || fail "a refused supersession destroyed the active frozen plan"
+[ "$(shasum -a 256 "$GUARD_WORKSPACE/frozen-plan.json" | cut -d' ' -f1)" = "$GUARD_SHA_BEFORE" ] \
+  || fail "a refused supersession altered the active frozen plan"
+[ ! -d "$GUARD_WORKSPACE/superseded" ] || [ -z "$(ls -A "$GUARD_WORKSPACE/superseded")" ] \
+  || fail "a refused supersession archived the active plan anyway"
+mkdir -p "$GUARD_WORKSPACE/bundles/pair-1-guard-on"
+jq '.run_id="pair-1-guard-on" | .stage="matrix"' "$MANIFEST" \
+  >"$GUARD_WORKSPACE/bundles/pair-1-guard-on/manifest.json"
+if "$BENCH" freeze --workspace "$GUARD_WORKSPACE" --file "$TMP_ROOT/valid-plan.json" \
+    --supersede --reason "an outcome already exists" >/dev/null 2>&1; then
+  fail "freeze superseded a slate after a run had produced output"
+fi
+pass "supersession validates first, publishes atomically, and closes once a run produced output"
+
+# Review findings 1 and 2: replayed candidate code is confined, and one run's
+# runtime scratch is not another run's to read or overwrite.
+if [ "$(uname -s)" = Darwin ]; then
+  if ! python3 - "$ROOT" "$TMP_ROOT/replay" <<'PY'
+import importlib.util
+import pathlib
+import subprocess
+import sys
+
+root, scratch = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("benchmark", root / "scripts/canonical-guard-benchmark/benchmark.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+mine = scratch / "runs/mine"
+theirs = scratch / "runs/theirs"
+workspace = scratch / "workspace"
+replay_home = scratch / "replay-home"
+for path in (mine, theirs, workspace, replay_home):
+    path.mkdir(parents=True, exist_ok=True)
+
+# The scratch grant must name this run's own child, not a shared root.
+granted = module.runtime_scratch_paths("claude", mine)
+if not granted:
+    raise SystemExit("claude was given no scratch path at all")
+for path in granted:
+    if path.parent == pathlib.Path(path.anchor) or path.name in {".cursor", f"claude-{__import__('os').getuid()}"}:
+        raise SystemExit(f"a shared scratch root was granted instead of this run's child: {path}")
+if module.runtime_scratch_paths("codex", mine):
+    raise SystemExit("a runtime that needs no scratch root was granted one")
+if module.runtime_scratch_paths("cursor-agent", mine):
+    raise SystemExit("cursor-agent is unsupported under the profile and must be granted nothing")
+
+neighbour = module.runtime_scratch_paths("claude", theirs)[0]
+(neighbour / "secret.txt").write_text("another run's file")
+argv = module.macos_sandbox_command(
+    ["/usr/bin/touch", str(neighbour / "trespass")], mine, mine / "origin.git", replay_home, workspace, "claude"
+)
+trespass = subprocess.run(argv, cwd=mine, capture_output=True, text=True)
+if trespass.returncode == 0:
+    raise SystemExit("one run could write into another run's runtime scratch")
+
+
+def as_mine(command):
+    return subprocess.run(
+        module.macos_sandbox_command(command, mine, mine / "origin.git", replay_home, workspace, "claude"),
+        cwd=mine, capture_output=True, text=True,
+    )
+
+
+# Denying only writes leaves a concurrent run's scratch, and the operator's own
+# session scratch, readable: the profile starts from allow-default.
+read_secret = as_mine(["/bin/cat", str(neighbour / "secret.txt")])
+if read_secret.returncode == 0 or "another run's file" in read_secret.stdout:
+    raise SystemExit("one run could read another run's runtime scratch")
+if as_mine(["/bin/ls", str(neighbour)]).returncode == 0:
+    raise SystemExit("one run could list another run's runtime scratch")
+if as_mine(["/bin/ls", str(granted[0].parent)]).returncode == 0:
+    raise SystemExit("a candidate could list the shared scratch root")
+own = subprocess.run(
+    module.macos_sandbox_command(["/usr/bin/touch", str(granted[0] / "ok")], mine, mine / "origin.git", replay_home, workspace, "claude"),
+    cwd=mine, capture_output=True, text=True,
+)
+if own.returncode != 0:
+    raise SystemExit(f"a run could not write its own runtime scratch: {own.stderr[:200]}")
+
+# The replay environment must not hand candidate-authored tests the operator's
+# home or provider credentials.
+environment = module.replay_environment(replay_home)
+if environment.get("HOME") != str(replay_home):
+    raise SystemExit("replayed candidate code kept the operator home")
+leaked = [name for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CURSOR_API_KEY", "KIMI_API_KEY", "GITHUB_TOKEN", "GH_TOKEN") if name in environment]
+if leaked:
+    raise SystemExit(f"replay environment carried provider credentials: {leaked}")
+PY
+  then
+    fail "the suite replay must be confined and runtime scratch must be per-run"
+  fi
+  pass "replayed candidate code is confined and cannot reach another run's scratch"
+else
+  echo "skip: sandbox confinement assertions need Darwin"
+fi
+
+if ! python3 - "$ROOT" "$TMP_ROOT/surface" <<'PY'
+import importlib.util
+import pathlib
+import shutil
+import sys
+
+root, scratch = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("benchmark", root / "scripts/canonical-guard-benchmark/benchmark.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+template = scratch / "template"
+replay = scratch / "replay"
+(template / "packages/backend").mkdir(parents=True, exist_ok=True)
+(replay / "packages/backend").mkdir(parents=True, exist_ok=True)
+(template / "package.json").write_text('{"scripts":{"test":"vitest run"}}')
+(template / "packages/backend/package.json").write_text('{"scripts":{"test":"vitest run"}}')
+(replay / "package.json").write_text('{"scripts":{"test":"echo owned && exit 0"}}')
+(replay / "packages/backend/package.json").write_text('{"scripts":{"test":"echo owned && exit 0"}}')
+
+restored = module.restore_suite_surface(replay, template)
+if not restored:
+    raise SystemExit("a candidate-rewritten suite surface was left in place")
+for relative in ("package.json", "packages/backend/package.json"):
+    if "owned" in (replay / relative).read_text():
+        raise SystemExit(f"candidate control of {relative} survived into the scored suite run")
+
+# A candidate can put anything at those paths. A symlink must not be hashed or
+# copied through, which would read a file outside the reconstructed tree, and a
+# directory in a file's place must not raise.
+outside = scratch / "outside-the-tree.txt"
+outside.write_text("operator-only content")
+(replay / "package.json").unlink()
+(replay / "package.json").symlink_to(outside)
+shutil.rmtree(replay / "packages/backend")
+(replay / "packages/backend/package.json").mkdir(parents=True)
+(replay / "packages/backend/package.json/planted").write_text("directory in a file's place")
+module.restore_suite_surface(replay, template)
+for relative in ("package.json", "packages/backend/package.json"):
+    target = replay / relative
+    if target.is_symlink():
+        raise SystemExit(f"a candidate symlink survived at {relative}")
+    if not target.is_file():
+        raise SystemExit(f"{relative} was not restored to a plain file")
+    if "vitest run" not in target.read_text():
+        raise SystemExit(f"{relative} was not restored from the template")
+if outside.read_text() != "operator-only content":
+    raise SystemExit("restoring the suite surface wrote through a candidate symlink")
+PY
+then
+  fail "a candidate must not choose what the scored suite executes"
+fi
+pass "the scored suite surface is restored from the template, not the candidate"
+
+# The Darwin probes above cannot see the Linux profile, and a root that does not
+# exist when the profile is written must still be denied.
+if ! python3 - "$ROOT" "$TMP_ROOT/scratch-isolation" <<'PY'
+import importlib.util
+import json
+import os
+import pathlib
+import shutil
+import sys
+
+root, scratch = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("benchmark", root / "scripts/canonical-guard-benchmark/benchmark.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+worktree = scratch / "runs/current"
+candidate_home = scratch / "homes/current"
+origin = candidate_home / "origin.git"
+workspace = scratch / "workspace"
+for path in (worktree, origin, candidate_home, workspace):
+    path.mkdir(parents=True, exist_ok=True)
+
+roots = module.shared_scratch_roots()
+if len(roots) < 2:
+    raise SystemExit(f"both known runtime scratch roots must be named: {roots}")
+
+# A root absent at profile-generation time is created later by another run or an
+# operator session; denying only what exists lets it escape confinement.
+absent = [path for path in roots if not path.exists()]
+profile_roots = [path for path in roots]
+argv = module.macos_sandbox_command(["/bin/true"], worktree, origin, candidate_home, workspace, "claude")
+profile = pathlib.Path(argv[argv.index("-f") + 1]).read_text()
+denied = profile.split("(allow file-read-metadata")[0]
+for path in profile_roots:
+    if json.dumps(str(path)) not in denied:
+        raise SystemExit(f"shared scratch root not denied regardless of existence: {path} (absent at build: {path in absent})")
+granted = module.runtime_scratch_paths("claude", worktree)[0]
+if json.dumps(str(granted)) not in profile:
+    raise SystemExit("this run's own scratch child was not granted back")
+
+# Linux masks nothing by default under --ro-bind / /, so the roots need an
+# explicit tmpfs and only this run's child re-bound.
+linux = module.linux_sandbox_argv(
+    pathlib.Path("/usr/bin/bwrap"), ["/bin/true"], worktree, origin, candidate_home, workspace, "claude"
+)
+for path in profile_roots:
+    mask = ["--tmpfs", str(path)]
+    if not any(linux[index:index + 2] == mask for index in range(len(linux) - 1)):
+        raise SystemExit(f"linux profile does not mask the shared scratch root {path}")
+rebind = ["--bind", str(granted), str(granted)]
+if not any(linux[index:index + 3] == rebind for index in range(len(linux) - 2)):
+    raise SystemExit("linux profile masked the root without re-binding this run's own child")
+if module.linux_sandbox_argv(pathlib.Path("/usr/bin/bwrap"), ["/bin/true"], worktree, origin, candidate_home, workspace, "codex").count(str(granted)):
+    raise SystemExit("a runtime that needs no scratch child was granted one on linux")
+
+# A deep worktree path must still produce a usable directory name.
+deep = scratch / ("nested/" * 40)
+deep.mkdir(parents=True, exist_ok=True)
+long_child = module.runtime_scratch_paths("claude", deep)[0]
+if len(long_child.name.encode()) > 255:
+    raise SystemExit(f"scratch child name exceeds the filesystem limit: {len(long_child.name)} bytes")
+if not long_child.is_dir():
+    raise SystemExit("a deep worktree path did not produce a usable scratch child")
+if module.runtime_scratch_paths("claude", deep)[0] != long_child:
+    raise SystemExit("the scratch child name is not stable for the same worktree")
+shutil.rmtree(long_child, ignore_errors=True)
+PY
+then
+  fail "shared runtime scratch must be masked on both platforms regardless of existence"
+fi
+pass "shared runtime scratch is masked on macOS and Linux, and only this run's child is granted"
+
+# Copilot: the active plan is made writable just before the rename, so a failure
+# after that point must not leave the supposedly immutable registration mutable.
+if ! python3 - "$ROOT" "$WORKSPACE" "$TMP_ROOT/chmod-rollback" "$TMP_ROOT/valid-plan.json" <<'PY'
+import importlib.util
+import os
+import pathlib
+import shutil
+import sys
+
+root, source_workspace, scratch, plan_file = (pathlib.Path(value) for value in sys.argv[1:5])
+spec = importlib.util.spec_from_file_location("benchmark", root / "scripts/canonical-guard-benchmark/benchmark.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+scratch.mkdir(parents=True, exist_ok=True)
+(scratch / "bundles").mkdir(exist_ok=True)
+shutil.copy2(source_workspace / "workspace.json", scratch / "workspace.json")
+
+import argparse
+
+module.command_freeze(argparse.Namespace(workspace=str(scratch), file=str(plan_file), supersede=False, reason=None))
+active = scratch / "frozen-plan.json"
+mode_before = active.stat().st_mode & 0o777
+if mode_before & 0o222:
+    raise SystemExit(f"a freshly frozen plan is writable: {oct(mode_before)}")
+
+original_replace = os.replace
+
+
+def failing_replace(*args, **kwargs):
+    raise OSError("simulated failure after the plan was made writable")
+
+
+os.replace = failing_replace
+try:
+    module.command_freeze(argparse.Namespace(workspace=str(scratch), file=str(plan_file), supersede=True, reason="probe"))
+except BaseException:
+    pass
+finally:
+    os.replace = original_replace
+
+if not active.is_file():
+    raise SystemExit("a failed publish left no active frozen plan")
+mode_after = active.stat().st_mode & 0o777
+if mode_after & 0o222:
+    raise SystemExit(f"a failed publish left the active plan writable: {oct(mode_after)}")
+PY
+then
+  fail "a failed supersession must leave the active plan read-only"
+fi
+pass "a failed supersession restores the active plan's immutability"
 
 pass "all canonical-guard benchmark tests passed"

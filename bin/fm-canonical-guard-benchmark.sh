@@ -13,6 +13,10 @@
 #   fm-canonical-guard-benchmark.sh record-verdict --workspace DIR --file FILE
 #   fm-canonical-guard-benchmark.sh schema-check --workspace DIR
 #   fm-canonical-guard-benchmark.sh scoreboard --workspace DIR --markdown FILE --html FILE
+#   fm-canonical-guard-benchmark.sh freeze-wave --workspace DIR --file WAVE.json
+#   fm-canonical-guard-benchmark.sh rank-suite --workspace DIR --run-id ID --suite-command CMD
+#   fm-canonical-guard-benchmark.sh rank-scoreboard --workspace DIR --markdown FILE --html FILE \
+#     --rubric FILE --quality FILE [--equivalence FILE]
 #
 # `init` creates a disposable filesystem-only bare remote and two installed
 # templates whose tracked trees differ only by deletion of the
@@ -26,6 +30,15 @@
 # runs the pinned detector, requires two independent semantic verdicts, and
 # appends one immutable verdict to the separate workspace verdict ledger.
 # `scoreboard` derives every displayed number from manifests and that ledger.
+# A plan may instead declare `plan_shape: ranking`: one single-condition run per
+# candidate model, no arms, which additionally freezes the quality rubric's hash
+# and the suite command before dispatch.  `rank-suite` replays a captured tree and
+# executes that frozen suite command as the executable verdict, and
+# `rank-scoreboard` ranks candidates by quality per token, keeping executable
+# verdicts and the judged read in separate tables.  `freeze-wave` adds one
+# labelled later wave that varies effort on the same task and rubric without
+# touching the frozen slate; its runs use `--stage wave --wave LABEL` and are
+# reported in their own tables, never merged into the primary ranking.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)

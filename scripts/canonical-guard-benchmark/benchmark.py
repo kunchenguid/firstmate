@@ -32,6 +32,8 @@ VERDICT_VERSION = "canonical-guard-verdict/v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 HARNESS_NAMES = ("codex", "claude", "cursor-agent", "kimi", "pi")
 ARMS = ("guard-on", "guard-off")
+PLAN_SHAPES = ("confirmatory", "ranking")
+RANK_SUITE_VERSION = "canonical-guard-rank-suite/v1"
 RESOLUTION_PATHS = (
     "exported-then-imported-point-in-ring",
     "imported-point-in-polygon",
@@ -440,7 +442,28 @@ def admission_gate(root: pathlib.Path, maximum: float, load_file: pathlib.Path |
             temporary.unlink(missing_ok=True)
 
 
+def keychain_credentials(service: str) -> str | None:
+    if sys.platform != "darwin":
+        return None
+    found = run(["security", "find-generic-password", "-s", service, "-w"], check=False)
+    if found.returncode != 0:
+        return None
+    value = (found.stdout or "").strip()
+    return value or None
+
+
 def copy_candidate_credentials(harness: str, candidate_home: pathlib.Path) -> None:
+    # On macOS the Claude credential lives in the login keychain, which sits
+    # inside the operator home the run profile blinds. Materialise it into the
+    # throwaway home the same way every other runtime's credential file is
+    # copied, instead of opening the operator's keychain to the candidate.
+    if harness == "claude" and not (pathlib.Path.home() / ".claude/.credentials.json").is_file():
+        secret = keychain_credentials("Claude Code-credentials")
+        if secret:
+            destination = candidate_home / ".claude/.credentials.json"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(secret)
+            destination.chmod(0o600)
     source_home = pathlib.Path.home()
     credential_files = {
         "codex": (".codex/auth.json",),
@@ -458,6 +481,14 @@ def copy_candidate_credentials(harness: str, candidate_home: pathlib.Path) -> No
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
         destination.chmod(0o600)
+
+
+def system_ca_bundle() -> str | None:
+    for candidate in ("/private/etc/ssl/cert.pem", "/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt"):
+        path = pathlib.Path(candidate)
+        if path.is_file():
+            return str(path)
+    return None
 
 
 def candidate_environment(harness: str, candidate_home: pathlib.Path) -> dict[str, str]:
@@ -482,10 +513,49 @@ def candidate_environment(harness: str, candidate_home: pathlib.Path) -> dict[st
         "CODEX_HOME": str(candidate_home / ".codex"),
         "CLAUDE_CONFIG_DIR": str(candidate_home / ".claude"),
     })
+    # A runtime that reads the macOS system trust store instead of bundling its
+    # own CAs cannot validate a certificate inside the profile, and answers by
+    # retrying until the run times out rather than by failing. Point it at the
+    # system CA bundle, which already sits inside a readable subpath, unless the
+    # operator has chosen one.
+    bundle = system_ca_bundle()
+    if bundle and "SSL_CERT_FILE" not in env:
+        env["SSL_CERT_FILE"] = bundle
     return env
 
 
-def macos_sandbox_command(command: list[str], worktree: pathlib.Path, run_origin: pathlib.Path, candidate_home: pathlib.Path, workspace: pathlib.Path) -> list[str]:
+def shared_scratch_roots() -> list[pathlib.Path]:
+    """Process-wide runtime scratch roots, shared with concurrent runs and with
+    ordinary operator sessions. A candidate gets its own child below one of
+    these, never the root, and never read access to a neighbour's child."""
+    temp = pathlib.Path(tempfile.gettempdir()).resolve()
+    return [temp / f"claude-{os.getuid()}", temp / ".cursor"]
+
+
+def runtime_scratch_paths(harness: str, worktree: pathlib.Path) -> list[pathlib.Path]:
+    """The scratch directory this one run's runtime builds for itself.
+
+    Claude Code derives it from the working directory rather than from TMPDIR,
+    so the exact per-run child is predictable and only that child is granted.
+    Granting the shared parent instead would let one candidate read, overwrite
+    or delete a concurrent candidate's files, and would expose ordinary
+    operator sessions using the same root.
+    """
+    if harness != "claude":
+        return []
+    temp = pathlib.Path(tempfile.gettempdir()).resolve()
+    resolved = str(worktree.resolve())
+    encoded = re.sub(r"[^A-Za-z0-9-]", "-", resolved)
+    # A deep worktree path encodes past NAME_MAX and mkdir fails, so keep a
+    # readable head and make the rest a digest of the full path.
+    if len(encoded.encode()) > 200:
+        encoded = f"{encoded[:160]}-{sha256_bytes(resolved.encode())[:16]}"
+    path = temp / f"claude-{os.getuid()}" / encoded
+    path.mkdir(parents=True, exist_ok=True)
+    return [path.resolve()]
+
+
+def macos_sandbox_command(command: list[str], worktree: pathlib.Path, run_origin: pathlib.Path, candidate_home: pathlib.Path, workspace: pathlib.Path, harness: str = "") -> list[str]:
     executable = pathlib.Path(shutil.which(command[0]) or command[0]).resolve()
     source_home = pathlib.Path.home().resolve()
     readable = [
@@ -495,15 +565,24 @@ def macos_sandbox_command(command: list[str], worktree: pathlib.Path, run_origin
         if candidate.exists():
             readable.append(candidate.resolve())
     readable.extend((worktree.resolve(), run_origin.resolve(), candidate_home.resolve()))
-    writable = (worktree.resolve(), run_origin.resolve(), candidate_home.resolve(), pathlib.Path("/dev"))
+    scratch_paths = runtime_scratch_paths(harness, worktree)
+    readable.extend(scratch_paths)
+    writable = (worktree.resolve(), run_origin.resolve(), candidate_home.resolve(), pathlib.Path("/dev"), *scratch_paths)
     profile_root = workspace / ".sandbox-profiles"
     profile_root.mkdir(exist_ok=True)
     profile = profile_root / f"{candidate_home.name}.sb"
     read_rules = " ".join(f"(subpath {json.dumps(str(path))})" for path in sorted(set(readable), key=str))
     write_rules = " ".join(f"(subpath {json.dumps(str(path))})" for path in writable)
+    # The shared scratch roots default to readable, so denying only writes would
+    # still let a candidate list and read a concurrent run's - or the operator's
+    # own session's - scratch. Deny the roots outright; this run's own child is
+    # allowed back below, and a later allow rule wins over an earlier deny.
     protected = {source_home, workspace.parent.resolve()}
+    protected.update(shared_scratch_roots())
     deny_rules = " ".join(f"(subpath {json.dumps(str(path))})" for path in sorted(protected, key=str))
-    profile.write_text(f"(version 1)\n(allow default)\n(deny file-read* {deny_rules})\n(allow file-read-metadata (subpath {json.dumps(str(workspace.parent.resolve()))}))\n(allow file-read* {read_rules})\n(deny file-write*)\n(allow file-write* {write_rules})\n")
+    traversed = {parent for path in set(readable) | set(writable) for parent in path.parents}
+    traverse_rules = " ".join(f"(literal {json.dumps(str(path))})" for path in sorted(traversed, key=str))
+    profile.write_text(f"(version 1)\n(allow default)\n(deny file-read* {deny_rules})\n(allow file-read-metadata (subpath {json.dumps(str(workspace.parent.resolve()))}) {traverse_rules})\n(allow file-read* {read_rules})\n(deny file-write*)\n(allow file-write* {write_rules})\n")
     return ["/usr/bin/sandbox-exec", "-f", str(profile), *command]
 
 
@@ -551,10 +630,10 @@ def selected_runtime_paths(command: list[str], source_home: pathlib.Path) -> tup
     return rewritten, closure
 
 
-def linux_sandbox_argv(binary: pathlib.Path, command: list[str], worktree: pathlib.Path, run_origin: pathlib.Path, candidate_home: pathlib.Path, workspace: pathlib.Path) -> list[str]:
+def linux_sandbox_argv(binary: pathlib.Path, command: list[str], worktree: pathlib.Path, run_origin: pathlib.Path, candidate_home: pathlib.Path, workspace: pathlib.Path, harness: str = "") -> list[str]:
     source_home = pathlib.Path.home().resolve()
     command, runtime_paths = selected_runtime_paths(command, source_home)
-    candidates = sorted({source_home, workspace.parent.resolve()}, key=lambda path: len(path.parts))
+    candidates = sorted({source_home, workspace.parent.resolve(), *shared_scratch_roots()}, key=lambda path: len(path.parts))
     protected = [path for path in candidates if not any(path != parent and path.is_relative_to(parent) for parent in candidates)]
     argv = [str(binary), "--die-with-parent", "--new-session", "--share-net", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"]
     for path in protected:
@@ -570,7 +649,7 @@ def linux_sandbox_argv(binary: pathlib.Path, command: list[str], worktree: pathl
                 argv.extend(("--dir", str(parent)))
                 created.add(parent)
 
-    destinations = (worktree.resolve(), run_origin.resolve(), candidate_home.resolve())
+    destinations = (worktree.resolve(), run_origin.resolve(), candidate_home.resolve(), *runtime_scratch_paths(harness, worktree))
     for destination in destinations:
         create_parents(destination)
         argv += ["--dir", str(destination), "--bind", str(destination), str(destination)]
@@ -583,18 +662,18 @@ def linux_sandbox_argv(binary: pathlib.Path, command: list[str], worktree: pathl
     return argv
 
 
-def linux_sandbox_command(command: list[str], worktree: pathlib.Path, run_origin: pathlib.Path, candidate_home: pathlib.Path, workspace: pathlib.Path) -> list[str]:
+def linux_sandbox_command(command: list[str], worktree: pathlib.Path, run_origin: pathlib.Path, candidate_home: pathlib.Path, workspace: pathlib.Path, harness: str = "") -> list[str]:
     binary = pathlib.Path("/usr/bin/bwrap")
     if not binary.is_file():
         die("Linux candidate execution requires /usr/bin/bwrap")
-    return linux_sandbox_argv(binary, command, worktree, run_origin, candidate_home, workspace)
+    return linux_sandbox_argv(binary, command, worktree, run_origin, candidate_home, workspace, harness)
 
 
-def sandboxed_command(command: list[str], worktree: pathlib.Path, run_origin: pathlib.Path, candidate_home: pathlib.Path, workspace: pathlib.Path) -> list[str]:
+def sandboxed_command(command: list[str], worktree: pathlib.Path, run_origin: pathlib.Path, candidate_home: pathlib.Path, workspace: pathlib.Path, harness: str = "") -> list[str]:
     if platform.system() == "Darwin":
-        return macos_sandbox_command(command, worktree, run_origin, candidate_home, workspace)
+        return macos_sandbox_command(command, worktree, run_origin, candidate_home, workspace, harness)
     if platform.system() == "Linux":
-        return linux_sandbox_command(command, worktree, run_origin, candidate_home, workspace)
+        return linux_sandbox_command(command, worktree, run_origin, candidate_home, workspace, harness)
     die(f"no supported candidate filesystem sandbox on {platform.system()}")
     return []
 
@@ -643,7 +722,14 @@ def harness_version(harness: str) -> str | None:
 def harness_command(args: argparse.Namespace, cwd: pathlib.Path, candidate_home: pathlib.Path, prompt: str) -> list[str]:
     effort = args.effort
     if args.harness == "codex":
-        command = ["codex", "exec", "-C", str(cwd), "--skip-git-repo-check", "--sandbox", "workspace-write", "--add-dir", str(cwd / ".git"), "--add-dir", str(args.mirror), "-m", args.model]
+        # macOS refuses a nested sandbox_apply, so codex applying its own
+        # sandbox inside the run profile makes every command it issues fail
+        # with "Operation not permitted" while the model still burns tokens
+        # explaining that it is blocked. The run profile is the confinement,
+        # and it is the stricter of the two: it denies writes everywhere except
+        # this run's worktree, origin and home, and blinds the operator home,
+        # which codex's own workspace-write does not do.
+        command = ["codex", "exec", "-C", str(cwd), "--skip-git-repo-check", "--sandbox", "danger-full-access", "--add-dir", str(cwd / ".git"), "--add-dir", str(args.mirror), "-m", args.model]
         if effort:
             command += ["-c", f'model_reasoning_effort="{effort}"']
         return command + ["--json", "-o", str(candidate_home / "delivery-note.txt"), prompt]
@@ -1111,7 +1197,7 @@ def command_run(args: argparse.Namespace) -> None:
     workspace = require_workspace(args.workspace)
     config = read_json(workspace / "workspace.json")
     run_id = require_safe_id(args.run_id)
-    if args.stage in ("matrix", "exploratory") and (not isinstance(args.lane, str) or not SAFE_ID.fullmatch(args.lane)):
+    if args.stage in ("matrix", "exploratory", "wave") and (not isinstance(args.lane, str) or not SAFE_ID.fullmatch(args.lane)):
         die(f"{args.stage} runs require a safe lane id")
     bundle = workspace / "bundles" / run_id
     run_root = pathlib.Path(config.get("run_root", workspace / "worktrees"))
@@ -1124,20 +1210,24 @@ def command_run(args: argparse.Namespace) -> None:
     if not prompt.strip():
         die("prompt file is empty")
     frozen_plan_path = workspace / "frozen-plan.json"
+    if args.stage == "wave":
+        if not isinstance(args.wave, str) or not SAFE_ID.fullmatch(args.wave):
+            die("wave runs require a safe --wave label")
+        frozen_plan_path = workspace / "waves" / f"{args.wave}.json"
     frozen_plan: dict[str, Any] | None = None
     frozen_expected: dict[str, Any] | None = None
-    if args.stage == "matrix":
+    if args.stage in ("matrix", "wave"):
         if harness_code_dirty:
-            die("matrix dispatch requires committed harness code")
+            die(f"{args.stage} dispatch requires committed harness code")
         if not args.lane:
-            die("matrix runs require --lane")
+            die(f"{args.stage} runs require --lane")
         if not frozen_plan_path.is_file():
-            die("matrix runs require a frozen pre-registration plan")
+            die(f"{args.stage} runs require a frozen pre-registration plan")
         frozen_plan = read_json(frozen_plan_path)
         if sha256_file(prompt_file) != frozen_plan.get("prompt_sha256"):
-            die("matrix prompt SHA does not match the frozen plan")
+            die(f"{args.stage} prompt SHA does not match the frozen plan")
         if args.max_load != frozen_plan.get("max_load") or args.timeout != frozen_plan.get("timeout_seconds"):
-            die("matrix load ceiling or timeout differs from the frozen plan")
+            die(f"{args.stage} load ceiling or timeout differs from the frozen plan")
         frozen_expected = next((item for item in frozen_plan.get("runs", []) if item.get("run_id") == run_id), None)
         if not frozen_expected:
             die(f"run id is not in the frozen plan: {run_id}")
@@ -1155,6 +1245,8 @@ def command_run(args: argparse.Namespace) -> None:
             die(f"run axes differ from frozen plan: {run_id}")
     if args.stage == "matrix":
         lock = workspace / f".lane-run-lock-{args.lane}"
+    elif args.stage == "wave":
+        lock = workspace / f".wave-{args.wave}-run-lock-{args.lane}"
     elif args.stage == "exploratory":
         lock = workspace / f".exploratory-lane-run-lock-{args.lane}"
     else:
@@ -1214,7 +1306,7 @@ def command_run(args: argparse.Namespace) -> None:
         sampler.start()
         args.mirror = run_origin
         command = harness_command(args, worktree, candidate_home, prompt)
-        command = sandboxed_command(command, worktree, run_origin, candidate_home, workspace)
+        command = sandboxed_command(command, worktree, run_origin, candidate_home, workspace, args.harness)
         env = candidate_environment(args.harness, candidate_home)
         bundle.mkdir(parents=True)
         with session_log.open("wb") as output:
@@ -1328,6 +1420,7 @@ def command_run(args: argparse.Namespace) -> None:
             "transcript": {"status": "captured" if copied_transcripts else "lost", "paths": [str(path.relative_to(bundle)) for path in copied_transcripts], "terminal_paths": [str(path.relative_to(bundle)) for path in copied_terminals], "loss_reason": "no exact cwd session matched" if transcript_loss else None},
             "usage": usage,
             "stage": args.stage,
+            "wave": args.wave,
             "lane": args.lane,
             "concurrent_lane_count": args.concurrent_lane_count,
             "preregistration": None,
@@ -1342,8 +1435,8 @@ def command_run(args: argparse.Namespace) -> None:
             "attrition": {"mechanical_failure": bool(attrition_reasons), "timeout": timed_out, "transcript_loss": transcript_loss, "reason": "; ".join(attrition_reasons) or None},
             "verdicts": {"machine": None, "semantic": None, "early_late": None, "false_fire": None, "ack": None, "source": "separate append-only verdicts.jsonl"},
         }
-        if args.stage == "matrix" and frozen_plan is not None:
-            manifest["preregistration"] = {"plan_sha256": sha256_file(frozen_plan_path), "ratified_at": frozen_plan["ratified_at"], "amendment": frozen_plan["amendment"]}
+        if args.stage in ("matrix", "wave") and frozen_plan is not None:
+            manifest["preregistration"] = {"plan_sha256": sha256_file(frozen_plan_path), "ratified_at": frozen_plan["ratified_at"], "amendment": frozen_plan["amendment"], "wave": frozen_plan.get("wave")}
         validate_manifest(manifest)
         write_json(bundle / "manifest.json", manifest)
         print(json.dumps({"run_id": run_id, "manifest": str(bundle / "manifest.json"), "mechanical_failure": manifest["attrition"]["mechanical_failure"]}, sort_keys=True))
@@ -1362,6 +1455,8 @@ def command_run(args: argparse.Namespace) -> None:
             pass
         if run_origin:
             shutil.rmtree(run_origin, ignore_errors=True)
+        for scratch_path in runtime_scratch_paths(args.harness, worktree):
+            shutil.rmtree(scratch_path, ignore_errors=True)
         try:
             lock.rmdir()
         except OSError:
@@ -1472,11 +1567,41 @@ def normalize_verdict(value: dict[str, Any], manifest_by_id: dict[str, dict[str,
     return value
 
 
+def plan_run_output(workspace: pathlib.Path, plan: dict[str, Any]) -> list[str]:
+    """Run ids in this plan that already produced any captured output.
+
+    A verdict is not the only visible outcome: a manifest, a captured diff or a
+    recorded suite result is enough to shape a replacement slate around results
+    the author has already seen.
+    """
+    suites = rank_suite_results(workspace) if (workspace / "suite-results.jsonl").is_file() else {}
+    judged = verdicts(workspace)
+    produced = []
+    for item in plan.get("runs", []):
+        run_id = item.get("run_id")
+        if not isinstance(run_id, str):
+            continue
+        bundle = workspace / "bundles" / run_id
+        if (bundle / "manifest.json").is_file() or (bundle / "final.diff").is_file() or run_id in judged or run_id in suites:
+            produced.append(run_id)
+    return produced
+
+
 def command_freeze(args: argparse.Namespace) -> None:
     workspace = require_workspace(args.workspace)
     destination = workspace / "frozen-plan.json"
-    if destination.exists():
-        die("pre-registration plan is already frozen")
+    # Every refusal below happens before the active registration is touched: a
+    # command that rejects its replacement must leave the existing plan in
+    # place, not destroy it and then complain.
+    replacing = destination.exists()
+    if replacing:
+        if not args.supersede:
+            die("pre-registration plan is already frozen")
+        if not isinstance(args.reason, str) or not args.reason.strip():
+            die("superseding a frozen plan requires --reason")
+        produced = plan_run_output(workspace, read_json(destination))
+        if produced:
+            die(f"cannot supersede a frozen plan once a run has produced output: {', '.join(produced[:5])}")
     plan = read_json(pathlib.Path(args.file).expanduser().resolve())
     if not isinstance(plan.get("ratified_at"), str) or not plan["ratified_at"].strip() or not isinstance(plan.get("amendment"), str) or not plan["amendment"].strip():
         die("frozen plan requires ratified_at and amendment")
@@ -1489,6 +1614,9 @@ def command_freeze(args: argparse.Namespace) -> None:
     runs = plan.get("runs")
     if not isinstance(runs, list) or not runs:
         die("frozen plan requires a non-empty runs array")
+    shape = plan.get("plan_shape", "confirmatory")
+    if shape not in PLAN_SHAPES:
+        die("frozen plan_shape must be confirmatory or ranking")
     ids: set[str] = set()
     lanes: dict[str, list[dict[str, Any]]] = {}
     helper_families = ("distance-helper", "point-in-polygon", "both", "smoke")
@@ -1512,25 +1640,149 @@ def command_freeze(args: argparse.Namespace) -> None:
             die(f"invalid frozen helper family: {run_id}")
         if type(item.get("concurrent_lane_count")) is not int or item["concurrent_lane_count"] < 1:
             die(f"invalid frozen concurrent lane count: {run_id}")
-        if type(item.get("lane_order")) is not int or item["lane_order"] not in (1, 2):
+        allowed_orders = (1, 2) if shape == "confirmatory" else (1,)
+        if type(item.get("lane_order")) is not int or item["lane_order"] not in allowed_orders:
             die(f"invalid frozen lane order: {run_id}")
         lanes.setdefault(lane, []).append(item)
-    if len(runs) != 14 or len(lanes) != 7:
-        die("frozen confirmatory plan requires exactly seven paired lanes and fourteen runs")
-    paired_axes = ("harness", "model", "provider", "effort", "helper_family", "concurrent_lane_count")
-    for lane, pair in lanes.items():
-        if len(pair) != 2 or {item["arm"] for item in pair} != set(ARMS) or {item["lane_order"] for item in pair} != {1, 2}:
-            die(f"frozen lane is not one paired ON/OFF slate: {lane}")
-        if any(pair[0][key] != pair[1][key] for key in paired_axes):
-            die(f"frozen lane changes non-arm axes within its pair: {lane}")
+    if shape == "confirmatory":
+        if len(runs) != 14 or len(lanes) != 7:
+            die("frozen confirmatory plan requires exactly seven paired lanes and fourteen runs")
+        paired_axes = ("harness", "model", "provider", "effort", "helper_family", "concurrent_lane_count")
+        for lane, pair in lanes.items():
+            if len(pair) != 2 or {item["arm"] for item in pair} != set(ARMS) or {item["lane_order"] for item in pair} != {1, 2}:
+                die(f"frozen lane is not one paired ON/OFF slate: {lane}")
+            if any(pair[0][key] != pair[1][key] for key in paired_axes):
+                die(f"frozen lane changes non-arm axes within its pair: {lane}")
+    else:
+        if len(runs) < 2:
+            die("frozen ranking plan requires at least two scored candidates")
+        if len(lanes) != len(runs):
+            die("frozen ranking plan requires exactly one run per lane")
+        condition = plan.get("condition_arm")
+        if condition not in ARMS:
+            die("frozen ranking plan requires condition_arm naming its single condition")
+        if any(item["arm"] != condition for item in runs):
+            die("frozen ranking plan mixes arms; a ranking slate runs one condition only")
+        candidates = [(item["harness"], item["provider"], item["model"]) for item in runs]
+        if len(set(candidates)) != len(candidates):
+            die("frozen ranking plan repeats a candidate; a ranking slate scores each model once")
+        if not isinstance(plan.get("rubric_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", plan["rubric_sha256"]):
+            die("frozen ranking plan requires rubric_sha256 binding the rubric frozen before any run")
+        if not isinstance(plan.get("suite_command"), str) or not plan["suite_command"].strip():
+            die("frozen ranking plan requires the suite_command its executable verdict replays")
     prompt_sha = plan.get("prompt_sha256")
     if not isinstance(prompt_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", prompt_sha):
         die("frozen plan requires prompt_sha256")
     plan["schema_version"] = "canonical-guard-frozen-plan/v1"
     plan["frozen_at"] = utc_now()
+    # Validation is complete. Stage the replacement, archive the old plan, then
+    # publish by rename so the workspace never has no frozen plan at all, and
+    # roll the archive back if publishing fails.
+    superseded = None
+    staged = workspace / f".frozen-plan-staged-{os.getpid()}.json"
+    try:
+        if replacing:
+            previous = read_json(destination)
+            archive = workspace / "superseded"
+            archive.mkdir(exist_ok=True)
+            superseded = archive / f"frozen-plan-{re.sub(r'[^0-9A-Za-z]', '-', str(previous.get('frozen_at', utc_now())))}.json"
+            if superseded.exists():
+                die(f"a superseded plan is already archived under that timestamp: {superseded.name}")
+            previous["superseded_at"] = utc_now()
+            previous["superseded_reason"] = args.reason.strip()
+            write_json(superseded, previous)
+            superseded.chmod(0o444)
+            plan["supersedes"] = {"archived": superseded.name, "sha256": sha256_file(superseded), "reason": args.reason.strip()}
+        write_json(staged, plan)
+        staged.chmod(0o444)
+        if replacing:
+            destination.chmod(0o644)
+        os.replace(staged, destination)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        if destination.exists():
+            # The plan is made writable just before the rename; a failure after
+            # that point must not leave the active registration mutable.
+            destination.chmod(0o444)
+            if superseded is not None:
+                superseded.chmod(0o644)
+                superseded.unlink(missing_ok=True)
+        raise
+    print(json.dumps({"frozen_plan": str(destination), "sha256": sha256_file(destination), "runs": len(runs), "superseded": superseded.name if superseded else None}, sort_keys=True))
+
+
+def wave_plans(workspace: pathlib.Path) -> dict[str, dict[str, Any]]:
+    root = workspace / "waves"
+    if not root.is_dir():
+        return {}
+    return {path.stem: read_json(path) for path in sorted(root.glob("*.json"))}
+
+
+def command_freeze_wave(args: argparse.Namespace) -> None:
+    workspace = require_workspace(args.workspace)
+    primary = ranking_plan(workspace)
+    plan = read_json(pathlib.Path(args.file).expanduser().resolve())
+    label = plan.get("wave")
+    if not isinstance(label, str) or not SAFE_ID.fullmatch(label):
+        die("a wave plan requires a safe wave label")
+    existing = wave_plans(workspace)
+    if label in existing:
+        die(f"wave is already frozen: {label}")
+    if not isinstance(plan.get("ratified_at"), str) or not plan["ratified_at"].strip() or not isinstance(plan.get("amendment"), str) or not plan["amendment"].strip():
+        die("a wave plan requires ratified_at and amendment")
+    # A wave is only comparable with the primary slate if it answers the same
+    # question with the same instrument, so the shared values are equality
+    # checks rather than repeated declarations.
+    for key in ("prompt_sha256", "rubric_sha256", "suite_command", "condition_arm", "max_load", "timeout_seconds"):
+        if plan.get(key) != primary.get(key):
+            die(f"wave {label} differs from the primary slate on {key}")
+    runs = plan.get("runs")
+    if not isinstance(runs, list) or not runs:
+        die("a wave plan requires a non-empty runs array")
+    taken_ids = {item["run_id"] for item in primary["runs"]}
+    taken_cells = {(item["harness"], item["provider"], item["model"], item["effort"]) for item in primary["runs"]}
+    for other_label, other in existing.items():
+        taken_ids |= {item["run_id"] for item in other["runs"]}
+        taken_cells |= {(item["harness"], item["provider"], item["model"], item["effort"]) for item in other["runs"]}
+    seen_ids: set[str] = set()
+    seen_lanes: set[str] = set()
+    for item in runs:
+        if not isinstance(item, dict):
+            die("every wave run must be an object")
+        run_id = require_safe_id(str(item.get("run_id", "")))
+        if run_id in seen_ids or run_id in taken_ids:
+            die(f"wave {label} reuses run id: {run_id}")
+        seen_ids.add(run_id)
+        lane = item.get("lane")
+        if not isinstance(lane, str) or not SAFE_ID.fullmatch(lane) or lane in seen_lanes:
+            die(f"wave {label} requires one safe unused lane per run: {run_id}")
+        seen_lanes.add(lane)
+        if item.get("arm") != primary["condition_arm"]:
+            die(f"wave {label} run is not in the slate's single condition: {run_id}")
+        if item.get("harness") not in HARNESS_NAMES or not isinstance(item.get("model"), str) or not item["model"].strip():
+            die(f"invalid wave run axes: {run_id}")
+        if "provider" not in item or (item["provider"] is not None and (not isinstance(item["provider"], str) or not item["provider"].strip())):
+            die(f"invalid wave provider: {run_id}")
+        if not isinstance(item.get("effort"), str) or not item["effort"].strip():
+            die(f"wave {label} exists to vary effort, so every run must name one: {run_id}")
+        if item.get("helper_family") not in ("distance-helper", "point-in-polygon", "both", "smoke"):
+            die(f"invalid wave helper family: {run_id}")
+        if type(item.get("concurrent_lane_count")) is not int or item["concurrent_lane_count"] < 1:
+            die(f"invalid wave concurrent lane count: {run_id}")
+        if type(item.get("lane_order")) is not int or item["lane_order"] != 1:
+            die(f"invalid wave lane order: {run_id}")
+        cell = (item["harness"], item["provider"], item["model"], item["effort"])
+        if cell in taken_cells:
+            die(f"wave {label} repeats an already-measured model and effort: {run_id}")
+        taken_cells.add(cell)
+    root = workspace / "waves"
+    root.mkdir(exist_ok=True)
+    destination = root / f"{label}.json"
+    plan["schema_version"] = "canonical-guard-ranking-wave/v1"
+    plan["frozen_at"] = utc_now()
     write_json(destination, plan)
     destination.chmod(0o444)
-    print(json.dumps({"frozen_plan": str(destination), "sha256": sha256_file(destination), "runs": len(runs)}, sort_keys=True))
+    print(json.dumps({"wave": label, "frozen_plan": str(destination), "sha256": sha256_file(destination), "runs": len(runs)}, sort_keys=True))
 
 
 def command_record_verdict(args: argparse.Namespace) -> None:
@@ -1587,6 +1839,17 @@ def captured_gate_remediations(bundle: pathlib.Path, manifest: dict[str, Any]) -
     return list(unique.values())
 
 
+def apply_captured_patch(scratch: pathlib.Path, patch: pathlib.Path) -> None:
+    prepared_patch = scratch / ".git" / "captured-score.patch"
+    patch_bytes = patch.read_bytes()
+    prepared_patch.write_bytes(patch_bytes + (b"\n" if patch_bytes and not patch_bytes.endswith(b"\n") else b""))
+    applied = run(["git", "apply", "--binary", str(prepared_patch)], cwd=scratch, check=False)
+    if applied.returncode != 0:
+        die(f"cannot reconstruct captured tree for scoring: {applied.stderr.strip()}")
+    git(scratch, "add", "-A")
+    run(["git", "commit", "--no-verify", "-m", "test: reconstruct captured benchmark tree"], cwd=scratch, env=clean_git_config_environment())
+
+
 def command_score(args: argparse.Namespace) -> None:
     workspace = require_workspace(args.workspace)
     lock = workspace / ".score-lock"
@@ -1631,14 +1894,7 @@ def command_score_locked(args: argparse.Namespace, workspace: pathlib.Path) -> N
         scratch = workspace / f".score-{args.run_id}-{suffix}-{os.getpid()}"
         cow_copy(template, scratch)
         try:
-            prepared_patch = scratch / ".git" / "captured-score.patch"
-            patch_bytes = patch.read_bytes()
-            prepared_patch.write_bytes(patch_bytes + (b"\n" if patch_bytes and not patch_bytes.endswith(b"\n") else b""))
-            applied = run(["git", "apply", "--binary", str(prepared_patch)], cwd=scratch, check=False)
-            if applied.returncode != 0:
-                die(f"cannot reconstruct captured tree for scoring: {applied.stderr.strip()}")
-            git(scratch, "add", "-A")
-            run(["git", "commit", "--no-verify", "-m", "test: reconstruct captured benchmark tree"], cwd=scratch, env=clean_git_config_environment())
+            apply_captured_patch(scratch, patch)
             return pinned_detector_run(scratch, template, manifest["base_sha"], manifest["detector_sha"])
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -1681,6 +1937,401 @@ def command_score_locked(args: argparse.Namespace, workspace: pathlib.Path) -> N
     normalized = normalize_verdict(value, manifest_by_id)
     append_jsonl(workspace / "verdicts.jsonl", normalized)
     print(json.dumps({"recorded": args.run_id, "machine": machine, "semantic": semantic_verdict, "outcome_class": outcome}, sort_keys=True))
+
+
+def ranking_plan(workspace: pathlib.Path) -> dict[str, Any]:
+    path = workspace / "frozen-plan.json"
+    if not path.is_file():
+        die("ranking commands require a frozen pre-registration plan")
+    plan = read_json(path)
+    if plan.get("plan_shape") != "ranking":
+        die("frozen plan is not a ranking slate")
+    return plan
+
+
+def rank_suite_results(workspace: pathlib.Path) -> dict[str, dict[str, Any]]:
+    ledger = workspace / "suite-results.jsonl"
+    result: dict[str, dict[str, Any]] = {}
+    if not ledger.is_file():
+        return result
+    for number, line in enumerate(ledger.read_text().splitlines(), 1):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            die(f"malformed suite ledger line {number}")
+        if not isinstance(value, dict) or not isinstance(value.get("run_id"), str):
+            die(f"invalid suite ledger line {number}")
+        if value["run_id"] in result:
+            die(f"duplicate suite result for run {value['run_id']}")
+        result[value["run_id"]] = value
+    return result
+
+
+def added_test_paths(scratch: pathlib.Path) -> list[str]:
+    listing = git(scratch, "show", "--name-only", "--format=", "HEAD")
+    found = [line.strip() for line in listing.splitlines() if line.strip()]
+    return sorted(path for path in found if re.search(r"(?:^|/)__tests__/|\.(?:test|spec)\.[cm]?[jt]sx?$", path))
+
+
+def command_rank_suite(args: argparse.Namespace) -> None:
+    workspace = require_workspace(args.workspace)
+    plan = ranking_plan(workspace)
+    if args.suite_command != plan["suite_command"]:
+        die("suite command differs from the frozen ranking plan")
+    recorded = rank_suite_results(workspace)
+    run_id = require_safe_id(args.run_id)
+    if run_id in recorded:
+        die(f"suite result already recorded for run: {run_id}")
+    manifest_by_id = {item["run_id"]: item for item in manifests(workspace)}
+    if run_id not in manifest_by_id:
+        die(f"unknown run: {run_id}")
+    manifest = manifest_by_id[run_id]
+    config = read_json(workspace / "workspace.json")
+    if manifest["detector_sha"] != config.get("detector_sha"):
+        die("manifest detector_sha differs from the initialized pinned detector")
+    template = pathlib.Path(config["templates"][manifest["arm"]]["path"])
+    patch = workspace / "bundles" / run_id / "final.diff"
+    if not patch.is_file():
+        die(f"run has no captured final diff: {run_id}")
+    record: dict[str, Any] = {"status": "no-change", "test_paths": [], "filters": [], "exit_code": None, "stdout_tail": "", "stderr_tail": ""}
+    if patch.read_bytes().strip():
+        scratch = workspace / f".suite-{run_id}-{os.getpid()}"
+        replay_home = workspace / f".suite-home-{run_id}-{os.getpid()}"
+        try:
+            cow_copy(template, scratch)
+            apply_captured_patch(scratch, patch)
+            # Everything replayed here was written by the candidate, and the suite
+            # command runs it. Restore the execution surface from the template so
+            # a rewritten package script cannot choose what the scorer executes,
+            # and confine the whole replay exactly like the run that produced it.
+            restore_suite_surface(scratch, template)
+            tests = added_test_paths(scratch)
+            filters = [pathlib.PurePath(path).name for path in tests]
+            if len(set(filters)) != len(filters):
+                die(f"run added test files sharing a name, so a name filter is ambiguous: {run_id}")
+            if not tests:
+                record["status"] = "no-tests"
+            else:
+                replay_home.mkdir(parents=True)
+                replay_home.chmod(0o700)
+                command = sandboxed_command(shlex.split(args.suite_command) + filters, scratch, scratch, replay_home, workspace)
+                environment = replay_environment(replay_home)
+                completed = run(command, cwd=scratch, env=environment, check=False)
+                record = {
+                    "status": "pass" if completed.returncode == 0 else "fail",
+                    "test_paths": tests,
+                    "filters": filters,
+                    "exit_code": completed.returncode,
+                    "sandboxed": True,
+                    "stdout_tail": (completed.stdout or "")[-4000:],
+                    "stderr_tail": (completed.stderr or "")[-4000:],
+                }
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+            shutil.rmtree(replay_home, ignore_errors=True)
+    record.update({
+        "schema_version": RANK_SUITE_VERSION,
+        "run_id": run_id,
+        "model": manifest["model"],
+        "suite_command": args.suite_command,
+        "plan_sha256": sha256_file(workspace / "frozen-plan.json"),
+        "recorded_at": utc_now(),
+    })
+    append_jsonl(workspace / "suite-results.jsonl", record)
+    print(json.dumps({"recorded": run_id, "status": record["status"], "tests": len(record["test_paths"])}, sort_keys=True))
+
+
+SUITE_SURFACE = ("package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml", "turbo.json")
+
+
+def restore_suite_surface(scratch: pathlib.Path, template: pathlib.Path) -> list[str]:
+    """Put back the files that decide what the frozen suite command executes."""
+    restored = []
+    targets = list(SUITE_SURFACE)
+    for path in sorted(scratch.rglob("package.json")):
+        if "node_modules" in path.parts:
+            continue
+        targets.append(str(path.relative_to(scratch)))
+    for relative in dict.fromkeys(targets):
+        source = template / relative
+        if not source.is_file():
+            continue
+        destination = scratch / relative
+        if replace_with_trusted_file(destination, source):
+            restored.append(relative)
+    return sorted(set(restored))
+
+
+def replace_with_trusted_file(destination: pathlib.Path, source: pathlib.Path) -> bool:
+    """Put the template's file at destination, whatever the candidate left there.
+
+    A candidate can swap any of these paths for a symlink or a directory. Never
+    hash or copy through the destination first: following a planted symlink
+    would read a file outside the reconstructed tree, and unlink() on a planted
+    directory raises. Compare only when the destination really is a plain file.
+    """
+    if destination.is_symlink():
+        destination.unlink()
+    elif destination.is_dir():
+        shutil.rmtree(destination)
+    elif destination.is_file():
+        if sha256_file(destination) == sha256_file(source):
+            return False
+        destination.unlink()
+    elif destination.exists():
+        destination.unlink()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return True
+
+
+def replay_environment(replay_home: pathlib.Path) -> dict[str, str]:
+    """A disposable environment for replayed candidate code: no operator secrets."""
+    inherited = clean_git_config_environment()
+    ordinary = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "SSL_CERT_FILE", "SSL_CERT_DIR")
+    env = {name: inherited[name] for name in ordinary if name in inherited}
+    temporary = replay_home / "tmp"
+    temporary.mkdir(parents=True, exist_ok=True)
+    bundle = system_ca_bundle()
+    if bundle and "SSL_CERT_FILE" not in env:
+        env["SSL_CERT_FILE"] = bundle
+    env.update({
+        "HOME": str(replay_home),
+        "TMPDIR": str(temporary),
+        "GIT_TERMINAL_PROMPT": "0",
+        "CI": "1",
+        "NO_COLOR": "1",
+    })
+    return env
+
+
+def rank_equivalence_counts(path: pathlib.Path, run_ids: set[str]) -> dict[str, dict[str, Any]]:
+    """Differential-equivalence counts, refused rather than trusted.
+
+    An unchecked row does not merely crash: a negative or oversized count silently
+    awards a score share no measurement supports.
+    """
+    document = read_json(path)
+    rows = document.get("runs")
+    if not isinstance(rows, dict):
+        die("equivalence file requires a runs object keyed by run id")
+    unknown = sorted(set(rows) - run_ids)
+    if unknown:
+        die(f"equivalence file scores unknown runs: {', '.join(unknown)}")
+    for run_id, row in rows.items():
+        if not isinstance(row, dict):
+            die(f"equivalence row for {run_id} must be an object")
+        comparable, equivalent = row.get("comparable"), row.get("equivalent")
+        if type(comparable) is not int or type(equivalent) is not int:
+            die(f"equivalence counts for {run_id} must be integers")
+        if comparable < 0 or equivalent < 0:
+            die(f"equivalence counts for {run_id} cannot be negative")
+        if equivalent > comparable:
+            die(f"equivalence for {run_id} claims more equivalent pairs than comparable ones")
+    return rows
+
+
+def rank_quality_reads(path: pathlib.Path, criteria: list[dict[str, Any]], run_ids: set[str]) -> dict[str, dict[str, Any]]:
+    document = read_json(path)
+    reads = document.get("runs")
+    if not isinstance(reads, dict):
+        die("quality file requires a runs object keyed by run id")
+    unknown = sorted(set(reads) - run_ids)
+    if unknown:
+        die(f"quality file scores unknown runs: {', '.join(unknown)}")
+    for run_id, scores in reads.items():
+        if not isinstance(scores, dict):
+            die(f"quality read for {run_id} must be an object")
+        for criterion in criteria:
+            entry = scores.get(criterion["id"])
+            if not isinstance(entry, dict):
+                die(f"quality read for {run_id} is missing criterion {criterion['id']}")
+            score = entry.get("score")
+            if type(score) is not int or score not in (0, 1, 2):
+                die(f"quality score for {run_id}/{criterion['id']} must be the integer 0, 1, or 2")
+            if not isinstance(entry.get("evidence"), str) or not entry["evidence"].strip():
+                die(f"quality read for {run_id}/{criterion['id']} requires one line of evidence")
+    return reads
+
+
+def command_rank_scoreboard(args: argparse.Namespace) -> None:
+    workspace = require_workspace(args.workspace)
+    plan = ranking_plan(workspace)
+    rubric_path = pathlib.Path(args.rubric).expanduser().resolve()
+    if sha256_file(rubric_path) != plan["rubric_sha256"]:
+        die("rubric file does not match the rubric frozen before the runs")
+    rubric = read_json(rubric_path)
+    criteria = rubric.get("criteria")
+    weights = rubric.get("weights")
+    if not isinstance(criteria, list) or not criteria or any(not isinstance(item, dict) or not item.get("id") or not item.get("name") for item in criteria):
+        die("rubric requires a non-empty criteria list of id/name objects")
+    identifiers = [item["id"] for item in criteria]
+    if any(not isinstance(value, str) or not SAFE_ID.fullmatch(value) for value in identifiers):
+        die("every rubric criterion needs a safe id")
+    if len(set(identifiers)) != len(identifiers):
+        die("rubric criterion ids must be unique")
+    required_weights = ("suite", "duplicate", "equivalence", "judged")
+    if not isinstance(weights, dict) or any(type(weights.get(key)) not in (int, float) for key in required_weights):
+        die(f"rubric requires numeric weights for {', '.join(required_weights)}")
+    if any(not math.isfinite(weights[key]) or weights[key] < 0 for key in required_weights):
+        die("every rubric weight must be finite and non-negative")
+    declared_total = rubric.get("composite_total", 100)
+    if type(declared_total) not in (int, float) or not math.isfinite(declared_total) or declared_total <= 0:
+        die("rubric composite_total must be a positive finite number")
+    if abs(sum(weights[key] for key in required_weights) - declared_total) > 1e-9:
+        die(f"rubric weights must total the advertised composite score of {declared_total}")
+    waves = wave_plans(workspace)
+    planned = {item["run_id"]: item for item in plan["runs"]}
+    wave_of = {}
+    for label, wave in waves.items():
+        for item in wave["runs"]:
+            planned[item["run_id"]] = item
+            wave_of[item["run_id"]] = label
+    all_runs = manifests(workspace)
+    runs = [
+        item for item in all_runs
+        if item["run_id"] in planned
+        and (item.get("stage") == "matrix" or (item.get("stage") == "wave" and item.get("wave") in waves))
+    ]
+    judged_ledger = verdicts(workspace)
+    suites = rank_suite_results(workspace)
+    quality = rank_quality_reads(pathlib.Path(args.quality).expanduser().resolve(), criteria, set(planned))
+    equivalence: dict[str, Any] = {}
+    if args.equivalence:
+        equivalence = rank_equivalence_counts(pathlib.Path(args.equivalence).expanduser().resolve(), set(planned))
+    judged_max = 2 * len(criteria)
+    rows = []
+    for item in sorted(runs, key=lambda value: value["run_id"]):
+        run_id = item["run_id"]
+        suite = suites.get(run_id)
+        suite_status = suite["status"] if suite else "not-run"
+        machine = judged_ledger.get(run_id, {}).get("machine")
+        pairs = equivalence.get(run_id) or {}
+        comparable = pairs.get("comparable")
+        equivalent = pairs.get("equivalent")
+        reads = quality.get(run_id)
+        judged_total = sum(reads[criterion["id"]]["score"] for criterion in criteria) if reads else None
+        suite_points = weights["suite"] if suite_status == "pass" else 0.0
+        duplicate_points = weights["duplicate"] if machine == "clean" else 0.0
+        if comparable:
+            equivalence_points = weights["equivalence"] * (equivalent / comparable)
+        else:
+            equivalence_points = 0.0
+        judged_points = weights["judged"] * (judged_total / judged_max) if judged_total is not None else 0.0
+        composite = round(suite_points + duplicate_points + equivalence_points + judged_points, 2)
+        tokens = item["usage"].get("total_tokens")
+        per_token = round(composite / (tokens / 1_000_000), 2) if tokens else None
+        rows.append({
+            "run_id": run_id,
+            "wave": wave_of.get(run_id, "primary"),
+            "effort": item.get("effort"),
+            "model": item["model"],
+            "harness": item["harness"],
+            "provider": item.get("provider"),
+            "suite": suite_status,
+            "machine": machine or "unscored",
+            "equivalence": f"{equivalent}/{comparable}" if comparable else "no comparable pair",
+            "judged": f"{judged_total}/{judged_max}" if judged_total is not None else "unread",
+            "composite": composite,
+            "tokens": tokens,
+            "per_token": per_token,
+            "wall": item["timing"]["wall_seconds"],
+            "peak_load": peak_numeric_load(item.get("load_samples")),
+            "lanes": item.get("concurrent_lane_count"),
+            "attrition": item["attrition"]["reason"],
+        })
+    primary_rows = [row for row in rows if row["wave"] == "primary"]
+    ranked = sorted([row for row in primary_rows if row["per_token"] is not None], key=lambda row: -row["per_token"])
+    untokened = sorted([row for row in primary_rows if row["per_token"] is None], key=lambda row: -row["composite"])
+    missing = sorted(set(planned) - {row["run_id"] for row in rows})
+
+    def footnote(row: dict[str, Any], value: Any) -> str:
+        return f"{value} [{row['run_id']}]"
+
+    sections: list[tuple[str, list[str], list[list[Any]]]] = [
+        ("Ranking by quality per million tokens", ["Rank", "Model", "Runtime", "Quality / 1M tokens", "Quality (0-100)", "Tokens", "Wall seconds"],
+         [[index, row["model"], row["harness"] + (f" / {row['provider']}" if row["provider"] else ""), footnote(row, row["per_token"]), row["composite"], row["tokens"], round(row["wall"])] for index, row in enumerate(ranked, 1)]),
+        ("Quality only — token counts unavailable from the runtime", ["Model", "Runtime", "Quality (0-100)", "Wall seconds", "Why unranked"],
+         [[row["model"], row["harness"] + (f" / {row['provider']}" if row["provider"] else ""), footnote(row, row["composite"]), round(row["wall"]), "runtime reports no token usage"] for row in untokened]),
+        ("Executable verdicts — no judgment", ["Model", "Wave", "Effort", "Reconstructed suite", "Duplicate detector", "Differential equivalence", "Run"],
+         [[row["model"], row["wave"], row["effort"] if row["effort"] is not None else "runtime default", row["suite"], row["machine"], row["equivalence"], row["run_id"]] for row in rows]),
+        ("Judged code-quality read", ["Model", "Wave", "Effort", "Criterion", "Score", "Evidence", "Run"],
+         [[row["model"], row["wave"], row["effort"] if row["effort"] is not None else "runtime default", criterion["name"], quality[row["run_id"]][criterion["id"]]["score"], quality[row["run_id"]][criterion["id"]]["evidence"], row["run_id"]]
+          for row in rows if row["run_id"] in quality for criterion in criteria]),
+        ("Run conditions", ["Model", "Wave", "Effort", "Peak 1m load", "Concurrent lanes", "Wall seconds", "Attrition", "Run"],
+         [[row["model"], row["wave"], row["effort"] if row["effort"] is not None else "runtime default", row["peak_load"], row["lanes"], round(row["wall"]), row["attrition"] or "none", row["run_id"]] for row in rows]),
+        ("Lanes that produced no scored run", ["Planned run", "Model", "Runtime"],
+         [[run_id, planned[run_id]["model"], planned[run_id]["harness"]] for run_id in missing]),
+    ]
+    # A later wave varies one axis on the same task and rubric. It is reported
+    # after the primary slate and never folded into it, so the primary ranking
+    # stays exactly the slate that was frozen first.
+    for label in sorted(waves):
+        wave_rows = sorted(
+            [row for row in rows if row["wave"] == label],
+            key=lambda row: (row["per_token"] is None, -(row["per_token"] or 0)),
+        )
+        sections.append((
+            f"Second wave: {label} — reported separately from the primary slate",
+            ["Model", "Runtime", "Effort", "Quality / 1M tokens", "Quality (0-100)", "Tokens", "Wall seconds"],
+            [[row["model"], row["harness"] + (f" / {row['provider']}" if row["provider"] else ""), row["effort"],
+              footnote(row, row["per_token"] if row["per_token"] is not None else "tokens unavailable"),
+              row["composite"], row["tokens"], round(row["wall"])] for row in wave_rows],
+        ))
+    by_model: dict[tuple[str, str, Any], dict[Any, dict[str, Any]]] = {}
+    for row in rows:
+        by_model.setdefault((row["model"], row["harness"], row["provider"]), {})[row["effort"]] = row
+    effort_rows = []
+    for (model, harness, provider), efforts in sorted(by_model.items()):
+        if len(efforts) < 2:
+            continue
+        for effort, row in sorted(efforts.items(), key=lambda pair: str(pair[0])):
+            effort_rows.append([
+                model, harness + (f" / {provider}" if provider else ""), effort if effort is not None else "runtime default",
+                row["composite"], row["per_token"] if row["per_token"] is not None else "tokens unavailable",
+                row["tokens"], round(row["wall"]), row["run_id"],
+            ])
+    sections.append((
+        "Model by effort — only models measured at more than one effort",
+        ["Model", "Runtime", "Effort", "Quality (0-100)", "Quality / 1M tokens", "Tokens", "Wall seconds", "Run"],
+        effort_rows,
+    ))
+    scoring_text = (
+        f"Quality is the pre-registered composite frozen in {rubric_path.name} (sha256 {plan['rubric_sha256'][:12]}): "
+        f"reconstructed suite pass {weights['suite']}, duplicate-detector clean {weights['duplicate']}, "
+        f"differential equivalence {weights['equivalence']} scaled by the equivalent share of comparable helper pairs, "
+        f"and the judged read {weights['judged']} scaled by its {judged_max}-point criteria total."
+    )
+    honesty = (
+        f"n=1 per model on one fixed task: every row is one observation, so a gap of a few points ranks nothing. "
+        f"{len(ranked)} of {len(rows)} scored runs report token usage; the rest are ranked on quality alone and never imputed. "
+        f"{len(missing)} planned lanes produced no scored run. "
+        f"The primary ranking contains only the slate frozen first; every later wave is reported in its own table and never merged into it. "
+        f"No pool in this fleet publishes a dollar-per-token price, so "
+        f"quality per token is a usage ratio, not a cost ratio. Executable verdicts and the judged read are reported separately "
+        f"and only combined inside the frozen composite."
+    )
+    markdown = f"# Router ranking benchmark\n\n{scoring_text}\n\n"
+    for title, headers, table in sections:
+        markdown += f"## {title}\n\n{md_table(headers, table)}\n\n"
+    markdown += f"## Honesty footer\n\n{honesty}\n"
+    pathlib.Path(args.markdown).write_text(markdown)
+    body = "".join(f"<section><h2>{html.escape(title)}</h2>{html_table(headers, table)}</section>" for title, headers, table in sections)
+    page = (
+        "<!doctype html><html><head><meta charset='utf-8'><title>Router ranking benchmark</title>"
+        "<style>:root{--ink:#17202a;--muted:#65707d;--paper:#fbfaf7;--line:#d8dce2;--accent:#4353ff}"
+        "*{box-sizing:border-box}body{font:15px/1.45 Inter,ui-sans-serif,system-ui;color:var(--ink);background:var(--paper);margin:0}"
+        "main{max-width:1280px;margin:auto;padding:48px}h1{font-size:40px;letter-spacing:-.03em;margin:0 0 8px}"
+        "h2{margin:40px 0 14px;font-size:22px}.lede{font-size:19px;max-width:880px}"
+        ".table-wrap{overflow:auto;border:1px solid var(--line);border-radius:10px;background:white}"
+        "table{border-collapse:collapse;width:100%;min-width:720px}th,td{padding:10px 12px;border-bottom:1px solid var(--line);"
+        "text-align:left;vertical-align:top;white-space:pre-wrap}th{background:#f0f2f5;position:sticky;top:0}"
+        ".foot{color:var(--muted);border-top:1px solid var(--line);margin-top:44px;padding-top:20px}</style></head>"
+        f"<body><main><h1>Router ranking benchmark</h1><p class='lede'>{html.escape(scoring_text)}</p>{body}"
+        f"<div class='foot'><strong>Honesty footer.</strong> {html.escape(honesty)}</div></main></body></html>\n"
+    )
+    pathlib.Path(args.html).write_text(page)
+    print(json.dumps({"markdown": args.markdown, "html": args.html, "ranked": len(ranked), "unranked": len(untokened), "missing_lanes": len(missing)}, sort_keys=True))
 
 
 def command_schema_check(args: argparse.Namespace) -> None:
@@ -1958,7 +2609,8 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--effort")
     run_parser.add_argument("--prompt-file", required=True)
     run_parser.add_argument("--helper-family", choices=("distance-helper", "point-in-polygon", "both", "smoke"))
-    run_parser.add_argument("--stage", choices=("smoke", "matrix", "exploratory"), default="matrix")
+    run_parser.add_argument("--stage", choices=("smoke", "matrix", "exploratory", "wave"), default="matrix")
+    run_parser.add_argument("--wave", help="label of the frozen wave plan a wave run belongs to")
     run_parser.add_argument("--lane")
     run_parser.add_argument("--concurrent-lane-count", type=int, default=1)
     run_parser.add_argument("--load-file")
@@ -1968,6 +2620,8 @@ def parser() -> argparse.ArgumentParser:
     freeze = commands.add_parser("freeze", help="freeze the ratified plan before the first matrix dispatch")
     freeze.add_argument("--workspace", required=True)
     freeze.add_argument("--file", required=True)
+    freeze.add_argument("--supersede", action="store_true", help="replace an existing frozen plan, allowed only before any verdict exists")
+    freeze.add_argument("--reason", help="why the existing plan is being superseded")
     freeze.set_defaults(handler=command_freeze)
     score = commands.add_parser("score", help="post-hoc machine-score one captured run and join exactly two independent semantic verdicts")
     score.add_argument("--workspace", required=True)
@@ -1978,6 +2632,23 @@ def parser() -> argparse.ArgumentParser:
     record.add_argument("--workspace", required=True)
     record.add_argument("--file", required=True)
     record.set_defaults(handler=command_record_verdict)
+    rank_suite = commands.add_parser("rank-suite", help="replay one ranking run's captured tree and execute the frozen suite command against the tests it added")
+    rank_suite.add_argument("--workspace", required=True)
+    rank_suite.add_argument("--run-id", required=True)
+    rank_suite.add_argument("--suite-command", required=True, help="must equal the ranking plan's frozen suite_command; each added test file's name is appended as a filter argument")
+    rank_suite.set_defaults(handler=command_rank_suite)
+    rank_board = commands.add_parser("rank-scoreboard", help="rank a frozen ranking slate by quality per token from manifests, verdicts, suite results, and the frozen rubric")
+    rank_board.add_argument("--workspace", required=True)
+    rank_board.add_argument("--markdown", required=True)
+    rank_board.add_argument("--html", required=True)
+    rank_board.add_argument("--rubric", required=True, help="the rubric file whose hash the plan froze before any run")
+    rank_board.add_argument("--quality", required=True, help="judged per-criterion reads with one line of evidence each")
+    rank_board.add_argument("--equivalence", help="optional differential-equivalence counts per run")
+    rank_board.set_defaults(handler=command_rank_scoreboard)
+    freeze_wave = commands.add_parser("freeze-wave", help="freeze one labelled later wave that varies effort on the already-frozen ranking slate")
+    freeze_wave.add_argument("--workspace", required=True)
+    freeze_wave.add_argument("--file", required=True)
+    freeze_wave.set_defaults(handler=command_freeze_wave)
     schema = commands.add_parser("schema-check", help="prove the raw schema can derive all seven registered tables")
     schema.add_argument("--workspace", required=True)
     schema.set_defaults(handler=command_schema_check)
