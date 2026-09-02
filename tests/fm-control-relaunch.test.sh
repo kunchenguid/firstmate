@@ -577,6 +577,23 @@ test_explicit_model_wins_over_the_recorded_one() {
   pass "fm-control relaunch: explicit model and effort win over the recorded ones"
 }
 
+test_raw_launch_relaunch_requires_explicit_harness() {
+  local dir out rc
+  dir=$(new_case rawprovenance rl35)
+  add_ship_task "$dir" rl35 prime-agent
+  printf 'raw_launch=1\n' >> "$dir/home/state/rl35.meta"
+  printf 'prime-agent' > "$dir/fake/command"
+  out=$(run_control "$dir" rl35 relaunch --note "resume raw work"); rc=$?
+  expect_code 1 "$rc" "a raw launch relaunch without --harness should refuse"
+  assert_contains "$out" "raw launch command that cannot be reconstructed" \
+    "the refusal should name raw-launch provenance"
+  [ "$(cat "$dir/fake/command")" = prime-agent ] \
+    || fail "a refused raw relaunch must leave the original agent alive"
+  [ ! -s "$dir/fake/literal" ] \
+    || fail "a refused raw relaunch must deliver no lifecycle input"
+  pass "fm-control relaunch: raw launch provenance requires an explicit replacement harness"
+}
+
 test_relaunch_onto_an_unverified_harness_is_refused() {
   local dir out rc
   dir=$(new_case badharness rl8)
@@ -1489,6 +1506,7 @@ test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
+test_raw_launch_relaunch_requires_explicit_harness
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm

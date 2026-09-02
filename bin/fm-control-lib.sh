@@ -35,10 +35,11 @@
 #      backend is refused rather than performed blind.
 #
 # `resume` is deliberately NOT a verb. It is not deterministic across the
-# verified adapters: codex and grok resume only from a session id printed at
-# exit, opencode resumes the most recent session for the cwd with --continue,
-# and claude, pi, pi-signed, and kimi have no verified pane-resume contract at
-# all. `relaunch` covers the same need deterministically for every adapter,
+# verified adapters: codex, grok, and prime-agent resume only from a session id
+# printed at exit, opencode resumes the most recent session for the cwd with
+# --continue, while claude, pi, pi-signed, and kimi have no verified pane-resume
+# contract at all. `relaunch` covers the same
+# need deterministically for every adapter,
 # because the brief on disk - not a harness-private session - is the durable
 # instruction.
 
@@ -63,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|muse) return 0 ;;
   esac
   return 1
 }
@@ -80,6 +81,7 @@ fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
     pi-signed) printf 'pi-signed' ;;
+    prime-agent) printf 'prime-agent' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -91,9 +93,10 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse is a crewmate/scout
-# adapter only: it has no primary supervision protocol, and bin/fm-spawn.sh
-# refuses a --secondmate launch on it. The control plane
+# Which task kinds an adapter is verified to run. muse and prime-agent are
+# crewmate/scout adapters only: neither has a verified primary supervision
+# protocol, and bin/fm-spawn.sh refuses a --secondmate launch on either.
+# The control plane
 # asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
@@ -101,7 +104,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse) [ "$kind" != secondmate ] || return 1 ;;
+    muse|prime-agent) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -110,7 +113,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|kimi|cursor|muse) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|prime-agent|kimi|cursor|muse) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -121,7 +124,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|grok|kimi|cursor|muse) printf '1' ;;
+    claude|codex|pi|pi-signed|prime-agent|grok|kimi|cursor|muse) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -139,7 +142,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor) ;;
     *) return 1 ;;
   esac
 }
@@ -151,7 +154,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # after an interrupt was measured as variable - sometimes seconds, sometimes
     # not within 20 - so a cancellation claim built on it would be unreliable.
     # Normal turn completion is prompt, which is what the busy fold depends on.
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -160,7 +163,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse) printf '/exit' ;;
-    codex|pi|pi-signed) printf '/quit' ;;
+    codex|pi|pi-signed|prime-agent) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -207,6 +210,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
+    prime-agent) printf '%s\n' "$state/$id.prime-ext.ts" ;;
     grok)
       printf '%s\n' "$wt/.fm-grok-turnend"
       printf '%s\n' "$state/$id.grok-turnend-token"

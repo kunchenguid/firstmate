@@ -7,8 +7,8 @@
 # command firstmate would run without starting any real harness.
 set -u
 
-# shellcheck source=tests/fixtures.sh
-. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -18,7 +18,15 @@ make_spawn_pi_probe() {
   cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = --version ] && [ "$(basename "$0")" = prime-agent ]; then
+  printf '%s\n' '0.8.1'
+  exit 0
+fi
 if [ "${1:-}" = --help ]; then
+  if [ "$(basename "$0")" = prime-agent ]; then
+    printf '%s\n' 'Prime Agent 0.8.1' 'Options: --daemon-socket <path>'
+    exit 0
+  fi
   if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
     printf '%s\n' 'Pi 0.82.0' 'Options: --help'
   else
@@ -32,7 +40,41 @@ SH
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
-  fakebin=$(fm_test_make_spawn_fakebin "$dir")
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+if [ "${FM_TEST_RELAUNCH_DEAD:-0}" = 1 ]; then
+  case "$*" in
+    *"#{window_name}"*) printf '%b\n' "${FM_TEST_RELAUNCH_WINDOWS:-}"; exit 0 ;;
+    *"#{pane_current_command}"*) printf '%s\n' zsh; exit 0 ;;
+    *"#{pane_tty}"*) exit 0 ;;
+  esac
+fi
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        fi
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -49,6 +91,8 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  make_spawn_pi_probe "$fakebin" prime-agent
+  fm_fake_exit0 "$fakebin" claude
   printf '%s\n' "$fakebin"
 }
 
@@ -61,10 +105,13 @@ make_spawn_case() {
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  fm_test_spawn_home "$home" "$harness"
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
-    fm_test_spawn_brief "$home" "$id"
+    mkdir -p "$home/data/$id"
+    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -91,12 +138,16 @@ run_spawn() {
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
-  CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
-    GROK_HOME="$home/grok-home" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    "$SPAWN" "$@" 2>&1
 }
 
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
@@ -366,22 +417,142 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
-test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+test_active_dispatch_profile_rejects_raw_launch_command() {
+  local rec id out status
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "custom-agent --flag")
+  status=$?
+  expect_code 1 "$status" "raw launch command must be rejected"
+  assert_contains "$out" "cannot prove complete runtime identity" "raw launch refusal did not name the identity boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw launch refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw launch refusal sent a command"
+  pass "active dispatch profiles require a verified harness"
+}
+
+test_raw_prime_launch_is_rejected_before_endpoint_creation() {
+  local rec id out status index prime_package
+  local -a ids commands
+  ids=(profile-raw-prime-z15b profile-raw-prime-command-z15b profile-raw-prime-exec-z15b profile-raw-prime-env-z15b profile-raw-prime-node-z15b profile-raw-prime-shell-z15b profile-raw-prime-quoted-z15b profile-raw-prime-alias-z15b profile-raw-prime-wrapper-z15b profile-raw-prime-opaque-wrapper-z15b profile-raw-prime-variable-z15b profile-raw-prime-semicolon-z15b profile-raw-prime-substitution-z15b profile-raw-prime-allowlisted-wrapper-z15b profile-raw-prime-launcher-alias-z15b profile-raw-prime-system-launcher-z15b)
+  rec=$(make_spawn_case profile-raw-prime claude "${ids[@]}" profile-raw-prime-mislabeled-z15b profile-raw-prime-opaque-mislabeled-z15b)
+  read_case_record "$rec"
+  prime_package="$CASE_DIR/prime-package"
+  mkdir -p "$prime_package/dist/bundle"
+  printf '%s\n' '{"name":"prime-agent","bin":{"prime-agent":"dist/bundle/cli.js"}}' > "$prime_package/package.json"
+  cat > "$prime_package/dist/bundle/cli.js" <<'SH'
+#!/usr/bin/env node
+SH
+  cat > "$FAKEBIN_DIR/prime-wrapper" <<'SH'
+#!/usr/bin/env bash
+exec prime-agent "$@"
+SH
+  cat > "$FAKEBIN_DIR/opaque-wrapper" <<'SH'
+#!/usr/bin/env bash
+runner=prime-agent
+exec "$runner" "$@"
+SH
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/usr/bin/env bash
+runner=prime-agent
+exec "$runner" "$@"
+SH
+  chmod +x "$prime_package/dist/bundle/cli.js" "$FAKEBIN_DIR/prime-wrapper" "$FAKEBIN_DIR/opaque-wrapper" "$FAKEBIN_DIR/claude"
+  ln -sf "$(type -P true)" "$FAKEBIN_DIR/prime-agent"
+  ln -s "$prime_package/dist/bundle/cli.js" "$FAKEBIN_DIR/prime-proxy"
+  ln -s "$(type -P env)" "$FAKEBIN_DIR/envx"
+  # shellcheck disable=SC2016 # The raw commands must keep literal shell syntax.
+  commands=("prime-agent --flag" "command prime-agent --flag" "exec prime-agent --flag" "env prime-agent --flag" "node $prime_package/dist/bundle/cli.js" "bash $FAKEBIN_DIR/opaque-wrapper --flag" "'$FAKEBIN_DIR/prime-agent' --flag" "prime-proxy --flag" "prime-wrapper --flag" "opaque-wrapper --flag" 'x=prime-; y=agent; exec "$x$y"' "claude --flag;prime-agent" 'claude --flag $(prime-agent)' "claude --flag" "envx prime-agent --flag" "/usr/bin/arch prime-agent --flag")
+
+  for index in "${!ids[@]}"; do
+    id=${ids[$index]}
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "${commands[$index]}")
+    status=$?
+    expect_code 1 "$status" "raw Prime launch form must be rejected: ${commands[$index]}"
+    assert_contains "$out" "Prime isolation boundary" "raw Prime refusal did not name the isolation boundary"
+    assert_absent "$HOME_DIR/state/$id.meta" "raw Prime refusal wrote task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw Prime refusal sent a launch command"
+    assert_absent "$HOME_DIR/state/$id.prime-ext.ts" "raw Prime refusal installed an extension"
+    assert_absent "$HOME_DIR/state/$id.busy-gen" "raw Prime refusal armed busy state"
+  done
+  id=profile-raw-prime-mislabeled-z15b
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "prime-agent --flag" --harness claude)
+  status=$?
+  expect_code 1 "$status" "a non-Prime harness label must not admit a raw Prime command"
+  assert_contains "$out" "Prime isolation boundary" "mislabeled raw Prime refusal did not name the isolation boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "mislabeled raw Prime refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "mislabeled raw Prime refusal sent a launch command"
+  id=profile-raw-prime-opaque-mislabeled-z15b
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "opaque-wrapper --flag" --harness claude)
+  status=$?
+  expect_code 1 "$status" "an opaque wrapper must not claim a verified non-Prime executable identity"
+  assert_contains "$out" "Prime isolation boundary" "opaque wrapper refusal did not name the isolation boundary"
+  assert_absent "$HOME_DIR/state/$id.meta" "opaque wrapper refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "opaque wrapper refusal sent a launch command"
+  pass "raw launch commands fail closed before endpoint creation"
+}
+
+test_native_non_prime_raw_launch_is_preserved() {
+  local rec id out status launch system_id copied_id
+  id=profile-raw-native-z15c
+  system_id=profile-raw-system-native-z15c
+  copied_id=profile-raw-copied-native-z15c
+  rec=$(make_spawn_case profile-raw-native claude "$id" "$system_id" "$copied_id")
+  read_case_record "$rec"
+  ln -sf "$(type -P true)" "$FAKEBIN_DIR/custom-agent"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "custom-agent --flag")
   status=$?
-  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  expect_code 0 "$status" "direct non-Prime raw launch should remain available"
+  assert_contains "$out" "spawned $id harness=custom-agent" "raw launch did not retain executable identity"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  assert_contains "$launch" "custom-agent --flag" "non-Prime raw command was not preserved"
+  ln -sf "$(type -P uname)" "$FAKEBIN_DIR/system-agent"
+  : > "$LAUNCH_LOG"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$system_id" "$PROJ_DIR" "system-agent --flag")
+  status=$?
+  expect_code 1 "$status" "an unlisted protected system executable must not cross the raw launch boundary"
+  assert_contains "$out" "Prime isolation boundary" "unlisted system executable refusal did not name the isolation boundary"
+  assert_absent "$HOME_DIR/state/$system_id.meta" "unlisted system executable refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unlisted system executable refusal sent a launch command"
+  cp "$(type -P true)" "$FAKEBIN_DIR/copied-agent"
+  chmod +x "$FAKEBIN_DIR/copied-agent"
+  : > "$LAUNCH_LOG"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$copied_id" "$PROJ_DIR" "copied-agent --flag")
+  status=$?
+  expect_code 1 "$status" "an arbitrary native executable must not cross the raw launch boundary"
+  assert_contains "$out" "Prime isolation boundary" "arbitrary native executable refusal did not name the isolation boundary"
+  assert_absent "$HOME_DIR/state/$copied_id.meta" "arbitrary native executable refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "arbitrary native executable refusal sent a launch command"
+  pass "trusted native non-Prime raw launch commands remain available"
+}
+
+test_prime_extension_serializes_generated_values() {
+  local rec id out status extension state_literal turnend_literal quoted_home
+  id=profile-prime-serialized-z15d
+  rec=$(make_spawn_case profile-prime-special-path prime-agent "$id")
+  read_case_record "$rec"
+  quoted_home="$CASE_DIR/home-'\\path"
+  mv "$HOME_DIR" "$quoted_home"
+  HOME_DIR=$quoted_home
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "prime-agent spawn with quoted state paths should succeed"
+  extension=$(cat "$HOME_DIR/state/$id.prime-ext.ts")
+  state_literal=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$(cd "$HOME_DIR/state" && pwd -P)")
+  turnend_literal=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$(cd "$HOME_DIR/state" && pwd -P)/$id.turn-ended")
+  assert_contains "$extension" "$state_literal" "Prime extension did not serialize its state path"
+  assert_contains "$extension" "$turnend_literal" "Prime extension did not serialize its turn-end path"
+  pass "prime-agent extension serializes generated string values"
 }
 
 test_claude_threads_model_and_effort() {
@@ -631,6 +802,419 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }
 
+test_prime_agent_threads_model_thinking_and_semantic_extension() {
+  local rec id out status launch prime_dir prime_home prime_session_dir prime_daemon_socket first_launch env_log operator_home root_line
+  local second_id second_proj second_wt second_prime_dir second_prime_home second_prime_session_dir second_daemon_socket second_launch second_env_log
+  local alternate_home alternate_id alternate_daemon_socket
+  id=profile-prime-agent-z8c
+  rec=$(make_spawn_case profile-prime-agent prime-agent "$id")
+  read_case_record "$rec"
+  operator_home="$CASE_DIR/operator-home"
+  mkdir -p "$operator_home/.agents/skills/no-mistakes"
+  printf '%s\n' '---' 'name: no-mistakes' '---' '# no-mistakes' > "$operator_home/.agents/skills/no-mistakes/SKILL.md"
+  git config --file "$operator_home/.gitconfig" user.name "Prime Test"
+  git config --file "$operator_home/.gitconfig" user.email "prime-test@example.test"
+  git config --file "$operator_home/.gitconfig" credential.helper "shared-secret-helper"
+
+  cat > "$FAKEBIN_DIR/shasum" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'not-a-digest  -'
+SH
+  cat > "$FAKEBIN_DIR/sha256sum" <<'SH'
+#!/usr/bin/env bash
+node -e 'const { createHash } = require("node:crypto"); let data = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => data += chunk); process.stdin.on("end", () => process.stdout.write(createHash("sha256").update(data).digest("hex") + "  -\n"));'
+SH
+  cat > "$FAKEBIN_DIR/prime-agent" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "${1:-}" = --version ]; then printf '%s\n' 'Prime Agent version v0.8.1 (project daemon build)'; exit 0; fi
+if [ "${1:-}" = --help ]; then printf '%s\n' 'Options: --daemon-socket <path>'; exit 0; fi
+: "${FM_FAKE_PRIME_ENV_LOG:?}"
+runtime_home=$(node -p 'require("node:os").homedir()')
+daemon_socket=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --daemon-socket ]; then daemon_socket=${2:-}; break; fi
+  shift
+done
+  {
+  printf 'home=%s\n' "$runtime_home"
+  printf 'agent_dir=%s\n' "${PRIME_AGENT_CODING_AGENT_DIR:-}"
+  printf 'session_dir=%s\n' "${PRIME_AGENT_SESSION_DIR:-}"
+  printf 'daemon_socket=%s\n' "$daemon_socket"
+  printf 'xdg_config=%s\n' "${XDG_CONFIG_HOME:-}"
+  printf 'xdg_data=%s\n' "${XDG_DATA_HOME:-}"
+  printf 'xdg_cache=%s\n' "${XDG_CACHE_HOME:-}"
+  printf 'xdg_state=%s\n' "${XDG_STATE_HOME:-}"
+  printf 'xdg_runtime=%s\n' "${XDG_RUNTIME_DIR:-}"
+  printf 'gh_config=%s\n' "${GH_CONFIG_DIR:-}"
+  printf 'cloudsdk_config=%s\n' "${CLOUDSDK_CONFIG:-}"
+  printf 'kernel_venv=%s\n' "${PRIME_AGENT_KERNEL_VENV:-}"
+  printf 'kernel_python=%s\n' "${PRIME_AGENT_KERNEL_PYTHON:-}"
+  printf 'aws_credentials=%s\n' "${AWS_SHARED_CREDENTIALS_FILE:-}"
+  printf 'aws_config=%s\n' "${AWS_CONFIG_FILE:-}"
+  printf 'azure_config=%s\n' "${AZURE_CONFIG_DIR:-}"
+  printf 'docker_config=%s\n' "${DOCKER_CONFIG:-}"
+  printf 'kube_config=%s\n' "${KUBECONFIG:-}"
+  printf 'hf_home=%s\n' "${HF_HOME:-}"
+  printf 'gnupg_home=%s\n' "${GNUPGHOME:-}"
+  printf 'npm_config=%s\n' "${NPM_CONFIG_USERCONFIG:-}"
+  printf 'netrc=%s\n' "${NETRC:-}"
+  for name in PRIME_AGENT_CODING_AGENT_SESSION_DIR PRIME_API_KEY PRIME_AGENT_TRACES_API_KEY PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN PRIME_TEAM_ID OPENAI_API_KEY ANTHROPIC_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN GH_TOKEN SERPER_API_KEY GOOGLE_APPLICATION_CREDENTIALS google_application_credentials AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SSH_AUTH_SOCK SSH_AGENT_PID GIT_ASKPASS SSH_ASKPASS SUDO_ASKPASS GIT_SSH GIT_SSH_COMMAND GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL; do
+    [ -z "${!name+x}" ] || printf 'visible=%s\n' "$name"
+  done
+  if [ -f "$runtime_home/.prime/config.json" ]; then
+    node --input-type=commonjs - "$runtime_home/.prime/config.json" <<'NODE'
+const fs = require("node:fs");
+const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(`config_project=${config.project}\n`);
+NODE
+  else
+    printf '%s\n' 'config_project=missing'
+  fi
+  [ ! -f "$runtime_home/.agents/skills/no-mistakes/SKILL.md" ] || printf '%s\n' 'skill=no-mistakes'
+  printf 'git_name=%s\n' "$(git -C "$FM_FAKE_PRIME_GIT_REPO" config user.name)"
+  printf 'git_email=%s\n' "$(git -C "$FM_FAKE_PRIME_GIT_REPO" config user.email)"
+  if git -C "$FM_FAKE_PRIME_GIT_REPO" config --global --get credential.helper >/dev/null 2>&1; then
+    printf '%s\n' 'credential_helper=visible'
+  fi
+  printf '%s\n' 'prime tooling probe' > "$FM_FAKE_PRIME_GIT_REPO/$FM_FAKE_PRIME_COMMIT_FILE"
+  git -C "$FM_FAKE_PRIME_GIT_REPO" add "$FM_FAKE_PRIME_COMMIT_FILE"
+  git -C "$FM_FAKE_PRIME_GIT_REPO" commit -m 'Prime tooling probe' >/dev/null
+  printf '%s\n' 'git_commit=ok'
+} > "$FM_FAKE_PRIME_ENV_LOG"
+SH
+  chmod +x "$FAKEBIN_DIR/shasum" "$FAKEBIN_DIR/sha256sum" "$FAKEBIN_DIR/prime-agent"
+  mkdir -p "$HOME_DIR/.prime"
+  printf '%s\n' '{"project":"global"}' > "$HOME_DIR/.prime/config.json"
+
+  out=$(HOME="$operator_home" GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model deepseek-v4-flash --effort max)
+  status=$?
+  expect_code 0 "$status" "prime-agent spawn with model and max effort should succeed"
+  assert_contains "$out" "spawned $id harness=prime-agent" \
+    "prime-agent spawn did not preserve its adapter identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" prime-agent deepseek-v4-flash max
+  prime_home=$(sed -n 's/^prime_home=//p' "$HOME_DIR/state/$id.meta")
+  prime_dir=$(sed -n 's/^prime_agent_dir=//p' "$HOME_DIR/state/$id.meta")
+  prime_session_dir=$(sed -n 's/^prime_session_dir=//p' "$HOME_DIR/state/$id.meta")
+  prime_daemon_socket=$(sed -n 's/^prime_daemon_socket=//p' "$HOME_DIR/state/$id.meta")
+  case "$prime_dir" in
+    "$HOME_DIR/state/prime-projects/"*/home/.prime/agent) : ;;
+    *) fail "prime-agent metadata did not record project-scoped state: $prime_dir" ;;
+  esac
+  [ "$prime_dir" = "$prime_home/.prime/agent" ] || \
+    fail "prime-agent home and agent directory are not aligned: $prime_home | $prime_dir"
+  [ "$prime_session_dir" = "$prime_dir/sessions" ] || \
+    fail "prime-agent session directory is not project scoped: $prime_session_dir"
+  assert_present "$prime_dir" "prime-agent did not create its project-scoped state directory"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "HOME='$prime_home' GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL='$prime_home/.gitconfig' PRIME_AGENT_CODING_AGENT_DIR='$prime_dir' PRIME_AGENT_SESSION_DIR='$prime_session_dir'" \
+    "prime-agent launch dropped project isolation, model, thinking, or its explicit extension flag"
+  assert_contains "$launch" "'$FAKEBIN_DIR/prime-agent' --model 'deepseek-v4-flash' --thinking 'max' --daemon-socket '$prime_daemon_socket' -e '$HOME_DIR/state/$id.prime-ext.ts'" \
+    "prime-agent launch dropped its model, thinking, daemon socket, or extension"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "prime-agent launch lost the canonical typed launch-brief envelope"
+  assert_present "$HOME_DIR/state/$id.prime-ext.ts" \
+    "prime-agent launch did not install its semantic lifecycle extension"
+  assert_present "$HOME_DIR/state/$id.busy-gen" \
+    "prime-agent spawn did not arm the busy-state contract"
+  printf '%s\n' '{"project":"one"}' > "$prime_home/.prime/config.json"
+  chmod 600 "$prime_home/.prime/config.json"
+  first_launch=$launch
+  env_log="$CASE_DIR/prime-one.env"
+  out=$(
+    cd "$WT_DIR" || exit 1
+    HOME="$HOME_DIR" PRIME_API_KEY=ambient-prime OPENAI_API_KEY=ambient-openai \
+      ANTHROPIC_OAUTH_TOKEN=ambient-anthropic ANTHROPIC_AUTH_TOKEN=ambient-anthropic-auth \
+      GH_TOKEN=ambient-github SERPER_API_KEY=ambient-serper \
+      PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN=ambient-daemon-token \
+      PRIME_AGENT_SESSION_DIR=/tmp/ambient-prime-sessions \
+      PRIME_AGENT_CODING_AGENT_SESSION_DIR=/tmp/ambient-prime-legacy-sessions \
+      PRIME_TEAM_ID=ambient-team GOOGLE_APPLICATION_CREDENTIALS=/tmp/ambient-google.json \
+      google_application_credentials=/tmp/ambient-google-lower.json \
+      AWS_ACCESS_KEY_ID=ambient-aws AWS_SECRET_ACCESS_KEY=ambient-aws-secret \
+      GIT_AUTHOR_NAME=ambient-author GIT_AUTHOR_EMAIL=ambient-author@example.test \
+      GIT_COMMITTER_NAME=ambient-committer GIT_COMMITTER_EMAIL=ambient-committer@example.test \
+      SSH_AUTH_SOCK=/tmp/ambient-ssh-agent.sock SSH_AGENT_PID=999 \
+      GIT_ASKPASS=/tmp/ambient-git-askpass SSH_ASKPASS=/tmp/ambient-ssh-askpass \
+      SUDO_ASKPASS=/tmp/ambient-sudo-askpass GIT_SSH=/tmp/ambient-git-ssh \
+      GIT_SSH_COMMAND='ssh -i /tmp/ambient-key' \
+      XDG_CONFIG_HOME=/tmp/ambient-xdg-config XDG_DATA_HOME=/tmp/ambient-xdg-data \
+      XDG_CACHE_HOME=/tmp/ambient-xdg-cache XDG_STATE_HOME=/tmp/ambient-xdg-state \
+      XDG_RUNTIME_DIR=/tmp/ambient-xdg-runtime GH_CONFIG_DIR=/tmp/ambient-gh \
+      CLOUDSDK_CONFIG=/tmp/ambient-gcloud PRIME_AGENT_KERNEL_VENV=/tmp/ambient-kernel \
+      PRIME_AGENT_KERNEL_PYTHON=/tmp/ambient-python AWS_SHARED_CREDENTIALS_FILE=/tmp/ambient-aws-creds \
+      AWS_CONFIG_FILE=/tmp/ambient-aws-config AZURE_CONFIG_DIR=/tmp/ambient-azure \
+      DOCKER_CONFIG=/tmp/ambient-docker KUBECONFIG=/tmp/ambient-kube HF_HOME=/tmp/ambient-hf \
+      GNUPGHOME=/tmp/ambient-gnupg NPM_CONFIG_USERCONFIG=/tmp/ambient-npmrc NETRC=/tmp/ambient-netrc \
+      GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" FM_FAKE_PRIME_GIT_REPO="$WT_DIR" \
+      FM_FAKE_PRIME_COMMIT_FILE=prime-tooling-one.txt FM_FAKE_PRIME_ENV_LOG="$env_log" bash -c "$first_launch"
+  )
+  status=$?
+  expect_code 0 "$status" "isolated prime-agent launch command should execute"
+  assert_grep "home=$prime_home" "$env_log" "prime-agent did not receive its project-scoped home"
+  assert_grep "agent_dir=$prime_dir" "$env_log" "prime-agent did not receive its project-scoped agent directory"
+  assert_grep "session_dir=$prime_session_dir" "$env_log" "prime-agent did not receive its project-scoped session directory"
+  assert_grep "daemon_socket=/tmp/firstmate-prime-" "$env_log" "prime-agent did not receive a short scoped daemon socket"
+  for root_line in \
+    "xdg_config=$prime_home/.config" "xdg_data=$prime_home/.local/share" \
+    "xdg_cache=$prime_home/.cache" "xdg_state=$prime_home/.local/state" \
+    "xdg_runtime=$prime_home/.local/run" "gh_config=$prime_home/.config/gh" \
+    "cloudsdk_config=$prime_home/.config/gcloud" "kernel_venv=$prime_dir/kernel-venv" \
+    "kernel_python=$prime_dir/kernel-venv/bin/python" "aws_credentials=$prime_home/.aws/credentials" \
+    "aws_config=$prime_home/.aws/config" "azure_config=$prime_home/.azure" \
+    "docker_config=$prime_home/.docker" "kube_config=$prime_home/.kube/config" \
+    "hf_home=$prime_home/.cache/huggingface" "gnupg_home=$prime_home/.gnupg" \
+    "npm_config=$prime_home/.npmrc" "netrc=$prime_home/.netrc"; do
+    assert_grep "$root_line" "$env_log" "prime-agent configuration root escaped project isolation: $root_line"
+  done
+  assert_grep "config_project=one" "$env_log" "prime-agent did not read the first project's CLI config"
+  assert_grep "skill=no-mistakes" "$env_log" "prime-agent did not discover the permitted no-mistakes skill"
+  assert_grep "git_name=Prime Test" "$env_log" "prime-agent did not receive the permitted Git author name"
+  assert_grep "git_email=prime-test@example.test" "$env_log" "prime-agent did not receive the permitted Git author email"
+  assert_grep "git_commit=ok" "$env_log" "prime-agent could not commit with its isolated tooling config"
+  [ "$(git -C "$WT_DIR" log -1 --format=%s)" = "Prime tooling probe" ] || \
+    fail "prime-agent tooling probe did not create a real commit"
+  assert_no_grep "credential_helper=visible" "$env_log" "prime-agent inherited the operator's Git credential helper"
+  assert_no_grep "visible=" "$env_log" "prime-agent inherited an ambient credential source"
+
+  second_id=profile-prime-agent-other-project-z8c
+  second_proj="$CASE_DIR/project-two"
+  second_wt="$CASE_DIR/wt-two"
+  fm_git_worktree "$second_proj" "$second_wt" profile-prime-agent-other-project
+  mkdir -p "$HOME_DIR/data/$second_id"
+  printf 'brief for %s\n' "$second_id" > "$HOME_DIR/data/$second_id/brief.md"
+  out=$(HOME="$operator_home" GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" \
+    run_ship_spawn "$HOME_DIR" "$second_wt" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$second_id" "$second_proj")
+  status=$?
+  expect_code 0 "$status" "prime-agent spawn for a second project should succeed"
+  second_prime_home=$(sed -n 's/^prime_home=//p' "$HOME_DIR/state/$second_id.meta")
+  second_prime_dir=$(sed -n 's/^prime_agent_dir=//p' "$HOME_DIR/state/$second_id.meta")
+  second_prime_session_dir=$(sed -n 's/^prime_session_dir=//p' "$HOME_DIR/state/$second_id.meta")
+  second_daemon_socket=$(sed -n 's/^prime_daemon_socket=//p' "$HOME_DIR/state/$second_id.meta")
+  [ -n "$second_prime_home" ] && [ "$second_prime_home" != "$prime_home" ] && \
+    [ -n "$second_prime_dir" ] && [ "$second_prime_dir" != "$prime_dir" ] || \
+    fail "distinct projects must not share Prime Agent state: $prime_dir"
+  [ "$second_prime_session_dir" = "$second_prime_dir/sessions" ] || \
+    fail "second project did not receive an isolated Prime session directory"
+  assert_present "$second_prime_dir" "second project did not receive its own Prime Agent state directory"
+  printf '%s\n' '{"project":"two"}' > "$second_prime_home/.prime/config.json"
+  chmod 600 "$second_prime_home/.prime/config.json"
+  second_launch=$(cat "$LAUNCH_LOG")
+  second_env_log="$CASE_DIR/prime-two.env"
+  out=$(
+    cd "$second_wt" || exit 1
+    HOME="$HOME_DIR" PRIME_API_KEY=ambient-prime OPENAI_API_KEY=ambient-openai \
+      ANTHROPIC_OAUTH_TOKEN=ambient-anthropic ANTHROPIC_AUTH_TOKEN=ambient-anthropic-auth \
+      GH_TOKEN=ambient-github SERPER_API_KEY=ambient-serper \
+      PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN=ambient-daemon-token \
+      PRIME_AGENT_SESSION_DIR=/tmp/ambient-prime-sessions \
+      PRIME_AGENT_CODING_AGENT_SESSION_DIR=/tmp/ambient-prime-legacy-sessions \
+      PRIME_TEAM_ID=ambient-team GOOGLE_APPLICATION_CREDENTIALS=/tmp/ambient-google.json \
+      google_application_credentials=/tmp/ambient-google-lower.json \
+      AWS_ACCESS_KEY_ID=ambient-aws AWS_SECRET_ACCESS_KEY=ambient-aws-secret \
+      GIT_AUTHOR_NAME=ambient-author GIT_AUTHOR_EMAIL=ambient-author@example.test \
+      GIT_COMMITTER_NAME=ambient-committer GIT_COMMITTER_EMAIL=ambient-committer@example.test \
+      SSH_AUTH_SOCK=/tmp/ambient-ssh-agent.sock SSH_AGENT_PID=999 \
+      GIT_ASKPASS=/tmp/ambient-git-askpass SSH_ASKPASS=/tmp/ambient-ssh-askpass \
+      SUDO_ASKPASS=/tmp/ambient-sudo-askpass GIT_SSH=/tmp/ambient-git-ssh \
+      GIT_SSH_COMMAND='ssh -i /tmp/ambient-key' \
+      XDG_CONFIG_HOME=/tmp/ambient-xdg-config XDG_DATA_HOME=/tmp/ambient-xdg-data \
+      XDG_CACHE_HOME=/tmp/ambient-xdg-cache XDG_STATE_HOME=/tmp/ambient-xdg-state \
+      XDG_RUNTIME_DIR=/tmp/ambient-xdg-runtime GH_CONFIG_DIR=/tmp/ambient-gh \
+      CLOUDSDK_CONFIG=/tmp/ambient-gcloud PRIME_AGENT_KERNEL_VENV=/tmp/ambient-kernel \
+      PRIME_AGENT_KERNEL_PYTHON=/tmp/ambient-python AWS_SHARED_CREDENTIALS_FILE=/tmp/ambient-aws-creds \
+      AWS_CONFIG_FILE=/tmp/ambient-aws-config AZURE_CONFIG_DIR=/tmp/ambient-azure \
+      DOCKER_CONFIG=/tmp/ambient-docker KUBECONFIG=/tmp/ambient-kube HF_HOME=/tmp/ambient-hf \
+      GNUPGHOME=/tmp/ambient-gnupg NPM_CONFIG_USERCONFIG=/tmp/ambient-npmrc NETRC=/tmp/ambient-netrc \
+      GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" FM_FAKE_PRIME_GIT_REPO="$second_wt" \
+      FM_FAKE_PRIME_COMMIT_FILE=prime-tooling-two.txt FM_FAKE_PRIME_ENV_LOG="$second_env_log" bash -c "$second_launch"
+  )
+  status=$?
+  expect_code 0 "$status" "second isolated prime-agent launch command should execute"
+  assert_grep "home=$second_prime_home" "$second_env_log" "second prime-agent launch did not receive its project home"
+  assert_grep "agent_dir=$second_prime_dir" "$second_env_log" "second prime-agent launch did not receive its agent directory"
+  assert_grep "session_dir=$second_prime_session_dir" "$second_env_log" "second prime-agent launch did not receive its session directory"
+  assert_grep "xdg_config=$second_prime_home/.config" "$second_env_log" "second prime-agent launch did not receive isolated configuration roots"
+  assert_grep "kernel_python=$second_prime_dir/kernel-venv/bin/python" "$second_env_log" "second prime-agent launch did not receive its scoped kernel Python path"
+  [ "$second_daemon_socket" != "$prime_daemon_socket" ] || \
+    fail "distinct projects shared a Prime daemon socket"
+  assert_grep "config_project=two" "$second_env_log" "second prime-agent launch observed another project's CLI config"
+  assert_grep "skill=no-mistakes" "$second_env_log" "second prime-agent launch lost the permitted no-mistakes skill"
+  assert_grep "git_commit=ok" "$second_env_log" "second prime-agent launch could not commit with isolated tooling config"
+  [ "$(git -C "$second_wt" log -1 --format=%s)" = "Prime tooling probe" ] || \
+    fail "second prime-agent tooling probe did not create a real commit"
+  assert_no_grep "credential_helper=visible" "$second_env_log" "second prime-agent launch inherited the operator's Git credential helper"
+  assert_no_grep "visible=" "$second_env_log" "second prime-agent launch inherited an ambient credential source"
+  alternate_home="$CASE_DIR/alternate-firstmate-home"
+  alternate_id=profile-prime-agent-other-home-z8c
+  mkdir -p "$alternate_home/data/$alternate_id" "$alternate_home/projects" "$alternate_home/state" "$alternate_home/config"
+  printf '%s\n' prime-agent > "$alternate_home/config/crew-harness"
+  printf 'brief for %s\n' "$alternate_id" > "$alternate_home/data/$alternate_id/brief.md"
+  touch "$alternate_home/state/.last-watcher-beat"
+  out=$(HOME="$operator_home" GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" \
+    run_ship_spawn "$alternate_home" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$alternate_id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "prime-agent spawn from a second Firstmate home should succeed"
+  alternate_daemon_socket=$(sed -n 's/^prime_daemon_socket=//p' "$alternate_home/state/$alternate_id.meta")
+  [ "$alternate_daemon_socket" != "$prime_daemon_socket" ] || \
+    fail "distinct Firstmate homes shared a Prime daemon socket for one project"
+  pass "prime-agent receives isolated project state, model, thinking, and its semantic extension"
+}
+
+test_prime_git_config_drops_stale_identity() {
+  local rec id out status operator_home prime_home relaunch_window
+  id=profile-prime-stale-git-z8c
+  rec=$(make_spawn_case profile-prime-stale-git prime-agent "$id")
+  read_case_record "$rec"
+  operator_home="$CASE_DIR/operator-home"
+  mkdir -p "$operator_home/.agents/skills/no-mistakes"
+  printf '%s\n' '---' 'name: no-mistakes' '---' '# no-mistakes' > "$operator_home/.agents/skills/no-mistakes/SKILL.md"
+  git config --file "$operator_home/.gitconfig" user.name "Prime Stale"
+  git config --file "$operator_home/.gitconfig" user.email "prime-stale@example.test"
+
+  out=$(HOME="$operator_home" GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "initial Prime spawn for stale identity coverage should succeed"
+  prime_home=$(sed -n 's/^prime_home=//p' "$HOME_DIR/state/$id.meta")
+  relaunch_window=$(sed -n 's/^window=.*://p' "$HOME_DIR/state/$id.meta")
+  [ "$(git config --file "$prime_home/.gitconfig" user.email)" = "prime-stale@example.test" ] || \
+    fail "initial Prime tooling config did not copy the effective identity"
+  git config --file "$operator_home/.gitconfig" --unset user.email
+
+  out=$(HOME="$operator_home" GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" \
+    FM_TEST_RELAUNCH_DEAD=1 FM_TEST_RELAUNCH_WINDOWS="$relaunch_window" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch --harness prime-agent)
+  status=$?
+  expect_code 0 "$status" "Prime relaunch with incomplete identity should succeed"
+  if git config --file "$prime_home/.gitconfig" --get user.name >/dev/null 2>&1 || \
+     git config --file "$prime_home/.gitconfig" --get user.email >/dev/null 2>&1; then
+    fail "Prime tooling config retained a stale partial author identity"
+  fi
+  pass "prime-agent atomically removes stale Git author identity"
+}
+
+test_prime_project_setup_serializes_concurrent_relaunches() {
+  local rec id_one id_two out status operator_home real_git guard log_one log_two out_one out_two pid_one pid_two rc_one rc_two relaunch_windows
+  id_one=profile-prime-relaunch-one-z8c
+  id_two=profile-prime-relaunch-two-z8c
+  rec=$(make_spawn_case profile-prime-relaunch-lock prime-agent "$id_one" "$id_two")
+  read_case_record "$rec"
+  operator_home="$CASE_DIR/operator-home"
+  mkdir -p "$operator_home/.agents/skills/no-mistakes"
+  printf '%s\n' '---' 'name: no-mistakes' '---' '# no-mistakes' > "$operator_home/.agents/skills/no-mistakes/SKILL.md"
+  git config --file "$operator_home/.gitconfig" user.name "Prime Relaunch"
+  git config --file "$operator_home/.gitconfig" user.email "prime-relaunch@example.test"
+  for id in "$id_one" "$id_two"; do
+    out=$(HOME="$operator_home" GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "initial Prime spawn for relaunch lock coverage should succeed"
+  done
+  relaunch_windows=$(sed -n 's/^window=.*://p' "$HOME_DIR/state/$id_one.meta" "$HOME_DIR/state/$id_two.meta")
+  real_git=$(type -P git)
+  guard="$CASE_DIR/git-config.guard"
+  cat > "$FAKEBIN_DIR/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = config ] && [ "\${2:-}" = --file ]; then
+  if ! mkdir "\$FM_TEST_GIT_GUARD" 2>/dev/null; then
+    printf '%s\n' overlap >> "\$FM_TEST_GIT_GUARD.overlap"
+    exit 97
+  fi
+  sleep 0.2
+  '$real_git' "\$@"
+  status=\$?
+  rmdir "\$FM_TEST_GIT_GUARD"
+  exit "\$status"
+fi
+exec '$real_git' "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/git"
+  log_one="$CASE_DIR/relaunch-one.log"
+  log_two="$CASE_DIR/relaunch-two.log"
+  out_one="$CASE_DIR/relaunch-one.out"
+  out_two="$CASE_DIR/relaunch-two.out"
+  (
+    HOME="$operator_home" GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" FM_TEST_GIT_GUARD="$guard" \
+      FM_TEST_RELAUNCH_DEAD=1 FM_TEST_RELAUNCH_WINDOWS="$relaunch_windows" \
+      run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$log_one" "$id_one" --relaunch --harness prime-agent > "$out_one" 2>&1
+    printf '%s\n' "$?" > "$CASE_DIR/relaunch-one.rc"
+  ) &
+  pid_one=$!
+  (
+    HOME="$operator_home" GIT_CONFIG_GLOBAL="$operator_home/.gitconfig" FM_TEST_GIT_GUARD="$guard" \
+      FM_TEST_RELAUNCH_DEAD=1 FM_TEST_RELAUNCH_WINDOWS="$relaunch_windows" \
+      run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$log_two" "$id_two" --relaunch --harness prime-agent > "$out_two" 2>&1
+    printf '%s\n' "$?" > "$CASE_DIR/relaunch-two.rc"
+  ) &
+  pid_two=$!
+  wait "$pid_one"
+  wait "$pid_two"
+  rc_one=$(cat "$CASE_DIR/relaunch-one.rc")
+  rc_two=$(cat "$CASE_DIR/relaunch-two.rc")
+  expect_code 0 "$rc_one" "first concurrent Prime relaunch should succeed: $(cat "$out_one")"
+  expect_code 0 "$rc_two" "second concurrent Prime relaunch should succeed: $(cat "$out_two")"
+  assert_absent "$guard.overlap" "concurrent Prime relaunches entered shared provisioning together"
+  pass "prime-agent serializes shared project setup across relaunches"
+}
+
+test_prime_agent_refuses_invalid_project_digest() {
+  local rec id out status
+  id=profile-prime-agent-invalid-digest-z8c
+  rec=$(make_spawn_case profile-prime-agent-invalid-digest prime-agent "$id")
+  read_case_record "$rec"
+  for tool in shasum sha256sum; do
+    cat > "$FAKEBIN_DIR/$tool" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'not-a-digest  -'
+SH
+    chmod +x "$FAKEBIN_DIR/$tool"
+  done
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "prime-agent spawn must reject invalid project digests"
+  assert_contains "$out" "cannot create project-scoped Prime Agent state" \
+    "invalid project digest refusal did not name project-scoped state"
+  assert_absent "$HOME_DIR/state/$id.meta" "invalid project digest refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "invalid project digest refusal sent a launch command"
+  pass "prime-agent project keys require a validated SHA-256 digest"
+}
+
+test_prime_agent_refuses_unscoped_daemon_versions() {
+  local rec id out status version_exit version_text
+  id=profile-prime-agent-old-daemon-z8c
+  rec=$(make_spawn_case profile-prime-agent-old-daemon prime-agent "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/prime-agent" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '%s\n' "${FM_TEST_PRIME_VERSION:-0.8.0}"; exit "${FM_TEST_PRIME_VERSION_EXIT:-0}" ;;
+  --help) printf '%s\n' 'Options: --daemon-socket <path>' ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/prime-agent"
+
+  for version_exit in 0 1; do
+    : > "$LAUNCH_LOG"
+    version_text=0.8.0
+    [ "$version_exit" -eq 0 ] || version_text=0.8.1
+    out=$(FM_TEST_PRIME_VERSION="$version_text" \
+      FM_TEST_PRIME_VERSION_EXIT="$version_exit" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "Prime without a successful scoped-daemon version probe must refuse"
+    assert_contains "$out" "requires version 0.8.1 or newer with --daemon-socket support" \
+      "Prime daemon probe refusal did not name the upgrade requirement"
+    assert_absent "$HOME_DIR/state/$id.meta" "unsupported Prime daemon launch wrote task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "unsupported Prime daemon launch sent a command"
+  done
+  pass "prime-agent refuses when scoped daemon support is unavailable"
+}
+
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   local harness version rec id out status launch
   for harness in pi pi-signed; do
@@ -802,7 +1386,10 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
-test_active_dispatch_profile_allows_raw_launch_command
+test_active_dispatch_profile_rejects_raw_launch_command
+test_raw_prime_launch_is_rejected_before_endpoint_creation
+test_native_non_prime_raw_launch_is_preserved
+test_prime_extension_serializes_generated_values
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
@@ -816,6 +1403,11 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
+test_prime_agent_threads_model_thinking_and_semantic_extension
+test_prime_git_config_drops_stale_identity
+test_prime_project_setup_serializes_concurrent_relaunches
+test_prime_agent_refuses_invalid_project_digest
+test_prime_agent_refuses_unscoped_daemon_versions
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags

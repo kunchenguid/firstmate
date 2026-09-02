@@ -24,6 +24,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-prime-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-prime-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -54,8 +56,8 @@ fm_backend_tmux_send_key() {  # <target> <key>
 # submit with Enter, retried (Enter only, never retyped) until the composer
 # clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
 # that file for the composer-verification contract and echoed verdicts.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  fm_tmux_submit_core "$@"
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label] [harness]
+  fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" "${7:-}"
 }
 
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
@@ -170,7 +172,7 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
+    *claude*|*codex*|*opencode*|*grok*|*kimi*|prime-agent|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -246,6 +248,44 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+fm_backend_tmux_foreground_args() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+        args=${args#"${args%%[![:space:]]*}"}
+        [ -n "$args" ] && printf '%s\n' "$args"
+      done
+}
+
+fm_backend_tmux_foreground_pids() {  # <target>
+  local target=$1 tty pid pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        printf '%s\n' "$pid"
+      done
+}
+
+fm_backend_tmux_foreground_pid_comms() {  # <target>
+  local target=$1 tty pid pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        printf '%s\t%s\n' "$pid" "$comm"
+      done
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
@@ -264,7 +304,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
+  local foreground argses pids name args argv0 pid fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -306,15 +346,33 @@ fm_backend_tmux_agent_state() {  # <target>
 $foreground
 EOF
 
-  argv0s=$(fm_backend_tmux_foreground_argv0s "$target")
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ]; then
+  pids=$(fm_backend_tmux_foreground_pid_comms "$target")
+  while read -r pid name; do
+    [ -n "$pid" ] || continue
+    name=${name##*/}
+    name=${name#-}
+    case "$name" in
+      node*)
+        if fm_prime_node_pid_matches "$pid"; then
+          printf 'alive'
+          return 0
+        fi
+        ;;
+    esac
+  done <<EOF
+$pids
+EOF
+
+  argses=$(fm_backend_tmux_foreground_args "$target")
+  while IFS= read -r args; do
+    [ -n "$args" ] || continue
+    argv0=${args%%[[:space:]]*}
+    if [ "$(fm_backend_tmux_classify_process_name '' "$argv0")" = agent ]; then
       printf 'alive'
       return 0
     fi
   done <<EOF
-$argv0s
+$argses
 EOF
 
   comm=$(fm_backend_tmux_current_command "$target") || {

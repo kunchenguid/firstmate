@@ -3,7 +3,7 @@
 # secondmate in its isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -104,20 +104,20 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
-#   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|muse)
+#   overrides it for this spawn (either kind). For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   For prime-agent, fm-spawn likewise resolves and launches one concrete PATH
+#   executable, without Pi's version-dependent --tui-mode probe.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
 #   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
+#   or positional harness arg starts with clean model/effort
 #   defaults unless the caller also passes explicit --model/--effort flags. When
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
@@ -177,7 +177,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse is crewmate/scout only and is refused for --secondmate.
+# log; prime-agent and muse are crewmate/scout only and are refused for --secondmate.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -297,6 +297,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-prime-lib.sh
+. "$SCRIPT_DIR/fm-prime-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -727,6 +729,8 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+PRIME_PROJECT_SETUP_LOCK=
+PRIME_PROJECT_SETUP_LOCK_HELD=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -863,6 +867,10 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  if [ "$PRIME_PROJECT_SETUP_LOCK_HELD" = 1 ]; then
+    PRIME_PROJECT_SETUP_LOCK_HELD=0
+    fm_lock_release "$PRIME_PROJECT_SETUP_LOCK" || true
   fi
   return "$status"
 }
@@ -1089,6 +1097,7 @@ FIRSTMATE_HOME=
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_PRIOR_RAW_LAUNCH=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1128,6 +1137,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_PRIOR_RAW_LAUNCH=$(fm_meta_get "$RELAUNCH_META" raw_launch)
+  if [ "$RELAUNCH_PRIOR_RAW_LAUNCH" = 1 ] && [ "$HARNESS_SET" -eq 0 ]; then
+    echo "error: task $ID was started from a raw launch command that cannot be reconstructed; pass --harness to choose the replacement runtime deliberately" >&2
+    exit 1
+  fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1166,7 +1180,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1186,7 +1200,12 @@ else
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
 fi
-[ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+if [ -n "$HARNESS_ARG" ]; then
+  case "$ARG3" in
+    *' '*) ;;
+    *) ARG3=$HARNESS_ARG ;;
+  esac
+fi
 
 shell_quote() {
   printf "'"
@@ -1194,7 +1213,7 @@ shell_quote() {
   printf "'"
 }
 
-resolve_pi_executable() {
+resolve_pi_family_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
   [ -x "$candidate" ] || return 1
@@ -1205,6 +1224,150 @@ resolve_pi_executable() {
       printf '%s/%s\n' "$dir" "$(basename "$candidate")"
       ;;
   esac
+}
+
+raw_non_prime_executable() {
+  local launch=$1 command command_name executable canonical canonical_name
+  # shellcheck disable=SC1003,SC2016 # Match literal shell syntax before the raw command can reach a shell.
+  case "$launch" in
+    *$'\n'*|*$'\r'*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'`'*|*'$('*|*'${'*|*'\\'*) return 1 ;;
+  esac
+  command=${launch%%[[:space:]]*}
+  case "$command" in ''|*[^A-Za-z0-9_./+-]*) return 1 ;; esac
+  command_name=${command##*/}
+  case "$command_name" in
+    prime-agent|\
+    command|exec|env|nice|nohup|setsid|stdbuf|timeout|xargs|\
+    sh|bash|dash|ksh|zsh|fish|\
+    node|nodejs|bun|deno|python|python[0-9]*|ruby|perl|php) return 1 ;;
+  esac
+  executable=$(type -P -- "$command" 2>/dev/null) || return 1
+  [ -x "$executable" ] || return 1
+  canonical=$(fm_cursor_canonical_path "$executable") || return 1
+  canonical_name=${canonical##*/}
+  case "$canonical_name" in
+    prime-agent|\
+    command|exec|env|nice|nohup|setsid|stdbuf|timeout|xargs|\
+    sh|bash|dash|ksh|zsh|fish|\
+    node|nodejs|bun|deno|python|python[0-9]*|ruby|perl|php) return 1 ;;
+    echo|sleep|true|false|cat|printf|test|ls) ;;
+    *) return 1 ;;
+  esac
+  case "$canonical" in
+    /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*) ;;
+    *) return 1 ;;
+  esac
+  [ ! -w "$canonical" ] || return 1
+  printf '%s\n' "$command_name"
+}
+
+prime_project_setup_locked() {
+  local skill_source skill_target git_name git_email git_config_tmp
+  mkdir -p "$FM_PRIME_AGENT_DIR_PATH" "$FM_PRIME_SESSION_DIR_PATH" \
+    "$FM_PRIME_XDG_CONFIG_PATH" "$FM_PRIME_XDG_DATA_PATH" "$FM_PRIME_XDG_CACHE_PATH" "$FM_PRIME_XDG_STATE_PATH" "$FM_PRIME_XDG_RUNTIME_PATH" \
+    "$FM_PRIME_GH_CONFIG_PATH" "$FM_PRIME_CLOUDSDK_CONFIG_PATH" "$FM_PRIME_KERNEL_VENV_PATH" \
+    "$FM_PRIME_AWS_CONFIG_PATH" "$FM_PRIME_AZURE_CONFIG_PATH" "$FM_PRIME_DOCKER_CONFIG_PATH" \
+    "$FM_PRIME_KUBE_CONFIG_PATH" "$FM_PRIME_HF_HOME_PATH" "$FM_PRIME_GNUPG_HOME_PATH" || return 1
+  chmod 700 "${FM_PRIME_HOME_PATH%/home}" "$FM_PRIME_HOME_PATH" "$FM_PRIME_HOME_PATH/.prime" \
+    "$FM_PRIME_AGENT_DIR_PATH" "$FM_PRIME_SESSION_DIR_PATH" "$FM_PRIME_XDG_CONFIG_PATH" \
+    "$FM_PRIME_XDG_DATA_PATH" "$FM_PRIME_XDG_CACHE_PATH" "$FM_PRIME_XDG_STATE_PATH" "$FM_PRIME_XDG_RUNTIME_PATH" \
+    "$FM_PRIME_GH_CONFIG_PATH" "$FM_PRIME_CLOUDSDK_CONFIG_PATH" "$FM_PRIME_KERNEL_VENV_PATH" \
+    "$FM_PRIME_AWS_CONFIG_PATH" "$FM_PRIME_AZURE_CONFIG_PATH" "$FM_PRIME_DOCKER_CONFIG_PATH" \
+    "$FM_PRIME_KUBE_CONFIG_PATH" "$FM_PRIME_HF_HOME_PATH" "$FM_PRIME_GNUPG_HOME_PATH" || return 1
+  skill_source="${HOME:-}/.agents/skills/no-mistakes"
+  skill_target="$FM_PRIME_HOME_PATH/.agents/skills/no-mistakes"
+  if [ -f "$skill_source/SKILL.md" ]; then
+    mkdir -p "$FM_PRIME_HOME_PATH/.agents/skills" || return 1
+    chmod 700 "$FM_PRIME_HOME_PATH/.agents" "$FM_PRIME_HOME_PATH/.agents/skills" || return 1
+    if [ ! -e "$skill_target" ] && [ ! -L "$skill_target" ]; then
+      ln -s "$skill_source" "$skill_target" || return 1
+    fi
+    [ -f "$skill_target/SKILL.md" ] || return 1
+  fi
+  git_name=$(git -C "$PROJ_ABS" config --get user.name 2>/dev/null || true)
+  git_email=$(git -C "$PROJ_ABS" config --get user.email 2>/dev/null || true)
+  git_config_tmp="$FM_PRIME_HOME_PATH/.gitconfig.tmp.${BASHPID:-$$}.$RANDOM"
+  ( umask 077; : > "$git_config_tmp" ) || return 1
+  if [ -n "$git_name" ] && [ -n "$git_email" ]; then
+    git config --file "$git_config_tmp" user.name "$git_name" || { rm -f "$git_config_tmp"; return 1; }
+    git config --file "$git_config_tmp" user.email "$git_email" || { rm -f "$git_config_tmp"; return 1; }
+  fi
+  chmod 600 "$git_config_tmp" || { rm -f "$git_config_tmp"; return 1; }
+  mv -f "$git_config_tmp" "$FM_PRIME_HOME_PATH/.gitconfig" || { rm -f "$git_config_tmp"; return 1; }
+}
+
+prime_sha256_value() {
+  local value=$1 digest=
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$value" | shasum -a 256 2>/dev/null | awk '{print $1}') || digest=
+  fi
+  if ! printf '%s\n' "$digest" | LC_ALL=C grep -Eq '^[0-9a-fA-F]{64}$'; then
+    digest=
+    if command -v sha256sum >/dev/null 2>&1; then
+      digest=$(printf '%s' "$value" | sha256sum 2>/dev/null | awk '{print $1}') || digest=
+    fi
+  fi
+  printf '%s\n' "$digest" | LC_ALL=C grep -Eq '^[0-9a-fA-F]{64}$' || return 1
+  printf '%s\n' "$digest"
+}
+
+prime_project_agent_dir() {
+  local project_key scope_key setup_root status
+  [ -n "${PROJ_ABS:-}" ] || return 1
+  project_key=$(prime_sha256_value "$PROJ_ABS") || return 1
+  scope_key=$(prime_sha256_value "prime-scope-v1|$STATE|$PROJ_ABS") || return 1
+  setup_root="$STATE/prime-projects/$project_key"
+  FM_PRIME_HOME_PATH="$setup_root/home"
+  FM_PRIME_AGENT_DIR_PATH="$FM_PRIME_HOME_PATH/.prime/agent"
+  FM_PRIME_SESSION_DIR_PATH="$FM_PRIME_AGENT_DIR_PATH/sessions"
+  FM_PRIME_XDG_CONFIG_PATH="$FM_PRIME_HOME_PATH/.config"
+  FM_PRIME_XDG_DATA_PATH="$FM_PRIME_HOME_PATH/.local/share"
+  FM_PRIME_XDG_CACHE_PATH="$FM_PRIME_HOME_PATH/.cache"
+  FM_PRIME_XDG_STATE_PATH="$FM_PRIME_HOME_PATH/.local/state"
+  FM_PRIME_XDG_RUNTIME_PATH="$FM_PRIME_HOME_PATH/.local/run"
+  FM_PRIME_GH_CONFIG_PATH="$FM_PRIME_XDG_CONFIG_PATH/gh"
+  FM_PRIME_CLOUDSDK_CONFIG_PATH="$FM_PRIME_XDG_CONFIG_PATH/gcloud"
+  FM_PRIME_KERNEL_VENV_PATH="$FM_PRIME_AGENT_DIR_PATH/kernel-venv"
+  FM_PRIME_KERNEL_PYTHON_PATH="$FM_PRIME_KERNEL_VENV_PATH/bin/python"
+  FM_PRIME_AWS_CONFIG_PATH="$FM_PRIME_HOME_PATH/.aws"
+  FM_PRIME_AZURE_CONFIG_PATH="$FM_PRIME_HOME_PATH/.azure"
+  FM_PRIME_DOCKER_CONFIG_PATH="$FM_PRIME_HOME_PATH/.docker"
+  FM_PRIME_KUBE_CONFIG_PATH="$FM_PRIME_HOME_PATH/.kube"
+  FM_PRIME_HF_HOME_PATH="$FM_PRIME_HOME_PATH/.cache/huggingface"
+  FM_PRIME_GNUPG_HOME_PATH="$FM_PRIME_HOME_PATH/.gnupg"
+  FM_PRIME_DAEMON_SOCKET_PATH="/tmp/firstmate-prime-${scope_key:0:24}.sock"
+  mkdir -p "$setup_root" || return 1
+  chmod 700 "$setup_root" || return 1
+  PRIME_PROJECT_SETUP_LOCK="$setup_root/.setup.lock"
+  fm_lock_acquire_wait "$PRIME_PROJECT_SETUP_LOCK" || return 1
+  PRIME_PROJECT_SETUP_LOCK_HELD=1
+  status=0
+  prime_project_setup_locked || status=$?
+  fm_lock_release "$PRIME_PROJECT_SETUP_LOCK" || status=1
+  PRIME_PROJECT_SETUP_LOCK_HELD=0
+  PRIME_PROJECT_SETUP_LOCK=
+  return "$status"
+}
+
+prime_supports_daemon_socket() {
+  local executable=$1 version version_output candidate major minor patch help
+  version_output=$("$executable" --version 2>/dev/null) || return 1
+  version=${version_output%%$'\n'*}
+  for candidate in $version; do
+    case "$candidate" in
+      v[0-9]*.[0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) version=$candidate; break ;;
+    esac
+  done
+  version=${version#v}
+  IFS=. read -r major minor patch <<< "$version"
+  case "$major" in ''|*[!0-9]*) return 1 ;; esac
+  case "$minor" in ''|*[!0-9]*) return 1 ;; esac
+  case "$patch" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$major" -eq 0 ] && { [ "$minor" -lt 8 ] || { [ "$minor" -eq 8 ] && [ "$patch" -lt 1 ]; }; }; then
+    return 1
+  fi
+  help=$("$executable" --help 2>&1) || return 1
+  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--daemon-socket([[:space:]=]|$)'
 }
 
 # Pi's CLI surface is version-dependent, so probe the resolved executable's help
@@ -1247,6 +1410,14 @@ launch_template() {
       else
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
+      ;;
+    prime-agent)
+      # Clear foreign PI-family markers a Pi-family primary leaks into the spawn
+      # environment: a worker inherited PI_MODEL from the primary session and
+      # self-reported the wrong model (verified live 2026-08-24). Prime sets its
+      # own PI_CODING_AGENT=true for its children, so clearing the inherited
+      # value here cannot blind ancestry-based harness detection.
+      printf '%s' 'env -u PI_MODEL -u PI_CODING_AGENT -u AI_AGENT -u FM_PI_HARNESS -u PRIME_API_KEY -u PRIME_AGENT_TRACES_API_KEY -u PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN -u PRIME_TEAM_ID -u PRIME_AGENT_SESSION_DIR -u PRIME_AGENT_CODING_AGENT_SESSION_DIR -u OPENAI_API_KEY -u OPENAI_ADMIN_KEY -u OPENAI_ORG_ID -u OPENAI_PROJECT_ID -u OPENAI_WEBHOOK_SECRET -u AZURE_OPENAI_API_KEY -u ANTHROPIC_OAUTH_TOKEN -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u DEEPSEEK_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_CLOUD_API_KEY -u GOOGLE_APPLICATION_CREDENTIALS -u google_application_credentials -u GOOGLE_CLOUD_PROJECT -u GCLOUD_PROJECT -u GOOGLE_CLOUD_LOCATION -u GROQ_API_KEY -u CEREBRAS_API_KEY -u XAI_API_KEY -u OPENROUTER_API_KEY -u AI_GATEWAY_API_KEY -u ZAI_API_KEY -u MISTRAL_API_KEY -u MINIMAX_API_KEY -u MINIMAX_CN_API_KEY -u MOONSHOT_API_KEY -u HF_TOKEN -u FIREWORKS_API_KEY -u OPENCODE_API_KEY -u KIMI_API_KEY -u CLOUDFLARE_API_KEY -u XIAOMI_API_KEY -u XIAOMI_TOKEN_PLAN_CN_API_KEY -u XIAOMI_TOKEN_PLAN_AMS_API_KEY -u XIAOMI_TOKEN_PLAN_SGP_API_KEY -u COPILOT_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SERPER_API_KEY -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN -u AWS_BEARER_TOKEN_BEDROCK -u AWS_CONTAINER_CREDENTIALS_RELATIVE_URI -u AWS_CONTAINER_CREDENTIALS_FULL_URI -u AWS_WEB_IDENTITY_TOKEN_FILE -u AWS_SHARED_CREDENTIALS_FILE -u AWS_CONFIG_FILE -u AWS_ROLE_ARN -u SSH_AUTH_SOCK -u SSH_AGENT_PID -u GIT_ASKPASS -u SSH_ASKPASS -u SUDO_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_COUNT -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL __PRIMESCOPEDENV____PRIMEBIN__ __MODELFLAG____EFFORTFLAG__--daemon-socket __PRIMEDAEMONSOCKET__ -e __PRIMEEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
@@ -1300,13 +1471,27 @@ launch_template() {
   esac
 }
 
+unset FM_PRIME_HOME_PATH FM_PRIME_AGENT_DIR_PATH FM_PRIME_SESSION_DIR_PATH FM_PRIME_XDG_CONFIG_PATH \
+  FM_PRIME_XDG_DATA_PATH FM_PRIME_XDG_CACHE_PATH FM_PRIME_XDG_STATE_PATH FM_PRIME_XDG_RUNTIME_PATH \
+  FM_PRIME_GH_CONFIG_PATH FM_PRIME_CLOUDSDK_CONFIG_PATH FM_PRIME_KERNEL_VENV_PATH FM_PRIME_KERNEL_PYTHON_PATH \
+  FM_PRIME_AWS_CONFIG_PATH FM_PRIME_AZURE_CONFIG_PATH FM_PRIME_DOCKER_CONFIG_PATH FM_PRIME_KUBE_CONFIG_PATH \
+  FM_PRIME_HF_HOME_PATH FM_PRIME_GNUPG_HOME_PATH FM_PRIME_DAEMON_SOCKET_PATH
+FM_PRIME_HOME_PATH=
+FM_PRIME_AGENT_DIR_PATH=
+FM_PRIME_SESSION_DIR_PATH=
+RAW_LAUNCH=0
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
+  *' '*)
+    if [ -f "$CONFIG/crew-dispatch.json" ]; then
+      echo "error: raw launch commands cannot prove complete runtime identity while config/crew-dispatch.json is active; use an explicit verified --harness" >&2
+      exit 1
+    fi
     LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    HARNESS=$(raw_non_prime_executable "$LAUNCH") || {
+      echo "error: raw launch commands cannot prove non-Prime executable identity under the Prime isolation boundary; use an explicit verified --harness" >&2
+      exit 1
+    }
+    RAW_LAUNCH=1
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1328,28 +1513,28 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); select a verified adapter" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; select a verified adapter" >&2; exit 1; }
     ;;
 esac
 
-# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
+# muse and prime-agent are verified as CREWMATE/SCOUT adapters only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
-  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = prime-agent ]; }; then
+  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no verified primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
 case "$HARNESS" in
   pi|pi-signed)
-    PI_BIN=$(resolve_pi_executable "$HARNESS") || {
+    PI_BIN=$(resolve_pi_family_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
       exit 1
     }
@@ -1359,6 +1544,22 @@ case "$HARNESS" in
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
+  prime-agent)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      if ! fm_prime_structured_argv_ready; then
+        echo "error: prime-agent on Darwin requires python3 for structured process identity; install or expose python3 on PATH, or select a different verified harness" >&2
+        exit 1
+      fi
+      PRIME_BIN=$(resolve_pi_family_executable prime-agent) || {
+        echo "error: prime-agent executable not found on PATH; install it or select a different verified harness" >&2
+        exit 1
+      }
+      if ! prime_supports_daemon_socket "$PRIME_BIN"; then
+        echo "error: prime-agent requires version 0.8.1 or newer with --daemon-socket support for project-isolated launches; upgrade Prime Agent or select a different verified harness" >&2
+        exit 1
+      fi
+    fi
     ;;
   cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too
@@ -1481,7 +1682,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1513,9 +1714,10 @@ effort_flag_for_harness() {
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
-    pi|pi-signed)
-      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
+    pi|pi-signed|prime-agent)
+      # Pi 0.80.6 and Prime Agent 0.8.0 accept the full shared effort vocabulary,
+      # including max, through --thinking. Prime also accepts off and minimal,
+      # which sit outside Firstmate's shared dispatch axis and are not remapped.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -1579,6 +1781,10 @@ esac
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+javascript_string_literal() {
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$1"
 }
 
 resolved_existing_dir() {
@@ -1766,6 +1972,12 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2; exit 1; }
+if [ "$HARNESS" = prime-agent ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  prime_project_agent_dir || {
+    echo "error: cannot create project-scoped Prime Agent state for '$PROJ_ABS'" >&2
+    exit 1
+  }
+fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
@@ -2535,6 +2747,15 @@ if [ "$KIND" != secondmate ]; then
       }
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
+    prime-agent)
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+          echo "error: failed to arm the busy-state contract for $ID" >&2
+          exit 1
+        }
+        [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+      fi
+      ;;
     kimi*)
       # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
       # live-verified installed version (bin/fm-busy-lib.sh owns the gate and
@@ -2654,6 +2875,180 @@ export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
+      ;;
+    prime-agent)
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        # Prime accepts Pi-style explicit -e extensions outside the project
+        # without a trust dialog. Prime 0.8.0 emits agent_end rather than Pi's
+        # agent_settled, so that verified lifecycle edge closes the busy record.
+        JS_BUSY_EVENT=$(javascript_string_literal "$FM_ROOT/bin/fm-busy-event.sh") || exit 1
+        JS_STATE_REAL=$(javascript_string_literal "$STATE_REAL") || exit 1
+        JS_ID=$(javascript_string_literal "$ID") || exit 1
+        JS_BUSY_GEN=$(javascript_string_literal "$BUSY_GEN") || exit 1
+        JS_TURNEND=$(javascript_string_literal "$TURNEND") || exit 1
+        cat > "$STATE/$ID.prime-ext.ts" <<EOF
+// Firstmate semantic busy-state events + turn-end notification for Prime Agent;
+// written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+import { execFile } from "node:child_process";
+const writeBusyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile($JS_BUSY_EVENT, [
+      "apply", $JS_STATE_REAL, $JS_ID, state,
+      "--gen", $JS_BUSY_GEN, "--source", "prime-ext", "--event", event,
+    ], () => resolve());
+  });
+const registryKey = Symbol.for("firstmate.prime.busy-coordinators");
+const registry = (globalThis as any)[registryKey] ?? new Map<string, any>();
+(globalThis as any)[registryKey] = registry;
+const coordinatorId = [$JS_STATE_REAL, $JS_ID, $JS_BUSY_GEN].join("\\u0000");
+if (!registry.has(coordinatorId)) {
+  registry.set(coordinatorId, {
+    activeSessions: new Set<any>(),
+    unprovenSessions: new Set<any>(),
+    compactingSessions: new Set<any>(),
+    awaitingContinuation: new Set<any>(),
+    rootSession: undefined,
+    rootEndedClean: false,
+    reloadPendingSessions: new Set<any>(),
+    publishChain: Promise.resolve(),
+  });
+}
+const coordinator = registry.get(coordinatorId);
+const busyEvent = (state: string, event: string) => {
+  const publish = () => writeBusyEvent(state, event);
+  coordinator.publishChain = coordinator.publishChain.then(publish, publish);
+  return coordinator.publishChain;
+};
+const sessionDepth = (ctx: any) => {
+  try {
+    const depth = ctx?.sessionManager?.getHeader?.()?.rlmDepth;
+    return Number.isInteger(depth) ? depth : undefined;
+  } catch {
+    return undefined;
+  }
+};
+const sessionIdentity = (ctx: any) => {
+  try {
+    const id = ctx?.sessionManager?.getSessionId?.();
+    if (typeof id === "string" && id) return "id:" + id;
+    const file = ctx?.sessionManager?.getSessionFile?.();
+    if (typeof file === "string" && file) return "file:" + file;
+  } catch {
+    return undefined;
+  }
+  return undefined;
+};
+const endIsClean = (event: any, ctx: any) => {
+  const messages = Array.isArray(event?.messages) ? event.messages : [];
+  const assistant = [...messages].reverse().find((message) => message?.role === "assistant");
+  if (assistant?.stopReason === "error") return false;
+  if (typeof ctx?.hasPendingMessages !== "function") return false;
+  try {
+    return !ctx.hasPendingMessages();
+  } catch {
+    return false;
+  }
+};
+const inactiveState = () => {
+  if (coordinator.unprovenSessions.size > 0) return "task-terminality-unproven";
+  if (coordinator.compactingSessions.size > 0 || coordinator.awaitingContinuation.size > 0) return "task-compaction-active";
+  return "task-quiescence-unavailable";
+};
+export default function (prime: any) {
+  const fallbackSession = {};
+  prime.on("session_start", (_event: any, ctx: any) => {
+    const identity = sessionIdentity(ctx);
+    if (!identity || !coordinator.reloadPendingSessions.has(identity)) return;
+    const session = ctx?.sessionManager ?? fallbackSession;
+    let active = false;
+    try {
+      active = typeof ctx?.isIdle === "function" && !ctx.isIdle();
+    } catch {
+      active = false;
+    }
+    coordinator.reloadPendingSessions.delete(identity);
+    coordinator.unprovenSessions.delete(session);
+    coordinator.compactingSessions.delete(session);
+    coordinator.awaitingContinuation.delete(session);
+    if (sessionDepth(ctx) === 0) {
+      coordinator.rootSession = session;
+      coordinator.rootEndedClean = false;
+    }
+    if (active) coordinator.activeSessions.add(session);
+    else coordinator.activeSessions.delete(session);
+    return coordinator.activeSessions.size > 0 || coordinator.reloadPendingSessions.size > 0
+      ? busyEvent("busy", "session-start-active")
+      : busyEvent("unknown", "session-start-idle");
+  });
+  prime.on("agent_start", (_event: any, ctx: any) => {
+    const session = ctx?.sessionManager ?? fallbackSession;
+    const identity = sessionIdentity(ctx);
+    coordinator.activeSessions.add(session);
+    if (identity) coordinator.reloadPendingSessions.delete(identity);
+    coordinator.unprovenSessions.delete(session);
+    coordinator.compactingSessions.delete(session);
+    coordinator.awaitingContinuation.delete(session);
+    if (sessionDepth(ctx) === 0) {
+      coordinator.rootSession = session;
+      coordinator.rootEndedClean = false;
+    }
+    return busyEvent("busy", "agent-start");
+  });
+  prime.on("agent_end", (event: any, ctx: any) => {
+    const session = ctx?.sessionManager ?? fallbackSession;
+    const depth = sessionDepth(ctx);
+    const clean = endIsClean(event, ctx);
+    coordinator.activeSessions.delete(session);
+    if (depth === 0) {
+      coordinator.rootSession = session;
+      coordinator.rootEndedClean = clean;
+    }
+    if (clean) coordinator.unprovenSessions.delete(session);
+    else coordinator.unprovenSessions.add(session);
+    if (coordinator.activeSessions.size > 0 || coordinator.reloadPendingSessions.size > 0) {
+      return busyEvent("busy", "agent-end-other-active");
+    }
+    return busyEvent("unknown", !coordinator.rootSession || !coordinator.rootEndedClean ? "task-terminality-unproven" : inactiveState());
+  });
+  prime.on("session_shutdown", (event: any, ctx: any) => {
+    const session = ctx?.sessionManager ?? fallbackSession;
+    const identity = sessionIdentity(ctx);
+    const activeReload = Boolean(identity) && event?.reason === "reload" && coordinator.activeSessions.has(session);
+    coordinator.activeSessions.delete(session);
+    coordinator.unprovenSessions.delete(session);
+    coordinator.compactingSessions.delete(session);
+    coordinator.awaitingContinuation.delete(session);
+    if (identity) coordinator.reloadPendingSessions.delete(identity);
+    if (coordinator.rootSession === session) {
+      coordinator.rootSession = undefined;
+      coordinator.rootEndedClean = false;
+    }
+    if (activeReload && identity) coordinator.reloadPendingSessions.add(identity);
+    if (coordinator.activeSessions.size > 0 || coordinator.reloadPendingSessions.size > 0) {
+      return busyEvent("busy", activeReload ? "session-reload-active" : "session-replaced-other-active");
+    }
+    return busyEvent("unknown", "session-replaced");
+  });
+  prime.on("session_before_compact", (_event: any, ctx: any) => {
+    const session = ctx?.sessionManager ?? fallbackSession;
+    coordinator.compactingSessions.add(session);
+    coordinator.awaitingContinuation.delete(session);
+    return coordinator.activeSessions.size > 0 || coordinator.reloadPendingSessions.size > 0
+      ? busyEvent("busy", "compaction-other-active")
+      : busyEvent("unknown", "task-compaction-active");
+  });
+  prime.on("session_compact", (_event: any, ctx: any) => {
+    const session = ctx?.sessionManager ?? fallbackSession;
+    coordinator.compactingSessions.delete(session);
+    coordinator.awaitingContinuation.add(session);
+    return coordinator.activeSessions.size > 0 || coordinator.reloadPendingSessions.size > 0
+      ? busyEvent("busy", "compaction-other-active")
+      : busyEvent("unknown", "task-compaction-active");
+  });
+  prime.on("turn_end", () => execFile("touch", [$JS_TURNEND]));
+}
+EOF
+      fi
       ;;
     codex*)
       # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
@@ -2846,7 +3241,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness raw_launch prime_home prime_agent_dir prime_session_dir prime_config_root prime_kernel_venv prime_daemon_socket kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2858,6 +3253,13 @@ preserve_relaunch_meta() {
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
+  [ "$RAW_LAUNCH" -eq 0 ] || echo "raw_launch=1"
+  [ -z "${FM_PRIME_HOME_PATH:-}" ] || echo "prime_home=$FM_PRIME_HOME_PATH"
+  [ -z "${FM_PRIME_AGENT_DIR_PATH:-}" ] || echo "prime_agent_dir=$FM_PRIME_AGENT_DIR_PATH"
+  [ -z "${FM_PRIME_SESSION_DIR_PATH:-}" ] || echo "prime_session_dir=$FM_PRIME_SESSION_DIR_PATH"
+  [ -z "${FM_PRIME_XDG_CONFIG_PATH:-}" ] || echo "prime_config_root=$FM_PRIME_XDG_CONFIG_PATH"
+  [ -z "${FM_PRIME_KERNEL_VENV_PATH:-}" ] || echo "prime_kernel_venv=$FM_PRIME_KERNEL_VENV_PATH"
+  [ -z "${FM_PRIME_DAEMON_SOCKET_PATH:-}" ] || echo "prime_daemon_socket=$FM_PRIME_DAEMON_SOCKET_PATH"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
@@ -2951,27 +3353,48 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_primeext=$(shell_quote "$STATE/$ID.prime-ext.ts")
+sq_primehome=$(shell_quote "${FM_PRIME_HOME_PATH:-}")
+sq_primegitconfig=$(shell_quote "${FM_PRIME_HOME_PATH:-}/.gitconfig")
+sq_primeagentdir=$(shell_quote "${FM_PRIME_AGENT_DIR_PATH:-}")
+sq_primesessiondir=$(shell_quote "${FM_PRIME_SESSION_DIR_PATH:-}")
+sq_primedaemonsocket=$(shell_quote "${FM_PRIME_DAEMON_SOCKET_PATH:-}")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+PRIME_SCOPED_ENV=
+if [ "$HARNESS" = prime-agent ]; then
+  PRIME_SCOPED_ENV="HOME=$sq_primehome GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=$sq_primegitconfig PRIME_AGENT_CODING_AGENT_DIR=$sq_primeagentdir PRIME_AGENT_SESSION_DIR=$sq_primesessiondir XDG_CONFIG_HOME=$(shell_quote "$FM_PRIME_XDG_CONFIG_PATH") XDG_DATA_HOME=$(shell_quote "$FM_PRIME_XDG_DATA_PATH") XDG_CACHE_HOME=$(shell_quote "$FM_PRIME_XDG_CACHE_PATH") XDG_STATE_HOME=$(shell_quote "$FM_PRIME_XDG_STATE_PATH") XDG_RUNTIME_DIR=$(shell_quote "$FM_PRIME_XDG_RUNTIME_PATH") GH_CONFIG_DIR=$(shell_quote "$FM_PRIME_GH_CONFIG_PATH") CLOUDSDK_CONFIG=$(shell_quote "$FM_PRIME_CLOUDSDK_CONFIG_PATH") PRIME_AGENT_KERNEL_VENV=$(shell_quote "$FM_PRIME_KERNEL_VENV_PATH") AWS_SHARED_CREDENTIALS_FILE=$(shell_quote "$FM_PRIME_AWS_CONFIG_PATH/credentials") AWS_CONFIG_FILE=$(shell_quote "$FM_PRIME_AWS_CONFIG_PATH/config") AZURE_CONFIG_DIR=$(shell_quote "$FM_PRIME_AZURE_CONFIG_PATH") DOCKER_CONFIG=$(shell_quote "$FM_PRIME_DOCKER_CONFIG_PATH") KUBECONFIG=$(shell_quote "$FM_PRIME_KUBE_CONFIG_PATH/config") HF_HOME=$(shell_quote "$FM_PRIME_HF_HOME_PATH") GNUPGHOME=$(shell_quote "$FM_PRIME_GNUPG_HOME_PATH") NPM_CONFIG_USERCONFIG=$(shell_quote "$FM_PRIME_HOME_PATH/.npmrc") NETRC=$(shell_quote "$FM_PRIME_HOME_PATH/.netrc") "
+  PRIME_SCOPED_ENV+="PRIME_AGENT_KERNEL_PYTHON=$(shell_quote "$FM_PRIME_KERNEL_PYTHON_PATH") "
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__PRIMEEXT__/$sq_primeext}
+LAUNCH=${LAUNCH//__PRIMEHOME__/$sq_primehome}
+LAUNCH=${LAUNCH//__PRIMEGITCONFIG__/$sq_primegitconfig}
+LAUNCH=${LAUNCH//__PRIMEAGENTDIR__/$sq_primeagentdir}
+LAUNCH=${LAUNCH//__PRIMESESSIONDIR__/$sq_primesessiondir}
+LAUNCH=${LAUNCH//__PRIMESCOPEDENV__/$PRIME_SCOPED_ENV}
+LAUNCH=${LAUNCH//__PRIMEDAEMONSOCKET__/$sq_primedaemonsocket}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
+  prime-agent)
+    [ "$RAW_LAUNCH" -eq 1 ] || LAUNCH=${LAUNCH//__PRIMEBIN__/"$(shell_quote "$PRIME_BIN")"}
+    ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  claude|codex|opencode|pi|pi-signed|prime-agent|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac

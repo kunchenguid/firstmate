@@ -218,7 +218,7 @@ test_stale_gen_record_unknown() {
 test_missing_record_unknown_not_idle() {
   local state out h
   state=$(new_state_dir missing)
-  for h in claude opencode pi pi-signed; do
+  for h in claude opencode pi pi-signed prime-agent; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state")
     [ "$out" = "unknown missing" ] || fail "$h with no record must be 'unknown missing', got '$out'"
   done
@@ -268,6 +268,13 @@ test_source_mismatch_cross_adapter() {
   [ "$out" = "unknown source-mismatch" ] || fail "pi-ext record on a claude task must be untrusted, got '$out'"
   out=$(fm_busy_classify tmux w1 pi t1 "$state")
   [ "$out" = "busy pi-ext" ] || fail "pi-ext record on a pi task must classify, got '$out'"
+  out=$(fm_busy_classify tmux w1 prime-agent t1 "$state")
+  [ "$out" = "unknown source-mismatch" ] || fail "prime-agent must not trust Pi's source, got '$out'"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source prime-ext --event agent-end
+  out=$(fm_busy_classify tmux w1 prime-agent t1 "$state")
+  [ "$out" = "unknown legacy-prime-idle" ] || fail "legacy Prime idle must not prove current task idleness, got '$out'"
+  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  [ "$out" = "unknown source-mismatch" ] || fail "pi must not trust Prime's source, got '$out'"
   out=$(fm_busy_classify tmux w1 grok t1 "$state")
   [ "$out" = "unknown source-mismatch" ] || fail "grok trusts no semantic source, got '$out'"
   pass "a record is trusted only by the adapter whose source wrote it"
@@ -280,7 +287,7 @@ test_converted_adapters_ignore_footer_text() {
    ■■■■⬝⬝⬝⬝  esc interrupt
 Working...
 Ctrl+c:cancel'
-  for h in claude opencode pi pi-signed; do
+  for h in claude opencode pi pi-signed prime-agent; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state" "$tail")
     [ "$out" = "unknown missing" ] || fail "$h must never classify from footer text, got '$out'"
   done

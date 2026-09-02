@@ -420,6 +420,8 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
+TARGET_HARNESS_FAMILY=$(fm_control_harness_family "$TARGET_HARNESS" 2>/dev/null) \
+  || TARGET_HARNESS_FAMILY=$TARGET_HARNESS
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
 # supervision actors, so refuse while the OTHER actor holds this task's live
@@ -758,7 +760,7 @@ else
     else
       case "$RESOLVE_ANSWER_TEXT" in
         /*) ;;
-        \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
+        \$*) [ "$TARGET_HARNESS_FAMILY" = codex ] || INBOX_PLANE=1 ;;
         *) INBOX_PLANE=1 ;;
       esac
     fi
@@ -975,7 +977,7 @@ else
   case "$*" in
     /*) settle=1.2 ;;
     \$*)
-      if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
+      if [ "$TARGET_HARNESS_FAMILY" = codex ]; then settle=1.2; else settle=0.3; fi
       ;;
     *) settle=0.3 ;;
   esac
@@ -986,7 +988,7 @@ else
   # block: remote text rides the inbox leg above, and remote --key exits
   # earlier.
   send_rc=0
-  if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS_FAMILY"); then
     :
   else
     send_rc=$?

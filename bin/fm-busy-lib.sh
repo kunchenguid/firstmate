@@ -29,6 +29,7 @@
 # task's recorded harness classifies unknown, so one adapter's writer can
 # never classify another adapter):
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
+#   prime-ext        Prime Agent per-task extension (agent_start/agent_end)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
@@ -192,6 +193,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;
+    prime-agent) adapter=prime-ext ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
@@ -878,7 +880,11 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     out=${out#* }
     r_source=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
-      printf '%s %s' "$r_state" "$r_source"
+      if [ "$harness" = prime-agent ] && [ "$r_source" = prime-ext ] && [ "$r_state" = idle ]; then
+        printf 'unknown legacy-prime-idle'
+      else
+        printf '%s %s' "$r_state" "$r_source"
+      fi
     else
       printf 'unknown source-mismatch'
     fi

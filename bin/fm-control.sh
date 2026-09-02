@@ -177,7 +177,7 @@ shift 2
 if ! fm_control_verb_allowed "$VERB"; then
   {
     if [ "$VERB" = resume ]; then
-      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex and grok need a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter."
+      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex, grok, and prime-agent need a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter."
     else
       echo "error: '$VERB' is not a control verb"
     fi
@@ -481,7 +481,7 @@ do_exit() {
   # authoritative proof is the agent-state wait below. The retried Enter still
   # matters, because a slash command opens a completion popup on some TUIs that
   # swallows the first Enter.
-  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
+  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL" "$HARNESS") \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
@@ -518,6 +518,7 @@ CONFIG_MODEL=
 CONFIG_EFFORT=
 PRIOR_MODEL=
 PRIOR_EFFORT=
+PRIOR_RAW_LAUNCH=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
@@ -614,8 +615,12 @@ resolve_relaunch_profile() {
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
+  PRIOR_RAW_LAUNCH=$(fm_meta_get "$META" raw_launch)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
+  if [ "$HARNESS_SET" = 0 ] && [ "$PRIOR_RAW_LAUNCH" = 1 ]; then
+    die "task $ID was started from a raw launch command that cannot be reconstructed; pass an explicit --harness to choose the replacement runtime deliberately"
+  fi
   if [ "$HARNESS_SET" = 0 ] \
      && [ "$PRIOR_RECORDED_HARNESS" != "$PRIOR_HARNESS" ]; then
     die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"

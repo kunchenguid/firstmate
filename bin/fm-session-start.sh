@@ -262,8 +262,10 @@ done
 SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
+  local next
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
-  printf '%s\n' "$1" > "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
+  next="${FM_SESSION_START_STAGE_FILE}.$$"
+  printf '%s\n' "$1" > "$next" 2>/dev/null && mv -f "$next" "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
 }
 
 # shellcheck source=bin/fm-timeout-lib.sh

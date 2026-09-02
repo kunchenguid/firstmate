@@ -661,6 +661,45 @@ test_queued_enter_verdict_does_not_convert_other_states() {
   pass "fm_composer_queued_enter_verdict: only proven pending is converted"
 }
 
+test_prime_delivery_busy_spinner_is_adapter_scoped() {
+  printf '%s\n' ' ⠸ Thinking · 3s' | fm_busy_lines_match prime-agent \
+    || fail "Prime's observed Thinking spinner must acknowledge delivery"
+  printf '%s\n' ' ⠼ Waiting · 1s' | fm_busy_lines_match prime-agent \
+    || fail "Prime's observed Waiting spinner must acknowledge delivery"
+  printf '%s\n' ' ⠼ Executing · 2s · ↑ 80 tokens' | fm_busy_lines_match prime-agent \
+    || fail "Prime's observed Executing spinner must acknowledge delivery"
+  printf '%s\n' ' ⠙ Writing · 59s · ↓ 80 tokens' | fm_busy_lines_match prime-agent \
+    || fail "Prime's Writing spinner must acknowledge delivery"
+  printf '%s\n' ' ⠹ Writing code · 1m 02s · ↓ 80 tokens' | fm_busy_lines_match prime-agent \
+    || fail "Prime's Writing code spinner with minute elapsed time must acknowledge delivery"
+  printf '%s\n' ' ⠴ Waiting · 2h 03m 04s' | fm_busy_lines_match prime-agent \
+    || fail "Prime's hour elapsed time must acknowledge delivery"
+  printf '%s\n' ' ⠦ Thinking · 1d 02h 03m 04s' | fm_busy_lines_match prime-agent \
+    || fail "Prime's day elapsed time must acknowledge delivery"
+  printf '%s\n' ' ⠧ Waiting for IPython kernel... 2s' | fm_busy_lines_match prime-agent \
+    || fail "Prime's custom IPython loader must acknowledge delivery"
+  printf '%s\n' ' ⠇ Rebuilding project index 1m 02s' | fm_busy_lines_match prime-agent \
+    || fail "Prime's custom loader with minute elapsed time must acknowledge delivery"
+  printf '%s\n' ' ⠹ Writing code · 1m 2s' | fm_busy_lines_match prime-agent \
+    && fail "Prime's renderer never emits an unpadded multi-unit elapsed time"
+  printf '%s\n' 'Executing · 2s' | fm_busy_lines_match prime-agent \
+    && fail "plain Prime transcript text must not acknowledge delivery"
+  printf '%s\n' 'status: ⠸ Thinking · 3s' | fm_busy_lines_match prime-agent \
+    && fail "an embedded Prime spinner fragment must not acknowledge delivery"
+  printf '%s\n' ' ⠧ Waiting for IPython kernel...' | fm_busy_lines_match prime-agent \
+    && fail "a Prime custom loader without elapsed time must not acknowledge delivery"
+  printf '%s\n' 'Executing · 2s' | fm_busy_lines_match \
+    && fail "Prime's elapsed spinner must not enter the harness-less delivery union"
+  printf '%s\n' 'Executing · 2s' | fm_busy_lines_match pi \
+    && fail "Prime's elapsed spinner must not acknowledge Pi delivery"
+  printf '%s\n' 'Thinking...' | fm_busy_lines_match prime-agent \
+    && fail "Prime's static thinking transcript heading is not a live spinner"
+  printf '%s\n' 'Working...' | fm_busy_lines_match prime-agent \
+    && fail "Prime must not borrow Pi's delivery signature"
+  pass "Prime delivery busy matching is scoped to its elapsed spinner shapes"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+test_prime_delivery_busy_spinner_is_adapter_scoped

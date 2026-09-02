@@ -23,7 +23,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
   `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
 - **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
 
-A recorded `harness=` is not always an exact adapter name: a task launched from a raw command records that command's basename instead.
+A raw utility launch record's `harness=` is not an exact adapter name: it records that command's basename instead.
 `fm_control_harness_family` is the one place that prefix rule is stated, and an unrecognized value resolves to no adapter rather than being guessed into one.
 
 ## Verbs
@@ -48,7 +48,7 @@ The clear is refused before anything is sent when the recorded backend cannot de
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
-It is not deterministic across the verified adapters: codex and grok resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract.
+It is not deterministic across the verified adapters: codex, grok, and prime-agent resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract.
 `relaunch` covers the same need on every adapter, because the brief on disk - not a harness-private session - is the durable instruction.
 
 ## Transactional relaunch
@@ -59,7 +59,7 @@ It is not deterministic across the verified adapters: codex and grok resume only
    An explicit `--harness`, `--model`, or `--effort` wins.
    Otherwise a `kind=secondmate` task re-resolves its durable `config/secondmate-harness` pin, including that file's optional model and effort tokens, exactly as every other respawn does - so setting the pin and relaunching is the ordinary way to move a secondmate's runtime.
    A ship or scout keeps the harness already recorded for it, because that harness comes from firstmate's dispatch-profile judgment at intake and must not be silently re-read from configuration.
-   A recorded raw-command basename that differs from its resolved adapter cannot reproduce the command actually running, so relaunch refuses before the checkpoint unless the caller passes an explicit `--harness` to choose the replacement runtime deliberately.
+   Relaunch reconstructs only verified harness adapters, so a raw utility launch record requires an explicit `--harness` replacement.
    A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
 2. **Safe checkpoint.**
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
@@ -89,7 +89,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   Its agent runs on another host, so none of the postconditions this plane verifies could be read for it here; local endpoint validation would refuse the record regardless, because `window=remote:<id>` can never match a local backend's required shape.
   Drive that lifecycle on its own host and reconcile it through the secondmate recovery path.
 - An unverified harness is refused rather than guessed at.
-- An implicit relaunch from a prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
+- An implicit relaunch from a legacy prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.

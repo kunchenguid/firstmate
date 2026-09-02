@@ -255,6 +255,39 @@ test_unrecognized_state_skips_busy_conversion() {
   pass "fm_tmux_submit_enter_core: unrecognized states skip busy conversion"
 }
 
+test_submit_busy_proof_uses_recorded_harness() {
+  local dir fakebin composer vfile
+  dir="$TMP_ROOT/harness-scoped-busy"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  vfile="$dir/verdict"
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
+  touch "$dir/.swallow"
+  (
+    # shellcheck disable=SC2329 # Test override invoked through fm_tmux_submit_core.
+    fm_pane_busy_state() { printf 'idle'; }
+    # shellcheck disable=SC2329 # Test override invoked through fm_tmux_submit_core.
+    fm_pane_is_busy() { [ "${2:-}" = prime-agent ]; }
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+      fm_tmux_submit_core "win" "fix" 3 0.05 0 prime-agent > "$vfile" 2>/dev/null
+  ) || fail "Prime harness-scoped submit check failed"
+  [ "$(cat "$vfile")" = empty ] \
+    || fail "Prime's recorded harness must reach delivery confirmation, got '$(cat "$vfile")'"
+  (
+    # shellcheck disable=SC2329 # Test override invoked through fm_tmux_submit_core.
+    fm_pane_busy_state() { printf 'idle'; }
+    # shellcheck disable=SC2329 # Test override invoked through fm_tmux_submit_core.
+    fm_pane_is_busy() { [ "${2:-}" = prime-agent ]; }
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+      fm_tmux_submit_core "win" "fix" 3 0.05 0 pi > "$vfile" 2>/dev/null
+  ) || fail "Pi harness-scoped submit check failed"
+  [ "$(cat "$vfile")" = pending ] \
+    || fail "another harness must not borrow Prime's delivery proof, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_core: delivery busy proof follows the recorded harness"
+}
+
 test_claude_busy_signature_uses_real_capture_shapes() {
   local dir fakebin composer
   dir="$TMP_ROOT/claude-signature"
@@ -337,4 +370,5 @@ test_busy_pane_unknown_stays_unknown
 test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
+test_submit_busy_proof_uses_recorded_harness
 test_claude_busy_signature_uses_real_capture_shapes

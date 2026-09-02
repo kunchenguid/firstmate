@@ -52,11 +52,36 @@ make_stubs() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_BUSY_SCREEN:-}" ]; then
+      shift
+      literal=0
+      key=
+      text=
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          -t) shift 2 ;;
+          -l) literal=1; shift ;;
+          *) if [ "$literal" = 1 ]; then text=$1; else key=$1; fi; shift ;;
+        esac
+      done
+      if [ "$literal" = 1 ]; then
+        printf '╭────────────────────╮\n│ > %s\n╰────────────────────╯\n' "$text" > "$FM_FAKE_BUSY_SCREEN"
+      elif [ "$key" = Enter ]; then
+        printf '%s\n' "${FM_FAKE_BUSY_LINE:- ⠸ Thinking · 3s}" >> "$FM_FAKE_BUSY_SCREEN"
+      fi
+    fi
+    exit 0 ;;
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  capture-pane)
+    if [ -n "${FM_FAKE_BUSY_SCREEN:-}" ]; then
+      cat "$FM_FAKE_BUSY_SCREEN"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -137,6 +162,21 @@ rides_inbox() {  # <label> <harness> <message>
   pass "fm-send popup-settle: $label -> inbox plane, fast doorbell"
 }
 
+raw_cursor_delivery() {
+  local dir fb log home screen rc
+  dir="$TMP_ROOT/raw-cursor-$RANDOM"; mkdir -p "$dir/state"
+  fb=$(make_stubs "$dir"); log="$dir/sleep.log"; home="$dir"; screen="$dir/screen"
+  fm_write_meta "$home/state/popupcase.meta" "window=sess:win" "harness=cursor-agent"
+  printf '╭────╮\n│    │\n╰────╯\n' > "$screen"
+  : > "$log"
+  env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+    FM_FAKE_BUSY_SCREEN="$screen" FM_FAKE_BUSY_LINE='ctrl+c to stop' \
+    "$SEND" fm-popupcase '/no-mistakes' 2>/dev/null; rc=$?
+  expect_code 0 "$rc" "raw cursor-agent delivery should use Cursor's busy proof"
+  pass "fm-send delivery: raw cursor-agent basename uses the Cursor adapter family"
+}
+
 # Codex `$<skill>` gets the long settle so its `$` popup clears (the fix).
 first_settle 1.2 'codex $skill -> long settle' codex '$no-mistakes'
 
@@ -165,3 +205,5 @@ first_settle 1.2 'codex /command -> long settle (slash unchanged)' codex '/help'
 
 # Plain text to codex rides the inbox - the codex scope is `$`-prefixed only.
 rides_inbox 'codex plain text' codex 'just a normal steer'
+
+raw_cursor_delivery

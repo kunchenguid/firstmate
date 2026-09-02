@@ -526,6 +526,7 @@ run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   local home=$1 root=$2 path=$3
   shift 3
   env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+    FM_FAKE_HARNESS=pi \
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"

@@ -293,11 +293,19 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
+prime-agent and muse are verified for crewmate and scout launches only, and `fm-spawn.sh` refuses either for a secondmate because neither has a verified primary supervision protocol.
 A cursor secondmate or primary runs the tracked project-scope `.cursor/hooks.json` in its own home and must be launched with `--trust`, or no project hook loads; [`docs/supervision-protocols/cursor.md`](supervision-protocols/cursor.md) owns its supervision protocol.
 Cursor typed-submit confirmation is verified on tmux and Herdr only.
 On Zellij, cmux, and Orca a typed-plane Cursor send (a harness-native invocation or an explicit backend target; ordinary text steers ride the durable inbox and exit 0 at enqueue) lands, but `fm-send` reports delivery unconfirmed and exits non-zero because their shared submit core does not consult the busy footer; [runtime backend verification](verification/runtime-backends.md#cursor-agent-cli) owns the evidence and transcript-state boundary.
-muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
+muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
+Prime exposes `agent_end` instead of Pi's primary `agent_settled` boundary; the harness-adapters skill owns the verified lifecycle facts.
 muse also needs a worker-reachable credential before spawning, and the portable fleet path is the `<config>/muse/auth.json` credential stored by `muse login`, because a caller-only `META_API_KEY` does not cross a long-lived backend daemon.
+Prime launches require Prime Agent 0.8.1 or newer.
+Firstmate checks both the reported version and `--help` for `--daemon-socket`; an inconclusive or unsupported probe refuses the spawn so the operator can upgrade Prime Agent or select another verified harness.
+Firstmate gives each project and Firstmate home a private Prime home, session directory, kernel runtime, and daemon socket.
+The launch points `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `CLOUDSDK_CONFIG`, `PRIME_AGENT_KERNEL_VENV`, and `PRIME_AGENT_KERNEL_PYTHON` into that private home, along with the other supported credential and state roots, and removes ambient provider credentials and credential brokers from the environment.
+After the first spawn creates the task metadata, read `prime_home` from `state/<task-id>.meta`, put the project's Prime configuration at `<prime_home>/.prime/config.json`, and relaunch the task.
+The isolated home exposes the installed `no-mistakes` skill and copies the project's effective Git author only when both its name and email are set.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in the skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
@@ -318,8 +326,8 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 Changing this pin affects the next secondmate spawn or control-plane relaunch; the relaunch profile rules are owned by [`docs/agent-control.md`](agent-control.md#transactional-relaunch).
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
-Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
+An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; an explicit harness starts with clean model and effort defaults unless those flags are also passed.
+`fm-spawn.sh` preserves direct raw launches only when the resolved, non-writable executable is `echo`, `sleep`, `true`, `false`, `cat`, `printf`, `test`, or `ls` under `/bin`, `/sbin`, `/usr/bin`, or `/usr/sbin`; it rejects every other raw command at the Prime isolation boundary.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
@@ -335,7 +343,7 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
+When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit verified harness through `--harness` or a positional adapter.
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.

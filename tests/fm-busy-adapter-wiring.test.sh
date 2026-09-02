@@ -9,13 +9,44 @@
 # with no live harness session.
 set -u
 
-# shellcheck source=tests/fixtures.sh
-. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 
+SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-busy-adapter-wiring)
+
+make_spawn_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse pi prime-agent opencode claude codex
+  cat > "$fakebin/prime-agent" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '%s\n' '0.8.1' ;;
+  --help) printf '%s\n' 'Options: --daemon-socket <path>' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/prime-agent"
+  printf '%s\n' "$fakebin"
+}
 
 make_spawn_case() {  # <name> <harness> <id>
   local name=$1 harness=$2 id=$3 case_dir home proj wt fakebin
@@ -23,10 +54,13 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex)
-  fm_test_spawn_home "$home" "$harness"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
-  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+  mkdir -p "$home/data/$id"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -36,8 +70,13 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   # fixed valid one.
   local home=$1 wt=$2 fakebin=$3
   shift 3
-  GROK_HOME="$home/grok-home" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" "$@" --mode no-mistakes --yolo off
+  set -- "$@" --mode no-mistakes --yolo off
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    "$SPAWN" "$@" 2>&1
 }
 
 read_case_record() {
@@ -76,6 +115,290 @@ if (process.env.MODE === "turn-end") {
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
 EOF
+}
+
+drive_prime_ext() {
+  EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
+import { copyFileSync } from "node:fs";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { pathToFileURL } from "node:url";
+const rootPath = process.env.EXT_PATH + ".root.ts";
+const childPath = process.env.EXT_PATH + ".child.ts";
+const replacementPath = process.env.EXT_PATH + ".replacement.ts";
+copyFileSync(process.env.EXT_PATH, rootPath);
+copyFileSync(process.env.EXT_PATH, childPath);
+copyFileSync(process.env.EXT_PATH, replacementPath);
+if (process.env.MODE === "overlapping-ends") {
+  const realExecFile = childProcess.execFile;
+  childProcess.execFile = (file, args, callback) => {
+    const eventIndex = args.indexOf("--event");
+    if (eventIndex >= 0 && args[eventIndex + 1] === "agent-end-other-active") {
+      setTimeout(() => realExecFile(file, args, callback), 150);
+      return;
+    }
+    return realExecFile(file, args, callback);
+  };
+  syncBuiltinESMExports();
+}
+const rootMod = await import(pathToFileURL(rootPath).href);
+const childMod = await import(pathToFileURL(childPath).href);
+const replacementMod = await import(pathToFileURL(replacementPath).href);
+const createHandlers = (mod) => {
+  const handlers = {};
+  mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+  return handlers;
+};
+const root = createHandlers(rootMod);
+const child = createHandlers(childMod);
+const replacement = createHandlers(replacementMod);
+const normalEnd = { messages: [] };
+const retryEnd = { messages: [{ role: "assistant", stopReason: "error", errorMessage: "retryable" }] };
+const manager = (rlmDepth, sessionId) => ({
+  getHeader: () => ({ rlmDepth }),
+  getSessionId: () => sessionId,
+});
+const rootManager = manager(0, "root");
+const childManager = manager(1, "child");
+const replacementManager = manager(0, "replacement");
+const reloadRootManager = manager(0, "root");
+const replacementChildManager = manager(1, "child");
+const unrelatedManager = manager(1, "unrelated");
+const context = (sessionManager, hasPendingMessages = false, isIdle = true) => ({
+  sessionManager,
+  hasPendingMessages: () => hasPendingMessages,
+  isIdle: () => isIdle,
+});
+const rootSettled = context(rootManager);
+const rootPending = context(rootManager, true);
+const childSettled = context(childManager);
+const replacementSettled = context(replacementManager);
+const replacementActive = context(reloadRootManager, false, false);
+const replacementChildActive = context(replacementChildManager, false, false);
+const unrelatedIdle = context(unrelatedManager);
+switch (process.env.MODE) {
+  case "root-settled":
+    await root["agent_start"]({}, rootSettled);
+    await root["agent_end"](normalEnd, rootSettled);
+    break;
+  case "root-pending":
+    await root["agent_start"]({}, rootPending);
+    await root["agent_end"](normalEnd, rootPending);
+    break;
+  case "root-retry":
+    await root["agent_start"]({}, rootSettled);
+    await root["agent_end"](retryEnd, rootSettled);
+    break;
+  case "root-unproven":
+    await root["agent_start"]({}, rootSettled);
+    await root["agent_end"](normalEnd, { sessionManager: rootManager });
+    break;
+  case "child-end-root-active":
+    await root["agent_start"]({}, rootSettled);
+    await child["agent_start"]({}, childSettled);
+    await child["agent_end"](normalEnd, childSettled);
+    break;
+  case "root-end-child-active":
+    await root["agent_start"]({}, rootSettled);
+    await child["agent_start"]({}, childSettled);
+    await root["agent_end"](normalEnd, rootSettled);
+    break;
+  case "root-end-child-compaction":
+    await root["agent_start"]({}, rootSettled);
+    await child["agent_start"]({}, childSettled);
+    await root["agent_end"](normalEnd, rootSettled);
+    await root["session_before_compact"]({}, rootSettled);
+    await root["session_compact"]({}, rootSettled);
+    break;
+  case "all-sessions-settled":
+    await root["agent_start"]({}, rootSettled);
+    await child["agent_start"]({}, childSettled);
+    await root["agent_end"](normalEnd, rootSettled);
+    await child["agent_end"](normalEnd, childSettled);
+    break;
+  case "child-retry-settled":
+    await root["agent_start"]({}, rootSettled);
+    await child["agent_start"]({}, childSettled);
+    await child["agent_end"](retryEnd, childSettled);
+    await child["agent_start"]({}, childSettled);
+    await child["agent_end"](normalEnd, childSettled);
+    await root["agent_end"](normalEnd, rootSettled);
+    break;
+  case "compaction-active":
+    await root["agent_start"]({}, rootSettled);
+    await root["agent_end"](normalEnd, rootSettled);
+    await root["session_before_compact"]({}, rootSettled);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await root["session_compact"]({}, rootSettled);
+    break;
+  case "compaction-continuation":
+    await root["agent_start"]({}, rootSettled);
+    await root["agent_end"](normalEnd, rootSettled);
+    await root["session_before_compact"]({}, rootSettled);
+    await root["session_compact"]({}, rootSettled);
+    await root["agent_start"]({}, rootSettled);
+    break;
+  case "session-replacement":
+    await root["agent_start"]({}, rootSettled);
+    await root["session_shutdown"]({ reason: "new" }, rootSettled);
+    await replacement["agent_start"]({}, replacementSettled);
+    await replacement["agent_end"](normalEnd, replacementSettled);
+    break;
+  case "active-reload-shutdown":
+    await root["agent_start"]({}, rootSettled);
+    await root["session_shutdown"]({ reason: "reload" }, rootSettled);
+    break;
+  case "active-reload":
+    await root["agent_start"]({}, rootSettled);
+    await root["session_shutdown"]({ reason: "reload" }, rootSettled);
+    await replacement["session_start"]({}, replacementActive);
+    break;
+  case "reload-unrelated-session":
+    await root["agent_start"]({}, rootSettled);
+    await root["session_shutdown"]({ reason: "reload" }, rootSettled);
+    await replacement["session_start"]({}, unrelatedIdle);
+    break;
+  case "inactive-shutdown-during-reload":
+    await root["agent_start"]({}, rootSettled);
+    await root["session_shutdown"]({ reason: "reload" }, rootSettled);
+    await child["session_shutdown"]({ reason: "new" }, childSettled);
+    break;
+  case "concurrent-active-reloads":
+    await root["agent_start"]({}, rootSettled);
+    await child["agent_start"]({}, childSettled);
+    await root["session_shutdown"]({ reason: "reload" }, rootSettled);
+    await child["session_shutdown"]({ reason: "reload" }, childSettled);
+    await replacement["session_start"]({}, replacementActive);
+    await replacement["session_start"]({}, replacementChildActive);
+    await replacement["agent_end"](normalEnd, replacementActive);
+    break;
+  case "overlapping-ends":
+    await root["agent_start"]({}, rootSettled);
+    await child["agent_start"]({}, childSettled);
+    await Promise.all([
+      root["agent_end"](normalEnd, rootSettled),
+      child["agent_end"](normalEnd, childSettled),
+    ]);
+    break;
+  case "turn-end":
+    await root["turn_end"]();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    break;
+  default: throw new Error("unknown mode " + process.env.MODE);
+}
+EOF
+}
+
+test_prime_extension_semantic_lifecycle() {
+  local rec id=busy-prime-1 out state ext record before_turn_end
+  rec=$(make_spawn_case prime-lifecycle prime-agent "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "prime-agent spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.prime-ext.ts"
+  assert_present "$ext" "prime-agent spawn did not write the per-task extension"
+
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "Prime seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  out=$(drive_prime_ext "$ext" root-settled) || fail "Prime settled root lifecycle drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "unknown prime-ext" ] || fail "Prime inactive root without a settled event must classify unknown, got '$out'"
+  record=$(fm_busy_record_read "$state" "$id") || fail "Prime root-settled record is unreadable"
+  case "$record" in "unknown prime-ext task-quiescence-unavailable "*) : ;; *) fail "Prime clean root end did not record unavailable quiescence: $record" ;; esac
+
+  out=$(drive_prime_ext "$ext" root-pending) || fail "Prime pending root lifecycle drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "unknown prime-ext" ] || fail "Prime agent_end with queued messages must classify unknown, got '$out'"
+
+  out=$(drive_prime_ext "$ext" root-retry) || fail "Prime retry root lifecycle drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "unknown prime-ext" ] || fail "Prime retry-hold agent_end must classify unknown, got '$out'"
+
+  out=$(drive_prime_ext "$ext" root-unproven) || fail "Prime unproven root lifecycle drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "unknown prime-ext" ] || fail "Prime agent_end without terminal context must classify unknown, got '$out'"
+
+  out=$(drive_prime_ext "$ext" child-end-root-active) || fail "Prime child-end aggregation drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "Prime child end while root remains active must stay busy, got '$out'"
+
+  out=$(drive_prime_ext "$ext" root-end-child-active) || fail "Prime root-end aggregation drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "Prime root end while a child remains active must stay busy, got '$out'"
+
+  out=$(drive_prime_ext "$ext" root-end-child-compaction) || fail "Prime active-child compaction drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "Prime compaction must preserve busy while a child remains active, got '$out'"
+
+  out=$(drive_prime_ext "$ext" all-sessions-settled) || fail "Prime all-session quiescence drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "unknown prime-ext" ] || fail "Prime clean root and child ends without a settled event must stay unknown, got '$out'"
+
+  out=$(drive_prime_ext "$ext" child-retry-settled) || fail "Prime child retry lifecycle drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "unknown prime-ext" ] || fail "Prime settled child retry must end at unknown quiescence, got '$out'"
+  record=$(fm_busy_record_read "$state" "$id") || fail "Prime child-retry record is unreadable"
+  case "$record" in "unknown prime-ext task-quiescence-unavailable "*) : ;; *) fail "Prime child retry left sticky unproven terminality: $record" ;; esac
+
+  out=$(drive_prime_ext "$ext" compaction-active) || fail "Prime compaction lifecycle drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "unknown prime-ext" ] || fail "Prime compaction without continuation must stay unknown, got '$out'"
+  record=$(fm_busy_record_read "$state" "$id") || fail "Prime compaction record is unreadable"
+  case "$record" in "unknown prime-ext task-compaction-active "*) : ;; *) fail "Prime compaction lifecycle was not recorded explicitly: $record" ;; esac
+
+  out=$(drive_prime_ext "$ext" compaction-continuation) || fail "Prime compaction continuation drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "Prime continuation start inside the quiescence window must stay busy, got '$out'"
+
+  out=$(drive_prime_ext "$ext" session-replacement) || fail "Prime session replacement drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "unknown prime-ext" ] || fail "Prime replacement must remove the abandoned active session, got '$out'"
+  record=$(fm_busy_record_read "$state" "$id") || fail "Prime session replacement record is unreadable"
+  case "$record" in "unknown prime-ext task-quiescence-unavailable "*) : ;; *) fail "Prime replacement left stale lifecycle state: $record" ;; esac
+
+  out=$(drive_prime_ext "$ext" active-reload-shutdown) || fail "Prime active reload shutdown drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "Prime active reload shutdown must preserve busy, got '$out'"
+  record=$(fm_busy_record_read "$state" "$id") || fail "Prime active reload shutdown record is unreadable"
+  case "$record" in "busy prime-ext session-reload-active "*) : ;; *) fail "Prime active reload shutdown lost its busy edge: $record" ;; esac
+
+  out=$(drive_prime_ext "$ext" active-reload) || fail "Prime active reload replacement drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "Prime active reload replacement must remain busy, got '$out'"
+  record=$(fm_busy_record_read "$state" "$id") || fail "Prime active reload replacement record is unreadable"
+  case "$record" in "busy prime-ext session-start-active "*) : ;; *) fail "Prime active reload replacement did not seed busy: $record" ;; esac
+
+  out=$(drive_prime_ext "$ext" reload-unrelated-session) || fail "Prime unrelated reload session drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "An unrelated session_start consumed Prime's active reload, got '$out'"
+  record=$(fm_busy_record_read "$state" "$id") || fail "Prime unrelated reload session record is unreadable"
+  case "$record" in "busy prime-ext session-reload-active "*) : ;; *) fail "Prime unrelated session consumed the reload identity: $record" ;; esac
+
+  out=$(drive_prime_ext "$ext" inactive-shutdown-during-reload) || fail "Prime inactive shutdown during reload drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "An inactive shutdown must preserve another session's pending reload, got '$out'"
+  record=$(fm_busy_record_read "$state" "$id") || fail "Prime inactive shutdown during reload record is unreadable"
+  case "$record" in "busy prime-ext session-replaced-other-active "*) : ;; *) fail "Prime inactive shutdown lost the pending reload: $record" ;; esac
+
+  out=$(drive_prime_ext "$ext" concurrent-active-reloads) || fail "Prime concurrent reload drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "busy prime-ext" ] || fail "Prime concurrent reloads must preserve the remaining active session, got '$out'"
+  record=$(fm_busy_record_read "$state" "$id") || fail "Prime concurrent reload record is unreadable"
+  case "$record" in "busy prime-ext agent-end-other-active "*) : ;; *) fail "Prime concurrent reloads collapsed per-session state: $record" ;; esac
+
+  out=$(drive_prime_ext "$ext" overlapping-ends) || fail "Prime overlapping writer drive failed: $out"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "unknown prime-ext" ] || fail "Prime serialized publication allowed an older busy write to win, got '$out'"
+
+  before_turn_end=$out
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_prime_ext "$ext" turn-end) || fail "Prime turn_end drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "Prime turn_end no longer touches the notification marker"
+  out=$(classify prime-agent "$id" "$state")
+  [ "$out" = "$before_turn_end" ] || fail "Prime turn_end changed lifecycle state from '$before_turn_end' to '$out'"
+  pass "Prime extension tracks compaction and per-session retries without inventing idle"
 }
 
 test_pi_extension_semantic_lifecycle() {
@@ -315,6 +638,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
+test_prime_extension_semantic_lifecycle
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle

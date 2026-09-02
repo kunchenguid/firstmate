@@ -76,6 +76,36 @@ fm_backend_agent_state tmux museliv:zsh
 alive
 ```
 
+The lifecycle and process-identity inputs for the crewmate-only Prime adapter were verified separately on Prime Agent 0.8.0 on 2026-08-23 against tmux 3.6a on macOS arm64.
+The current launch requires Prime Agent 0.8.1 or newer for its project-scoped daemon socket; [`docs/configuration.md`](../configuration.md#harness-support) owns that supported-version boundary.
+
+```sh
+prime-agent --version
+tmux -L fm-prime-verify display-message -p -t prime-live '#{pane_pid} #{pane_current_command}'
+ps -o pid=,ppid=,comm=,args= -p "$pane_pid"
+```
+
+Observed bounded output:
+
+```text
+0.8.0
+94666 prime-agent
+94666 83227 prime-agent prime-agent
+```
+
+An explicit absolute `-e` extension outside a nested disposable project recorded `agent_start`, `turn_end`, and `agent_end` during a real `deepseek-v4-flash` turn.
+The same extension invoked `bin/fm-harness.sh` from Prime's process and recorded `identity:prime-agent` despite `PI_CODING_AGENT=true` and `AI_AGENT=pi`.
+The following Prime 0.8.0 idle observation is retained as historical evidence and is superseded by the current conservative contract.
+Prime 0.8.1 can continue after `agent_end` through compaction, queued work, and inline children, so the current adapter reports every inactive state as unknown, preserves busy while any root or child session remains active, and remains crewmate/scout-only.
+A live launch carried `--thinking low` but rendered `high` in Prime's footer, so this record proves flag parsing and transport rather than the effective runtime thinking level.
+A second 0.8.0 live run wrote through `bin/fm-busy-event.sh` and read the now-superseded stored contract through `fm_busy_classify`.
+
+```text
+during=busy prime-ext
+after=idle prime-ext
+state=idle source=prime-ext event=agent-end
+```
+
 `#{pane_current_command}` and foreground `ps -o comm=` read different name fields, but which one preserves executable identity is platform-dependent.
 On macOS the pane command reflected the rewritable title while the full install path could survive in `ps -o comm=`; in the Linux portable regression those roles reversed for the version-named native executable, with the identifying path retained in argv[0].
 The classifier therefore accepts a harness basename first, then an exact harness path component in the full executable path, then the same component in argv[0], without depending on which field carries it on a given platform.
@@ -168,7 +198,7 @@ Firstmate therefore sets the exact `FM_PI_HARNESS` selection marker on both work
 Both recorded runtime identities now classify the exact `pi-launcher` foreground command as `alive`.
 
 Backend applicability was reviewed across every spawn adapter.
-Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
+Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, `Pi`, and `prime-agent` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
@@ -202,7 +232,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Prime Agent, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Composer classification matrix
 
