@@ -30,11 +30,17 @@
 #      pipeline-custody, and newest-first rules owned by bin/fm-nm-run-lib.sh.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
-#      the active step is ci, `axi status` alone cannot tell "still waiting on
-#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      passed/checks-passed -> done, failed/cancelled -> failed. A terminal
+#      passed run reports a merge ONLY when its own pr step and every step it
+#      reports after that one completed; a skipped pr step means the run opened
+#      and merged nothing, and a completed pr step whose later step never ran
+#      means it opened a PR it never carried to a merge - the detail names the
+#      step that stopped short instead of asserting a merge (nm_passed_pr_detail).
+#      EXCEPT: while the active step is ci, `axi status` alone cannot tell "still
+#      waiting on checks" from "checks green, waiting on merge" (see
+#      nm_ci_checks_state) - a ci-step log-tail check overrides working -> done
+#      once checks read green, so a green PR is never silently read as
+#      still-validating.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -291,13 +297,96 @@ log_reports_ci_ready() {
   esac
 }
 
-nm_ci_step_status() {
+# Every row of the steps[N]{step,status,findings,duration_ms} table, in the
+# order `axi status` renders them - the pipeline's own step order, so a row's
+# position is what says which steps ran after which. The NUMERIC third column is
+# what separates a step row from a findings row, whose third column is a file
+# path, so the status word itself is matched loosely: an unrecognized or newly
+# added status must still be read and reported, not silently dropped.
+# Verified against all 495 step rows `no-mistakes axi status --run` renders for
+# every run in the local v1.60.2 store, every one of them terminal: all 495 are
+# read. That scan could not cover, and this deliberately does not match, the
+# separate active_steps{step,status,active_for,...} table an ACTIVE run also
+# renders, whose third column is a duration, as in `ci,running,1m40s,...`. The
+# narrower ci-only predicate this replaced did match those rows; nothing is lost
+# by rejecting them, because the same output's steps table still carries that
+# step as `ci,running,0,0`.
+nm_step_rows() {
+  printf '%s\n' "$RUN_OUT" \
+    | grep -E "^[[:space:]]*[A-Za-z0-9_-]+,[[:space:]]*\"?[A-Za-z0-9_-]+\"?[[:space:]]*,[[:space:]]*[0-9]+[[:space:]]*,"
+}
+
+# Status word of one named step row, or empty when the run output carries no
+# such row.
+nm_step_status() {  # <step-name>
   local row rest
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
+  row=$(nm_step_rows | grep -E "^[[:space:]]*$1," | head -1)
   [ -n "$row" ] || return 0
   row=$(trim "$row")
   rest=${row#*,}
   strip_quotes "$(trim "${rest%%,*}")"
+}
+
+# The ci step's status, deliberately narrowed to the two ACTIVE values its
+# caller acts on. Any other ci status (completed, skipped, pending) must read
+# as empty here so nm_effective_ci_step_status still falls through to the
+# top-level RUN_STATUS check below.
+nm_ci_step_status() {
+  local step_status
+  step_status=$(nm_step_status ci)
+  case "$step_status" in
+    running|fixing) printf '%s' "$step_status" ;;
+  esac
+}
+
+# What outcome=passed actually proves about the pull request. A run reaches
+# outcome=passed once its steps finish without failing, which INCLUDES a run
+# whose pr and ci steps were SKIPPED - what happens whenever no-mistakes cannot
+# resolve the push provider - so nothing was ever opened or merged. Verified
+# 2026-09-01 on no-mistakes v1.60.2: run 01M1EA5NJVP18AE7SPY5MBYW42 reported
+# `pr,skipped,0,17` and `ci,skipped,0,16` under outcome=passed while the forge
+# still had that branch's pull request open and unmerged, and firstmate reported
+# the work as landed.
+#
+# A COMPLETED pr step is not that evidence on its own either: the pr step only
+# OPENS the pull request. On merged run 01M1669Y82JTHWEBSG7PR2TKNH its pr.log
+# ends at `created pull request: <url>` while the LATER ci step's log ends at
+# `PR has been merged!`. The merge is therefore proven only when the pr row AND
+# every step row the run reports after it read `completed`; any of them skipped,
+# pending or absent means the run stopped short of a merge, and the detail names
+# the step it stopped at rather than asserting one. `no-mistakes axi run --skip=ci`
+# reaches exactly that shape - pr completed, ci skipped, outcome passed, PR
+# still open. No step name after `pr` is written here: the steps a merge claim
+# depends on are read from the run's own step order, because `axi status`
+# carries no merge signal to key on directly (v1.60.2 emits the PR url as `pr:`
+# and never the pr_state its store records beside it).
+# This never asks the forge itself: fm-crew-state reports the RUN's state, and
+# the forge remains the authority on merge state (bin/fm-pr-merge.sh).
+nm_passed_pr_detail() {
+  local step_status after row rest step status
+  step_status=$(nm_step_status pr)
+  case "$step_status" in
+    completed) ;;
+    skipped)   printf 'run passed, PR step skipped: no PR was opened or merged by the run, merge state unknown to it'; return ;;
+    '')        printf 'run passed, no PR step reported: merge state unknown to the run'; return ;;
+    *)         printf 'run passed, PR step %s: merge state unknown to the run' "$step_status"; return ;;
+  esac
+  after=$(nm_step_rows | sed -n '/^[[:space:]]*pr,/,$p' | tail -n +2)
+  if [ -z "$after" ]; then
+    printf 'run passed, PR opened, no step reported after it: merge state unknown to the run'
+    return
+  fi
+  while IFS= read -r row; do
+    row=$(trim "$row")
+    [ -n "$row" ] || continue
+    step=$(trim "${row%%,*}")
+    rest=${row#*,}
+    status=$(strip_quotes "$(trim "${rest%%,*}")")
+    [ "$status" = completed ] && continue
+    printf 'run passed, PR opened but %s step %s: merge state unknown to the run' "$step" "$status"
+    return
+  done <<< "$after"
+  printf 'run passed: PR merged/closed'
 }
 
 nm_effective_ci_step_status() {
@@ -319,18 +408,20 @@ nm_effective_ci_step_status() {
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
 # to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
-# reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
-# never distinguishes "still waiting on checks" from "checks green, waiting on
-# merge": both read as plain `ci,running,...`. The only place that transition is
-# recorded is the ci step's own log text, e.g. "all CI checks passed - still
-# monitoring until merged or closed" or "no CI checks reported - still
-# monitoring until merged or closed" (verified against 360+ real run logs under
-# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
-# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
-# for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
+# reports every check green: the ci step keeps monitoring until that PR is
+# merged or closed. What a terminal outcome=passed does and does not prove about
+# the PR is owned by nm_passed_pr_detail above, not restated here. `axi status`'s
+# steps[] table never distinguishes "still waiting on checks" from "checks green,
+# waiting on merge": both read as plain `ci,running,...`. The only place that
+# transition is recorded is the ci step's own log text, e.g. "all CI checks
+# passed - still monitoring until merged or closed" or "no CI checks reported -
+# still monitoring until merged or closed" (verified against 360+ real run logs
+# under ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including
+# the actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans
+# it for the MOST RECENT recognized marker (the log is append-only and
+# chronological, so the last match is current):
+# green with nothing red after it means CI is green right now, still only
+# waiting on merge/close.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -499,7 +590,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        passed)        RUN_STATE="done"; RUN_DETAIL="$(nm_passed_pr_detail)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;

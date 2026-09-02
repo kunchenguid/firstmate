@@ -278,6 +278,61 @@ outcome: passed
 EOF
 }
 
+# outcome=passed with the pr and ci steps SKIPPED - the exact shape a run takes
+# when no-mistakes cannot resolve the push provider, so it never opened or
+# merged a PR. Copied from the real `no-mistakes axi status --run
+# 01M1EA5NJVP18AE7SPY5MBYW42` output on v1.60.2 (2026-09-01), which reported
+# this while the forge still had that branch's pull request open and unmerged.
+# Note the absent `pr:` field, exactly as the real run emits it.
+run_passed_pr_skipped() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: "1 awaiting, 3 auto-fix, 42 info"
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,13
+    rebase,skipped,42,521
+    review,completed,3,836695
+    test,completed,0,704937
+    document,completed,0,939357
+    lint,completed,1,16
+    push,completed,0,697
+    pr,skipped,0,17
+    ci,skipped,0,16
+outcome: passed
+EOF
+}
+
+# outcome=passed with the pr and ci steps actually COMPLETED - the ordinary
+# landed case, copied from the real `no-mistakes axi status --run
+# 01M1669Y82JTHWEBSG7PR2TKNH` output on v1.60.2 (2026-09-01) for a pull
+# request the pipeline itself merged.
+run_passed_pr_completed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: "3 awaiting, 3 auto-fix, 1 info"
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,2
+    rebase,completed,0,1953
+    review,completed,3,6046577
+    test,completed,1,1385831
+    document,completed,2,418814
+    lint,completed,1,13
+    push,completed,0,4179
+    pr,completed,0,43885
+    ci,completed,0,31779488
+outcome: passed
+EOF
+}
+
 run_failed() {  # <branch>
   cat <<EOF
 run:
@@ -669,6 +724,222 @@ test_terminal_passed() {
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
   pass "terminal passed run is authoritative"
+}
+
+# A run reaches outcome=passed whenever its steps finish without failing, which
+# INCLUDES a run whose pr and ci steps were skipped for want of a resolvable
+# push provider. Such a run pushed nothing to a pull request and merged
+# nothing, so the reported detail must not claim a merge.
+test_terminal_passed_pr_skipped_claims_no_merge() {
+  reset_fakes
+  local d; d=$(new_case passed-pr-skipped)
+  make_repo_on_branch "$d/wt" fm/feat-d-skipped
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d-skipped.meta" "window=fm:fm-feat-d-skipped" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_pr_skipped fm/feat-d-skipped)"
+  local out; out=$(run_crew_state "$d" feat-d-skipped)
+  assert_contains "$out" "source: run-step" "passed with skipped pr -> run-step source"
+  assert_not_contains "$out" "PR merged" "skipped pr step must not claim a merged PR"
+  assert_not_contains "$out" "merged/closed" "skipped pr step must not claim a merged-or-closed PR"
+  assert_contains "$out" "PR step skipped" "skipped pr step must say so plainly"
+  assert_contains "$out" "merge state unknown" "skipped pr step must state merge state is unknown to the run"
+  pass "outcome=passed with a skipped pr step does not claim a merge"
+}
+
+# The step-row reader separates a step row from a findings row by the numeric
+# third column alone. The findings table is emitted BEFORE the steps table, so
+# without that guard a findings row whose id is `pr` is matched first and
+# shadows the real pr step row entirely, making the reported PR step status the
+# finding's SEVERITY. This fixture is that collision: a `pr` finding sitting
+# above a genuine `pr,skipped` step row.
+run_passed_findings_row_shadowing_pr_step() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings[1]{id,severity,file,line,action,description}:
+    pr,warning,a.go,,auto-fix,ignored error
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,13
+    rebase,skipped,42,521
+    review,completed,3,836695
+    test,completed,0,704937
+    document,completed,0,939357
+    lint,completed,1,16
+    push,completed,0,697
+    pr,skipped,0,17
+    ci,skipped,0,16
+outcome: passed
+EOF
+}
+
+# The ordinary landed case: the merge claim holds because the pr row AND every
+# step row the run reports after it read `completed` - a completed pr step alone
+# only says a PR was opened. The fixture's trailing `ci,completed,0,31779488` is
+# therefore load-bearing for the assertion below, not incidental: with that last
+# row skipped or pending the detail must stop claiming a merge, which is what
+# test_terminal_passed_ci_skipped_claims_no_merge pins.
+test_terminal_passed_pr_completed_reads_as_landed() {
+  reset_fakes
+  local d; d=$(new_case passed-pr-completed)
+  make_repo_on_branch "$d/wt" fm/feat-d-landed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d-landed.meta" "window=fm:fm-feat-d-landed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_pr_completed fm/feat-d-landed)"
+  local out; out=$(run_crew_state "$d" feat-d-landed)
+  assert_contains "$out" "state: done" "passed with completed pr -> done"
+  assert_contains "$out" "source: run-step" "passed with completed pr -> run-step source"
+  assert_contains "$out" "run passed: PR merged/closed" "completed pr step still reads as landed"
+  pass "outcome=passed with a completed pr step still reports the merge"
+}
+
+# outcome=passed from `no-mistakes axi run --skip=ci`: the run opened the pull
+# request and stopped there, leaving it open and unmerged. The pr URL is present
+# exactly as a run that opened one emits it, and `ci,skipped,0,16` is a skipped
+# step row copied from the real v1.60.2 status of run 01M1EA5NJVP18AE7SPY5MBYW42.
+run_passed_ci_skipped() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: "1 auto-fix"
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,2
+    rebase,completed,0,1953
+    review,completed,3,6046577
+    test,completed,1,1385831
+    document,completed,2,418814
+    lint,completed,1,13
+    push,completed,0,4179
+    pr,completed,0,43885
+    ci,skipped,0,16
+outcome: passed
+EOF
+}
+
+# The pr step only OPENS a pull request - the step the run reports AFTER it is
+# what carries that PR to merged-or-closed. A run whose pr step completed and
+# whose later step never ran left the PR open, so the detail must report the PR
+# as opened and name the step that stopped short, never claim a merge.
+test_terminal_passed_ci_skipped_claims_no_merge() {
+  reset_fakes
+  local d; d=$(new_case passed-ci-skipped)
+  make_repo_on_branch "$d/wt" fm/feat-d-ciskip
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d-ciskip.meta" "window=fm:fm-feat-d-ciskip" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_ci_skipped fm/feat-d-ciskip)"
+  local out; out=$(run_crew_state "$d" feat-d-ciskip)
+  assert_contains "$out" "state: done" "passed with a skipped ci step is still a terminal done run"
+  assert_not_contains "$out" "merged/closed" "a PR the run never carried past opening must not read as merged"
+  assert_contains "$out" "PR opened but ci step skipped" "the step that stopped short must be named"
+  assert_contains "$out" "merge state unknown" "an unproven merge must read as unknown to the run"
+  pass "outcome=passed with a completed pr step but a skipped later step does not claim a merge"
+}
+
+# outcome=passed from a step table whose LAST row is the pr step, the shape any
+# axi status revision that drops or renames the merge-carrying step after it
+# would produce. Opening a PR is not merging it, so with nothing reported after
+# the pr step the run has shown no merge either.
+run_passed_pr_is_last_step() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+  steps[8]{step,status,findings,duration_ms}:
+    intent,completed,0,2
+    rebase,completed,0,1953
+    review,completed,3,6046577
+    test,completed,1,1385831
+    document,completed,2,418814
+    lint,completed,1,13
+    push,completed,0,4179
+    pr,completed,0,43885
+outcome: passed
+EOF
+}
+
+test_terminal_passed_with_pr_as_last_step_claims_no_merge() {
+  reset_fakes
+  local d; d=$(new_case passed-pr-last-step)
+  make_repo_on_branch "$d/wt" fm/feat-d-prlast
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d-prlast.meta" "window=fm:fm-feat-d-prlast" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_pr_is_last_step fm/feat-d-prlast)"
+  local out; out=$(run_crew_state "$d" feat-d-prlast)
+  assert_contains "$out" "source: run-step" "passed with pr as the last step -> run-step source"
+  assert_not_contains "$out" "merged/closed" "a pr step with nothing after it must not claim a merged-or-closed PR"
+  assert_contains "$out" "no step reported after it" "the missing merge-carrying step must be reported plainly"
+  assert_contains "$out" "merge state unknown" "an unproven merge must read as unknown to the run"
+  pass "outcome=passed with the pr step last and nothing after it does not claim a merge"
+}
+
+# outcome=passed from a run whose step table carries NO pr row at all - the
+# shape any axi status revision that renames, reorders or drops that step would
+# produce. The reader cannot then observe a merge either, so the safety property
+# is the same one the skipped case pins: never assert a merge the run did not
+# perform.
+run_passed_no_pr_row() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: "1 awaiting, 3 auto-fix, 42 info"
+  steps[7]{step,status,findings,duration_ms}:
+    intent,completed,0,13
+    rebase,skipped,42,521
+    review,completed,3,836695
+    test,completed,0,704937
+    document,completed,0,939357
+    lint,completed,1,16
+    push,completed,0,697
+outcome: passed
+EOF
+}
+
+test_terminal_passed_without_a_pr_row_claims_no_merge() {
+  reset_fakes
+  local d; d=$(new_case passed-no-pr-row)
+  make_repo_on_branch "$d/wt" fm/feat-d-nopr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d-nopr.meta" "window=fm:fm-feat-d-nopr" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_no_pr_row fm/feat-d-nopr)"
+  local out; out=$(run_crew_state "$d" feat-d-nopr)
+  assert_contains "$out" "source: run-step" "passed with no pr row -> run-step source"
+  assert_not_contains "$out" "merged/closed" "an unreported pr step must not claim a merged-or-closed PR"
+  assert_contains "$out" "no PR step reported" "an unreported pr step must say so plainly"
+  assert_contains "$out" "merge state unknown" "an unreported pr step must state merge state is unknown to the run"
+  pass "outcome=passed with no pr step row does not claim a merge"
+}
+
+# Negative case for the numeric-third-column guard in the step-row reader. The
+# run below genuinely skipped its pr step, and a `pr` finding sits above that
+# row in the output. Drop the guard and the finding is matched first, so the pr
+# step reads as the finding's severity ("warning") and the real skipped step is
+# never seen. Asserting the SPECIFIC skipped detail, not merely the absence of a
+# merge claim, is what makes this case fail when the guard is removed.
+test_findings_row_is_not_read_as_a_step_row() {
+  reset_fakes
+  local d; d=$(new_case findings-row-shadowing-pr)
+  make_repo_on_branch "$d/wt" fm/feat-d-findings
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d-findings.meta" "window=fm:fm-feat-d-findings" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_findings_row_shadowing_pr_step fm/feat-d-findings)"
+  local out; out=$(run_crew_state "$d" feat-d-findings)
+  assert_contains "$out" "PR step skipped" "the real skipped pr step must be read, not the pr-named finding"
+  assert_not_contains "$out" "PR step warning" "a finding severity must never be reported as a step status"
+  assert_not_contains "$out" "merged/closed" "the shadowed case must still not claim a merged-or-closed PR"
+  pass "a findings row is never mistaken for a step row"
 }
 
 test_terminal_failed() {
@@ -1567,6 +1838,12 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_terminal_passed_pr_skipped_claims_no_merge
+test_terminal_passed_pr_completed_reads_as_landed
+test_terminal_passed_ci_skipped_claims_no_merge
+test_terminal_passed_with_pr_as_last_step_claims_no_merge
+test_findings_row_is_not_read_as_a_step_row
+test_terminal_passed_without_a_pr_row_claims_no_merge
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
