@@ -56,6 +56,10 @@ if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
 fi
 URL=$FM_PR_URL
 PROVIDER=$FM_PR_PROVIDER
+if [ "$PROVIDER" = codebase ]; then
+  echo "error: merging Codebase merge requests is not supported" >&2
+  exit 2
+fi
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER

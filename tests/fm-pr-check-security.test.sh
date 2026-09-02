@@ -103,10 +103,23 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  cat > "$fakebin/bytedcli" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_CODEBASE_LOG"
+[ "${FM_TEST_CODEBASE_FAIL:-0}" = 0 ] || exit 1
+printf '{"status":"%s","data":{"repository":{"path":"%s"},"merge_request":{"number":%s,"status":"%s","url":"%s","source_commit_id":"%s"}}}\n' \
+  "${FM_TEST_CODEBASE_RESPONSE_STATUS:-success}" \
+  "${FM_TEST_CODEBASE_PATH:-chengyuhang/firstmate}" \
+  "${FM_TEST_CODEBASE_NUMBER:-123}" \
+  "${FM_TEST_CODEBASE_MR_STATUS:-open}" \
+  "${FM_TEST_CODEBASE_URL:-https://code.byted.org/chengyuhang/firstmate/merge_requests/123}" \
+  "${FM_TEST_CODEBASE_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/bytedcli"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/bytedcli.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -254,6 +267,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_CODEBASE_LOG="$dir/bytedcli.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -264,6 +278,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_CODEBASE_LOG="$dir/bytedcli.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -287,6 +302,22 @@ INVALID_URLS=(
   'https://.gitlab.com/g/p/-/merge_requests/1'
   'https://gitlab.com./g/p/-/merge_requests/1'
   'http://gitlab.com/g/p/-/merge_requests/1'
+  'https://code.byted.org/chengyuhang/firstmate/merge_requests/0'
+  'https://code.byted.org/chengyuhang/firstmate/merge_requests/01'
+  'https://code.byted.org/chengyuhang/firstmate/merge_requests/123/'
+  'https://code.byted.org/chengyuhang/firstmate/merge_requests/123?x=1'
+  'https://code.byted.org/chengyuhang/firstmate/merge_requests/123#note'
+  'https://code.byted.org/chengyuhang/firstmate/-/merge_requests/123'
+  'https://code.byted.org/chengyuhang/team/firstmate/merge_requests/123'
+  'https://code.byted.org/chengyuhang/./merge_requests/123'
+  'https://code.byted.org/../firstmate/merge_requests/123'
+  'https://code.byted.org.evil/chengyuhang/firstmate/merge_requests/123'
+  'https://evilcode.byted.org/chengyuhang/firstmate/merge_requests/123'
+  'https://code-tx.byted.org/chengyuhang/firstmate/merge_requests/123'
+  'https://code-tx.byted.org/chengyuhang/firstmate/-/merge_requests/123'
+  'https://Code.byted.org/chengyuhang/firstmate/merge_requests/123'
+  'http://code.byted.org/chengyuhang/firstmate/merge_requests/123'
+  'https://user@code.byted.org/chengyuhang/firstmate/merge_requests/123'
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
   'https://github.com/o/r/pull/1 '
@@ -407,6 +438,12 @@ https://github.com/a/b/pull/1|a|b|1
 https://github.com/my-org/repo/pull/42|my-org|repo|42
 https://github.com/Owner/repo-name_with.parts/pull/123456|Owner|repo-name_with.parts|123456
 EOF
+  fm_pr_url_parse https://code.byted.org/chengyuhang/firstmate/merge_requests/123 \
+    || fail "parser rejected a canonical Codebase merge request URL"
+  [ "$FM_PR_PROVIDER" = codebase ] || fail "parser did not tag a Codebase URL as codebase"
+  [ "$FM_PR_HOST" = code.byted.org ] || fail "parser returned the wrong Codebase host"
+  [ "$FM_PR_PATH" = chengyuhang/firstmate ] || fail "parser returned the wrong Codebase repository path"
+  [ "$FM_PR_NUMBER" = 123 ] || fail "parser returned the wrong Codebase merge request number"
   while IFS='|' read -r url host path number; do
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" || fail "parser rejected a canonical merge request URL"
@@ -721,6 +758,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_CODEBASE_LOG="$dir/bytedcli.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -2915,6 +2953,91 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+test_codebase_merge_watch() {
+  local dir state url head next_head out rc before after
+  dir=$(make_case codebase-merge-watch)
+  state="$dir/home/state"
+  url=https://code.byted.org/chengyuhang/firstmate/merge_requests/123
+  head=0123456789abcdef0123456789abcdef01234567
+  next_head=89abcdef0123456789abcdef0123456789abcdef
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir"
+
+  FM_TEST_CODEBASE_HEAD="$head" run_check_entry "$dir" task-a "$url" \
+    > "$dir/arm.out" 2> "$dir/arm.err" || fail "canonical Codebase registration failed"
+  grep -qxF -- "--json codebase mr status 123 -R chengyuhang/firstmate" "$dir/bytedcli.log" \
+    || fail "Codebase registration did not use the official status surface"
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "Codebase registration did not record the canonical URL"
+  grep -qxF "pr_head=$head" "$state/task-a.meta" || fail "Codebase registration did not record the exact source head"
+  [ "$(cat "$state/task-a.pr-poll")" = "codebase
+$url
+code.byted.org
+chengyuhang/firstmate
+123
+$head" ] || fail "Codebase sidecar did not bind the exact URL, repository, number, and head"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Codebase poll provenance or metadata binding was invalid"
+  printf 'legacy poll bytes\n' > "$state/task-a.check.sh"
+  chmod 0600 "$state/task-a.check.sh"
+  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$MIGRATE" >/dev/null 2> "$dir/migrate.err" \
+    || fail "Codebase poll migration did not preserve the recorded source head: $(cat "$dir/migrate.err")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "migrated Codebase poll lost its exact metadata binding"
+  [ "$(tail -1 "$state/task-a.pr-poll")" = "$head" ] \
+    || fail "migrated Codebase poll lost the recorded source head"
+
+  out=$(FM_TEST_CODEBASE_HEAD="$head" FM_TEST_CODEBASE_MR_STATUS=open run_poll "$dir")
+  [ -z "$out" ] || fail "Codebase poll emitted for an open merge request"
+  out=$(FM_TEST_CODEBASE_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Codebase poll emitted after a transient official CLI failure"
+  out=$(FM_TEST_CODEBASE_HEAD="$next_head" FM_TEST_CODEBASE_MR_STATUS=merged run_poll "$dir")
+  [ -z "$out" ] || fail "Codebase poll emitted after the source head changed"
+  out=$(FM_TEST_CODEBASE_PATH=other/firstmate FM_TEST_CODEBASE_HEAD="$head" \
+    FM_TEST_CODEBASE_MR_STATUS=merged run_poll "$dir")
+  [ -z "$out" ] || fail "Codebase poll emitted for a different repository identity"
+  out=$(FM_TEST_CODEBASE_NUMBER=124 FM_TEST_CODEBASE_HEAD="$head" \
+    FM_TEST_CODEBASE_MR_STATUS=merged run_poll "$dir")
+  [ -z "$out" ] || fail "Codebase poll emitted for a different merge request identity"
+  out=$(FM_TEST_CODEBASE_URL=https://code.byted.org/chengyuhang/firstmate/merge_requests/124 \
+    FM_TEST_CODEBASE_HEAD="$head" FM_TEST_CODEBASE_MR_STATUS=merged run_poll "$dir")
+  [ -z "$out" ] || fail "Codebase poll emitted for a different canonical URL"
+  out=$(FM_TEST_CODEBASE_HEAD="$head" FM_TEST_CODEBASE_MR_STATUS=merged run_poll "$dir")
+  [ "$out" = merged ] || fail "Codebase poll did not emit exactly one merged line"
+
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_CODEBASE_HEAD="$head" FM_TEST_CODEBASE_MR_STATUS=merged \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "Codebase merged watcher cycle failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "Codebase exact merged notification was missing: $(cat "$dir/watch.out")" ;;
+  esac
+  assert_poll_absent "$state" task-a
+  fm_pr_poll_merge_already_notified "$state" task-a codebase code.byted.org \
+    chengyuhang/firstmate 123 "$head" || fail "Codebase notification marker did not bind the source head"
+  ! fm_pr_poll_merge_already_notified "$state" task-a codebase code.byted.org \
+    chengyuhang/firstmate 123 "$next_head" || fail "Codebase notification marker matched a different source head"
+
+  dir=$(make_case codebase-merge-command-refusal)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  before=$(state_snapshot "$state")
+  set +e
+  run_merge_entry "$dir" task-a "$url" > "$dir/merge.out" 2> "$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "merge command did not reject unsupported Codebase merging"
+  grep -qxF 'error: merging Codebase merge requests is not supported' "$dir/merge.err" \
+    || fail "merge command did not report its Codebase provider boundary"
+  after=$(state_snapshot "$state")
+  [ "$after" = "$before" ] || fail "unsupported Codebase merge changed task state"
+  [ ! -s "$dir/bytedcli.log" ] || fail "unsupported Codebase merge called the official CLI before refusing"
+  pass "Codebase registration and monitoring bind exact official identity while merging stays unsupported"
+}
+
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"
@@ -3465,6 +3588,7 @@ test_gitlab_merged_poll_retires() {
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_codebase_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_different_merged_pr_for_same_task_is_not_absorbed

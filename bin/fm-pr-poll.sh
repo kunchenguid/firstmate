@@ -4,18 +4,22 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its standard CLI: gh for GitHub, glab for
+# GitLab, and the official bytedcli codebase surface for Codebase.
 set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+head=
+has_head=0
+if [ "$#" -ge 6 ] && [ "$#" -le 7 ] && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  head=${7-}
+  [ "$#" -ne 7 ] || has_head=1
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -29,8 +33,11 @@ elif [ "$#" -eq 0 ]; then
   IFS= read -r host <&3 || exit 0
   IFS= read -r path <&3 || exit 0
   IFS= read -r number <&3 || exit 0
-  if IFS= read -r _extra <&3; then
-    exit 0
+  if IFS= read -r head <&3; then
+    has_head=1
+    if IFS= read -r _extra <&3; then
+      exit 0
+    fi
   fi
   exec 3<&-
 else
@@ -50,6 +57,7 @@ esac
 # a doctored sidecar cannot redirect this poll at another host or project.
 case "$provider" in
   github)
+    [ "$has_head" -eq 0 ] || exit 0
     [ "$host" = github.com ] || exit 0
     owner=${path%%/*}
     repo=${path#*/}
@@ -66,6 +74,7 @@ case "$provider" in
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gitlab)
+    [ "$has_head" -eq 0 ] || exit 0
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
     [ "$host" != github.com ] || exit 0
     case "$host" in
@@ -104,6 +113,49 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  codebase)
+    [ "$has_head" -eq 1 ] || exit 0
+    [ "$host" = code.byted.org ] || exit 0
+    namespace=${path%%/*}
+    repo=${path#*/}
+    [ -n "$namespace" ] && [ "$repo" != "$path" ] || exit 0
+    case "$repo" in
+      */*) exit 0 ;;
+    esac
+    [ "${#namespace}" -le 255 ] && [ "${#repo}" -le 255 ] || exit 0
+    case "$namespace" in
+      .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
+    esac
+    case "$repo" in
+      .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
+    esac
+    case "$head" in
+      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+      *) exit 0 ;;
+    esac
+    case "${#head}" in
+      40|64) ;;
+      *) exit 0 ;;
+    esac
+    case "$head" in
+      *[!0-9a-f]*) exit 0 ;;
+    esac
+    [ "$url" = "https://code.byted.org/$path/merge_requests/$number" ] || exit 0
+    command -v bytedcli >/dev/null 2>&1 || exit 0
+    command -v jq >/dev/null 2>&1 || exit 0
+    raw=$(bytedcli --json codebase mr status "$number" -R "$path" 2>/dev/null) || exit 0
+    printf '%s' "$raw" | jq -er \
+      --arg url "$url" --arg path "$path" --arg number "$number" --arg head "$head" '
+        select(
+          .status == "success" and
+          .data.repository.path == $path and
+          (.data.merge_request.number | tostring) == $number and
+          .data.merge_request.url == $url and
+          .data.merge_request.source_commit_id == $head and
+          .data.merge_request.status == "merged"
+        ) | "merged"
+      ' 2>/dev/null | grep -qx merged && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac
