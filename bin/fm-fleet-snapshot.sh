@@ -33,7 +33,11 @@
 #     body carries an explicit SUPERSEDED / NOT REQUIRED / DEFERRED marker.
 #     It never changes captain_actionable; renderers may use it to keep
 #     prose-deferred rows out of default views.
-#   tasks[]: one row per state/<id>.meta, sorted by id.
+#   tasks[]: one row per task metadata record captured at snapshot start, sorted
+#     by id. A record removed before capture is omitted. If a captured task's
+#     generation changes while observations run, its selected metadata remains
+#     but mutable current-state, status, report, and endpoint evidence is discarded
+#     rather than attributed to the replacement generation.
 #     Local current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
