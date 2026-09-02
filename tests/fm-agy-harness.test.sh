@@ -58,6 +58,10 @@ agy_payload() {  # <template> <workspace>
 #                     bottom rows: the footer is bottom-anchored while the
 #                     dialog sits further up, so a poll that reads only the tail
 #                     of the capture sees the footer and misses the dialog
+#   quoted-dialog   - a started session whose rendered brief QUOTES the dialog's
+#                     question and its answer text as prose, with no dialog on
+#                     screen: the capture agy draws when the task it was given
+#                     is about the trust dialog itself
 #   blank           - nothing renders at all, the pane that never starts
 #
 # FM_FAKE_AGY_PHASE, when set, makes the stub honour launch ORDER: the screen
@@ -87,6 +91,13 @@ render_agy() {
       printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n> Yes, I trust this folder\n  No, browse in restricted mode\n'
       i=0
       while [ "$i" -lt 14 ]; do printf '  workspace row %s\n' "$i"; i=$((i + 1)); done
+      printf '\n  >\n? for shortcuts\n'
+      ;;
+    quoted-dialog)
+      printf 'agy 1.1.24\n\n> Read the brief and follow it exactly.\n'
+      printf '  The brief says agy asks this on an untrusted folder:\n'
+      printf 'Do you trust the contents of this project?\n'
+      printf '  and the preselected row reads Yes, I trust this folder.\n'
       printf '\n  >\n? for shortcuts\n'
       ;;
     blank) : ;;
@@ -294,6 +305,27 @@ EOF
   pass "agy can only be selected explicitly for one crewmate or scout"
 }
 
+# The same implicit resolution reaches a secondmate through
+# config/secondmate-harness and its fallbacks, and there the explicit-choice
+# advice would be wrong: no explicit form of agy can run a secondmate. The
+# refusal must name the kind it actually refused.
+test_implicit_agy_secondmate_names_the_secondmate_refusal() {
+  local rec case_dir home proj wt fakebin agy_home id out
+  rec=$(make_spawn_case implicit-secondmate)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  printf '%s\n' agy > "$home/config/crew-harness"
+  out=$(HOME="$home" fm_test_run_spawn "$home" "$wt" "$fakebin" \
+    "$id" --secondmate 2>&1) \
+    && fail "an implicitly resolved agy was accepted for a secondmate"
+  case "$out" in
+    *"cannot run a secondmate"*) : ;;
+    *) fail "the implicit agy secondmate refusal did not name the secondmate boundary: $out" ;;
+  esac
+  pass "an implicitly resolved agy secondmate is refused for being a secondmate"
+}
+
 # agy 1.1.24 rejects xhigh outright ("invalid --effort \"xhigh\""), so an
 # unsupported level must be OMITTED rather than passed through and refused at
 # launch. A supported level must still reach the command.
@@ -430,6 +462,30 @@ EOF
   [ "$enters" -eq 2 ] \
     || fail "the spawn sent $enters Enters after the launch line; expected the launch submit plus exactly one answer to a dialog sitting above the footer"
   pass "a trust dialog above the footer is answered rather than read past"
+}
+
+# agy renders the brief as the first message in the same pane, so a brief that
+# QUOTES the trust dialog puts its question, and even its answer text, into the
+# very capture the poll reads. Matching the question alone would then fire one
+# Enter into a session that has already started its turn. Only the dialog's
+# structure - the question together with the preselected answer as a row of its
+# own - counts as the dialog being on screen.
+test_a_brief_quoting_the_dialog_draws_no_enter() {
+  local rec case_dir home proj wt fakebin agy_home id out enters
+  rec=$(make_spawn_case quoted-dialog)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_SCREEN=quoted-dialog FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_TRUST_POLLS=4 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    || fail "agy spawn failed against a session whose brief quotes the trust dialog: $out"
+  enters=$(agy_enters_after_launch "$case_dir/events.log")
+  [ "$enters" -eq 1 ] \
+    || fail "the spawn sent $enters Enters after the launch line into a session whose brief merely quotes the dialog; expected only the launch submit"
+  pass "a brief that quotes the trust dialog never draws the trust Enter"
 }
 
 # agy proves no readiness after that Enter, deliberately: a capture is recent
@@ -635,7 +691,8 @@ EOF
     && fail "jq is still resolvable on the probe PATH, so this case would prove nothing"
 
   rc=0
-  out=$(PATH="$shim" run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+  out=$(PATH="$shim" FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
     --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an agy spawn installed a turn-end hook it had no jq to run"
   case "$out" in
@@ -648,7 +705,12 @@ EOF
     "the missing-jq refusal still wrote into the agy registry"
   assert_absent "$wt/.fm-agy-turnend" \
     "the missing-jq refusal still dropped a worktree pointer"
-  pass "an agy spawn refuses without jq and installs nothing"
+  # Nothing was typed into a pane, which is what proves the refusal beat the
+  # worktree lease: the shell line that takes a pooled worktree rides the same
+  # channel this log records.
+  [ ! -s "$case_dir/launch.log" ] \
+    || fail "the missing-jq refusal came after the pane had already been driven: $(cat "$case_dir/launch.log")"
+  pass "an agy spawn refuses without jq before it drives a pane, and installs nothing"
 }
 
 test_teardown_retires_the_hook_wiring() {
@@ -784,11 +846,13 @@ test_ancestry_is_anchored
 test_tmux_process_classification
 test_launch_shape
 test_implicit_agy_selection_is_refused
+test_implicit_agy_secondmate_names_the_secondmate_refusal
 test_effort_is_clamped_to_supported_levels
 test_secondmate_is_refused
 test_secondmate_positional_agy_is_refused
 test_trust_dialog_is_answered_exactly_once
 test_trust_dialog_above_the_footer_is_still_answered
+test_a_brief_quoting_the_dialog_draws_no_enter
 test_a_pane_that_never_renders_still_completes_the_spawn
 test_turnend_requires_fully_idle
 test_turnend_preserves_payload_while_stdin_stays_open

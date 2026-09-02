@@ -1348,7 +1348,7 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    if [ "$HARNESS" = agy ]; then
+    if [ "$HARNESS" = agy ] && [ "$KIND" != secondmate ]; then
       echo "error: agy is selectable only as an explicit per-task choice; pass --harness agy for this crewmate or scout" >&2
       exit 1
     fi
@@ -1619,6 +1619,18 @@ case "$LAUNCH" in
     fi
     ;;
 esac
+
+# jq is a hard requirement of the agy turn-end hook installed further below
+# rather than a nicety: the payload arrives as JSON on stdin, and
+# `select(.fullyIdle == true)` is an exact test where substring matching would be
+# guessing. Refused here, alongside every other adapter precondition, so a host
+# without jq is turned away before any endpoint, worktree lease, or partial
+# install exists (the same contract and the same placement as the Kimi
+# installer).
+if [ "$HARNESS" = agy ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: agy's turn-end hook requires jq to read its JSON Stop payload; install jq or select a different verified harness" >&2
+  exit 1
+fi
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -2455,9 +2467,13 @@ spawn_harness_fail() {  # <detail>
 # Stop it fires carries fullyIdle=false, which the turn-end gate ignores, and agy
 # has no worker-state source, so the task would sit at `unknown agy-unverified`
 # forever with nothing to observe. One Enter resolves it (Yes is preselected).
-# Either line of the dialog proves it: a narrow pane can wrap the question, and
-# the preselected answer is the row the Enter is aimed at anyway.
-AGY_TRUST_REGEX='Do you trust the contents of this project|Yes, I trust this folder'
+# The match is the dialog's STRUCTURE, not its question: agy renders the brief
+# as the first message in the same pane, and a brief that quotes the question -
+# this adapter's own does - would otherwise draw an Enter into a session that
+# already started its turn. The question must therefore appear TOGETHER with the
+# preselected answer as a row of its own, which rendered prose is not.
+AGY_TRUST_QUESTION_REGEX='Do you trust the contents of this project'
+AGY_TRUST_OPTION_REGEX='^[^A-Za-z]*Yes, I trust this folder[^A-Za-z]*$'
 
 # Answering that dialog is the WHOLE launch step. Readiness is deliberately not
 # proven: a capture is recent output on both backends, so it guarantees neither
@@ -2472,10 +2488,15 @@ AGY_TRUST_REGEX='Do you trust the contents of this project|Yes, I trust this fol
 # whole window, because the dialog's absence and a slow start read identically.
 # That is the steady state on a recycled pool slot and is accepted deliberately;
 # docs/verification/agy.md records the trade against a shorter window.
+agy_trust_dialog_visible() {  # <capture>
+  printf '%s\n' "$1" | grep -qE "$AGY_TRUST_QUESTION_REGEX" || return 1
+  printf '%s\n' "$1" | grep -qE "$AGY_TRUST_OPTION_REGEX"
+}
+
 agy_answer_trust_dialog() {
   local i=0 max=${FM_AGY_TRUST_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
-    if spawn_pane_capture | grep -qE "$AGY_TRUST_REGEX"; then
+    if agy_trust_dialog_visible "$(spawn_pane_capture)"; then
       spawn_send_key "$T" Enter || true
       return 0
     fi
@@ -2881,15 +2902,6 @@ EOF
       # and teardown deliberately leaves that entry, so those entries accumulate
       # (docs/configuration.md records that for operators).
       #
-      # jq is a hard requirement of the installed hook rather than a nicety: the
-      # payload arrives as JSON on stdin, and `select(.fullyIdle == true)` is an
-      # exact test where substring matching would be guessing. Refuse at spawn
-      # naming the missing requirement rather than installing a hook that would
-      # silently never fire (the same contract as the Kimi installer).
-      if ! command -v jq >/dev/null 2>&1; then
-        echo "error: agy's turn-end hook requires jq to read its JSON Stop payload; install jq or select a different verified harness" >&2
-        exit 1
-      fi
       AGY_CONFIG_HOME="$HOME/.gemini/config"
       AGY_PLUGIN_DIR="$AGY_CONFIG_HOME/plugins/fm-turn-end"
       AGY_AUTH_DIR="$AGY_CONFIG_HOME/fm-turn-end.d"

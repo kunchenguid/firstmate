@@ -31,7 +31,8 @@ ok - agy 1.1.24's global customization root is where the turn-end installer writ
 all fm-agy-surface-live-e2e checks passed against agy 1.1.24
 ```
 
-The suite carries one further check that the run above did not enable: `FM_AGY_TURNEND_LIVE_E2E=1` with `FM_AGY_TURNEND_PAYLOAD` naming a Stop payload captured from a real turn asserts only that agy still emits the `fullyIdle` and `workspacePaths` keys the installed hook parses.
+The suite carries one further check that the run above did not enable: `FM_AGY_TURNEND_LIVE_E2E=1` with `FM_AGY_TURNEND_PAYLOAD` naming a Stop payload captured from a real turn asserts only what the installed hook depends on, namely that `workspacePaths` is still emitted and that `fullyIdle`, when present, is still a boolean.
+Any Stop will do, including one from an interrupted turn: protojson omits default values, so an absent `fullyIdle` is a legitimate `false` rather than a broken contract.
 It spends no turn and says nothing about what those values mean; what a `fullyIdle` value does to a turn is owned by the portable regression below.
 
 The portable regression is `tests/fm-agy-harness.test.sh`, which pins the same contracts with no harness installed and carries the captured Stop payloads below as fixtures.
@@ -142,6 +143,9 @@ A session blocked on this dialog still fires `Stop` hooks with `fullyIdle:false`
 
 An unanswered dialog is a silent hang: agy never reads the brief, its only `Stop` is ignored by the `fullyIdle` gate, and the busy classifier stays at `unknown agy-unverified`.
 `bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen, and the poll ends on that Enter, so exactly one is ever delivered.
+What counts as proof is the dialog's structure, not its wording: the question must appear together with `Yes, I trust this folder` as a row of its own.
+agy renders the brief as the first message in the same pane, so a brief that quotes the question - this adapter's own does - would otherwise draw an Enter into a session that has already started its turn.
+That row match assumes the plain-text capture both backends serve through `fm_backend_capture`, where tmux's `capture-pane -p` and herdr's default `pane read` carry no escape sequences; the ANSI form is a separate primitive neither this poll nor any other launch gate reads.
 
 How often that dialog actually appears was measured here against fresh lab directories, which is not how the fleet allocates a worktree.
 Treehouse pools and recycles worktrees for tmux, herdr, zellij, and cmux tasks, as [`docs/architecture.md`](../architecture.md) records; teardown returns each one to that pool, and `trustedWorkspaces` is keyed by path.
