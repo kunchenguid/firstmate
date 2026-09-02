@@ -44,11 +44,12 @@ ACK_NOTICE_FINGERPRINTS=
 # eligibility classification (which signal/stale rows resolve to a known
 # project, and the existing all-unread-rows-safe rule for a heartbeat); this
 # script never reclassifies a row itself, it only consumes the extension's
-# already-computed verdict. The extension writes the exact eligible sequence
-# numbers to ELIGIBLE_ROWS_FILE under the queue lock, immediately before every
-# branch prompt, so the file is always fresh for the one wake that prompt is about to
-# handle (the branch drains and acks exactly once per prompt, serialized by
-# its own branchChain, before the next wake can overwrite the file).
+# already-computed verdict. The extension publishes the exact eligible
+# sequence numbers to ELIGIBLE_ROWS_FILE under the queue lock while accepting
+# a watcher offer, and re-verifies those granted rows immediately before the
+# branch prompt, so the file names exactly the rows that in-flight turn still
+# owns (the branch drains and acks exactly once per prompt, and no new grant
+# is written until that turn settles).
 # A row whose sequence number is not in that file is left completely
 # untouched by a branch-actor drain or ack, no matter its sequence number
 # relative to what the branch presents or consumes - that per-row scoping,

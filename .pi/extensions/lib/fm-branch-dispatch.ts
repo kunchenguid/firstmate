@@ -149,8 +149,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 
 // The exact state-relative filename bin/fm-wake-drain.sh reads for a
 // FM_SUPERVISION_ACTOR=branch drain or ack (its header is the single owner of
-// the consume-side contract). Written atomically, immediately before every
-// branch prompt, by writeEligibleRowsSnapshot below.
+// the consume-side contract). Written atomically, when the branch accepts a
+// watcher offer, by writeEligibleRowsSnapshot below; the accepted wake
+// re-verifies those rows immediately before its prompt.
 export const BRANCH_ELIGIBLE_ROWS_FILE = ".branch-eligible-rows";
 
 // Read the live grant rows without taking the queue lock. Every writer
