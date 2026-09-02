@@ -47,29 +47,18 @@ agy_payload() {  # <template> <workspace>
 # --- spawn scaffolding ------------------------------------------------------
 
 # The shared spawn stub answers no capture-pane at all, which would leave every
-# case here staring at a blank screen. agy's launch is followed by a readiness
-# gate that reads the pane, so this suite needs a stub that RENDERS one.
+# case here staring at a blank screen. agy's launch is followed by a poll that
+# reads the pane looking for the workspace-trust dialog, so this suite needs a
+# stub that RENDERS one.
 #
 # FM_FAKE_AGY_SCREEN names what agy shows once its launch line is submitted:
 #   ready (default) - a pre-trusted workspace already on agy's idle footer
 #   trust           - blocked on the workspace-trust dialog until an Enter lands
 #   trust-tall      - blocked on the dialog, but the frame is taller than the
 #                     bottom rows: the footer is bottom-anchored while the
-#                     dialog sits further up, so a gate that reads only the tail
+#                     dialog sits further up, so a poll that reads only the tail
 #                     of the capture sees the footer and misses the dialog
-#   blank           - nothing renders at all, the case where the gate gives up
-#
-# FM_FAKE_AGY_PRELAUNCH, when set, puts a PREVIOUS agent's output in the capture
-# before the launch and keeps serving it afterwards, which is what a relaunch
-# that adopts a live pane reads: the predecessor's own idle footer plus the row
-# the launch line was typed on. It ends on that typed row, so the readiness
-# gate's freshness anchor is the ordinary one rather than a fixture-only shape.
-#
-# FM_FAKE_AGY_AFTER_ENTER names what replaces the dialog once it is answered,
-# and defaults to the idle footer. Setting it to `blank` is the pane read that
-# fails or comes back empty, which is what a backend hiccup looks like, and
-# `trust-and-ready` is the capture that still carries the answered dialog above
-# the footer, which is what a recent-output read looks like.
+#   blank           - nothing renders at all, the pane that never starts
 #
 # FM_FAKE_AGY_PHASE, when set, makes the stub honour launch ORDER: the screen
 # stays empty until the launch line is typed AND submitted. Without it the spawn
@@ -100,16 +89,12 @@ render_agy() {
       while [ "$i" -lt 14 ]; do printf '  workspace row %s\n' "$i"; i=$((i + 1)); done
       printf '\n  >\n? for shortcuts\n'
       ;;
-    trust-and-ready)
-      printf 'Do you trust the contents of this project?\n> Yes, I trust this folder\n\n  >\n? for shortcuts\n'
-      ;;
-    blank|same) : ;;
+    blank) : ;;
     *) printf '  >\n\n? for shortcuts\n' ;;
   esac
 }
 target=${FM_FAKE_AGY_SCREEN:-ready}
 phase_file=${FM_FAKE_AGY_PHASE:-}
-sentinel_file=${FM_FAKE_AGY_SENTINEL_FILE:-${phase_file:+$phase_file.sentinel}}
 # 0 pre-launch, 1 launch typed, 2 launch submitted, 3 dialog answered.
 phase=2
 if [ -n "$phase_file" ]; then
@@ -130,17 +115,9 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   capture-pane)
-    if [ -n "${FM_FAKE_AGY_PRELAUNCH:-}" ]; then
-      printf 'a previous agy session\n? for shortcuts\n$ agy --dangerously-skip-permissions -i "brief"\n'
-    fi
     [ "$phase" -ge 2 ] || exit 0
-    if [ "${FM_FAKE_AGY_HIDE_SENTINEL:-0}" != 1 ] && [ -n "$sentinel_file" ] && [ -f "$sentinel_file" ]; then
-      cat "$sentinel_file"
-    fi
     if [ "$phase" -eq 3 ]; then
-      render_agy "$target"
-      after=${FM_FAKE_AGY_AFTER_ENTER:-ready}
-      [ "$after" = same ] || render_agy "$after"
+      render_agy ready
     else
       render_agy "$target"
     fi
@@ -152,12 +129,6 @@ case "${1:-}" in
       if [ "$prev" = "-l" ]; then
         [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         agy_log "literal:$a"
-        case "$a" in
-          *fm-agy-start-fm.*)
-            sentinel=$(printf '%s\n' "$a" | sed -n "s/.*'\(fm-agy-start-fm\.[^']*\)'.*/\1/p")
-            [ -z "$sentinel_file" ] || printf '%s\n' "$sentinel" > "$sentinel_file"
-            ;;
-        esac
         case "$a" in *--dangerously-skip-permissions*) set_phase 1 ;; esac
       fi
       prev=$a
@@ -187,7 +158,9 @@ make_spawn_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" gh-axi gh)
-  agy_home="$case_dir/agyconfig"
+  # agy's customization root is fixed at $HOME/.gemini/config with no override,
+  # so a case sandboxes it the way the Kimi suite does: by owning HOME.
+  agy_home="$home/.gemini/config"
   id="agy-$name-x1"
   mkdir -p "$agy_home"
   fm_test_spawn_home "$home"
@@ -199,8 +172,12 @@ make_spawn_case() {
 run_agy_spawn() {
   local home=$1 proj=$2 wt=$3 fakebin=$4 agy_home=$5 id=$6
   shift 6
-  FM_AGY_CONFIG_HOME="$agy_home" FM_FAKE_AGY_SENTINEL_FILE="$agy_home/.launch-sentinel" \
-    FM_FAKE_LAUNCH_LOG="${FM_FAKE_LAUNCH_LOG:-}" \
+  # A case that does not render the trust dialog polls to the deadline, exactly
+  # as a spawn into an already-trusted workspace does, so every case caps that
+  # window unless it sets its own.
+  HOME="$home" FM_FAKE_LAUNCH_LOG="${FM_FAKE_LAUNCH_LOG:-}" \
+    FM_AGY_POLL_INTERVAL="${FM_AGY_POLL_INTERVAL:-0}" \
+    FM_AGY_TRUST_POLLS="${FM_AGY_TRUST_POLLS:-4}" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" \
     "$id" "$proj" agy "$@"
 }
@@ -305,7 +282,7 @@ test_implicit_agy_selection_is_refused() {
 $rec
 EOF
   printf '%s\n' agy > "$home/config/crew-harness"
-  out=$(FM_AGY_CONFIG_HOME="$agy_home" fm_test_run_spawn "$home" "$wt" "$fakebin" \
+  out=$(HOME="$home" fm_test_run_spawn "$home" "$wt" "$fakebin" \
     "$id" "$proj" --mode no-mistakes --yolo off 2>&1) \
     && fail "agy was selected implicitly from config/crew-harness"
   case "$out" in
@@ -372,7 +349,7 @@ test_secondmate_positional_agy_is_refused() {
   IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
 $rec
 EOF
-  out=$(FM_AGY_CONFIG_HOME="$agy_home" fm_test_run_spawn "$home" "$wt" "$fakebin" \
+  out=$(HOME="$home" fm_test_run_spawn "$home" "$wt" "$fakebin" \
     "$id" agy --secondmate 2>&1) \
     && fail "positional agy was accepted for a secondmate spawn"
   case "$out" in
@@ -384,8 +361,8 @@ EOF
 
 # --- workspace trust --------------------------------------------------------
 
-# Enters that arrived AFTER the launch line, which is the only window the
-# readiness gate acts in. Counting every Enter in the spawn would mostly count
+# Enters that arrived AFTER the launch line, which is the only window the trust
+# answer acts in. Counting every Enter in the spawn would mostly count
 # the shell lines that set the pane up.
 agy_enters_after_launch() {  # <event-log>
   awk '
@@ -410,7 +387,7 @@ $rec
 EOF
   out=$(FM_FAKE_AGY_SCREEN=ready FM_FAKE_AGY_PHASE="$case_dir/phase" \
     FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=8 \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_TRUST_POLLS=8 \
     run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
     --mode no-mistakes --yolo off) || fail "agy spawn failed on a trusted workspace: $out"
   trusted=$(agy_enters_after_launch "$case_dir/events.log")
@@ -421,7 +398,7 @@ $rec
 EOF
   out=$(FM_FAKE_AGY_SCREEN=trust FM_FAKE_AGY_PHASE="$case_dir/phase" \
     FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=8 \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_TRUST_POLLS=8 \
     run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
     --mode no-mistakes --yolo off) || fail "agy spawn failed on an untrusted workspace: $out"
   blocked=$(agy_enters_after_launch "$case_dir/events.log")
@@ -431,94 +408,12 @@ EOF
   pass "agy's workspace-trust dialog is answered with exactly one Enter, and only when it is on screen"
 }
 
-# A pane that renders neither the dialog nor either agy footer must FAIL the
-# spawn. The alternative is the defect this gate exists to close: a task that
-# reports launched, never reads its brief, and classifies unknown forever.
-test_spawn_fails_when_agy_never_renders() {
-  local rec case_dir home proj wt fakebin agy_home id out status
-  rec=$(make_spawn_case trust-blank)
-  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
-$rec
-EOF
-  out=$(FM_FAKE_AGY_SCREEN=blank \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=2 \
-    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
-    --mode no-mistakes --yolo off) \
-    && fail "agy spawn reported success against a pane that never rendered: $out"
-  case "$out" in
-    *"workspace-trust dialog"*) : ;;
-    *) fail "the agy readiness failure did not name the reason: $out" ;;
-  esac
-  status=$(cat "$home/state/$id.status" 2>/dev/null || true)
-  case "$status" in
-    *failed:*) : ;;
-    *) fail "the agy readiness failure was not recorded in the task status: $status" ;;
-  esac
-  pass "an agy pane that never reaches a ready state fails the spawn loudly"
-}
-
-# Answering the dialog is not evidence that agy started. A pane read that comes
-# back EMPTY - every backend error reads that way, and so does an unresponsive
-# TUI - clears the dialog text from the capture without proving anything, so an
-# Enter that the TUI never consumed would look identical to a resolved dialog.
-# Readiness must therefore rest on a POSITIVE match of agy's own footer, and the
-# spawn must fail naming what was never seen rather than report a launch that
-# left the agent sitting on the dialog.
-test_answered_dialog_alone_does_not_prove_readiness() {
-  local rec case_dir home proj wt fakebin agy_home id out enters
-  rec=$(make_spawn_case trust-then-empty)
-  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
-$rec
-EOF
-  out=$(FM_FAKE_AGY_SCREEN=trust FM_FAKE_AGY_AFTER_ENTER=blank \
-    FM_FAKE_AGY_PHASE="$case_dir/phase" \
-    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=6 \
-    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
-    --mode no-mistakes --yolo off) \
-    && fail "agy spawn reported success on an empty pane read after answering the dialog: $out"
-  case "$out" in
-    *"after firstmate answered its workspace-trust dialog"*) : ;;
-    *) fail "the failure did not name the ready footer that was never observed: $out" ;;
-  esac
-  # And still exactly one Enter: a gate that keeps polling must not keep typing.
-  enters=$(agy_enters_after_launch "$case_dir/events.log")
-  [ "$enters" -eq 2 ] \
-    || fail "the gate sent $enters Enters after the launch line while waiting; expected the launch submit plus exactly one answer"
-  pass "an answered dialog that never yields an agy footer fails the spawn instead of passing on an empty pane"
-}
-
-# Both backends answer a capture with recent OUTPUT, not a screen snapshot, so
-# the dialog agy has already dismissed can still sit in the read above the
-# footer that replaced it. Readiness must come from the footer regardless: a
-# gate that waits for the dialog text to LEAVE the capture waits forever and
-# hard-fails a session that started normally.
-test_ready_footer_settles_a_capture_still_carrying_the_dialog() {
-  local rec case_dir home proj wt fakebin agy_home id out enters
-  rec=$(make_spawn_case trust-retained)
-  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
-$rec
-EOF
-  out=$(FM_FAKE_AGY_SCREEN=trust FM_FAKE_AGY_AFTER_ENTER=trust-and-ready \
-    FM_FAKE_AGY_PHASE="$case_dir/phase" \
-    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=6 \
-    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
-    --mode no-mistakes --yolo off) \
-    || fail "agy spawn failed although its footer rendered under the answered dialog: $out"
-  enters=$(agy_enters_after_launch "$case_dir/events.log")
-  [ "$enters" -eq 2 ] \
-    || fail "the gate sent $enters Enters after the launch line; expected the launch submit plus exactly one answer"
-  pass "a ready footer settles readiness even while the answered dialog is still in the capture"
-}
-
 # agy's footer is bottom-anchored by construction while the trust dialog is a
-# modal further up the same frame, so a gate that reads only the bottom rows of
+# modal further up the same frame, so a poll that reads only the bottom rows of
 # the capture can see the footer without ever seeing the dialog it must answer.
-# That reports a successful launch for a session still blocked on the dialog -
-# the silent hang this gate exists to close, and worse than a loud failure. The
-# gate must therefore read the whole capture it was given; the one-Enter latch,
-# not a narrower read, is what bounds a dialog re-served by a later poll.
+# That leaves the session blocked on the dialog with nothing to observe, which
+# is the silent hang the Enter exists to close. The poll must therefore read the
+# whole capture it was given.
 test_trust_dialog_above_the_footer_is_still_answered() {
   local rec case_dir home proj wt fakebin agy_home id out enters
   rec=$(make_spawn_case trust-tall)
@@ -527,95 +422,42 @@ $rec
 EOF
   out=$(FM_FAKE_AGY_SCREEN=trust-tall FM_FAKE_AGY_PHASE="$case_dir/phase" \
     FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=6 \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_TRUST_POLLS=6 \
     run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
     --mode no-mistakes --yolo off) \
     || fail "agy spawn failed on a tall frame carrying both the dialog and the footer: $out"
   enters=$(agy_enters_after_launch "$case_dir/events.log")
   [ "$enters" -eq 2 ] \
-    || fail "the gate sent $enters Enters after the launch line; expected the launch submit plus exactly one answer to a dialog sitting above the footer"
+    || fail "the spawn sent $enters Enters after the launch line; expected the launch submit plus exactly one answer to a dialog sitting above the footer"
   pass "a trust dialog above the footer is answered rather than read past"
 }
 
-# A capture is recent OUTPUT on both backends and a relaunch adopts the pane
-# without clearing it, so the PREVIOUS agent's idle footer is still in the window
-# the gate reads. Settling on it would report a verified launch before the
-# replacement agy drew anything - and on a cross-harness relaunch the trust
-# dialog it skipped would then never be answered, which is the silent hang this
-# gate exists to close.
-test_stale_footer_from_a_previous_session_does_not_settle_readiness() {
-  local rec case_dir home proj wt fakebin agy_home id out status
-  rec=$(make_spawn_case stale-footer)
+# agy proves no readiness after that Enter, deliberately: a capture is recent
+# output on both backends, so it can settle neither that a row is this
+# incarnation's nor that a repaint appended rather than replaced. A pane that
+# renders NOTHING is therefore a completed spawn with no Enter delivered, not a
+# launch failure - agy is left to ordinary stuck-worker detection like every
+# adapter except Kimi.
+test_a_pane_that_never_renders_still_completes_the_spawn() {
+  local rec case_dir home proj wt fakebin agy_home id out status enters
+  rec=$(make_spawn_case trust-blank)
   IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
 $rec
 EOF
-  out=$(FM_FAKE_AGY_PRELAUNCH=stale FM_FAKE_AGY_SCREEN=blank \
-    FM_FAKE_AGY_PHASE="$case_dir/phase" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=3 \
+  out=$(FM_FAKE_AGY_SCREEN=blank FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_TRUST_POLLS=3 \
     run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
     --mode no-mistakes --yolo off) \
-    && fail "agy spawn reported success on a footer that predates the launch: $out"
+    || fail "agy spawn failed against a pane that rendered nothing: $out"
   status=$(cat "$home/state/$id.status" 2>/dev/null || true)
   case "$status" in
-    *failed:*) : ;;
-    *) fail "the stale-footer readiness failure was not recorded in the task status: $status" ;;
+    *failed:*) fail "an agy spawn recorded a launch failure for an unrendered pane: $status" ;;
   esac
-  pass "a footer left behind by a previous session never settles agy readiness"
-}
-
-test_missing_launch_sentinel_fails_closed() {
-  local rec case_dir home proj wt fakebin agy_home id out
-  rec=$(make_spawn_case missing-sentinel)
-  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
-$rec
-EOF
-  out=$(FM_FAKE_AGY_PRELAUNCH=stale FM_FAKE_AGY_SCREEN=ready \
-    FM_FAKE_AGY_HIDE_SENTINEL=1 FM_FAKE_AGY_PHASE="$case_dir/phase" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=3 \
-    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
-    --mode no-mistakes --yolo off) \
-    && fail "agy spawn accepted readiness without observing its launch sentinel: $out"
-  pass "an unreadable launch sentinel cannot promote predecessor output"
-}
-
-test_identical_post_trust_capture_does_not_settle_readiness() {
-  local rec case_dir home proj wt fakebin agy_home id out enters
-  rec=$(make_spawn_case trust-identical)
-  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
-$rec
-EOF
-  out=$(FM_FAKE_AGY_SCREEN=trust-tall FM_FAKE_AGY_AFTER_ENTER=same \
-    FM_FAKE_AGY_PHASE="$case_dir/phase" FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=4 \
-    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
-    --mode no-mistakes --yolo off) \
-    && fail "agy spawn accepted the same dialog/footer capture after its trust Enter: $out"
   enters=$(agy_enters_after_launch "$case_dir/events.log")
-  [ "$enters" -eq 2 ] \
-    || fail "the identical capture received $enters Enters; expected launch plus one trust answer"
-  pass "an unchanged dialog/footer capture is not fresh post-trust readiness"
-}
-
-# The freshness rule must not turn a normal relaunch into a hang: output this
-# incarnation actually produced still settles the gate, and the dialog it draws
-# is still answered exactly once.
-test_fresh_output_over_a_stale_footer_still_settles_readiness() {
-  local rec case_dir home proj wt fakebin agy_home id out enters
-  rec=$(make_spawn_case stale-then-fresh)
-  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
-$rec
-EOF
-  out=$(FM_FAKE_AGY_PRELAUNCH=stale FM_FAKE_AGY_SCREEN=trust \
-    FM_FAKE_AGY_AFTER_ENTER=ready FM_FAKE_AGY_PHASE="$case_dir/phase" \
-    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
-    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=6 \
-    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
-    --mode no-mistakes --yolo off) \
-    || fail "agy spawn failed although this session drew its own dialog and footer: $out"
-  enters=$(agy_enters_after_launch "$case_dir/events.log")
-  [ "$enters" -eq 2 ] \
-    || fail "the gate sent $enters Enters after the launch line; expected the launch submit plus exactly one answer"
-  pass "output this incarnation drew settles readiness even over a previous session's footer"
+  [ "$enters" -eq 1 ] \
+    || fail "the spawn sent $enters Enters after the launch line against an unrendered pane; expected only the launch submit"
+  pass "a pane that never renders completes the spawn without an unwarranted Enter"
 }
 
 # --- the fullyIdle turn-end rule -------------------------------------------
@@ -818,7 +660,7 @@ EOF
   out=$(run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
     --mode no-mistakes --yolo off) || fail "agy spawn failed: $out"
   token=$(sed -n 's/^token=//p' "$wt/.fm-agy-turnend")
-  out=$(FM_HOME="$home" \
+  out=$(HOME="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     PATH="$fakebin:$PATH" \
@@ -924,12 +766,15 @@ test_wiring_paths_cover_every_artifact() {
   [ "$out" = "/state/task1.agy-turnend-token" ] || fail "agy token path is '$out'"
   # A token that is not a registry name must resolve to nothing rather than to
   # an attacker-chosen path.
-  out=$(FM_AGY_CONFIG_HOME=/cfg fm_control_harness_turnend_auth_path agy '../../etc/passwd')
+  out=$(HOME=/cfg fm_control_harness_turnend_auth_path agy '../../etc/passwd')
   [ -z "$out" ] || fail "agy auth path accepted a traversing token: $out"
-  out=$(FM_AGY_CONFIG_HOME=/cfg fm_control_harness_turnend_auth_path agy fm.abcdefghijkl)
-  [ "$out" = "/cfg/fm-turn-end.d/fm.abcdefghijkl" ] || fail "agy auth path is '$out'"
-  out=$(fm_control_harness_turnend_auth_path agy /cfg/fm-turn-end.d/fm.abcdefghijkl)
-  [ "$out" = "/cfg/fm-turn-end.d/fm.abcdefghijkl" ] || fail "agy persisted auth path is '$out'"
+  out=$(HOME=/cfg fm_control_harness_turnend_auth_path agy fm.abcdefghijkl)
+  [ "$out" = "/cfg/.gemini/config/fm-turn-end.d/fm.abcdefghijkl" ] || fail "agy auth path is '$out'"
+  # The registry root is fixed under HOME, so the recorded token is a bare
+  # registry NAME. A path masquerading as one resolves to nothing, which is what
+  # keeps spawn and teardown pointed at the same entry by construction.
+  out=$(HOME=/cfg fm_control_harness_turnend_auth_path agy /elsewhere/fm-turn-end.d/fm.abcdefghijkl)
+  [ -z "$out" ] || fail "agy auth path accepted an absolute path as a token: $out"
   pass "agy's wiring and registry paths are complete and refuse a bad token"
 }
 
@@ -943,14 +788,8 @@ test_effort_is_clamped_to_supported_levels
 test_secondmate_is_refused
 test_secondmate_positional_agy_is_refused
 test_trust_dialog_is_answered_exactly_once
-test_spawn_fails_when_agy_never_renders
-test_answered_dialog_alone_does_not_prove_readiness
-test_ready_footer_settles_a_capture_still_carrying_the_dialog
 test_trust_dialog_above_the_footer_is_still_answered
-test_stale_footer_from_a_previous_session_does_not_settle_readiness
-test_missing_launch_sentinel_fails_closed
-test_identical_post_trust_capture_does_not_settle_readiness
-test_fresh_output_over_a_stale_footer_still_settles_readiness
+test_a_pane_that_never_renders_still_completes_the_spawn
 test_turnend_requires_fully_idle
 test_turnend_preserves_payload_while_stdin_stays_open
 test_turnend_requires_registered_token

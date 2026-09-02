@@ -138,16 +138,22 @@ The value is validated inside the TUI rather than at flag-parse time, so `--effo
 
 Outside `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`, agy asks `Do you trust the contents of this project?` with `Yes, I trust this folder` preselected; one Enter resolves it.
 `--dangerously-skip-permissions` does not suppress it.
-A session blocked on this dialog still fires `Stop` hooks with `fullyIdle:false`, which is a second reason the gate matters.
+A session blocked on this dialog still fires `Stop` hooks with `fullyIdle:false`, which is a second reason the dialog must be answered rather than waited out.
 
 Every crewmate and scout runs in a fresh per-task worktree, so the dialog is the ordinary case rather than an edge one, and an unanswered one is a silent hang: agy never reads the brief, its only `Stop` is ignored by the `fullyIdle` gate, and the busy classifier stays at `unknown agy-unverified`.
-`bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen.
-Readiness is then settled only by a positive match of one of agy's own footers, never by the dialog's absence: a pane read that fails or comes back empty clears the dialog text without proving that the Enter was ever consumed.
-The read is the same 120-line capture every other launch gate uses, so a dialog anywhere in the window is answered rather than missed; both backends answer with recent output rather than a screen snapshot, and an answered dialog re-served in that output is bounded by the one-Enter latch instead of by narrowing the read.
-Because that output can predate the launch - a relaunch adopts a live pane and nothing clears it - the evidence is bounded to this incarnation instead: the gate captures the pane immediately before the launch Enter and reasons only about rows drawn after the last baseline row that is neither dialog nor footer text, which in practice is the row the launch line was typed on.
-That anchoring assumes the backend re-serves that row byte-identically in later captures, which was not measured; a backend that re-renders or re-wraps it, or that answers the baseline read empty, degrades the gate to the unanchored read rather than failing, and an empty baseline read means the backend is already failing in a way the gate's own polls report at the deadline.
-An empty read is treated as no evidence yet, and the spawn fails loudly at the deadline naming what was never observed.
-That gate is covered by `tests/fm-agy-harness.test.sh` against a rendered pane; the Enter itself was not re-exercised against a live agy in this session, so treat the dialog text above as the measured fact and the gate as the portable regression's contract.
+`bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen, and the poll ends on that Enter, so exactly one is ever delivered.
+
+Answering the dialog is the whole launch step: no readiness is proven afterwards.
+Readiness could only be inferred from the same capture, and a capture is recent output on both backends rather than a screen snapshot, so it guarantees neither that a row was drawn by this incarnation nor that a repaint appends instead of replacing what it drew before.
+An earlier iteration of this adapter did gate the spawn on a footer match and was removed for that reason; agy now behaves like every adapter except Kimi, and a launch that never starts is caught by ordinary stuck-worker detection instead of by a launch gate that could hard-fail a healthy spawn.
+The cost of that choice is bounded and one-sided: a workspace agy already trusts never draws the dialog, so the poll runs to its deadline (`FM_AGY_TRUST_POLLS`, 120 polls at `FM_AGY_POLL_INTERVAL`, 0.5s) before the spawn continues, because the dialog's absence and a slow start read identically.
+Relaunch is untested (see boundaries below); it adopts a live pane that nothing clears, so a predecessor's dialog text still in the capture would draw one Enter into an already-started session, whose worst case is one empty submit.
+
+Answering the dialog has one out-of-tree effect that firstmate does not undo: it adds the answered worktree to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`, which is operator state that firstmate's Enter causes to change.
+The entries accumulate one per task worktree, and teardown deliberately leaves them, because pruning the operator's own trust store is riskier than leaving it - the operator also runs agy outside the fleet.
+`docs/configuration.md` carries that disclosure for operators.
+
+The Enter is covered by `tests/fm-agy-harness.test.sh` against a rendered pane; it was not re-exercised against a live agy in this session, so treat the dialog text above as the measured fact and the test as the portable regression's contract.
 
 ## Quota
 

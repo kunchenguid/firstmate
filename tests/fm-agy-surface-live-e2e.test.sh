@@ -113,12 +113,13 @@ test_model_discovery_needs_no_session() {
   pass "agy $AGY_VERSION lists models without opening a session"
 }
 
-# The Stop-hook installer writes a plugin under this root. If agy relocated its
-# global customization root the installer would write somewhere agy no longer
-# reads, and every turn-end signal would silently stop arriving.
+# The Stop-hook installer writes a plugin under this FIXED root - there is no
+# environment override, so spawn and teardown resolve it identically. If agy
+# relocated its global customization root the installer would write somewhere
+# agy no longer reads, and every turn-end signal would silently stop arriving.
 test_customization_root_is_where_the_installer_writes() {
   local root
-  root=${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}
+  root="$HOME/.gemini/config"
   [ -d "$root" ] \
     || fail "agy $AGY_VERSION global customization root '$root' is absent; bin/fm-spawn.sh installs its turn-end plugin there"
   CHECKS_RUN=$((CHECKS_RUN + 1))

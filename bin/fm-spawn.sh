@@ -175,7 +175,7 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
-# agy uses a firstmate-owned global plugin under ${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}/plugins
+# agy uses a firstmate-owned global plugin under $HOME/.gemini/config/plugins
 # plus a gitignored .fm-agy-turnend worktree pointer and a state token. Its hook
 # fires only on a Stop payload carrying fullyIdle=true, because agy also ends a
 # turn while it waits on work it pushed into the background; agy is crewmate/scout
@@ -1285,8 +1285,8 @@ launch_template() {
     # so the brief rides that flag rather than a bare argument.
     # --dangerously-skip-permissions is what makes an unattended crewmate
     # viable (footer shows `accept-edits`); it does NOT cover the workspace
-    # trust dialog, which agy_wait_for_ready below answers with a single Enter
-    # once the dialog is proven on screen.
+    # trust dialog, which agy_answer_trust_dialog below answers with a single
+    # Enter once the dialog is proven on screen.
     # agy's turn-end signal rides neither the launch command nor a project
     # config: it is a global Stop hook installed below as a firstmate-owned
     # plugin plus a per-task worktree pointer, gated on `fullyIdle`.
@@ -2458,67 +2458,29 @@ spawn_harness_fail() {  # <detail>
 # Either line of the dialog proves it: a narrow pane can wrap the question, and
 # the preselected answer is the row the Enter is aimed at anyway.
 AGY_TRUST_REGEX='Do you trust the contents of this project|Yes, I trust this folder'
-# The ONLY evidence that agy is running its session: one of its own footers,
-# streaming or idle. Readiness is a positive claim, so nothing else may settle
-# it - least of all the dialog's absence, which an empty pane read satisfies
-# just as well as a started session does. The read answers empty for every
-# backend error, so an empty capture means "no evidence yet" and the poll simply
-# continues to the deadline.
-# An UNANSWERED dialog pre-empts a footer in the same read, because a blocked
-# session must be answered rather than declared ready. Once it has been
-# answered, a footer settles readiness on its own: the dialog's text may still
-# sit in the capture, and waiting for it to leave would be waiting on a negative.
-AGY_READY_REGEX='esc to cancel|\? for shortcuts'
 
-# What the gate never managed to observe, reported verbatim when it gives up.
-AGY_READY_DETAIL=
-
-# Both backends answer a capture with recent OUTPUT rather than a live screen,
-# and nothing clears the endpoint on a relaunch. The launch prints a unique
-# sentinel before agy starts, and the gate accepts only output below that exact
-# row. A missing or unreadable sentinel therefore leaves the gate with no
-# evidence instead of promoting predecessor scrollback.
-AGY_READY_SENTINEL=
-
-agy_fresh_region() {  # <capture>
-  local cur=$1 n
-  [ -n "$AGY_READY_SENTINEL" ] || return 1
-  n=$(printf '%s\n' "$cur" | grep -nFx -- "$AGY_READY_SENTINEL" | tail -1 | cut -d: -f1)
-  [ -n "$n" ] || return 1
-  printf '%s\n' "$cur" | tail -n +$((n + 1))
-}
-
-agy_wait_for_ready() {
-  local pane fresh blocked ready ready_count min_ready_count=0 i=0 answered=0 max=${FM_AGY_READY_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
-  AGY_READY_DETAIL="agy rendered nothing readable in its pane after the launch line: neither its workspace-trust dialog nor a ready footer ($AGY_READY_REGEX) was ever observed as output newer than the launch"
+# Answering that dialog is the WHOLE launch step. Readiness is deliberately not
+# proven: a capture is recent output on both backends, so it guarantees neither
+# that what it shows was drawn by this incarnation nor that a repaint appends
+# rather than replaces, and no reading of it can settle a positive readiness
+# claim. agy therefore behaves like every adapter except Kimi - if the Enter
+# never lands, the worker sits idle and ordinary stuck-worker detection is what
+# catches it, rather than a launch gate that can hard-fail a healthy spawn.
+#
+# The poll ends the moment the Enter is sent, so exactly one is ever delivered.
+# A workspace agy already trusts never draws the dialog and therefore pays the
+# whole window, because the dialog's absence and a slow start read identically.
+agy_answer_trust_dialog() {
+  local i=0 max=${FM_AGY_TRUST_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
-    pane=$(spawn_pane_capture)
-    fresh=$(agy_fresh_region "$pane") || fresh=
-    blocked=0
-    ready=0
-    if printf '%s\n' "$fresh" | grep -qE "$AGY_TRUST_REGEX"; then blocked=1; fi
-    ready_count=$(printf '%s\n' "$fresh" | grep -cE "$AGY_READY_REGEX" || true)
-    if [ "$ready_count" -gt "$min_ready_count" ]; then ready=1; fi
-    if [ "$blocked" -eq 1 ] && [ "$answered" -eq 0 ]; then
-      # Exactly one Enter for the whole gate. A second would land in the
-      # composer of a session that has already started its turn, submitting an
-      # empty message into the brief.
-      if ! spawn_send_key "$T" Enter; then
-        AGY_READY_DETAIL="the Enter answering agy's workspace-trust dialog could not be delivered to the pane"
-        return 1
-      fi
-      answered=1
-      min_ready_count=$ready_count
-      AGY_READY_DETAIL="agy never rendered a ready footer ($AGY_READY_REGEX) after firstmate answered its workspace-trust dialog with one Enter"
-    elif [ "$ready" -eq 1 ]; then
+    if spawn_pane_capture | grep -qE "$AGY_TRUST_REGEX"; then
+      spawn_send_key "$T" Enter || true
       return 0
-    elif [ -n "$fresh" ] && [ "$answered" -eq 0 ]; then
-      AGY_READY_DETAIL="agy rendered output after its launch line but never a ready footer ($AGY_READY_REGEX), and its workspace-trust dialog never appeared"
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
-  return 1
+  return 0
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -2886,7 +2848,7 @@ EOF
       ;;
     agy)
       # agy fires a Stop hook when its execution loop terminates, and its global
-      # customization root (${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}) is always
+      # customization root ($HOME/.gemini/config) is always
       # loaded with no trust grant - the same shape as grok's ~/.grok/hooks.
       #
       # Two agy-specific facts change the installation from grok's, and neither
@@ -2911,8 +2873,11 @@ EOF
       # The rest is grok's guarded pattern unchanged: the hook is a no-op for
       # every non-firstmate agy session because it acts only when the payload's
       # workspace holds a .fm-agy-turnend pointer matching firstmate's private
-      # registry. It never edits project configuration and never touches agy's
-      # own trust store.
+      # registry. It leaves agy's own config.json and hooks.json and all project
+      # configuration untouched. Answering the trust dialog, by contrast, does
+      # change operator state: agy adds the task worktree to trustedWorkspaces
+      # and teardown deliberately leaves that entry, so those entries accumulate
+      # (docs/configuration.md records that for operators).
       #
       # jq is a hard requirement of the installed hook rather than a nicety: the
       # payload arrives as JSON on stdin, and `select(.fullyIdle == true)` is an
@@ -2923,7 +2888,7 @@ EOF
         echo "error: agy's turn-end hook requires jq to read its JSON Stop payload; install jq or select a different verified harness" >&2
         exit 1
       fi
-      AGY_CONFIG_HOME="${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}"
+      AGY_CONFIG_HOME="$HOME/.gemini/config"
       AGY_PLUGIN_DIR="$AGY_CONFIG_HOME/plugins/fm-turn-end"
       AGY_AUTH_DIR="$AGY_CONFIG_HOME/fm-turn-end.d"
       mkdir -p "$AGY_PLUGIN_DIR"
@@ -2933,7 +2898,7 @@ EOF
       auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
       umask "$old_umask"
       printf '%s\n' "$TURNEND" > "$auth_file"
-      printf '%s\n' "$auth_file" > "$STATE/$ID.agy-turnend-token"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.agy-turnend-token"
       sq_agy_auth_dir=$(shell_quote "$AGY_AUTH_DIR")
       agy_hook_tmp=$(mktemp "$AGY_PLUGIN_DIR/.fm-turn-end.sh.XXXXXXXXXXXX")
       cat > "$agy_hook_tmp" <<EOF
@@ -3252,11 +3217,6 @@ if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
 
-if [ "$HARNESS" = agy ]; then
-  AGY_READY_SENTINEL="fm-agy-start-${auth_file##*/}"
-  LAUNCH="printf '%s\\n' $(shell_quote "$AGY_READY_SENTINEL"); $LAUNCH"
-fi
-
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
   # Fresh publication still owns the lock. Relaunch deliberately uses a short
@@ -3313,10 +3273,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = agy ]; then
-  if ! agy_wait_for_ready; then
-    spawn_harness_fail "$AGY_READY_DETAIL"
-    exit 1
-  fi
+  agy_answer_trust_dialog
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

@@ -244,20 +244,13 @@ fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   esac
 }
 
-fm_control_harness_turnend_auth_path() {  # <harness> <token-or-path>
+fm_control_harness_turnend_auth_path() {  # <harness> <token>
   local harness=${1-} token=${2-}
-  if [ "$harness" = agy ] && [ "${token#/}" != "$token" ]; then
-    case "$token" in
-      */../*|*/./*) return 0 ;;
-      */fm-turn-end.d/fm.????????????) printf '%s\n' "$token" ;;
-    esac
-    return 0
-  fi
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   case "$harness" in
     grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
-    agy) printf '%s\n' "${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}/fm-turn-end.d/$token" ;;
+    agy) printf '%s\n' "$HOME/.gemini/config/fm-turn-end.d/$token" ;;
     *) return 0 ;;
   esac
 }
