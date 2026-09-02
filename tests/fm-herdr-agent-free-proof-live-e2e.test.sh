@@ -66,6 +66,10 @@ mkdir -p "$LAB/wt"
 . "$ROOT/bin/fm-backend.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-cursor-lib.sh"
+# The single resolver both real-harness drift guards launch through, so neither
+# can measure a different binary than the other or than a real spawn.
+# shellcheck source=tests/harness-binary.sh
+. "$ROOT/tests/harness-binary.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$LAB/wt") || fail "container_ensure failed"
@@ -77,32 +81,6 @@ HERDR_VERSION=$(herdr --version 2>/dev/null | head -1 | tr -d '\r')
 [ -n "$HERDR_VERSION" ] || HERDR_VERSION=unknown
 note "herdr: $HERDR_VERSION"
 
-# Mirror bin/fm-spawn.sh's own binary resolution, so this guard covers the same
-# binary firstmate would actually launch.
-resolve_harness_binary() {  # <harness>
-  local harness=$1 candidate
-  # cursor first, and never through a bare PATH lookup: it installs as
-  # `cursor-agent` plus the legacy alias `agent`, while an unrelated `cursor`
-  # on PATH is routinely the editor launcher rather than the agent (observed on
-  # a developer machine, where it answered a `--trust` launch with an Electron
-  # warning and exited). fm_cursor_resolve_binary is the verified owner
-  # fm-spawn itself uses, so this guard launches exactly what firstmate would.
-  if [ "$harness" = cursor ]; then
-    fm_cursor_resolve_binary 2>/dev/null && return 0
-    return 1
-  fi
-  candidate=$(command -v "$harness" 2>/dev/null || true)
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  if [ "$harness" = kimi ] && [ -n "${HOME:-}" ] && [ -x "$HOME/.kimi-code/bin/kimi" ]; then
-    printf '%s\n' "$HOME/.kimi-code/bin/kimi"
-    return 0
-  fi
-  return 1
-}
-
 foreground_names() {  # <pane>
   fm_backend_herdr_cli "$SESSION" pane process-info --pane "$1" 2>/dev/null \
     | jq -r '[.result.process_info.foreground_processes[]? | "\(.name)/\(.argv0 // .argv[0] // "")"] | join(" ")' 2>/dev/null
@@ -113,23 +91,55 @@ foreground_pids() {  # <pane>
     | jq -r '.result.process_info.foreground_processes[]?.pid | select(type == "number") | floor' 2>/dev/null
 }
 
-# end_harness: stop only the exact processes this guard launched into the pane,
-# leaving the pane and its tab in place. Closing the pane instead would remove
-# the workspace's last tab and destroy the container the next harness needs.
-end_harness() {  # <pane>
-  local pid
+pane_shell_pid() {  # <pane>
+  fm_backend_herdr_cli "$SESSION" pane process-info --pane "$1" 2>/dev/null \
+    | jq -r '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null
+}
+
+# harness_pids: every foreground pid in <pane> EXCEPT the pane's own shell.
+#
+# The shell is the process herdr runs the pane on, so signalling it makes herdr
+# reap the pane, which removes its tab and - for the first harness, whose tab is
+# the workspace's only one after the seeded-tab prune - the container every
+# later harness needs. A harness that exits during the registration wait (a
+# failed auth, a declined trust prompt, a crash) leaves that shell as the pane's
+# SOLE foreground process, so excluding it is what keeps a per-harness failure
+# from destroying the lab and turning every remaining verdict into "could not
+# create a lab tab".
+#
+# An inventory that cannot be read names no shell, so nothing is signalled: this
+# never guesses which pid is safe to kill.
+harness_pids() {  # <pane>
+  local shell_pid pid
+  shell_pid=$(pane_shell_pid "$1")
+  [ -n "$shell_pid" ] || return 0
   for pid in $(foreground_pids "$1"); do
+    [ "$pid" = "$shell_pid" ] && continue
+    printf '%s\n' "$pid"
+  done
+}
+
+# end_harness: stop only the exact processes this guard launched into the pane,
+# leaving the pane, its shell, and its tab in place. Closing the pane instead
+# would remove the workspace's last tab and destroy the container the next
+# harness needs.
+end_harness() {  # <harness> <pane>
+  local pid
+  for pid in $(harness_pids "$2"); do
     kill -TERM "$pid" 2>/dev/null || true
   done
   for _ in $(seq 1 100); do
-    case "$(foreground_names "$1")" in
-      ''|*sh/*sh*) return 0 ;;
-    esac
+    [ -z "$(harness_pids "$2")" ] && return 0
     sleep 0.1
   done
-  for pid in $(foreground_pids "$1"); do
+  for pid in $(harness_pids "$2"); do
     kill -KILL "$pid" 2>/dev/null || true
   done
+  for _ in $(seq 1 50); do
+    [ -z "$(harness_pids "$2")" ] && return 0
+    sleep 0.1
+  done
+  fail "$1: could not clear the lab pane's foreground after TERM and KILL (still [$(foreground_names "$2")]), so the next harness would be measured in a pane that is not clean"
 }
 
 CHECKED=0
@@ -138,7 +148,7 @@ SKIPPED=
 # The verified adapters, in the order .agents/skills/harness-adapters/SKILL.md
 # records them. An adapter that gains a verified launch path belongs here too.
 for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
-  if ! bin_path=$(resolve_harness_binary "$harness"); then
+  if ! bin_path=$(fm_test_resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its Herdr classification is unverified here"
     continue
@@ -205,7 +215,7 @@ EOF
   pass "herdr agent-free proof: $harness $version running in a Herdr pane never proves a bare idle shell"
   CHECKED=$((CHECKED + 1))
 
-  end_harness "$PANE_ID"
+  end_harness "$harness $version" "$PANE_ID"
 done
 
 [ "$CHECKED" -gt 0 ] || fail \

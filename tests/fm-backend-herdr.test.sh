@@ -929,7 +929,9 @@ test_registration_over_a_shell_with_a_child_stays_alive() {
   dir="$TMP_ROOT/reg-child"
   # A real shell that is genuinely running something: the trailing `true` keeps
   # bash from exec-ing away, so the child row is real.
-  bash -c 'sleep 300; true' & bgpid=$!
+  bash -c 'sleep 300; true' &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
   # Give the real child a moment to exist before the proof reads the table.
   while [ "$attempt" -lt 200 ]; do
     child=$(ps -axo ppid= -o pid= 2>/dev/null | awk -v p="$bgpid" '$1 == p {print $2}')
@@ -3180,6 +3182,98 @@ test_current_path_reads_cwd() {
 
 # --- busy_state (semantic agent state) ---------------------------------------
 
+# --- busy_state corroborated against the pane's own processes ---------------
+#
+# The registry is written by whatever reports into it and a report is not
+# withdrawn when the process that made it goes away, so a harness killed
+# mid-turn leaves `agent get` answering `working` forever. The busy verdict
+# reuses the SAME idle-shell proof the liveness classifier uses, so the two can
+# never disagree about what the pane is, and it resolves to `unknown` rather
+# than `idle`: a pane with no agent has no native agent state at all, and
+# `unknown` is every consumer's cue to fall back to its own evidence.
+
+busy_state_case() {  # <dir> <pane> <agent-status> [<process-info-json>]
+  local dir=$1 pane=$2 status=$3 proc_json=${4:-} log resp fb
+  mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status" > "$resp/1.out"
+  [ -z "$proc_json" ] || printf '%s' "$proc_json" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state "fmtest:$1"' "$ROOT" "$pane"
+}
+
+test_busy_state_stale_registration_is_not_busy() {
+  local dir bgpid stale live
+  dir="$TMP_ROOT/busy-stale-registration"
+  sleep 300 &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
+  stale=$(busy_state_case "$dir/husk" w1:p2 working "$(bare_shell_inventory w1:p2 "$bgpid")")
+  # The IDENTICAL working reading, with a live harness process in the pane.
+  live=$(busy_state_case "$dir/live" w1:p2 working \
+    "$(process_info_fixture w1:p2 "$bgpid" 4242 '[{"pid":4242,"name":"node","argv0":"pi"}]')")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$stale" = unknown ] \
+    || fail "a working registration whose pane holds only a bare idle shell must not read busy, got '$stale'"
+  [ "$live" = busy ] \
+    || fail "the same working registration over a live process must still read busy, got '$live'"
+  pass "fm_backend_herdr_busy_state: a working registration contradicted by a lone bare idle shell reads unknown, while the identical registration over a live process stays busy"
+}
+
+test_busy_state_keeps_busy_when_the_inventory_proves_nothing() {
+  local dir bgpid ambiguous unreadable other
+  dir="$TMP_ROOT/busy-inconclusive"
+  sleep 300 &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
+  # An idle shell transiently hosting a prompt helper: two foreground
+  # processes, so nothing is proved and the busy verdict stands.
+  ambiguous=$(busy_state_case "$dir/ambiguous" w1:p2 working \
+    "$(process_info_fixture w1:p2 "$bgpid" "$bgpid" \
+      "$(printf '[{"pid":99998,"name":"starship","argv0":"starship"},{"pid":%s,"name":"zsh","argv0":"zsh"}]' "$bgpid")")")
+  unreadable=$(busy_state_case "$dir/unreadable" w1:p2 working)
+  other=$(busy_state_case "$dir/other-pane" w1:p2 working "$(bare_shell_inventory w9:p9 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$ambiguous" = busy ] || fail "an extra foreground process proves nothing and must leave busy standing, got '$ambiguous'"
+  [ "$unreadable" = busy ] || fail "an unreadable inventory must leave busy standing, got '$unreadable'"
+  [ "$other" = busy ] || fail "an inventory about another pane must leave busy standing, got '$other'"
+  pass "fm_backend_herdr_busy_state: an extra foreground process, an unreadable inventory, and an inventory about another pane all leave the busy verdict untouched"
+}
+
+test_busy_state_keeps_busy_for_a_shell_with_a_child() {
+  local dir bgpid child attempt=0 childpid=
+  dir="$TMP_ROOT/busy-shell-child"
+  # A real shell that is genuinely running something: the trailing `true` keeps
+  # bash from exec-ing away, so the child row is real.
+  bash -c 'sleep 300; true' &
+  # shellcheck disable=SC2031 # the & runs in THIS shell; the adapter's own backgrounded server launch is what ShellCheck saw
+  bgpid=$!
+  while [ "$attempt" -lt 200 ]; do
+    childpid=$(ps -axo ppid= -o pid= 2>/dev/null | awk -v p="$bgpid" '$1 == p {print $2}')
+    [ -n "$childpid" ] && break
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  if [ -z "$childpid" ]; then
+    kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+    fail "ps never reported a child of the backgrounded shell $bgpid, so this case cannot exercise a shell that is running something"
+  fi
+  child=$(busy_state_case "$dir" w1:p2 working "$(bare_shell_inventory w1:p2 "$bgpid")")
+  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  [ "$child" = busy ] || fail "a shell with a child of its own is not idle and must leave busy standing, got '$child'"
+  pass "fm_backend_herdr_busy_state: a shell running a child of its own never proves an agent-free pane, so its busy verdict stands"
+}
+
+test_busy_state_non_busy_verdicts_never_read_the_inventory() {
+  local dir out
+  dir="$TMP_ROOT/busy-idle-no-inventory"
+  out=$(busy_state_case "$dir" w1:p2 idle)
+  [ "$out" = idle ] || fail "an idle registration must still read idle, got '$out'"
+  assert_not_contains "$(cat "$dir/log")" $'pane\x1fprocess-info' \
+    "a verdict the inventory could not change must not pay for the inventory read"
+  pass "fm_backend_herdr_busy_state: only a busy verdict pays for the corroborating inventory read, so no non-busy poll gets slower"
+}
+
 test_busy_state_working_maps_to_busy() {
   local dir log resp fb out
   dir="$TMP_ROOT/busy-working"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4781,6 +4875,10 @@ test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
+test_busy_state_stale_registration_is_not_busy
+test_busy_state_keeps_busy_when_the_inventory_proves_nothing
+test_busy_state_keeps_busy_for_a_shell_with_a_child
+test_busy_state_non_busy_verdicts_never_read_the_inventory
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty

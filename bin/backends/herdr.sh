@@ -1206,10 +1206,11 @@ fm_backend_herdr_pane_idle_shell_pid() {  # <session> <pane-id>
 # observation of the idle-shell shape.
 # fm_backend_herdr_pane_idle_shell_pid wraps it with the settle retry and owns
 # the proof contract for the destructive close paths.
-# fm_backend_herdr_pane_agent_state instead takes a single sample directly, on
-# purpose: that read runs in poll loops, the retry budget would slow every
-# healthy `live` answer, and its corroboration is positive-only, so a sample
-# lost to a transient prompt helper simply keeps `live` until the next poll.
+# fm_backend_herdr_pane_agent_state and fm_backend_herdr_busy_state instead
+# take a single sample directly, on purpose: both reads run in poll loops, the
+# retry budget would slow every healthy answer, and their corroboration is
+# positive-only, so a sample lost to a transient prompt helper simply keeps the
+# uncorroborated verdict until the next poll.
 fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
   local session=$1 pane=$2 info shell_pid foreground_pgid count
   local process_pid name argv0 shell_name rows stat ps_bin
@@ -3046,10 +3047,49 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # gets real semantics" per the design report. See
 # fm_backend_herdr_classify_agent_status for the status->busy/idle/unknown
 # mapping.
+#
+# A `busy` verdict is corroborated against the pane's own process inventory
+# through fm_backend_herdr_pane_idle_shell_sample - the SAME proof
+# fm_backend_herdr_pane_agent_state uses, so the liveness verdict and the busy
+# verdict can never disagree about what the pane is. The registry is written by
+# whatever reports into it and a report is not withdrawn when the process that
+# made it goes away, so a harness killed mid-turn leaves `agent get` answering
+# `working` forever. Nothing else clears that: bin/fm-busy-lib.sh's record-free
+# fallthrough would print `busy herdr-native` on every poll and suppress watcher
+# stale-pane escalation, and bin/fm-supervise-daemon.sh's pane_is_busy would
+# defer away-mode injection forever - the same "no state that could ever clear
+# it" failure the liveness classifier fixes, in the watcher lane.
+#
+# The corroboration is positive-only and identical in shape to the classifier's:
+# only a pane that positively proves a lone bare idle shell loses `busy`, while
+# a live process, an extra foreground process, a shell with a child, an
+# unreadable inventory, and an inventory answering about a different pane all
+# leave the verdict exactly as before.
+#
+# It resolves to `unknown`, never `idle`: a pane with no agent has no native
+# agent state at all, and `unknown` is every consumer's documented cue to fall
+# back to its own evidence, so no caller gains a fabricated positive idle (a
+# secondmate delivery confirmation in bin/fm-pending-reply-lib.sh would read
+# one as a completed turn).
+#
+# The inventory read is taken ONLY on the `busy` branch, where it can change
+# the answer. `idle` and `unknown` verdicts pay nothing, and the submit
+# confirmation loop does not come through here at all: it polls
+# fm_backend_herdr_agent_status_raw directly (fm_backend_herdr_wait_for_working,
+# fm_backend_herdr_send_text_submit, fm_backend_herdr_queued_enter_busy), so no
+# tight loop pays for this. Measured cost on the busy branch:
+# docs/verification/runtime-backends.md "Native busy-state corroboration cost".
 fm_backend_herdr_busy_state() {  # <target>
+  local verdict
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
-  fm_backend_herdr_classify_agent_status \
-    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")"
+  verdict=$(fm_backend_herdr_classify_agent_status \
+    "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
+  if [ "$verdict" = busy ] && fm_backend_herdr_pane_idle_shell_sample \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1; then
+    printf 'unknown'
+    return 0
+  fi
+  printf '%s' "$verdict"
 }
 
 # fm_backend_herdr_wait_for_working: poll <session>:<pane_id>'s NATIVE

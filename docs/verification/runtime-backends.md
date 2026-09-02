@@ -673,7 +673,7 @@ Herdr does validate a report claiming a source it owns itself: an otherwise iden
 ### Agent-free proof across installed harnesses
 
 The classifier's negative verdict rests on `pane process-info` naming a lone bare idle shell, and both that name and its argv0 come from the harness vendor, so the proof is measured against every installed harness rather than a stub.
-Measured 2026-09-01 on Herdr 0.8.2, macOS aarch64, in an isolated `fm-lab-` session:
+Reverified 2026-09-02 on Herdr 0.8.2, macOS aarch64, in an isolated `fm-lab-` session, and first measured 2026-09-01 on the same Herdr with the then-current claude 2.1.252 and codex 0.150.1:
 
 ```sh
 FM_HERDR_AGENT_FREE_PROOF=1 tests/fm-herdr-agent-free-proof-live-e2e.test.sh
@@ -683,10 +683,10 @@ Observed output:
 
 ```text
 # herdr: herdr 0.8.2
-# claude 2.1.252 (Claude Code): foreground=[2.1.252/claude] state=alive
-ok - herdr agent-free proof: claude 2.1.252 (Claude Code) running in a Herdr pane never proves a bare idle shell
-# codex codex-cli 0.150.1: foreground=[codex/codex] state=alive
-ok - herdr agent-free proof: codex codex-cli 0.150.1 running in a Herdr pane never proves a bare idle shell
+# claude 2.1.258 (Claude Code): foreground=[2.1.258/claude] state=alive
+ok - herdr agent-free proof: claude 2.1.258 (Claude Code) running in a Herdr pane never proves a bare idle shell
+# codex codex-cli 0.152.1: foreground=[codex/codex] state=alive
+ok - herdr agent-free proof: codex codex-cli 0.152.1 running in a Herdr pane never proves a bare idle shell
 # opencode 1.17.11: foreground=[opencode/opencode] state=alive
 ok - herdr agent-free proof: opencode 1.17.11 running in a Herdr pane never proves a bare idle shell
 # pi 0.84.4: foreground=[node/pi] state=alive
@@ -697,9 +697,44 @@ ok - herdr agent-free proof: cursor 2026.08.31-4057e58 running in a Herdr pane n
 # checked 5 installed harness(es) on herdr herdr 0.8.2 in workspace w1
 ```
 
+Both guards resolve the harness binary through one shared helper (`tests/harness-binary.sh`), which is also what `tests/fm-harness-liveness-drift-live-e2e.test.sh` launches through, so neither guard can measure a different binary than the other or than a real spawn.
+
 Every installed harness owns the pane's foreground under its own argv0, so none can satisfy the shell-only proof, and Herdr registered each of them within the guard's wait.
 `pi-signed`, `grok`, `kimi`, and `muse` were not installed on that machine and remain unverified here; the guard reports them explicitly and refuses a pass that checked nothing.
 This is the command that refreshes this record; run it after every harness upgrade.
+
+### Native busy-state corroboration cost
+
+`fm_backend_herdr_busy_state` corroborates a `busy` verdict against the same `pane process-info` inventory the liveness classifier uses, because a registration is not withdrawn when the process that made it goes away.
+Busy state is read on watcher and away-mode ticks, so the added read was measured rather than assumed.
+Measured 2026-09-02 on Herdr 0.8.2, macOS aarch64, against a pane in an isolated `fm-lab-` session carrying a registration reported with `herdr pane report-agent --state working`, 50 calls per row:
+
+```sh
+. bin/fm-backend.sh
+fm_backend_source herdr
+for _ in $(seq 1 50); do fm_backend_herdr_agent_status_raw "$SESSION" "$PANE" >/dev/null; done
+for _ in $(seq 1 50); do fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE" >/dev/null; done
+for _ in $(seq 1 50); do fm_backend_herdr_busy_state "$SESSION:$PANE" >/dev/null; done
+```
+
+```text
+agent get (existing per-poll read)                16.1 ms/call
+pane process-info (added read)                    10.6 ms/call
+busy_state, idle registration (no inventory)      42.7 ms/call
+busy_state, working registration over a live process   61.2 ms/call
+busy_state, working registration over a bare shell    157.9 ms/call
+```
+
+The inventory is read only on the `busy` branch, where it can change the answer, so an `idle` or `unknown` verdict pays nothing at all.
+A genuinely busy pane pays about 19 ms per poll: the inventory read plus its parsing, ending as soon as the foreground process group turns out not to be the shell, before the operating-system process table is scanned.
+Only a pane that really is a lone bare idle shell runs the whole proof, and that pane is the husk this exists to catch; it is read once per watcher tick, not in a loop.
+
+No tight loop pays anything, because the submit-confirmation path does not read busy state at all.
+`fm_backend_herdr_wait_for_working`, `fm_backend_herdr_send_text_submit`, and `fm_backend_herdr_queued_enter_busy` each poll `fm_backend_herdr_agent_status_raw` directly, which is unchanged and deliberately skips even the server-ensure round trip that `fm_backend_herdr_busy_state` pays.
+The consumers that do read busy state are `bin/fm-busy-lib.sh`, `bin/fm-supervise-daemon.sh`, and `bin/fm-pending-reply-lib.sh`, all of which read it once per tick.
+
+A contradicted verdict resolves to `unknown`, never `idle`, because a pane with no agent has no native agent state at all.
+`unknown` is every consumer's documented cue to fall back to its own evidence, so no caller gains a fabricated positive idle.
 
 ### Away-mode transport
 

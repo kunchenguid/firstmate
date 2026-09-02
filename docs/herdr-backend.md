@@ -239,6 +239,14 @@ Herdr's native agent state can read idle while a harness waits on its own long f
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
 A human-blocked permission dialog has no busy banner and still surfaces.
 
+A native `busy` verdict is corroborated against the pane's own process inventory, through the same idle-shell proof the liveness classifier uses, so the two verdicts can never disagree about what the pane is.
+A registration is not withdrawn when the process that made it goes away, so a harness killed mid-turn would otherwise keep reporting `working` forever, with no state that could ever clear it.
+That stale report would suppress this task's stale-pane escalation through the record-free `busy herdr-native` fallthrough and defer away-mode injection indefinitely.
+The corroboration is positive-only in exactly the same way: a live process, an extra foreground process, a shell with a child, an unreadable inventory, and an inventory answering about a different pane all leave the busy verdict standing.
+A pane the inventory positively proves to be a lone bare idle shell reads `unknown` rather than `idle`, because a pane with no agent has no native agent state at all, and `unknown` is every consumer's cue to fall back to its own evidence.
+The inventory is read only on the busy branch, and the submit-confirmation path never reads busy state, so no tight loop pays for it.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#native-busy-state-corroboration-cost) records the measured per-poll cost.
+
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.

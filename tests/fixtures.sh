@@ -289,3 +289,61 @@ make_stubs() {
   fm_test_fake_sleep_noop "$fakebin"
   printf '%s\n' "$fakebin"
 }
+
+# --- herdr native agent-state stubs -----------------------------------------
+
+# make_herdr_agent_state_fakebin: a `herdr` stub for the NATIVE agent-state
+# lane, answering by SUBCOMMAND rather than by call order.
+#
+# The call-numbered stub in tests/fm-backend-herdr.test.sh pins an exact CLI
+# sequence, which is the wrong shape for a consumer test: bin/fm-busy-lib.sh
+# and bin/fm-supervise-daemon.sh decide for themselves how many reads to make,
+# and that decision is part of what those tests assert. This stub answers
+# whatever is asked, as often as it is asked.
+#
+# Read from the environment at call time, so one stub serves every case:
+#   FM_FAKE_HERDR_AGENT_STATUS - the agent_status `agent get` reports
+#   FM_FAKE_HERDR_PROCESS_INFO - file holding the `pane process-info` response
+#                                (absent or unset means an unreadable inventory)
+#   FM_FAKE_HERDR_PANE_READ    - file holding the `pane read` capture
+make_herdr_agent_state_fakebin() {  # <dir> -> echoes fakebin dir
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '{"client":{"version":"0.8.2","protocol":19},"server":{"running":true}}\n'
+    ;;
+  "agent get")
+    printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "${FM_FAKE_HERDR_AGENT_STATUS:-}"
+    ;;
+  "pane process-info")
+    if [ -f "${FM_FAKE_HERDR_PROCESS_INFO:-}" ]; then cat "$FM_FAKE_HERDR_PROCESS_INFO"; fi
+    ;;
+  "pane read")
+    if [ -f "${FM_FAKE_HERDR_PANE_READ:-}" ]; then cat "$FM_FAKE_HERDR_PANE_READ"; fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# herdr_bare_shell_process_info: the inventory herdr reports for a pane whose
+# agent has exited - one foreground process, which is the pane's own shell.
+# <real-pid> must be a REAL live pid with no child, because the
+# operating-system half of the idle-shell proof is answered by the real `ps`.
+herdr_bare_shell_process_info() {  # <pane> <real-pid>
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' \
+    "$1" "$2" "$2" "$2"
+}
+
+# herdr_live_process_info: the same pane with a real harness process owning the
+# foreground instead of the shell. Nothing here may ever prove agent-free.
+herdr_live_process_info() {  # <pane> <shell-pid>
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"node","argv0":"pi"}]}}}\n' \
+    "$1" "$2"
+}
