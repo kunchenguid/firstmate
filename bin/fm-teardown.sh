@@ -19,6 +19,16 @@
 # home with a backlog but no compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
+# Cleanup also removes this task's own per-task temp root - gotmp/ always, plus
+# the agent's harness scratch when the opt-in TMPDIR pin confined it there -
+# recorded as tasktmp= by fm-spawn, and only when it is
+# exactly the path bin/fm-task-tmp-lib.sh derives for this task id. Nothing is
+# removed by worktree slot, by age, or by scanning for siblings, so a live task
+# sharing a reused slot is never touched. A refusal or failure there is reported
+# on stderr and never fails an otherwise-complete teardown. Forced secondmate
+# retirement applies the same removal to each child task it retires, derived as
+# that child's own home, because those records disappear with the home and would
+# otherwise name nothing.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -139,9 +149,12 @@
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     roots are unique per task and never shared, so this can never reach
+#     another task's or the primary's processes - the temp root because it is
+#     passed only after fm_task_tmp_owned (bin/fm-task-tmp-lib.sh) confirms the
+#     recorded path is exactly this task's own, the same validation the removal
+#     further below applies, so a foreign or hand-edited tasktmp= is neither
+#     scanned nor removed. Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -189,6 +202,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-task-tmp-lib.sh
+. "$SCRIPT_DIR/fm-task-tmp-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -733,8 +748,15 @@ fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
-# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
+# (bin/fm-task-tmp-lib.sh owns its shape); absent for tasks spawned before that
+# change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+# The one validated unit both the process reaper and the removal act on: the
+# recorded root, and only when it is exactly the root fm_task_tmp_root derives
+# for this id. Empty for a task with no tasktmp= and for a recorded path that is
+# not this task's own, so neither is scanned for processes nor removed; the
+# removal below reports the refusal once.
+TASK_TMP_OWN=$(fm_task_tmp_owned "$ID" "$TASK_TMP") || TASK_TMP_OWN=
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -2451,7 +2473,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_tasktmp
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2459,6 +2481,7 @@ cleanup_firstmate_home_children() {
     child_id=$(basename "$child_meta" .meta)
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
+    child_tasktmp=$(meta_value "$child_meta" tasktmp)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
@@ -2526,6 +2549,18 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
+    # This child's own temp root, removed while its record still names it: once
+    # the meta below is gone nothing names the path, and with the opt-in TMPDIR
+    # pin it holds the child agent's whole scratch tree rather than only Go
+    # build temp.
+    # The root is home-scoped, so it must be derived as the CHILD home the same
+    # way the zellij branch above verifies that home's tabs; deriving it from the
+    # parent's ambient FM_HOME/FM_ROOT would produce the parent's tag, fail the
+    # exact-match guard, and leak exactly as before while looking fixed. Only the
+    # recorded path is ever removed, and only when it is exactly what
+    # fm_task_tmp_root derives for that child - never by slot, age, or pattern.
+    # A refusal or failure reports on stderr and never fails forced retirement.
+    ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_task_tmp_remove "$child_id" "$child_tasktmp" ) || true
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
@@ -2723,7 +2758,7 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP_OWN"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -2866,9 +2901,14 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Remove the per-task temp root recorded by spawn: this task's own gotmp/, plus
+# its agent's harness scratch when the launch pinned TMPDIR there. Read before
+# the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
+# Only the one path this task's own record names is ever removed, and only when it
+# is exactly the path fm_task_tmp_root derives for this id, so a live sibling
+# session in a reused worktree slot cannot be caught by it. A refusal or failure
+# there is reported by the library and never fails an otherwise-complete teardown.
+fm_task_tmp_remove "$ID" "$TASK_TMP" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1

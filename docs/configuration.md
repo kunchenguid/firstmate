@@ -187,6 +187,21 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Task TMPDIR pin (config/task-tmpdir-pin)
+
+The optional local, gitignored `config/task-tmpdir-pin` presence flag opts this home into pinning each launched agent's `TMPDIR` to that task's own temp root, so the harness scratch the agent derives from `TMPDIR` is torn down with the task.
+It is off by default because `TMPDIR` is far broader than the `GOTMPDIR` export that ships unconditionally: it redirects every temporary file the agent and its child processes create, not just Go's build temp.
+A new default that broad would assume consent, so it ships as a flag to enable.
+
+With the flag absent, behavior is unchanged: the per-task temp root is still created, still recorded as `tasktmp=`, still holds Go's build temp at `gotmp/`, and is still removed by `fm-teardown.sh`, but the agent's own scratch stays wherever the harness puts it.
+For Claude Code that is `/tmp/claude-<uid>/`, which is outside the task root and is **not** removed by teardown, so that scratch accumulates until the directory is cleared by hand or the machine reboots.
+On a RAM-backed `/tmp` that is retained memory rather than disk.
+Turning the flag on is what closes that leak; the default only bounds Go's build temp.
+
+A raw launch command is the unverified-adapter escape hatch and is never given the pin, with the flag on or off.
+The flag is inherited by secondmate homes, so a secondmate's own crewmates follow the primary's choice.
+`bin/fm-spawn.sh` owns the launch mechanics and [`bin/fm-task-tmp-lib.sh`](../bin/fm-task-tmp-lib.sh)'s header owns the temp-root path shape, creation validation, and removal rules.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
@@ -411,7 +426,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `task-tmpdir-pin`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
@@ -792,6 +807,7 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
+FM_TASK_TMP_BASE=/tmp    # parent directory of each task's own temp root (bin/fm-task-tmp-lib.sh); spawn and teardown must agree on it, or teardown refuses the removal and reports it
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
@@ -927,6 +943,17 @@ FM_INBOX_STT_MODEL=     # overrides config/inbox-stt-model for fm-inbox.sh say
 FM_INBOX_ASK_MODEL=     # overrides config/inbox-ask-model for fm-inbox.sh ask
 FM_INBOX_PROFILE=       # overrides config/inbox-profile; explicitly empty forces ambient credentials
 ```
+
+A task that was already in flight when the per-task temp root became home-scoped recorded the older undiscriminated `<base>/fm-<id>` shape, so its teardown prints `warning: recorded temp root ... is not <id>'s own` and leaves the directory in place.
+That is intended one-time upgrade behavior rather than a fault: the old shape cannot be attributed to a home, because two homes with colliding task ids both recorded exactly it, so removing it would risk deleting a live sibling home's directory.
+What is left behind is small and bounded - those roots hold only Go build temp, since agent scratch reaches a task root only where `config/task-tmpdir-pin` is on - and it stops appearing once the tasks in flight at the upgrade are gone.
+An operator who wants the space back can remove such a directory by hand after confirming no live task is using it.
+[`bin/fm-task-tmp-lib.sh`](../bin/fm-task-tmp-lib.sh)'s header owns the full rationale for that refusal.
+
+`fm-spawn.sh` also refuses to start a task when the path it would use as that task's temp root already exists as a symlink, as a non-directory, or as a directory belonging to another user, printing `error: temp root ... refusing to use it`.
+The root's name is deterministic and its default parent `/tmp` is world-writable, so writing through such a path would hand whatever the task puts there - Go's build temp always, and the agent's whole scratch tree when `config/task-tmpdir-pin` is on - to a directory this user neither controls nor tears down.
+Remove or rename the offending path after establishing where it came from, then spawn again.
+A fresh spawn that aborts before its task record is published removes the root it just created, because nothing would name that path afterwards.
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
 `FM_TREEHOUSE_RETURN_LOCK_RETRIES` accepts a nonnegative integer, and an unset, blank, or invalid value uses the default of 3.

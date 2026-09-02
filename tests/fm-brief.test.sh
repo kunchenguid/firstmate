@@ -749,6 +749,15 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  # A torn-down scout's temp root goes with the task, so a report that cites a
+  # path under it cites something already gone. The scaffold removes the need for
+  # any preservation special case by telling the scout, in the rendered brief, to
+  # copy cited evidence into the report's own directory - named absolutely, the
+  # way every other path in this generated brief is.
+  assert_grep "copy that file into \`$BRIEF_HOME/data/brief-scout-q6/\`" "$brief" \
+    "scout brief must tell the scout to copy cited evidence beside the report"
+  assert_grep "never a path under the worktree or under a temp directory" "$brief" \
+    "scout brief must rule out citing worktree or temp paths that cleanup removes"
   assert_grep "you may host the Lavish review loop yourself" "$brief" \
     "scout brief must mention the option to host a Lavish review loop"
 

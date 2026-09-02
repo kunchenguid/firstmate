@@ -1163,9 +1163,25 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' orca
       ;;
-    bin/fm-backend.sh|bin/fm-backend-hometag-lib.sh)
+    bin/fm-backend.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-backend-hometag-lib.sh)
+      # The shared home tag has exactly three call sites: bin/backends/cmux.sh
+      # and bin/backends/zellij.sh scope their titles with it, and
+      # bin/fm-task-tmp-lib.sh discriminates the per-task temp root with it.
+      # The cmux and zellij suites re-derive its prefix-and-hash shape byte for
+      # byte (cmux, zellij); the temp-root side is everything
+      # bin/fm-task-tmp-lib.sh covers below. Herdr does not use this tag - it
+      # labels workspaces through fm_backend_herdr_workspace_label instead.
+      printf '%s\n' cmux
+      printf '%s\n' zellij
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
+      printf '%s\n' orca
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
@@ -1234,7 +1250,15 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-teardown.sh)
+      # Teardown's own suite (pr-forge) plus fm-gotmp.test.sh
+      # (session-bootstrap), which drives the real teardown subprocess through
+      # the temp-root ownership refusals, the unremovable-root non-fatal path,
+      # and the live-sibling survival case.
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
@@ -1257,6 +1281,21 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-task-tmp-lib.sh)
+      # The per-task temp root: created by fm-spawn (backend-dispatch), removed
+      # by fm-teardown (pr-forge), and covered directly by fm-gotmp.test.sh
+      # (session-bootstrap). Three spawn suites derive the exact path through
+      # this library's fm_test_task_tmp_root and assert it whole - the dispatch
+      # profile (backend-dispatch) on both sides of the pin flag, the Kimi spawn
+      # (pure-contract-unit) on the enabled pin and the recorded tasktmp=, and
+      # the Orca spawn (orca) on the pane's GOTMPDIR export, which is all it
+      # asserts because it never creates config/task-tmpdir-pin.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
+      printf '%s\n' orca
+      printf '%s\n' pure-contract-unit
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)

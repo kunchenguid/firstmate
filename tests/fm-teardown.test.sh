@@ -58,6 +58,10 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+# Derive every per-task temp root inside this suite's own sandbox instead of the
+# machine's /tmp, so the tasktmp case creates and leaves nothing outside it. The
+# teardown subprocess and fm_test_task_tmp_root read the same override.
+export FM_TASK_TMP_BASE="$TMP_ROOT"
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
@@ -1774,6 +1778,71 @@ SH
   pass "forced secondmate teardown holds every descendant lifecycle and metadata lock"
 }
 
+# Seed one task's own temp root under <home>, holding agent scratch shaped the way
+# a harness lays it out, and record it as that task's tasktmp= exactly as fm-spawn
+# does. Echoes the LITERAL path.
+# A caller must keep that string and assert on it, never re-derive the path later:
+# the root is home-scoped through the home's .fm-secondmate-home marker, so a
+# derivation repeated after the home is gone names a different, never-created path
+# and would pass whether or not the removal worked.
+seed_task_tmp_for() {  # <home> <task-id> <session>
+  local home=$1 id=$2 session=$3 root
+  root=$(fm_test_task_tmp_root "$home" "$id" "$home")
+  mkdir -p "$root/claude-1000/-home-cap--treehouse-proj-1/$session/scratchpad"
+  printf '%s\n' "$id scratch" \
+    > "$root/claude-1000/-home-cap--treehouse-proj-1/$session/scratchpad/index.db"
+  printf '%s\n' "tasktmp=$root" >> "$home/state/$id.meta"
+  printf '%s\n' "$root"
+}
+
+test_forced_secondmate_teardown_removes_child_task_temp_roots() {
+  # Forced retirement of a secondmate home retires every child task with it, and
+  # each child's record - the only thing that names that child's temp root - goes
+  # with the home. Since the TMPDIR pin that root holds the child agent's whole
+  # scratch tree, so leaving it behind orphans it permanently.
+  # A live sibling home holding a task with the SAME id must survive: /tmp is one
+  # namespace for every firstmate home, so the home tag is the only thing that
+  # separates the two, and removal must be by exact recorded path alone.
+  local case_dir home sibling_home rc child_a_tmp child_b_tmp sibling_tmp sibling_db
+  case_dir=$(make_case forced-child-tasktmp)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  child_a_tmp=$(seed_task_tmp_for "$home" child-a session-child-a)
+  child_b_tmp=$(seed_task_tmp_for "$home" child-b session-child-b)
+
+  # An unrelated live home whose own in-flight task carries the id child-a, so
+  # only the home tag separates its root from the retired child's.
+  sibling_home="$case_dir/live-sibling-home"
+  mkdir -p "$sibling_home/state"
+  printf '%s\n' live-sibling > "$sibling_home/.fm-secondmate-home"
+  sibling_tmp=$(seed_task_tmp_for "$sibling_home" child-a session-live)
+  sibling_db="$sibling_tmp/claude-1000/-home-cap--treehouse-proj-1/session-live/scratchpad/index.db"
+  [ "$sibling_tmp" != "$child_a_tmp" ] \
+    || fail "forced-child-tasktmp: precondition - the two homes' child-a roots must differ"
+
+  # The removal assertions below are only load-bearing if these roots are really
+  # there first: a path that never existed is absent afterwards no matter what
+  # teardown did.
+  [ -d "$child_a_tmp" ] || fail "forced-child-tasktmp: precondition - child-a's temp root was not seeded"
+  [ -d "$child_b_tmp" ] || fail "forced-child-tasktmp: precondition - child-b's temp root was not seeded"
+  [ -f "$sibling_db" ] || fail "forced-child-tasktmp: precondition - the live sibling's scratch was not seeded"
+  assert_grep "tasktmp=$child_a_tmp" "$home/state/child-a.meta" \
+    "forced-child-tasktmp: precondition - child-a's meta must record the seeded root"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "forced-child-tasktmp: forced secondmate teardown should complete"
+  [ ! -d "$home" ] || fail "forced-child-tasktmp: the secondmate home survived forced teardown"
+  [ ! -e "$child_a_tmp" ] \
+    || fail "forced-child-tasktmp: retired child-a left its temp root behind ($child_a_tmp)"
+  [ ! -e "$child_b_tmp" ] \
+    || fail "forced-child-tasktmp: retired child-b left its temp root behind ($child_b_tmp)"
+  [ -f "$sibling_db" ] \
+    || fail "forced-child-tasktmp: a live sibling home's identically-named task lost its scratch"
+  pass "forced secondmate teardown removes each retired child's own temp root and spares a live sibling home's"
+}
+
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   local case_dir home log closed rc
   case_dir=$(make_case herdr-child-unconfirmed-close)
@@ -2247,14 +2316,18 @@ test_leaked_worktree_process_is_reaped() {
 }
 
 test_leaked_tasktmp_process_is_reaped() {
-  local case_dir rc pid
+  local case_dir rc pid task_tmp
   case_dir=$(make_case leaked-tasktmp-reap)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
-  mkdir -p "$case_dir/tasktmp"
+  # Teardown scans - and removes - only the root bin/fm-task-tmp-lib.sh derives
+  # for this task under this home, so the fixture records exactly that path
+  # instead of an arbitrary one. run_teardown resolves FM_HOME the same way.
+  task_tmp=$(fm_test_task_tmp_root "${FM_HOME:-$ROOT}" task-x1)
+  printf '%s\n' "tasktmp=$task_tmp" >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$task_tmp"
   land_shippable_commit "$case_dir"
 
-  ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
+  ( cd "$task_tmp" && exec sleep 300 ) &
   pid=$!
   disown
   sleep 0.3
@@ -2620,6 +2693,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
+test_forced_secondmate_teardown_removes_child_task_temp_roots
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close

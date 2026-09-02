@@ -15,14 +15,16 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
-KIMI_RUNTIME_TASK_TMP=
+# Derive every per-task temp root inside this suite's own sandbox instead of the
+# machine's /tmp, so a spawned case creates and leaves nothing outside it. The
+# spawn subprocess and fm_test_task_tmp_root read the same override.
+export FM_TASK_TMP_BASE="$TMP_ROOT"
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
-  [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_kimi_harness EXIT
@@ -148,6 +150,9 @@ make_spawn_case() {
   printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
   printf 'brief for kimi\n' > "$home/data/$id/brief.md"
   printf 'kimi\n' > "$home/config/crew-harness"
+  # These cases assert the ENABLED launch pin, which is opt-in and off by
+  # default (config/task-tmpdir-pin; docs/configuration.md "Task TMPDIR pin").
+  touch "$home/config/task-tmpdir-pin"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
@@ -185,11 +190,11 @@ EOF
 test_kimi_launch_then_send_is_verified() {
   local id rec out rc launch pointer brief_real meta task_tmp
   id="kimi-success-z1-$$"
-  task_tmp="/tmp/fm-$id"
-  KIMI_RUNTIME_TASK_TMP=$task_tmp
-  rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
+  # The temp root is home-scoped, so derive it through its owning library rather
+  # than spelling the shape out here.
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
@@ -198,8 +203,8 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
+  [ "$launch" = "TMPDIR='$task_tmp' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+    || fail "kimi launch did not pin the task temp root and use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
@@ -213,13 +218,80 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
   assert_grep "tasktmp=$task_tmp" "$meta" "kimi meta did not record its task temp root"
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
-  assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
+  assert_grep "export GOTMPDIR='$task_tmp/gotmp'" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+test_spawn_refuses_a_planted_temp_root_symlink() {
+  # The temp root's name is deterministic and its real parent /tmp is
+  # world-writable, so another local user can plant a symlink at it. The launch
+  # pins TMPDIR to that root, so writing through the link would hand the agent's
+  # whole scratch tree to a directory this user does not own. Refuse instead.
+  local id rec out rc task_tmp target
+  id=kimi-tmp-symlink-z9
+  rec=$(make_spawn_case tmp-symlink "$id")
+  read_spawn_record "$rec"
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
+  target="$TMP_ROOT/planted-target-z9"
+  mkdir -p "$target"
+  ln -s "$target" "$task_tmp"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn accepted a symlink planted at its temp root"
+  assert_contains "$out" "refusing to use it" "spawn omitted the concrete temp-root refusal"
+  [ -z "$(ls -A "$target")" ] || fail "spawn created directories through the planted symlink"
+  [ -L "$task_tmp" ] || fail "spawn removed the planted symlink instead of refusing"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "spawn launched an agent through the planted symlink"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn recorded a task whose temp root it refused"
+  pass "fm-spawn: a symlink planted at the task temp root refuses the spawn before launch"
+}
+
+test_spawn_removes_its_temp_root_when_it_aborts_unrecorded() {
+  # A fresh spawn creates its temp root before any record names it. If it aborts
+  # in between, no later teardown could find the path, so the abort must remove
+  # it - otherwise the failed-spawn path keeps the very leak this root closes.
+  # A directory where the task record goes makes the atomic publish fail, which
+  # is exactly an abort after creation and before the record exists.
+  local id rec out rc task_tmp
+  id=kimi-tmp-abort-z10
+  rec=$(make_spawn_case tmp-abort "$id")
+  read_spawn_record "$rec"
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
+  mkdir -p "$HOME_DIR/state/$id.meta"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn succeeded although its task record could not be published"
+  assert_contains "$out" "could not be published" "spawn omitted the record-publication failure"
+  [ ! -e "$task_tmp" ] || fail "aborted spawn left its unrecorded temp root behind: $task_tmp"
+  pass "fm-spawn: a spawn that aborts before recording its temp root removes that root"
+}
+
+test_spawn_keeps_a_temp_root_it_did_not_create_when_it_aborts() {
+  # The other half of the pair above: this spawn did not create the root, it
+  # accepted one already there, which is what a live task of the same id would
+  # own. Its record names the path and outlives this abort, so the abort must
+  # leave it alone - removing it would destroy that agent's running scratch.
+  local id rec out rc task_tmp scratch
+  id=kimi-tmp-abort-existing-z11
+  rec=$(make_spawn_case tmp-abort-existing "$id")
+  read_spawn_record "$rec"
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
+  scratch="$task_tmp/claude-1000/-slot/session/index.db"
+  mkdir -p "${scratch%/*}"
+  printf 'live scratch\n' > "$scratch"
+  mkdir -p "$HOME_DIR/state/$id.meta"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn succeeded although its task record could not be published"
+  assert_contains "$out" "could not be published" "spawn omitted the record-publication failure"
+  [ -d "$task_tmp" ] || fail "aborted spawn removed a temp root it did not create: $task_tmp"
+  [ -f "$scratch" ] || fail "aborted spawn destroyed the scratch inside a temp root it did not create"
+  pass "fm-spawn: a spawn that aborts over a temp root it did not create leaves that root intact"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -443,7 +515,7 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
 }
 
 test_kimi_falls_back_to_expanded_home_binary() {
-  local id rec out rc launch fallback
+  local id rec out rc launch fallback task_tmp
   id=kimi-fallback-z4
   rec=$(make_spawn_case fallback "$id")
   read_spawn_record "$rec"
@@ -454,8 +526,9 @@ test_kimi_falls_back_to_expanded_home_binary() {
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" ] \
+  [ "$launch" = "TMPDIR='$task_tmp' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
@@ -675,6 +748,9 @@ test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
+test_spawn_refuses_a_planted_temp_root_symlink
+test_spawn_removes_its_temp_root_when_it_aborts_unrecorded
+test_spawn_keeps_a_temp_root_it_did_not_create_when_it_aborts
 test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation

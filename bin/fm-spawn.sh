@@ -170,6 +170,12 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+# Every task gets its own temp root (bin/fm-task-tmp-lib.sh owns the path),
+# recorded as tasktmp= in the meta, with Go's build temp at gotmp/ exported as
+# GOTMPDIR, and fm-teardown removes that root with the task.
+# Pinning the agent's own TMPDIR to that root as well - which is what confines
+# harness scratch to it - is opt-in through the config/task-tmpdir-pin presence
+# flag and off by default; see docs/configuration.md "Task TMPDIR pin".
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -303,6 +309,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-task-tmp-lib.sh
+. "$SCRIPT_DIR/fm-task-tmp-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -718,6 +726,7 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
+TASK_TMP_ABORT_CLEANUP=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -837,6 +846,23 @@ spawn_abort_cleanup() {
         fi
       fi
     fi
+  fi
+  # Before the per-task lock is released, and after the orca recovery record
+  # above: that record names the root, and a root already removed here is a
+  # silent no-op at teardown. The lock ordering is the load-bearing part. This
+  # root can still be adopted by another spawn of the same id, because
+  # fm_task_tmp_create accepts an existing directory this user owns so a
+  # relaunch can reuse its own root. Releasing the lock first would let a
+  # waiting same-id spawn take the lock, adopt this very directory, and then
+  # have it deleted underneath it, leaving a live agent with a TMPDIR and
+  # GOTMPDIR that no longer exist - the same "never delete a live task's
+  # scratch" rule the removal path exists to keep. Holding the lock across the
+  # removal makes adoption and removal mutually exclusive. Only this task's own
+  # root is touched, through the same validation teardown uses, and a refusal or
+  # failure only reports - it never changes the abort's status.
+  if [ "$TASK_TMP_ABORT_CLEANUP" = 1 ]; then
+    TASK_TMP_ABORT_CLEANUP=0
+    fm_task_tmp_remove "$ID" "${TASK_TMP:-}" || true
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -1300,9 +1326,11 @@ launch_template() {
   esac
 }
 
+LAUNCH_RAW=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
+    LAUNCH_RAW=1
     HARNESS=""
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
@@ -2473,13 +2501,30 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
+# Per-task temp root (path shape owned by bin/fm-task-tmp-lib.sh), with Go's
+# build temp nested at gotmp/. Go won't create GOTMPDIR, so mkdir before it is
+# used; fm-teardown removes the whole root. Nested (not a bare root/gotmp) so
+# other per-task temp lives alongside it and teardown cleans one deterministic
+# path. The agent's own harness scratch becomes a second occupant only when the
+# config/task-tmpdir-pin flag is present, which is what pins the launch TMPDIR
+# here; with the flag absent that scratch stays where the harness puts it.
+TASK_TMP=$(fm_task_tmp_root "$ID") || { echo "error: cannot derive a temp root for task '$ID'" >&2; exit 1; }
+# Creation is validated by the same library that owns the path: the root name is
+# predictable and /tmp is world-writable, so a foreign symlink or directory
+# planted at that name would receive whatever this task writes through it - Go's
+# build temp always, and the agent's whole scratch tree when the TMPDIR pin
+# below is enabled. Refuse the spawn rather than write through it.
+fm_task_tmp_create "$TASK_TMP" || exit 1
+# Arm the abort trap only for a root this spawn created itself (the outcome
+# FM_TASK_TMP_CREATED reports, contract in bin/fm-task-tmp-lib.sh), and keep it
+# armed until a published record names the path. A root that was already there
+# may be a live task's own scratch, so an abort must leave it. Whether this is a
+# relaunch is not the discriminator: a relaunch of a task recorded before
+# tasktmp= existed creates the root too, and nothing would name it if the
+# relaunch aborted before publishing its replacement record.
+if [ "$FM_TASK_TMP_CREATED" -eq 1 ]; then
+  TASK_TMP_ABORT_CLEANUP=1
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -2910,6 +2955,9 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  # The published record now carries tasktmp=, so teardown can find the root; a
+  # later abort must leave it for teardown rather than remove it here.
+  TASK_TMP_ABORT_CLEANUP=0
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created
@@ -2931,6 +2979,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  # The replacement record now carries tasktmp=, so teardown can find the root;
+  # a later abort must leave it for teardown rather than remove it here.
+  TASK_TMP_ABORT_CLEANUP=0
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so
@@ -2985,6 +3036,20 @@ esac
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# Optionally pin the agent's temp root to this task's own, so harness scratch
+# (tool results, scratchpad files, and anything else it derives from TMPDIR)
+# lands where teardown removes it. The pane shell keeps its ambient TMPDIR; only
+# the agent process tree is scoped. A raw launch command is the
+# unverified-adapter escape hatch and is passed through exactly as given, so it
+# is left alone.
+# Off unless config/task-tmpdir-pin is present: TMPDIR is far broader than the
+# GOTMPDIR export above, redirecting every temp file the agent and its children
+# create, so it ships as a flag to enable rather than a new default. With the
+# flag absent the agent's scratch stays wherever the harness puts it (commonly
+# /tmp/claude-<uid>/), outside this root and not removed by teardown.
+if [ "$LAUNCH_RAW" -eq 0 ] && [ -f "$CONFIG/task-tmpdir-pin" ]; then
+  LAUNCH="TMPDIR=$(shell_quote "$TASK_TMP") $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
@@ -3037,7 +3102,7 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+spawn_send_text_line "$T" "export GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp")"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.

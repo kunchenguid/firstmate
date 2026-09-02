@@ -110,6 +110,29 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+# fm_test_task_tmp_root <fm-home> <task-id> [fm-root]: the canonical per-task
+# temp root a spawn/teardown subprocess derives for that task. The root is
+# home-scoped via bin/fm-backend-hometag-lib.sh, so a suite asserting the launch's
+# TMPDIR pin derives it through the owning library - with the same FM_HOME/FM_ROOT
+# the subprocess resolves - instead of spelling the shape out a second time. The
+# suites that need it launch spawn with FM_ROOT_OVERRIDE='', so the subprocess
+# resolves FM_ROOT to this same installation root, which is the default.
+# A secondmate home is its own installation root, so a suite asserting a
+# secondmate's task passes that home as <fm-root> too.
+#
+# The derivation runs in a separate `bash -c` process that RECEIVES FM_HOME and
+# FM_ROOT through a command-prefix assignment, rather than assigning those shared
+# names inside a subshell of the sourcing shell. Assigning them here would make
+# every suite that sources this library look, to static analysis, like it reads
+# FM_HOME after a subshell modified it (SC2031) - a warning that lands in files
+# this helper never touches, because the shared names really would be at risk of
+# being confused with the suite's own.
+fm_test_task_tmp_root() {
+  local home=$1 id=$2 root=${3:-$ROOT}
+  FM_HOME="$home" FM_ROOT="$root" bash -c '. "$1"; fm_task_tmp_root "$2"' \
+    fm_test_task_tmp_root "$ROOT/bin/fm-task-tmp-lib.sh" "$id"
+}
+
 trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM

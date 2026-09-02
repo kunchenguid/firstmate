@@ -1116,3 +1116,36 @@ The live probe loads the tracked watcher extension through Pi's real resource lo
 It proved that a follow-up the extension sends while main is streaming raises no `before_agent_start` at queue time or when the run reaches it, joins the run as a user `message_start` carrying the exact wake text in its own model turn, and is followed by a verified successor and delivery of the next close; a follow-up sent to the idle main raises `before_agent_start` with the exact text before its user `message_start`.
 The portable regression drives the same shape with a fake main that never raises `before_agent_start` while streaming, then proves a replacement replays only the follow-up Pi had not consumed and that an exhausted restoration delivers its typed failure without launching a further arm.
 A second regression holds a branch settlement open while the verified successor exits with a failure, and proves that failure takes the ordinary bounded retry once the delivery settles rather than leaving the generation with no watcher and no retry.
+
+## Per-task temp root and harness scratch
+
+`bin/fm-spawn.sh` pins each launched agent's `TMPDIR` to that task's own temp root so its harness scratch is torn down with the task (`bin/fm-task-tmp-lib.sh`), but only where the default-off `config/task-tmpdir-pin` flag is present; see [`../configuration.md`](../configuration.md) "Task TMPDIR pin".
+The evidence below is what that flag buys when it is on, and equally what an unpinned default leaves under `/tmp`.
+That confinement depends on one vendor-observable fact: a harness derives its scratch tree from the process `TMPDIR` rather than a fixed `/tmp`.
+
+Verified on 2026-08-28 with Claude Code 2.1.251 on Linux 6.19.12 x86_64, in a tmux pane whose shell exported `TMPDIR` before launch:
+
+```sh
+export TMPDIR=/tmp/fm-scratch-probe/tmp; mkdir -p "$TMPDIR"
+claude --dangerously-skip-permissions
+# prompt: Print only the absolute path of your scratchpad directory.
+```
+
+The agent answered with, and the filesystem carried, a path under the pinned root:
+
+```text
+/tmp/fm-scratch-probe/tmp/claude-1000/-tmp-fm-scratch-probe-wt/aa9a9886-e9a4-4f65-9381-46c935f6fb82/scratchpad
+```
+
+The same root also received that run's `node-compile-cache`, so an unpinned run's whole scratch tree is what accumulates under `/tmp` between reboots.
+Only Claude Code is verified here; it is the harness whose scratch was observed leaking (up to 2.7 GB of search-index databases from a single session).
+
+No live guard is registered for this fact, because nothing in Firstmate reads harness output to reach a verdict from it.
+A harness that stopped honoring `TMPDIR` would simply keep its scratch outside the task root: teardown still removes exactly the one recorded temp root, still refuses anything else, and still succeeds.
+The portable regressions for the removal itself are in `tests/fm-gotmp.test.sh`, which covers teardown's removal of its own task's root including a live sibling task in a reused worktree slot that must survive, the ownership refusals, and the creation guard.
+Both sides of the flag are pinned in `tests/fm-spawn-dispatch-profile.test.sh`: absent, the launch carries no `TMPDIR=` prefix while the root is still created and still recorded as `tasktmp=`; present, the prefix names this task's own root.
+That suite asserts nothing about `GOTMPDIR`; the flag-off `GOTMPDIR` export is held by `tests/fm-backend-orca.test.sh`, which asserts the pane export of `GOTMPDIR` under the task root and never creates `config/task-tmpdir-pin`.
+The enabled launch pin is also asserted in `tests/fm-kimi-harness.test.sh`, which drives a real spawn through the creation refusal and through the aborted-spawn cleanup: an abort before the task record is published removes a root that spawn created itself, and leaves a root it only found already present, because that one can be a live task's own.
+`tests/fm-control-relaunch.test.sh` holds the same rule on the relaunch path: a task recorded before `tasktmp=` existed carries no root, so the relaunch creates one itself, and an abort before the replacement record is published removes it.
+A separate case there covers the other side, where a launch failure after publication leaves the root the published record now names for teardown.
+Forced secondmate retirement removes each retired child's own root the same way, and `tests/fm-teardown.test.sh` holds that path against a live sibling home whose task carries the same id.

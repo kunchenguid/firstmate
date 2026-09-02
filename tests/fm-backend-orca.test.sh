@@ -7,6 +7,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
+# Derive every per-task temp root the real fm-spawn creates inside this suite's
+# own sandbox instead of the machine's /tmp, so a spawned case leaves nothing
+# behind outside it. The spawn subprocess and fm_test_task_tmp_root read the
+# same override.
+export FM_TASK_TMP_BASE="$TMP_ROOT"
 
 make_orca_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
@@ -488,7 +493,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
 }
 
 test_spawn_writes_orca_metadata_and_launches_harness() {
-  local proj wt data state config id out log
+  local proj wt data state config id out log task_tmp
   id="orcaspawnz1"
   proj="$TMP_ROOT/spawn-project"
   wt="$TMP_ROOT/spawn-wt"
@@ -518,11 +523,14 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
-  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
+  # The temp root is home-scoped, so derive it through its owning library rather
+  # than spelling the shape out here; the assertion stays an exact whole-argument
+  # match so a wrong path is still caught.
+  task_tmp=$(fm_test_task_tmp_root "${FM_HOME:-$ROOT}" "$id")
+  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f'"export GOTMPDIR='$task_tmp/gotmp'"$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
   assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
     "spawn did not send the selected harness launch command through Orca"
-  rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }
 

@@ -39,12 +39,16 @@ set -u
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
+# The secondmate relaunches below run the real bin/fm-spawn.sh, which creates the
+# relaunched task's own per-task temp root.
+# Derive it inside this suite's sandbox so a run leaves nothing in the machine's
+# /tmp, where each world's own FM_ROOT_OVERRIDE would give the leftover a
+# different home tag every run and so no fixed name to clean up by.
+export FM_TASK_TMP_BASE="$TMP_ROOT"
 SESSION_START_TEST_HARNESS_PID=$$
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
-SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
 SESSION_START_HERDR_SECOND_MATE_ID="fmtest-herdr-${TMP_ROOT##*.}"
-SESSION_START_HERDR_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_HERDR_SECOND_MATE_ID"
-FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT" "$SESSION_START_SECOND_MATE_TMP" "$SESSION_START_HERDR_SECOND_MATE_TMP")
+FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
 fm_git_identity fmtest fmtest@example.invalid
 
