@@ -413,8 +413,9 @@ The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you on the next delivery phase.
 For an ordinary no-mistakes task, that next phase is /no-mistakes validation and PR delivery.
-For deployable ByteDance-internal code with a BITS/PPE delivery surface, do not start no-mistakes until Firstmate has loaded \`bits-development\` and that lifecycle has delivered the exact candidate through the BITS-owned source branch, deployed it to a fresh dedicated PPE, and passed E2E against that deployment.
-On that BITS/PPE path, the final no-mistakes pass is limited to review, tests, documentation, and lint; it must not own rebase, push, PR, or CI, and a code-changing fix creates a new candidate that repeats BITS PPE deployment and E2E before another final pass.
+For deployable ByteDance-internal code with a BITS/PPE delivery surface, do not start no-mistakes until Firstmate has loaded \`bits-development\`, delivered the exact candidate through the BITS-owned source branch, created one fresh dedicated PPE for the first delivery through the newly created Dev Task or reused that task's existing PPE for a subsequent revision, and passed the required API or end-to-end test against that exact deployment.
+On that BITS/PPE path, the final no-mistakes pass is limited to review, tests, documentation, and lint; it must not own rebase, push, PR, or CI, and any code-changing final-validation fix returns to the existing Dev Task and source branch for exact push verification, same-PPE deployment, and API Test before another final pass.
+Once the Dev Task and its dedicated PPE exist, the subsequent-revision loop must not create a new Dev Task, MR, binding, Change Card, snapshot, environment, or PPE.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
