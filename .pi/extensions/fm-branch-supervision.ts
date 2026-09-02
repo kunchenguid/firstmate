@@ -891,7 +891,7 @@ export default function (pi: ExtensionAPI) {
     return presentUnprocessedOutcomes(expectedGeneration);
   }
 
-  function createReportTool(toolGeneration: number, toolSelectionRevision: number): ToolDefinition {
+  function createReportTool(toolGeneration: number): ToolDefinition {
     return {
       name: "fm_branch_report",
       label: "Report supervision outcome",
@@ -944,7 +944,6 @@ export default function (pi: ExtensionAPI) {
           };
         }
         durableReportRevision += 1;
-        recordDurableBranchReport(toolGeneration, toolSelectionRevision);
         const seq = Number(appended.stdout);
         if (!Number.isSafeInteger(seq) || seq < 1 || !reconcileUnreadOutcomes(toolGeneration)) {
           return {
@@ -1063,7 +1062,7 @@ ${context.command}
       tools: [...BRANCH_TOOL_NAMES],
       customTools: [
         bashTool as unknown as ToolDefinition,
-        createReportTool(branchGeneration, selectionRevision),
+        createReportTool(branchGeneration),
       ],
       ...(pinned ? { model: pinned.model, modelRuntime: pinned.modelRuntime } : {}),
       ...(effort === undefined ? {} : { thinkingLevel: effort }),
@@ -1208,6 +1207,7 @@ ${context.command}
         if (durableReportRevision <= reportRevisionBeforePrompt) {
           throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
         }
+        recordDurableBranchReport(branchForWake.generation, branchForWake.selectionRevision);
         if (!releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }

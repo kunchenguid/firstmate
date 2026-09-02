@@ -1761,6 +1761,15 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
     return;
   }
   if (attempt === 5) {
+    const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+    const recorded = await report.execute(
+      "reported-before-provider-error",
+      { task: "branch-driver", verdict: "routine", summary: "durable report preceded a failed continuation" },
+      undefined,
+      undefined,
+      {},
+    );
+    if (recorded.isError) throw new Error(`pre-error report failed: ${JSON.stringify(recorded)}`);
     await new Promise((resolve) => { releaseFailedProbe = resolve; });
   }
   session.messages.push({
@@ -1817,6 +1826,9 @@ now += 1;
 const failedProbe = dispatch("signal: first cooldown probe");
 if (!failedProbe.accepted) throw new Error("the branch did not accept one probe after its cooldown elapsed");
 await settle(() => attempt === 5 && typeof releaseFailedProbe === "function", "in-flight failed cooldown probe");
+if (sentToMain.some((sent) => sent.message.content.includes("Supervision branch recovered after a successful cooldown probe"))) {
+  throw new Error("a durable report cleared the latch before its prompt settled");
+}
 const duringProbe = makeOffer("signal: main owns wakes during a branch probe");
 pi.events.emit("fm-branch-supervision:dispatch", duringProbe);
 if (duringProbe.accepted) throw new Error("a second wake entered the branch while its one cooldown probe was in flight");
