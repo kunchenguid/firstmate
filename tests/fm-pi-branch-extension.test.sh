@@ -558,8 +558,10 @@ function makeOffer(message, projects = [approvedProject], heartbeat = false, eli
     heartbeat,
     eligible,
     accepted: false,
-    accept() {
+    settlement: Promise.resolve(),
+    accept(settlement = Promise.resolve()) {
       offer.accepted = true;
+      offer.settlement = settlement;
     },
   };
   return offer;
@@ -1529,22 +1531,27 @@ const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, mainUserMessages }; })()`);
 const { dispatch, settle, mainUserMessages } = globalThis.__t;
 
-// A branch that cannot come up must degrade to today's behavior: the accepted
-// wake falls back to main with the failure named, and later wakes are no
-// longer accepted (no wake is ever lost).
-if (!dispatch("signal: first wake").accepted) throw new Error("first offer was not accepted");
-await settle(() => mainUserMessages.length === 1, "fallback delivery to main");
-const fallback = mainUserMessages[0].content;
-if (!fallback.includes("FIRSTMATE WATCHER WAKE: signal: first wake")) throw new Error(`fallback lost the wake: ${fallback}`);
-if (!fallback.includes("Supervision branch unavailable")) throw new Error(`fallback did not name the branch failure: ${fallback}`);
-if (mainUserMessages[0].options.deliverAs !== "followUp") throw new Error("fallback must deliver as a follow-up");
+// A branch that cannot come up rejects the accepted offer's settlement so the
+// watcher retains delivery ownership and can route the durable wake to main.
+// Later wakes are no longer accepted and therefore take that same watcher path
+// directly (no wake is ever lost or independently delivered twice).
+const firstOffer = dispatch("signal: first wake");
+if (!firstOffer.accepted) throw new Error("first offer was not accepted");
+const firstFailure = await firstOffer.settlement.then(
+  () => null,
+  (error) => error,
+);
+if (!(firstFailure instanceof Error) || !firstFailure.message.includes("synthetic generator failure")) {
+  throw new Error(`branch settlement did not expose the startup failure: ${String(firstFailure)}`);
+}
+if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 if (dispatch("signal: second wake").accepted) throw new Error("broken branch kept accepting wakes");
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "broken-branch fallback must return wakes to main: $out"
-  pass "branch default-on eligibility (task-scoped, heartbeat, afk) binds and a broken branch falls back to main"
+  expect_code 0 "$status" "broken-branch settlement must return delivery ownership to the watcher: $out"
+  pass "branch default-on eligibility (task-scoped, heartbeat, afk) binds and a broken branch rejects to watcher fallback"
 }
 
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under() {
@@ -1670,19 +1677,20 @@ const { spawnSync } = await import("node:child_process");
 const { existsSync } = await import("node:fs");
 
 fire("session_start", {});
-if (!dispatch("signal: unacknowledged branch wake").accepted) {
-  throw new Error("eligible wake was not accepted");
-}
+const offer = dispatch("signal: unacknowledged branch wake");
+if (!offer.accepted) throw new Error("eligible wake was not accepted");
 for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if ((globalThis.__fmPrompts ?? []).length !== 1) throw new Error("branch prompt did not settle");
-for (let i = 0; i < 250 && mainUserMessages.length === 0; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
+const failure = await offer.settlement.then(
+  () => null,
+  (error) => error,
+);
+if (!(failure instanceof Error) || !failure.message.includes("produced no durable outcome")) {
+  throw new Error(`settled prompt did not reject delivery ownership: ${String(failure)}`);
 }
-if (mainUserMessages.length !== 1 || !mainUserMessages[0].content.includes("produced no durable outcome")) {
-  throw new Error(`settled prompt without a report did not fall back to main: ${JSON.stringify(mainUserMessages)}`);
-}
+if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 for (let i = 0; i < 250 && existsSync(`${home}/state/.branch-eligible-rows`); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -1782,32 +1790,40 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
 
 const first = dispatch("signal: c1 provider error");
 if (!first.accepted) throw new Error("first provider-error wake was not accepted after branch construction");
-await settle(() => mainUserMessages.length === 1, "first provider-error fallback");
-if (!mainUserMessages[0].content.includes("FIRSTMATE WATCHER WAKE: signal: c1 provider error") ||
-    !mainUserMessages[0].content.includes("provider failed after construction") ||
-    !mainUserMessages[0].content.includes("429: Monthly usage limit reached")) {
-  throw new Error(`provider-error fallback did not detect the normally settled error turn: ${mainUserMessages[0].content}`);
+const firstFailure = await first.settlement.then(() => null, (error) => error);
+if (!(firstFailure instanceof Error) ||
+    !firstFailure.message.includes("provider failed after construction") ||
+    !firstFailure.message.includes("429: Monthly usage limit reached")) {
+  throw new Error(`provider-error settlement lost the settled error turn: ${String(firstFailure)}`);
 }
+if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 if (existsSync(`${home}/state/.branch-eligible-rows`)) {
   throw new Error("provider-error fallback left the claimed row grant active");
 }
 
 const healthy = dispatch("signal: healthy branch turn");
 if (!healthy.accepted) throw new Error("one provider error latched the branch prematurely");
+await healthy.settlement;
 await settle(() => attempt === 2 && sentToMain.length === 1, "healthy branch report");
-if (mainUserMessages.length !== 1) throw new Error("a healthy reported turn fell back to main");
+if (mainUserMessages.length !== 0) throw new Error("a healthy reported turn fell back to main");
 
 const third = dispatch("signal: provider error after reset");
 if (!third.accepted) throw new Error("a successful report did not reset the consecutive provider-error streak");
-await settle(() => mainUserMessages.length === 2, "provider-error fallback after reset");
+const thirdFailure = await third.settlement.then(() => null, (error) => error);
+if (!(thirdFailure instanceof Error) || !thirdFailure.message.includes("provider failed after construction")) {
+  throw new Error(`provider error after reset did not reject settlement: ${String(thirdFailure)}`);
+}
 const fourth = dispatch("signal: consecutive provider error");
 if (!fourth.accepted) throw new Error("the branch latched before the second consecutive provider error settled");
-await settle(() => mainUserMessages.length === 3, "second consecutive provider-error fallback");
+const fourthFailure = await fourth.settlement.then(() => null, (error) => error);
+if (!(fourthFailure instanceof Error) || !fourthFailure.message.includes("provider failed after construction")) {
+  throw new Error(`consecutive provider error did not reject settlement: ${String(fourthFailure)}`);
+}
 
 const fifth = dispatch("signal: branch must now defer directly to main");
 if (fifth.accepted) throw new Error("two consecutive provider errors did not latch the broken branch");
 await new Promise((resolve) => setTimeout(resolve, 50));
-if (attempt !== 4 || mainUserMessages.length !== 3) {
+if (attempt !== 4 || mainUserMessages.length !== 0) {
   throw new Error(`latched branch still prompted or emitted its own fallback: attempts=${attempt} fallbacks=${mainUserMessages.length}`);
 }
 const pauseNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch paused after repeated provider errors"));
@@ -1833,7 +1849,14 @@ const duringProbe = makeOffer("signal: main owns wakes during a branch probe");
 pi.events.emit("fm-branch-supervision:dispatch", duringProbe);
 if (duringProbe.accepted) throw new Error("a second wake entered the branch while its one cooldown probe was in flight");
 releaseFailedProbe();
-await settle(() => mainUserMessages.length === 4, "failed cooldown probe fallback");
+const failedProbeError = await failedProbe.settlement.then(() => null, (error) => error);
+if (!(failedProbeError instanceof Error) || !failedProbeError.message.includes("provider failed after construction")) {
+  throw new Error(`failed cooldown probe did not reject settlement: ${String(failedProbeError)}`);
+}
+if (mainUserMessages.length !== 0) throw new Error("failed cooldown probe bypassed watcher-owned fallback delivery");
+if (existsSync(`${home}/state/.branch-eligible-rows`)) {
+  throw new Error("failed cooldown probe left the claimed row grant active");
+}
 
 // The failed probe doubles the cooldown from five to ten minutes. Five more
 // minutes are not enough, but the next five admit exactly one recovery probe.
@@ -1845,7 +1868,7 @@ now += 5 * 60 * 1000;
 const recoveryProbe = dispatch("signal: recovery probe after extended cooldown");
 if (!recoveryProbe.accepted) throw new Error("the branch did not re-probe after the extended cooldown elapsed");
 await settle(() => attempt === 6 && sentToMain.some((sent) => sent.message.content.includes("cooldown probe recovered the branch")), "successful recovery probe");
-if (mainUserMessages.length !== 4) throw new Error("a successful recovery probe also fell back to main");
+if (mainUserMessages.length !== 0) throw new Error("a successful recovery probe also fell back to main");
 const recoveryNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch recovered after a successful cooldown probe"));
 if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n")) {
   throw new Error(`recovery must surface exactly one one-line note: ${JSON.stringify(recoveryNotes)}`);
@@ -1856,7 +1879,14 @@ if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n"
 // reaches the branch and can report successfully.
 const afterRecoveryError = dispatch("signal: first provider error after recovery");
 if (!afterRecoveryError.accepted) throw new Error("the successful probe did not clear the branch latch");
-await settle(() => mainUserMessages.length === 5, "first post-recovery provider fallback");
+const afterRecoveryFailure = await afterRecoveryError.settlement.then(() => null, (error) => error);
+if (!(afterRecoveryFailure instanceof Error) || !afterRecoveryFailure.message.includes("provider failed after construction")) {
+  throw new Error(`first post-recovery provider error did not reject settlement: ${String(afterRecoveryFailure)}`);
+}
+if (mainUserMessages.length !== 0) throw new Error("post-recovery provider error bypassed watcher-owned fallback delivery");
+if (existsSync(`${home}/state/.branch-eligible-rows`)) {
+  throw new Error("post-recovery provider error left the claimed row grant active");
+}
 const afterRecoveryHealthy = dispatch("signal: healthy turn after one post-recovery error");
 if (!afterRecoveryHealthy.accepted) throw new Error("the successful probe did not clear the provider-error streak");
 await settle(() => attempt === 8 && sentToMain.some((sent) => sent.message.content.includes("post-recovery report proved")), "post-recovery healthy report");
@@ -1920,21 +1950,27 @@ if (!stale.accepted) throw new Error("in-flight wake was not accepted");
 await settle(() => globalThis.__fmMirrorStarted === true, "pending branch mirror");
 fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
 releaseMirror();
-await settle(() => mainUserMessages.length === 1, "stale provider-error fallback");
-if (!mainUserMessages[0].content.includes("provider failed after construction") ||
-    mainUserMessages[0].content.includes("no durable transcript")) {
-  throw new Error(`selection change detached the in-flight transcript: ${mainUserMessages[0].content}`);
+const staleFailure = await stale.settlement.then(() => null, (error) => error);
+if (!(staleFailure instanceof Error) ||
+    !staleFailure.message.includes("provider failed after construction") ||
+    staleFailure.message.includes("no durable transcript")) {
+  throw new Error(`selection change detached the in-flight transcript: ${String(staleFailure)}`);
 }
+if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 
 globalThis.__fmMirrorGate = null;
 const replacementError = dispatch("signal: first replacement provider error");
 if (!replacementError.accepted) throw new Error("replacement branch was unavailable after selection");
-await settle(() => mainUserMessages.length === 2, "replacement provider-error fallback");
+const replacementFailure = await replacementError.settlement.then(() => null, (error) => error);
+if (!(replacementFailure instanceof Error) || !replacementFailure.message.includes("provider failed after construction")) {
+  throw new Error(`replacement provider error did not reject settlement: ${String(replacementFailure)}`);
+}
 
 const healthy = dispatch("signal: replacement branch recovery");
 if (!healthy.accepted) throw new Error("stale provider error polluted the replacement failure streak");
+await healthy.settlement;
 await settle(() => attempt === 3, "replacement branch recovery");
-if (mainUserMessages.length !== 2) throw new Error("healthy replacement turn fell back to main");
+if (mainUserMessages.length !== 0) throw new Error("healthy replacement turn fell back to main");
 process.exit(0);
 EOF
   status=$?
@@ -1960,27 +1996,25 @@ fire("session_start", {});
 const offer = dispatch("signal: interrupted main claim");
 if (!offer.accepted) throw new Error("eligible wake was not accepted before the ownership recheck");
 writeFileSync(`${home}/state/.main-eligible-rows`, "1\n");
-for (let i = 0; i < 250 && mainUserMessages.length === 0; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
+const failure = await offer.settlement.then(
+  () => null,
+  (error) => error,
+);
+if (!(failure instanceof Error) || !failure.message.includes("already claimed by main")) {
+  throw new Error(`main-owned claim did not reject branch settlement: ${String(failure)}`);
 }
 if ((globalThis.__fmPrompts ?? []).length !== 0) {
   throw new Error("branch prompted for a row already claimed by main");
 }
-if (mainUserMessages.length !== 1) {
-  throw new Error(`main-owned row was silently absorbed: ${JSON.stringify(mainUserMessages)}`);
-}
-if (!String(mainUserMessages[0].content).includes("FIRSTMATE WATCHER WAKE: signal: interrupted main claim")) {
-  throw new Error(`fallback lost the durable wake: ${mainUserMessages[0].content}`);
-}
-if (mainUserMessages[0].options.deliverAs !== "followUp") {
-  throw new Error("main-owned fallback was not delivered as a follow-up");
+if (mainUserMessages.length !== 0) {
+  throw new Error(`branch bypassed watcher-owned fallback delivery: ${JSON.stringify(mainUserMessages)}`);
 }
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "a main-owned grant result must still deliver the wake to main: $out"
-  pass "a stale main claim cannot silently suppress later wake delivery"
+  expect_code 0 "$status" "a main-owned grant result must reject to watcher delivery: $out"
+  pass "a stale main claim returns the durable wake to watcher delivery"
 }
 
 test_branch_predrain_recheck_noops_already_drained_wake() {
@@ -2962,12 +2996,20 @@ registryModels.push(
 // downgrade onto main's model, even when main's session knows that model.
 writeFileSync(`${home}/config/supervision-branch-model`, "dynamic/extension-only\n");
 fire("session_start", {}, makeCtx());
-dispatch("signal: unusable pin probe");
-await settle(() => mainUserMessages.length === 1, "fallback to main");
-const delivered = mainUserMessages[0].content;
-if (!delivered.includes("dynamic/extension-only") || !delivered.includes("supervision model pin")) {
-  throw new Error(`the fallback did not name the unusable pin: ${delivered}`);
+const unusableOffer = dispatch("signal: unusable pin probe");
+if (!unusableOffer.accepted) throw new Error("unusable-pin wake was not initially accepted");
+const unusableFailure = await unusableOffer.settlement.then(
+  () => null,
+  (error) => error,
+);
+if (
+  !(unusableFailure instanceof Error) ||
+  !unusableFailure.message.includes("dynamic/extension-only") ||
+  !unusableFailure.message.includes("supervision model pin")
+) {
+  throw new Error(`the rejected settlement did not name the unusable pin: ${String(unusableFailure)}`);
 }
+if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 if ((globalThis.__fmSessions ?? []).length !== 0) throw new Error("an unusable pin must not build a branch session");
 
 // An unparseable file is simply no pin, so supervision keeps working and the
@@ -2985,8 +3027,8 @@ process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "an unusable model pin must fall back to main and an unparseable one must be no pin: $out"
-  pass "an unusable model pin falls back to main and an unparseable one is treated as no pin"
+  expect_code 0 "$status" "an unusable model pin must reject to watcher delivery and an unparseable one must be no pin: $out"
+  pass "an unusable model pin rejects to watcher fallback and an unparseable one is treated as no pin"
 }
 
 test_replacement_activation_cleans_leases_and_retries_failure() {
@@ -3091,23 +3133,23 @@ let releasePrompt;
 globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
 if (!dispatch("signal: active wake").accepted) throw new Error("first wake was not accepted");
 await settle(() => globalThis.__fmPromptStarted === true, "blocked first prompt");
-if (!dispatch("signal: queued wake").accepted) throw new Error("queued wake was not accepted");
+const queuedOffer = dispatch("signal: queued wake");
+if (!queuedOffer.accepted) throw new Error("queued wake was not accepted");
+const queuedFailure = queuedOffer.settlement.then(
+  () => null,
+  (error) => error,
+);
 const entries = [{ type: "message", message: { role: "user", content: "queued mirror must stay undelivered" } }];
 fire("turn_end", {}, {
   sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => entries },
 });
 unlinkSync(`${home}/state/.lock`);
 releasePrompt();
-for (let i = 0; i < 1000 && mainUserMessages.length < 2; i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 10));
+const failure = await queuedFailure;
+if (!(failure instanceof Error) || !failure.message.includes("no longer owns the fleet lock")) {
+  throw new Error(`queued wake did not reject to watcher fallback: ${String(failure)}`);
 }
-if (mainUserMessages.length !== 2) {
-  throw new Error(`every accepted wake without an outcome must return to main after ownership loss: ${JSON.stringify(mainUserMessages)}`);
-}
-if (!mainUserMessages[0].content.includes("FIRSTMATE WATCHER WAKE: signal: active wake") ||
-    !mainUserMessages[1].content.includes("FIRSTMATE WATCHER WAKE: signal: queued wake")) {
-  throw new Error(`ownership-loss fallbacks changed accepted wake order: ${JSON.stringify(mainUserMessages)}`);
-}
+if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 await new Promise((resolve) => setTimeout(resolve, 25));
 const session = globalThis.__fmSessions[0];
 if (session.ops.some((op) => op.kind === "custom")) throw new Error("queued mirror appended after lock ownership was lost");
@@ -3292,8 +3334,10 @@ const offer = {
   heartbeat: false,
   eligible: true,
   accepted: false,
-  accept() {
+  settlement: Promise.resolve(),
+  accept(settlement = Promise.resolve()) {
     offer.accepted = true;
+    offer.settlement = settlement;
   },
 };
 replacementBus.emit("fm-branch-supervision:dispatch", offer);

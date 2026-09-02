@@ -1208,14 +1208,18 @@ import { pathToFileURL } from "node:url";
 
 let tool = null;
 const prompts = [];
+const handlers = new Map();
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
   sendUserMessage: async (message) => {
     prompts.push(message);
+    queueMicrotask(() => handlers.get("before_agent_start")?.({ prompt: message }, {}));
   },
 };
 const rows = () => existsSync(process.env.FM_ARM_LOG)
@@ -1609,10 +1613,6 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const startup = makePi();
 mod.default(startup.pi);
 await startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
-const first = await startup.getTool().execute("startup", {}, undefined, undefined, {});
-if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
-  throw new Error(`startup arm failed: ${JSON.stringify(first.details)}`);
-}
 await waitFor(() => {
   const arm = currentArm();
   return arm.pid && arm.marker && existsSync(arm.marker) && pidAlive(arm.pid);
@@ -1634,13 +1634,6 @@ async function replaceSession(previous, reason) {
     reason,
     previousSessionFile: `/tmp/previous-${reason}.jsonl`,
   }, {});
-  const armed = await next.getTool().execute(`arm-${reason}`, {}, undefined, undefined, {});
-  if (!armed.details?.ok) {
-    throw new Error(`${reason} replacement arm failed: ${JSON.stringify(armed.details)}`);
-  }
-  if (String(armed.details.message).includes("shutting down")) {
-    throw new Error(`${reason} replacement still refused with shutting-down latch`);
-  }
   await waitFor(() => {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== previousArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
@@ -1649,26 +1642,31 @@ async function replaceSession(previous, reason) {
   if (live.length !== 1) {
     throw new Error(`${reason} expected exactly one live arm child, got ${live.join(",") || "(none)"}`);
   }
+  const redundant = await next.getTool().execute(`redundant-${reason}`, {}, undefined, undefined, {});
+  if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {
+    throw new Error(`${reason} replacement lost automatic arm ownership: ${JSON.stringify(redundant.details)}`);
+  }
   return next;
 }
 
 let current = await replaceSession(startup, "new");
 current = await replaceSession(current, "resume");
 current = await replaceSession(current, "fork");
+current = await replaceSession(current, "reload");
 
 // Same bound instance: ordinary shutdown then session_start without a fresh factory.
 const sameInstanceArm = currentArm();
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 await current.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-const sameInstanceResult = await current.getTool().execute("same-instance", {}, undefined, undefined, {});
-if (!sameInstanceResult.details?.ok || String(sameInstanceResult.details.message).includes("shutting down")) {
-  throw new Error(`same-instance replacement arm failed: ${JSON.stringify(sameInstanceResult.details)}`);
-  }
-  await waitFor(() => {
+await waitFor(() => {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== sameInstanceArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
-  }, "same-instance replacement child and arm record");
-  await waitFor(() => !existsSync(sameInstanceArm.marker), "same-instance previous child exit");
+}, "same-instance replacement child and arm record");
+await waitFor(() => !existsSync(sameInstanceArm.marker), "same-instance previous child exit");
+const sameInstanceResult = await current.getTool().execute("same-instance-redundant", {}, undefined, undefined, {});
+if (!sameInstanceResult.details?.ok || !String(sameInstanceResult.details.message).includes("unchanged")) {
+  throw new Error(`same-instance replacement lost automatic arm ownership: ${JSON.stringify(sameInstanceResult.details)}`);
+}
 if (liveArmPids().length !== 1) {
   throw new Error(`same-instance expected one live arm child, got ${liveArmPids().join(",")}`);
 }
@@ -1711,9 +1709,598 @@ if (liveArmPids().length !== 0) {
 EOF
 )
   status=$?
-  [ "$status" -eq 0 ] || fail "Pi session transitions must rearm through an explicit generation owner (exit $status): $out"
+  [ "$status" -eq 0 ] || fail "Pi session transitions must auto-arm through their generation owner (exit $status): $out"
   [ -z "$out" ] || fail "Pi session-transition generation owner test printed output: $out"
-  pass "Pi session transitions use a generation owner across /new /resume /fork, stale callbacks, and quit"
+  pass "Pi session transitions auto-arm through a generation owner across /new /resume /fork/reload, stale callbacks, and quit"
+}
+
+test_pi_session_replacement_carries_inflight_actionable_close() {
+  local repo home plugin log marker_root trigger stop out status
+  repo="$TMP_ROOT/pi-session-replacement-handoff-root"
+  home="$TMP_ROOT/pi-session-replacement-handoff-home"
+  log="$TMP_ROOT/pi-session-replacement-handoff.log"
+  marker_root="$TMP_ROOT/pi-session-replacement-handoff-markers"
+  trigger="$TMP_ROOT/pi-session-replacement-handoff.trigger"
+  stop="$TMP_ROOT/pi-session-replacement-handoff.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
+cleanup() { rm -f "$marker"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=replacement-fixture\n' "$$"
+while :; do
+  if [ -e "$FM_TRIGGER_FILE" ]; then
+    outcome=$(cat "$FM_TRIGGER_FILE")
+    rm -f "$FM_TRIGGER_FILE"
+    printf 'signal: '
+    sleep 0.02
+    printf '%s\n' "$outcome"
+    exit 0
+  fi
+  [ ! -e "$FM_STOP_FILE" ] || exit 0
+  sleep 0.02
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_MARKER_ROOT="$marker_root" FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let releaseOldDelivery = () => {};
+const oldDeliveryRelease = new Promise((resolve) => {
+  releaseOldDelivery = resolve;
+});
+let oldDeliveryStarted = false;
+
+function makePi(blockDelivery = false) {
+  const handlers = new Map();
+  const eventHandlers = new Map();
+  let tool = null;
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: {
+      on(event, handler) {
+        eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
+      },
+      emit(event, data) {
+        if (blockDelivery && event === "fm-branch-supervision:dispatch") {
+          oldDeliveryStarted = true;
+          data.accept(oldDeliveryRelease);
+        }
+        for (const handler of eventHandlers.get(event) ?? []) handler(data);
+      },
+    },
+  };
+  return { pi, handlers, getTool: () => tool, prompts };
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function armRows() {
+  if (!existsSync(process.env.FM_ARM_LOG)) return [];
+  return readFileSync(process.env.FM_ARM_LOG, "utf8")
+    .trim()
+    .split(/\n/)
+    .filter((row) => row.startsWith("arm "))
+    .map((row) => {
+      const match = /pid=(\d+) marker=(\S+)/.exec(row);
+      return match ? { pid: match[1], marker: match[2] } : { pid: "", marker: "" };
+    });
+}
+
+function liveArms() {
+  return armRows().filter((arm) => arm.pid && arm.marker && existsSync(arm.marker) && pidAlive(arm.pid));
+}
+
+async function waitFor(pred, label, attempts = 500) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/replacement-race.meta`, "project=/projects/replacement-race\nwindow=fm-replacement-race\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\treplacement-race.status\tsignal: replacement-race actionable outcome\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const previous = makePi(true);
+mod.default(previous.pi);
+const initial = await previous.getTool().execute("initial-arm", {}, undefined, undefined, {});
+if (!initial.details?.ok || !String(initial.details.message).includes("started Pi extension arm child")) {
+  throw new Error(`initial arm failed: ${JSON.stringify(initial.details)}`);
+}
+await waitFor(() => liveArms().length === 1, "initial live arm");
+
+writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-race actionable outcome\n");
+await waitFor(() => oldDeliveryStarted, "old-session accepted branch delivery");
+if (previous.prompts.length !== 0) {
+  throw new Error(`accepted old-session branch wake reached main: ${previous.prompts.join(" | ")}`);
+}
+await waitFor(() => liveArms().length === 1 && armRows().length >= 2, "old-session successor");
+writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-successor actionable outcome\n");
+await waitFor(() => liveArms().length === 0, "mid-delivery successor actionable close");
+
+await previous.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+await waitFor(() => liveArms().length === 0, "retired old-session successor");
+
+const replacement = makePi(false);
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=durable-handoff`);
+replacementMod.default(replacement.pi);
+const replacementStart = replacement.handlers.get("session_start")?.({
+  type: "session_start",
+  reason: "new",
+  previousSessionFile: "/tmp/previous.jsonl",
+}, {});
+await new Promise((resolve) => setTimeout(resolve, 50));
+await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement arm before old delivery settlement");
+if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
+  throw new Error(`replacement raced the accepted old-session delivery: ${replacement.prompts.join(" | ")}`);
+}
+writeFileSync(
+  `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`,
+  "{malformed handoff\n",
+);
+releaseOldDelivery();
+await replacementStart;
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
+  "replacement-session successor actionable delivery",
+);
+if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
+  throw new Error(`settled old-session branch delivery was replayed: ${replacement.prompts.join(" | ")}`);
+}
+if (replacement.prompts.filter((message) => message.includes("signal: replacement-successor actionable outcome")).length !== 1) {
+  throw new Error(`replacement session did not receive exactly one carried successor outcome: ${replacement.prompts.join(" | ")}`);
+}
+if (!replacement.prompts.some((message) => message.includes("could not clear a delivered replacement-session actionable wake"))) {
+  throw new Error(`handoff cleanup failure was not surfaced: ${replacement.prompts.join(" | ")}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 700));
+if (replacement.prompts.filter((message) => message.includes("could not clear a delivered replacement-session actionable wake")).length !== 1) {
+  throw new Error(`persistent handoff cleanup failure repeated alerts: ${replacement.prompts.join(" | ")}`);
+}
+await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement live arm");
+const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});
+if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {
+  throw new Error(`replacement did not retain automatic arm ownership: ${JSON.stringify(redundant.details)}`);
+}
+
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (liveArms().length !== 1) {
+  throw new Error(`old delivery completion disturbed replacement ownership: ${JSON.stringify(liveArms())}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session replacement must auto-arm and carry an in-flight actionable close"
+  [ -z "$out" ] || fail "Pi session-replacement handoff test printed output: $out"
+  pass "Pi session replacement auto-arms and carries its in-flight actionable close"
+}
+
+test_pi_streaming_followup_is_replayed_after_replacement() {
+  local repo home plugin trigger out status
+  repo="$TMP_ROOT/pi-streaming-followup-replacement-root"
+  home="$TMP_ROOT/pi-streaming-followup-replacement-home"
+  trigger="$TMP_ROOT/pi-streaming-followup-replacement.trigger"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+printf 'watcher: started pid=%s\n' "$$"
+while :; do
+  if [ -e "$FM_TRIGGER_FILE" ]; then
+    rm -f "$FM_TRIGGER_FILE"
+    printf 'signal: streaming queued actionable outcome\n'
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_TRIGGER_FILE="$trigger" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+function makePi() {
+  const handlers = new Map();
+  const prompts = [];
+  let tool = null;
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, prompts, getTool: () => tool };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const originalMod = await import(pathToFileURL(process.env.PLUGIN).href);
+const original = makePi();
+originalMod.default(original.pi);
+await original.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+original.handlers.get("agent_start")?.({}, {});
+writeFileSync(process.env.FM_TRIGGER_FILE, "trigger\n");
+await waitFor(
+  () => original.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
+  "old-session queued follow-up",
+);
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=streaming-followup`);
+const replacement = makePi();
+replacementMod.default(replacement.pi);
+await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
+  "replacement-session replay",
+);
+if (replacement.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
+  throw new Error(`replacement did not replay the unconsumed follow-up exactly once: ${replacement.prompts.join(" | ")}`);
+}
+await replacement.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+
+const finalMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=idle-followup`);
+const finalSession = makePi();
+finalMod.default(finalSession.pi);
+const { unlinkSync } = await import("node:fs");
+unlinkSync(`${process.env.FM_HOME}/state/.lock`);
+await finalSession.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+if (finalSession.prompts.length !== 0) throw new Error("lockless replacement adopted its handoff early");
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const reclaimed = await finalSession.getTool().execute("reclaimed-arm", {}, undefined, undefined, {});
+if (!reclaimed.details?.ok) throw new Error(`reclaimed arm failed: ${JSON.stringify(reclaimed.details)}`);
+await waitFor(
+  () => finalSession.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
+  "second replacement replay before idle consumption",
+);
+if (finalSession.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
+  throw new Error(`second replacement did not replay the idle queued follow-up exactly once: ${finalSession.prompts.join(" | ")}`);
+}
+finalSession.handlers.get("before_agent_start")?.({ prompt: finalSession.prompts[0] }, {});
+await new Promise((resolve) => setTimeout(resolve, 20));
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement must replay a streaming follow-up before consumption"
+  [ -z "$out" ] || fail "Pi streaming follow-up replacement test printed output: $out"
+  pass "Pi replacement replays a streaming follow-up before consumption"
+}
+
+test_pi_late_retiring_actionable_reaches_replacement() {
+  local repo home plugin count out status
+  repo="$TMP_ROOT/pi-late-retiring-actionable-root"
+  home="$TMP_ROOT/pi-late-retiring-actionable-home"
+  count="$TMP_ROOT/pi-late-retiring-actionable.count"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_ARM_COUNT"
+late_close() {
+  sleep 0.15
+  printf 'signal: late retiring actionable outcome\n'
+  exit 0
+}
+trap late_close TERM INT
+printf 'watcher: started pid=%s\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+function makePi() {
+  const handlers = new Map();
+  let tool = null;
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, getTool: () => tool, prompts };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const originalMod = await import(pathToFileURL(process.env.PLUGIN).href);
+const original = makePi();
+originalMod.default(original.pi);
+const armed = await original.getTool().execute("initial-arm", {}, undefined, undefined, {});
+if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(armed.details)}`);
+await waitFor(() => existsSync(process.env.FM_ARM_COUNT) && readFileSync(process.env.FM_ARM_COUNT, "utf8").trim() === "1", "original arm");
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block late handoff publication\n");
+const foreignState = `${process.env.FM_HOME}/foreign-state`;
+const { mkdirSync } = await import("node:fs");
+mkdirSync(foreignState, { recursive: true });
+writeFileSync(`${foreignState}/.lock`, `${process.pid}\n`);
+process.env.FM_STATE_OVERRIDE = foreignState;
+const foreignMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=foreign-state`);
+const foreign = makePi();
+foreignMod.default(foreign.pi);
+await foreign.handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, {});
+await new Promise((resolve) => setTimeout(resolve, 250));
+if (foreign.prompts.some((message) => message.includes("signal: late retiring actionable outcome"))) {
+  throw new Error(`late old-state outcome crossed into foreign state: ${foreign.prompts.join(" | ")}`);
+}
+await foreign.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+delete process.env.FM_STATE_OVERRIDE;
+
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=late-retiring-close`);
+const replacement = makePi();
+replacementMod.default(replacement.pi);
+await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: late retiring actionable outcome")),
+  "late actionable delivery to replacement",
+);
+const latePrompts = replacement.prompts.filter((message) => message.includes("signal: late retiring actionable outcome"));
+if (latePrompts.length !== 1) {
+  throw new Error(`replacement did not receive exactly one late outcome: ${replacement.prompts.join(" | ")}`);
+}
+if (!latePrompts[0].includes("watcher: FAILED - Pi extension could not persist a late replacement-session actionable wake")) {
+  throw new Error(`late handoff publication failure was not surfaced: ${latePrompts[0]}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement must receive an actionable close after retirement timeout"
+  [ -z "$out" ] || fail "Pi late retiring actionable test printed output: $out"
+  pass "Pi replacement receives actionable closes after retirement timeout"
+}
+
+test_pi_replacement_tokens_are_process_unique() {
+  local repo home plugin count out status
+  repo="$TMP_ROOT/pi-replacement-token-uniqueness-root"
+  home="$TMP_ROOT/pi-replacement-token-uniqueness-home"
+  count="$TMP_ROOT/pi-replacement-token-uniqueness.count"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_ARM_COUNT"
+late_close() {
+  sleep 0.08
+  printf 'signal: module-%s late actionable outcome\n' "$count"
+  exit 0
+}
+trap late_close TERM INT
+printf 'watcher: started pid=%s\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+Date.now = () => 1700000000000;
+
+function makePi() {
+  const handlers = new Map();
+  let tool = null;
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async () => {},
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, getTool: () => tool };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+for (let moduleIndex = 1; moduleIndex <= 2; moduleIndex += 1) {
+  const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?token-module=${moduleIndex}`);
+  const instance = makePi();
+  mod.default(instance.pi);
+  const armed = await instance.getTool().execute(`arm-${moduleIndex}`, {}, undefined, undefined, {});
+  if (!armed.details?.ok) throw new Error(`module ${moduleIndex} arm failed: ${JSON.stringify(armed.details)}`);
+  await waitFor(
+    () => existsSync(process.env.FM_ARM_COUNT) && Number(readFileSync(process.env.FM_ARM_COUNT, "utf8").trim()) >= moduleIndex,
+    `module ${moduleIndex} arm`,
+  );
+  await instance.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+}
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+await waitFor(() => existsSync(handoffPath), "replacement handoff");
+await waitFor(() => JSON.parse(readFileSync(handoffPath, "utf8")).pending.length === 2, "two distinct handoff outcomes");
+const handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
+if (new Set(handoff.pending.map((item) => item.token)).size !== 2) {
+  throw new Error(`fresh modules reused a replacement token: ${JSON.stringify(handoff)}`);
+}
+for (const moduleIndex of [1, 2]) {
+  if (!handoff.pending.some((item) => item.message.includes(`signal: module-${moduleIndex} late actionable outcome`))) {
+    throw new Error(`module ${moduleIndex} outcome was dropped: ${JSON.stringify(handoff)}`);
+  }
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement handoff tokens must stay unique across fresh modules"
+  [ -z "$out" ] || fail "Pi replacement token uniqueness test printed output: $out"
+  pass "Pi replacement handoff tokens stay unique across fresh modules"
+}
+
+test_pi_replacement_persistence_failure_stops_arm_child() {
+  local repo home plugin count marker out status
+  repo="$TMP_ROOT/pi-replacement-persistence-failure-root"
+  home="$TMP_ROOT/pi-replacement-persistence-failure-home"
+  count="$TMP_ROOT/pi-replacement-persistence-failure.count"
+  marker="$TMP_ROOT/pi-replacement-persistence-failure.marker"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_ARM_COUNT"
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s\n' "$$"
+  printf 'signal: persistence failure actionable outcome\n'
+  exit 0
+fi
+cleanup() { rm -f "$FM_CHILD_MARKER"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+printf '%s\n' "$$" > "$FM_CHILD_MARKER"
+printf 'watcher: started pid=%s\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_CHILD_MARKER="$marker" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let tool = null;
+let deliveryStarted = false;
+const prompts = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    deliveryStarted = true;
+    prompts.push(message);
+  },
+  events: { on() {}, emit() {} },
+};
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const armed = await tool.execute("initial-arm", {}, undefined, undefined, {});
+if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(armed.details)}`);
+await waitFor(() => deliveryStarted && existsSync(process.env.FM_CHILD_MARKER), "blocked delivery and successor child");
+writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block handoff directory\n");
+let shutdownError = null;
+try {
+  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+} catch (error) {
+  shutdownError = error;
+}
+if (!shutdownError) throw new Error("replacement shutdown hid the handoff persistence failure");
+await waitFor(() => !existsSync(process.env.FM_CHILD_MARKER), "successor cleanup after persistence failure");
+const { unlinkSync } = await import("node:fs");
+unlinkSync(`${process.env.FM_HOME}/state/extensions`);
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=persistence-failure`);
+replacementMod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(() => prompts.length >= 2, "in-process handoff after persistence failure");
+if (!prompts[1].includes("signal: persistence failure actionable outcome")) {
+  throw new Error(`replacement lost the in-process actionable outcome: ${prompts.join(" | ")}`);
+}
+if (!prompts[1].includes("could not persist a replacement-session actionable wake")) {
+  throw new Error(`replacement did not surface the persistence failure: ${prompts[1]}`);
+}
+handlers.get("before_agent_start")?.({ prompt: prompts[1] }, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement shutdown must stop its arm after handoff persistence fails"
+  [ -z "$out" ] || fail "Pi replacement persistence-failure cleanup test printed output: $out"
+  pass "Pi replacement persistence failure still stops its arm child"
 }
 
 test_pi_process_exit_cleanup_listener_lifecycle() {
@@ -2824,6 +3411,11 @@ test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
+test_pi_session_replacement_carries_inflight_actionable_close
+test_pi_streaming_followup_is_replayed_after_replacement
+test_pi_late_retiring_actionable_reaches_replacement
+test_pi_replacement_tokens_are_process_unique
+test_pi_replacement_persistence_failure_stops_arm_child
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_plugin_package_boundary_is_explicit_esm
