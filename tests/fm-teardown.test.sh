@@ -2330,6 +2330,120 @@ EOF
   pass "missing lsof falls back to reaping the tmux pane process group"
 }
 
+test_lsof_absent_skips_reused_group_before_term() {
+  local case_dir rc pid path_without_lsof
+  case_dir=$(make_case lsof-absent-reused-group-before-term)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+
+  perl -e 'setpgrp(0, 0); sleep 300' &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "lsof-absent-reused-group-before-term: setup sleeper did not start"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = kill-window ]; then
+  : > '$case_dir/tmux-closed'
+  exit 0
+fi
+if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
+  printf '%s\n' '$pid'
+fi
+exit 0
+EOF
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_GROUP_PID:-}" ] \
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  if [ -e "$FM_FAKE_ENDPOINT_CLOSED" ]; then
+    printf 'Tue Aug  4 10:00:01 2026\n'
+  else
+    printf 'Tue Aug  4 10:00:00 2026\n'
+  fi
+  exit 0
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/ps"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_GROUP_PID="$pid" \
+  FM_FAKE_ENDPOINT_CLOSED="$case_dir/tmux-closed" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "lsof-absent-reused-group-before-term: teardown should skip the replacement group"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "lsof-absent-reused-group-before-term: teardown signalled a process group whose captured member identity changed"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_grep "captured tmux pane process group identity no longer matches" "$case_dir/stderr" \
+    "lsof-absent-reused-group-before-term: teardown did not report the stale group identity"
+  pass "missing lsof never sends TERM to a process group whose captured member identity changed"
+}
+
+test_lsof_absent_skips_reused_group_before_kill() {
+  local case_dir rc pid path_without_lsof term_marker
+  case_dir=$(make_case lsof-absent-reused-group-before-kill)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  path_without_lsof=$(make_path_without_lsof "$case_dir")
+  term_marker="$case_dir/term-received"
+
+  perl -e '
+    my $marker = shift;
+    setpgrp(0, 0);
+    $SIG{TERM} = sub { open my $fh, ">", $marker or die; close $fh; };
+    while (1) { sleep 1; }
+  ' "$term_marker" &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "lsof-absent-reused-group-before-kill: setup sleeper did not start"
+  cat > "$case_dir/fakebin/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = kill-window ]; then exit 0; fi
+if [ "\${1:-}" = display-message ] && [ "\${*: -1}" = '#{pane_pid}' ]; then
+  printf '%s\n' '$pid'
+fi
+exit 0
+EOF
+  cat > "$case_dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_GROUP_PID:-}" ] \
+   && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  if [ -e "$FM_FAKE_TERM_MARKER" ]; then
+    printf 'Tue Aug  4 10:00:01 2026\n'
+  else
+    printf 'Tue Aug  4 10:00:00 2026\n'
+  fi
+  exit 0
+fi
+exec "$REAL_PS_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/ps"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
+  FM_PROC_ROOT_OVERRIDE="$case_dir/no-proc" FM_FAKE_GROUP_PID="$pid" \
+  FM_FAKE_TERM_MARKER="$term_marker" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "lsof-absent-reused-group-before-kill: teardown should skip the replacement group"
+  assert_present "$term_marker" \
+    "lsof-absent-reused-group-before-kill: teardown did not send the initial TERM"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "lsof-absent-reused-group-before-kill: teardown sent KILL after the captured member identity changed"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  if grep -F "force-killing leaked worktree process group" "$case_dir/stderr" >/dev/null 2>&1; then
+    fail "lsof-absent-reused-group-before-kill: teardown attempted KILL after the group identity changed"
+  fi
+  pass "missing lsof revalidates captured process identity before KILL"
+}
+
 test_lsof_error_refuses_before_removal() {
   local case_dir rc
   case_dir=$(make_case lsof-error-refusal)
@@ -2676,6 +2790,8 @@ test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
+test_lsof_absent_skips_reused_group_before_term
+test_lsof_absent_skips_reused_group_before_kill
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped

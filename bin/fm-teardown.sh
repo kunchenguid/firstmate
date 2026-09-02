@@ -1631,6 +1631,42 @@ task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
 }
 
+task_process_group_pids() {  # <pgid>
+  local pgid=$1 rows pid current_pgid extra
+  rows=$(LC_ALL=C ps -axo pid=,pgid= 2>/dev/null) || return 1
+  while read -r pid current_pgid extra; do
+    [ -z "$extra" ] || return 1
+    case "$pid:$current_pgid" in
+      *[!0-9:]*) return 1 ;;
+    esac
+    [ "$current_pgid" != "$pgid" ] || printf '%s\n' "$pid"
+  done <<EOF
+$rows
+EOF
+}
+
+task_process_group_matches() {  # <pid> <pgid>
+  local current_pgid
+  current_pgid=$(ps -o pgid= -p "$1" 2>/dev/null) || return 1
+  current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
+  [ "$current_pgid" = "$2" ]
+}
+
+task_backend_process_group_has_captured_member() {
+  local pgid=$TASK_BACKEND_PGID i pid identity
+  i=0
+  while [ "$i" -lt "${#TASK_BACKEND_MEMBER_PIDS[@]}" ]; do
+    pid=${TASK_BACKEND_MEMBER_PIDS[$i]}
+    identity=${TASK_BACKEND_MEMBER_IDENTITIES[$i]}
+    if task_process_identity_matches "$pid" "$identity" \
+       && task_process_group_matches "$pid" "$pgid"; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
@@ -1648,8 +1684,10 @@ $dir_pids"
 }
 
 capture_task_backend_process_group() {
-  local leader leader_start pgid current_pgid own_pgid
+  local leader leader_start pgid own_pgid members pid identity captured_leader=0
   TASK_BACKEND_PGID=
+  TASK_BACKEND_MEMBER_PIDS=()
+  TASK_BACKEND_MEMBER_IDENTITIES=()
   command -v lsof >/dev/null 2>&1 && return 0
   if [ "$BACKEND" != tmux ]; then
     echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
@@ -1678,10 +1716,29 @@ capture_task_backend_process_group() {
     echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
     return 0
   fi
-  task_process_identity_matches "$leader" "$leader_start" || return 0
-  current_pgid=$(ps -o pgid= -p "$leader" 2>/dev/null) || current_pgid=""
-  current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
-  [ "$current_pgid" = "$pgid" ] || return 0
+  members=$(task_process_group_pids "$pgid") || {
+    echo "warning: lsof is unavailable; cannot identify the tmux pane process group members for $ID" >&2
+    return 0
+  }
+  task_pid_list_contains "$members" "$leader" || return 0
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    identity=$(task_process_identity "$pid") || continue
+    task_process_identity_matches "$pid" "$identity" || continue
+    task_process_group_matches "$pid" "$pgid" || continue
+    TASK_BACKEND_MEMBER_PIDS+=("$pid")
+    TASK_BACKEND_MEMBER_IDENTITIES+=("$identity")
+    if [ "$pid" = "$leader" ] && [ "$identity" = "$leader_start" ]; then
+      captured_leader=1
+    fi
+  done <<EOF
+$members
+EOF
+  [ "$captured_leader" -eq 1 ] || {
+    TASK_BACKEND_MEMBER_PIDS=()
+    TASK_BACKEND_MEMBER_IDENTITIES=()
+    return 0
+  }
   TASK_BACKEND_PGID=$pgid
 }
 
@@ -1698,13 +1755,20 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
     return 0
   fi
-  kill -0 -- "-$pgid" 2>/dev/null || return 0
+  if ! task_backend_process_group_has_captured_member; then
+    echo "warning: lsof is unavailable; captured tmux pane process group identity no longer matches for $ID" >&2
+    return 0
+  fi
   echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
-  kill -TERM -- "-$pgid" 2>/dev/null || true
+  if task_backend_process_group_has_captured_member; then
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+  fi
   sleep 1
-  if kill -0 -- "-$pgid" 2>/dev/null; then
+  if task_backend_process_group_has_captured_member; then
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
-    kill -KILL -- "-$pgid" 2>/dev/null || true
+    if task_backend_process_group_has_captured_member; then
+      kill -KILL -- "-$pgid" 2>/dev/null || true
+    fi
   fi
 }
 
@@ -2708,6 +2772,8 @@ fi
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
 TASK_BACKEND_PGID=
+TASK_BACKEND_MEMBER_PIDS=()
+TASK_BACKEND_MEMBER_IDENTITIES=()
 if [ "$BACKEND" = herdr ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1

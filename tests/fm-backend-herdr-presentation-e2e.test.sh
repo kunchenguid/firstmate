@@ -31,7 +31,7 @@ FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
 REFRESH_CWD_CONTROL="$TMP_ROOT/refresh-cwd-control"
-mkdir -p "$FAKEBIN"
+mkdir -p "$FAKEBIN" "$TMP_ROOT/pane-death-watches"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$LEASED_WORKTREES_LOG"
@@ -135,12 +135,12 @@ case "${1:-} ${2:-}" in
   "workspace create") mutation=workspace-create; mutation_target=$label ;;
   "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
-  # The emptying-close plan removes a lone idle shell through Herdr's
-  # pane-death path instead of an explicit close; its process-info read is the
-  # one CLI call that marks that removal, so audit it as the pane's removal.
-  "pane process-info") mutation=pane-death; mutation_target=$(arg_value --pane "$@" || true) ;;
   "tab focus") mutation=tab-focus ;;
 esac
+if [ "$mutation" = pane-close ]; then
+  watch_dir="$TMP_ROOT/pane-death-watches/$mutation_target"
+  [ ! -d "$watch_dir" ] || : > "$watch_dir/cancel"
+fi
 refusal_probe=0
 if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
    && [ "$(cat "$ACTIVE_SEEDED_CONTROL/stage" 2>/dev/null || true)" = injected ] \
@@ -150,7 +150,7 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
-if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@" 2>&1); then
   status=0
 else
   status=$?
@@ -191,6 +191,28 @@ if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE
     break
   done
 fi
+if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane process-info" ]; then
+  watched_pane=$(arg_value --pane "$@" || true)
+  watch_dir="$TMP_ROOT/pane-death-watches/$watched_pane"
+  if [ -n "$watched_pane" ] \
+     && printf '%s' "$out" | jq -e --arg pane "$watched_pane" \
+       '.result.type == "pane_process_info" and .result.process_info.pane_id == $pane' >/dev/null 2>&1 \
+     && mkdir "$watch_dir" 2>/dev/null; then
+    focus_snapshot > "$watch_dir/before" || printf '%s\n' ambiguous/ambiguous > "$watch_dir/before"
+  fi
+fi
+if [ "${1:-} ${2:-}" = "pane get" ]; then
+  watched_pane=${3:-}
+  watch_dir="$TMP_ROOT/pane-death-watches/$watched_pane"
+  if [ -f "$watch_dir/before" ] && [ ! -e "$watch_dir/cancel" ] && [ ! -e "$watch_dir/done" ] \
+     && printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1; then
+    death_before=$(cat "$watch_dir/before")
+    death_after=$(focus_snapshot || printf ambiguous/ambiguous)
+    printf 'pane-death\t%s\t%s\t%s\n' \
+      "$death_before" "$death_after" "$watched_pane" >> "$FOCUS_AUDIT_LOG"
+    printf '%s\n' done > "$watch_dir/done"
+  fi
+fi
 if [ -n "$mutation" ]; then
   after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "$mutation_target" >> "$FOCUS_AUDIT_LOG"
@@ -199,7 +221,9 @@ if [ "$refusal_probe" -eq 1 ]; then
   refusal_after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf 'seeded-prune-refusal\t%s\t%s\t%s\n' "$refusal_before" "$refusal_after" "${3:-}" >> "$FOCUS_AUDIT_LOG"
 fi
-[ -z "$out" ] || printf '%s\n' "$out"
+[ -z "$out" ] || {
+  if [ "$status" -eq 0 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" >&2; fi
+}
 exit "$status"
 SH
 
@@ -372,6 +396,21 @@ assert_focus_is() {  # <expected> <case-name>
 
 focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
 
+await_pane_removal_audit_since() {  # <line-count> <pane-id>
+  local start=$1 pane=$2 attempt=0 count
+  while [ "$attempt" -lt 200 ]; do
+    count=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane" '
+      ($1 == "pane-close" || $1 == "pane-death") && $4 == pane { count++ }
+      END { print count + 0 }
+    ')
+    [ "$count" -eq 0 ] || break
+    sleep 0.025
+    attempt=$((attempt + 1))
+  done
+  [ "$count" -eq 1 ] \
+    || fail "projected cleanup recorded $count removal events for exact pane $pane"
+}
+
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
   changed=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' '
@@ -388,9 +427,10 @@ assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name
 # a fallback plain close must preserve or immediately restore exact focus.
 assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
   local start=$1 pane_id=$2 expected=$3
+  await_pane_removal_audit_since "$start" "$pane_id"
   sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v expected="$expected" '
     ($1 == "pane-close" || $1 == "pane-death") && $4 == pane {
-      saw_close = 1
+      saw_close++
       if ($2 != expected) { bad = 1 }
       else if ($3 == expected) { preserved = 1 }
       else { drift = $3 }
@@ -399,7 +439,7 @@ assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
     saw_close && drift != "" && $1 == "tab-focus" && $2 == drift && $3 == expected {
       preserved = 1
     }
-    END { exit(bad || (saw_close && !preserved) ? 1 : 0) }
+    END { exit(bad || saw_close != 1 || !preserved ? 1 : 0) }
   ' || fail "projected pane close did not preserve or restore the exact active workspace and tab"
   if lab pane get "$pane_id" >/dev/null 2>&1; then
     fail "projected cleanup left exact pane $pane_id alive"
@@ -895,6 +935,8 @@ grep -F "did not settle in the leased worktree" "$TMP_ROOT/abort-b.err" >/dev/nu
   || fail "post-create abort fixture B did not reach the armed settle failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
+await_pane_removal_audit_since "$ABORT_FOCUS_START" "$ABORT_A_PANE"
+await_pane_removal_audit_since "$ABORT_FOCUS_START" "$ABORT_B_PANE"
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
