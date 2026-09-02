@@ -64,7 +64,7 @@ fm_merge_outcome_append_once() {  # <path> <line>
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 
-# fm_merge_outcome_report <home> <state> <task-id> <pr-url> <origin>
+# fm_merge_outcome_report <home> <state> <task-id> <pr-url> <origin> [source-head]
 #
 # <origin> says who observed the merge, because that decides whether the
 # existing poll path also needs a local wake:
@@ -77,8 +77,8 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 # enough to say where the outcome belongs, and 1 on any other failure to
 # record. A caller that has already merged must report a non-zero return rather
 # than treat it as success: the merge landed and the record did not.
-fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
-  local home=$1 state=$2 id=$3 url=$4 origin=$5
+fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [source-head]
+  local home=$1 state=$2 id=$3 url=$4 origin=$5 head=${6-}
   local self='' self_rc=0 destination='' line lock status=0
   local provider host path number
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
@@ -91,6 +91,11 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   host=$FM_PR_HOST
   path=$FM_PR_PATH
   number=$FM_PR_NUMBER
+  if [ "$provider" = codebase ]; then
+    fm_pr_head_valid "$head" || return 2
+  else
+    [ -z "$head" ] || return 2
+  fi
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
 
   if self=$(fm_merge_outcome_home_id "$home"); then
@@ -115,7 +120,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   lock="$state/$id.pr-poll-merge-notified.lock"
   fm_lock_acquire_wait "$lock" || return 1
   if fm_pr_poll_merge_already_notified "$state" "$id" \
-    "$provider" "$host" "$path" "$number"; then
+    "$provider" "$host" "$path" "$number" "$head"; then
     # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
     FM_MERGE_OUTCOME_ALREADY_RECORDED=true
     fm_lock_release "$lock"
@@ -131,7 +136,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   fi
   if [ "$status" -eq 0 ]; then
     fm_pr_poll_merge_mark_notified "$state" "$id" \
-      "$provider" "$host" "$path" "$number" || status=1
+      "$provider" "$host" "$path" "$number" "$head" || status=1
   fi
   fm_lock_release "$lock"
   return "$status"

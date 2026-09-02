@@ -347,15 +347,15 @@ Load `ask-user-authority` before deciding any ask-user finding; the implementati
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
-For deployable ByteDance-internal code with a BITS/PPE delivery surface, resolve the concrete task mode to `no-mistakes`, load `bits-development` before delivery begins, and follow its implement-and-commit -> exact candidate through the BITS-owned source branch -> fresh dedicated PPE -> exact-candidate E2E -> final limited no-mistakes order.
-On that path BITS owns push, MR, and CI; final no-mistakes may run review, tests, documentation, and lint but never those delivery phases, and any fix that changes code creates a new candidate that returns to BITS PPE deployment and E2E before another final pass.
-Regardless of `yolo`, the BITS MR needs separate explicit captain merge authority and may not merge before both exact-candidate PPE E2E and the candidate-unchanged final no-mistakes pass succeed.
+For deployable ByteDance-internal code with a BITS/PPE delivery surface, resolve the concrete task mode to `no-mistakes`, load `bits-development` before delivery begins, and follow its initial one-time dedicated-PPE delivery or subsequent existing-PPE revision lifecycle through the final limited no-mistakes pass.
+On that path BITS owns push, MR, and CI; final no-mistakes may run review, tests, documentation, and lint but never those delivery phases, and any code-changing fix returns to the existing BITS task, exact source delivery, same-PPE deployment, and API Test before another final pass.
+Regardless of `yolo`, the BITS MR needs separate explicit captain merge authority and may not merge before both the exact-candidate PPE API or end-to-end test and the candidate-unchanged final no-mistakes pass succeed.
 Shared IDL source or generated repositories and documentation-only, local-only, or otherwise non-deployable work retain their ordinary resolved delivery path, including direct-PR where configured, and never gain an invented PPE stage.
 
 ### Validate
 
 For an ordinary no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
-A deployable ByteDance BITS/PPE ship instead reaches final validation only at the point `bits-development` defines after exact-candidate PPE E2E.
+A deployable ByteDance BITS/PPE ship instead reaches final validation only at the point `bits-development` defines after the exact-candidate PPE API or end-to-end test.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.

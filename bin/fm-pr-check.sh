@@ -3,8 +3,8 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# GitHub pull requests, GitLab merge requests (including self-hosted), and
+# canonical code.byted.org Codebase merge requests are accepted.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -57,13 +57,25 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
 fi
+if [ "$PROVIDER" = codebase ]; then
+  CODEBASE_MISSING=
+  command -v bytedcli >/dev/null 2>&1 || CODEBASE_MISSING=bytedcli
+  if ! command -v jq >/dev/null 2>&1; then
+    CODEBASE_MISSING="${CODEBASE_MISSING:+$CODEBASE_MISSING and }jq"
+  fi
+  if [ -n "$CODEBASE_MISSING" ]; then
+    echo "error: watching a Codebase merge request requires $CODEBASE_MISSING on PATH" >&2
+    exit 1
+  fi
+fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
+# pr_head is recorded only when the forge's CLI can supply it. Codebase requires
+# the official status response to supply an exact source head; gh exposes the
+# head commit as a selectable field. Plain glab exposes it only inside its JSON
 # output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
+# GitLab task records no pr_head. Existing consumers treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
@@ -71,11 +83,29 @@ fi
 # and treats a recorded value that disagrees as stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
+POLL_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
+fi
+if [ "$PROVIDER" = codebase ]; then
+  if ! CODEBASE_STATUS=$(bytedcli --json codebase mr status "$NUMBER" -R "$PROJECT_PATH" 2>/dev/null) \
+    || ! PR_HEAD=$(printf '%s' "$CODEBASE_STATUS" | jq -er \
+      --arg url "$URL" --arg path "$PROJECT_PATH" --arg number "$NUMBER" '
+        select(
+          .status == "success" and
+          .data.repository.path == $path and
+          (.data.merge_request.number | tostring) == $number and
+          .data.merge_request.url == $url
+        ) | .data.merge_request.source_commit_id | select(type == "string")
+      ' 2>/dev/null) \
+    || ! fm_pr_head_valid "$PR_HEAD"; then
+    echo "error: could not verify the Codebase merge request identity and source head" >&2
+    exit 1
+  fi
+  POLL_HEAD=$PR_HEAD
 fi
 
 META_TMP=
@@ -91,7 +121,8 @@ pr_check_cleanup() {
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
+fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" \
+  "$SCRIPT_DIR/fm-pr-poll.sh" "$POLL_HEAD" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
@@ -116,7 +147,8 @@ fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] \
+  && { [ "$PROVIDER" != codebase ] || [ "$FM_PR_META_HEAD" = "$PR_HEAD" ]; } || exit 1
 fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 mv -f -- "$META_TMP" "$META" || exit 1
 META_TMP=
@@ -124,7 +156,8 @@ fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META" || exit 1
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] \
+  && { [ "$PROVIDER" != codebase ] || [ "$FM_PR_META_HEAD" = "$PR_HEAD" ]; } || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 

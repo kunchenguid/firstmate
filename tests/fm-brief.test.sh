@@ -347,12 +347,16 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
   assert_grep "do not start no-mistakes until Firstmate has loaded \`bits-development\`" "$brief" \
     "no-mistakes DOD must route deployable BITS/PPE work before validation"
-  assert_grep "deployed it to a fresh dedicated PPE, and passed E2E against that deployment" "$brief" \
-    "no-mistakes DOD must place exact-candidate PPE E2E before final validation"
+  assert_grep "created one fresh dedicated PPE for the first delivery through the newly created Dev Task or reused that task's existing PPE for a subsequent revision" "$brief" \
+    "no-mistakes DOD must distinguish one-time PPE creation from subsequent reuse"
+  assert_grep "passed the required API or end-to-end test against that exact deployment" "$brief" \
+    "no-mistakes DOD must place the exact-candidate deployment test before final validation"
   assert_grep "must not own rebase, push, PR, or CI" "$brief" \
     "no-mistakes DOD must keep BITS delivery phases outside the final validation pass"
-  assert_grep "a code-changing fix creates a new candidate that repeats BITS PPE deployment and E2E" "$brief" \
-    "no-mistakes DOD must restart BITS candidate proof after a code-changing fix"
+  assert_grep "any code-changing final-validation fix returns to the existing Dev Task and source branch for exact push verification, same-PPE deployment, and API Test" "$brief" \
+    "no-mistakes DOD must reuse the existing task and PPE after a code-changing fix"
+  assert_grep "must not create a new Dev Task, MR, binding, Change Card, snapshot, environment, or PPE" "$brief" \
+    "no-mistakes DOD must forbid duplicate delivery objects in the subsequent-revision loop"
   assert_grep "BITS owns the MR and CI" "$brief" \
     "no-mistakes DOD must use the BITS-owned ready signal"
   # The apostrophe in "firstmate's authority check" is now structurally safe

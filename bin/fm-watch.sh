@@ -1598,8 +1598,14 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+          head=$FM_PR_POLL_SNAPSHOT_HEAD
+          if [ "$provider" = codebase ]; then
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+              "$provider" "$url" "$host" "$path" "$number" "$head" || exit 1
+          else
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+              "$provider" "$url" "$host" "$path" "$number" || exit 1
+          fi
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
@@ -1616,7 +1622,7 @@ while :; do
         reason="check: $c: $out"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           merge_outcome_rc=0
-          fm_merge_outcome_report "$FM_HOME" "$STATE" "$id" "$url" poll \
+          fm_merge_outcome_report "$FM_HOME" "$STATE" "$id" "$url" poll "$head" \
             || merge_outcome_rc=$?
           if [ "$merge_outcome_rc" -ne 0 ]; then
             triage_log "merge outcome for $id could not be recorded (rc=$merge_outcome_rc)"

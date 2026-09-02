@@ -3,7 +3,8 @@
 # supported forges. Callers must validate task IDs and raw PR/MR URLs before
 # constructing task paths or performing any side effect.
 #
-# The stored identity is provider-tagged: provider, url, host, path, number.
+# The stored identity is provider-tagged: provider, url, host, path, number,
+# plus the recorded source head for Codebase merge requests.
 # "path" is the full project path, which is owner/repository on GitHub and an
 # arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
 # project can sit at any depth, so no owner/repository pair can address one and
@@ -29,11 +30,13 @@ FM_PR_DATA_URL=
 FM_PR_DATA_HOST=
 FM_PR_DATA_PATH=
 FM_PR_DATA_NUMBER=
+FM_PR_DATA_HEAD=
 FM_PR_META_PROVIDER=
 FM_PR_META_URL=
 FM_PR_META_HOST=
 FM_PR_META_PATH=
 FM_PR_META_NUMBER=
+FM_PR_META_HEAD=
 FM_PR_REG_ID=
 FM_PR_REG_PROVIDER=
 FM_PR_REG_URL=
@@ -56,6 +59,7 @@ FM_PR_POLL_EXPECT_URL=
 FM_PR_POLL_EXPECT_HOST=
 FM_PR_POLL_EXPECT_PATH=
 FM_PR_POLL_EXPECT_NUMBER=
+FM_PR_POLL_EXPECT_HEAD=
 FM_PR_POLL_EXPECT_DATA_HASH=
 FM_PR_POLL_EXPECT_TEMPLATE_HASH=
 FM_PR_POLL_EXPECT_DATA_IDENTITY=
@@ -68,6 +72,7 @@ FM_PR_POLL_SNAPSHOT_URL=
 FM_PR_POLL_SNAPSHOT_HOST=
 FM_PR_POLL_SNAPSHOT_PATH=
 FM_PR_POLL_SNAPSHOT_NUMBER=
+FM_PR_POLL_SNAPSHOT_HEAD=
 FM_PR_POLL_SNAPSHOT_DATA_HASH=
 FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=
 FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
@@ -158,8 +163,8 @@ fm_pr_gitlab_path_valid() {
 
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, Codebase is accepted only on its exact host and route, and GitLab
+# gets its own host and namespace rules rather than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
 # bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
@@ -191,6 +196,17 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
+  pattern='^https://code\.byted\.org/([A-Za-z0-9._-]{1,255})/([A-Za-z0-9._-]{1,255})/merge_requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    [ "${BASH_REMATCH[1]}" != . ] && [ "${BASH_REMATCH[1]}" != .. ] || return 1
+    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    FM_PR_PROVIDER=codebase
+    FM_PR_URL=$raw
+    FM_PR_HOST=code.byted.org
+    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
   # The path class contains "/" and "-", so this match is greedy to the last
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
@@ -198,6 +214,7 @@ fm_pr_url_parse() {
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
+  [ "$host" != code.byted.org ] && [ "$host" != code-tx.byted.org ] || return 1
   fm_pr_gitlab_host_valid "$host" || return 1
   fm_pr_gitlab_path_valid "$path" || return 1
   FM_PR_PROVIDER=gitlab
@@ -286,12 +303,13 @@ fm_pr_regular_destination_on_device_or_absent() {
 }
 
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value pr_count=0 head_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
   FM_PR_META_PATH=
   FM_PR_META_NUMBER=
+  FM_PR_META_HEAD=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -311,8 +329,13 @@ fm_pr_metadata_identity_parse() {
         ;;
       pr_head=*)
         if [ "$seen_pr" -eq 1 ]; then
+          head_count=$((head_count + 1))
           value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
+          if fm_pr_head_valid "$value"; then
+            FM_PR_META_HEAD=$value
+          else
+            post_pr_invalid=1
+          fi
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
@@ -324,20 +347,24 @@ fm_pr_metadata_identity_parse() {
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
   [ "$post_pr_invalid" -eq 0 ] || return 1
-  [ -n "$FM_PR_META_URL" ]
+  [ -n "$FM_PR_META_URL" ] || return 1
+  [ "$FM_PR_META_PROVIDER" != codebase ] \
+    || { [ "$head_count" -eq 1 ] && fm_pr_head_valid "$FM_PR_META_HEAD"; }
 }
 
-# Sidecar layout: provider, url, host, path, number, one per line. A sidecar
-# written before the provider tag existed has a URL on its first line and one
-# line fewer, so it fails both the field count and the provider comparison and
-# is refused rather than misread as a provider-tagged record.
+# Sidecar layout: provider, url, host, path, number, one per line, followed by
+# the exact source head for Codebase only. GitHub and GitLab retain their exact
+# five-line records. A sidecar written before the provider tag existed has a URL
+# on its first line and one line fewer, so it fails both the field count and the
+# provider comparison and is refused rather than misread as a tagged record.
 fm_pr_poll_data_parse() {
-  local file=$1 provider url host path number
+  local file=$1 provider url host path number head='' has_head=0
   FM_PR_DATA_PROVIDER=
   FM_PR_DATA_URL=
   FM_PR_DATA_HOST=
   FM_PR_DATA_PATH=
   FM_PR_DATA_NUMBER=
+  FM_PR_DATA_HEAD=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 8< "$file" || return 1
   IFS= read -r provider <&8 || { exec 8<&-; return 1; }
@@ -345,9 +372,12 @@ fm_pr_poll_data_parse() {
   IFS= read -r host <&8 || { exec 8<&-; return 1; }
   IFS= read -r path <&8 || { exec 8<&-; return 1; }
   IFS= read -r number <&8 || { exec 8<&-; return 1; }
-  if IFS= read -r _extra <&8; then
-    exec 8<&-
-    return 1
+  if IFS= read -r head <&8; then
+    has_head=1
+    if IFS= read -r _extra <&8; then
+      exec 8<&-
+      return 1
+    fi
   fi
   exec 8<&-
   fm_pr_url_parse "$url" || return 1
@@ -355,11 +385,17 @@ fm_pr_poll_data_parse() {
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  if [ "$FM_PR_PROVIDER" = codebase ]; then
+    [ "$has_head" -eq 1 ] && fm_pr_head_valid "$head" || return 1
+  else
+    [ "$has_head" -eq 0 ] || return 1
+  fi
   FM_PR_DATA_PROVIDER=$FM_PR_PROVIDER
   FM_PR_DATA_URL=$FM_PR_URL
   FM_PR_DATA_HOST=$FM_PR_HOST
   FM_PR_DATA_PATH=$FM_PR_PATH
   FM_PR_DATA_NUMBER=$FM_PR_NUMBER
+  FM_PR_DATA_HEAD=$head
 }
 
 # Registration layout: version tag, task id, then the same provider-tagged
@@ -448,13 +484,18 @@ fm_pr_poll_revoke_final() {
 }
 
 fm_pr_poll_prepare() {
-  local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8
+  local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8 head=${9-}
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
   [ "$host" = "$FM_PR_HOST" ] || return 1
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
+  if [ "$provider" = codebase ]; then
+    fm_pr_head_valid "$head" || return 1
+  else
+    [ -z "$head" ] || return 1
+  fi
   [ -f "$template" ] || return 1
 
   [ ! -L "$state" ] || return 1
@@ -470,6 +511,7 @@ fm_pr_poll_prepare() {
   FM_PR_POLL_EXPECT_HOST=$host
   FM_PR_POLL_EXPECT_PATH=$path
   FM_PR_POLL_EXPECT_NUMBER=$number
+  FM_PR_POLL_EXPECT_HEAD=$head
   FM_PR_POLL_TEMPLATE=$template
   FM_PR_POLL_STATE_DEVICE=$(fm_pr_file_device "$state") || return 1
   [ -n "$FM_PR_POLL_STATE_DEVICE" ] || return 1
@@ -483,8 +525,17 @@ fm_pr_poll_prepare() {
     return 1
   }
 
-  if ! printf '%s\n%s\n%s\n%s\n%s\n' "$provider" "$url" "$host" "$path" "$number" > "$FM_PR_POLL_DATA_TMP" \
-    || ! chmod 0600 "$FM_PR_POLL_DATA_TMP" \
+  if [ "$provider" = codebase ]; then
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      "$provider" "$url" "$host" "$path" "$number" "$head" > "$FM_PR_POLL_DATA_TMP"
+  else
+    printf '%s\n%s\n%s\n%s\n%s\n' \
+      "$provider" "$url" "$host" "$path" "$number" > "$FM_PR_POLL_DATA_TMP"
+  fi || {
+    fm_pr_poll_cleanup
+    return 1
+  }
+  if ! chmod 0600 "$FM_PR_POLL_DATA_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_DATA_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
     || ! fm_pr_poll_data_parse "$FM_PR_POLL_DATA_TMP" \
     || [ "$FM_PR_DATA_PROVIDER" != "$provider" ] \
@@ -492,6 +543,7 @@ fm_pr_poll_prepare() {
     || [ "$FM_PR_DATA_HOST" != "$host" ] \
     || [ "$FM_PR_DATA_PATH" != "$path" ] \
     || [ "$FM_PR_DATA_NUMBER" != "$number" ] \
+    || [ "$FM_PR_DATA_HEAD" != "$head" ] \
     || ! cp "$template" "$FM_PR_POLL_CHECK_TMP" \
     || ! chmod 0600 "$FM_PR_POLL_CHECK_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_CHECK_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
@@ -539,7 +591,8 @@ fm_pr_poll_publish_prepared() {
     || [ "$FM_PR_DATA_URL" != "$FM_PR_POLL_EXPECT_URL" ] \
     || [ "$FM_PR_DATA_HOST" != "$FM_PR_POLL_EXPECT_HOST" ] \
     || [ "$FM_PR_DATA_PATH" != "$FM_PR_POLL_EXPECT_PATH" ] \
-    || [ "$FM_PR_DATA_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ]; then
+    || [ "$FM_PR_DATA_NUMBER" != "$FM_PR_POLL_EXPECT_NUMBER" ] \
+    || [ "$FM_PR_DATA_HEAD" != "$FM_PR_POLL_EXPECT_HEAD" ]; then
     fm_pr_poll_revoke_final || true
     return 1
   fi
@@ -613,7 +666,9 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1
   [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
   [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || return 1
-  [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
+  [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ] || return 1
+  [ "$FM_PR_DATA_PROVIDER" != codebase ] \
+    || [ "$FM_PR_META_HEAD" = "$FM_PR_DATA_HEAD" ]
 }
 
 fm_pr_poll_snapshot_capture() {
@@ -628,6 +683,7 @@ fm_pr_poll_snapshot_capture() {
   FM_PR_POLL_SNAPSHOT_HOST=$FM_PR_DATA_HOST
   FM_PR_POLL_SNAPSHOT_PATH=$FM_PR_DATA_PATH
   FM_PR_POLL_SNAPSHOT_NUMBER=$FM_PR_DATA_NUMBER
+  FM_PR_POLL_SNAPSHOT_HEAD=$FM_PR_DATA_HEAD
   FM_PR_POLL_SNAPSHOT_DATA_HASH=$FM_PR_REG_DATA_HASH
   FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=$FM_PR_REG_TEMPLATE_HASH
   FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=$FM_PR_REG_DATA_IDENTITY
@@ -646,6 +702,7 @@ fm_pr_poll_snapshot_matches() {
   [ "$FM_PR_DATA_HOST" = "$FM_PR_POLL_SNAPSHOT_HOST" ] || return 1
   [ "$FM_PR_DATA_PATH" = "$FM_PR_POLL_SNAPSHOT_PATH" ] || return 1
   [ "$FM_PR_DATA_NUMBER" = "$FM_PR_POLL_SNAPSHOT_NUMBER" ] || return 1
+  [ "$FM_PR_DATA_HEAD" = "$FM_PR_POLL_SNAPSHOT_HEAD" ] || return 1
   [ "$FM_PR_REG_DATA_HASH" = "$FM_PR_POLL_SNAPSHOT_DATA_HASH" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH" ] || return 1
   [ "$FM_PR_REG_DATA_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_DATA_IDENTITY" ] || return 1
@@ -949,9 +1006,9 @@ fm_pr_poll_retirement_recover_all() {
 # matching identity is a no-op; a different PR for the same task reaches its
 # role-routed supervision destination and replaces the marker when its first
 # outcome is published.
-fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number>
+fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number> [head]
   local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
-  local version provider host path number
+  local expected_head=${7-} version provider host path number head='' has_head=0
   fm_pr_private_file_valid "$marker" 600 "$device" || return 1
   exec 8< "$marker" || return 1
   IFS= read -r version <&8 || { exec 8<&-; return 1; }
@@ -959,30 +1016,42 @@ fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path
   IFS= read -r host <&8 || { exec 8<&-; return 1; }
   IFS= read -r path <&8 || { exec 8<&-; return 1; }
   IFS= read -r number <&8 || { exec 8<&-; return 1; }
-  if IFS= read -r _extra <&8; then
-    exec 8<&-
-    return 1
+  if IFS= read -r head <&8; then
+    has_head=1
+    if IFS= read -r _extra <&8; then
+      exec 8<&-
+      return 1
+    fi
   fi
   exec 8<&-
-  [ "$version" = fm-pr-poll-merge-notified-v1 ] \
-    && [ "$provider" = "$expected_provider" ] \
+  if [ "$expected_provider" = codebase ]; then
+    [ "$version" = fm-pr-poll-merge-notified-v2 ] \
+      && [ "$has_head" -eq 1 ] \
+      && fm_pr_head_valid "$expected_head" \
+      && [ "$head" = "$expected_head" ] || return 1
+  else
+    [ "$version" = fm-pr-poll-merge-notified-v1 ] \
+      && [ "$has_head" -eq 0 ] \
+      && [ -z "$expected_head" ] || return 1
+  fi
+  [ "$provider" = "$expected_provider" ] \
     && [ "$host" = "$expected_host" ] \
     && [ "$path" = "$expected_path" ] \
     && [ "$number" = "$expected_number" ]
 }
 
-fm_pr_poll_merge_already_notified() {  # <state> <id> <provider> <host> <path> <number>
-  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker state_device
+fm_pr_poll_merge_already_notified() {  # <state> <id> <provider> <host> <path> <number> [head]
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 head=${7-} marker state_device
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   marker="$state/$id.pr-poll-merge-notified"
   fm_pr_poll_merge_marker_matches "$marker" "$state_device" \
-    "$provider" "$host" "$path" "$number"
+    "$provider" "$host" "$path" "$number" "$head"
 }
 
-fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <number>
-  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker tmp state_device
+fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <number> [head]
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 head=${7-} marker tmp state_device
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -990,15 +1059,22 @@ fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <num
   fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
   umask 077
   tmp=$(mktemp "$state/.fm-pr-poll-merge-notified.XXXXXX") || return 1
-  if ! printf '%s\n%s\n%s\n%s\n%s\n' \
-      fm-pr-poll-merge-notified-v1 "$provider" "$host" "$path" "$number" > "$tmp" \
-    || ! chmod 0600 "$tmp" \
+  if [ "$provider" = codebase ]; then
+    fm_pr_head_valid "$head" || { rm -f -- "$tmp"; return 1; }
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-merge-notified-v2 "$provider" "$host" "$path" "$number" "$head" > "$tmp"
+  else
+    [ -z "$head" ] || { rm -f -- "$tmp"; return 1; }
+    printf '%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-merge-notified-v1 "$provider" "$host" "$path" "$number" > "$tmp"
+  fi || { rm -f -- "$tmp"; return 1; }
+  if ! chmod 0600 "$tmp" \
     || ! fm_pr_poll_merge_marker_matches "$tmp" "$state_device" \
-      "$provider" "$host" "$path" "$number" \
+      "$provider" "$host" "$path" "$number" "$head" \
     || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
     || ! mv -f -- "$tmp" "$marker" \
     || ! fm_pr_poll_merge_marker_matches "$marker" "$state_device" \
-      "$provider" "$host" "$path" "$number"; then
+      "$provider" "$host" "$path" "$number" "$head"; then
     rm -f -- "$tmp"
     return 1
   fi

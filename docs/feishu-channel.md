@@ -8,13 +8,16 @@ The network side uses the official `@larksuiteoapi/node-sdk` long-connection cli
 ## Supported scope
 
 The MVP allows one exact Feishu user in one exact P2P chat.
-Inbound supports plain text, standalone images, and ordered rich-text messages whose elements are limited to text and images.
+Inbound supports plain text, standalone images, and ordered rich-text messages containing text, links, and images.
+Inbound links retain their visible label and exact destination in a deterministic `label (destination)` representation, or the destination alone when the label is empty or identical.
+An unsupported or malformed element inside an otherwise representable rich-text message becomes a bounded non-sensitive unavailable marker in its original position, without copying hidden element fields.
+An entirely unsupported or malformed rich-text message is quarantined with only deterministic type and encoded-size metadata and produces a private local refusal outcome.
 Images are delivered to the exact bound Pi session as Pi-native image content, never as prompt placeholders, Markdown links, data URLs, signed URLs, or private file paths.
 Outbound mirrors every finalized non-empty Assistant text persisted after the binding boundary as Feishu post rich text containing one Markdown element, regardless of whether Feishu, native TUI, watcher, turn-end, or another normal Pi source caused the turn.
 The exact fixed responses `Captain, shipshape.`, `Captain，shipshape.`, and `船长，处理中。` stay local and are never pushed.
 Mirroring adds no model classification, summarization, semantic rewrite, or second model call beyond the deterministic carrier-safety renderer described in the outbound contract.
 Group chats, inbound cards, card interactions, non-image attachments, audio/video/files/stickers, webhooks, multi-home routing, and remote slash commands are unsupported.
-An unsupported rich-media input is quarantined with only its deterministic type and encoded-size metadata and produces a private local refusal outcome instead of being dropped or flattened.
+An unsupported non-rich-text media input is quarantined with only its deterministic type and encoded-size metadata and produces a private local refusal outcome instead of being dropped or flattened.
 Slash-like Feishu text is ordinary user content and cannot invoke a Pi slash command or prompt template.
 
 Feishu and native TUI input use the same normal Pi tool path.
@@ -130,10 +133,11 @@ An accepted callback validates the authenticated app identity when present, send
 Only after the authorization fence passes can the transport claim an image resource.
 It calls the official SDK resource API with the immutable message and resource identities, streams at most 10 MiB per image and 20 MiB per logical message, permits at most eight images, and requires the response MIME and actual PNG/JPEG/GIF/WebP signature to agree.
 The private cache uses generated names, atomic owner-only writes, a SHA-256 byte binding, and no user-controlled path component.
-Rich-text bodies are read from one well-formed locale, preferring `zh_cn`, and a structurally malformed post quarantines with non-sensitive metadata instead of failing the transport.
+Rich-text bodies are read from one well-formed locale, preferring `zh_cn`, and preserve paragraph order, meaningful line breaks, link labels, and link destinations.
+The [supported-scope contract](#supported-scope) owns partial-element fallback and whole-message quarantine behavior.
 Download pending, downloading, ready, retryable failure, terminal refusal, Pi offer, and persisted delivery remain distinct durable states.
 A retryable download waits on a bounded durable schedule that honors a server `Retry-After` when present and uses bounded exponential delays otherwise, and later accepted inputs hold behind the oldest not-ready media input in local commit order until it becomes ready or is terminally refused.
-Unauthorized, malformed, unsupported, duplicate, overlength, or resource-pressure events never reach Pi.
+Unauthorized, wholly malformed, wholly unsupported, duplicate, overlength, or resource-pressure events never reach Pi.
 A durability failure throws from the callback so the SDK can report failure to Feishu rather than acknowledging memory-only receipt.
 
 The SDK owns reconnect and protocol replay behavior within the transport's bounded recovery and identity-verification fence.

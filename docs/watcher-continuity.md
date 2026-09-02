@@ -69,11 +69,13 @@ A live initial queue-lock holder produces one PID-naming advisory and skips the 
 Acknowledgement invocations and every other mutation-critical queue-lock acquire retain blocking semantics, so acknowledgement atomicity is unchanged.
 Main records its presented set in `state/.main-eligible-rows`.
 A branch grant is published through `bin/fm-wake-grant.sh` under that same lock in `state/.branch-eligible-rows`, bound to the live branch process and extension generation recorded in `state/.branch-eligible-owner`, and publication is refused if main already claimed any requested row.
+The branch publishes that exact grant before synchronously accepting the watcher offer, and it accepts no further offer while a prompt or mirror operation is unsettled, so acceptance proves current ownership and capacity rather than eventual serialized capacity.
+A busy branch instead reports an offered wake whose eligible rows its live grant already covers as already owned, and the watcher suppresses that main delivery because the in-flight turn's drain will present those rows; rows outside the live grant keep the single main fallback.
 A main drain validates that owner evidence under the queue lock and reclaims the grant when its process is gone or its identity no longer matches.
 A main drain claims every currently unclaimed row and excludes an active branch grant from both presentation and acknowledgement.
 Its `--ack-through <SEQ>` deletes only claimed main rows at or below the cutoff, while a branch acknowledgement deletes only claimed branch rows at or below its cutoff.
 Every settled branch prompt releases any residual grant, so an omitted or failed acknowledgement leaves the durable row available to a later main drain; a successful acknowledgement has already removed it.
-If a branch offer loses the claim race to main, it falls back to a main follow-up rather than assuming the earlier main delivery is still live.
+If publication loses the claim race to main, the offer is never accepted and the watcher itself delivers that wake to main rather than the branch assuming an earlier main delivery is still live.
 [`pi-supervision-branch.md`](pi-supervision-branch.md#components-and-their-owners) owns branch eligibility, mixed-queue dispatch, the pre-drain recheck, and heartbeat's all-or-nothing rule.
 A check-kind row is main-owned in every mode, including a heartbeat review, so it is never part of a branch claim and never defers one; main is woken for it on that check's own triggering close.
 `fm-wake-drain.sh` never reclassifies a row itself: it filters the queue to the current actor's opaque claim before same-key deduplication, then presents and acknowledges only that actor-local view.

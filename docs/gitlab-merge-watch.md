@@ -267,8 +267,8 @@ It skips only that prompt; the conditions above are what authorize the merge.
 
 ## Why a recorded head is not the authority
 
-`bin/fm-pr-check.sh` records `pr_head=` only for GitHub, where `gh` exposes the head commit as a selectable field.
-It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+`bin/fm-pr-check.sh` records `pr_head=` for GitHub, where `gh` exposes the head commit as a selectable field, and for Codebase, where arming verifies and records the exact source head through the official read-only CLI.
+A GitLab task records none, and the other consumers treat a recorded head as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
 
 The merge path does not record one either, and deliberately does not depend on one.
 A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.

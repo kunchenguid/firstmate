@@ -5,6 +5,8 @@
 # addressed through gh-axi by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded.
+# A canonical Codebase URL is refused before any recording or poll side effect,
+# because this script does not implement that provider's merge operation.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -94,6 +96,10 @@ if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
 fi
 URL=$FM_PR_URL
 PROVIDER=$FM_PR_PROVIDER
+if [ "$PROVIDER" = codebase ]; then
+  echo "error: merging Codebase merge requests is not supported" >&2
+  exit 2
+fi
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER

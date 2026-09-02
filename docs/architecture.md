@@ -322,6 +322,8 @@ Where a no-mistakes pipeline stores evidence in the repo, it publishes that PR-v
 This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`](configuration.md) owns the setting.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling the forge CLI.
 The helper requires a full canonical URL and rejects malformed URLs or repo override flags before recording merge state.
+Merge monitoring also accepts an exact `https://code.byted.org/<namespace>/<repo>/merge_requests/<n>` URL: registration and the static poll use the official read-only `bytedcli codebase mr status` surface and bind the observation to the canonical URL, repository, number, and recorded source head.
+`fm-pr-merge.sh` still rejects Codebase because it does not implement that provider's merge operation.
 A `https://github.com/<owner>/<repo>/pull/<n>` URL invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, and preserves explicit merge-method flags.
 A `https://<host>/<path>/-/merge_requests/<n>` URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) invokes `glab mr merge <n> -R https://<host>/<path>`, so the instance comes from the URL, and adds no merge-method flag because the project's own merge method applies.
 That path merges only after one live read of the merge request confirms it is open, mergeable, conflict-free, with blocking discussions resolved and a successful pipeline at the current head, and it binds the merge to that verified head; recorded metadata is never the authority for those conditions because a rebase leaves it stale.
@@ -411,7 +413,8 @@ Feishu and TUI use the same normal Pi tool path with no channel-specific tool fe
 The transport authenticates through the SDK's app-credential mechanism, verifies the safe app fingerprint and P2P chat, and durably publishes accepted SDK callbacks before returning.
 The callback never waits for Pi or executes a model or tool.
 The SDK owns protocol reconnect and replay within the transport's bounded recovery fence, which suspends dispatch until the exact owner, generation, and P2P identity are reverified; durable `event_id` and `message_id` indexes converge redelivery without history polling or an invented replay service.
-A reconnect, malformed event, disk failure, authorization mismatch, or unsupported message type becomes body-free health or quarantine evidence rather than an in-memory success.
+A reconnect, wholly malformed event, disk failure, authorization mismatch, or unsupported message type becomes body-free health or quarantine evidence rather than an in-memory success.
+The [Feishu operator contract](feishu-channel.md#supported-scope) owns supported rich-text link normalization and safe partial-element fallback.
 
 Direct egress is a deterministic persisted-session projection rather than a second reasoning path.
 After Pi persists a finalized Assistant message, the extension scans message entries strictly after the binding's history boundary and registers every non-empty Assistant text regardless of whether Feishu, native TUI, watcher, turn-end, or another normal Pi source caused it.
