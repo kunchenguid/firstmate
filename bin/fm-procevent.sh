@@ -173,16 +173,31 @@ usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//';
 
 case "${1-}" in ''|-h|--help|help) usage ;; esac
 
-STATE=$(fm_procevent_state_root_resolve "$STATE") \
-  || die "process-event state root is not a private directory"
 REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 EXTENSION_HOST="$SCRIPT_DIR/fm-extension.mjs"
 EXTENSION_LIFECYCLE_LOCK="$REG/.extension-binding-lifecycle.lock"
 
+state_root_bind() {  # [create]
+  if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+    [ "${1-}" = create ] || return 1
+    (umask 077; mkdir -p "$STATE") || return 1
+  fi
+  STATE=$(fm_procevent_state_root_resolve "$STATE") || return 1
+  REG=$(fm_procevent_registry_dir "$STATE")
+  EXTENSION_LIFECYCLE_LOCK="$REG/.extension-binding-lifecycle.lock"
+  FM_STATE_OVERRIDE=$STATE
+  export FM_STATE_OVERRIDE
+}
+
+if [ -e "$STATE" ] || [ -L "$STATE" ]; then
+  state_root_bind || die "process-event state root is not a private directory"
+fi
+
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
 extension_lifecycle_lock_acquire() {
+  state_root_bind create || return 1
   (umask 077; mkdir -p "$REG") || return 1
   [ -d "$REG" ] && [ ! -L "$REG" ] || return 1
   fm_lock_acquire_wait "$EXTENSION_LIFECYCLE_LOCK"
@@ -395,6 +410,7 @@ cmd_register() {
     case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
   done
   [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
+  state_root_bind create || die "cannot safely prepare the process-event state root"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
   if ! extension_registration_replacement_safe_locked "$id"; then
     fm_procevent_source_lock_release "$id"

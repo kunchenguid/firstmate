@@ -138,7 +138,7 @@ hold_source_lock_then_handle() {  # <home> <source-id> <sequence> <ready-file> <
 }
 
 # --- inert with nothing configured ------------------------------------------
-IDLE="$TMP_ROOT/idle"; new_home "$IDLE"
+IDLE="$TMP_ROOT/idle"; mkdir -p "$IDLE"
 out=$(pe "$IDLE" list)
 assert_contains "$out" "no sources registered" "an unconfigured home reports no sources"
 out=$(pe "$IDLE" reconcile)
@@ -151,7 +151,7 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
 assert_contains "$sup" no "an unconfigured home does not need supervision"
 
 # --- a blocking source completes into exactly one normalized event ----------
-H1="$TMP_ROOT/h1"; new_home "$H1"
+H1="$TMP_ROOT/h1"; mkdir -p "$H1"
 TRIG="$TMP_ROOT/trigger-one"
 out=$(pe_register "$H1" lavish src-one -- "$BLOCKER" "$TRIG" "payload one")
 assert_contains "$out" "registered: src-one" "register records a source"
