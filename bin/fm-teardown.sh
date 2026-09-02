@@ -2642,7 +2642,7 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
-    if [ -n "$child_usage_stage" ]; then
+    if [ -n "$child_usage_stage" ] && [ -s "$child_usage_stage" ]; then
       FM_DATA_OVERRIDE="$DATA" \
         "$FM_ROOT/bin/fm-usage-harvest.sh" --append-from "$child_usage_stage" "$child_id" >/dev/null \
         || echo "warning: usage harvest for $child_id failed; continuing cleanup" >&2
@@ -3025,8 +3025,10 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # Append phase of the harvest: every fail-closed refusal is behind us, so this
 # teardown is committed and the staged row can become permanent. It still
-# precedes the status retirement below, and it stays best effort.
-if [ -n "${USAGE_STAGE_MAIN:-}" ]; then
+# precedes the status retirement below, and it stays best effort. It runs only
+# when the scan actually staged a row, so one failed scan warns once here
+# rather than warning again for a staging file it already reported.
+if [ -n "${USAGE_STAGE_MAIN:-}" ] && [ -s "$USAGE_STAGE_MAIN" ]; then
   "$FM_ROOT/bin/fm-usage-harvest.sh" --append-from "$USAGE_STAGE_MAIN" "$ID" >/dev/null \
     || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
 fi

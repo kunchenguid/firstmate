@@ -18,12 +18,30 @@
 #
 # Ledger line schema (this file is the single owner of that schema; the
 # report script is a consumer):
-#   {"task":<id>,"harness":<name|null>,"model":<id|null>,"effort":<id|null>,
+#   {"task":<id>,"spawn_gen":<token|null>,
+#    "harness":<name|null>,"model":<id|null>,"effort":<id|null>,
 #    "spawned_at":<iso|null>,"completed_at":<iso|null>,
 #    "wall_secs":<int>,"turns":<int>,
 #    "input_tokens":<int|null>,"cached_input_tokens":<int|null>,
 #    "output_tokens":<int|null>,"reasoning_tokens":<int|null>,
 #    "source":<claude-projects|codex-sessions|pi-sessions|unavailable>}
+#
+# Row identity is the PAIR task plus spawn_gen, not the task id alone, because
+# a task id is reusable: teardown retires a task's records, and a later spawn
+# may take the same id. Keying on the id alone silently dropped every such
+# later run, since the append found the earlier row and skipped. spawn_gen is
+# the meta's incarnation token, so a teardown rerun after a fail-closed refusal
+# carries the same one and is still deduped, while a genuinely new spawn of a
+# recycled id carries a different one and earns its own row. One consequence
+# is a gain rather than a wart: a refused teardown followed by a relaunch and
+# then a successful teardown records the relaunched incarnation instead of
+# losing the work done after the refusal.
+# ABSENCE has one reserved spelling, null: a task whose meta carries no
+# spawn_gen writes "spawn_gen":null, and a row written before this field
+# existed omits the key entirely. Both read as null, so a legacy row still
+# blocks a re-harvest of that same legacy task while never matching, and never
+# blocking, a row that does carry a token. A null generation is equal only to
+# another null one.
 #
 # Token invariant, identical for every source: input_tokens counts FRESH,
 # uncached input only, and cached_input_tokens counts every input token served
@@ -168,8 +186,9 @@
 # through to the full parse, and the full parse still admits a file only when
 # the cwd it reports equals the meta worktree.
 #
-# Idempotent: if the ledger already contains a line whose "task" is
-# <task-id>, the command exits 0 without appending.
+# Idempotent: if the ledger already contains a line whose "task" and
+# "spawn_gen" both match this incarnation, the command exits 0 without
+# appending.
 #
 # Two-phase contract: measuring and appending are separable because the ledger
 # row is permanent while the caller's own work may still fail. --scan-to reads
@@ -271,7 +290,8 @@ trap harvest_cleanup EXIT
 # past the bound we give up best-effort (exit 1, which teardown warns on and
 # continues) rather than duplicate the row by appending unserialized.
 ledger_append_row() {  # <row-json>
-  local row=$1 lock_deadline
+  local row=$1 lock_deadline row_gen
+  row_gen=$(printf '%s' "$row" | jq -r '.spawn_gen // ""' 2>/dev/null || true)
   mkdir -p -- "$DATA"
   LEDGER_LOCK="$DATA/.usage-ledger.lock"
   LEDGER_LOCK_WAIT=${FM_USAGE_LEDGER_LOCK_WAIT:-30}
@@ -284,13 +304,16 @@ ledger_append_row() {  # <row-json>
     sleep 0.1
   done
   LEDGER_LOCK_HELD=1
-  # The identity test parses each ledger line and compares the task field's own
-  # value, so exactness is structural rather than resting on the punctuation
-  # that happens to surround the field today: it stays exact if the schema or
-  # the key order ever changes. A line this cannot parse simply does not match,
-  # which risks a duplicate row rather than a lost one.
-  if [ -f "$LEDGER" ] && jq -Rn --exit-status --arg id "$ID" \
-      'any(inputs | try (fromjson | objects) catch empty; .task == $id)' \
+  # The identity test parses each ledger line and compares the task and
+  # spawn_gen fields' own values, so exactness is structural rather than
+  # resting on the punctuation that happens to surround them today: it stays
+  # exact if the schema or the key order ever changes. An absent or null
+  # generation on either side reads as the empty string, so it matches only
+  # another absent one. A line this cannot parse simply does not match, which
+  # risks a duplicate row rather than a lost one.
+  if [ -f "$LEDGER" ] && jq -Rn --exit-status --arg id "$ID" --arg gen "$row_gen" \
+      'any(inputs | try (fromjson | objects) catch empty;
+           .task == $id and (.spawn_gen // "") == $gen)' \
       "$LEDGER" >/dev/null 2>&1; then
     return 0
   fi
@@ -599,13 +622,14 @@ SPAWNED=$(iso_from_epoch "$START_EPOCH" || true)
 COMPLETED=$(iso_from_epoch "$END_EPOCH" || true)
 
 ROW=$(jq -cn \
-  --arg task "$ID" --arg harness "$HARNESS" \
+  --arg task "$ID" --arg gen "$SPAWN_GEN" --arg harness "$HARNESS" \
   --arg model "$MODEL" --arg effort "$EFFORT" \
   --arg spawned "$SPAWNED" --arg completed "$COMPLETED" \
   --argjson wall "$WALL" --argjson turns "$TURNS" \
   --argjson it "$IT" --argjson ct "$CT" --argjson ot "$OT" --argjson rt "$RT" \
   --arg source "$SRC" \
-  '{task:$task, harness:(if $harness == "" then null else $harness end),
+  '{task:$task, spawn_gen:(if $gen == "" then null else $gen end),
+    harness:(if $harness == "" then null else $harness end),
     model:(if ($model == "" or $model == "default") then null else $model end),
     effort:(if ($effort == "" or $effort == "default") then null else $effort end),
     spawned_at:(if $spawned == "" then null else $spawned end),

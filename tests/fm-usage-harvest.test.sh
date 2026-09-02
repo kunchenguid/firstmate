@@ -715,6 +715,85 @@ JSON
 
 # --- concurrency: the ledger lock keeps the append idempotent ---------------
 
+# A task id is reusable: teardown retires the task's records and a later spawn
+# may take the same id. The ledger's identity is therefore the task plus its
+# spawn_gen incarnation token, so a teardown rerun is still deduped while a
+# genuinely new spawn earns its own row. Keyed on the id alone, the second
+# incarnation's whole cost record was silently dropped.
+reused_task_id_case() {
+  local id=usagereuse1 wt="$TMP_ROOT/wt-usagereuse1"
+  local data home state ledger out base rows
+  data=$(harvest_case "$id" cursor "$wt" cursor-x "")
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+  ledger="$data/usage-ledger.jsonl"
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.11.1\n' "$((base - 300))" >> "$state/$id.meta"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "first incarnation harvest should succeed"$'\n'"$out"
+  assert_contains "$(cat "$ledger")" "\"spawn_gen\":\"s$((base - 300)).11.1\"" \
+    "the row records the incarnation it measured"
+  # Same incarnation again, as a teardown rerun does: still exactly one row.
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "a rerun of the same incarnation should succeed"$'\n'"$out"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 1 ] \
+    || fail "a rerun of the same incarnation duplicated its row"
+
+  # The id is spawned again later, which fm-spawn records as a new spawn_gen.
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$TMP_ROOT/proj-$id" "harness=cursor" "kind=ship" "mode=no-mistakes" \
+    "model=cursor-x" "effort="
+  printf 'spawn_gen=s%s.22.2\n' "$base" >> "$state/$id.meta"
+  printf 'working: second incarnation\n' > "$state/$id.status"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "second incarnation harvest should succeed"$'\n'"$out"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 2 ] \
+    || fail "a reused task id did not get its own row"$'\n'"$(cat "$ledger")"
+  rows=$(jq -r '.spawn_gen' "$ledger" | sort | tr '\n' ' ')
+  [ "$rows" = "s$((base - 300)).11.1 s$base.22.2 " ] \
+    || fail "the two incarnations are not recorded separately: [$rows]"
+  [ "$(jq -r '.task' "$ledger" | sort -u)" = "$id" ] \
+    || fail "the two rows do not share the reused task id"
+  pass "usage harvest: a reused task id records each incarnation once"
+}
+
+# A row written before the ledger carried spawn_gen omits the key entirely, and
+# a task whose meta has no spawn_gen writes null. Both read as an absent
+# generation, which matches only another absent one.
+legacy_ledger_row_case() {
+  local id=usagelegacy1 wt="$TMP_ROOT/wt-usagelegacy1"
+  local data home state ledger out base
+  data=$(harvest_case "$id" cursor "$wt" cursor-x "")
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+  ledger="$data/usage-ledger.jsonl"
+  mkdir -p "$data"
+  printf '%s\n' \
+    "{\"task\":\"$id\",\"harness\":\"cursor\",\"model\":\"cursor-x\",\"effort\":null,\"spawned_at\":null,\"completed_at\":null,\"wall_secs\":7,\"turns\":1,\"input_tokens\":null,\"cached_input_tokens\":null,\"output_tokens\":null,\"reasoning_tokens\":null,\"source\":\"unavailable\"}" \
+    > "$ledger"
+
+  # The same generation-less task: the legacy row still blocks a re-harvest.
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "harvest against a legacy row should succeed"$'\n'"$out"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 1 ] \
+    || fail "a legacy row did not block a re-harvest of that same task"$'\n'"$(cat "$ledger")"
+
+  # A later spawn of the same id does carry a token, so it is not blocked.
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.33.3\n' "$base" >> "$state/$id.meta"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "harvest of a new incarnation should succeed"$'\n'"$out"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 2 ] \
+    || fail "a legacy row blocked a genuinely new incarnation"$'\n'"$(cat "$ledger")"
+  assert_contains "$(tail -1 "$ledger")" "\"spawn_gen\":\"s$base.33.3\"" \
+    "the new incarnation's row carries its own token"
+  pass "usage harvest: an absent generation matches only another absent one"
+}
+
 race_case() {
   local id=usagerace1 wt="$TMP_ROOT/wt-usagerace1"
   local data home ledger p1 p2
@@ -840,11 +919,27 @@ JSON
   fields=$(printf '%s\n' "$out" | awk '$1 == "other-model" {print $2"|"$3"|"$4"|"$5"|"$6"|"$7}')
   [ "$fields" = "1|5|6|7|8|7" ] \
     || fail "per-model totals for other-model are wrong: [$fields]"
+
   # Both agg-model rows still appear per task, so the grouping folded them
   # rather than the report dropping one.
   assert_contains "$out" "agg1" "the per-task section still lists the first task"
   assert_contains "$out" "agg2" "the per-task section still lists the second task"
   assert_contains "$out" "agg4" "the per-task section still lists the unavailable task"
+
+  # A reused task id is two incarnations, so it is two rows: the per-task
+  # section lists both and the per-model section sums both rather than
+  # collapsing them onto one id.
+  cat > "$ledger" <<'JSON'
+{"task":"agg9","spawn_gen":"s1000000001.1.1","harness":"claude","model":"reuse-model","effort":null,"spawned_at":null,"completed_at":null,"wall_secs":10,"turns":1,"input_tokens":3,"cached_input_tokens":4,"output_tokens":5,"reasoning_tokens":6,"source":"claude-projects"}
+{"task":"agg9","spawn_gen":"s1000000999.2.2","harness":"claude","model":"reuse-model","effort":null,"spawned_at":null,"completed_at":null,"wall_secs":20,"turns":2,"input_tokens":30,"cached_input_tokens":40,"output_tokens":50,"reasoning_tokens":60,"source":"claude-projects"}
+JSON
+  out=$(FM_DATA_OVERRIDE="$home/data" "$REPORT" 2>&1)
+  expect_code 0 "$?" "report of a reused task id should succeed"$'\n'"$out"
+  fields=$(printf '%s\n' "$out" | awk '$1 == "reuse-model" {print $2"|"$3"|"$4"|"$5"|"$6"|"$7}')
+  [ "$fields" = "2|33|44|55|66|30" ] \
+    || fail "per-model totals collapsed or mis-summed a reused id: [$fields]"
+  [ "$(printf '%s\n' "$out" | awk '$1 == "agg9"' | wc -l | tr -d ' ')" = 2 ] \
+    || fail "the per-task section did not list both incarnations of a reused id"$'\n'"$out"
   pass "usage report: per-model rows group on the model and sum each column"
 }
 
@@ -1218,6 +1313,58 @@ SH
   [ -z "$(find "$tmp" -maxdepth 1 -name 'fm-usage-stage.*' -print -quit)" ] \
     || fail "a completed teardown leaked its usage staging directory"
   pass "teardown integration: an aborted teardown writes no row and the rerun re-measures"
+}
+
+# A scan that fails after its staging directory exists must produce exactly one
+# diagnostic: without a gate on the staged row the append phase runs against a
+# file that was never written, printing its own error and a second warning for
+# one underlying failure.
+teardown_single_diagnostic_case() {
+  local proj wt id fb state data config out
+  id=usageharvonewarn1
+  proj="$TMP_ROOT/onewarn-proj"; wt="$TMP_ROOT/onewarn-wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb="$TMP_ROOT/onewarn-fakebin"
+  mkdir -p "$fb"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/treehouse"
+  # The staging directory is created read-only, so it exists for the append
+  # gate to see while the scan's own write into it fails.
+  cat > "$fb/mktemp" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *fm-usage-stage.XXXXXX)
+      d=\$("$REAL_MKTEMP" "\$@") || exit 1
+      chmod 500 "\$d"
+      printf '%s\\n' "\$d"
+      exit 0
+      ;;
+  esac
+done
+exec "$REAL_MKTEMP" "\$@"
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse" "$fb/mktemp"
+  state="$TMP_ROOT/onewarn-state"; config="$TMP_ROOT/onewarn-config"; data="$TMP_ROOT/onewarn-data"
+  mkdir -p "$state" "$config" "$data/$id"
+  printf 'scout findings\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" \
+    "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "decisions_reviewed=1" "decision_keys="
+  printf 'working: scouting\n' > "$state/$id.status"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/onewarn-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/onewarn-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/onewarn-fake-pi" \
+    "$TEARDOWN" "$id" 2>&1)
+  expect_code 0 "$?" "teardown must survive a scan that cannot stage"$'\n'"$out"
+  [ "$(printf '%s\n' "$out" | grep -c "warning: usage harvest for $id failed")" = 1 ] \
+    || fail "one failed scan produced more than one warning"$'\n'"$out"
+  assert_not_contains "$out" "no staged usage row" \
+    "the append ran against a staging file the scan never wrote"
+  pass "teardown integration: one failed scan yields exactly one diagnostic"
 }
 
 teardown_case() {
@@ -1636,6 +1783,8 @@ missing_model_case
 no_usage_case
 cursor_case
 remote_case
+reused_task_id_case
+legacy_ledger_row_case
 race_case
 lock_bound_case
 report_case
@@ -1646,4 +1795,5 @@ teardown_status_case
 teardown_child_case
 teardown_pool_order_case
 teardown_refusal_case
+teardown_single_diagnostic_case
 teardown_case
