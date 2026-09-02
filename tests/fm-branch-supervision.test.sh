@@ -124,9 +124,22 @@ PY
 }
 
 test_outcome_startup_replay_preserves_silence() {
-  local home replay
+  local home replay out status store
   home="$TMP_ROOT/store-silent-home"
   mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict captain --summary 'blocked' --silent true 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted a silent captain outcome"
+  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent captain refusal lost its diagnostic"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'healthy' --silent true 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted a silent task-scoped outcome"
+  assert_contains "$out" "silent outcomes must be routine fleet outcomes" "silent task refusal lost its diagnostic"
+  [ ! -e "$store" ] || fail "refused silent outcomes changed the durable store"
 
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task fleet --verdict routine --summary 'fleet reviewed, nothing changed' --silent true >/dev/null \
@@ -147,7 +160,13 @@ test_outcome_startup_replay_preserves_silence() {
   assert_contains "$replay" "legacy visible outcome" "startup replay hid a legacy row with no silent field"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the legacy row read"
-  pass "startup replay skips silent outcomes and preserves visible and legacy rows"
+
+  printf '%s\n' '{"seq":4,"epoch":1,"task":"task-bad","wake":"","verdict":"captain","summary":"poisoned","silent":true}' >> "$store"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unread accepted a stored silent captain outcome"
+  assert_contains "$out" "malformed or non-sequential" "stored silent captain refusal lost its diagnostic"
+  pass "only routine fleet outcomes can be silent"
 }
 
 test_outcome_startup_replay_stops_at_captain_barrier() {
