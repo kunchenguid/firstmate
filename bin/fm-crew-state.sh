@@ -420,6 +420,53 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
+# A terminal no-mistakes `outcome: passed` is only a local pipeline result until
+# the linked GitHub PR is checked live. Never turn an unverified or still-open
+# PR into a merged/closed claim. A missing PR remains a genuine local-only
+# completion, while non-GitHub PRs and unavailable GitHub reads stay explicit
+# without making a forge claim this helper cannot prove.
+nm_passed_run_detail() {
+  local pr_url identity repo_path number pr_out state
+  pr_url=$(strip_quotes "$(nm_field pr)")
+  if [ -z "$pr_url" ]; then
+    printf 'run passed: local work complete'
+    return
+  fi
+
+  # Only GitHub URLs can be checked by the required gh-axi GitHub surface.
+  # Strip ordinary URL decorations before applying the exact owner/repo/pull
+  # shape, so malformed or foreign-forge URLs cannot become a merge claim.
+  pr_url=${pr_url%%\?*}
+  pr_url=${pr_url%%\#*}
+  pr_url=${pr_url%/}
+  identity=$(printf '%s\n' "$pr_url" \
+    | sed -nE 's#^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+)$#\1 \2#p')
+  if [ -z "$identity" ]; then
+    printf 'run passed: PR state unverified'
+    return
+  fi
+  repo_path=${identity% *}
+  number=${identity##* }
+  if ! command -v gh-axi >/dev/null 2>&1; then
+    printf 'run passed: PR state unverified'
+    return
+  fi
+  # Address the exact linked repository explicitly via gh-axi's --repo flag
+  # (as bin/fm-pr-merge.sh already does), so a stale or foreign-fork link
+  # cannot silently resolve against the crew worktree's own checkout instead.
+  pr_out=$(cd "$WT" && gh-axi pr view "$number" --repo "$repo_path" 2>/dev/null) || {
+    printf 'run passed: PR state unverified'
+    return
+  }
+  state=$(fm_nm_strip_quotes "$(fm_nm_field "$pr_out" state)")
+  case "$state" in
+    merged) printf 'run passed: PR merged/closed' ;;
+    closed) printf 'run passed: PR closed (not merged)' ;;
+    open) printf 'run passed: PR open (not merged/closed)' ;;
+    *) printf 'run passed: PR state unverified' ;;
+  esac
+}
+
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
@@ -499,7 +546,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        passed)        RUN_STATE="done"; RUN_DETAIL=$(nm_passed_run_detail) ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;

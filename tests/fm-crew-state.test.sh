@@ -25,6 +25,7 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) a passed run with an open GitHub PR is never reported as merged/closed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -79,6 +80,36 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  cat > "$fb/gh-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  [ -z "${FM_FAKE_GH_CALLS:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_GH_CALLS"
+  [ "${FM_FAKE_GH_PR_VIEW:-ok}" = unavailable ] && exit 1
+  if [ "${FM_FAKE_GH_PR_VIEW:-ok}" = malformed ]; then
+    printf 'error: pull request state unavailable\n'
+    exit 0
+  fi
+  number=${3:-1}
+  repo_arg=""
+  shift 3
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo_arg=${2:-}; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  # Real gh-axi resolves --repo authoritatively: an unexpected repo/PR pair
+  # (a stale or foreign-fork link) is not found, exactly as GitHub would 404 it.
+  if [ -n "${FM_FAKE_GH_REPO_EXPECTED:-}" ] && [ "$repo_arg" != "$FM_FAKE_GH_REPO_EXPECTED" ]; then
+    exit 1
+  fi
+  printf 'pull_request:\n  number: %s\n  state: %s\n' \
+    "$number" "${FM_FAKE_GH_PR_STATE:-open}"
+  exit 0
+fi
+exit 1
+SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -122,7 +153,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr" "$fb/gh-axi"
   printf '%s\n' "$fb"
 }
 
@@ -170,8 +201,13 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_GH_PR_VIEW=ok
+  FM_FAKE_GH_PR_STATE=open
+  FM_FAKE_GH_REPO_EXPECTED=
+  FM_FAKE_GH_CALLS=
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_GH_PR_VIEW FM_FAKE_GH_PR_STATE FM_FAKE_GH_REPO_EXPECTED FM_FAKE_GH_CALLS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -273,6 +309,19 @@ run:
   status: completed
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: passed
+EOF
+}
+
+run_passed_local() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
   findings: none
 outcome: passed
 EOF
@@ -669,6 +718,91 @@ test_terminal_passed() {
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
   pass "terminal passed run is authoritative"
+}
+
+test_terminal_passed_open_pr_not_reported_merged() {
+  reset_fakes
+  local d; d=$(new_case passed-open-pr)
+  make_repo_on_branch "$d/wt" fm/feat-open-pr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-open-pr.meta" "window=fm:fm-feat-open-pr" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-open-pr)"
+  FM_FAKE_GH_PR_STATE=open
+  FM_FAKE_GH_REPO_EXPECTED=o/r
+  local out; out=$(FM_FAKE_GH_CALLS="$d/gh.calls" run_crew_state "$d" feat-open-pr)
+  assert_contains "$out" "state: done" "passed run with open PR remains locally done"
+  assert_contains "$out" "run passed: PR open (not merged/closed)" "live open PR state is reported"
+  assert_not_contains "$out" "PR merged/closed" "open PR is never reported as merged/closed"
+  assert_grep 'pr view 1 --repo o/r' "$d/gh.calls" "the linked GitHub PR was checked live in its own repo"
+  pass "passed run with open PR is not falsely reported as merged/closed"
+}
+
+test_terminal_passed_unverified_pr_not_reported_merged() {
+  reset_fakes
+  local d; d=$(new_case passed-unverified-pr)
+  make_repo_on_branch "$d/wt" fm/feat-unverified-pr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unverified-pr.meta" "window=fm:fm-feat-unverified-pr" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-unverified-pr)"
+  FM_FAKE_GH_PR_VIEW=unavailable
+  local out; out=$(run_crew_state "$d" feat-unverified-pr)
+  assert_contains "$out" "run passed: PR state unverified" "unverified PR state is explicit"
+  assert_not_contains "$out" "PR merged/closed" "unverified PR is never reported as merged/closed"
+  pass "unverified passed PR is not falsely reported as merged/closed"
+}
+
+test_terminal_passed_mismatched_repo_pr_not_reported_merged() {
+  reset_fakes
+  local d; d=$(new_case passed-mismatched-repo-pr)
+  make_repo_on_branch "$d/wt" fm/feat-mismatched-pr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-mismatched-pr.meta" "window=fm:fm-feat-mismatched-pr" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(cat <<EOF
+run:
+  id: "01RUN"
+  branch: fm/feat-mismatched-pr
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/other-owner/other-repo/pull/9"
+  findings: none
+outcome: passed
+EOF
+)"
+  FM_FAKE_GH_PR_STATE=merged
+  FM_FAKE_GH_REPO_EXPECTED=o/r
+  local out; out=$(FM_FAKE_GH_CALLS="$d/gh.calls" run_crew_state "$d" feat-mismatched-pr)
+  assert_contains "$out" "run passed: PR state unverified" "a stale link to a foreign repo is never trusted"
+  assert_not_contains "$out" "PR merged/closed" "a mismatched repo PR is never reported as merged/closed"
+  assert_grep 'pr view 9 --repo other-owner/other-repo' "$d/gh.calls" "the linked repo, not the worktree's own repo, was queried"
+  pass "PR link pointing at a different repo is not falsely reported as merged/closed"
+}
+
+test_terminal_passed_merged_pr_reports_merged() {
+  reset_fakes
+  local d; d=$(new_case passed-merged-pr)
+  make_repo_on_branch "$d/wt" fm/feat-merged-pr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-merged-pr.meta" "window=fm:fm-feat-merged-pr" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-merged-pr)"
+  FM_FAKE_GH_PR_STATE=merged
+  FM_FAKE_GH_REPO_EXPECTED=o/r
+  local out; out=$(run_crew_state "$d" feat-merged-pr)
+  assert_contains "$out" "run passed: PR merged/closed" "live merged PR state permits the merge claim"
+  pass "verified merged PR retains the merged/closed claim"
+}
+
+test_terminal_passed_local_only_stays_done() {
+  reset_fakes
+  local d; d=$(new_case passed-local-only)
+  make_repo_on_branch "$d/wt" fm/feat-local-only
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-local-only.meta" "window=fm:fm-feat-local-only" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_local fm/feat-local-only)"
+  local out; out=$(run_crew_state "$d" feat-local-only)
+  assert_contains "$out" "state: done" "local-only passed run remains done"
+  assert_contains "$out" "run passed: local work complete" "local-only completion remains visible"
+  assert_not_contains "$out" "state unverified" "local-only completion is not downgraded to an unverifiable PR"
+  pass "passed local-only work remains genuinely finished"
 }
 
 test_terminal_failed() {
@@ -1567,6 +1701,11 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_terminal_passed_open_pr_not_reported_merged
+test_terminal_passed_unverified_pr_not_reported_merged
+test_terminal_passed_mismatched_repo_pr_not_reported_merged
+test_terminal_passed_merged_pr_reports_merged
+test_terminal_passed_local_only_stays_done
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row

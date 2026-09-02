@@ -1,0 +1,17 @@
+{
+  "schema": "fm-linear-poll.v1",
+  "activeStates": [
+    "Todo",
+    "In Progress",
+    "Blocked",
+    "Human Review"
+  ],
+  "projects": [
+    {
+      "linearProjectSlug": "replace-with-linear-project-slug",
+      "linearProjectName": "Replace with Linear project name",
+      "firstmateProject": "Replace with Firstmate project name"
+    }
+  ],
+  "allowIssues": []
+}
