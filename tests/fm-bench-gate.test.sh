@@ -768,6 +768,7 @@ mkdir -p "$ISO/sealed"
 printf 'K7 -> Fable 5 High\n' > "$ISO/sealed/key.json"
 for entrant in e1 e2; do
   mkdir -p "$ISO/$entrant/objects" "$ISO/$entrant/tmp" "$ISO/$entrant/home" "$ISO/$entrant/session"
+  printf 'objects/\ntmp/\nhome/\nsession/\n' > "$ISO/$entrant/.gitignore"
   # Each declared private store is a probe target, so it must hold material a
   # sibling can be proven unable to read; an empty directory proves nothing.
   for private in objects tmp home session; do
@@ -924,6 +925,33 @@ assert_contains "$out" "isolation.bench-b1-k7.private_containment fail" "the iso
 assert_contains "$out" "private_tmp" "the containment refusal names the offending private path"
 pass "private paths outside the proven entrant root are refused during isolation verification"
 
+BENCH="$TMP_ROOT/iso-private-tree"
+write_plan "$BENCH"
+write_isolation "$BENCH" none
+DENY_WRAPPER="$TMP_ROOT/deny-all-probes.sh"
+cat > "$DENY_WRAPPER" <<'EOF'
+#!/usr/bin/env bash
+printf 'PROBE DENIED fixture confinement\n'
+EOF
+chmod +x "$DENY_WRAPPER"
+python3 - "$BENCH/isolation.json" "$DENY_WRAPPER" <<'PY'
+import json, sys
+path, wrapper = sys.argv[1:]
+d = json.load(open(path))
+d["exec_wrapper"] = [wrapper]
+json.dump(d, open(path, "w"), indent=2, sort_keys=True)
+PY
+git -C "$ISO/e1" add -f tmp/canary.txt
+git -C "$ISO/e1" -c user.name=t -c user.email=t@x commit -qm private-tree-fixture
+out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
+expect_code 1 "$status" "private storage committed into a candidate tree is refused"
+assert_contains "$out" "isolation.bench-b1-k7.private_tree_exclusion fail" \
+  "the gate names private material present in the candidate index"
+assert_contains "$out" "private_tmp" "the tree-exclusion refusal names the offending private path"
+git -C "$ISO/e1" rm --cached -q tmp/canary.txt
+git -C "$ISO/e1" -c user.name=t -c user.email=t@x commit -qm remove-private-tree-fixture
+pass "in-root private storage must be ignored and absent from the candidate tree"
+
 # An object store reached through .git/objects/info/alternates sits outside every
 # entrant root, so a probe that only walks the sibling root would miss it.
 BENCH="$TMP_ROOT/iso-alternates"
@@ -970,6 +998,35 @@ expect_code 1 "$status" "partial confinement earns no partial credit"
 assert_contains "$out" "isolation.bench-b1-k7.environment_leakage ok" "the environment probe really flips to denied"
 assert_contains "$out" "isolation.bench-b1-k7.sibling_file_read fail" "shared filesystem access still refuses the gate"
 pass "per-probe verdicts are real, and partial confinement still refuses the launch"
+
+BENCH="$TMP_ROOT/iso-missing-tool"
+write_plan "$BENCH"
+write_isolation "$BENCH" none
+NO_FIND_BIN="$TMP_ROOT/no-find-bin"
+MISSING_TOOL_WRAPPER="$TMP_ROOT/missing-tool-wrapper.sh"
+mkdir -p "$NO_FIND_BIN"
+ln -s "$(command -v bash)" "$NO_FIND_BIN/bash"
+cat > "$MISSING_TOOL_WRAPPER" <<EOF
+#!/usr/bin/env bash
+if [ "\${2:-}" = sibling_file_read ]; then
+  PATH='$NO_FIND_BIN' "\$@"
+else
+  printf 'PROBE DENIED fixture confinement\\n'
+fi
+EOF
+chmod +x "$MISSING_TOOL_WRAPPER"
+python3 - "$BENCH/isolation.json" "$MISSING_TOOL_WRAPPER" <<'PY'
+import json, sys
+path, wrapper = sys.argv[1:]
+d = json.load(open(path))
+d["exec_wrapper"] = [wrapper]
+json.dump(d, open(path, "w"), indent=2, sort_keys=True)
+PY
+out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
+expect_code 1 "$status" "a missing probe utility cannot count as an isolation denial"
+assert_contains "$out" "required tool is unavailable: find" "the absent required utility is reported"
+assert_contains "$out" "inconclusive against" "the gate refuses an unmeasurable confined probe"
+pass "a confinement missing a required probe utility is inconclusive, never denied"
 
 # A target that does not exist would report "denied" for the wrong reason.
 BENCH="$TMP_ROOT/iso-control"
@@ -1032,6 +1089,7 @@ root = bench / "archive"
 shutil.rmtree(root, ignore_errors=True)
 for track_name, candidate, packet in work:
     slug = f"{track_name}-{packet}-{candidate}".lower().replace(" ", "-").replace(".", "-")
+    (src / ".ignored-by-evaluator").write_text("not scored\n")
     (src / "work.txt").write_text(slug + "\n")
     git("add", "-A")
     git("commit", "-q", "-m", slug)
@@ -1079,7 +1137,7 @@ print(json.dumps(payload, sort_keys=True))
         "tree_binding": {"original_sha": sha, "original_tree": tree, "neutral_sha": sha,
                          "neutral_tree": tree, "base_tree": base_tree,
                          "patch_hash": hashlib.sha256(slug.encode()).hexdigest()},
-        "evaluator_rerun": {"argv": ["scoring.py"],
+        "evaluator_rerun": {"argv": ["scoring.py"], "scored_inputs": ["work.txt"],
                              "result_hash": hashlib.sha256((json.dumps({"candidate_sha256": hashlib.sha256((slug + "\n").encode()).hexdigest(), "pixel": 0.003}, sort_keys=True) + "\n").encode()).hexdigest()},
     }, indent=2, sort_keys=True) + "\n")
 PY
@@ -1101,6 +1159,8 @@ out=$(run_gate "$BENCH" restore-drill) || fail "the restore drill must pass: $ou
 assert_contains "$out" "restored into a fresh repository, and rebound to its archived tree" \
   "each bundle is really restored and rebound"
 assert_present "$BENCH/archive/restore-drill.json" "the drill writes its receipt"
+assert_contains "$out" "changed perturbed result" \
+  "the evaluator responds to its declared scored subset rather than the first restored file"
 out=$(run_gate "$BENCH" cleanup-gate) || fail "cleanup must pass after a drill: $out"
 assert_contains "$out" "no candidate ships directly" "the disposition is re-asserted at cleanup"
 pass "the restore drill authorises cleanup only after really restoring every bundle"
@@ -1220,14 +1280,71 @@ record = json.loads(manifest.read_text())
 (sample / "scoring.sh").chmod(0o755)
 record["files"]["scoring.sh"] = hashlib.sha256((sample / "scoring.sh").read_bytes()).hexdigest()
 record["groups"]["capture_and_scoring"] = ["capture.json", "scoring.sh"]
-record["evaluator_rerun"] = {"argv": ["scoring.sh"], "result_hash": hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()}
+record["evaluator_rerun"] = {"argv": ["scoring.sh"], "scored_inputs": ["work.txt"], "result_hash": hashlib.sha256((sample / "capture.json").read_bytes()).hexdigest()}
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "an archived-file echo cannot stand in for a restored-tree evaluator"
-assert_contains "$out" "invariant under a perturbed restored candidate" "the rerun contract proves evaluator dependence on restored content"
+assert_contains "$out" "ignored its declared scored inputs" "the rerun contract proves evaluator dependence on restored content"
 assert_absent "$BENCH/archive/restore-drill.json" "a no-op evaluator writes no cleanup receipt"
 pass "the restore drill refuses an executable evaluator that ignores restored content"
+
+BENCH="$TMP_ROOT/archive-stateful-evaluator"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-stateful-evaluator"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text("#!/bin/sh\ncat counter 2>/dev/null\nprintf x >> counter\n")
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"").hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "per-run evaluator state cannot impersonate scored-input dependence"
+assert_contains "$out" "ignored its declared scored inputs" \
+  "fresh scratch state makes both input-ignoring evaluator results identical"
+assert_absent "$BENCH/archive/restore-drill.json" "a stateful no-op evaluator writes no cleanup receipt"
+pass "differential evaluator runs use independent scratch state"
+
+BENCH="$TMP_ROOT/archive-no-scored-inputs"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-no-scored-inputs"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text())
+d["evaluator_rerun"]["scored_inputs"] = []
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "an evaluator must declare the restored inputs it scores"
+assert_contains "$out" "scored_inputs must name at least one" "an empty scored-input declaration is refused"
+assert_absent "$BENCH/archive/restore-drill.json" "an input-free evaluator writes no cleanup receipt"
+pass "every archived evaluator declares a non-empty scored-input set"
+
+BENCH="$TMP_ROOT/archive-escaping-scored-input"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-escaping-scored-input"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text())
+d["evaluator_rerun"]["scored_inputs"] = ["../outside.txt"]
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a declared scored input cannot escape the restored candidate"
+assert_contains "$out" "scored input escapes the restored candidate" "the escaping scored-input path is refused"
+assert_absent "$BENCH/archive/restore-drill.json" "an escaping scored-input declaration writes no cleanup receipt"
+pass "declared scored inputs stay inside the restored candidate"
 
 BENCH="$TMP_ROOT/archive-scratch-evaluator"
 write_plan "$BENCH"
