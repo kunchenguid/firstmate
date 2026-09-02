@@ -418,7 +418,7 @@ action_arm() {
     printf 'fm-runner-health-check: state directory is unavailable\n' >&2
     return 1
   fi
-  mkdir -p "$STATE" || return 1
+  (umask 077; mkdir -p "$STATE") || return 1
   state_private_valid || {
     state_unavailable_diagnostic
     printf 'fm-runner-health-check: state directory is unavailable\n' >&2

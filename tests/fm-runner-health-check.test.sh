@@ -506,6 +506,22 @@ test_arm_registers_a_targeted_shim_and_disarm_removes_it() {
   pass "arm registers the named target and disarm removes every watch artifact"
 }
 
+test_arm_creates_a_private_state_directory() {
+  local home fakebin status mode
+  home="$TMP_ROOT/private-state"
+  fakebin=$(make_fake_gh_axi private-state)
+  mkdir -p "$home/config"
+
+  status=0
+  umask 022
+  env FM_HOME="$home" PATH="$fakebin:$PATH" "$CHECK" arm "$REPOSITORY" "$LABEL" >/dev/null || status=$?
+  expect_code 0 "$status" "arm with a new state directory exit"
+  mode=$(stat -c %a "$home/state" 2>/dev/null || stat -f %Lp "$home/state")
+  [ "$mode" = 700 ] || fail "arm created the state directory with mode $mode instead of 700"
+  FM_HOME="$home" "$CHECK" disarm >/dev/null || fail "disarm failed for a newly created state directory"
+  pass "arm creates a missing state directory with private permissions"
+}
+
 test_arm_refuses_a_symlink_at_the_shim_path() {
   local home fakebin target status
   home=$(make_home symlink)
@@ -613,6 +629,7 @@ test_direct_paginated_health_states_are_aggregated
 test_api_timeout_finishes_inside_the_watcher_bound
 test_target_validation_refuses_unsafe_or_ambiguous_values
 test_arm_registers_a_targeted_shim_and_disarm_removes_it
+test_arm_creates_a_private_state_directory
 test_arm_refuses_a_symlink_at_the_shim_path
 test_arm_and_disarm_refuse_a_symlinked_state_directory
 test_arm_rejects_a_dangling_state_symlink_before_mkdir
