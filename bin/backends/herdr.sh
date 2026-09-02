@@ -1990,9 +1990,12 @@ fm_backend_herdr_agent_alive() {  # <target>
 # Create-attempt identity is published under state/<id>.herdr-create-attempt
 # before the tab create CLI runs, so a successful create that later fails to
 # parse or clean up never returns an untraceable resource. Cleanup uses only
-# exact tab/pane ids from that response, verifies absence, and keeps the
-# attempt record when close or absence cannot be proved. Label-based deletion
-# is never used.
+# exact tab/pane ids from that response. The journal is retired only after a
+# successful query proves that exact id gone: a tab list that omits the tab, or
+# a pane get whose structured body is pane_not_found
+# (fm_backend_herdr_pane_presence_state). Transport, permission, socket,
+# session, parse, and protocol failures are unknown and keep the record.
+# Label-based deletion is never used.
 #
 # --no-focus: verified tab create never focuses by default regardless of
 # sibling tabs, so this is defense in depth rather than a behavior change.
@@ -2117,18 +2120,12 @@ fm_backend_herdr_create_task_tab_absent() {  # <session> <workspace-id> <tab-id>
     '((.result.tabs | type) == "array") and (([.result.tabs[].tab_id] | index($want)) == null)' >/dev/null 2>&1
 }
 
-fm_backend_herdr_create_task_pane_absent() {  # <session> <pane-id>
-  local session=$1 pane_id=$2
-  if fm_backend_herdr_cli "$session" pane get "$pane_id" >/dev/null 2>&1; then
-    return 1
-  fi
-  return 0
-}
-
 # Close only an exact tab or pane id, then prove it is gone. Close failure is
 # never discarded. Ambiguous identity (neither id) does not delete anything.
+# Pane absence is only the structured pane_not_found body; any other pane-get
+# outcome is unknown and keeps the create-attempt record.
 fm_backend_herdr_create_task_cleanup() {  # <session> <workspace-id> <tab-id> <pane-id>
-  local session=$1 wsid=$2 tab_id=$3 pane_id=$4
+  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 presence
   if [ -n "$tab_id" ]; then
     if ! fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null; then
       echo "error: herdr tab close failed for exact tab $tab_id in workspace $wsid (session $session)" >&2
@@ -2145,11 +2142,18 @@ fm_backend_herdr_create_task_cleanup() {  # <session> <workspace-id> <tab-id> <p
       echo "error: herdr pane close failed for exact pane $pane_id (session $session)" >&2
       return 1
     fi
-    if ! fm_backend_herdr_create_task_pane_absent "$session" "$pane_id"; then
-      echo "error: herdr pane $pane_id was closed but is still present (session $session)" >&2
-      return 1
-    fi
-    return 0
+    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+    case "$presence" in
+      dead) return 0 ;;
+      present)
+        echo "error: herdr pane $pane_id was closed but is still present (session $session)" >&2
+        return 1
+        ;;
+      *)
+        echo "error: herdr pane $pane_id absence could not be proved after close (session $session); the create-attempt record is $FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE" >&2
+        return 1
+        ;;
+    esac
   fi
   echo "error: herdr create produced no exact tab or pane id to clean up; the create-attempt record is $FM_BACKEND_HERDR_CREATE_ATTEMPT_FILE" >&2
   return 1

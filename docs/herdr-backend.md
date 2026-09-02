@@ -267,6 +267,8 @@ Stopping and restarting a named Herdr server preserves workspace, tab, pane, and
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
+An unpublished tab create keeps a precise identity record until a successful query proves that exact tab or pane gone.
+A failed pane query is unknown and keeps the record.
 A recorded endpoint that is gone entirely is not reconstructed by relaunch.
 [`agent-control.md`](agent-control.md) owns that missing-endpoint refusal until restoration and creation can be excluded atomically.
 

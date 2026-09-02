@@ -630,6 +630,66 @@ test_create_task_cleans_exact_tab_after_incomplete_create_response() {
   pass "fm_backend_herdr_create_task: late identity failure removes the exact unpublished tab"
 }
 
+test_create_task_cleans_exact_pane_after_incomplete_create_when_absence_proved() {
+  local dir log resp fb out status home
+  dir="$TMP_ROOT/create-incomplete-pane"; mkdir -p "$dir/responses" "$dir/home/state"
+  log="$dir/log"; resp="$dir/responses"; home="$dir/home"; : > "$log"
+  printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/2.out"
+  printf '{"error":{"code":"pane_not_found","message":"pane w1:p9 not found"}}\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-latepane /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should reject an incomplete create response that named only a pane"
+  assert_contains "$out" "could not parse tab/pane id" "create_task did not report the incomplete identity"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p9' \
+    "create_task did not close the exact response-identified unpublished pane"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p9' \
+    "create_task did not re-query the exact pane after close"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''fm-latepane' \
+    "create_task must never clean up an unpublished pane by ambiguous label"
+  [ ! -e "$home/state/latepane.herdr-create-attempt" ] \
+    || fail "structured pane_not_found after close must retire the create-attempt record"
+  pass "fm_backend_herdr_create_task: proved pane absence retires the unpublished create-attempt record"
+}
+
+test_create_task_retains_attempt_when_pane_absence_query_is_unknown() {
+  local case_name dir log resp fb out status home journal label
+  for case_name in transport parse protocol; do
+    dir="$TMP_ROOT/create-pane-unknown-$case_name"
+    mkdir -p "$dir/responses" "$dir/home/state"
+    log="$dir/log"; resp="$dir/responses"; home="$dir/home"; : > "$log"
+    label="fm-paneq-$case_name"
+    printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
+    printf '{"result":{"tab":{},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/2.out"
+    case "$case_name" in
+      transport) echo 1 > "$resp/4.exit" ;;
+      parse) printf 'not-json\n' > "$resp/4.out" ;;
+      protocol) printf '{"error":{"code":"internal_error","message":"transient failure"}}\n' > "$resp/4.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj' "$ROOT" "$label" 2>&1 )
+    status=$?
+    [ "$status" -ne 0 ] || fail "create_task should fail when pane absence is $case_name-unknown after close"
+    journal="$home/state/paneq-$case_name.herdr-create-attempt"
+    [ -f "$journal" ] || fail "$case_name pane-get failure must keep a queryable create-attempt record"
+    assert_contains "$(cat "$journal")" "phase=cleanup-unproven" \
+      "$case_name pane-get failure must remain recorded as cleanup-unproven"
+    assert_contains "$(cat "$journal")" "pane_id=w1:p9" \
+      "$case_name pane-get failure must keep the exact pane id"
+    assert_contains "$out" "$journal" "the $case_name unknown-absence error must name the recovery record"
+    assert_contains "$out" "absence could not be proved" \
+      "the $case_name unknown-absence error must not claim the pane is gone"
+    assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p9' \
+      "$case_name must still close the exact unpublished pane"
+    assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f'"$label" \
+      "$case_name must never fall back to label deletion"
+  done
+  pass "fm_backend_herdr_create_task: unknown pane-get outcomes keep the create-attempt record"
+}
+
 test_create_task_retains_attempt_when_exact_close_fails() {
   local dir log resp fb out status home journal
   dir="$TMP_ROOT/create-close-fail"; mkdir -p "$dir/responses" "$dir/home/state"
@@ -4602,6 +4662,8 @@ test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
 test_create_task_cleans_exact_tab_after_incomplete_create_response
+test_create_task_cleans_exact_pane_after_incomplete_create_when_absence_proved
+test_create_task_retains_attempt_when_pane_absence_query_is_unknown
 test_create_task_retains_attempt_when_exact_close_fails
 test_create_task_retains_attempt_when_create_returns_no_ids
 test_create_task_refuses_when_create_attempt_already_exists

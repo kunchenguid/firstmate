@@ -134,7 +134,7 @@ case "${1:-}" in
         *) shift ;;
       esac
     done
-    if [ "$format" = '#{window_id}\t#{window_name}' ]; then
+    if [ "$format" = $'#{window_id}\t#{window_name}' ]; then
       n=0
       [ -f "$D/windows" ] || exit 0
       while IFS= read -r wname; do
