@@ -140,17 +140,26 @@ Outside `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`, agy as
 `--dangerously-skip-permissions` does not suppress it.
 A session blocked on this dialog still fires `Stop` hooks with `fullyIdle:false`, which is a second reason the dialog must be answered rather than waited out.
 
-Every crewmate and scout runs in a fresh per-task worktree, so the dialog is the ordinary case rather than an edge one, and an unanswered one is a silent hang: agy never reads the brief, its only `Stop` is ignored by the `fullyIdle` gate, and the busy classifier stays at `unknown agy-unverified`.
+An unanswered dialog is a silent hang: agy never reads the brief, its only `Stop` is ignored by the `fullyIdle` gate, and the busy classifier stays at `unknown agy-unverified`.
 `bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen, and the poll ends on that Enter, so exactly one is ever delivered.
+
+How often that dialog actually appears was measured here against fresh lab directories, which is not how the fleet allocates a worktree.
+Treehouse pools and recycles worktrees for tmux, herdr, zellij, and cmux tasks, as [`docs/architecture.md`](../architecture.md) records; teardown returns each one to that pool, and `trustedWorkspaces` is keyed by path.
+So the dialog is the ordinary case only for the FIRST agy task in a given path: that task answers it and agy records the path as trusted, and every later task or relaunch in the same slot finds it already trusted and sees no dialog at all.
+Orca is the exception, because it creates a worktree per task instead of pooling, so its paths are new every time.
 
 Answering the dialog is the whole launch step: no readiness is proven afterwards.
 Readiness could only be inferred from the same capture, and a capture is recent output on both backends rather than a screen snapshot, so it guarantees neither that a row was drawn by this incarnation nor that a repaint appends instead of replacing what it drew before.
 An earlier iteration of this adapter did gate the spawn on a footer match and was removed for that reason; agy now behaves like every adapter except Kimi, and a launch that never starts is caught by ordinary stuck-worker detection instead of by a launch gate that could hard-fail a healthy spawn.
-The cost of that choice is bounded and one-sided: a workspace agy already trusts never draws the dialog, so the poll runs to its deadline (`FM_AGY_TRUST_POLLS`, 120 polls at `FM_AGY_POLL_INTERVAL`, 0.5s) before the spawn continues, because the dialog's absence and a slow start read identically.
+The cost of that choice lands on exactly those already-trusted spawns, which is the steady state rather than an edge case: with no dialog to see, the poll runs its full deadline (`FM_AGY_TRUST_POLLS`, 120 polls at `FM_AGY_POLL_INTERVAL` 0.5s, so about 60s) before the spawn continues, because the dialog's absence and a slow start read identically.
+That is a deliberate trade, not an oversight.
+Sixty silent automatic seconds spending no model tokens is noise against tasks that run for hours.
+A shorter window buys that time back only by risking a miss, and a missed dialog leaves the worker stuck in a modal until stuck-worker detection fires, measured on this date at over four minutes plus a manual intervention, and it would land precisely on the first spawn into each new pool slot.
+The ceiling and the interval therefore stay as they are, and readiness is never inferred from a pane capture again.
 Relaunch is untested (see boundaries below); it adopts a live pane that nothing clears, so a predecessor's dialog text still in the capture would draw one Enter into an already-started session, whose worst case is one empty submit.
 
 Answering the dialog has one out-of-tree effect that firstmate does not undo: it adds the answered worktree to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`, which is operator state that firstmate's Enter causes to change.
-The entries accumulate one per task worktree, and teardown deliberately leaves them, because pruning the operator's own trust store is riskier than leaving it - the operator also runs agy outside the fleet.
+The entries accumulate one per worktree path that has ever hosted an agy task, and teardown deliberately leaves them, because pruning the operator's own trust store is riskier than leaving it - the operator also runs agy outside the fleet.
 `docs/configuration.md` carries that disclosure for operators.
 
 The Enter is covered by `tests/fm-agy-harness.test.sh` against a rendered pane; it was not re-exercised against a live agy in this session, so treat the dialog text above as the measured fact and the test as the portable regression's contract.

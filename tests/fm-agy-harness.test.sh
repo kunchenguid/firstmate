@@ -372,9 +372,9 @@ agy_enters_after_launch() {  # <event-log>
   ' "$1"
 }
 
-# Every crewmate and scout runs in a FRESH per-task worktree, which is outside
-# agy's trustedWorkspaces, so agy blocks on "Do you trust the contents of this
-# project?" before it ever reads the brief. --dangerously-skip-permissions does
+# A worktree path agy has not seen before is outside its trustedWorkspaces, so
+# agy blocks on "Do you trust the contents of this project?" before it ever
+# reads the brief. --dangerously-skip-permissions does
 # not suppress it, and the only Stop it fires carries fullyIdle=false, which the
 # turn-end gate ignores by design - so an unanswered dialog is a silent hang.
 # One Enter resolves it, and exactly one: a second would submit an empty message

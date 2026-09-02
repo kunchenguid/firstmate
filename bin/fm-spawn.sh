@@ -2449,10 +2449,10 @@ spawn_harness_fail() {  # <detail>
 
 # agy gates a workspace it has not seen before behind a trust dialog, and
 # --dangerously-skip-permissions does NOT suppress it (verified live, agy
-# 1.1.24). Every crewmate and scout runs in a FRESH per-task worktree, so that
-# dialog is the ordinary case rather than an edge one, and it blocks before the
-# brief is read. Leaving it unanswered is a SILENT hang: the only Stop it fires
-# carries fullyIdle=false, which the turn-end gate correctly ignores, and agy
+# 1.1.24). It blocks before the brief is read, and treehouse recycles pooled
+# worktrees, so the dialog appears on the FIRST agy task in a pool slot and
+# never again for that path. Leaving it unanswered is a SILENT hang: the only
+# Stop it fires carries fullyIdle=false, which the turn-end gate ignores, and agy
 # has no worker-state source, so the task would sit at `unknown agy-unverified`
 # forever with nothing to observe. One Enter resolves it (Yes is preselected).
 # Either line of the dialog proves it: a narrow pane can wrap the question, and
@@ -2470,6 +2470,8 @@ AGY_TRUST_REGEX='Do you trust the contents of this project|Yes, I trust this fol
 # The poll ends the moment the Enter is sent, so exactly one is ever delivered.
 # A workspace agy already trusts never draws the dialog and therefore pays the
 # whole window, because the dialog's absence and a slow start read identically.
+# That is the steady state on a recycled pool slot and is accepted deliberately;
+# docs/verification/agy.md records the trade against a shorter window.
 agy_answer_trust_dialog() {
   local i=0 max=${FM_AGY_TRUST_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
