@@ -2245,12 +2245,10 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
 # PAUSE_RESURFACE_SECS are absorbed, and the window's end still re-surfaces once,
 # so a forgotten wait cannot rot invisibly.
 test_live_declared_wait_churn_honors_the_resurface_throttle() {
-  local spec name status_line dir state fakebin out capture_file statusf window key
+  local name status_line dir state fakebin out capture_file statusf window key
   local sig round wakes bare text throttle replacement
-  for spec in \
-    'captain-held-churn|captain-held [key=route]: awaiting the captain on the routing call'
-  do
-    name=${spec%%|*}; status_line=${spec#*|}
+  name=captain-held-churn
+  status_line='captain-held [key=route]: awaiting the captain on the routing call'
     dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
     window="test:fm-parked"
@@ -2325,7 +2323,6 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
       "$state/.wake-queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
     [ "$bare" -eq 1 ] || fail "[$name] elapsed re-surface changed the wake identity: $(cat "$state/.wake-queue")"
-  done
   pass "a parked live captain-held worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
 }
 
