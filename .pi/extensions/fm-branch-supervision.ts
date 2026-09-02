@@ -475,8 +475,13 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
 }
 
 export default function (pi: ExtensionAPI) {
-  let branch: AgentSession | null = null;
-  let branchSessionManager: SessionManager | null = null;
+  type BranchSession = {
+    session: AgentSession;
+    sessionManager: SessionManager;
+    generation: number;
+    selectionRevision: number;
+  };
+  let branch: BranchSession | null = null;
   let branchBroken = "";
   let consecutiveProviderErrors = 0;
   // A revision advances only after fm_branch_report has appended successfully,
@@ -1022,7 +1027,7 @@ ${context.command}
     return { session: created.session, sessionManager };
   }
 
-  async function ensureBranch(expectedGeneration: number): Promise<AgentSession> {
+  async function ensureBranch(expectedGeneration: number): Promise<BranchSession> {
     if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
     if (branchBroken) throw new Error(branchBroken);
     if (branch) return branch;
@@ -1042,9 +1047,12 @@ ${context.command}
           } catch {}
           throw new Error("supervision session was replaced or lost lock ownership");
         }
-        branch = created.session;
-        branchSessionManager = created.sessionManager;
-        return created.session;
+        branch = {
+          ...created,
+          generation: expectedGeneration,
+          selectionRevision: buildRevision,
+        };
+        return branch;
       } catch (error) {
         if (buildRevision !== branchSelectionRevision) continue;
         if (expectedGeneration === generation && !shuttingDown) {
@@ -1094,7 +1102,8 @@ ${context.command}
           throw new Error("supervision session was replaced before handling the accepted wake");
         }
         if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
-        const session = await ensureBranch(acceptedGeneration);
+        const branchForWake = await ensureBranch(acceptedGeneration);
+        const { session, sessionManager } = branchForWake;
         await flushMirror(session, acceptedGeneration);
         if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
@@ -1125,20 +1134,28 @@ ${context.command}
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
-        const sessionManager = branchSessionManager;
-        if (!sessionManager) throw new Error("supervision branch session has no durable transcript");
         const entryOffset = sessionManager.getEntries().length;
         await session.prompt(
           `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
         );
         const providerError = settledPromptProviderError(sessionManager, entryOffset);
         if (providerError) {
-          consecutiveProviderErrors += 1;
           const detail = `supervision branch provider failed after construction: ${providerError}`;
-          if (consecutiveProviderErrors >= PROVIDER_ERROR_LATCH_THRESHOLD) branchBroken = detail;
+          if (
+            branchForWake.generation === generation &&
+            branchForWake.selectionRevision === branchSelectionRevision
+          ) {
+            consecutiveProviderErrors += 1;
+            if (consecutiveProviderErrors >= PROVIDER_ERROR_LATCH_THRESHOLD) branchBroken = detail;
+          }
           throw new Error(detail);
         }
-        consecutiveProviderErrors = 0;
+        if (
+          branchForWake.generation === generation &&
+          branchForWake.selectionRevision === branchSelectionRevision
+        ) {
+          consecutiveProviderErrors = 0;
+        }
         if (durableReportRevision <= reportRevisionBeforePrompt) {
           throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
         }
@@ -1166,11 +1183,10 @@ ${context.command}
     consecutiveProviderErrors = 0;
     const stale = branch;
     branch = null;
-    branchSessionManager = null;
     if (!stale) return;
     branchChain = branchChain
       .then(() => {
-        stale.dispose();
+        stale.session.dispose();
       })
       .catch(() => {
         // Already gone, or disposed by a session replacement first.
@@ -1190,7 +1206,7 @@ ${context.command}
   function enqueueMirrorFlush(): void {
     if (!branch || pendingMirror.length === 0) return;
     const flushGeneration = generation;
-    const flushSession = branch;
+    const flushSession = branch.session;
     branchChain = branchChain
       .then(async () => {
         if (!actingAsOwner(flushGeneration)) return;
@@ -1336,13 +1352,12 @@ ${context.command}
     mirrorCollection.stagedCaptain = null;
     if (branch) {
       try {
-        branch.dispose();
+        branch.session.dispose();
       } catch {
         // Already gone.
       }
       branch = null;
     }
-    branchSessionManager = null;
   });
 
   // Pi keeps /model and its own thinking selector for the captain's own

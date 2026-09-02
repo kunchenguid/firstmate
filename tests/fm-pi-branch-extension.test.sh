@@ -1798,6 +1798,81 @@ EOF
   pass "post-construction provider errors fall back immediately and repeated failures defer later wakes directly to main"
 }
 
+test_selection_change_does_not_corrupt_inflight_provider_state() {
+  local repo home out status
+  repo="$TMP_ROOT/provider-selection-race-root"
+  home="$TMP_ROOT/provider-selection-race-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home, mainUserMessages }; })()`);
+const { dispatch, fire, settle, home, mainUserMessages } = globalThis.__t;
+
+const entries = [];
+const mainSession = {
+  getSessionFile: () => `${home}/main.jsonl`,
+  getEntries: () => entries,
+};
+fire("session_start", {}, { sessionManager: mainSession });
+entries.push({ type: "message", message: { role: "user", content: "context waiting for the branch mirror" } });
+fire("turn_end", {}, { sessionManager: mainSession });
+
+let releaseMirror;
+globalThis.__fmMirrorGate = new Promise((resolve) => { releaseMirror = resolve; });
+let attempt = 0;
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  attempt += 1;
+  if (attempt === 3) {
+    const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+    const recorded = await report.execute(
+      "healthy-after-selection",
+      { task: "branch-driver", verdict: "routine", summary: "replacement branch remains available" },
+      undefined,
+      undefined,
+      {},
+    );
+    if (recorded.isError) throw new Error(`healthy report failed: ${JSON.stringify(recorded)}`);
+    session.messages.push({ role: "assistant", content: [], stopReason: "stop" });
+    return;
+  }
+  session.messages.push({
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "429: provider unavailable",
+  });
+};
+
+const stale = dispatch("signal: provider error during model selection");
+if (!stale.accepted) throw new Error("in-flight wake was not accepted");
+await settle(() => globalThis.__fmMirrorStarted === true, "pending branch mirror");
+fire("model_select", { model: { provider: "anthropic", id: "replacement-model" } });
+releaseMirror();
+await settle(() => mainUserMessages.length === 1, "stale provider-error fallback");
+if (!mainUserMessages[0].content.includes("provider failed after construction") ||
+    mainUserMessages[0].content.includes("no durable transcript")) {
+  throw new Error(`selection change detached the in-flight transcript: ${mainUserMessages[0].content}`);
+}
+
+globalThis.__fmMirrorGate = null;
+const replacementError = dispatch("signal: first replacement provider error");
+if (!replacementError.accepted) throw new Error("replacement branch was unavailable after selection");
+await settle(() => mainUserMessages.length === 2, "replacement provider-error fallback");
+
+const healthy = dispatch("signal: replacement branch recovery");
+if (!healthy.accepted) throw new Error("stale provider error polluted the replacement failure streak");
+await settle(() => attempt === 3, "replacement branch recovery");
+if (mainUserMessages.length !== 2) throw new Error("healthy replacement turn fell back to main");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "selection changes must preserve in-flight transcript and isolate provider streaks: $out"
+  pass "selection changes preserve in-flight transcript ownership and reset provider-error streaks"
+}
+
 test_main_owned_grant_result_falls_back_to_main() {
   local repo home out status
   repo="$TMP_ROOT/main-owned-fallback-root"
@@ -3570,6 +3645,7 @@ test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_settled_branch_prompt_releases_unacknowledged_grant
 test_post_construction_provider_error_falls_back_and_latches_branch
+test_selection_change_does_not_corrupt_inflight_provider_state
 test_main_owned_grant_result_falls_back_to_main
 test_branch_predrain_recheck_noops_already_drained_wake
 test_branch_mirror_filters_order_and_cursor
