@@ -251,23 +251,66 @@ function normalizeSdkPostContent(parsed) {
   const body = postLocaleBody(parsed);
   if (!body) return [];
   const parts = [];
+  let hasRepresentableContent = false;
+  let firstUnavailableKind = null;
+  const postString = (value) => typeof value === "string" && Buffer.from(value, "utf8").toString("utf8") === value;
   const appendText = (text) => {
     if (typeof text !== "string") throw new Error("unsupported Feishu post element");
     const previous = parts.at(-1);
     if (previous?.type === "text") previous.text += text;
     else parts.push({ type: "text", text });
   };
-  if (typeof body.title === "string" && body.title.length > 0) appendText(`${body.title}\n`);
+  const appendRepresentableText = (text) => {
+    appendText(text);
+    hasRepresentableContent ||= text.trim().length > 0;
+  };
+  const appendUnavailable = (kind) => {
+    const safeKind = typeof kind === "string" && /^[a-z0-9._-]{1,80}$/i.test(kind) ? kind.toLowerCase() : "unknown";
+    firstUnavailableKind ??= safeKind;
+    appendText(`[Feishu ${safeKind} rich-text element unavailable]`);
+  };
+  if (body.title !== undefined && body.title !== "") {
+    if (postString(body.title)) appendRepresentableText(`${body.title}\n`);
+    else appendUnavailable("malformed-title");
+  }
   for (let paragraphIndex = 0; paragraphIndex < body.content.length; paragraphIndex += 1) {
     const paragraph = body.content[paragraphIndex];
-    if (!Array.isArray(paragraph)) throw new Error("unsupported Feishu post structure");
     if (paragraphIndex > 0) appendText("\n");
-    for (const element of paragraph) {
-      if (!element || typeof element !== "object" || Array.isArray(element)) throw new Error("unsupported Feishu post element");
-      if (element.tag === "text") appendText(element.text);
-      else if (element.tag === "img" && typeof element.image_key === "string") parts.push({ type: "image", resource_key: element.image_key });
-      else parts.push({ type: "unsupported", media_type: typeof element.tag === "string" ? element.tag : "unknown" });
+    if (!Array.isArray(paragraph)) {
+      appendUnavailable("malformed-paragraph");
+      continue;
     }
+    for (const element of paragraph) {
+      if (!element || typeof element !== "object" || Array.isArray(element)) {
+        appendUnavailable("malformed");
+        continue;
+      }
+      if (element.tag === "text") {
+        if (postString(element.text)) appendRepresentableText(element.text);
+        else appendUnavailable("malformed-text");
+      } else if (element.tag === "img") {
+        if (postString(element.image_key) && /^[A-Za-z0-9._-]{4,512}$/.test(element.image_key)) {
+          hasRepresentableContent = true;
+          parts.push({ type: "image", resource_key: element.image_key });
+        } else appendUnavailable("malformed-image");
+      } else if (element.tag === "a") {
+        const label = postString(element.text) ? element.text : null;
+        const href = postString(element.href) && element.href.length > 0 ? element.href : null;
+        if (label !== null && href !== null) {
+          appendRepresentableText(label.length === 0 || label === href ? href : `${label} (${href})`);
+        } else {
+          if (label) appendRepresentableText(label);
+          else if (href) appendRepresentableText(href);
+          appendUnavailable("malformed-link");
+        }
+      } else {
+        if (postString(element.text) && element.text.length > 0) appendRepresentableText(element.text);
+        appendUnavailable(element.tag);
+      }
+    }
+  }
+  if (!hasRepresentableContent && firstUnavailableKind !== null) {
+    return firstUnavailableKind.startsWith("malformed") ? [] : [{ type: "unsupported", media_type: firstUnavailableKind }];
   }
   return parts;
 }
