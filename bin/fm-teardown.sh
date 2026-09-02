@@ -1182,7 +1182,7 @@ backlog_done_args() {
 # invariant). This prints what already happened, so the follow-up wording stays
 # only where a human still owes the edit.
 backlog_refresh_reminder() {
-  local backlog_display
+  local backlog_display frontier
   [ "$KIND" = secondmate ] && return 0
   [ "$CLEANUP_RECOVERY" = orca ] && return 0
   if backlog_display=$(fm_backlog_file "$DATA"); then
@@ -1191,7 +1191,13 @@ backlog_refresh_reminder() {
     backlog_display="${DATA%/}/backlog.md"
   fi
   if [ "$BACKLOG_CLOSED" = 1 ]; then
-    printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    if frontier=$(fm_ready_frontier_text "$backlog_display"); then
+      printf '%s\n' "Backlog: $ID is closed in $backlog_display."
+      printf '%s\n' "$frontier"
+      printf '%s\n' "Check date gates: dispatch only work whose blockers are gone and date is due."
+    else
+      printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+    fi
   else
     printf '%s\n' "Backlog: $ID just finished ($BACKLOG_SKIP_REASON). Update $backlog_display - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
   fi

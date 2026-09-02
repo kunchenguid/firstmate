@@ -31,6 +31,10 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-backlog-transition-lib.sh"
 
 # The secondmate identity of the home reporting, or non-zero when this home is
 # a main home (1) or carries an unusable identity marker (2). Mirrors
@@ -81,6 +85,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   local home=$1 state=$2 id=$3 url=$4 origin=$5
   local self='' self_rc=0 destination='' line lock status=0
   local provider host path number
+  local data config backlog_file frontier='' wake_payload
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -93,6 +98,26 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   number=$FM_PR_NUMBER
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
 
+  # A merging PR is how a `blocked-by` dependency clears, so this outcome is
+  # itself a frontier-changing event: carry the ready frontier along with it
+  # rather than let it wait for the next session start. Never let a failed
+  # probe (manual backend, incompatible tasks-axi, unreadable backlog) turn
+  # into a failure of the outcome report itself. Derived from $home alone,
+  # never an ambient FM_DATA_OVERRIDE/FM_CONFIG_OVERRIDE, the same way
+  # .fm-secondmate-home and .fm-secondmate-parent below are: an override
+  # inherited from an unrelated parent process must never point this home's
+  # frontier probe at another home's backlog.
+  data="$home/data"
+  config="$home/config"
+  if backlog_file=$(fm_backlog_file "$data" 2>/dev/null); then
+    :
+  else
+    backlog_file="${data%/}/backlog.md"
+  fi
+  if ! fm_backlog_backend_manual "$config"; then
+    frontier=$(fm_ready_frontier_text "$backlog_file") || frontier=''
+  fi
+
   if self=$(fm_merge_outcome_home_id "$home"); then
     fm_secondmate_parent_record_parse "$home/.fm-secondmate-parent" || return 3
     case "$FM_SECONDMATE_PARENT_ROUTE" in
@@ -103,6 +128,13 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
       remote) destination="$state/parent-replies.status" ;;
       *) return 3 ;;
     esac
+    # The frontier is time-varying and fm_merge_outcome_append_once dedupes on
+    # an exact whole-line match, guarding the retry the header above
+    # describes ("a failed commit stays eligible for at-least-once retry").
+    # Appending the frontier here would break that match on a retry whose
+    # ready set moved between attempts, risking a duplicated upward line. The
+    # frontier is attached only to the local wake below, whose key is
+    # invariant.
     line="done [key=merged-$id]: merged $id $FM_PR_URL"
   else
     self_rc=$?
@@ -126,8 +158,12 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
     fm_merge_outcome_append_once "$destination" "$line" || status=1
   fi
   if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
-    fm_wake_append check "merged-$id-$FM_PR_URL" \
-      "check: merge landed: $id $FM_PR_URL" || status=1
+    wake_payload="check: merge landed: $id $FM_PR_URL"
+    if [ -n "$frontier" ]; then
+      wake_payload="$wake_payload
+$frontier"
+    fi
+    fm_wake_append check "merged-$id-$FM_PR_URL" "$wake_payload" || status=1
   fi
   if [ "$status" -eq 0 ]; then
     fm_pr_poll_merge_mark_notified "$state" "$id" \

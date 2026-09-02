@@ -121,3 +121,27 @@ fm_tasks_axi_backend_available() {
   fm_backlog_backend_manual "$config_dir" && return 1
   fm_tasks_axi_compatible
 }
+
+# The doctrine sentence attached to every ready-frontier report. Kept as one
+# constant so bin/fm-teardown.sh's backlog_refresh_reminder and
+# bin/fm-merge-outcome-lib.sh's fm_merge_outcome_report - the two places a
+# lane closing or a PR merging opens the frontier - cannot drift apart.
+FM_READY_FRONTIER_SENTENCE='No arbitrary cap. Dispatch every ready node that is independent and collision-free. Any ready node left undispatched needs a recorded reason, an owner, and a recheck trigger.'
+
+# fm_ready_frontier_text <backlog-file>
+# Captures `tasks-axi ready --file <backlog-file>` and appends
+# FM_READY_FRONTIER_SENTENCE. Prints nothing and returns 1 on any failure
+# (incompatible tasks-axi, manual backend, unreadable backlog, or any other
+# tasks-axi error), so a caller falls back to its own wording instead of
+# letting this become part of its own failure.
+# Every tasks-axi listing closes with its own `help[...]:` block
+# (bin/fm-session-start.sh's strip_axi_help cuts the same block off the
+# session-start digest's listings); this report is its own complete unit, not
+# one of several grouped listings, so the block is dropped outright rather
+# than replaced with a pointer.
+fm_ready_frontier_text() {
+  local backlog_file=$1 ready
+  ready=$(tasks-axi ready --file "$backlog_file" 2>/dev/null) || return 1
+  ready=$(printf '%s\n' "$ready" | awk '/^help\[/ { exit } { print }')
+  printf '%s\n%s\n' "$ready" "$FM_READY_FRONTIER_SENTENCE"
+}

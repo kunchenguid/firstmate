@@ -64,6 +64,8 @@ REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
+REAL_TASKS_AXI_FOR_TEST=$(command -v tasks-axi) || fail "these tests need the real tasks-axi to seed and read a backlog"
+export REAL_TASKS_AXI_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -550,6 +552,30 @@ backlog_row_state() {
     sed -n 's/^  state: *//p' | head -1
 }
 
+# Add an independent, unblocked queued item so `tasks-axi ready` has something
+# to report once task-x1 (added by seed_backlog_in_flight) closes.
+seed_ready_queued_item() {
+  local case_dir=$1 id=$2
+  tasks-axi add "$id" "next ready item" --kind ship \
+    --file "$case_dir/data/backlog.md" >/dev/null
+}
+
+# A tasks-axi stub that fails only on `ready` and delegates every other
+# subcommand to the real binary, so the backlog close itself still succeeds
+# while the frontier probe backlog_refresh_reminder runs afterward fails.
+write_tasks_axi_ready_failure_stub() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = ready ]; then
+  echo "tasks-axi: ready: simulated failure" >&2
+  exit 1
+fi
+exec "$REAL_TASKS_AXI_FOR_TEST" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
 # Build the teardown test's executable search path without lsof, regardless of
 # whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
 make_path_without_lsof() {  # <case-dir>
@@ -585,12 +611,15 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+FM_READY_FRONTIER_SENTENCE_FOR_TEST='No arbitrary cap. Dispatch every ready node that is independent and collision-free. Any ready node left undispatched needs a recorded reason, an owner, and a recheck trigger.'
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  seed_ready_queued_item "$case_dir" task-x2
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
@@ -599,13 +628,34 @@ test_teardown_closes_the_backlog_item_itself() {
     "closed backlog item did not record the task's PR"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
     "a landed close left its pending-close record behind"
-  printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
-    || fail "teardown dropped the dependency-cleared follow-up: $out"
-  printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
+  printf '%s\n' "$out" | grep -F 'task-x2' >/dev/null \
+    || fail "teardown's frontier report omitted the ready item it should have shown: $out"
+  printf '%s\n' "$out" | grep -F "$FM_READY_FRONTIER_SENTENCE_FOR_TEST" >/dev/null \
+    || fail "teardown dropped the standing no-cap sentence: $out"
+  printf '%s\n' "$out" | grep -F 'Check date gates' >/dev/null \
     || fail "teardown did not preserve date-gate check: $out"
   printf '%s\n' "$out" | grep -F 'Run tasks-axi done' >/dev/null \
     && fail "teardown still asked a later turn to close the item it already closed: $out"
-  pass "teardown closes its own backlog item before reporting success"
+  pass "teardown closes its own backlog item and shows the actual ready frontier, not a command to go run"
+}
+
+test_teardown_ready_probe_failure_falls_back_to_legacy_reminder() {
+  local case_dir out
+  case_dir=$(make_case tasks-axi-ready-probe-fails)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/8' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  seed_ready_queued_item "$case_dir" task-x2
+  write_tasks_axi_ready_failure_stub "$case_dir"
+
+  out=$(run_teardown "$case_dir") || fail "teardown should still succeed when the ready probe fails"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "a failing ready probe should never block the backlog item's own close: $(backlog_row_state "$case_dir")"
+  printf '%s\n' "$out" | grep -F 'Run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due.' >/dev/null \
+    || fail "a failing tasks-axi ready did not degrade to the legacy reminder sentence: $out"
+  printf '%s\n' "$out" | grep -F "$FM_READY_FRONTIER_SENTENCE_FOR_TEST" >/dev/null \
+    && fail "a failing tasks-axi ready still printed the no-cap sentence with no real frontier behind it: $out"
+  pass "a failing tasks-axi ready probe degrades to the legacy reminder and teardown still succeeds"
 }
 
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
@@ -2607,6 +2657,7 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_teardown_ready_probe_failure_falls_back_to_legacy_reminder
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
