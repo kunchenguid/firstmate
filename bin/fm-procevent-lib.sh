@@ -353,6 +353,14 @@ fm_procevent_claim_state_root_identity() {  # <state-root>
   printf '%s\t%s\t%s\t%s\t%s\n' "$canonical" "$device" "$inode" "$owner" "$mode"
 }
 
+fm_procevent_claim_owned_by_state() {  # <state-root> <legacy-home>
+  if [ -n "${FM_PROCEVENT_CLAIM_STATE_ROOT:-}" ]; then
+    [ "$FM_PROCEVENT_CLAIM_STATE_ROOT" = "$1" ]
+  else
+    [ "$FM_PROCEVENT_CLAIM_HOME" = "$2" ]
+  fi
+}
+
 fm_procevent_claim_recorded_state_root_valid() {
   local identity state_root state_device state_inode state_owner state_mode
   state_root=${FM_PROCEVENT_CLAIM_STATE_ROOT:-}
@@ -422,10 +430,10 @@ fm_procevent_claim_state_locked() {
   fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY"
 }
 
-# fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration>
+# fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration> <state-root>
 # 0 acquired, 1 error, 2 held by a live owner (possibly another home).
 fm_procevent_claim_acquire_locked() {
-  local id=$1 home=$2 pid=$3 registration=$4 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage state state_root state_device state_inode state_owner state_mode
+  local id=$1 home=$2 pid=$3 registration=$4 state=$5 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage state_root state_device state_inode state_owner state_mode
   fm_procevent_source_id_valid "$id" || return 1
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
   reg_dir=${registration%/*}
@@ -478,7 +486,6 @@ fm_procevent_claim_acquire_locked() {
     tmp=$(umask 077; mktemp "$root/.claim.XXXXXX") || status=1
   fi
   if [ "$status" -eq 0 ]; then
-    state=${FM_STATE_OVERRIDE:-$home/state}
     IFS=$'\t' read -r state_root state_device state_inode state_owner state_mode \
       < <(fm_procevent_claim_state_root_identity "$state") || status=1
   fi

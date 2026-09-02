@@ -168,13 +168,17 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
+die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
+
+case "${1-}" in ''|-h|--help|help) usage ;; esac
+
+STATE=$(fm_procevent_state_root_resolve "$STATE") \
+  || die "process-event state root is not a private directory"
 REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
 EXTENSION_HOST="$SCRIPT_DIR/fm-extension.mjs"
 EXTENSION_LIFECYCLE_LOCK="$REG/.extension-binding-lifecycle.lock"
-
-die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
 adapter_script() { printf '%s/bin/fm-procevent-%s.sh\n' "$FM_ROOT" "$1"; }
 
@@ -645,7 +649,7 @@ cmd_start() {
       die "extension registration owner is unreadable: $id"
       ;;
   esac
-  fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")"
+  fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")" "$STATE"
   claimed=$?
   fm_procevent_source_lock_release "$id"
   case "$claimed" in
@@ -914,7 +918,7 @@ cmd_reconcile() {
     pid=$FM_PROCEVENT_CLAIM_PID
     token=$FM_PROCEVENT_CLAIM_TOKEN
     identity=$FM_PROCEVENT_CLAIM_IDENTITY
-    if [ "$owner" != "$FM_HOME" ]; then
+    if ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
       fm_procevent_source_lock_release "$id"
       continue
     fi
@@ -958,7 +962,7 @@ cmd_reconcile() {
           owner=$FM_PROCEVENT_CLAIM_HOME
           pid=$FM_PROCEVENT_CLAIM_PID
           token=$FM_PROCEVENT_CLAIM_TOKEN
-          if [ "$owner" = "$FM_HOME" ] \
+          if fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME" \
             && rm -f -- "$(source_file "$id")" \
             && [ ! -e "$(source_file "$id")" ] \
             && [ ! -L "$(source_file "$id")" ] \
@@ -978,7 +982,7 @@ cmd_reconcile() {
           token=$FM_PROCEVENT_CLAIM_TOKEN
           identity=$FM_PROCEVENT_CLAIM_IDENTITY
           stop_state=2
-          if [ "$owner" = "$FM_HOME" ]; then
+          if fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
             stop_runner_pid "$pid" "$identity"
             stop_state=$?
           fi
@@ -1157,7 +1161,7 @@ cmd_retire() {
       fm_procevent_source_lock_release "$id"
       die "cannot safely read source ownership: $id"
     fi
-    if [ "$FM_PROCEVENT_CLAIM_HOME" = "$FM_HOME" ]; then
+    if fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
       owner=$FM_PROCEVENT_CLAIM_HOME
       pid=$FM_PROCEVENT_CLAIM_PID
       token=$FM_PROCEVENT_CLAIM_TOKEN
@@ -1214,8 +1218,18 @@ sweep_relevant_state() {
   done
   for path in "$(fm_procevent_claim_root)"/*.claim; do
     [ -f "$path" ] && [ ! -L "$path" ] || continue
-    IFS= read -r owner < "$path" 2>/dev/null || continue
-    [ "$owner" = "$FM_HOME" ] && return 0
+    owner=${path##*/}; owner=${owner%.claim}
+    fm_procevent_source_id_valid "$owner" || return 0
+    fm_procevent_source_lock_acquire "$owner" || return 0
+    if ! fm_procevent_claim_load_locked "$owner" 2>/dev/null; then
+      fm_procevent_source_lock_release "$owner"
+      return 0
+    fi
+    if fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
+      fm_procevent_source_lock_release "$owner"
+      return 0
+    fi
+    fm_procevent_source_lock_release "$owner"
   done
   return 1
 }
@@ -1228,7 +1242,7 @@ sweep_source_preflight() {
       fm_procevent_source_lock_release "$id"
       return 1
     fi
-    if [ "$FM_PROCEVENT_CLAIM_HOME" = "$FM_HOME" ]; then
+    if fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
       fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY"
       state=$?
       if [ "$state" -eq 2 ]; then
@@ -1278,14 +1292,24 @@ cmd_sweep_home() {
   done
   for path in "$(fm_procevent_claim_root)"/*.claim; do
     [ -f "$path" ] && [ ! -L "$path" ] || continue
-    IFS= read -r owner < "$path" 2>/dev/null || continue
-    [ "$owner" = "$FM_HOME" ] || continue
     id=${path##*/}; id=${id%.claim}
-    if fm_procevent_source_id_valid "$id"; then
-      sweep_add_id "$id"
-    else
+    if ! fm_procevent_source_id_valid "$id"; then
       failed=$((failed + 1))
+      continue
     fi
+    if ! fm_procevent_source_lock_acquire "$id"; then
+      failed=$((failed + 1))
+      continue
+    fi
+    if ! fm_procevent_claim_load_locked "$id" 2>/dev/null; then
+      failed=$((failed + 1))
+      fm_procevent_source_lock_release "$id"
+      continue
+    fi
+    if fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
+      sweep_add_id "$id"
+    fi
+    fm_procevent_source_lock_release "$id"
   done
   for path in "$REG"/*.runner; do
     if [ -e "$path" ] || [ -L "$path" ]; then
