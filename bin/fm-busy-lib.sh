@@ -41,7 +41,7 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
-#   kimi-unverified, codex-unverified, capture-failed, no-target
+#   kimi-unverified, codex-unverified, agy-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -50,9 +50,9 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log and cursor transcript pull sources, then the Grok-only
-#      temporary regex fallback classifies a grok task from its rendered tail,
-#      then unknown missing
+#      muse session-log and cursor transcript pull sources, then agy's
+#      explicit sourceless verdict, then the Grok-only temporary regex fallback
+#      classifies a grok task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
@@ -68,6 +68,35 @@
 # MUSE_EXPERIMENTAL_PLUGINS). Nothing is armed for muse for the same reason
 # standalone Kimi is not: a seeded record with no writer could never be
 # cleared. See fm_busy_muse_run_state for the fold.
+#
+# agy (Antigravity CLI) has no worker-state source at all and deliberately
+# classifies unknown. Two independent findings force that, both measured live on
+# agy 1.1.24 (docs/verification/agy.md):
+#
+#   1. Its rendered footer cannot separate a waiting turn from a finished one.
+#      agy pushes a long command into the background after about ten seconds and
+#      renders the SAME idle footer (`? for shortcuts`) for the whole wait as it
+#      does once the turn is genuinely over; the busy footer (`esc to cancel`)
+#      is present only while tokens are actually streaming. A grok-shaped regex
+#      arm would therefore report a working agent as idle for minutes at a time,
+#      which is a false idle - the one verdict this contract never permits.
+#   2. Its `Stop` hook cannot be a semantic WRITER either, for the reason stated
+#      above for grok and muse. `Stop` fires with `fullyIdle:false` on an
+#      interrupted or still-waiting turn, and the turn-end contract requires
+#      those to be IGNORED (bin/fm-spawn.sh owns the gate). A source that only
+#      ever writes idle on `fullyIdle:true` would leave an interrupted turn's
+#      busy record with nothing that could ever settle it.
+#      agy's `PreInvocation` event fires once per MODEL INVOCATION rather than
+#      once per turn (measured: ten of them across two turns), so it is not a
+#      turn boundary and pairing it with `Stop` would still leave the
+#      interrupted-turn record stuck busy. Completing the pair needs an
+#      adapter-owned cancellation event that agy does not expose today.
+#
+# On herdr a genuinely streaming agy turn is still positively provable through
+# the native busy arm above, which runs before this one. Everything else is
+# unknown, never idle. bin/fm-composer-lib.sh separately matches `esc to cancel`
+# as a DELIVERY acknowledgement, which is a positive-only signal whose worst
+# case is one extra submit retry; that is not a worker-state source.
 #
 # The cursor pull source works the same way and for the same reason: it folds
 # cursor's own durable per-conversation transcript, which brackets each turn
@@ -177,11 +206,13 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
-# Grok and muse deliberately trust nothing: neither has a semantic WRITER, so
-# neither is armed, and both read their live source on demand in the classifier
+# Grok, muse, and agy deliberately trust nothing: none has a semantic WRITER, so
+# none is armed. Grok and muse read a live source on demand in the classifier
 # (grok's rendered tail, muse's session log) rather than through a stored
-# record. Listing a source here without a writer that can clear it would seed a
-# busy record nothing could ever settle.
+# record, and agy has no usable live source at all. Listing a source here
+# without a writer that can clear it would seed a busy record nothing could ever
+# settle - which is precisely why agy's `fullyIdle`-gated Stop hook stays a
+# turn-end NOTIFICATION and never becomes a state writer.
 fm_busy_sources_for_harness() {  # <harness>
   local adapter=
   case "${1:-}" in
@@ -916,6 +947,17 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         settled) printf 'idle muse-session-log' ;;
         *) printf 'unknown muse-session-log' ;;
       esac
+      return 0
+      ;;
+    agy*)
+      # agy has no worker-state source. Placed AFTER the native arm above on
+      # purpose: on herdr a genuinely streaming turn is still proven busy there,
+      # and only what the native verdict cannot prove reaches this line. Neither
+      # agy's rendered footer nor its Stop hook can separate a turn waiting on
+      # backgrounded work from a finished one, so everything else is unknown
+      # with an explicit reason rather than the bare `unknown missing`. The
+      # header owns the measured evidence for both.
+      printf 'unknown agy-unverified'
       return 0
       ;;
     grok*)

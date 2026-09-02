@@ -199,6 +199,50 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# fm_test_named_interpreter <dir> <name>: place an executable at <dir>/<name>
+# that behaves like bash AND that the platform's own process table reports under
+# <name>, then echo its path. Returns 1 when no construction on this host
+# achieves that, so a caller can skip loudly instead of asserting nothing.
+#
+# Two constructions are needed because the two supported platforms answer
+# `ps -o comm=` from different sources. procps on Linux reports the KERNEL exec
+# name and ignores argv[0], so only a real copy carries the name. macOS reports
+# argv[0], so a symlink carries it - and a copy is actively wrong there, because
+# copying Apple's signed /bin/bash produces a binary that still claims
+# Identifier=com.apple.bash but no longer validates, and the platform SIGKILLs
+# it (exit 137) the moment it is executed. Each construction is therefore TRIED
+# and PROVEN by asking the copy/symlink to report its own name, rather than
+# selected from a guess about the host.
+#
+# The probe deliberately runs TWO statements. A bash `-c` carrying a single
+# command is exec'd in place, which replaces the very process name being
+# measured, so a one-statement probe reports the probe tool instead.
+fm_test_named_interpreter() {  # <dir> <name>
+  local dir=$1 name=$2 path="$1/$2" real reported
+  real=$(command -v bash) || return 1
+  mkdir -p "$dir"
+  rm -f "$path"
+  if cp "$real" "$path" 2>/dev/null && chmod +x "$path" 2>/dev/null; then
+    # shellcheck disable=SC2016  # the probe body is evaluated by the CHILD shell, not this one
+    reported=$("$path" -c 'p=$(ps -o comm= -p $$); printf "%s" "$p"' 2>/dev/null || true)
+    if [ "$(basename -- "${reported:-}")" = "$name" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  fi
+  rm -f "$path"
+  if ln -s "$real" "$path" 2>/dev/null; then
+    # shellcheck disable=SC2016  # the probe body is evaluated by the CHILD shell, not this one
+    reported=$("$path" -c 'p=$(ps -o comm= -p $$); printf "%s" "$p"' 2>/dev/null || true)
+    if [ "$(basename -- "${reported:-}")" = "$name" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  fi
+  rm -f "$path"
+  return 1
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

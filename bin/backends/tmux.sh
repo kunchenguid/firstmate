@@ -170,6 +170,17 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
     # cannot carry it either: ~/.local/bin/muse-bin-<version> has no `muse` path
     # COMPONENT, so the fm_harness_path_name fallback below never fires for it.
     muse|muse-bin-*) printf 'agent' ;;
+    # agy is anchored for the same reason muse is, and needs its own entry for
+    # the same reason: it is a single native binary whose installed path
+    # (~/.local/bin/agy) carries no `agy` COMPONENT, so the fm_harness_path_name
+    # fallback below never fires for it, and `agy` is a substring of ordinary
+    # words such as `magyar` and `stagy`, so a glob would classify a stranger's
+    # pane as a live agent. `ps -o comm=` reports exactly `agy` (verified live,
+    # agy 1.1.24).
+    # This entry is needed for CREWMATES, not only secondmates: fm-control's
+    # exit and relaunch postconditions and the session-start liveness read all
+    # go through this classifier for every task kind.
+    agy) printf 'agent' ;;
     *claude*|*codex*|*opencode*|*grok*|*kimi*|pi|pi-signed|pi-launcher|Pi) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)

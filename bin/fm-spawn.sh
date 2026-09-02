@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -175,6 +175,11 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# agy uses a firstmate-owned global plugin under ${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}/plugins
+# plus a gitignored .fm-agy-turnend worktree pointer and a state token. Its hook
+# fires only on a Stop payload carrying fullyIdle=true, because agy also ends a
+# turn while it waits on work it pushed into the background; agy is crewmate/scout
+# only and is refused for --secondmate.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse is crewmate/scout only and is refused for --secondmate.
@@ -1274,6 +1279,20 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # agy (Antigravity CLI): it REJECTS a positional prompt outright
+    # ("Error: unexpected argument"), and reads one only from -p/--print,
+    # -i/--prompt-interactive, or stdin. -i is the supervised interactive form,
+    # so the brief rides that flag rather than a bare argument.
+    # --dangerously-skip-permissions is what makes an unattended crewmate
+    # viable (footer shows `accept-edits`); it does NOT cover the workspace
+    # trust dialog, which the readiness gate below answers instead.
+    # agy's turn-end signal rides neither the launch command nor a project
+    # config: it is a global Stop hook installed below as a firstmate-owned
+    # plugin plus a per-task worktree pointer, gated on `fullyIdle`.
+    # The foreign primary markers are cleared so an inherited CLAUDECODE cannot
+    # outrank agy's own ANTIGRAVITY_AGENT marker in a process that only reads
+    # the environment.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse
     # ships approval prompts AND a filesystem/network sandbox ON by default
@@ -1344,6 +1363,16 @@ esac
 # secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# agy is verified as a CREWMATE/SCOUT adapter only, for the same structural
+# reason: a secondmate is a firstmate instance and needs a primary supervision
+# protocol, and agy has none. Its Stop hook is a turn-end NOTIFICATION gated on
+# fullyIdle, not the model-reawakening surface a primary's supervision cycle is
+# built on, and no agy primary protocol exists under docs/supervision-protocols/.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = agy ]; then
+  echo "error: agy is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1481,7 +1510,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1511,6 +1540,15 @@ effort_flag_for_harness() {
       # than passing a known-bad value.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    agy)
+      # agy 1.1.24 --effort accepts only low|medium|high and rejects anything
+      # else with an explicit message ("invalid --effort \"xhigh\" (valid: low,
+      # medium, high)"), so xhigh and max are omitted rather than passed as a
+      # known-bad value - the same shape as grok.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi|pi-signed)
@@ -2765,6 +2803,96 @@ EOF
         fi
       } > "$STATE/$ID.cursor-session"
       ;;
+    agy*)
+      # agy fires a Stop hook when its execution loop terminates, and its global
+      # customization root (${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}) is always
+      # loaded with no trust grant - the same shape as grok's ~/.grok/hooks.
+      #
+      # Two agy-specific facts change the installation from grok's, and neither
+      # is optional:
+      #
+      # 1. agy's global hooks live in ONE shared hooks.json keyed by hook NAME,
+      #    which is the operator's own file. Firstmate installs a PLUGIN instead
+      #    (plugins/fm-turn-end/{plugin.json,hooks.json}), a firstmate-owned
+      #    directory agy discovers and enables on its own. Verified live: the
+      #    plugin's Stop hook fires and agy's config.json is left byte-identical,
+      #    so nothing firstmate writes can clobber operator configuration.
+      # 2. A Stop is NOT a turn end. agy pushes a long-running command into the
+      #    background after about ten seconds, ends the turn saying it will wait,
+      #    then wakes itself and ends a SECOND turn once the work lands. Only the
+      #    second carries fullyIdle=true. Measured on a real 90-second command:
+      #    a fullyIdle=false Stop arrived with workspacePaths ALREADY POPULATED,
+      #    81 seconds before the true end, so a grok-shaped hook keyed on the
+      #    workspace alone would have reported a validation run finished while it
+      #    was still going. The hook therefore gates on fullyIdle=true and treats
+      #    every other Stop as an event to ignore.
+      #
+      # The rest is grok's guarded pattern unchanged: the hook is a no-op for
+      # every non-firstmate agy session because it acts only when the payload's
+      # workspace holds a .fm-agy-turnend pointer matching firstmate's private
+      # registry. It never edits project configuration and never touches agy's
+      # own trust store.
+      #
+      # jq is a hard requirement of the installed hook rather than a nicety: the
+      # payload arrives as JSON on stdin, and `select(.fullyIdle == true)` is an
+      # exact test where substring matching would be guessing. Refuse at spawn
+      # naming the missing requirement rather than installing a hook that would
+      # silently never fire (the same contract as the Kimi installer).
+      if ! command -v jq >/dev/null 2>&1; then
+        echo "error: agy's turn-end hook requires jq to read its JSON Stop payload; install jq or select a different verified harness" >&2
+        exit 1
+      fi
+      AGY_CONFIG_HOME="${FM_AGY_CONFIG_HOME:-$HOME/.gemini/config}"
+      AGY_PLUGIN_DIR="$AGY_CONFIG_HOME/plugins/fm-turn-end"
+      AGY_AUTH_DIR="$AGY_CONFIG_HOME/fm-turn-end.d"
+      mkdir -p "$AGY_PLUGIN_DIR"
+      old_umask=$(umask)
+      umask 077
+      mkdir -p "$AGY_AUTH_DIR"
+      auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.agy-turnend-token"
+      sq_agy_auth_dir=$(shell_quote "$AGY_AUTH_DIR")
+      cat > "$AGY_PLUGIN_DIR/fm-turn-end.sh" <<EOF
+#!/usr/bin/env bash
+# Firstmate agy turn-end hook. Managed by bin/fm-spawn.sh.
+# Deliberately passive: every path is silent, prints one JSON object, exits zero.
+set +e
+exec 2>/dev/null
+payload=
+IFS= read -r payload
+# agy reads a hook's verdict from stdout and only the literal decision
+# "continue" blocks the stop, so an empty object always lets the agent stop.
+# Printed FIRST so any later failure still leaves valid output behind.
+printf '{}\n'
+auth_dir=$sq_agy_auth_dir
+command -v jq >/dev/null 2>&1 || exit 0
+# fullyIdle=true is the ONLY turn end. A false or absent value means agy is
+# still waiting on backgrounded work and will end another turn later.
+# Tested with == true, never with jq's // operator, which treats false as null.
+ws=\$(jq -er 'select(.fullyIdle == true) | .workspacePaths[0] | strings | select(length > 0)' <<< "\$payload" 2>/dev/null) || exit 0
+# The hook's cwd is the plugin directory, never the workspace, so the workspace
+# can only come from the payload.
+p="\$ws/.fm-agy-turnend"
+[ -f "\$p" ] || exit 0
+first=
+IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
+case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
+case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
+case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
+t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
+case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
+touch -- "\$t" 2>/dev/null || true
+exit 0
+EOF
+      chmod +x "$AGY_PLUGIN_DIR/fm-turn-end.sh"
+      printf '{"name":"fm-turn-end"}\n' > "$AGY_PLUGIN_DIR/plugin.json"
+      agy_hook_command=$(json_escape "bash $(shell_quote "$AGY_PLUGIN_DIR/fm-turn-end.sh")")
+      printf '{"fm-turn-end":{"Stop":[{"type":"command","command":"%s","timeout":10}]}}\n' "$agy_hook_command" > "$AGY_PLUGIN_DIR/hooks.json"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-agy-turnend"
+      exclude_path '.fm-agy-turnend'
+      ;;
     kimi*)
       # Kimi's Stop hook is global, but it is inert unless cwd contains this
       # task's token pointer and the token resolves through Firstmate's private
@@ -2971,7 +3099,7 @@ case "$HARNESS" in
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  claude|codex|opencode|pi|pi-signed|grok|kimi|muse|agy)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
