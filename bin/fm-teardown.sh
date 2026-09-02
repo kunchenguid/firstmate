@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
-# harvest the task's fleet usage-ledger row while its state files still exist
-# (best effort: bin/fm-usage-harvest.sh owns that ledger, and a harvest failure
-# only warns on stderr rather than blocking teardown; a forced secondmate
-# teardown harvests each of that home's children the same way before their own
-# records retire),
-# clear volatile state, and transition this home's backlog item for ship and
-# scout tasks before reporting success (a secondmate teardown transitions none,
-# since secondmates are not backlog items), then refresh/prune the project's
-# clone for PR-based ship tasks.
+# Tear down a finished task: harvest the task's fleet usage-ledger row, then
+# return the treehouse worktree, release the Orca worktree, or retire a
+# secondmate home; kill the recorded runtime endpoint, clear volatile state,
+# and transition this home's backlog item for ship and scout tasks before
+# reporting success (a secondmate teardown transitions none, since secondmates
+# are not backlog items), then refresh/prune the project's clone for PR-based
+# ship tasks.
+# The harvest runs FIRST of those steps deliberately, and that order is
+# load-bearing rather than incidental: it precedes the worktree release so the
+# task still holds its pooled slot and no later occupant of that slot can be
+# scanned into its row, and it precedes the status retirement that deletes
+# state/<id>.status along with the task window and the turn count.
+# bin/fm-usage-harvest.sh owns that ledger and states the same ordering
+# contract from its own side. The harvest is best effort: a failure only warns
+# on stderr and never blocks teardown or the worktree release. A forced
+# secondmate teardown harvests each of that home's children the same way,
+# before each child's own worktree release and record retirement, but a
+# retired secondmate home's own ledger is not migrated into this home's.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -2793,9 +2800,12 @@ fi
 # worktree and no later task can have written a session log into that slot,
 # which is what lets the scan run to the harvest instant; and it runs before
 # the status retirement further below, which deletes state/<id>.status and
-# with it the task window and the turn count. It also follows the worktree
-# process reap above, so a runtime's closing write has already landed. A
-# harvest failure must never block teardown or the worktree return.
+# with it the task window and the turn count. A runtime's closing write has
+# landed by this point on both kinds reaching this line, for different
+# reasons: a task teardown has already run the worktree process reap above,
+# while a secondmate teardown skips that reap and relies on the secondmate
+# having finished before teardown was invoked at all. A harvest failure must
+# never block teardown or the worktree return.
 "$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
   || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
 
