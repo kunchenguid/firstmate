@@ -233,6 +233,7 @@ These conditions therefore surface as follows:
 - Broken GitHub auth surfaces through the deferred network result, inline or as a wake.
 
 None of these becomes a refusal to open the session.
+Broken registered-forge authentication, including GitLab auth, surfaces through the deferred network result inline or as a wake.
 
 ## Harness transports
 
