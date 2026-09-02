@@ -32,6 +32,7 @@ TMP_ROOT=$(fm_test_tmproot fm-usage-harvest)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 REAL_JQ=$(command -v jq)
+REAL_MKTEMP=$(command -v mktemp)
 
 file_mtime_epoch() {  # <file>
   local t
@@ -1060,8 +1061,9 @@ JSON
   assert_contains "$row" '"model":"claude-own"' \
     "the next occupant's model does not become this task's model"
 
-  # Same ordering, but the harvest cannot write: teardown must still return the
-  # worktree and still succeed.
+  # Failure mode one, on the FAR side of the return: the append cannot write.
+  # It proves the append is best effort; it says nothing about the return,
+  # which has already happened by then.
   id=usageharvpool2
   proj="$TMP_ROOT/pool2-proj"; wt="$TMP_ROOT/pool2-wt"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1080,12 +1082,56 @@ JSON
     FM_USAGE_CLAUDE_DIR="$TMP_ROOT/pool-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/pool-fake-codex" \
     FM_USAGE_PI_DIR="$TMP_ROOT/pool-fake-pi" \
     "$TEARDOWN" "$id" 2>&1)
-  expect_code 0 "$?" "teardown must survive a failing harvest in its new position"$'\n'"$out"
+  expect_code 0 "$?" "teardown must survive a failing append"$'\n'"$out"
   assert_contains "$out" "warning: usage harvest for $id failed" \
-    "a failing harvest warns rather than aborting teardown"
+    "a failing append warns rather than aborting teardown"
+
+  # Failure mode two, on the NEAR side of the return: the SCAN itself fails,
+  # because staging cannot be created. This is the half that can actually block
+  # the worktree return, so it is the half that has to be proven.
+  id=usageharvpool3
+  proj="$TMP_ROOT/pool3-proj"; wt="$TMP_ROOT/pool3-wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  thlog="$TMP_ROOT/pool3-treehouse.log"
+  : > "$thlog"
+  fb="$TMP_ROOT/pool3-fakebin"
+  mkdir -p "$fb"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/tmux"
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$thlog"
+exit 0
+SH
+  # Only the usage-staging directory fails to be created; every other mktemp
+  # caller in teardown is passed through untouched.
+  cat > "$fb/mktemp" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in *fm-usage-stage.XXXXXX) exit 1 ;; esac
+done
+exec "$REAL_MKTEMP" "\$@"
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse" "$fb/mktemp"
+  data="$TMP_ROOT/pool3-data"
+  mkdir -p "$data/$id"
+  printf 'scout findings\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" \
+    "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "decisions_reviewed=1" "decision_keys="
+  printf 'working: scouting\n' > "$state/$id.status"
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/pool-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/pool-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/pool-fake-pi" \
+    "$TEARDOWN" "$id" 2>&1)
+  expect_code 0 "$?" "teardown must survive a failing scan"$'\n'"$out"
+  assert_contains "$out" "warning: usage harvest for $id failed" \
+    "a failing scan warns rather than aborting teardown"
   grep -q '^return' "$thlog" \
-    || fail "a failing harvest blocked the worktree return"$'\n'"$(cat "$thlog")"
-  pass "teardown integration: the harvest precedes the worktree return and never blocks it"
+    || fail "a failing scan blocked the worktree return"$'\n'"$(cat "$thlog")"
+  [ ! -s "$data/usage-ledger.jsonl" ] || fail "a failing scan still produced a row"
+  pass "teardown integration: neither harvest phase can block the worktree return"
 }
 
 # Teardown's refusals exit while deliberately retaining the task's records so
@@ -1094,7 +1140,7 @@ JSON
 # aborted teardown must leave no row at all, and the rerun must MEASURE the
 # task again rather than replay whatever the aborted attempt had computed.
 teardown_refusal_case() {
-  local proj wt id fb state data config out status row encoded logdir base failflag
+  local proj wt id fb state data config out status row encoded logdir base failflag tmp
   id=usageharvrefuse1
   proj="$TMP_ROOT/refuse-proj"; wt="$TMP_ROOT/refuse-wt"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1133,7 +1179,11 @@ SH
   printf 'spawn_gen=s%s.66.1\n' "$((base - 400))" >> "$state/$id.meta"
   touch -t "$(touch_stamp $((base - 100)))" "$logdir/session.jsonl"
 
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  # Teardown gets its own TMPDIR so the staging directory it creates for the
+  # scan phase is observable: it must not outlive the run, aborted or not.
+  tmp="$TMP_ROOT/refuse-tmp"
+  mkdir -p "$tmp"
+  out=$(PATH="$fb:$PATH" TMPDIR="$tmp" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_USAGE_CLAUDE_DIR="$TMP_ROOT/refuse-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/refuse-fake-codex" \
     FM_USAGE_PI_DIR="$TMP_ROOT/refuse-fake-pi" \
@@ -1144,13 +1194,15 @@ SH
     || fail "the refusal did not retain the task's status log for a rerun"$'\n'"$out"
   [ ! -s "$data/usage-ledger.jsonl" ] \
     || fail "an aborted teardown left a ledger row: $(cat "$data/usage-ledger.jsonl")"
+  [ -z "$(find "$tmp" -maxdepth 1 -name 'fm-usage-stage.*' -print -quit)" ] \
+    || fail "an aborted teardown leaked its usage staging directory"
 
   # The task keeps working before the operator reruns teardown, so a rerun that
   # replayed the aborted attempt's row would report the old turn count.
   printf 'working: resumed\n' >> "$state/$id.status"
   touch -t "$(touch_stamp "$base")" "$state/$id.status"
   rm -f "$failflag"
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(PATH="$fb:$PATH" TMPDIR="$tmp" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_USAGE_CLAUDE_DIR="$TMP_ROOT/refuse-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/refuse-fake-codex" \
     FM_USAGE_PI_DIR="$TMP_ROOT/refuse-fake-pi" \
@@ -1163,6 +1215,8 @@ SH
     "the rerun re-measured the task instead of replaying the aborted attempt"
   assert_contains "$row" '"input_tokens":17' "the rerun's row carries the task's usage"
   assert_contains "$row" '"source":"claude-projects"' "the rerun's row names its source"
+  [ -z "$(find "$tmp" -maxdepth 1 -name 'fm-usage-stage.*' -print -quit)" ] \
+    || fail "a completed teardown leaked its usage staging directory"
   pass "teardown integration: an aborted teardown writes no row and the rerun re-measures"
 }
 

@@ -179,9 +179,11 @@
 # the phases therefore leaves NO row, so its retry measures the task again
 # rather than inheriting the abandoned attempt's numbers. The staging file
 # belongs to the caller, which owns creating it, keeping it private to one task
-# and one run, and removing it on every exit path; --append-from refuses a file
-# that is missing, unparseable, or names another task rather than appending
-# something it cannot attribute.
+# and one run, and removing it on every exit path; the scan renames it into
+# place through a sibling temp file, so that cleanup has to cover the directory
+# rather than just the row file. --append-from refuses a file that is missing,
+# unparseable, or names another task rather than appending something it cannot
+# attribute.
 #
 # Overrides (test seams and alternate homes):
 #   FM_ROOT_OVERRIDE, FM_HOME, FM_STATE_OVERRIDE, FM_DATA_OVERRIDE  as usual
@@ -614,10 +616,13 @@ ROW=$(jq -cn \
 
 # --scan-to stops here: the row is staged for a later --append-from and the
 # ledger is untouched, so a caller that aborts between the two phases leaves no
-# row to freeze. The staging write is atomic within this run: a partial file
-# fails --append-from's own parse rather than appending half a row.
+# row to freeze. The staging file is written through a sibling temp file and
+# renamed, so a scan killed mid-write leaves the previous content rather than a
+# half row, and a torn file that reaches --append-from anyway fails its parse
+# rather than appending half a row.
 if [ "$STAGE_MODE" = scan ]; then
-  printf '%s\n' "$ROW" > "$STAGE_FILE"
+  printf '%s\n' "$ROW" > "$STAGE_FILE.tmp.$$"
+  mv -f -- "$STAGE_FILE.tmp.$$" "$STAGE_FILE"
   exit 0
 fi
 

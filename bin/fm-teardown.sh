@@ -259,14 +259,21 @@ DESCENDANT_TASK_HOMES=()
 # Staging for the two-phase usage harvest (bin/fm-usage-harvest.sh owns that
 # contract). The scan phase writes one task-scoped row file here and the append
 # phase reads it back after this teardown's fail-closed refusals have passed.
-# The directory is private to this run and the exit trap removes it on every
-# path, including an aborted teardown, so a retry can never read a row measured
-# by an earlier attempt.
+# The layout is one mktemp directory per teardown, $TMPDIR/fm-usage-stage.XXXXXX,
+# holding one <task-id>.row file per task this run harvests: the main task, or
+# every child of a forced secondmate cleanup. The directory is private to this
+# run and the exit trap removes it on every path, including an aborted
+# teardown, so a retry can never read a row measured by an earlier attempt.
+# usage_stage_dir creates it and must be called UNSUBSTITUTED, because an
+# assignment made inside $(...) cannot reach this shell; usage_stage_path only
+# formats a path, so it is safe to call in a substitution.
 USAGE_STAGE_DIR=
+usage_stage_dir() {  # create this run's staging directory once
+  [ -z "$USAGE_STAGE_DIR" ] || return 0
+  USAGE_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-usage-stage.XXXXXX") || return 1
+}
 usage_stage_path() {  # <task-id> : print this run's staging path for that task
-  if [ -z "$USAGE_STAGE_DIR" ]; then
-    USAGE_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-usage-stage.XXXXXX") || return 1
-  fi
+  [ -n "$USAGE_STAGE_DIR" ] || return 1
   printf '%s/%s.row\n' "$USAGE_STAGE_DIR" "$1"
 }
 teardown_release_locks() {
@@ -2583,7 +2590,10 @@ cleanup_firstmate_home_children() {
     # retirement that deletes the log carrying the window and the turn count.
     # Best effort, exactly as at the other sites: a failure warns and never
     # changes this cleanup's own outcome.
-    child_usage_stage=$(usage_stage_path "$child_id" 2>/dev/null || true)
+    child_usage_stage=
+    if usage_stage_dir; then
+      child_usage_stage=$(usage_stage_path "$child_id" 2>/dev/null || true)
+    fi
     if [ -n "$child_usage_stage" ]; then
       FM_STATE_OVERRIDE="$sub_state" FM_DATA_OVERRIDE="$DATA" \
         "$FM_ROOT/bin/fm-usage-harvest.sh" --scan-to "$child_usage_stage" "$child_id" >/dev/null \
@@ -2842,16 +2852,22 @@ fi
 # worktree and no later task can have written a session log into that slot,
 # which is what lets the scan run to the harvest instant; and it runs before
 # the status retirement further below, which deletes state/<id>.status and
-# with it the task window and the turn count. A runtime's closing write has
-# landed by this point on both kinds reaching this line, for different
-# reasons: a task teardown has already run the worktree process reap above,
-# while a secondmate teardown skips that reap and relies on the secondmate
-# having finished before teardown was invoked at all. The measured row is only
+# with it the task window and the turn count. Whether a runtime's closing
+# write has landed by this line differs by kind. A task teardown has already
+# run the worktree process reap above, so it has. A secondmate teardown skips
+# that reap, and an ordinary one relies on the secondmate having finished
+# before teardown was invoked; a forced discard does NOT, because --force
+# exists to retire a secondmate that is still working, and its endpoint is not
+# killed until further below, so such a row is narrowed to whatever its
+# runtime had written by this point. The measured row is only
 # STAGED here, because every fail-closed refusal below exits while retaining
 # the task's records for a rerun, and a row appended before those refusals
 # could never be corrected by that rerun. A scan failure must never block
 # teardown or the worktree return.
-USAGE_STAGE_MAIN=$(usage_stage_path "$ID" 2>/dev/null || true)
+USAGE_STAGE_MAIN=
+if usage_stage_dir; then
+  USAGE_STAGE_MAIN=$(usage_stage_path "$ID" 2>/dev/null || true)
+fi
 if [ -n "$USAGE_STAGE_MAIN" ]; then
   "$FM_ROOT/bin/fm-usage-harvest.sh" --scan-to "$USAGE_STAGE_MAIN" "$ID" >/dev/null \
     || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
