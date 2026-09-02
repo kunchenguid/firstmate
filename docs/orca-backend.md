@@ -43,10 +43,10 @@ worktree=<absolute Orca worktree path>
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
 
-`orca worktree create --json` emits a composite worktree id, and cleanup requires that shape: `<opaque id>::<absolute worktree path>`.
+`orca worktree create --json` emits a composite worktree id, and the shared endpoint-identity validation requires that shape: `<opaque id>::<absolute worktree path>`.
 The id half must be non-empty and contain no `/`, and the path half must be absolute with no empty segment, no trailing slash, and no `..` segment.
 Nothing else about the id half is assumed, and the path half is not character-filtered, so worktree paths containing spaces or non-ASCII characters are accepted.
-A recorded id that does not match this shape is refused by cleanup rather than passed to `orca`.
+A recorded id that does not match this shape is refused before any `orca` command runs, for the [control-plane verbs](agent-control.md) as well as for cleanup.
 
 ## Current lifecycle and safety
 
