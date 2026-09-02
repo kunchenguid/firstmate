@@ -408,7 +408,7 @@ set_origin_base() {  # <repo-dir>
   local branch
   branch=$(resolve_origin_default_branch "$1") || return 1
   BASE_REF="origin/$branch"
-  BASE_SHELL_REF=$(shell_quote "$BASE_REF")
+  BASE_SHELL_REF=$(shell_quote "refs/remotes/origin/$branch")
   BASE_DESCRIPTION="the freshly fetched default branch \`$BASE_REF\`"
   BASE_NEEDS_FETCH=1
 }
@@ -417,7 +417,7 @@ set_local_base() {  # <repo-dir> <why-no-fetch>
   local branch
   branch=$(resolve_local_default_branch "$1") || return 1
   BASE_REF=$branch
-  BASE_SHELL_REF=$(shell_quote "$BASE_REF")
+  BASE_SHELL_REF=$(shell_quote "refs/heads/$branch")
   BASE_DESCRIPTION="your local default branch \`$branch\`"
   BASE_NO_FETCH_REASON=$2
 }
@@ -460,14 +460,14 @@ $step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so res
    If that names a branch, refresh the remote exactly once BEFORE verifying or comparing its tracking ref - the fetch is what creates a pruned or never-fetched \`origin/<default>\`:
    \`git fetch origin --quiet\`
    If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
-   Then confirm the tracking ref with \`git rev-parse --verify origin/<default>\` and measure:
-   \`git rev-list --count \$(git merge-base HEAD origin/<default>)..origin/<default>\`
-   Only \`0\` passes. If the count is not \`0\`, rebase onto \`origin/<default>\` before reading or writing anything.
+   Then confirm the tracking ref with \`git rev-parse --verify refs/remotes/origin/<default>\` and measure:
+   \`git rev-list --count \$(git merge-base HEAD refs/remotes/origin/<default>)..refs/remotes/origin/<default>\`
+   Only \`0\` passes. If the count is not \`0\`, rebase onto \`refs/remotes/origin/<default>\` before reading or writing anything.
    If no usable origin default remains after that single fetch - no \`origin\` remote, no \`origin/HEAD\`, or its tracking ref still missing - fall back to a local default branch with NO further network refresh, named by exactly this rule:
 $LOCAL_DEFAULT_RULE
    Then measure against that local branch:
-   \`git rev-list --count \$(git merge-base HEAD <default>)..<default>\`
-   Only \`0\` passes, and if the count is not \`0\`, rebase onto \`<default>\` before reading or writing anything.
+   \`git rev-list --count \$(git merge-base HEAD refs/heads/<default>)..refs/heads/<default>\`
+   Only \`0\` passes, and if the count is not \`0\`, rebase onto \`refs/heads/<default>\` before reading or writing anything.
 EOF
   elif [ -n "$BASE_UNRESOLVED_REASON" ] && [ "$BASE_POLICY" = origin ]; then
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
@@ -476,17 +476,17 @@ $step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so res
    If you cannot determine it, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
    Then refresh the remote exactly once and measure:
    \`git fetch origin --quiet\`
-   \`git rev-list --count \$(git merge-base HEAD origin/<default>)..origin/<default>\`
+   \`git rev-list --count \$(git merge-base HEAD refs/remotes/origin/<default>)..refs/remotes/origin/<default>\`
    Only \`0\` passes. If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
-   If the count is not \`0\`, rebase onto \`origin/<default>\` before reading or writing anything.
+   If the count is not \`0\`, rebase onto \`refs/remotes/origin/<default>\` before reading or writing anything.
 EOF
   elif [ -n "$BASE_UNRESOLVED_REASON" ]; then
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_UNRESOLVED_REASON, so resolve the base yourself first. This check is mandatory: never skip, soften, or postpone it.
 $LOCAL_DEFAULT_RULE
    This task lands locally, so do not fetch; measure against the local branch:
-   \`git rev-list --count \$(git merge-base HEAD <default>)..<default>\`
-   Only \`0\` passes. If the count is not \`0\`, rebase onto \`<default>\` before reading or writing anything.
+   \`git rev-list --count \$(git merge-base HEAD refs/heads/<default>)..refs/heads/<default>\`
+   Only \`0\` passes. If the count is not \`0\`, rebase onto \`refs/heads/<default>\` before reading or writing anything.
 EOF
   elif [ "$BASE_NEEDS_FETCH" -eq 1 ]; then
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
@@ -495,14 +495,14 @@ $step. **Check your base before starting work.** Refresh the remote exactly once
    \`git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF\`
    Only \`0\` passes against $BASE_DESCRIPTION.
    If the fetch fails, append \`blocked: cannot fetch origin to verify base freshness\` to the status file and stop - one fetch, no retry loop.
-   If the count is not \`0\`, rebase onto \`$BASE_REF\` before reading or writing anything.
+   If the count is not \`0\`, rebase onto \`$BASE_SHELL_REF\` before reading or writing anything.
 EOF
   else
     IFS= read -r -d '' BASE_FRESHNESS_SECTION <<EOF || true
 $step. **Check your base before starting work.** $BASE_NO_FETCH_REASON; measure against the local branch:
    \`git rev-list --count \$(git merge-base HEAD $BASE_SHELL_REF)..$BASE_SHELL_REF\`
    Only \`0\` passes against $BASE_DESCRIPTION.
-   If the count is not \`0\`, rebase onto \`$BASE_REF\` before reading or writing anything.
+   If the count is not \`0\`, rebase onto \`$BASE_SHELL_REF\` before reading or writing anything.
 EOF
   fi
   BASE_FRESHNESS_SECTION=${BASE_FRESHNESS_SECTION%$'\n'}
