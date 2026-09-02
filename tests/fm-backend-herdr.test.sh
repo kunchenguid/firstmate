@@ -845,6 +845,23 @@ test_create_task_refuses_when_agent_state_ambiguous() {
   pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than guessing when the duplicate's agent state cannot be classified confidently"
 }
 
+test_create_task_refuses_an_error_tab_list_envelope() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-error-tab-list"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A result alongside an error must not authorize a tab create.
+  printf '%s\n' '{"error":{"code":"temporary"},"result":{"tabs":[]}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-error-list /tmp/proj' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse an error tab-list envelope"
+  assert_contains "$out" "could not parse herdr tab list" \
+    "create_task did not report its unreadable tab list"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
+    "create_task created a tab from an error tab-list envelope"
+  pass "fm_backend_herdr_create_task: refuses an error tab-list envelope without creating a tab"
+}
+
 test_create_task_refuses_an_ambiguous_duplicate_pane_list() {
   # A recovered task tab has one root pane. If Herdr returns two candidates for
   # the same tab, do not select whichever happens to sort first and create a
@@ -1731,12 +1748,9 @@ test_create_task_refuses_when_stale_done_changes_before_close() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/8.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/9.out"
   printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/10.out"
-  # The unpublished replacement is still its exact, agent-free pane, so the
-  # refusal must retire it rather than leave a duplicate unrecorded tab.
-  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' > "$resp/11.out"
-  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3"}}}' > "$resp/12.out"
-  printf '%s\n' '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}' > "$resp/13.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-boundary","workspace_id":"w1"}]}}' > "$resp/15.out"
+  # Deliberately leave response 11 absent. The old rollback consumed this as
+  # an unreadable pane-list response and stranded the replacement; the exact
+  # tab returned from create is unpublished, so it must be closed directly.
   make_death_lab "$dir" "$pid"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -1750,7 +1764,7 @@ test_create_task_refuses_when_stale_done_changes_before_close() {
     "create_task closed a pane that became working after stale-done proof"
   assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw1:t3' \
     "create_task left its unpublished replacement tab behind after stale-done proof changed"
-  pass "fm_backend_herdr_create_task: rechecks stale done before closing its old tab and retires its unpublished replacement"
+  pass "fm_backend_herdr_create_task: rechecks stale done before closing its old tab and retires its unpublished replacement despite unreadable cleanup reads"
 }
 
 test_spawn_relaunch_refuses_when_stale_done_changes_before_input() {
@@ -4874,6 +4888,7 @@ test_create_task_closes_and_replaces_no_agent_husk
 test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
+test_create_task_refuses_an_error_tab_list_envelope
 test_create_task_refuses_an_ambiguous_duplicate_pane_list
 test_agent_state_accepts_only_a_stale_done_registration
 test_agent_state_refuses_done_without_a_bare_shell

@@ -2014,24 +2014,14 @@ fm_backend_herdr_agent_alive() {  # <target>
   esac
 }
 
-# fm_backend_herdr_unpublished_replacement_rollback: remove an exact replacement
-# tab that create_task made but cannot publish after its stale-husk boundary
-# recheck. It may only close the exact response-derived tab after it still owns
-# its exact response-derived pane and that pane is positively unregistered.
-# A live, stale-done, dead, or unreadable pane leaves the tab untouched for an
-# operator rather than risking another process.
+# fm_backend_herdr_unpublished_replacement_rollback: remove the exact replacement
+# tab create_task made but cannot publish after its stale-husk boundary recheck.
+# Its response-derived tab id is enough authority: no input has been sent to the
+# new pane, while an extra pane/agent read could transiently fail and strand an
+# unrecorded duplicate. Never derive a label-based target here.
 fm_backend_herdr_unpublished_replacement_rollback() {  # <session> <workspace> <tab> <pane>
-  local session=$1 wsid=$2 tab_id=$3 pane_id=$4 state list
-  [ "$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id")" = "$pane_id" ] || return 1
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
-  [ "$state" = no-agent ] || return 1
-  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1 || return 1
-  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  fm_backend_herdr_response_is_success "$list" || return 1
-  printf '%s' "$list" | jq -e --arg tab "$tab_id" '
-    (.result.tabs | type) == "array"
-    and ([.result.tabs[]? | select(.tab_id == $tab)] | length) == 0
-  ' >/dev/null 2>&1
+  local session=$1 tab_id=$3
+  fm_backend_herdr_cli "$session" tab close "$tab_id" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_create_task: create the task's tab (one pane) in
@@ -2082,6 +2072,10 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  fm_backend_herdr_response_is_success "$list" || {
+    echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
+    return 1
+  }
   dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" 'if (.result.tabs | type) == "array" then .result.tabs[] | select(.label == $want) | .tab_id else error("missing result.tabs") end' 2>/dev/null) || {
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
@@ -2105,6 +2099,10 @@ $dup_tabs
 EOF
   fi
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  fm_backend_herdr_response_is_success "$out" || {
+    echo "error: could not parse tab/pane id from herdr tab create output" >&2
+    return 1
+  }
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
@@ -2132,7 +2130,8 @@ EOF
       echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
       return 1
     }
-    if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+    if ! fm_backend_herdr_response_is_success "$list" \
+       || ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
       return 1
     fi
