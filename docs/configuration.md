@@ -10,7 +10,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
+`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, the append-only task-usage ledger described below, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 `state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
@@ -219,6 +219,31 @@ Shared captain preferences that apply across secondmate domains live only in the
 Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 There is no shared learnings file by captain decision.
+
+## Task usage ledger (data/task-usage.jsonl)
+
+`data/task-usage.jsonl` is a durable, home-private, append-only record of which harness, model, and workflow produced each task's outcome.
+It exists because a task's implementation axes live only in `state/<id>.meta`, which ordinary successful cleanup deletes, so a merged pull request could not afterwards be joined to the model that produced it.
+The ledger is gitignored like the rest of `data/`, is created at mode `0600`, and is never read by the orchestrator; nothing in the fleet's behavior depends on it, and a record that cannot be written warns rather than failing the lifecycle step it describes.
+That includes a `data/` directory the write can never take its lock in, such as a read-only or full device: a lifecycle record gives up after `FM_USAGE_LEDGER_LOCK_TIMEOUT` seconds (default 60) and warns, instead of holding the spawn or cleanup it is only observing.
+Records are written as a task is dispatched, registers a pull or merge request, lands, and is cleaned up; [architecture.md](architecture.md#task-attribution-outlives-cleanup) owns which script writes each one and why those points were chosen.
+A forced secondmate retirement discards every task still inside that home along with the home's own ledger, so each discarded task, at any nesting depth, is recorded in the retiring home's ledger instead of the one being deleted.
+That holds wherever the retiring home outlives the operation, which is every local retirement.
+On the remote-host leg of a forced retirement of a REMOTE secondmate the retiring home is itself the home being deleted, so nothing that leg records outlives it: its child rows go with the home, and the retired mate's own cleanup record - which targets that same store, as it did before this sweep recorded anything - is only reached after the home is gone, so it warns instead of writing.
+
+[`bin/fm-usage-ledger.sh`](../bin/fm-usage-ledger.sh)'s header is the single owner of the record schema, the stored-field allowlist and its privacy boundary, the event-identity rules that make repeated calls idempotent, and the safety and retention mechanics.
+Read it before parsing the file or reasoning about what the file may contain.
+In summary for an operator: the ledger stores implementation and outcome axes only, never credentials, account identity, prompt or response text, captain text, local paths, or free-form status prose, and it states an unproven value rather than inferring one.
+
+Inspect the ledger with `bin/fm-usage-ledger.sh list` and check its integrity with `bin/fm-usage-ledger.sh verify`, which also prints the first-observed timestamp.
+`verify` is the whole-file integrity check, because a lifecycle write reads and validates only the records one append needs, the last one plus any already carrying the same event identity: that costs a single fixed-string scan instead of parsing the whole history, and damage anywhere else is neither detected nor repaired by the write.
+Run `verify` if you suspect the file was damaged by something other than Firstmate.
+History is bounded only by the explicit `bin/fm-usage-ledger.sh prune` command, whose horizon is `FM_USAGE_LEDGER_RETENTION_DAYS` (default 400 days, so 30-day, quarterly, and year-over-year comparisons all still resolve).
+No lifecycle step ever prunes, so recording one task cannot rewrite another task's history; at a few hundred bytes per record a busy home costs single-digit megabytes a year, which is why retention is an operator decision rather than an automatic one.
+
+Two limitations bound what the file can answer, beyond the coverage start and unproven-axis rules its owner documents.
+Firstmate cannot currently prove which agent the no-mistakes pipeline ran, so a task's validator identity is never filled in from the worker that implemented it.
+A forced retirement of a remote secondmate leaves no record of the tasks that host discarded, because the remote leg's rows are written into a store the same leg deletes; the parent home's ledger still holds the retired mate's own spawn and cleanup records, so the mate is attributable there even though its children are not.
 
 ## Startup memory budget (config/startup-memory-budget)
 

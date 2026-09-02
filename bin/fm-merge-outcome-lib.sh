@@ -23,6 +23,12 @@
 # is committed, so a failed commit stays eligible for at-least-once retry and
 # may rarely duplicate rather than leave a merge silent.
 #
+# A confirmed merge is also appended to this home's durable task-usage ledger
+# before the marker is committed, so an ordinary teardown cannot later erase the
+# only link between the landed PR and the harness and model that produced it.
+# bin/fm-usage-ledger.sh owns that schema and bin/fm-usage-ledger-lib.sh owns the
+# rule that a failed ledger write never turns a landed merge into a failure.
+#
 # Sourced by bin/fm-pr-merge.sh, bin/fm-watch.sh, and tests. No side effects on
 # source beyond its sourced libraries.
 
@@ -31,6 +37,8 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-usage-ledger-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-usage-ledger-lib.sh"
 
 # The secondmate identity of the home reporting, or non-zero when this home is
 # a main home (1) or carries an unusable identity marker (2). Mirrors
@@ -130,6 +138,10 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
       "check: merge landed: $id $FM_PR_URL" || status=1
   fi
   if [ "$status" -eq 0 ]; then
+    # Both origins land here, so a merge this home performed and a merge its
+    # poll detected leave the same durable usage record.
+    fm_usage_ledger_record "$home" "$state" "${FM_DATA_OVERRIDE:-$home/data}" \
+      merge "$id" --meta "$state/$id.meta" --pr "$FM_PR_URL" --outcome merged
     fm_pr_poll_merge_mark_notified "$state" "$id" \
       "$provider" "$host" "$path" "$number" || status=1
   fi

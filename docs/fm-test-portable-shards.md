@@ -64,8 +64,9 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
-The hints are the slowest measurement of each of the lane's 139 scripts across the `fm-test-timing-portable-serial-*` artifacts of three green CI runs on 2026-09-01, [33558082172](https://github.com/kunchenguid/firstmate/actions/runs/33558082172), [33523597838](https://github.com/kunchenguid/firstmate/actions/runs/33523597838), and [33463326167](https://github.com/kunchenguid/firstmate/actions/runs/33463326167).
-Those per-script maxima total 3809887 ms of conservative balance weight.
+The hints are the slowest measurement of each of the lane's scripts across the `fm-test-timing-portable-serial-*` artifacts of three green CI runs on 2026-09-01, [33558082172](https://github.com/kunchenguid/firstmate/actions/runs/33558082172), [33523597838](https://github.com/kunchenguid/firstmate/actions/runs/33523597838), and [33463326167](https://github.com/kunchenguid/firstmate/actions/runs/33463326167).
+Those runs measured 139 scripts, and two scripts postdate them: `tests/fm-usage-ledger.test.sh`, whose hint is the slowest of its measurements on the green runs that have since measured it, [33564877693](https://github.com/kunchenguid/firstmate/actions/runs/33564877693) and [33597127052](https://github.com/kunchenguid/firstmate/actions/runs/33597127052), and `tests/fm-wake-drain-outcome-backstop.test.sh`, which carries the hint recorded when it was added.
+Those per-script maxima total 3854880 ms of conservative balance weight across 141 scripts.
 Taking the slowest of several runs rather than a single run keeps the balance honest on a slow runner: individual scripts varied by up to 20% between those three runs.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
@@ -76,14 +77,15 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of5` | 27 | 761980 ms (~12.70 min) |
-| `portable-serial-2of5` | 27 | 761972 ms (~12.70 min) |
-| `portable-serial-3of5` | 28 | 761968 ms (~12.70 min) |
-| `portable-serial-4of5` | 28 | 761984 ms (~12.70 min) |
-| `portable-serial-5of5` | 29 | 761983 ms (~12.70 min) |
+| `portable-serial-1of5` | 27 | 770979 ms (~12.85 min) |
+| `portable-serial-2of5` | 29 | 770981 ms (~12.85 min) |
+| `portable-serial-3of5` | 28 | 770965 ms (~12.85 min) |
+| `portable-serial-4of5` | 28 | 770974 ms (~12.85 min) |
+| `portable-serial-5of5` | 29 | 770981 ms (~12.85 min) |
 | imbalance | | 16 ms |
 
-Replaying that partition against each of the three source runs' real per-script durations puts the worst shard at 12.54 min, 63% of the 20-minute job cap.
+Replaying this partition against each of the three source runs' real per-script durations, counting the two scripts those runs never measured at their hints, puts the worst shard at 12.69 min, 63% of the 20-minute job cap.
+Those two sit in different shards, and in none of the three runs is either of those the worst shard, so that headroom rests on measurement rather than on their hints.
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 262626 ms, is the floor for any shard count.
 

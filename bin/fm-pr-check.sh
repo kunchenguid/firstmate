@@ -5,6 +5,9 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# After the poll is published, the PR's identity is also appended to this home's
+# durable task-usage ledger, so the outcome can later be joined to the harness
+# and model that produced it; bin/fm-usage-ledger.sh owns that schema.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -12,11 +15,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-usage-ledger-lib.sh
+. "$SCRIPT_DIR/fm-usage-ledger-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -132,4 +138,10 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+# The meta now carries the canonical pr= (and pr_head= when the forge supplied
+# one), so the ledger reads this task's axes and PR identity from one source.
+PR_HEAD_ARGS=()
+[ -z "$PR_HEAD" ] || PR_HEAD_ARGS=(--pr-head "$PR_HEAD")
+fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" pr "$ID" \
+  --meta "$META" --pr "$URL" "${PR_HEAD_ARGS[@]+"${PR_HEAD_ARGS[@]}"}"
 printf 'armed: state/%s.check.sh\n' "$ID"

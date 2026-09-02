@@ -59,11 +59,11 @@
 # fm-send under its final route lock, and before the cooldown commit so a retired
 # endpoint is never nudged or allowed to silence its replacement.
 #
-# A persistent REMOTE secondmate's parent-side metadata intentionally has no
-# spawn_gen (docs/remote-secondmates.md). Such a row is legitimate and markerless
-# by construction, not corrupt, so it uses its sampled remote_host as the separate
-# identity guard. The current metadata must still have no spawn_gen and must still
-# name that host. A row with neither identity fails loudly.
+# A persistent REMOTE secondmate route seeded before its parent-side metadata
+# carried a spawn_gen has none (docs/remote-secondmates.md). Such a row is
+# legitimate and markerless, not corrupt, so it uses its sampled remote_host as
+# the separate identity guard. The current metadata must still have no spawn_gen
+# and must still name that host. A row with neither identity fails loudly.
 #
 # Notify exits 0 when no delivery or cooldown-recording failure is known,
 # including when a home was skipped for lock contention or a stale endpoint;
@@ -164,9 +164,10 @@ meta_remote_host() {
 # Confirms the row's sampled identity still matches the mate's current
 # metadata. When a spawn generation was sampled, that generation alone is the
 # identity, exactly as before. When none was sampled - the only legitimate
-# case is a persistent remote secondmate, whose parent metadata never carries
-# one - the sampled host substitutes, and the metadata must still carry no
-# spawn_gen of its own or the row's assumed identity model no longer holds.
+# case is a persistent remote secondmate route seeded before its parent
+# metadata carried one - the sampled host substitutes, and the metadata must
+# still carry no spawn_gen of its own or the row's assumed identity model no
+# longer holds.
 # Sets REVALIDATE_REASON to "no-identity" (nothing here can be safely
 # identified; report failed) or "stale" (identified, but changed; report
 # stale) on any non-zero return.
@@ -430,11 +431,11 @@ cmd_notify() {
 
   # Only a real inventory mismatch is a books problem the mate can fix; every
   # other invalidity is either unreadable state or nothing to reconcile.
-  # spawn_gen is empty only for a persistent remote secondmate, whose parent
-  # metadata never carries one (bin/fm-spawn.sh's spawn_remote_secondmate());
-  # host is its substitute identity there and is otherwise unused. Both are
-  # still character-restricted so a malformed sample cannot masquerade as
-  # either a live incarnation token or a live host.
+  # spawn_gen is empty only for a persistent remote secondmate route seeded
+  # before its parent metadata carried one; host is its substitute identity
+  # there and is otherwise unused. Both are still character-restricted so a
+  # malformed sample cannot masquerade as either a live incarnation token or
+  # a live host.
   #
   # Rows join on ASCII unit separator (0x1F), not @tsv: bash's IFS-whitespace
   # `read` collapses consecutive tabs, which would silently drop a

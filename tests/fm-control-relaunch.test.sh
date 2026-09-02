@@ -17,6 +17,10 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. Every replacement record this transaction leaves committed is joinable to
+#      the model that produced it: bin/fm-usage-ledger.sh holds exactly one
+#      spawn row for that incarnation, including when the launch fails after the
+#      replacement record was published and that record is deliberately kept.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1028,6 +1032,89 @@ test_post_publication_launch_failure_keeps_the_new_record() {
   pass "fm-control relaunch: post-publication failure keeps the new durable record"
 }
 
+# --- 7. the replacement incarnation stays attributable ----------------------
+
+ledger_store() { printf '%s/home/data/task-usage.jsonl\n' "$1"; }
+
+# ledger_spawn_rows <case-dir> <id> <gen>: how many spawn rows the ledger holds
+# for exactly that incarnation.
+ledger_spawn_rows() {
+  local rows
+  rows=$(grep -c -F "\"id\":\"spawn:$2:$3\"" "$(ledger_store "$1")" 2>/dev/null) || rows=0
+  printf '%s\n' "$rows"
+}
+
+# field_of_spawn_row <case-dir> <id> <gen> <key>: one string field out of that
+# incarnation's spawn row.
+field_of_spawn_row() {
+  grep -F "\"id\":\"spawn:$2:$3\"" "$(ledger_store "$1")" 2>/dev/null | head -1 |
+    sed -n "s/.*\"$4\":\"\([^\"]*\)\".*/\1/p"
+}
+
+# assert_committed_record_is_attributable <case-dir> <id> <context>: the
+# property every relaunch outcome has to satisfy - if a replacement record
+# survived, the incarnation it names has exactly one spawn row.
+assert_committed_record_is_attributable() {
+  local dir=$1 id=$2 context=$3 gen
+  [ -f "$dir/home/state/$id.meta" ] || return 0
+  gen=$(meta_field "$dir" "$id" spawn_gen)
+  [ -n "$gen" ] || fail "$context: the committed record names no incarnation"
+  [ "$(ledger_spawn_rows "$dir" "$id" "$gen")" -eq 1 ] \
+    || fail "$context: a committed replacement record left $(ledger_spawn_rows "$dir" "$id" "$gen") usage rows for incarnation $gen"
+}
+
+test_a_relaunch_records_its_replacement_incarnation_once() {
+  local dir out gen prior
+  dir=$(new_case ledgerrelaunch rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl40 --relaunch --harness claude) \
+    || fail "an ordinary relaunch failed: $out"
+  gen=$(meta_field "$dir" rl40 spawn_gen)
+  [ -n "$gen" ] || fail "a relaunch minted no incarnation for its replacement worker"
+  assert_committed_record_is_attributable "$dir" rl40 "an ordinary relaunch"
+  [ "$(field_of_spawn_row "$dir" rl40 "$gen" harness)" = claude ] \
+    || fail "the replacement row lost the harness it relaunched onto"
+  [ "$(field_of_spawn_row "$dir" rl40 "$gen" kind)" = ship ] \
+    || fail "the replacement row lost the task kind"
+
+  # A second relaunch is a second incarnation, not a second row for the first.
+  prior=$gen
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl40 --relaunch --harness claude) \
+    || fail "a second relaunch failed: $out"
+  gen=$(meta_field "$dir" rl40 spawn_gen)
+  [ "$gen" != "$prior" ] || fail "a second relaunch reused the first replacement's incarnation"
+  assert_committed_record_is_attributable "$dir" rl40 "a second relaunch"
+  [ "$(ledger_spawn_rows "$dir" rl40 "$prior")" -eq 1 ] \
+    || fail "a second relaunch disturbed the first replacement's row"
+  pass "fm-spawn --relaunch: each replacement incarnation is recorded exactly once"
+}
+
+test_a_post_publication_launch_failure_still_records_the_replacement() {
+  local dir out rc gen
+  dir=$(new_case ledgerkept rl41)
+  add_ship_task "$dir" rl41 claude
+  printf 'codex' > "$dir/fake/becomes"
+
+  rc=0
+  out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
+    run_control "$dir" rl41 relaunch --harness codex --note "keep the published record") || rc=$?
+  expect_code 1 "$rc" "a post-publication launch failure should still fail closed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl41 harness)" = codex ] \
+    || fail "the published replacement record was not kept"
+
+  # The record is kept and nothing rolls it back, so this incarnation would
+  # otherwise be permanently unattributable.
+  gen=$(meta_field "$dir" rl41 spawn_gen)
+  [ -n "$gen" ] || fail "the kept replacement record names no incarnation"
+  assert_committed_record_is_attributable "$dir" rl41 "a post-publication launch failure"
+  [ "$(field_of_spawn_row "$dir" rl41 "$gen" harness)" = codex ] \
+    || fail "the kept replacement's row lost the harness it was republished onto"
+  pass "fm-control relaunch: a kept replacement record is still joinable to its model"
+}
+
 test_stop_transport_failure_reconciles_a_dead_agent() {
   local dir out rc
   dir=$(new_case stopfail rl25)
@@ -1509,6 +1596,8 @@ test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_keeps_the_prior_record_and_reports_it
 test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
+test_a_relaunch_records_its_replacement_incarnation_once
+test_a_post_publication_launch_failure_still_records_the_replacement
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state

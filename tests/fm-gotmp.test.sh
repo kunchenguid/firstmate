@@ -89,6 +89,11 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
+  # The durable task-usage ledger teardown records into just before it removes
+  # the task record: the call policy it sources, and the schema owner that
+  # policy runs as a subprocess.
+  ln -s "$ROOT/bin/fm-usage-ledger-lib.sh" "$fake/bin/fm-usage-ledger-lib.sh"
+  ln -s "$ROOT/bin/fm-usage-ledger.sh" "$fake/bin/fm-usage-ledger.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -180,6 +185,11 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-pending-reply-lib.sh" "$fake/bin/fm-pending-reply-lib.sh"
   ln -s "$ROOT/bin/fm-marker-lib.sh" "$fake/bin/fm-marker-lib.sh"
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
+  # The durable task-usage ledger teardown records into just before it removes
+  # the task record: the call policy it sources, and the schema owner that
+  # policy runs as a subprocess.
+  ln -s "$ROOT/bin/fm-usage-ledger-lib.sh" "$fake/bin/fm-usage-ledger-lib.sh"
+  ln -s "$ROOT/bin/fm-usage-ledger.sh" "$fake/bin/fm-usage-ledger.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0

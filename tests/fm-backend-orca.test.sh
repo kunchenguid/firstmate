@@ -682,6 +682,77 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
 }
 
+# The Orca abort path publishes a real task record for a launch that failed, and
+# bin/fm-teardown.sh later retires that record and hands it to the durable usage
+# ledger with exactly the arguments used below. Two aborted launches of one
+# reused id are two incarnations, so each record must name its own or the second
+# retirement is suppressed as a repeat of the first and is never recorded.
+test_orca_cleanup_recovery_records_keep_their_incarnations_apart() {
+  local proj wt home data state config id first_gen second_gen ids
+  id="orcareusedincz0"
+  proj="$TMP_ROOT/reuse-project"
+  wt="$TMP_ROOT/reuse-wt"
+  home="$TMP_ROOT/reuse-home"
+  data="$home/data"
+  state="$home/state"
+  config="$home/config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+
+  orca_abort_case() {  # <case-name>
+    orca_case "$1"
+    printf '1\n' > "$RESP/1.exit"
+    printf '{"ok":true,"result":{"repo":{"id":"repo-reuse"}}}\n' > "$RESP/2.out"
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-reuse","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
+    printf '1\n' > "$RESP/4.exit"
+    printf '1\n' > "$RESP/5.exit"
+    if PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+      FM_CONFIG_OVERRIDE="$config" FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
+      FM_SPAWN_NO_GUARD=1 \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off \
+      --backend orca >/dev/null 2>&1; then
+      fail "the Orca spawn should have failed with its abort cleanup blocked"
+    fi
+    assert_present "$state/$id.meta" "a failed Orca abort cleanup preserved no task record"
+  }
+
+  # The retirement the ledger row describes, driven the way bin/fm-teardown.sh
+  # drives it: the record itself supplies the axes and the incarnation.
+  orca_retire_record() {
+    FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+      "$ROOT/bin/fm-usage-ledger.sh" record --event cleanup --task "$id" \
+      --meta "$state/$id.meta" --outcome retired >/dev/null \
+      || fail "the durable usage ledger refused a retirement of the recovery record"
+    rm -f "$state/$id.meta"
+  }
+
+  orca_abort_case reuse-one
+  first_gen=$(sed -n 's/^spawn_gen=//p' "$state/$id.meta")
+  [ -n "$first_gen" ] || fail "a preserved Orca recovery record carries no incarnation token"
+  orca_retire_record
+
+  orca_abort_case reuse-two
+  second_gen=$(sed -n 's/^spawn_gen=//p' "$state/$id.meta")
+  [ -n "$second_gen" ] || fail "the second Orca recovery record carries no incarnation token"
+  [ "$second_gen" != "$first_gen" ] \
+    || fail "two aborted Orca launches of one id recorded the same incarnation token"
+  orca_retire_record
+
+  ids=$(sed -n 's/.*"id":"\(cleanup:'"$id"':[^"]*\)".*/\1/p' "$data/task-usage.jsonl")
+  [ "$(printf '%s\n' "$ids" | grep -c .)" -eq 2 ] \
+    || fail "two retirements of one reused Orca recovery id left $(printf '%s\n' "$ids" | grep -c .) ledger rows, not two"
+  [ "$(printf '%s\n' "$ids" | sort -u | grep -c .)" -eq 2 ] \
+    || fail "two retirements of one reused Orca recovery id collapsed onto one ledger identity"
+  case "$ids" in
+    *":unknown"*) fail "a retirement of a preserved Orca recovery record recorded an unproven incarnation" ;;
+  esac
+  unset -f orca_abort_case orca_retire_record
+  pass "fm-spawn.sh --backend orca: a reused cleanup-recovery id keeps its incarnations apart"
+}
+
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
   local proj wt data state config id out status
   id="orcametafailz9"
@@ -1337,6 +1408,7 @@ test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
+test_orca_cleanup_recovery_records_keep_their_incarnations_apart
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json

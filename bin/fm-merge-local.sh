@@ -9,6 +9,9 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
+# A confirmed landing also appends the landed commit to this home's durable
+# task-usage ledger, so a local-only outcome is joinable to the harness and
+# model that produced it; bin/fm-usage-ledger.sh owns that schema.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -16,6 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-usage-ledger-lib.sh
+. "$SCRIPT_DIR/fm-usage-ledger-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 # Role partition: landing local-only work is MAIN-owned; the Pi supervision
 # branch reports readiness and never lands (contract: bin/fm-lease-lib.sh;
@@ -71,4 +77,7 @@ fi
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+LANDED=$(git -C "$PROJ" rev-parse "$DEFAULT")
+fm_usage_ledger_record "$FM_HOME" "$STATE" "$DATA" merge "$ID" \
+  --meta "$META" --landing "$LANDED" --outcome merged
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"

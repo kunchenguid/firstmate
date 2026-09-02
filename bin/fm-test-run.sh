@@ -288,7 +288,8 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
-    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-review-diff.test.sh|fm-teardown.test.sh|fm-usage-ledger.test.sh|\
+    fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -633,6 +634,7 @@ tests/fm-trace-context-lib.test.sh 209
 tests/fm-trace-context-spawn.test.sh 44702
 tests/fm-turnend-guard.test.sh 42565
 tests/fm-update.test.sh 5212
+tests/fm-usage-ledger.test.sh 29811
 tests/fm-vendor-auth-probe.test.sh 43316
 tests/fm-voice-relay.test.sh 28699
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7381
@@ -1167,8 +1169,16 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
+    bin/fm-wake-lib.sh|bin/fm-classify-lib.sh)
+      # The same family as the watcher arm below, plus the ledger: these two are
+      # the shared libraries bin/fm-usage-ledger.sh sources whose contracts it
+      # alone regresses - the locks-only state guard, and the status vocabulary
+      # a home may rename. Select that one script rather than the whole family.
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' "__script__:fm-usage-ledger.test.sh"
+      ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)
@@ -1238,6 +1248,16 @@ families_for_changed_path() {
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
+    bin/fm-usage-ledger.sh|bin/fm-usage-ledger-lib.sh|bin/fm-merge-outcome-lib.sh)
+      # The durable task-usage ledger and its call policy are written from the
+      # spawn path, the teardown/PR/merge path, the watcher's merge poll, and the
+      # remote-secondmate launch and retirement paths, so a change to either
+      # re-selects every family that drives one of those call sites.
+      printf '%s\n' pr-forge
+      printf '%s\n' backend-dispatch
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' secondmate
+      ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both
       # bin/fm-crew-state.sh (pure-contract-unit) and bin/fm-teardown.sh's
@@ -1258,7 +1278,22 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-spawn.sh)
+      # The same families as the dispatch-surface arm below, plus the ledger:
+      # fm-spawn.sh is the one script in that group carrying ledger call sites
+      # (the post-commit point and the remote-secondmate launch), whose only
+      # regression lives in the pr-forge family. The remote-secondmate task
+      # record is written on a path no portable family drives, and only the
+      # secondmate family's full remote launch proves what it records; the same
+      # holds for the Orca abort path's own task record and the orca family.
+      # Select those three scripts rather than any of those whole families.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' "__script__:fm-usage-ledger.test.sh"
+      printf '%s\n' "__script__:fm-remote-secondmate-lifecycle-e2e.test.sh"
+      printf '%s\n' "__script__:fm-backend-orca.test.sh"
+      ;;
+    bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit

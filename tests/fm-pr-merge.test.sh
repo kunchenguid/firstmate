@@ -96,7 +96,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$fakebin"
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
@@ -353,9 +353,13 @@ glab_merge_line() {
 
 run_pr_merge() {
   local case_dir=$1 rc; shift
+  # FM_DATA_OVERRIDE is pinned to the case dir because a confirmed merge appends
+  # to this home's durable task-usage ledger; without it a main-home case would
+  # resolve $DATA to the real repo's own home and write live records.
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="${FM_TEST_HOME:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
@@ -1947,6 +1951,40 @@ test_main_home_merge_leaves_a_durable_wake() {
   pass "a merge a main home performs itself leaves one durable wake naming the PR"
 }
 
+# A confirmed merge must also survive the cleanup that later deletes
+# state/<id>.meta, or the landed PR can never be joined to the model that
+# produced it. bin/fm-usage-ledger.sh owns that record's schema.
+test_merge_records_the_landed_pr_in_the_usage_ledger() {
+  local case_dir url ledger rec
+  url=https://github.com/example/repo/pull/70
+  case_dir=$(make_home_case merge-usage-ledger)
+  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+  : >"$case_dir/gh-axi.log"
+  ledger="$case_dir/data/task-usage.jsonl"
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "merge-usage-ledger: merge failed"
+
+  rec=$(grep -F "\"id\":\"merge:task-x1:$url:-\"" "$ledger" 2>/dev/null | head -1)
+  [ -n "$rec" ] || fail "merge-usage-ledger: a landed merge left no durable usage record"
+  case "$rec" in
+    *'"outcome":"merged"'*) : ;;
+    *) fail "merge-usage-ledger: the landed outcome was not recorded: $rec" ;;
+  esac
+  case "$rec" in
+    *'"kind":"ship"'*) : ;;
+    *) fail "merge-usage-ledger: the task's axes were not carried into the record: $rec" ;;
+  esac
+
+  # The same merge again must not duplicate the record.
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout2" 2>"$case_dir/stderr2" \
+    || fail "merge-usage-ledger: repeat merge failed"
+  [ "$(grep -c -F '"event":"merge"' "$ledger")" -eq 1 ] \
+    || fail "merge-usage-ledger: a repeated merge notification duplicated its usage record"
+  pass "a confirmed merge records the landed PR and the task's axes in the usage ledger"
+}
+
 test_queued_github_merge_leaves_the_poll_armed() {
   local case_dir url
   url=https://github.com/example/repo/pull/66
@@ -2129,6 +2167,7 @@ test_queued_gitlab_merge_leaves_the_poll_armed
 test_failed_merge_reports_nothing
 test_gitlab_refusal_reports_nothing
 test_main_home_merge_leaves_a_durable_wake
+test_merge_records_the_landed_pr_in_the_usage_ledger
 test_queued_github_merge_leaves_the_poll_armed
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent

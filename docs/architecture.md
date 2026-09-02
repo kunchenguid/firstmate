@@ -302,6 +302,32 @@ The same emitter handles a merge firstmate performed and one its poll detected, 
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
+## Task attribution outlives cleanup
+
+A task's implementation axes - harness, model, effort, kind, project, delivery mode, autonomy posture, backend, incarnation - are recorded only in `state/<id>.meta`, and teardown removes that record as one atomic step with closing the backlog item.
+That made the axes unrecoverable the moment a task finished, so a merged PR could not be joined back to the model that produced it.
+A durable, home-private, append-only ledger under `data/` closes that gap; [`bin/fm-usage-ledger.sh`](../bin/fm-usage-ledger.sh)'s header is the one owner of its schema, event identity, safety rules, and retention, and [configuration.md](configuration.md#task-usage-ledger-datatask-usagejsonl) is the operator-facing reference.
+
+The mechanism boundary is deliberately narrow, and its extension points are the lifecycle call sites rather than the record format.
+`bin/fm-usage-ledger.sh` is the only thing that serializes a record, validates a target, or applies retention.
+[`bin/fm-usage-ledger-lib.sh`](../bin/fm-usage-ledger-lib.sh) owns only how a lifecycle script calls it: the effective home is passed explicitly so a secondmate records into its own ledger, and the helper always returns success so a failed observability write can never fail a launch that already happened, a merge that already landed, or a cleanup whose safety checks already passed.
+Every axis it stores comes from a strict allowlist read out of the task record through `fm-backend.sh`'s existing `fm_meta_get`, resolving the backend through the contract of whichever writer produced that record, and the final status class comes from `fm-classify-lib.sh`'s existing verb reader, so this feature restates no contract it does not own.
+
+Each call site sits at the single point where every supported primary harness and every spawn-capable runtime backend converges, rather than inside a per-harness or per-backend branch.
+`bin/fm-spawn.sh` writes its record as the statement immediately after each point that leaves a launch's task record committed beyond rollback - a fresh spawn's fused In-flight transition, a relaunch's replacement publication, and a remote-secondmate launch's endpoint publication - so no span of code sits between a commit and its record for a later early return, signal exit, or error path to fall into.
+Recording twice is a no-op, so one incarnation yields exactly one record however many of those points it crosses, while a batch re-execs that single-task path once per pair and a relaunch mints a fresh `spawn_gen`, so a replacement worker becomes its own record rather than overwriting one.
+The task record an aborted Orca launch leaves behind is the deliberate exception and gets no spawn record, because a record there would assert a worker that never ran.
+`bin/fm-pr-check.sh` records after the poll is published, for GitHub and GitLab alike.
+`bin/fm-merge-outcome-lib.sh` records inside the one emitter both a self-performed merge and a poll-detected merge already share, and `bin/fm-merge-local.sh` records an approved local-only landing's commit.
+`bin/fm-teardown.sh` records immediately before the task record is removed, on the ordinary path, the remote-secondmate path, and the forced retirement's own sweep of the tasks still inside the home being discarded, so a refused teardown deliberately leaves no cleanup record for a task that is still live.
+Its own sequence destroys two of the things that record describes - retiring the presentation entry deletes the status log, and a secondmate retirement removes the home the task record itself sits in - so both are captured through the ledger's own reader past every refusal and before either is gone, while the append stays where the refusals still govern it.
+That sweep is the one place a record is deliberately written to a home other than the task's own: every home it walks, at any nesting depth, is deleted by the same operation, so a row written there would be destroyed with the ledger holding it, and the retiring home is the nearest one that survives.
+It is the nearest surviving home rather than a guaranteed surviving one: on the remote-host leg of a forced retirement of a remote secondmate the retiring home is the home being deleted, so that leg's child rows do not outlive it and the mate's own cleanup record there warns rather than writes, its append falling after the home removal, while the parent home's ledger holds the mate's records but not its children's.
+Nothing the ledger stores is read from a vendor's process name, rendered output, or banner - every axis comes from the task record fm-spawn already wrote and from the forge identity fm-pr-lib already validated - so the feature has no harness-dependent verdict needing per-adapter evidence in [verification/runtime-backends.md](verification/runtime-backends.md).
+
+Because the spawn record is written first and independently, abandoned or indefinitely preserved work stays attributable even when no later record is ever written.
+Idempotency is by stable event identity, not by a side marker, so a retried spawn, a re-armed PR poll, an at-least-once merge notification, and a rerun teardown converge without coordination while a genuinely new incarnation, PR head, or PR appends its own record.
+
 ## Optional Relay
 
 Relay is opt-in presence for the shared `@myfirstmate` bot on both public surfaces it supports, X and Discord.

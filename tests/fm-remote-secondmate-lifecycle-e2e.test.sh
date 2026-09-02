@@ -724,6 +724,23 @@ assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
+# No --model and no --effort were passed and none is configured, so both axes
+# are unpinned. The remote writer records that the same way the local one does,
+# and the durable usage row reads it back as an unpinned axis rather than as a
+# task that had no model axis at all.
+assert_grep 'model=default' "$PARENT/state/ios.meta" \
+  "an unpinned remote model was not recorded as the writer's own default"
+assert_grep 'effort=default' "$PARENT/state/ios.meta" \
+  "an unpinned remote effort was not recorded as the writer's own default"
+remote_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$PARENT/state/ios.meta")
+[ -n "$remote_spawn_gen" ] \
+  || fail "the remote task record carries no incarnation token to tell two launches apart"
+remote_usage_row=$(grep -F "\"id\":\"spawn:ios:$remote_spawn_gen\"" "$PARENT/data/task-usage.jsonl") \
+  || fail "the remote secondmate spawn wrote no task-usage record"
+assert_contains "$remote_usage_row" '"model":"default"' \
+  "the remote spawn's usage record claims the task had no model axis"
+assert_contains "$remote_usage_row" '"effort":"default"' \
+  "the remote spawn's usage record claims the task had no effort axis"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "remote endpoint was not projected alive from its own host"
@@ -1263,5 +1280,39 @@ jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
 assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
 assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
 pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
+
+# A reused remote id lives more than once: this file has already launched ios
+# several times and retired it once. The durable usage ledger has to keep those
+# incarnations apart, so a second seed-launch-retire cycle for the SAME id must
+# append its own spawn and cleanup rows instead of being suppressed as a repeat
+# of the first.
+rm -f "$TMUX_STATE" "$TMP_ROOT/launch.entered" "$TMP_ROOT/launch.release"
+out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
+  FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REMOTE_HOME" alpha 2>&1) \
+  || fail "re-seeding the retired remote route failed: $out"
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1) \
+  || fail "relaunching the retired remote id failed: $out"
+second_spawn_gen=$(sed -n 's/^spawn_gen=//p' "$PARENT/state/ios.meta")
+[ -n "$second_spawn_gen" ] || fail "the relaunched remote task record carries no incarnation token"
+[ "$second_spawn_gen" != "$remote_spawn_gen" ] \
+  || fail "a relaunch of the same remote id reused its predecessor's incarnation token"
+publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
+out=$(remote_env "$ROOT/bin/fm-teardown.sh" ios 2>&1) \
+  || fail "retiring the relaunched remote id failed: $out"
+ios_spawn_ids=$(sed -n 's/.*"id":"\(spawn:ios:[^"]*\)".*/\1/p' "$PARENT/data/task-usage.jsonl")
+ios_cleanup_ids=$(sed -n 's/.*"id":"\(cleanup:ios:[^"]*\)".*/\1/p' "$PARENT/data/task-usage.jsonl")
+[ "$(printf '%s\n' "$ios_spawn_ids" | grep -c .)" -ge 2 ] \
+  || fail "repeated launches of one remote id collapsed into a single ledger spawn row"
+[ "$(printf '%s\n' "$ios_spawn_ids" | sort -u | grep -c .)" \
+  = "$(printf '%s\n' "$ios_spawn_ids" | grep -c .)" ] \
+  || fail "two ledger spawn rows for one remote id share an incarnation"
+[ "$(printf '%s\n' "$ios_cleanup_ids" | grep -c .)" -eq 2 ] \
+  || fail "two retirements of one remote id did not leave two ledger cleanup rows"
+[ "$(printf '%s\n' "$ios_cleanup_ids" | sort -u | grep -c .)" -eq 2 ] \
+  || fail "two retirements of one remote id collapsed onto one cleanup identity"
+FM_HOME="$PARENT" "$ROOT/bin/fm-usage-ledger.sh" verify >/dev/null \
+  || fail "the repeated remote lifecycle left a malformed ledger"
+pass "repeated launches and retirements of one remote id stay distinct in the ledger"
 
 echo "ALL TESTS PASSED"
