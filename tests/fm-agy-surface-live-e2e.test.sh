@@ -19,9 +19,13 @@
 #   - the customization root still resolves the way the Stop-hook installer
 #     assumes.
 #
-# Set FM_AGY_TURNEND_LIVE_E2E=1 as well to additionally spend a real turn and
-# re-prove the fullyIdle turn-end contract end to end. That one costs model
-# quota, so it is gated separately from the free surface checks above.
+# Set FM_AGY_TURNEND_LIVE_E2E=1 as well to check the SHAPE of a Stop payload the
+# operator captured from a real agy turn and handed over in
+# FM_AGY_TURNEND_PAYLOAD. It spends no turn of its own and it does not re-prove
+# the fullyIdle rule: that a true value ends a turn and a false or absent one
+# does not is owned by tests/fm-agy-harness.test.sh, which drives the installed
+# hook against the captured payloads. This check answers only whether the vendor
+# still emits the two keys that gate reads.
 # docs/verification/agy.md records the dated result of both.
 set -u
 
@@ -121,20 +125,21 @@ test_customization_root_is_where_the_installer_writes() {
   pass "agy $AGY_VERSION's global customization root is where the turn-end installer writes"
 }
 
-# The Stop payload contract, re-proven against a real turn. Gated separately
-# because it spends model quota. It asserts the SHAPE the hook parses, not a
-# rendered surface: the keys fullyIdle and workspacePaths must both be present
-# on a genuine turn end.
+# The SHAPE of a Stop payload the operator captured from a real agy turn: the
+# keys fullyIdle and workspacePaths must both still be present, because those
+# are what the installed hook parses. It asserts nothing about what those values
+# MEAN - the fullyIdle rule is owned by the portable regression - and it spends
+# no turn, so the operator supplies the capture.
 test_turn_end_payload_contract() {
   local lab payload
   if [ "${FM_AGY_TURNEND_LIVE_E2E:-0}" != 1 ]; then
-    echo "# skip: set FM_AGY_TURNEND_LIVE_E2E=1 to spend a turn re-proving the Stop payload"
+    echo "# skip: set FM_AGY_TURNEND_LIVE_E2E=1 with FM_AGY_TURNEND_PAYLOAD to check a captured Stop payload's shape"
     return 0
   fi
   lab=${FM_AGY_TURNEND_PAYLOAD:-}
   [ -n "$lab" ] && [ -f "$lab" ] \
     || fail "FM_AGY_TURNEND_LIVE_E2E=1 requires FM_AGY_TURNEND_PAYLOAD to name a captured Stop payload file from a real agy turn"
-  payload=$(tail -1 "$lab")
+  payload=$(cat "$lab")
   command -v jq >/dev/null 2>&1 || fail "jq is required to check the agy Stop payload contract"
   printf '%s' "$payload" | jq -e 'has("fullyIdle")' >/dev/null 2>&1 \
     || fail "agy $AGY_VERSION Stop payload no longer carries fullyIdle; the turn-end gate has no signal to read"

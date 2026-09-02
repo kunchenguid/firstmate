@@ -74,6 +74,9 @@ Its global hooks live in one shared `hooks.json` keyed by hook name, which is th
 Verified across two runs: the plugin's `Stop` hook fires, and `~/.gemini/config/config.json` is byte-identical before and after (`diff` reported no change), so plugin discovery does not rewrite operator configuration.
 Hook payloads arrive as JSON on **stdin**; the hook's working directory is the directory containing `hooks.json`, never the workspace, so the worktree comes only from `workspacePaths`.
 agy reads the hook's verdict from stdout and only the literal decision `continue` blocks the stop, so the hook prints `{}` first and always exits zero.
+The payload is read whole with a bounded `read -r -t 5 -d ''` rather than one line or a plain `cat`, so a multi-line payload survives and a runner that never closes stdin cannot park the hook until agy's 10s timeout kills it.
+That bounded form was not re-exercised against a live agy; only the EOF path was, and it is byte-identical to what the lab ran.
+Measured directly on this host (GNU bash 3.2.57, macOS arm64): on EOF the variable holds the complete payload, and on the 5s timeout bash 3.2 assigns nothing, so a runner holding stdin open loses that turn end rather than delivering a truncated one.
 
 `PreInvocation` and `PostInvocation` fire once per model invocation, not once per turn: 10 of each across 2 turns.
 That is why they cannot pair with `Stop` to form a turn-level busy source.
@@ -139,6 +142,8 @@ Every crewmate and scout runs in a fresh per-task worktree, so the dialog is the
 `bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen.
 Readiness is then settled only by a positive match of one of agy's own footers, never by the dialog's absence: a pane read that fails or comes back empty clears the dialog text without proving that the Enter was ever consumed.
 The read is the same 120-line capture every other launch gate uses, so a dialog anywhere in the window is answered rather than missed; both backends answer with recent output rather than a screen snapshot, and an answered dialog re-served in that output is bounded by the one-Enter latch instead of by narrowing the read.
+Because that output can predate the launch - a relaunch adopts a live pane and nothing clears it - the evidence is bounded to this incarnation instead: the gate captures the pane immediately before the launch Enter and reasons only about rows drawn after the last baseline row that is neither dialog nor footer text, which in practice is the row the launch line was typed on.
+That anchoring assumes the backend re-serves that row byte-identically in later captures, which was not measured; a backend that re-renders or re-wraps it, or that answers the baseline read empty, degrades the gate to the unanchored read rather than failing, and an empty baseline read means the backend is already failing in a way the gate's own polls report at the deadline.
 An empty read is treated as no evidence yet, and the spawn fails loudly at the deadline naming what was never observed.
 That gate is covered by `tests/fm-agy-harness.test.sh` against a rendered pane; the Enter itself was not re-exercised against a live agy in this session, so treat the dialog text above as the measured fact and the gate as the portable regression's contract.
 

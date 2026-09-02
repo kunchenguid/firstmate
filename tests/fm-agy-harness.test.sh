@@ -59,6 +59,12 @@ agy_payload() {  # <template> <workspace>
 #                     of the capture sees the footer and misses the dialog
 #   blank           - nothing renders at all, the case where the gate gives up
 #
+# FM_FAKE_AGY_PRELAUNCH, when set, puts a PREVIOUS agent's output in the capture
+# before the launch and keeps serving it afterwards, which is what a relaunch
+# that adopts a live pane reads: the predecessor's own idle footer plus the row
+# the launch line was typed on. It ends on that typed row, so the readiness
+# gate's freshness anchor is the ordinary one rather than a fixture-only shape.
+#
 # FM_FAKE_AGY_AFTER_ENTER names what replaces the dialog once it is answered,
 # and defaults to the idle footer. Setting it to `blank` is the pane read that
 # fails or comes back empty, which is what a backend hiccup looks like, and
@@ -105,6 +111,9 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   capture-pane)
+    if [ -n "${FM_FAKE_AGY_PRELAUNCH:-}" ]; then
+      printf 'a previous agy session\n? for shortcuts\n$ agy --dangerously-skip-permissions -i "brief"\n'
+    fi
     [ "$phase" -ge 2 ] || exit 0
     [ "$phase" -eq 3 ] && target=${FM_FAKE_AGY_AFTER_ENTER:-ready}
     case "$target" in
@@ -490,6 +499,54 @@ EOF
   pass "a trust dialog above the footer is answered rather than read past"
 }
 
+# A capture is recent OUTPUT on both backends and a relaunch adopts the pane
+# without clearing it, so the PREVIOUS agent's idle footer is still in the window
+# the gate reads. Settling on it would report a verified launch before the
+# replacement agy drew anything - and on a cross-harness relaunch the trust
+# dialog it skipped would then never be answered, which is the silent hang this
+# gate exists to close.
+test_stale_footer_from_a_previous_session_does_not_settle_readiness() {
+  local rec case_dir home proj wt fakebin agy_home id out status
+  rec=$(make_spawn_case stale-footer)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_PRELAUNCH=stale FM_FAKE_AGY_SCREEN=blank \
+    FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=3 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    && fail "agy spawn reported success on a footer that predates the launch: $out"
+  status=$(cat "$home/state/$id.status" 2>/dev/null || true)
+  case "$status" in
+    *failed:*) : ;;
+    *) fail "the stale-footer readiness failure was not recorded in the task status: $status" ;;
+  esac
+  pass "a footer left behind by a previous session never settles agy readiness"
+}
+
+# The freshness rule must not turn a normal relaunch into a hang: output this
+# incarnation actually produced still settles the gate, and the dialog it draws
+# is still answered exactly once.
+test_fresh_output_over_a_stale_footer_still_settles_readiness() {
+  local rec case_dir home proj wt fakebin agy_home id out enters
+  rec=$(make_spawn_case stale-then-fresh)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_PRELAUNCH=stale FM_FAKE_AGY_SCREEN=trust \
+    FM_FAKE_AGY_AFTER_ENTER=ready FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_READY_POLLS=6 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    || fail "agy spawn failed although this session drew its own dialog and footer: $out"
+  enters=$(agy_enters_after_launch "$case_dir/events.log")
+  [ "$enters" -eq 2 ] \
+    || fail "the gate sent $enters Enters after the launch line; expected the launch submit plus exactly one answer"
+  pass "output this incarnation drew settles readiness even over a previous session's footer"
+}
+
 # --- the fullyIdle turn-end rule -------------------------------------------
 
 # Drive the INSTALLED hook, not a copy of its logic, so the assertion covers
@@ -738,6 +795,8 @@ test_spawn_fails_when_agy_never_renders
 test_answered_dialog_alone_does_not_prove_readiness
 test_ready_footer_settles_a_capture_still_carrying_the_dialog
 test_trust_dialog_above_the_footer_is_still_answered
+test_stale_footer_from_a_previous_session_does_not_settle_readiness
+test_fresh_output_over_a_stale_footer_still_settles_readiness
 test_turnend_requires_fully_idle
 test_turnend_requires_registered_token
 test_turnend_never_blocks_the_stop
