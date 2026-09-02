@@ -1010,8 +1010,11 @@ EOF
 }
 
 test_default_is_bounded_and_local_only() {
-  local home fakebin toon json
+  local home fakebin toon json backlog
   home=$(make_home bounded); write_fixture "$home"
+  backlog="$home/data/backlog.md"
+  awk '{if ($0 ~ /^- \[ \] ship-task /) sub(/ \(repo: firstmate\)/, ""); print}' \
+    "$backlog" > "$backlog.tmp" && mv "$backlog.tmp" "$backlog"
   fakebin=$(make_fakebin "$home"); : > "$home/net.log"
   toon=$(run "$home" "$fakebin")
   json=$(run "$home" "$fakebin" --json)
@@ -1744,11 +1747,12 @@ EOF
   pass "counterfactual meta clears main inventory warning and projects the live task"
 }
 
-seed_working_child() {  # <mate-home> <id> <doing>
-  local mate=$1 id=$2 doing=$3
+seed_working_child() {  # <mate-home> <id> <doing> [repo]
+  local mate=$1 id=$2 doing=$3 repo=${4-sample} repo_field=
   mkdir -p "$mate/projects/$id"
-  printf -- '- [ ] %s - %s (repo: sample) (kind: ship) (since 2026-07-13)\n' \
-    "$id" "$doing" >> "$mate/data/backlog.md"
+  [ -z "$repo" ] || repo_field=" (repo: $repo)"
+  printf -- '- [ ] %s - %s%s (kind: ship) (since 2026-07-13)\n' \
+    "$id" "$doing" "$repo_field" >> "$mate/data/backlog.md"
   fm_write_meta "$mate/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$mate/projects/$id" "project=sample" \
     "harness=claude" "kind=ship" "mode=no-mistakes"
@@ -1768,7 +1772,7 @@ test_active_children_project_independent_of_home_captain_hold() {
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 EOF
-  seed_working_child "$mate" child-a "first live child"
+  seed_working_child "$mate" child-a "first live child" ""
   seed_working_child "$mate" child-b "second live child"
   cat >> "$mate/data/backlog.md" <<'EOF'
 
