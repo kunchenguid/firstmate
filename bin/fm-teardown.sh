@@ -140,9 +140,16 @@
 # relaxes a landed-work, dirty-tree, process, lock, endpoint, or ownership refusal -
 # it runs only after all of those have already passed. It is not a `--force` path.
 # The convergence lives in the backend-independent worktree-return step, so it is
-# shared by every treehouse-backed backend (tmux, herdr, zellij, cmux) and by the
-# secondmate-home lease release; `backend=orca` never reaches it, because Orca owns
-# its own worktrees and is removed through `orca worktree rm` instead.
+# shared by every treehouse-backed backend (tmux, herdr, zellij, cmux), by the
+# secondmate-home lease release, and by the forced-secondmate child-worktree return;
+# `backend=orca` never reaches it, because Orca owns its own worktrees and is removed
+# through `orca worktree rm` instead. The child-worktree site is the one place where
+# the convergence decides more than abort-versus-continue: a failed return there falls
+# through to safe_rm_rf_child_worktree, which `rm -rf`s the copy, so a child slot
+# treehouse had already auto-returned used to be erased out from under the pool. A
+# child copy proven back in the pool is now left alone instead. A child worktree that
+# is NOT a pool slot never appears in the listing, so it still refuses and still falls
+# through to that same fallback.
 #
 # Pre-teardown cleanup sequence (runs once every landed/discard-work safety
 # refusal above has already passed, and BEFORE any worktree return, branch
@@ -1405,7 +1412,7 @@ teardown_treehouse_already_returned() {  # <dir> <cd_dir> <label>
   local entry_line entry_index path
   local hit_index="" hit_fields=""
   local hit_state="" hit_lease_id="" hit_lease_holder="" hit_leased_at="" hit_procs=""
-  local entry_canon copy_repo project_canon project_repo
+  local entry_canon copy_repo project_canon project_repo leased_at_desc
 
   want=$(canonical_existing_dir "$dir") || {
     echo "teardown: $label return reported $dir is not managed by this pool, but $dir is not an inspectable directory, so it cannot be proven already returned; aborting" >&2
@@ -1488,7 +1495,8 @@ EOF
   if [ "$hit_state" != available ] \
      || [ -n "$hit_lease_id" ] || [ -n "$hit_lease_holder" ] || [ -n "$hit_leased_at" ] \
      || [ "$hit_procs" != 0 ]; then
-    echo "teardown: $label return reported $dir is not managed by this pool, but the pool still reports that copy as '${hit_state:-unknown}' (lease '${hit_lease_id:-}', holder '${hit_lease_holder:-}', ${hit_procs:-?} live processes), so it cannot be proven already returned; aborting" >&2
+    if [ -n "$hit_leased_at" ]; then leased_at_desc="a lease timestamp"; else leased_at_desc="no lease timestamp"; fi
+    echo "teardown: $label return reported $dir is not managed by this pool, but the pool still reports that copy as '${hit_state:-unknown}' (lease '${hit_lease_id:-}', holder '${hit_lease_holder:-}', $leased_at_desc, ${hit_procs:-?} live processes), so it cannot be proven already returned; aborting" >&2
     return 1
   fi
 

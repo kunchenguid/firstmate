@@ -322,6 +322,8 @@ The portable half is enforced without Treehouse installed by the `teardown-alrea
 bin/fm-test-run.sh tests/fm-teardown.test.sh
 ```
 
+That file runs its whole teardown matrix; the `teardown-already-returned` lines excerpted from that run are:
+
 ```text
 ok - a copy proven already returned lets cleanup finish without a second worktree return
 ok - the already-returned proof matches the exact copy through a symlinked pool root
