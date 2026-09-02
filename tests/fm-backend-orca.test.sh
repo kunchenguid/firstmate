@@ -453,7 +453,7 @@ test_worktree_create_removes_worktree_when_path_missing() {
 }
 
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
-  local proj data state config id out status
+  local proj data state config id out status task_tmp
   id="orcapathlessz6"
   proj="$TMP_ROOT/pathless-cleanup-project"
   data="$TMP_ROOT/pathless-cleanup-data"
@@ -484,11 +484,15 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   assert_grep "backend=orca" "$state/$id.meta" "preserved pathless metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved pathless metadata should not invent a terminal handle"
+  task_tmp=$(grep '^tasktmp=' "$state/$id.meta" | cut -d= -f2-)
+  [ -n "$task_tmp" ] && [ -d "$task_tmp/gotmp" ] \
+    || fail "failed Orca cleanup did not preserve the exact claimed temporary root in recovery metadata"
+  rm -rf -- "$task_tmp"
   pass "fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails"
 }
 
 test_spawn_writes_orca_metadata_and_launches_harness() {
-  local proj wt data state config id out log
+  local proj wt data state config id out log task_tmp
   id="orcaspawnz1"
   proj="$TMP_ROOT/spawn-project"
   wt="$TMP_ROOT/spawn-wt"
@@ -518,11 +522,13 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
-  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
-    "spawn did not export GOTMPDIR through the Orca terminal"
+  task_tmp=$(grep '^tasktmp=' "$state/$id.meta" | cut -d= -f2-)
+  [ -n "$task_tmp" ] || fail "Orca spawn metadata omitted tasktmp"
+  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f'"export GOTMPDIR=$task_tmp/gotmp"$'\x1f''--enter'$'\x1f''--json' \
+    "spawn did not export the recorded GOTMPDIR through the Orca terminal"
   assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
     "spawn did not send the selected harness launch command through Orca"
-  rm -rf "/tmp/fm-$id"
+  rm -rf -- "$task_tmp"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }
 
@@ -617,7 +623,7 @@ test_spawn_refuses_orca_nonisolated_worktree() {
 
 test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   local proj wt data state config id out status
-  id="orcatermfailz8"
+  id="orcatermfailz8-$$"
   proj="$TMP_ROOT/terminal-fail-project"
   wt="$TMP_ROOT/terminal-fail-wt"
   data="$TMP_ROOT/terminal-fail-data"
@@ -645,11 +651,16 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
     "Orca spawn should remove the worktree when terminal creation fails"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
     "Orca spawn should not close a terminal when no handle was recorded"
-  pass "fm-spawn.sh --backend orca: removes worktree when terminal creation fails"
+  [ ! -e "$state/$id.tasktmp-claim" ] \
+    || fail "pre-publication Orca failure retained the temporary-root claim"
+  if find /tmp -maxdepth 1 -name "fm-$id.*" -print -quit | grep -q .; then
+    fail "pre-publication Orca failure leaked the untransferred temporary root"
+  fi
+  pass "fm-spawn.sh --backend orca: pre-publication failure removes worktree, temporary root, and claim"
 }
 
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
-  local proj wt data state config id out status
+  local proj wt data state config id out status task_tmp
   id="orcacleanupleakz0"
   proj="$TMP_ROOT/cleanup-fail-project"
   wt="$TMP_ROOT/cleanup-fail-wt"
@@ -679,12 +690,16 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   assert_grep "backend=orca" "$state/$id.meta" "preserved metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved metadata should not invent a terminal handle"
-  pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
+  task_tmp=$(grep '^tasktmp=' "$state/$id.meta" | cut -d= -f2-)
+  [ -n "$task_tmp" ] && [ -d "$task_tmp/gotmp" ] \
+    || fail "failed Orca abort cleanup did not preserve its exact temporary root"
+  rm -rf -- "$task_tmp"
+  pass "fm-spawn.sh --backend orca: preserves metadata and its temporary root when abort cleanup fails"
 }
 
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
   local proj wt data state config id out status
-  id="orcametafailz9"
+  id="orcametafailz9-$$"
   proj="$TMP_ROOT/meta-fail-project"
   wt="$TMP_ROOT/meta-fail-wt"
   data="$TMP_ROOT/meta-fail-data"
@@ -711,7 +726,12 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the recorded worktree when a later abort occurs"
   [ ! -f "$state/$id.meta" ] || fail "metadata-write abort should not publish a regular metadata file"
-  pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
+  [ ! -e "$state/$id.tasktmp-claim" ] \
+    || fail "successful Orca abort cleanup retained the temporary-root claim"
+  if find /tmp -maxdepth 1 -name "fm-$id.*" -print -quit | grep -q .; then
+    fail "successful Orca abort cleanup leaked the untransferred temporary root"
+  fi
+  pass "fm-spawn.sh --backend orca: releases terminal, worktree, temporary root, and claim on later aborts"
 }
 
 test_peek_send_and_crew_state_route_through_orca_meta() {

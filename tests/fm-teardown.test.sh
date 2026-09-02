@@ -2247,14 +2247,17 @@ test_leaked_worktree_process_is_reaped() {
 }
 
 test_leaked_tasktmp_process_is_reaped() {
-  local case_dir rc pid
+  local case_dir rc pid task_tmp
   case_dir=$(make_case leaked-tasktmp-reap)
+  task_tmp="/tmp/fm-task-x1.td$$teardownfixture"
+  rm -rf "$task_tmp"
+  mkdir -p "$task_tmp/gotmp"
+  chmod 700 "$task_tmp" "$task_tmp/gotmp"
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
-  mkdir -p "$case_dir/tasktmp"
+  printf '%s\n' "tasktmp=$task_tmp" >> "$case_dir/state/task-x1.meta"
   land_shippable_commit "$case_dir"
 
-  ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
+  ( cd "$task_tmp" && exec sleep 300 ) &
   pid=$!
   disown
   sleep 0.3
@@ -2271,6 +2274,44 @@ test_leaked_tasktmp_process_is_reaped() {
   assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
     "leaked-tasktmp-reap: teardown did not report reaping the leaked tasktmp process"
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
+}
+
+test_tasktmp_that_vanishes_before_the_scan_stays_a_compatible_no_op() {
+  local case_dir rc task_tmp
+  case_dir=$(make_case tasktmp-vanish)
+  task_tmp="/tmp/fm-task-x1.vanish$$compat"
+  rm -rf "$task_tmp"
+  mkdir -p "$task_tmp/gotmp"
+  chmod 700 "$task_tmp" "$task_tmp/gotmp"
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' "tasktmp=$task_tmp" >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  # conclude_task_no_mistakes_run is the last step before teardown revalidates
+  # the root for process scanning, so removing the root from this stub lands the
+  # deletion exactly in the window between the two validations - the shape a
+  # /tmp reaper or the agent's own cleanup produces.
+  cat > "$case_dir/fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+rm -rf -- "$task_tmp"
+: > "$case_dir/vanish-window-reached"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  [ -e "$case_dir/vanish-window-reached" ] \
+    || fail "the fixture never reached the window between teardown's two validations"
+  [ ! -e "$task_tmp" ] || fail "the fixture did not actually remove the recorded root"
+  expect_code 0 "$rc" "a root that vanished mid-teardown must stay a compatible no-op: $(cat "$case_dir/stderr")"
+  assert_grep "teardown task-x1 complete" "$case_dir/stdout" \
+    "teardown did not finish after its recorded root vanished mid-run"
+  assert_not_contains "$(cat "$case_dir/stderr")" "REFUSED" \
+    "a vanished root was reported as an untrusted-path refusal"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "teardown left the task record behind after its root vanished mid-run"
+  pass "a recorded tasktmp that disappears between teardown's two validations is a no-op, not a refusal"
 }
 
 test_lsof_absent_reaps_tmux_process_group() {
@@ -2655,6 +2696,7 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_tasktmp_that_vanishes_before_the_scan_stays_a_compatible_no_op
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

@@ -17,6 +17,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-tasktmp-lib.sh
+. "$ROOT/bin/fm-tasktmp-lib.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TMP_ROOT=$(fm_test_tmproot fm-remote-trace-context)
@@ -33,7 +35,41 @@ TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
-trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+# Each spawn here claims its own unpredictable /tmp/fm-<id>.<nonce> root, and a
+# later incarnation of the same task id overwrites the tasktmp= record that names
+# the previous one. Remember every root as it is published so cleanup can hand
+# each back to the shared owner instead of leaking a directory per run.
+TRACE_TASKTMP_RECORDS=()
+remember_recorded_task_roots() {
+  local meta id recorded known
+  while IFS= read -r meta; do
+    id=${meta##*/}
+    id=${id%.meta}
+    recorded=$(sed -n 's/^tasktmp=//p' "$meta" | head -1)
+    [ -n "$recorded" ] || continue
+    for known in "${TRACE_TASKTMP_RECORDS[@]:-}"; do
+      [ "$known" = "$id|$recorded" ] && continue 2
+    done
+    TRACE_TASKTMP_RECORDS+=("$id|$recorded")
+  done < <(find "$TMP_ROOT" -type d -name state -prune \
+    -exec find {} -type f -name '*.meta' -print \; 2>/dev/null)
+}
+
+remote_trace_cleanup() {
+  local record
+  FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
+    "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
+    kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true
+  fi
+  for record in "${TRACE_TASKTMP_RECORDS[@]:-}"; do
+    [ -n "$record" ] || continue
+    fm_tasktmp_remove "${record%%|*}" "${record#*|}" >/dev/null 2>&1 || true
+  done
+  fm_test_cleanup_tasktmp_roots "$TMP_ROOT"
+  rm -rf -- "$TMP_ROOT"
+}
+trap remote_trace_cleanup EXIT
 
 # The remote host's tracked code root is this branch, as a real git repository:
 # fm-on and the remote entrypoint both require the dispatched command to be
@@ -168,6 +204,7 @@ freeze_parent_session
 : > "$HERDR_LOG"
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "default-off remote secondmate spawn failed"
+remember_recorded_task_roots
 assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no parent metadata"
 ! grep -q '^traceparent=' "$PARENT/state/ios.meta" \
   || fail "default-off remote spawn must not record a traceparent= line"
@@ -175,6 +212,9 @@ assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no p
   || fail "default-off remote spawn must not export a carrier into the remote pane"
 ! grep -q '^traceparent=' "$REMOTE_HOME/state/parent-route/ios.meta" \
   || fail "default-off remote spawn must not record a carrier on the remote host"
+FIRST_REMOTE_TASK_TMP=$(grep '^tasktmp=' "$REMOTE_HOME/state/parent-route/ios.meta" | cut -d= -f2-)
+[ -d "$FIRST_REMOTE_TASK_TMP/gotmp" ] \
+  || fail "the first remote incarnation published no usable temporary root"
 [ "$(remote_launch_snapshot)" = off ] \
   || fail "default-off remote spawn must deliver FM_TRACE_CONTEXT=off (got '$(remote_launch_snapshot)')"
 assert_absent "$REMOTE_HOME/config/trace-context" "default-off remote spawn inherited an enablement flag"
@@ -188,9 +228,12 @@ reset_remote_herdr_fixture "$HERDR_STATE"   # the previous endpoint is gone; thi
 : > "$HERDR_LOG"
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "enabled remote secondmate spawn failed"
+remember_recorded_task_roots
 
 PARENT_TP=$(meta_traceparent "$PARENT/state/ios.meta")
-REMOTE_TP=$(meta_traceparent "$REMOTE_HOME/state/parent-route/ios.meta")
+REMOTE_META="$REMOTE_HOME/state/parent-route/ios.meta"
+REMOTE_TP=$(meta_traceparent "$REMOTE_META")
+REMOTE_TASK_TMP=$(grep '^tasktmp=' "$REMOTE_META" | cut -d= -f2-)
 INJECTED_TP=$(remote_injected_traceparent)
 fm_trace_context_valid "$PARENT_TP" \
   || fail "an enabled remote spawn must record a valid carrier in the parent metadata (got '$PARENT_TP')"
@@ -204,6 +247,17 @@ fm_trace_context_valid "$INJECTED_TP" \
   || fail "an enabled remote spawn must deliver FM_TRACE_CONTEXT=on (got '$(remote_launch_snapshot)')"
 assert_present "$REMOTE_HOME/config/trace-context" \
   "an enabled remote launch did not inherit the enablement flag into the remote home"
+[ -n "$REMOTE_TASK_TMP" ] \
+  || fail "the remote Herdr task metadata omitted its temporary root"
+# This route re-launches a dead endpoint through an ordinary fresh spawn, so the
+# superseded incarnation's root must be reclaimed rather than left in /tmp with
+# no record naming it.
+[ "$REMOTE_TASK_TMP" != "$FIRST_REMOTE_TASK_TMP" ] \
+  || fail "a fresh remote incarnation reused the previous root instead of claiming its own"
+[ ! -e "$FIRST_REMOTE_TASK_TMP" ] && [ ! -L "$FIRST_REMOTE_TASK_TMP" ] \
+  || fail "the superseded remote incarnation leaked $FIRST_REMOTE_TASK_TMP, which no record names any more"
+grep -q "export GOTMPDIR=$REMOTE_TASK_TMP/gotmp" "$HERDR_LOG" \
+  || fail "the remote Herdr pane did not export the exact root recorded in its metadata"
 GOTMP_LINE=$(grep -n 'export GOTMPDIR=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
 TP_LINE=$(grep -n 'export TRACEPARENT=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
 LAUNCH_LINE=$(grep -n 'FM_TRACE_CONTEXT=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
@@ -220,6 +274,7 @@ reset_remote_herdr_fixture "$HERDR_STATE"
 : > "$HERDR_LOG"
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
   || fail "enabled remote secondmate relaunch failed"
+remember_recorded_task_roots
 RELAUNCH_TP=$(meta_traceparent "$PARENT/state/ios.meta")
 RELAUNCH_INJECTED=$(remote_injected_traceparent)
 [ "$RELAUNCH_TP" = "$PARENT_TP" ] \
@@ -242,6 +297,7 @@ reset_remote_herdr_fixture "$HERDR_STATE"
 : > "$HERDR_LOG"
 TRACEPARENT="$AMBIENT" remote_env "$ROOT/bin/fm-spawn.sh" ios2 --secondmate >/dev/null 2>&1 \
   || fail "second remote secondmate spawn failed"
+remember_recorded_task_roots
 SECOND_TP=$(meta_traceparent "$PARENT/state/ios2.meta")
 fm_trace_context_valid "$SECOND_TP" \
   || fail "the second remote route must record a valid carrier (got '$SECOND_TP')"

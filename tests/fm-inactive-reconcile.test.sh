@@ -233,7 +233,7 @@ test_legacy_metadata_rewrite_keeps_receipt_identity() {
   meta="$MATE/state/child.meta"
   tmp="$MATE/state/.child.meta.legacy"
   awk '$0 !~ /^spawn_gen=/' "$meta" > "$tmp"
-  printf 'tasktmp=/tmp/fm-child\n' >> "$tmp"
+  printf 'tasktmp=/tmp/fm-child.ir%srandomroot\n' "$$" >> "$tmp"
   mv "$tmp" "$meta"
   age "$meta"
 

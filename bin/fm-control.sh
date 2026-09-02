@@ -134,6 +134,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tasktmp-lib.sh
+. "$SCRIPT_DIR/fm-tasktmp-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -782,7 +784,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line recorded_tasktmp
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -810,6 +812,18 @@ do_relaunch() {
     note_line="note_file=$NOTE_FILE"
   else
     note_line="note=none"
+  fi
+
+  # Validate the recorded root before changing instructions or stopping the
+  # prior worker.
+  # A missing field or recognized missing directory is compatible: fm-spawn
+  # will claim a new random root after the prior worker has stopped.
+  recorded_tasktmp=$(fm_meta_get "$META" tasktmp)
+  if [ -n "$recorded_tasktmp" ]; then
+    fm_tasktmp_trust "$ID" "$recorded_tasktmp"
+    if [ "$FM_TASKTMP_TRUST" = unsafe ]; then
+      die "relaunch refused unsafe task temporary root for $ID before its worker was stopped: $FM_TASKTMP_ERROR"
+    fi
   fi
   safe_checkpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"

@@ -83,14 +83,49 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+fm_test_cleanup_tasktmp_roots() {  # <fixture-root>
+  local fixture=$1
+  [ -d "$fixture" ] || return 0
+  # Task roots are recorded only in a home's task metadata, so prune the walk to
+  # state directories rather than crawling fixtures that hold real clones and
+  # worktrees, and source the shared owner once for the whole sweep.
+  # The inner walk stays unbounded inside each state directory because a
+  # remote-routed second mate records its metadata one level down at
+  # state/<route>/<id>.meta, and an unswept record leaks a fresh unpredictable
+  # /tmp/fm-<id>.<nonce> root on every run.
+  find "$fixture" -type d -name state -prune -exec find {} -type f -name '*.meta' -print \; 2>/dev/null \
+    | (
+        local_meta=
+        . "$ROOT/bin/fm-tasktmp-lib.sh"
+        while IFS= read -r local_meta; do
+          fm_test_remove_recorded_tasktmp "$local_meta"
+        done
+      )
+}
+
+fm_test_remove_recorded_tasktmp() {  # <meta>
+  local meta=$1 id task_tmp
+  id=${meta##*/}
+  id=${id%.meta}
+  task_tmp=$(awk -F= '$1 == "tasktmp" { value = substr($0, index($0, "=") + 1); found += 1 } END { if (found == 1) print value }' "$meta" 2>/dev/null || true)
+  [ -n "$task_tmp" ] || return 0
+  fm_tasktmp_remove "$id" "$task_tmp" >/dev/null 2>&1 || true
+}
+
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    if [ -n "$d" ]; then
+      fm_test_cleanup_tasktmp_roots "$d"
+      rm -rf "$d"
+    fi
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      if [ -n "$d" ]; then
+        fm_test_cleanup_tasktmp_roots "$d"
+        rm -rf "$d"
+      fi
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi

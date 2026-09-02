@@ -203,6 +203,15 @@
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
+# Before any endpoint or launcher exists, every fresh spawn claim-then-creates a
+# random private task temporary root through bin/fm-tasktmp-lib.sh and records its
+# exact tasktmp= value.
+# A fresh spawn over a record that already named a root - the remote secondmate
+# route relaunches a dead endpoint this way - reclaims that superseded root once
+# the new metadata is published, and leaves it untouched if it is no longer
+# trusted.
+# Relaunch reuses an existing trusted recorded root and claims a new random root
+# only when that field or recognized directory is missing.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
 # When the home session's frozen trace-context decision is enabled (see
@@ -303,6 +312,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-tasktmp-lib.sh
+. "$SCRIPT_DIR/fm-tasktmp-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -699,6 +710,8 @@ spawn_remote_secondmate() {
 }
 
 BACKEND=
+TASK_TMP=
+SPAWN_SUPERSEDED_TASK_TMP=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
@@ -838,14 +851,43 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
-    SPAWN_TASK_LOCK_HELD=0
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-  fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
     if ! spawn_fresh_commit_rollback; then
       status=1
     fi
+  fi
+  # Orca recovery metadata is intentionally durable even though ordinary
+  # fresh metadata has not reached the spawn commit point.
+  # Mark that exceptional transfer before generic claim reconciliation.
+  # Both blocks below require this process to still hold the per-task spawn
+  # lock: bin/fm-tasktmp-lib.sh makes that lock the sole authority over a
+  # claim, so an exit that never took it - a refused concurrent spawn, a
+  # backend refusal - must leave another spawn's live claim and root alone and
+  # let locked startup own any genuinely unowned leftover.
+  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ] \
+     && [ -n "${ID:-}" ] \
+     && [ "$(fm_meta_get "$STATE/$ID.meta" cleanup_recovery 2>/dev/null || true)" = orca ] \
+     && { [ -e "$STATE/$ID.tasktmp-claim" ] || [ -L "$STATE/$ID.tasktmp-claim" ]; }; then
+    if ! fm_tasktmp_claim_mark_committed "$STATE" "$ID"; then
+      echo "warning: Orca recovery metadata for $ID could not commit its temporary-root claim: $FM_TASKTMP_ERROR" >&2
+      status=1
+    fi
+  fi
+  # Metadata rollback and Orca recovery publication above decide whether the
+  # claim still owns the root.
+  # Reconcile while the same per-task spawn lock is still held, so an aborted
+  # pre-publication spawn cannot leak an unowned root or race startup cleanup.
+  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ] \
+     && [ -n "${ID:-}" ] \
+     && { [ -e "$STATE/$ID.tasktmp-claim" ] || [ -L "$STATE/$ID.tasktmp-claim" ]; }; then
+    if ! fm_tasktmp_claim_reconcile_one "$STATE" "$ID"; then
+      echo "warning: pending task temporary root for $ID was preserved: $FM_TASKTMP_ERROR" >&2
+      status=1
+    fi
+  fi
+  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -2054,6 +2096,43 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   exit 1
 fi
 
+# Allocate or adopt the task-owned temporary root before any endpoint,
+# launcher, task metadata, or cleanup path can use it.
+# Fresh and missing-root relaunch paths publish a durable private claim before
+# the random candidate is created under the public temporary parent.
+# Relaunch otherwise reuses the exact recorded trusted root, including a
+# grandfathered legacy root.
+# True only when a pending claim exists AND names the exact root this spawn is
+# using, which is the one case where this spawn is the claim's owner.
+# A leftover claim for any other path is a crash remnant that locked startup
+# reconciles; adopting it here would transfer or delete a root this spawn never
+# allocated.
+spawn_tasktmp_claim_is_ours() {
+  fm_tasktmp_claim_read "$STATE" "$ID" || return 1
+  [ -n "$TASK_TMP" ] && [ "$FM_TASKTMP_CLAIM_PATH" = "$TASK_TMP" ]
+}
+
+if [ "$RELAUNCH" -eq 1 ]; then
+  RELAUNCH_RECORDED_TASK_TMP=$(fm_meta_get "$RELAUNCH_META" tasktmp)
+  if ! TASK_TMP=$(fm_tasktmp_recorded_prepare "$STATE" "$ID" "$RELAUNCH_RECORDED_TASK_TMP"); then
+    # fm_tasktmp_recorded_prepare runs in a command substitution, so its refusal
+    # detail reaches stderr directly rather than through FM_TASKTMP_ERROR here.
+    echo "error: relaunch refused unsafe task temporary root for $ID; see the tasktmp refusal above" >&2
+    exit 1
+  fi
+else
+  # A fresh spawn over a record that already names a root supersedes it - the
+  # remote secondmate route re-launches a dead endpoint through this path, never
+  # through --relaunch. Remember the superseded root now, while the record still
+  # names it, so publication below can hand it back instead of orphaning one
+  # unpredictable /tmp root per incarnation.
+  SPAWN_SUPERSEDED_TASK_TMP=$(fm_meta_get "$STATE/$ID.meta" tasktmp 2>/dev/null || true)
+  if ! TASK_TMP=$(fm_tasktmp_claim_create "$STATE" "$ID"); then
+    echo "error: task temporary root allocation for $ID failed safely; see the tasktmp refusal above" >&2
+    exit 1
+  fi
+fi
+
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
@@ -2472,14 +2551,6 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
-
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -2910,6 +2981,15 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  # No record names the superseded root any more, so this is the point where
+  # reclaiming it can no longer take a root some record still owns.
+  # An unsafe superseded path is refused and left exactly where it is.
+  if [ -n "$SPAWN_SUPERSEDED_TASK_TMP" ] && [ "$SPAWN_SUPERSEDED_TASK_TMP" != "$TASK_TMP" ]; then
+    if ! fm_tasktmp_remove "$ID" "$SPAWN_SUPERSEDED_TASK_TMP"; then
+      echo "warning: the task temporary root $SPAWN_SUPERSEDED_TASK_TMP that $ID's previous record named could not be reclaimed: $FM_TASKTMP_ERROR" >&2
+    fi
+  fi
+  SPAWN_SUPERSEDED_TASK_TMP=
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created
@@ -2931,6 +3011,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  # A missing recorded root minted a claim for this relaunch.
+  # Replacement metadata is intentionally durable from this point even if
+  # launch confirmation later fails, so it can take ownership now.
+  # Only a claim naming this spawn's exact root is this spawn's claim: a
+  # relaunch that reused a trusted recorded root minted nothing, so a leftover
+  # claim naming some other path belongs to locked startup, not to this
+  # transfer.
+  if spawn_tasktmp_claim_is_ours; then
+    if ! fm_tasktmp_claim_mark_committed "$STATE" "$ID" \
+       || ! fm_tasktmp_claim_transfer "$STATE" "$ID" "$STATE/$ID.meta"; then
+      # The replacement record published above owns the exact root, so retaining
+      # the claim is safe and lets locked startup complete the transfer. Failing
+      # here instead would leave a stopped worker with no replacement.
+      echo "warning: task $ID was relaunched, but its temporary-root claim remains for locked startup reconciliation: $FM_TASKTMP_ERROR" >&2
+    fi
+  fi
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so
@@ -3037,6 +3133,10 @@ spawn_record_traceparent() {
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
+# Go does not create GOTMPDIR itself, so the claimed root's gotmp child was
+# created and validated above, before any endpoint existed. GOTMPDIR (not
+# TMPDIR) stays the targeted knob: TMPDIR would redirect every child program's
+# temp, not just Go's.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -3135,6 +3235,14 @@ fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
+fi
+if [ "$RELAUNCH" -eq 0 ] && spawn_tasktmp_claim_is_ours; then
+  if ! fm_tasktmp_claim_mark_committed "$STATE" "$ID" \
+     || ! fm_tasktmp_claim_transfer "$STATE" "$ID" "$STATE/$ID.meta"; then
+    # The published task record still owns the exact root, so retaining the
+    # claim is safe and lets locked startup complete the transfer.
+    echo "warning: task $ID launched, but its temporary-root claim remains for locked startup reconciliation: $FM_TASKTMP_ERROR" >&2
+  fi
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0

@@ -164,9 +164,47 @@ test_orphan_sweep_reaps_read_only_package_tree() {
   pass "the orphan sweep reaps read-only package fixtures"
 }
 
+# A per-task temporary root now lives at an unpredictable /tmp/fm-<id>.<nonce>
+# outside the fixture root, so only the recorded tasktmp= value can find it and a
+# missed record leaks a fresh directory on every run rather than reusing one
+# predictable path. Remote-routed second mates record their metadata one level
+# below state/ (state/<route>/<id>.meta), so the sweep must reach nested homes
+# as well as top-level ones.
+test_fixture_cleanup_removes_every_recorded_task_root() {
+  local child_out top nested
+  child_out=$(bash -c '
+    set -u
+    # shellcheck source=tests/lib.sh
+    . "'"$LIB"'"
+    # shellcheck source=bin/fm-tasktmp-lib.sh
+    . "$ROOT/bin/fm-tasktmp-lib.sh"
+    d=$(fm_test_tmproot fm-test-cleanup-tasktmp)
+    mkdir -p "$d/home/state" "$d/remote-home/state/parent-route"
+    top=$(fm_tasktmp_claim_create "$d/home/state" fixturetop) || exit 1
+    nested=$(fm_tasktmp_claim_create "$d/remote-home/state/parent-route" fixturenested) || exit 1
+    printf "window=fm-fixturetop\ntasktmp=%s\n" "$top" > "$d/home/state/fixturetop.meta"
+    printf "window=fm-fixturenested\ntasktmp=%s\n" "$nested" \
+      > "$d/remote-home/state/parent-route/fixturenested.meta"
+    printf "%s\n%s\n" "$top" "$nested"
+    fm_test_cleanup
+  ') || fail "the fixture child could not allocate its task temporary roots"
+  top=$(printf '%s\n' "$child_out" | sed -n '1p')
+  nested=$(printf '%s\n' "$child_out" | sed -n '2p')
+  # Register both before asserting so a regression cannot leave the roots behind.
+  FM_TEST_CLEANUP_DIRS+=("$top" "$nested")
+  [ -n "$top" ] && [ -n "$nested" ] \
+    || fail "the fixture child did not publish both task temporary roots"
+  assert_absent "$top" \
+    "fm_test_cleanup left the random task temporary root recorded in a top-level state/<id>.meta"
+  assert_absent "$nested" \
+    "fm_test_cleanup left the random task temporary root recorded in a nested state/<route>/<id>.meta"
+  pass "fixture cleanup removes every recorded random task temporary root, including nested homes"
+}
+
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_cleanup_registry_resists_precreation
 test_fixture_registration_failure_rolls_back_root
 test_orphan_sweep_respects_fixture_ownership
 test_orphan_sweep_reaps_read_only_package_tree
+test_fixture_cleanup_removes_every_recorded_task_root

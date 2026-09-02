@@ -437,7 +437,30 @@ normalize_meta() {  # <meta>
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
     -e 's|^spawn_gen=.*$|spawn_gen=<spawn-incarnation>|' \
+    -e 's|^tasktmp=.*$|tasktmp=<task-temporary-root>|' \
     "$1"
+}
+
+# Every spawn allocates its own unpredictable task temporary root, so two runs
+# of the same task id record different roots on either path by design. Assert
+# that shape directly instead of letting the byte comparison below see it.
+task_tmp_parent() {
+  bash -c '. "$0/bin/fm-tasktmp-lib.sh"; fm_tasktmp_parent' "$ROOT"
+}
+
+assert_random_task_root() {  # <recorded-root> <task-id> <label>
+  local root=$1 id=$2 label=$3 prefix suffix
+  prefix="$TASKTMP_PARENT/fm-$id."
+  case "$root" in
+    "$prefix"*) ;;
+    *) fail "$label did not record a random task temporary root under $TASKTMP_PARENT for $id: ${root:-<empty>}" ;;
+  esac
+  suffix=${root#"$prefix"}
+  case "$suffix" in
+    ''|*[!A-Za-z0-9]*) fail "$label recorded a task temporary root without a plain random suffix: $root" ;;
+  esac
+  [ "${#suffix}" -ge 12 ] \
+    || fail "$label recorded a task temporary root with too short a random suffix: $root"
 }
 
 log_line_count() { wc -l < "$HERDR_CALL_LOG" | tr -d '[:space:]'; }
@@ -516,7 +539,8 @@ FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
 
 # The same task id and project run once opted out and once projected, so
 # Treehouse commands and metadata can be compared after normalizing endpoint
-# IDs and the deliberately fresh per-spawn incarnation.
+# IDs, the deliberately fresh per-spawn incarnation, and the per-spawn random
+# task temporary root, each of which is asserted on its own below.
 : > "$TREEHOUSE_CALL_LOG"
 OFF_HERDR_START=$(log_line_count)
 OFF_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
@@ -745,10 +769,19 @@ pass "real Herdr lab: bounded lock contention warns and falls back flat without 
 PROJECTION_ORDER_START=$(log_line_count)
 
 [ "$OFF_WT" = "$ON_WT" ] || fail "Treehouse did not reuse the same fixture worktree, so byte comparison is inconclusive"
+TASKTMP_PARENT=$(task_tmp_parent) || fail "could not resolve the trusted task temporary parent"
+OFF_TASK_TMP=$(grep '^tasktmp=' "$OFF_META" | cut -d= -f2-)
+ON_TASK_TMP=$(grep '^tasktmp=' "$ON_META" | cut -d= -f2-)
+assert_random_task_root "$OFF_TASK_TMP" shape "opted-out spawn"
+assert_random_task_root "$ON_TASK_TMP" shape "projected spawn"
+[ -d "$ON_TASK_TMP" ] \
+  || fail "the projected spawn did not create its recorded task temporary root: $ON_TASK_TMP"
+[ "$OFF_TASK_TMP" != "$ON_TASK_TMP" ] \
+  || fail "the projected respawn reused the opted-out spawn's task temporary root: $ON_TASK_TMP"
 normalize_meta "$OFF_META" > "$TMP_ROOT/off.meta.normalized"
 normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
 cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
-  || fail "metadata changed beyond Herdr container IDs between opted-out and projected paths"
+  || fail "metadata changed beyond Herdr container IDs and per-spawn allocations between opted-out and projected paths"
 
 # Two real primary spawns begin concurrently.
 # The fresh-spawn task-set lock may fail closed for one while the other
@@ -882,7 +915,7 @@ teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-t
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected teardown"
 assert_cleanup_focus_preserved "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
-pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for endpoint IDs and spawn incarnation"
+pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for endpoint IDs, spawn incarnation, and the per-spawn random task temporary root"
 if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
   fail "closing the exact projected task pane did not remove its last-tab workspace"
 fi

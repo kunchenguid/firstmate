@@ -90,6 +90,9 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   Drive that lifecycle on its own host and reconcile it through the secondmate recovery path.
 - An unverified harness is refused rather than guessed at.
 - An implicit relaunch from a prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
+- A recorded task temporary root that no longer passes its trust check is refused **before** the running agent is stopped, so a relaunch never leaves a task agent-free over a path it must not use; `bin/fm-spawn.sh --relaunch` re-checks it independently.
+  An absent `tasktmp=` field or a recorded root that is simply gone stays compatible: the replacement claims a new random root instead.
+  [`bin/fm-tasktmp-lib.sh`](../bin/fm-tasktmp-lib.sh) owns that trust contract, and [`configuration.md`](configuration.md) routes to it.
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
@@ -118,5 +121,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, temporary-root reuse and its pre-stop refusal, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

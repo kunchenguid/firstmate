@@ -141,7 +141,18 @@
 #     grace period to any survivor whose process identity still matches. Both
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     processes.
+#     bin/fm-tasktmp-lib.sh revalidates the recorded root and gotmp child before
+#     this scan and immediately before removal; an unsafe path is never scanned,
+#     traversed, changed, or deleted.
+#     That refusal is scoped to the temporary root alone: the path is preserved
+#     and reported on stderr and in the completion line, while the worktree,
+#     backlog close, busy state, endpoint, and state cleanup all still run, so
+#     one untrusted root can never strand a whole task.
+#     Because this teardown also removes the task record that carried tasktmp=,
+#     the refusal is recorded durably at state/<id>.tasktmp-refused, which every
+#     later startup re-reports until the refused path is gone.
+#     Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -189,6 +200,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-tasktmp-lib.sh
+. "$SCRIPT_DIR/fm-tasktmp-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -732,9 +745,44 @@ if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-# tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
-# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
+# tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root.
+# An absent field and a recognized root that is already missing remain
+# compatible no-ops.
+# Any existing unsafe path is refused before process scanning or cleanup can
+# treat it as task-owned.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+TASK_TMP_SCAN=$TASK_TMP
+TASK_TMP_REFUSED=
+TASK_TMP_REFUSED_RECORDED=0
+# This teardown removes state/<id>.meta, the only durable carrier of tasktmp=,
+# so a refusal has to leave its own record behind or the untouched path would
+# never be nameable again.
+# state/<id>.tasktmp-refused survives teardown and every later startup
+# re-reports it until the refused path is gone.
+refuse_task_tmp() {  # <path> <sentence>
+  local path=$1 sentence=$2 reason=$FM_TASKTMP_ERROR
+  TASK_TMP_REFUSED=$path
+  TASK_TMP=
+  TASK_TMP_SCAN=
+  echo "REFUSED: $sentence" >&2
+  if fm_tasktmp_refusal_record "$STATE" "$ID" "$path" "$reason"; then
+    TASK_TMP_REFUSED_RECORDED=1
+  else
+    TASK_TMP_REFUSED_RECORDED=0
+    echo "error: the refused task temporary root $path for $ID could not be recorded for re-reporting, so only this run reports it" >&2
+  fi
+}
+if [ -n "$TASK_TMP" ]; then
+  fm_tasktmp_trust "$ID" "$TASK_TMP"
+  case "$FM_TASKTMP_TRUST" in
+    unsafe)
+      refuse_task_tmp "$TASK_TMP" "unsafe task temporary root for $ID: $FM_TASKTMP_ERROR. Nothing under that path is scanned, changed, or removed; the rest of this teardown proceeds and the path is left for an operator."
+      ;;
+    absent)
+      TASK_TMP_SCAN=
+      ;;
+  esac
+fi
 BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
@@ -2723,7 +2771,18 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if [ -n "$TASK_TMP_SCAN" ]; then
+    fm_tasktmp_trust "$ID" "$TASK_TMP_SCAN"
+    case "$FM_TASKTMP_TRUST" in
+      unsafe)
+        refuse_task_tmp "$TASK_TMP_SCAN" "task temporary root for $ID stopped being trusted immediately before process scanning: $FM_TASKTMP_ERROR. Nothing under that path is scanned, changed, or removed; the rest of this teardown proceeds."
+        ;;
+      absent)
+        TASK_TMP_SCAN=
+        ;;
+    esac
+  fi
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP_SCAN"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -2866,9 +2925,17 @@ fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
-# Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+# Revalidate immediately before removal.
+# The shared owner preserves absent and already-missing compatibility and
+# refuses every unsafe existing path without traversing or changing it.
+if [ -n "$TASK_TMP" ] && ! fm_tasktmp_remove "$ID" "$TASK_TMP"; then
+  if [ "$FM_TASKTMP_TRUST" = unsafe ]; then
+    refuse_task_tmp "$TASK_TMP" "task temporary root for $ID stopped being trusted immediately before removal: $FM_TASKTMP_ERROR. It was preserved untouched; the rest of this teardown proceeds."
+  else
+    echo "error: task temporary root for $ID could not be removed: $FM_TASKTMP_ERROR" >&2
+    exit 1
+  fi
+fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
@@ -2918,5 +2985,11 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
-echo "teardown $ID complete (window $T, worktree $WT)"
+if [ -n "$TASK_TMP_REFUSED" ] && [ "$TASK_TMP_REFUSED_RECORDED" = 1 ]; then
+  echo "teardown $ID complete (window $T, worktree $WT); its untrusted task temporary root $TASK_TMP_REFUSED was preserved untouched for an operator and recorded at $(fm_tasktmp_refusal_path "$STATE" "$ID") for re-reporting"
+elif [ -n "$TASK_TMP_REFUSED" ]; then
+  echo "teardown $ID complete (window $T, worktree $WT); its untrusted task temporary root $TASK_TMP_REFUSED was preserved untouched for an operator, but that refusal could NOT be recorded for re-reporting, so no later session start will name it again - deal with $TASK_TMP_REFUSED now"
+else
+  echo "teardown $ID complete (window $T, worktree $WT)"
+fi
 backlog_refresh_reminder

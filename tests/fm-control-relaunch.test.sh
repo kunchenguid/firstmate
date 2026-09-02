@@ -36,9 +36,14 @@ TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 TASK_TMPS=()
+# Every fixture root this file creates carries a per-process nonce, so two
+# concurrent suite runs - or a host where another user already owns a
+# predictable /tmp name - never collide on one shared path.
+RL_TMP_NONCE="rl$$rlfixture"
 
 relaunch_cleanup() {
   local d
+  fm_test_cleanup_tasktmp_roots "$TMP_ROOT"
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
@@ -143,6 +148,10 @@ add_ship_task() {
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
   printf '# brief for %s\n\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
+  local task_tmp="/tmp/fm-$id.$RL_TMP_NONCE"
+  rm -rf -- "$task_tmp"
+  mkdir -p "$task_tmp/gotmp"
+  chmod 700 "$task_tmp" "$task_tmp/gotmp"
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"
@@ -152,13 +161,13 @@ add_ship_task() {
     echo "kind=ship"
     echo "mode=no-mistakes"
     echo "yolo=off"
-    echo "tasktmp=/tmp/fm-$id"
+    echo "tasktmp=$task_tmp"
     echo "model=default"
     echo "effort=default"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
-  TASK_TMPS+=("/tmp/fm-$id")
+  TASK_TMPS+=("$task_tmp")
 }
 
 run_control() {  # <case-dir> <args...>
@@ -283,9 +292,17 @@ SH
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
-  local dir out rc gen_before gen_after
+  local dir out rc gen_before gen_after random_root
   dir=$(new_case same rl1)
   add_ship_task "$dir" rl1 claude
+  random_root=/tmp/fm-rl1.random$RL_TMP_NONCE
+  rm -rf "$random_root"
+  mkdir -p "$random_root/gotmp"
+  chmod 700 "$random_root" "$random_root/gotmp"
+  TASK_TMPS+=("$random_root")
+  awk -v root="$random_root" 'BEGIN { FS=OFS="=" } $1 == "tasktmp" { $0="tasktmp=" root } { print }' \
+    "$dir/home/state/rl1.meta" > "$dir/home/state/rl1.meta.tmp"
+  mv "$dir/home/state/rl1.meta.tmp" "$dir/home/state/rl1.meta"
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
   printf 'busy_gen=%s\n' "$gen_before" >> "$dir/home/state/rl1.meta"
   out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
@@ -297,6 +314,10 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
     || fail "the worktree must be reused, not reallocated"
   [ "$(meta_field "$dir" rl1 kind)" = ship ] || fail "kind must survive the relaunch"
   [ "$(meta_field "$dir" rl1 project)" = "$dir/proj" ] || fail "project must survive the relaunch"
+  [ "$(meta_field "$dir" rl1 tasktmp)" = "$random_root" ] \
+    || fail "the exact recorded random task root must survive relaunch"
+  assert_grep "export GOTMPDIR=$random_root/gotmp" "$dir/fake/keys" \
+    "the replacement did not export the exact recorded random root"
   gen_after=$(meta_field "$dir" rl1 busy_gen)
   [ -n "$gen_after" ] && [ "$gen_after" != "$gen_before" ] \
     || fail "a relaunch must arm a fresh busy generation, got '$gen_after'"
@@ -305,6 +326,83 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_legacy_tasktmp_relaunch_reuses_the_grandfathered_root() {
+  local dir id out rc legacy_root
+  # A grandfathered legacy root is spelled /tmp/fm-<id> exactly, so the task id
+  # itself carries this run's uniqueness.
+  id="rllegacy$$"
+  dir=$(new_case legacy "$id")
+  add_ship_task "$dir" "$id" claude
+  legacy_root=/tmp/fm-$id
+  rm -rf -- "$legacy_root"
+  mkdir -p "$legacy_root/gotmp"
+  chmod 700 "$legacy_root" "$legacy_root/gotmp"
+  TASK_TMPS+=("$legacy_root")
+  awk -v root="$legacy_root" '/^tasktmp=/ { print "tasktmp=" root; next } { print }' \
+    "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
+  mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
+  out=$(run_control "$dir" "$id" relaunch --note "keep the legacy root"); rc=$?
+  expect_code 0 "$rc" "a relaunch over a trusted legacy root should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" tasktmp)" = "$legacy_root" ] \
+    || fail "the exact recorded trusted legacy task root must survive relaunch"
+  assert_grep "export GOTMPDIR=$legacy_root/gotmp" "$dir/fake/keys" \
+    "the replacement did not export the exact recorded legacy root"
+  [ -d "$legacy_root/gotmp" ] || fail "relaunch removed the reused legacy root"
+  pass "fm-control relaunch: a trusted grandfathered legacy root is reused, not reallocated"
+}
+
+test_relaunch_restores_a_vanished_gotmp_child_and_keeps_the_root() {
+  local dir out rc recorded_root
+  dir=$(new_case regotmp rlgotmp)
+  add_ship_task "$dir" rlgotmp claude
+  recorded_root=$(meta_field "$dir" rlgotmp tasktmp)
+  # The prior worker removed its own $GOTMPDIR; the root is still task-owned.
+  rm -rf -- "$recorded_root/gotmp"
+  out=$(run_control "$dir" rlgotmp relaunch --note "gotmp went missing"); rc=$?
+  expect_code 0 "$rc" "a task-owned root missing only its gotmp child must not block relaunch"$'\n'"$out"
+  [ "$(meta_field "$dir" rlgotmp tasktmp)" = "$recorded_root" ] \
+    || fail "relaunch reallocated instead of restoring the root it already owned"
+  [ -d "$recorded_root/gotmp" ] || fail "relaunch did not restore the gotmp child"
+  assert_grep "export GOTMPDIR=$recorded_root/gotmp" "$dir/fake/keys" \
+    "the replacement did not export the restored gotmp child"
+  pass "fm-control relaunch: a vanished gotmp child is restored rather than refused"
+}
+
+test_relaunch_over_a_foreign_leftover_claim_still_replaces_the_agent() {
+  local dir out rc recorded_root claim stale_root
+  dir=$(new_case stale-claim rlstale)
+  add_ship_task "$dir" rlstale claude
+  recorded_root=$(meta_field "$dir" rlstale tasktmp)
+  # A crashed earlier spawn of this id left a valid claim naming a root this
+  # relaunch never allocated and metadata never owned. Reusing the trusted
+  # recorded root mints no claim of its own, so this leftover must not be
+  # mistaken for one and must not cost the task its replacement agent.
+  stale_root=/tmp/fm-rlstale.stale$RL_TMP_NONCE
+  claim=$dir/home/state/rlstale.tasktmp-claim
+  printf 'version=1\nid=rlstale\nnonce=stale%s\npath=%s\nphase=pending\ncreated=%s\n' \
+    "$RL_TMP_NONCE" "$stale_root" '2026-01-01T00:00:00Z' > "$claim"
+  chmod 600 "$claim"
+  out=$(run_control "$dir" rlstale relaunch --note "a stale claim must not strand this task"); rc=$?
+  expect_code 0 "$rc" "a leftover claim for another root must not block the replacement"$'\n'"$out"
+  assert_contains "$out" "relaunched rlstale harness=claude from=claude" "the replacement should still be reported"
+  [ "$(meta_field "$dir" rlstale tasktmp)" = "$recorded_root" ] \
+    || fail "the leftover claim displaced the recorded trusted root"
+  assert_grep "export GOTMPDIR=$recorded_root/gotmp" "$dir/fake/keys" \
+    "the replacement did not export the recorded trusted root"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  case "$out" in
+    *"could not take ownership"*) fail "the leftover claim was mistaken for this relaunch's own claim" ;;
+  esac
+  [ ! -e "$stale_root" ] && [ ! -L "$stale_root" ] \
+    || fail "the relaunch created the leftover claim's root"
+  # Ordinary crash-remnant reconciliation under the spawn lock, not an ownership
+  # transfer, is what clears a claim no metadata owns.
+  [ ! -e "$claim" ] \
+    || fail "the leftover claim was left to wedge the next allocation for this id"
+  [ -d "$recorded_root/gotmp" ] || fail "the relaunch removed the reused recorded root"
+  pass "fm-control relaunch: a leftover claim naming another root is left to startup, not fatal"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -892,6 +990,27 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
 
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
+test_unsafe_tasktmp_refuses_before_stopping_anything() {
+  local dir out rc before
+  dir=$(new_case unsafe-tasktmp rlunsafe)
+  add_ship_task "$dir" rlunsafe claude
+  # The fixture's own unpredictable root is what becomes group/world-writable;
+  # this suite never creates or chmods a predictable shared /tmp name.
+  chmod 0777 "$(meta_field "$dir" rlunsafe tasktmp)"
+  before=$(git hash-object "$dir/home/state/rlunsafe.meta")
+  out=$(run_control "$dir" rlunsafe relaunch --note "must not stop"); rc=$?
+  [ "$rc" -ne 0 ] || fail "unsafe recorded task root should refuse relaunch"
+  assert_contains "$out" "before its worker was stopped" \
+    "unsafe task root refusal did not name the pre-stop guarantee"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "unsafe task root refusal stopped the prior worker"
+  assert_not_contains "$(cat "$dir/fake/literal")" "/exit" \
+    "unsafe task root refusal sent the prior worker an exit command"
+  [ "$(git hash-object "$dir/home/state/rlunsafe.meta")" = "$before" ] \
+    || fail "unsafe task root refusal changed metadata"
+  pass "fm-control relaunch: unsafe recorded root refuses before the prior worker is stopped"
+}
+
 test_missing_worktree_refuses_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nowt rl10)
@@ -1478,6 +1597,9 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_legacy_tasktmp_relaunch_reuses_the_grandfathered_root
+test_relaunch_restores_a_vanished_gotmp_child_and_keeps_the_root
+test_relaunch_over_a_foreign_leftover_claim_still_replaces_the_agent
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
@@ -1502,6 +1624,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
+test_unsafe_tasktmp_refuses_before_stopping_anything
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
