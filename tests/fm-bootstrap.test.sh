@@ -998,6 +998,26 @@ SH
     bash -c '. "$1"; fm_forge_resolve_host git@github-work:org/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
   [ "$result" = github.com ] || fail "included SSH alias must resolve to its canonical host, got: $result"
   [ ! -e "$marker" ] || fail "SSH Match exec commands must not run during forge detection"
+
+  case_dir="$TMP_ROOT/forge-ssh-tilde-include"
+  config_dir="$case_dir/home/.ssh"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$config_dir" "$fakebin"
+  cat > "$config_dir/config" <<'EOF'
+Include ~/.ssh/hosts.conf
+EOF
+  cat > "$config_dir/hosts.conf" <<'EOF'
+Host gitlab-work
+  HostName gitlab.com
+EOF
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'hostname gitlab.com'
+SH
+  chmod +x "$fakebin/ssh"
+  result=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/home" FM_GITLAB_HOSTS=gitlab.com \
+    bash -c '. "$1"; fm_forge_resolve_host git@gitlab-work:group/repo.git 1' _ "$ROOT/bin/fm-forge-lib.sh")
+  [ "$result" = gitlab.com ] || fail "tilde SSH Include must resolve from HOME, got: $result"
   pass "forge host resolver expands included aliases without executing SSH config commands"
 }
 
@@ -1505,7 +1525,7 @@ test_crew_dispatch_validation() {
       grep)
         printf '%s\n' "$out" | grep -Fx "$expect" >/dev/null || fail "$label: missing '$expect' (got: $out)" ;;
     esac
-  done <<'ROWS'
+  done <<'DISPATCH_VALIDATION_ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
 codex Luna max effort is accepted^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
