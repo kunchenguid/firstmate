@@ -754,7 +754,9 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select($work.current_role != "program")
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
-         | {id,kind,state:.current_state.state,source:.current_state.source,
+         | {id,kind,state:.current_state.state,
+            repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
+            source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
