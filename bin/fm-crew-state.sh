@@ -305,12 +305,17 @@ log_reports_ci_ready() {
 # added status must still be read and reported, not silently dropped.
 # Verified against all 495 step rows `no-mistakes axi status --run` renders for
 # every run in the local v1.60.2 store, every one of them terminal: all 495 are
-# read. That scan could not cover, and this deliberately does not match, the
-# separate active_steps{step,status,active_for,...} table an ACTIVE run also
-# renders, whose third column is a duration, as in `ci,running,1m40s,...`. The
-# narrower ci-only predicate this replaced did match those rows; nothing is lost
-# by rejecting them, because the same output's steps table still carries that
-# step as `ci,running,0,0`.
+# read. This deliberately does not match the separate
+# active_steps{step,status,active_for,last_activity,agent_pid,round} table an
+# ACTIVE run also renders, whose third column is a duration, as in
+# `ci,running,1m40s,...`. The narrower ci-only predicate this replaced did match
+# those rows; nothing is lost by rejecting them, because the same output's steps
+# table still carries that step as `ci,running,0,0`. That store-wide scan reached
+# terminal runs only, so the active-run shape was settled by direct observation
+# instead - `axi status` captured mid-step on a live run (v1.60.2, eb4e379, built
+# 2026-08-29), sampled on three different running steps, renders the running step
+# as `<step>,running,0,0` in the steps table beside `<step>,running,7s,...` in
+# active_steps. An output shape is a fact about a version, not a law.
 nm_step_rows() {
   printf '%s\n' "$RUN_OUT" \
     | grep -E "^[[:space:]]*[A-Za-z0-9_-]+,[[:space:]]*\"?[A-Za-z0-9_-]+\"?[[:space:]]*,[[:space:]]*[0-9]+[[:space:]]*,"

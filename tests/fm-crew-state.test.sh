@@ -397,6 +397,39 @@ run:
 EOF
 }
 
+# The same ci-monitoring run as run_ci_monitoring above, rendered the way
+# `axi status` actually renders a run while a step is UNDERWAY: the
+# steps[N]{step,status,findings,duration_ms} table carrying the running step as
+# `ci,running,0,0`, followed by the second
+# active_steps[1]{step,status,active_for,last_activity,agent_pid,round} table
+# whose third column is a DURATION rather than a count. Both tables, their order
+# and their column shapes were captured from a live run on no-mistakes v1.60.2
+# (eb4e379, built 2026-08-29), sampled on three different running steps; only
+# the step name and the durations differ here.
+run_ci_monitoring_with_active_steps() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,12
+    rebase,completed,0,77
+    review,completed,0,22991
+    test,completed,0,1385831
+    document,completed,0,418814
+    lint,completed,0,13
+    push,completed,0,4179
+    pr,completed,0,43885
+    ci,running,0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    ci,running,1m40s,"12s ago: claude producing output","12345",starting
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # (a) active run-step is authoritative
 test_active_run_is_authoritative() {
@@ -536,6 +569,31 @@ EOF
   assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
   assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
   pass "ci-monitoring run with checks already green surfaces done"
+}
+
+# The same green-checks override as above, on a run rendering BOTH the steps
+# table and the active_steps table a live run carries (see
+# run_ci_monitoring_with_active_steps). The ci status must come from the steps
+# row `ci,running,0,0`, never from the active_steps row `ci,running,1m40s,...`
+# whose third column is a duration: the step-row reader matches a NUMERIC third
+# column only, so this pins that the narrowing left the ACTIVE-run path intact.
+# Stop reading that steps row and this run's ci step reads as nothing at all, the
+# override never fires, and a green PR reads as validating forever - the PR #252
+# incident class.
+test_ci_monitoring_with_active_steps_table_still_reads_the_step_row() {
+  reset_fakes
+  local d; d=$(new_case ci-active-steps)
+  make_repo_on_branch "$d/wt" fm/feat-ciactive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciactive.meta" "window=fm:fm-feat-ciactive" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring_with_active_steps fm/feat-ciactive)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-ciactive)
+  assert_contains "$out" "state: done" "an active_steps table must not hide the ci step's own steps row"
+  assert_contains "$out" "source: run-step" "the active run is still read from the run step"
+  assert_contains "$out" "checks green" "the green-checks override still fires for an active run"
+  assert_not_contains "$out" "state: working" "a green PR must not read as still validating"
+  pass "an active run's second active_steps table does not disturb the step-row reader"
 }
 
 test_top_level_ci_checks_green_surfaces_done() {
@@ -1827,6 +1885,7 @@ test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
+test_ci_monitoring_with_active_steps_table_still_reads_the_step_row
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_green_then_rearm_stays_working
