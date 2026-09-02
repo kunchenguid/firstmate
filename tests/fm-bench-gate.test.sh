@@ -206,6 +206,12 @@ out=$(run_gate "$BENCH" plan-check) || fail "the corrected plan must pass plan-c
 assert_contains "$out" "BENCH_RESULT plan-check ok" "corrected plan passes"
 assert_contains "$out" "6 distinct frozen packets, one sample each" "packets are distinct, not repeated runs"
 assert_contains "$out" "a standing route needs 6/6" "the sweep rule is the promotion bar"
+assert_contains "$out" "track.A.spec_seat ok no specification-required design seat" \
+  "a track without a design seat reports that decision"
+assert_contains "$out" "track.B.spec_seat ok specification-required design seat" \
+  "a specification-requiring track reports its evaluated seat"
+assert_contains "$out" "track.C.spec_seat ok no specification-required design seat" \
+  "every track reports its spec-seat scope"
 pass "a plan carrying the whole correction set passes plan-check"
 
 # Each refusal below is one correction the review demanded, proven to bite.
@@ -246,12 +252,21 @@ refuses "candidate-specific judge exclusions" \
 refuses "a one-judge panel" \
   'plan["tracks"]["A"]["judges"] = [{"name": "GLM 5.3 Max", "family": "zai"}]' \
   "at least two common neutral-family judges"
+refuses "a specification-requiring track with no author" \
+  'plan["tracks"]["B"].pop("spec_author")' \
+  "track.B.spec_seat fail track requires a specification"
 refuses "the design author also judging its own specification" \
   'plan["tracks"]["B"]["judges"] = [{"name": "Fable 5", "family": "anthropic"}, {"name": "Nova 3", "family": "cohere"}]' \
   "may not interpret its own unstated intent"
 refuses "an unaudited specification" \
   'plan["tracks"]["B"]["spec_audit"][2]["pre_freeze"] = False' \
   "not independent, pre-freeze, or accepted"
+refuses "an unaudited specification outside the capture track" \
+  'track = plan["tracks"]["A"]; track["spec_author"] = {"name": "Design Author", "family": "mistral"}; track["spec_audit"] = [{"packet": packet["id"], "auditor": "Independent Auditor", "auditor_family": "cohere", "pre_freeze": True, "verdict": "accepted"} for packet in track["packets"]]; track["spec_audit"][2]["pre_freeze"] = False' \
+  "track.A.spec_audit_independent fail"
+refuses "a specification audit with no auditor family" \
+  'plan["tracks"]["B"]["spec_audit"][2]["auditor_family"] = ""' \
+  "track.B.spec_audit_independent fail"
 refuses "cost in the tie rule" \
   'plan["promotion_rule"]["tie_breakers"] = ["deterministic_evidence", "lower_cost_usd"]' \
   "may not use cost or elapsed time"

@@ -265,6 +265,10 @@ def track_families(track: dict[str, Any]) -> set[str]:
     }
 
 
+def track_requires_specification(track: dict[str, Any]) -> bool:
+    return any(key in track for key in ("capture_required", "wave", "spec_author", "spec_audit"))
+
+
 def check_plan(plan: dict[str, Any], report: Report) -> None:
     samples = plan.get("samples_per_entrant")
     baseline_samples = plan.get("samples_per_baseline")
@@ -600,10 +604,19 @@ def check_track_panel(prefix: str, track: dict[str, Any], report: Report) -> Non
 
 def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) -> None:
     """Correction 3: the spec author may not judge, and each spec is audited pre-freeze."""
-    author = track.get("spec_author")
-    if not isinstance(author, dict):
+    if not track_requires_specification(track):
+        report.ok(f"{prefix}.spec_seat", "no specification-required design seat")
         return
-    author_family = str(author.get("family", "")).strip().lower()
+
+    author = track.get("spec_author")
+    author_name = str(author.get("name", "")).strip().lower() if isinstance(author, dict) else ""
+    author_family = str(author.get("family", "")).strip().lower() if isinstance(author, dict) else ""
+    author_valid = (
+        isinstance(author, dict)
+        and nonempty_str(author.get("name"))
+        and nonempty_str(author.get("family"))
+    )
+
     judge_families = {
         str(judge.get("family", "")).strip().lower()
         for judge in (track.get("judges") or [])
@@ -614,9 +627,9 @@ def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) ->
         for judge in (track.get("judges") or [])
         if isinstance(judge, dict)
     }
+    author_not_judge = author_valid and author_family not in judge_families and author_name not in judge_names
     report.require(
-        author_family not in judge_families
-        and str(author.get("name", "")).strip().lower() not in judge_names,
+        author_not_judge,
         f"{prefix}.spec_author_not_judge",
         "the design author does not judge its own specification",
         "the specification author may not interpret its own unstated intent after outputs exist",
@@ -624,8 +637,9 @@ def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) ->
     entrant_names = {
         str(candidate.get("name", "")).strip().lower() for candidate in track_candidates(track)
     }
+    author_not_entrant = author_valid and author_name not in entrant_names
     report.require(
-        str(author.get("name", "")).strip().lower() not in entrant_names,
+        author_not_entrant,
         f"{prefix}.spec_author_not_entrant",
         "the design author fields no entrant here",
         "the specification author is also an entrant in this track",
@@ -633,30 +647,46 @@ def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) ->
     # Keeping the design seat is a fixed captain choice, so a same-family entrant
     # is not refused. It is a residual recognition channel, and the review's rule
     # is that residual channels are disclosed rather than left silent.
-    adjacent = sorted(
-        str(candidate.get("name"))
-        for candidate in track_candidates(track)
-        if str(candidate.get("family", "")).strip().lower() == author_family
+    adjacent = (
+        sorted(
+            str(candidate.get("name"))
+            for candidate in track_candidates(track)
+            if str(candidate.get("family", "")).strip().lower() == author_family
+        )
+        if author_valid
+        else []
     )
-    if adjacent:
+    if not author_valid:
+        adjacency_valid = False
+        report.fail(
+            f"{prefix}.spec_author_family_adjacency",
+            "spec_author must name an author and family before family adjacency can be evaluated",
+        )
+    elif adjacent:
         disclosed = sorted(str(item) for item in (author.get("family_adjacency_disclosed") or []))
+        adjacency_valid = disclosed == adjacent
         report.require(
-            disclosed == adjacent,
+            adjacency_valid,
             f"{prefix}.spec_author_family_adjacency",
             f"the design author shares a family with {', '.join(adjacent)}, disclosed in the plan",
             f"entrants share the design author's family and are not disclosed: {', '.join(adjacent)}",
         )
     else:
+        adjacency_valid = True
         report.ok(f"{prefix}.spec_author_family_adjacency", "no entrant shares the design author's family")
 
     packet_ids = [str(item.get("id", "")) for item in (track.get("packets") or []) if isinstance(item, dict)]
-    audits = track.get("spec_audit")
-    if not isinstance(audits, list):
+    raw_audits = track.get("spec_audit")
+    audits_valid = isinstance(raw_audits, list)
+    if audits_valid:
+        audits = raw_audits
+    else:
         report.fail(f"{prefix}.spec_audit", "spec_audit must be a list, one record per packet")
-        return
+        audits = []
     audited = {str(item.get("packet", "")) for item in audits if isinstance(item, dict)}
+    audit_coverage_valid = audits_valid and audited == set(packet_ids) and len(audits) == len(packet_ids)
     report.require(
-        audited == set(packet_ids) and len(audits) == len(packet_ids),
+        audit_coverage_valid,
         f"{prefix}.spec_audit_coverage",
         f"{len(audits)} specifications independently audited",
         f"every packet needs one specification audit; missing {sorted(set(packet_ids) - audited)}",
@@ -669,16 +699,29 @@ def check_track_spec_seat(prefix: str, track: dict[str, Any], report: Report) ->
         auditor_family = str(item.get("auditor_family", "")).strip().lower()
         if (
             not nonempty_str(item.get("auditor"))
+            or not nonempty_str(item.get("auditor_family"))
             or auditor_family in ({author_family} | track_families(track))
             or item.get("pre_freeze") is not True
             or item.get("verdict") != "accepted"
         ):
             bad.append(str(item.get("packet", "<unnamed>")))
+    audits_independent = audits_valid and author_valid and not bad
     report.require(
-        not bad,
+        audits_independent,
         f"{prefix}.spec_audit_independent",
         "each specification was accepted by an independent auditor before its hash was frozen",
         f"specification audits are not independent, pre-freeze, or accepted: {', '.join(bad)}",
+    )
+    report.require(
+        author_valid
+        and author_not_judge
+        and author_not_entrant
+        and adjacency_valid
+        and audit_coverage_valid
+        and audits_independent,
+        f"{prefix}.spec_seat",
+        "specification-required design seat fully evaluated",
+        "track requires a specification but its author and independent audits are incomplete",
     )
 
 
@@ -813,7 +856,7 @@ def build_manifest(plan: dict[str, Any]) -> dict[str, Any]:
         entrant_runs = len(entrants) * samples
         baseline_runs = baseline_samples if isinstance(track.get("baseline"), dict) else 0
         scored = entrant_runs + baseline_runs
-        spec_jobs = len(packets) if isinstance(track.get("spec_author"), dict) else 0
+        spec_jobs = len(packets) if track_requires_specification(track) else 0
         judge_calls = scored * len(track.get("judges") or [])
         captures = entrant_runs if track.get("capture_required") is True else 0
 
