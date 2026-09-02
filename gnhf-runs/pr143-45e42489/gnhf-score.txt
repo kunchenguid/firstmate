@@ -1,0 +1,118 @@
+run_id: pr143-45e42489
+archived_merge_commit: 45e42489
+archived_pr: https://github.com/pedromuller-del/firstmate/pull/143
+captured_head: d27efc5cd33a4570911df5ec3fa8012738324499
+model: Cursor Grok 4.6
+baseline: 0/9
+score: 3/9
+passing: 3, 4, 5
+oracle: bash bin/fm-test-run.sh tests/fm-model-telemetry.test.sh
+oracle-untouched: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=190150 exit=0 (18 subtests)
+oracle-iter1: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=173922 exit=0 (19 subtests)
+oracle-iter2-before-edit: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=170682 exit=0 (19 subtests)
+oracle-iter2-after: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=167233 exit=0 (20 subtests; new taskId test green)
+oracle-iter3-before-edit: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=171603 exit=0 (20 subtests)
+oracle-iter3-after: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=165215 exit=0 (21 subtests; new quotaDecision test green)
+oracle-iter4-before-edit: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=168284 exit=0 (21 subtests)
+oracle-iter4-after: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=166221 exit=0 (22 subtests; new custody-wait test green)
+oracle-iter5-before-edit: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=167399 exit=0 (22 subtests)
+oracle-iter5-after: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=171932 exit=0 (23 subtests; new lease-conflict test green)
+oracle-iter6-before-edit: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=168352 exit=0 (23 subtests)
+oracle-iter6-after: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=173133 exit=0 (24 subtests; new facts round-trip test green)
+oracle-iter7-before-edit: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=176764 exit=0 (24 subtests)
+oracle-iter7-after: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=168378 exit=0 (25 subtests; new state-divergence test green)
+oracle-iter8-before-edit: FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=174389 exit=0 (25 subtests)
+oracle-iter8-rejected: FM_TEST_SUMMARY total=1 failed=1 skipped_gate=0 duration_ms=6254 exit=1 (not ok - cancelled terminal failed)
+rejected: rejected/iter8-refuse-unknown-on-terminal-write.diff score-that-rejected=3/9
+stop: existing test_terminals_and_retry_links cancelled:not-applicable:unknown blocks refusing unknown on new writes
+PR: https://github.com/pedromuller-del/firstmate/pull/143
+
+assertions:
+  1 fail — failed terminal-facts with no class still accepted and records unknown
+    red (untouched): exit=0 RECORDED_CLASS=unknown
+    red (iter 6, real commands, after facts pass-through):
+      failed facts without primaryFailureClass → exit=0 status=recorded
+      ledger primaryFailureClass=unknown
+      (existing mechanical/failed-gate tests still require this silence to be accepted)
+  2 fail — all four blocked classes are legal to write; unknown still writable on new rows
+    red (untouched): terminal payload primaryFailureClass=approval-wait → exit=1 "terminal payload violates the V1 whitelist"
+    green (iter 1): same payload accepted, sheet.primaryFailureClass=approval-wait; invented class blocked-dialog still refused
+    red (iter 4, real commands, before writer change):
+      terminal payload primaryFailureClass=custody-wait → exit=1
+      stderr=error: model telemetry: terminal payload violates the V1 whitelist
+    green (iter 4, real commands, after writer change):
+      exit=0 status=recorded
+      ledger primaryFailureClass=custody-wait
+      sheet --format json primaryFailureClass=custody-wait taskId=custody-wait-red quotaDecision=selected
+    green (iter 4, oracle):
+      ok - a terminal may carry primaryFailureClass=custody-wait and still refuses an invented class
+      FM_TEST_END tests/fm-model-telemetry.test.sh exit=0 duration_ms=166165
+      FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=166221
+    red (iter 5, real commands, before writer change):
+      terminal payload primaryFailureClass=lease-conflict → exit=1
+      stderr=error: model telemetry: terminal payload violates the V1 whitelist
+      sheet state=open primaryFailureClass=null
+    green (iter 5, real commands, after writer change):
+      exit=0 status=recorded
+      ledger primaryFailureClass=lease-conflict
+      sheet --format json primaryFailureClass=lease-conflict taskId=lease-conflict-red quotaDecision=selected usageSource=null
+      invented class blocked-dialog still refused: exit=1 "terminal payload violates the V1 whitelist"
+    green (iter 5, oracle):
+      ok - a terminal may carry primaryFailureClass=lease-conflict and still refuses an invented class
+      FM_TEST_END tests/fm-model-telemetry.test.sh exit=0 duration_ms=171877
+      FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=171932
+    red (iter 7, real commands, before writer change):
+      terminal payload primaryFailureClass=state-divergence → exit=1
+      stderr=error: model telemetry: terminal payload violates the V1 whitelist
+      sheet state=open primaryFailureClass=null
+    green (iter 7, real commands, after writer change):
+      exit=0 status=recorded
+      ledger primaryFailureClass=state-divergence
+      sheet --format json primaryFailureClass=state-divergence taskId=state-divergence-red quotaDecision=selected usageSource=absent
+      invented class blocked-dialog still refused: exit=1 "terminal payload violates the V1 whitelist"
+    green (iter 7, oracle):
+      ok - a terminal may carry primaryFailureClass=state-divergence and still refuses an invented class
+      FM_TEST_END tests/fm-model-telemetry.test.sh exit=0 duration_ms=168320
+      FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=168378
+  3 pass — intake taskId persisted and sheet column additive
+    red (iter 2, real commands, before writer change):
+      intake without --task → exit=1 "error: model telemetry: --task is required"
+      intake with --task typed-task → event keys lack taskId (hasTaskId=false)
+      sheet --format json → hasTaskId=false
+      csv header ends with legacyRaw (no taskId)
+    green (iter 2, oracle):
+      ok - intake persists the task id slug and the sheet surfaces it as a column
+      FM_TEST_END tests/fm-model-telemetry.test.sh exit=0 duration_ms=167178
+      FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=167233
+  4 pass — new intake refuses unknown/invalid quota.decision; sheet surfaces quotaDecision
+    red (iter 3, real commands, before writer change):
+      intake quota.decision=unknown → exit=0 hasQuotaDecision=false nested=unknown
+      sheet --format json → hasQuotaDecision=false
+      csv header ends with taskId (no quotaDecision)
+      missing nested quota.decision → exit=1 "intake payload violates the V1 whitelist"
+    green (iter 3, oracle):
+      ok - new intake refuses an unknown quota decision and the sheet surfaces quotaDecision
+      FM_TEST_END tests/fm-model-telemetry.test.sh exit=0 duration_ms=165163
+      FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=165215
+  5 pass — terminal-facts round-trips a blocked class and a green none through sheet --format json
+    red (iter 6, real commands, before writer change):
+      terminal-facts payload with primaryFailureClass=approval-wait usageSource=recorded
+        → exit=1 stderr=error: model telemetry: terminal facts payload violates the whitelist
+      failed facts without a class → exit=0 status=recorded ledger primaryFailureClass=unknown
+      sheet --format json has("usageSource")=false primaryFailureClass=unknown taskId=failed-silent quotaDecision=selected
+      csv header ends with quotaDecision,taskId (no usageSource)
+    green (iter 6, real commands, after writer change):
+      blocked facts seal → exit=0 status=recorded
+      ledger primaryFailureClass=approval-wait usageSource=recorded
+      sheet --format json primaryFailureClass=approval-wait taskId=blocked-facts quotaDecision=selected usageSource=recorded cost=null
+      green facts seal → exit=0
+      sheet --format json primaryFailureClass=none taskId=green-facts quotaDecision=selected usageSource=absent cost=null
+      invented facts class blocked-dialog → exit=1 "terminal facts payload violates the whitelist"
+      csv header ends with usageSource,quotaDecision,taskId
+    green (iter 6, oracle):
+      ok - terminal-facts round-trips a blocked class and a green none through the sheet with typed usageSource
+      FM_TEST_END tests/fm-model-telemetry.test.sh exit=0 duration_ms=173076
+      FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=173133
+  6-9 fail — phase B not started
+
+this-iteration: refused unknown on new terminal_command writes with the quota-pattern helper; oracle went red on cancelled terminal failed. Reverted. Assertion 2 stays red. Score stays 3/9. Stop: existing test encodes the old write contract.

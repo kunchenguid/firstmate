@@ -284,6 +284,14 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "gnhf-runs/pr143-45e42489/gnhf-night-report.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "gnhf-runs/pr143-45e42489/gnhf-score.txt",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "rejected/2-gh-axi-instead.md",
       "audience": "maintainer-verification"
     },
