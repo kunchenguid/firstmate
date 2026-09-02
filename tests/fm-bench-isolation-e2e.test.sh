@@ -49,6 +49,7 @@ printf 'K7 -> Fable 5 High\nR2 -> GPT 5.6 Sol High\n' > "$ISO/sealed/key.json"
 # commit, a worktree registry, and an object database a sibling could mine.
 for entrant in e1 e2; do
   mkdir -p "$ISO/$entrant/objects" "$ISO/$entrant/tmp" "$ISO/$entrant/home" "$ISO/$entrant/session"
+  printf 'objects/\ntmp/\nhome/\nsession/\n' > "$ISO/$entrant/.gitignore"
   # Each declared private store is probed against every sibling, so it must hold
   # material the probe can reach unconfined for its denial to mean anything.
   for private in objects tmp home session; do
@@ -109,6 +110,8 @@ assert_contains "$out" "all 7 probe classes exercised" "no probe class was skipp
 for label in k7 r2; do
   assert_contains "$out" "isolation.bench-b1-$label.private_storage ok" \
     "each declared private store carries probe material"
+  assert_contains "$out" "isolation.bench-b1-$label.private_tree_exclusion ok" \
+    "each declared private store stays out of the candidate tree"
   assert_contains "$out" "isolation.bench-b1-$label.alternates ok" \
     "no clone reaches an object store outside its own private storage"
 done

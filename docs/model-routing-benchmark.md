@@ -22,7 +22,7 @@ A gate that cannot obtain its evidence refuses; an unproven denial is never trea
 | `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, finite positive per-dimension mutation calibration, and exactly one bound capture record for every planned candidate head are all required. |
 | `manifest-build` / `manifest-check` | The original run, judge, capture, and cost arithmetic did not add up, and cost and elapsed time were tie-breakers while unmeasurable. Every count is now derived, and cost is low/base/high arithmetic rather than a quoted range. |
 | `promote-evaluate` | Only a six-of-six paired sweep with the predeclared margin, no blocker-class failure, and no regression against the baseline veto is eligible, and the captain still gives the word. |
-| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup. Every evidence file except its sample's own top-level manifest and the executable evaluator must be content-addressed beneath its sample directory, the evaluator must change its output when a scratch-only restored-tree perturbation changes its input, and cleanup is authorised only while the archive verifies both before and after the rerun. |
+| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup; every evidence file except its sample's own top-level manifest is content-addressed beneath its sample directory, including the executable evaluator; the manifest names the restored candidate files the evaluator scores, independent scratch runs must reproduce the genuine result and change after every declared input is perturbed, and cleanup is authorised only while the archive verifies both before and after the rerun. |
 | `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. A preflight that refuses or stops for the captain also revokes any receipt already on disk, so evidence degrading outside the plan cannot leave a stale clearance standing. |
 
 ## Where the refusal actually bites
@@ -46,7 +46,9 @@ Only a mechanism with its own PID namespace confines processes as well as storag
 `docs/verification/model-routing-benchmark.md` records the dated per-mechanism result.
 
 No declared path is trusted either.
-Each entrant's private object store, temp, home, and session space must resolve within that entrant's root before it is a sibling probe target, so a path on a shared subtree or a separate filesystem is refused during `isolation-verify` rather than later at launch.
+Each entrant's private object store, temp, home, and session space deliberately resolves within that entrant's root so the proven confinement wrapper owns the complete private layout and cannot silently substitute a shared external path.
+Each private path must also be ignored by Git and absent from the candidate index, so routine candidate commits and the tree later bound as `tree_binding.original_tree` cannot absorb object data, temporary files, home configuration, or session state.
+An external private path, an unignored path, or private material already present in the candidate index is refused during `isolation-verify` rather than later at launch or scoring.
 Because a denial against an empty directory proves nothing, every declared private store must hold material the probe reaches unconfined, and a store that holds none is refused by name.
 
 The gate also resolves each clone's `objects/info/alternates` itself.

@@ -29,7 +29,8 @@
 #   provenance-check  positive identification of every original participant
 #                     before a historical packet is replayed
 #   isolation-verify  run the sibling-access probe set inside each entrant's
-#                     confinement and refuse unless every probe is denied
+#                     confinement, prove its in-root private paths are ignored
+#                     by Git, and refuse unless every probe is denied
 #   evaluator-verify  environment lock, published score map, zero-weight
 #                     validity gates, two identical dry-runs, mutation
 #                     calibration, and one bound capture record per planned head
@@ -43,7 +44,8 @@
 #                     veto to recorded results
 #   archive-verify    recompute every archived content address
 #   restore-drill     restore each bundle into a fresh repository, rebind its
-#                     tree, rerun its archived evaluator, and write the receipt
+#                     tree, rerun its archived evaluator in independent scratch
+#                     copies against declared scored inputs, and write the receipt
 #   cleanup-gate      authorise candidate and snapshot cleanup only from a
 #                     passing drill still bound to the archive as it stands
 #

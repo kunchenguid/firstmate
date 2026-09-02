@@ -26,11 +26,11 @@
 #   PROBE INCONCLUSIVE <detail>  the probe could not measure the access at all
 #
 # A missing tool is INCONCLUSIVE, never DENIED. A confinement whose image simply
-# lacks git or ps would otherwise look like enforced isolation while enforcing
-# nothing, which is the exact vacuous pass these probes exist to prevent. Each
-# probe therefore measures the underlying capability - reading the object bytes,
-# seeing another command line - by whatever means the environment offers, and
-# gives up loudly when it has none. The gate refuses on inconclusive.
+# lacks a required utility would otherwise look like enforced isolation while
+# enforcing nothing, which is the exact vacuous pass these probes exist to
+# prevent. Each probe therefore measures the underlying capability - reading the
+# object bytes, seeing another command line - by whatever means the environment
+# offers, and gives up loudly when it has none. The gate refuses on inconclusive.
 #
 # For the same reason a probe never narrows its evidence to one sample: the
 # storage probes try a bounded set of files rather than only the first, and the
@@ -45,7 +45,10 @@ fi
 PROBE=$1
 if [ "$PROBE" = process_inspection ]; then
   [ "$#" -eq 1 ] || { echo "usage: PROCESS_INSPECTION_MARKER_FILE=<path> fm-bench-probe.sh process_inspection" >&2; exit 2; }
-  TARGET=$(cat "${PROCESS_INSPECTION_MARKER_FILE:-}" 2>/dev/null || true)
+  marker_file=${PROCESS_INSPECTION_MARKER_FILE:-}
+  [ -r "$marker_file" ] || { echo "error: PROCESS_INSPECTION_MARKER_FILE must name readable marker material" >&2; exit 2; }
+  TARGET=
+  IFS= read -r TARGET < "$marker_file" || true
   [ -n "$TARGET" ] || { echo "error: PROCESS_INSPECTION_MARKER_FILE must name readable marker material" >&2; exit 2; }
 else
   [ "$#" -eq 2 ] || { echo "usage: fm-bench-probe.sh <probe> <target>" >&2; exit 2; }
@@ -56,8 +59,16 @@ leaked() { printf 'PROBE LEAKED %s\n' "$1"; exit 0; }
 denied() { printf 'PROBE DENIED %s\n' "$1"; exit 0; }
 inconclusive() { printf 'PROBE INCONCLUSIVE %s\n' "$1"; exit 0; }
 
-# Read one byte of any regular file under a directory. This is the capability
-# every storage probe is really testing, and it needs no vendor tool.
+require_tools() {
+  local tool
+  for tool in "$@"; do
+    command -v "$tool" >/dev/null 2>&1 \
+      || inconclusive "required tool is unavailable: $tool"
+  done
+}
+
+# Open any regular file under a directory. This is the capability every storage
+# probe is really testing, and it needs no vendor-specific tool.
 #
 # A bounded set of candidates is tried rather than only the first path find
 # returns: a permission-based confinement can deny one file while leaving its
@@ -65,37 +76,41 @@ inconclusive() { printf 'PROBE INCONCLUSIVE %s\n' "$1"; exit 0; }
 READABLE_CANDIDATES=64
 
 readable_under() {  # <dir>
-  local found candidates
-  candidates=$(find "$1" -type f -print 2>/dev/null | head -n "$READABLE_CANDIDATES" || true)
-  [ -n "$candidates" ] || return 1
-  while IFS= read -r found; do
-    [ -n "$found" ] || continue
-    head -c 1 -- "$found" >/dev/null 2>&1 || continue
+  local found candidates=0
+  while IFS= read -r -d '' found; do
+    candidates=$((candidates + 1))
+    [ "$candidates" -le "$READABLE_CANDIDATES" ] || break
+    { : < "$found"; } 2>/dev/null || continue
     printf '%s\n' "$found"
     return 0
-  done <<< "$candidates"
+  done < <(find "$1" -type f -print0 2>/dev/null)
   return 1
 }
 
 case "$PROBE" in
   sibling_file_read)
+    require_tools find
     found=$(readable_under "$TARGET" || true)
     [ -n "$found" ] && leaked "read $found"
     denied "sibling files are unreadable"
     ;;
   sibling_worktree_enumeration)
-    listing=$(ls -1 "$TARGET/.git/worktrees" 2>/dev/null || true)
-    [ -n "$listing" ] && leaked "enumerated $TARGET/.git/worktrees"
+    shopt -s nullglob dotglob
+    worktrees=("$TARGET/.git/worktrees"/*)
+    [ "${#worktrees[@]}" -gt 0 ] && leaked "enumerated $TARGET/.git/worktrees"
     denied "no reachable worktree registry"
     ;;
   sibling_object_enumeration)
     if command -v git >/dev/null 2>&1; then
-      objects=$(git --git-dir="$TARGET/.git" cat-file --batch-all-objects --batch-check='%(objectname)' 2>/dev/null | head -n 1 || true)
+      objects=
+      IFS= read -r objects < <(git --git-dir="$TARGET/.git" cat-file --batch-all-objects --batch-check='%(objectname)' 2>/dev/null) || true
       [ -n "$objects" ] && leaked "enumerated shared objects from $TARGET"
-      objects=$(git --git-dir="$TARGET" cat-file --batch-all-objects --batch-check='%(objectname)' 2>/dev/null | head -n 1 || true)
+      objects=
+      IFS= read -r objects < <(git --git-dir="$TARGET" cat-file --batch-all-objects --batch-check='%(objectname)' 2>/dev/null) || true
       [ -n "$objects" ] && leaked "enumerated shared objects from bare $TARGET"
     fi
     # Without git, the same capability is reading the object bytes directly.
+    require_tools find
     found=$(readable_under "$TARGET/.git/objects" || true)
     [ -n "$found" ] && leaked "read the sibling object database at $found"
     found=$(readable_under "$TARGET/objects" || true)
@@ -106,11 +121,13 @@ case "$PROBE" in
     ;;
   sibling_unreachable_objects)
     if command -v git >/dev/null 2>&1; then
-      unreachable=$(git --git-dir="$TARGET/.git" fsck --unreachable --no-progress 2>/dev/null | head -n 1 || true)
+      unreachable=
+      IFS= read -r unreachable < <(git --git-dir="$TARGET/.git" fsck --unreachable --no-progress 2>/dev/null) || true
       [ -n "$unreachable" ] && leaked "recovered a detached object from $TARGET"
     fi
     # A detached candidate commit is only hidden from `git log`; its bytes sit in
     # the same object directory, so reading them is the leak that matters.
+    require_tools find
     found=$(readable_under "$TARGET/.git/objects" || true)
     [ -n "$found" ] && leaked "traversed the object directory at $found"
     denied "detached sibling objects are unreachable"
@@ -118,7 +135,7 @@ case "$PROBE" in
   process_inspection)
     table_readable=0
     other_process=0
-    if [ -d /proc ]; then
+    if [ -d /proc ] && command -v tr >/dev/null 2>&1; then
       for entry in /proc/[0-9]*/cmdline; do
         [ -r "$entry" ] || continue
         table_readable=1
@@ -146,15 +163,19 @@ case "$PROBE" in
     denied "no sibling benchmark process is visible in the process table"
     ;;
   environment_leakage)
-    hits=$(env 2>/dev/null | grep -E "^${TARGET}" | head -n 3 || true)
-    [ -n "$hits" ] && leaked "benchmark variables reached the entrant environment"
+    while IFS= read -r name; do
+      case "$name" in
+        "$TARGET"*) leaked "benchmark variables reached the entrant environment" ;;
+      esac
+    done < <(compgen -e)
     denied "no benchmark variable is present"
     ;;
   protected_path_read)
     if [ -d "$TARGET" ]; then
+      require_tools find
       found=$(readable_under "$TARGET" || true)
       [ -n "$found" ] && leaked "read sealed material at $found"
-    elif head -c 1 -- "$TARGET" >/dev/null 2>&1; then
+    elif [ -f "$TARGET" ] && { : < "$TARGET"; } 2>/dev/null; then
       leaked "read sealed material at $TARGET"
     fi
     denied "sealed material is unreadable"

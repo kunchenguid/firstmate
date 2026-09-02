@@ -1204,6 +1204,47 @@ def probe_material(path: Path) -> bool:
     return False
 
 
+def check_private_tree_exclusion(
+    entrant_id: str,
+    entrant: dict[str, Any],
+    entrant_root: Path,
+    report: Report,
+) -> None:
+    if shutil.which("git") is None:
+        report.fail(
+            f"isolation.{entrant_id}.private_tree_exclusion",
+            "git is unavailable, so private-path exclusion from the candidate tree cannot be proven",
+        )
+        return
+    top = run_git(["-C", str(entrant_root), "rev-parse", "--show-toplevel"])
+    if top.returncode != 0 or Path(top.stdout.decode().strip()).resolve() != entrant_root:
+        report.fail(
+            f"isolation.{entrant_id}.private_tree_exclusion",
+            "the entrant root is not a git worktree whose private-path exclusions can be proven",
+        )
+        return
+    unsafe: list[str] = []
+    for key in PRIVATE_STORAGE_KEYS:
+        relative = Path(str(entrant.get(key))).resolve().relative_to(entrant_root).as_posix()
+        ignored = run_git(
+            ["-C", str(entrant_root), "check-ignore", "--quiet", "--no-index", "--", relative]
+        )
+        tracked = run_git(["-C", str(entrant_root), "ls-files", "--", relative])
+        reasons: list[str] = []
+        if ignored.returncode != 0:
+            reasons.append("is not ignored")
+        if tracked.returncode != 0 or tracked.stdout.strip():
+            reasons.append("is present in the candidate index")
+        if reasons:
+            unsafe.append(f"{key} ({relative}: {', '.join(reasons)})")
+    report.require(
+        not unsafe,
+        f"isolation.{entrant_id}.private_tree_exclusion",
+        "in-root private storage is ignored and absent from the candidate index",
+        "private storage could enter the committed candidate tree: " + "; ".join(unsafe),
+    )
+
+
 def check_entrant_alternates(entrant_id: str, entrant: dict[str, Any], report: Report) -> list[Path]:
     root = Path(str(entrant.get("root"))).resolve()
     store = Path(str(entrant.get("private_object_store"))).resolve()
@@ -1261,9 +1302,11 @@ def probe_entrants(
         report.require(
             not outside_private,
             f"isolation.{entrant_id}.private_containment",
-            "every declared private path resolves within this entrant's root",
+            "every declared private path resolves within this entrant's root so the proven wrapper owns its layout",
             "declared private storage escapes this entrant's proven root: " + ", ".join(outside_private),
         )
+        if not outside_private:
+            check_private_tree_exclusion(entrant_id, entrant, entrant_root, report)
 
         barren = [key for key in PRIVATE_STORAGE_KEYS if not probe_material(Path(str(entrant.get(key))))]
         report.require(
@@ -1750,10 +1793,17 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree
         return False, "archive manifest has no deterministic evaluator rerun"
     argv = rerun.get("argv")
     expected = rerun.get("result_hash")
+    scored_inputs = rerun.get("scored_inputs")
     if not isinstance(argv, list) or len(argv) != 1 or not isinstance(argv[0], str) or not argv[0]:
         return False, "archived evaluator argv must name exactly one executable evaluator file"
     if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
         return False, "archived evaluator result_hash must be a sha256 digest"
+    if (
+        not isinstance(scored_inputs, list)
+        or not scored_inputs
+        or not all(isinstance(item, str) and item for item in scored_inputs)
+    ):
+        return False, "archived evaluator scored_inputs must name at least one restored candidate file"
     files = record.get("files")
     groups = record.get("groups")
     if not isinstance(files, dict) or argv[0] not in files:
@@ -1765,39 +1815,49 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree
         return False, "archived evaluator file escapes or is absent from its sample archive"
     if not os.access(evaluator, os.X_OK):
         return False, "archived evaluator file is not executable"
+    restored_root = restored_tree.resolve()
+    input_paths: list[Path] = []
+    for relative in scored_inputs:
+        candidate = (restored_tree / relative).resolve()
+        if not is_within(candidate, restored_root):
+            return False, f"archived evaluator scored input escapes the restored candidate: {relative}"
+        if not candidate.is_file():
+            return False, f"archived evaluator scored input is not a restored candidate file: {relative}"
+        input_paths.append(Path(relative))
     try:
         with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as workspace:
-            scratch = Path(workspace) / "evidence"
-            for relative in files:
-                source = (sample / relative).resolve()
-                if not is_within(source, sample.resolve()) or not source.is_file():
-                    return False, f"archived evaluator input is unavailable: {relative}"
-                destination = scratch / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-            genuine_tree = scratch / "restored-genuine"
-            perturbed_tree = scratch / "restored-perturbed"
-            shutil.copytree(restored_tree, genuine_tree, symlinks=True)
-            shutil.copytree(genuine_tree, perturbed_tree, symlinks=True)
-            perturbable = sorted(
-                (path for path in perturbed_tree.rglob("*") if path.is_file() and not path.is_symlink()),
-                key=lambda path: path.as_posix(),
-            )
-            if not perturbable:
-                return False, "restored candidate has no regular file the evaluator can be proven to consume"
-            with perturbable[0].open("ab") as handle:
-                handle.write(b"\nfm-bench-restore-perturbation\n")
+            run_roots: dict[str, tuple[Path, Path]] = {}
+            for run_name in ("genuine", "perturbed"):
+                scratch = Path(workspace) / run_name / "evidence"
+                for relative in files:
+                    source = (sample / relative).resolve()
+                    if not is_within(source, sample.resolve()) or not source.is_file():
+                        return False, f"archived evaluator input is unavailable: {relative}"
+                    destination = scratch / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                run_tree = Path(workspace) / run_name / "restored"
+                shutil.copytree(restored_tree, run_tree, symlinks=True)
+                run_roots[run_name] = (scratch, run_tree)
+            genuine_scratch, genuine_tree = run_roots["genuine"]
+            perturbed_scratch, perturbed_tree = run_roots["perturbed"]
+            for relative in input_paths:
+                perturbed_input = (perturbed_tree / relative).resolve()
+                if not is_within(perturbed_input, perturbed_tree.resolve()):
+                    return False, f"archived evaluator scored input cannot be perturbed inside scratch: {relative}"
+                with perturbed_input.open("ab") as handle:
+                    handle.write(b"\nfm-bench-restore-perturbation\n")
             genuine = subprocess.run(
-                [str(scratch / argv[0]), str(genuine_tree)],
-                cwd=str(scratch),
+                [str(genuine_scratch / argv[0]), str(genuine_tree)],
+                cwd=str(genuine_scratch),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
                 timeout=60,
             )
             perturbed = subprocess.run(
-                [str(scratch / argv[0]), str(perturbed_tree)],
-                cwd=str(scratch),
+                [str(perturbed_scratch / argv[0]), str(perturbed_tree)],
+                cwd=str(perturbed_scratch),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
@@ -1815,7 +1875,7 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree
     if actual != expected:
         return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}"
     if perturbed.stdout == genuine.stdout:
-        return False, "archived evaluator output is invariant under a perturbed restored candidate"
+        return False, "archived evaluator ignored its declared scored inputs; their perturbation did not change output"
     return True, actual
 
 
@@ -2306,7 +2366,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Benchmark directory layout: benchmark.json (the frozen plan), packets/, ground-truth/, "
             "scoring/, judge-prompts/, provenance/<packet>.json, isolation.json, allowance.json, "
             "evaluator/{lock.json,score-map.json,determinism/,mutations/,captures/}, manifest.json, "
-            "freeze.json, results/<sample>.json, archive/<sample>/manifest.json, and the generated "
+            "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with evaluator_rerun.scored_inputs, and the generated "
             "preflight.receipt and archive/restore-drill.json."
         ),
     )
