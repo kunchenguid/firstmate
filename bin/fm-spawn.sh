@@ -206,8 +206,11 @@
 # data/backlog.md. An automatic-backend home with a backlog but no compatible
 # tasks-axi refuses before creating any lifecycle state.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] [cursor_exemption=<grant>] window=<backend-target> worktree=<path>
-# cursor_exemption= appears only when --cursor-exemption granted this launch, and
-# carries the same value recorded in state/<id>.meta so the grant is auditable.
+# cursor_exemption= appears only when a grant governs the worker this line reports,
+# and carries the same value recorded in state/<id>.meta so the grant is auditable.
+# On the remote secondmate route that is the grant the remote endpoint actually
+# holds, which differs from the requested one when an already-live endpoint was
+# reused; every other route reports the grant this launch was made under.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -477,7 +480,8 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
-  local remote_exemption_note remote_launch_refusal remote_launch_qualifier
+  local remote_recorded_exemption remote_exemption_note
+  local remote_launch_refusal remote_launch_qualifier
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -751,6 +755,29 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
+  # The cursor grant is read back from the same launch, on the same terms and for
+  # the same reason. When the remote host finds its endpoint already alive it
+  # returns that route WITHOUT applying this invocation's grant, so recording what
+  # this side requested would claim an isolation envelope that does not govern the
+  # live worker - and firstmate's own liveness recovery would later inherit that
+  # false record as authority for an envelope nobody proved. Only the grant the
+  # remote endpoint actually carries is recorded and reported. It is validated on
+  # arrival, like the carrier, and only in the envelope form: `attended` describes
+  # a person at a pane on the other host and is never authority here, and a value
+  # the one owner rejects is dropped rather than written into the task record.
+  remote_recorded_exemption=$(printf '%s\n' "$out" | sed -n 's/^cursor_exemption=//p' | tail -1)
+  case "$remote_recorded_exemption" in
+    envelope:*) fm_control_cursor_exemption_valid "$remote_recorded_exemption" || remote_recorded_exemption= ;;
+    *) remote_recorded_exemption= ;;
+  esac
+  # A remote host old enough not to echo the grant back cannot have applied one
+  # either - it refuses the forwarded argument outright - so an empty read-back is
+  # the truth there too, and the divergence below is reachable only by endpoint
+  # reuse. Say so rather than silently substituting a different grant, because the
+  # operator attested to an envelope that did not take effect.
+  if [ "$remote_recorded_exemption" != "$CURSOR_EXEMPTION" ]; then
+    echo "notice: remote secondmate $id kept its already-live endpoint, so this launch's cursor grant was not applied; it runs under ${remote_recorded_exemption:-no cursor grant} rather than the requested ${CURSOR_EXEMPTION:-none}, and the task record carries what actually governs it" >&2
+  fi
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
@@ -761,7 +788,7 @@ spawn_remote_secondmate() {
     echo "kind=secondmate"
     echo "mode=secondmate"
     echo "yolo=off"
-    [ -z "$CURSOR_EXEMPTION" ] || echo "cursor_exemption=$CURSOR_EXEMPTION"
+    [ -z "$remote_recorded_exemption" ] || echo "cursor_exemption=$remote_recorded_exemption"
     echo "tasktmp="
     echo "model=${model#-}"
     echo "effort=${effort#-}"
@@ -798,7 +825,7 @@ spawn_remote_secondmate() {
     return 1
   fi
   remote_exemption_note=
-  [ -z "$CURSOR_EXEMPTION" ] || remote_exemption_note=" cursor_exemption=$CURSOR_EXEMPTION"
+  [ -z "$remote_recorded_exemption" ] || remote_exemption_note=" cursor_exemption=$remote_recorded_exemption"
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off$remote_exemption_note window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }

@@ -389,6 +389,30 @@ grep -q '^cursor_exemption=envelope:routing-benchmark$' "$REMOTE_HOME/state/pare
   || fail "the remote endpoint record must carry the grant its own spawn ran under"
 pass "remote route: an envelope grant and a carrier both cross the wire and reach the remote spawn"
 
+# Endpoint REUSE, not launch. A remote host that finds its endpoint already alive
+# returns that route and applies nothing, so a repeat spawn carrying a DIFFERENT
+# envelope must not have its request written into the parent's record: the live
+# worker still runs under the envelope the first launch proved, and the record is
+# what an audit reads and what firstmate's own recovery later inherits as
+# authority. The Herdr fixture is deliberately NOT reset here - that is what keeps
+# the previous endpoint alive and makes this the reuse path rather than a
+# relaunch.
+: > "$HERDR_LOG"
+REUSE_OUT=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --cursor-exemption envelope:unproven-envelope 2>&1) \
+  || fail "a repeat spawn onto a live remote endpoint should return its existing route"
+! grep -q -- '--trust --auto-review --sandbox enabled' "$HERDR_LOG" \
+  || fail "a live remote endpoint must be reused, not relaunched under the newly requested grant"
+grep -q '^cursor_exemption=envelope:routing-benchmark$' "$PARENT/state/ios.meta" \
+  || fail "the parent record must keep the envelope that governs the live worker"
+! grep -q 'unproven-envelope' "$PARENT/state/ios.meta" \
+  || fail "a grant the remote endpoint never applied must not be recorded as if it governed the worker"
+assert_contains "$REUSE_OUT" "cursor_exemption=envelope:routing-benchmark" \
+  "the success line must report the grant the live worker actually runs under"
+assert_contains "$REUSE_OUT" "was not applied" \
+  "the operator must be told the grant they attested to did not take effect"
+pass "remote route: a reused live endpoint records the grant that governs it, not the one the repeat launch requested"
+
 # RECOVERY, not relaunch. firstmate's secondmate liveness sweep brings a dead
 # secondmate back by re-running exactly `fm-spawn.sh <id> --secondmate` with no
 # --cursor-exemption (bin/fm-bootstrap.sh's dead/missing remote branch), which is
