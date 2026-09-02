@@ -18,20 +18,29 @@
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
-#   task's own recorded endpoint and worktree instead of creating either. It is
+#   task's own recorded worktree instead of allocating another copy. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
 #   owns the checkpoint, the progress note, stopping the previous agent, and the
 #   transaction; call fm-control rather than this flag directly unless you are
 #   deliberately re-launching an already-stopped task. Every identity axis -
-#   backend, kind, project or home, worktree, endpoint - comes from the task's
+#   backend, kind, project or home, worktree - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
-#   agent-free on a backend with a recovery-grade agent-state classifier (tmux
-#   or herdr), refuses unless the endpoint's shell is sitting in the recorded
-#   worktree, and clears the previous harness's per-task wiring before arming
-#   the new incarnation.
+#   agent-free or authoritatively missing on a backend with a recovery-grade
+#   agent-state classifier (tmux or herdr). An agent-free endpoint is reused
+#   when its shell is sitting in the recorded worktree. A missing endpoint is
+#   reconstructed through that backend's ordinary creation path into the same
+#   worktree, then published only after the replacement launch is proved.
+#   Under the existing task and control locks it revalidates the complete task
+#   incarnation and backend target immediately before replacement so a
+#   concurrently restored or changed endpoint cannot create a duplicate worker.
+#   Live or ambiguous endpoints still refuse. It clears the previous harness's
+#   per-task wiring before arming the new incarnation. An unpublished
+#   reconstructed endpoint is removed on failure; the worktree is never
+#   destroyed. zellij, orca, and cmux remain refused because they cannot prove
+#   a missing-target rebuild is safe.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -725,6 +734,9 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+RELAUNCH_RECONSTRUCT=0
+RELAUNCH_CREATED_TARGET=
+RELAUNCH_SPAWN_GEN=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -780,6 +792,10 @@ spawn_abort_cleanup() {
         echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
       fi
     fi
+  fi
+  if [ "$RELAUNCH_RECONSTRUCT" = 1 ] && [ -n "$RELAUNCH_CREATED_TARGET" ]; then
+    fm_backend_kill "$BACKEND" "$RELAUNCH_CREATED_TARGET" 2>/dev/null || true
+    RELAUNCH_CREATED_TARGET=
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
@@ -1123,10 +1139,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  case "$RELAUNCH_STATE" in
+    dead|missing) ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free or authoritatively missing recorded endpoint (stop a live agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+      ;;
+  esac
+  RELAUNCH_SPAWN_GEN=$(fm_meta_get "$RELAUNCH_META" spawn_gen)
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -2055,17 +2075,146 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
-if [ "$RELAUNCH" -eq 1 ]; then
-  # Adopt the recorded endpoint instead of creating one. This is what keeps a
-  # relaunch a REPLACEMENT rather than a second copy of the task: no new
-  # terminal, no second worktree, and every uncommitted change left exactly
-  # where the previous agent left it.
-  T=$RELAUNCH_TARGET
-  # A secondmate's home already resolved WT above through the same validation a
-  # fresh secondmate spawn uses; every other kind takes the recorded worktree.
-  [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+
+# spawn_relaunch_revalidate_incarnation: under the already-held task/control
+# locks, re-read the durable record immediately before reuse or reconstruction
+# so a concurrently restored or changed endpoint cannot create a duplicate.
+spawn_relaunch_revalidate_incarnation() {
+  local seen_backend seen_target seen_wt seen_kind seen_gen
+  fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || return 1
+  seen_backend=$FM_BACKEND_VALIDATED_BACKEND
+  seen_target=$FM_BACKEND_VALIDATED_TARGET
+  seen_wt=$(fm_meta_get "$RELAUNCH_META" worktree)
+  seen_kind=$(fm_meta_get "$RELAUNCH_META" kind)
+  [ -n "$seen_kind" ] || seen_kind=ship
+  seen_gen=$(fm_meta_get "$RELAUNCH_META" spawn_gen)
+  [ "$seen_backend" = "$BACKEND" ] \
+    || { echo "error: task $ID's recorded backend changed during relaunch; refusing to replace a different incarnation" >&2; return 1; }
+  [ "$seen_target" = "$RELAUNCH_TARGET" ] \
+    || { echo "error: task $ID's recorded endpoint changed during relaunch; refusing to replace a different incarnation" >&2; return 1; }
+  [ "$seen_wt" = "$RELAUNCH_WT" ] \
+    || { echo "error: task $ID's recorded worktree changed during relaunch; refusing to replace a different incarnation" >&2; return 1; }
+  [ "$seen_kind" = "$KIND" ] \
+    || { echo "error: task $ID's recorded kind changed during relaunch; refusing to replace a different incarnation" >&2; return 1; }
+  [ "$seen_gen" = "$RELAUNCH_SPAWN_GEN" ] \
+    || { echo "error: task $ID's recorded incarnation changed during relaunch; refusing to replace a different worker" >&2; return 1; }
+  export FM_RELAUNCH_PRE_REPLACE=1
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  unset FM_RELAUNCH_PRE_REPLACE
+}
+
+spawn_relaunch_reconstruct_tmux() {
+  local recorded_ses wid
+  recorded_ses=${RELAUNCH_TARGET%%:*}
+  if tmux list-windows -t "$recorded_ses" -F '#{window_name}' >/dev/null 2>&1; then
+    SES=$recorded_ses
+  else
+    SES=$(fm_backend_tmux_container_ensure) || return 1
+  fi
+  wid=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || return 1
+  T="$SES:$W"
+  WT_TARGET=$wid
+  RELAUNCH_CREATED_TARGET=$T
+}
+
+spawn_relaunch_reconstruct_herdr() {
+  local container_raw container seeded task_ids
+  HERDR_LABEL_HOME=$FM_HOME
+  HERDR_LAUNCHER_RELATIONSHIP=launcher-home
+  if [ "$KIND" = secondmate ]; then
+    HERDR_LABEL_HOME=$PROJ_ABS
+    HERDR_LAUNCHER_RELATIONSHIP=other-home
+  fi
+  container_raw=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$WT" "$HERDR_LAUNCHER_RELATIONSHIP") || return 1
+  container=${container_raw%%$'\t'*}
+  seeded=${container_raw#*$'\t'}
+  HERDR_SES=${container%%:*}
+  HERDR_WORKSPACE_ID=${container#*:}
+  task_ids=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$container" "$W" "$WT" "$seeded") || return 1
+  read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$task_ids
+EOF
+  if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+    echo "error: herdr did not return a tab/pane id for $W" >&2
+    return 1
+  fi
+  T="$HERDR_SES:$HERDR_PANE_ID"
   WT_TARGET=$T
-  SES=${T%%:*}
+  RELAUNCH_CREATED_TARGET=$T
+}
+
+spawn_relaunch_reconstruct_endpoint() {
+  case "$BACKEND" in
+    tmux) spawn_relaunch_reconstruct_tmux || return 1 ;;
+    herdr) spawn_relaunch_reconstruct_herdr || return 1 ;;
+    *)
+      echo "error: backend '$BACKEND' has no safe missing-endpoint reconstruction path; refusing rather than creating an unproved replacement" >&2
+      return 1
+      ;;
+  esac
+  RELAUNCH_RECONSTRUCT=1
+}
+
+spawn_relaunch_replace_endpoint() {
+  spawn_relaunch_revalidate_incarnation || return 1
+  case "$RELAUNCH_STATE" in
+    dead)
+      T=$RELAUNCH_TARGET
+      WT_TARGET=$T
+      SES=${T%%:*}
+      RELAUNCH_RECONSTRUCT=0
+      RELAUNCH_CREATED_TARGET=
+      ;;
+    missing)
+      spawn_relaunch_reconstruct_endpoint || return 1
+      ;;
+    alive)
+      echo "error: task $ID's recorded endpoint reappeared as a live agent during relaunch; refusing to create a duplicate worker" >&2
+      return 1
+      ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE' during replacement; a relaunch requires a positively agent-free or authoritatively missing recorded endpoint" >&2
+      return 1
+      ;;
+  esac
+}
+
+spawn_wait_agent_alive() {
+  local timeout=${FM_CONTROL_LAUNCH_WAIT:-90}
+  local poll=${FM_CONTROL_POLL:-0.5}
+  local elapsed=0 state=
+  while :; do
+    state=$(fm_backend_agent_state "$BACKEND" "$T")
+    if [ "$state" = alive ]; then
+      return 0
+    fi
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    sleep "$poll"
+    elapsed=$(awk -v e="$elapsed" -v p="$poll" 'BEGIN{printf "%.3f", e + p}')
+  done
+  echo "error: the replacement agent for $ID did not come up within ${timeout}s (endpoint reads '${state:-unknown}')" >&2
+  return 1
+}
+
+spawn_publish_relaunch_meta() {
+  SPAWN_META_PUBLISH_STARTED=1
+  if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
+    echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    return 1
+  fi
+  RELAUNCH_REPLACEMENT_PENDING=0
+  SPAWN_META_PUBLISH_STARTED=0
+  SPAWN_META_TMP=
+  RELAUNCH_CREATED_TARGET=
+}
+
+if [ "$RELAUNCH" -eq 1 ]; then
+  # Adopt a still-present agent-free endpoint, or reconstruct a positively
+  # missing one through the backend's ordinary creation path into the recorded
+  # worktree. Either way this stays a replacement: no second worktree, and every
+  # uncommitted change left exactly where the previous agent left it.
+  [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+  spawn_relaunch_replace_endpoint || exit 1
 else
 case "$BACKEND" in
   tmux)
@@ -2922,15 +3071,8 @@ spawn_commit_backlog_transition() {
   fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
 }
 
-if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_META_PUBLISH_STARTED=1
-  if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
-    echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
-    exit 1
-  fi
-  RELAUNCH_REPLACEMENT_PENDING=0
-  SPAWN_META_PUBLISH_STARTED=0
-  SPAWN_META_TMP=
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_RECONSTRUCT" != 1 ]; then
+  spawn_publish_relaunch_meta || exit 1
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so
@@ -3038,6 +3180,18 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+if [ "$RELAUNCH_RECONSTRUCT" = 1 ] && [ "$HARNESS" = claude ]; then
+  # Reconstructed panes do not inherit firstmate's PATH. Put the directory of
+  # the `claude` this spawn resolved first so the replacement runs that same
+  # binary rather than whatever the session daemon happens to have.
+  claude_resolved=$(command -v claude 2>/dev/null || true)
+  if [ -n "$claude_resolved" ] && [ -x "$claude_resolved" ]; then
+    claude_dir=$(cd "$(dirname "$claude_resolved")" 2>/dev/null && pwd -P) || claude_dir=
+    if [ -n "$claude_dir" ]; then
+      spawn_send_text_line "$T" "export PATH=$(shell_quote "$claude_dir"):\$PATH"
+    fi
+  fi
+fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
@@ -3095,6 +3249,11 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
+fi
+
+if [ "$RELAUNCH_RECONSTRUCT" = 1 ]; then
+  spawn_wait_agent_alive || exit 1
+  spawn_publish_relaunch_meta || exit 1
 fi
 
 # This is the commit point: all endpoint and harness delivery that can reject

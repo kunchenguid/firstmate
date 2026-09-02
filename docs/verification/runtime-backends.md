@@ -652,6 +652,7 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 ```
 
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
+The same command also covers missing-pane reconstruction: a throwaway sleeper registers in that registry after `fm-control relaunch` rebuilds a pane into the recorded worktree.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
 ### Away-mode transport
