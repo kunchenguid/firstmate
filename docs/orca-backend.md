@@ -43,6 +43,11 @@ worktree=<absolute Orca worktree path>
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
 
+`orca worktree create --json` emits a composite worktree id, and cleanup requires that shape: `<opaque id>::<absolute worktree path>`.
+The id half must be non-empty and contain no `/`, and the path half must be absolute with no empty segment, no trailing slash, and no `..` segment.
+Nothing else about the id half is assumed, and the path half is not character-filtered, so worktree paths containing spaces or non-ASCII characters are accepted.
+A recorded id that does not match this shape is refused by cleanup rather than passed to `orca`.
+
 ## Current lifecycle and safety
 
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
