@@ -404,6 +404,13 @@ case "$KIND:$MODE" in
   *) BASE_POLICY=origin ;;
 esac
 
+# BASE_REF and BASE_SHELL_REF are two spellings of the same base and are
+# deliberately not interchangeable: BASE_REF is the short readable name used in
+# prose, while BASE_SHELL_REF is what the worker EXECUTES, so it is fully
+# qualified and shell-quoted. git's refname precedence puts `refs/tags/<name>`
+# above both heads and remotes, so an unqualified `release` or `origin/release`
+# lets a same-named TAG decide the pass/fail count this check exists to trust,
+# and the quoting keeps a shell-significant branch name one shell word.
 set_origin_base() {  # <repo-dir>
   local branch
   branch=$(resolve_origin_default_branch "$1") || return 1
@@ -444,6 +451,11 @@ fi
 
 # The one rule for naming a LOCAL default branch at runtime, shared by every
 # fallback that has to fall back to one so their wording cannot drift apart.
+# It has the worker read the FULL `origin/HEAD` ref for the same reason
+# origin_default_branch_name does, and confirm `refs/heads/<default>` rather than
+# a bare `<default>`: git resolves `remotes/origin/<default>` to the tracking
+# ref, which would satisfy a check meant to prove a LOCAL branch exists and leave
+# the worker measuring against origin while its local default is ahead.
 IFS= read -r -d '' LOCAL_DEFAULT_RULE <<EOF || true
    Read \`git symbolic-ref --quiet refs/remotes/origin/HEAD\`. If it names a ref, that ref with the leading \`refs/remotes/origin/\` dropped IS \`<default>\`: confirm the local branch exists with \`git rev-parse --verify refs/heads/<default>\`, and if it does not, append \`blocked: cannot determine the default branch to verify base freshness\` to the status file and stop.
    Only when that ref is absent entirely may \`<default>\` be the local \`main\` or \`master\`, confirmed the same way. Never substitute \`main\`, \`master\`, or whatever branch happens to be checked out for a default branch this clone is missing, and append the same \`blocked:\` line and stop if none of these resolves.
