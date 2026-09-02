@@ -22,12 +22,27 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-# "Has this session already acquired the home lock?" is one question with one
-# owner. Asking it here with a private ancestry walk kept a second copy of every
-# platform assumption that owner makes, so this script stayed wrong on Cygwin
-# after the owner itself was fixed - and nudged a session that already held the
-# lock to start over.
-fm_session_lock_owned_by_self "$STATE" && exit 0
+lock_is_in_ancestry() {
+  local lock_pid pid=$$ _
+  [ -f "$STATE/.lock" ] || return 1
+  IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
+  case "$lock_pid" in
+    # A Windows-tagged holder is not in this process table at all, so a local
+    # ancestry comparison cannot answer for it. Defer to the owner of harness
+    # identity, which is the only thing that can read across that boundary.
+    "$FM_WIN_PID_PREFIX"[0-9]*) fm_session_lock_owned_by_self "$STATE"; return ;;
+    ''|*[!0-9]*|1) return 1 ;;
+  esac
+  kill -0 "$lock_pid" 2>/dev/null || return 1
+  for _ in 1 2 3 4 5 6 7 8; do
+    [ "$pid" = "$lock_pid" ] && return 0
+    pid=$(fm_ps_ppid "$pid")
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+  done
+  return 1
+}
+
+lock_is_in_ancestry && exit 0
 nudge=
 fm_operational_input_encode session-start \
   "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
