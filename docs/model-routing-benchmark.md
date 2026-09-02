@@ -15,7 +15,7 @@ A gate that cannot obtain its evidence refuses; an unproven denial is never trea
 
 | Gate | The review finding it closes |
 |---|---|
-| `plan-check` | Three packets run twice are not six independent samples; 5/6 and 4/6-plus-margin have uncalibrated false-promotion rates; candidate-specific judge exclusions make candidates incomparable; the specification author must not interpret its own unstated intent; an inconclusive result is "no standing route", never an adaptive ninth sample. |
+| `plan-check` | Three packets run twice are not six independent samples; 5/6 and 4/6-plus-margin have uncalibrated false-promotion rates; candidate-specific judge exclusions make candidates incomparable; every track whose plan carries a specification design seat must name an author and provide complete independent pre-freeze audits; an inconclusive result is "no standing route", never an adaptive ninth sample. |
 | `freeze` / `freeze-check` | Packets, ground truth, scoring code, judge prompts, model tuples, the randomisation seed, and the failure policy are fixed before labels exist, and any later edit is visible. |
 | `provenance-check` | A historical security packet may be replayed only after every original author, reviewer, and judge is positively identified by task, resolved model id, family, and session. "No record found" fails. |
 | `isolation-verify` | Opaque labels and a transcript grep hide metadata but neither prevent nor detect sibling access. The gate runs the exact bypasses the grep missed and requires each to be denied. |
@@ -24,6 +24,9 @@ A gate that cannot obtain its evidence refuses; an unproven denial is never trea
 | `promote-evaluate` | Only a six-of-six paired sweep with the predeclared margin, no blocker-class failure, and no regression against the baseline veto is eligible, and the captain still gives the word. |
 | `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup; every evidence file except its sample's own top-level manifest is content-addressed beneath its sample directory, including the executable evaluator; every restored sample must carry a valid evaluator declaration and scored-input set, while bounded execution reruns a deterministic sample in independent opaque confinements that must reproduce the genuine result and change after fresh unpredictable input perturbation; cleanup is authorised only while the archive verifies both before and after the rerun. |
 | `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. A preflight that refuses or stops for the captain also revokes any receipt already on disk, so evidence degrading outside the plan cannot leave a stale clearance standing. |
+
+Specification scope is derived from each frozen track's design-seat fields, including specification audits, capture requirements, and wave controls, rather than from the track name.
+Every track emits a spec-seat verdict, while a specification-requiring track must name its author and family, keep that author out of its judging and entrant seats, disclose same-family adjacency, and carry one independent accepted pre-freeze audit per packet.
 
 ## Where the refusal actually bites
 
