@@ -797,11 +797,25 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line local_model_endpoint
   local -a spawn_args
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+
+  if { [ "$PRIOR_HARNESS" = claude-local ] || [ "$TARGET_HARNESS" = claude-local ]; } \
+     && fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+    die "task $ID has an active PR poll in state/$ID.check.sh, the single custom-check slot a claude-local eviction watcher also needs; finish or retire that poll before relaunching so neither watcher is silently replaced (the running worker was left in place)"
+  fi
+  if [ "$TARGET_HARNESS" = claude-local ]; then
+    [ "$TARGET_MODEL" != default ] \
+      || die "claude-local requires an explicit model id and task $ID records none; pass --model <exact-model-id> (list them with: bin/fm-local-model.sh list) rather than stopping the running worker for a launch that must be refused"
+    local_model_endpoint=${FM_LOCAL_MODEL_ENDPOINT:-}
+    [ -n "$local_model_endpoint" ] || local_model_endpoint=$(fm_meta_get "$META" local_model_endpoint)
+    [ -n "$local_model_endpoint" ] || local_model_endpoint=http://127.0.0.1:1234
+    FM_LOCAL_MODEL_ENDPOINT="$local_model_endpoint" "$SCRIPT_DIR/fm-local-model.sh" preflight "$TARGET_MODEL" >/dev/null \
+      || die "the local-model preflight for claude-local failed (see above), so relaunching $ID would stop the running worker for a launch that must be refused; the worker was left in place"
+  fi
 
   case "$KIND" in
     ship|scout)

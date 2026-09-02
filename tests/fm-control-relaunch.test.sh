@@ -25,6 +25,10 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-check-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -1586,3 +1590,147 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_relaunch_keeps_the_exact_recorded_claude_local_profile
+
+# --- claude-local: pre-stop gates and watcher ownership ---------------------
+
+# A claude-local ship task whose recorded endpoint is a file:// catalog, so the
+# local-model gates run against a real, controllable endpoint. <state> is the
+# catalog's model state (loaded or not-loaded).
+add_claude_local_task() {  # <case-dir> <id> <state>
+  local dir=$1 id=$2 state=$3 meta
+  meta="$dir/home/state/$id.meta"
+  add_ship_task "$dir" "$id" claude-local
+  sed -i.bak -e 's/^model=default$/model=local-coder/' -e 's/^mode=no-mistakes$/mode=direct-PR/' "$meta"
+  rm -f "$meta.bak"
+  printf 'local_model_endpoint=file://%s/endpoint\n' "$dir" >> "$meta"
+  set_local_model_state "$dir" "$state"
+}
+
+# Arm a merge poll through the real entrypoint. The guard is stubbed the way
+# tests/fm-pr-check-security.test.sh stubs it, and gh is absent so no PR head
+# is looked up.
+arm_pr_poll() {  # <case-dir> <id> <url>
+  local dir=$1 id=$2 url=$3
+  mkdir -p "$dir/root/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/root/bin/fm-guard.sh"
+  chmod +x "$dir/root/bin/fm-guard.sh"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/gh"
+  chmod +x "$dir/fakebin/gh"
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" "$id" "$url" >/dev/null 2>"$dir/pr-check.err" \
+    || fail "the PR poll fixture could not be armed: $(cat "$dir/pr-check.err")"
+}
+
+set_local_model_state() {  # <case-dir> <state>
+  mkdir -p "$1/endpoint/api/v0"
+  cat > "$1/endpoint/api/v0/models" <<EOF
+{"object":"list","data":[
+ {"id":"local-coder","object":"model","type":"llm","state":"$2","max_context_length":262144,"loaded_context_length":131072}
+]}
+EOF
+}
+
+# The endpoint and model gates lived only in fm-spawn, which fm-control reaches
+# after the running agent has been stopped: a relaunch prompted by the eviction
+# watcher itself would stop a healthy worker and then fail to replace it. The
+# same preflight now answers on the pre-stop side, so an unloaded model refuses
+# with nothing changed.
+test_claude_local_relaunch_refuses_before_stop_when_the_model_is_unloaded() {
+  local dir out rc
+  dir=$(new_case claude-local-unloaded rl41)
+  add_claude_local_task "$dir" rl41 not-loaded
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 \
+    run_control "$dir" rl41 relaunch --note "model was evicted"); rc=$?
+  expect_code 1 "$rc" "a relaunch onto an unloaded local model should refuse"$'\n'"$out"
+  case "$out" in
+    *"not loaded"*) : ;;
+    *) fail "the refusal did not carry the preflight's diagnosis: $out" ;;
+  esac
+  case "$out" in
+    *"left in place"*) : ;;
+    *) fail "the refusal did not say the worker was kept: $out" ;;
+  esac
+  ! grep -qx '/exit' "$dir/fake/literal" \
+    || fail "a refused claude-local relaunch stopped the running worker"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the running worker did not survive a refused relaunch"
+  [ "$(meta_field "$dir" rl41 harness)" = claude-local ] \
+    && [ "$(meta_field "$dir" rl41 model)" = local-coder ] \
+    || fail "a refused relaunch changed the durable record"
+  pass "fm-control relaunch: an unavailable local model refuses before the worker is stopped"
+}
+
+# The same slot the eviction watcher needs is the one an armed PR poll owns.
+# Neither may silently replace the other, so a claude-local relaunch that
+# finds a live poll refuses before the worker is stopped and leaves the poll
+# exactly as it was.
+test_claude_local_relaunch_refuses_an_armed_pr_poll_before_stop() {
+  local dir state out rc
+  dir=$(new_case claude-local-poll rl42)
+  add_claude_local_task "$dir" rl42 loaded
+  state="$dir/home/state"
+  arm_pr_poll "$dir" rl42 https://github.com/my-org/repo/pull/5
+  fm_pr_poll_artifacts_valid "$state" rl42 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR poll fixture was not valid before the relaunch"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 \
+    run_control "$dir" rl42 relaunch --note "worker looked stuck"); rc=$?
+  expect_code 1 "$rc" "a claude-local relaunch over an armed PR poll should refuse"$'\n'"$out"
+  case "$out" in
+    *"active PR poll"*) : ;;
+    *) fail "the refusal did not name the PR poll occupying the slot: $out" ;;
+  esac
+  ! grep -qx '/exit' "$dir/fake/literal" \
+    || fail "a refused claude-local relaunch stopped the running worker"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the running worker did not survive a refused relaunch"
+  fm_pr_poll_artifacts_valid "$state" rl42 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the armed PR poll was disturbed by a refused relaunch"
+  pass "fm-control relaunch: an armed PR poll refuses a claude-local relaunch before the worker is stopped"
+}
+
+# The watcher is provisional only until the replacement record is published
+# and its launch delivered. A failure before that point must retire it (no
+# worker exists for it to watch); a failure after it that deliberately keeps
+# the record and the live worker must NOT, or the worker is left with no
+# eviction detection - the silent stall the watcher exists to make loud.
+test_claude_local_relaunch_abort_before_the_worker_exists_retires_the_watcher() {
+  local dir state out rc real_mv
+  dir=$(new_case claude-local-abort rl43)
+  add_claude_local_task "$dir" rl43 loaded
+  state="$dir/home/state"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 FM_REAL_MV="$real_mv" \
+    FM_FAKE_META_PUBLISH_MV_FAIL="$state/rl43.meta" \
+    run_control "$dir" rl43 relaunch --note "abort before publication"); rc=$?
+  expect_code 1 "$rc" "a failed metadata publication should fail closed"$'\n'"$out"
+  [ ! -e "$state/rl43.check.sh" ] && [ ! -e "$state/rl43.check-trust" ] \
+    || fail "an aborted claude-local relaunch left its provisional eviction watcher armed"
+  pass "fm-spawn relaunch: an abort before the worker exists retires the provisional watcher"
+}
+
+test_claude_local_relaunch_preserved_after_delivery_keeps_the_watcher() {
+  local dir state out rc
+  dir=$(new_case claude-local-preserved rl44)
+  add_claude_local_task "$dir" rl44 loaded
+  state="$dir/home/state"
+  seed_backlog "$dir" rl44 queued
+  break_tasks_axi_start "$dir"
+  out=$(FM_LOCAL_MODEL_HARNESS_BASELINE=1000 \
+    run_control "$dir" rl44 relaunch --note "backlog commit fails after delivery"); rc=$?
+  expect_code 1 "$rc" "a post-delivery backlog failure should be reported"$'\n'"$out"
+  case "$out" in
+    *"republished but its backlog item could not be moved"*) : ;;
+    *) fail "the fixture did not reach the preserving post-delivery exit: $out" ;;
+  esac
+  [ "$(meta_field "$dir" rl44 harness)" = claude-local ] \
+    || fail "the preserving exit did not keep the republished record"
+  fm_custom_check_registered "$state" rl44 \
+    || fail "a preserving exit after launch delivery disarmed the live worker's eviction watcher"
+  pass "fm-spawn relaunch: a preserving exit after delivery keeps the eviction watcher armed"
+}
+
+test_claude_local_relaunch_refuses_before_stop_when_the_model_is_unloaded
+test_claude_local_relaunch_refuses_an_armed_pr_poll_before_stop
+test_claude_local_relaunch_abort_before_the_worker_exists_retires_the_watcher
+test_claude_local_relaunch_preserved_after_delivery_keeps_the_watcher

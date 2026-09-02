@@ -261,8 +261,9 @@ test_spawn_arms_an_executable_eviction_check() {
   assert_present "$home/state/$id.check-trust" "claude-local spawn did not bind its watcher check"
 
   set_model_state "$case_dir" not-loaded 0
-  out=$("$home/state/$id.check.sh")
-  status=$?
+  status=0
+  run_check "$home/state/$id.check.sh" alive "$id" || status=$?
+  out=$(cat "$CHECK_OUT")
   [ "$status" -eq 0 ] || fail "the registered watcher check did not run"
   case "$out" in
     blocked:*"no longer loaded"*) : ;;
@@ -274,6 +275,140 @@ test_spawn_arms_an_executable_eviction_check() {
   pass "a claude-local spawn registers an executable watcher check that reports eviction"
 }
 
+
+# The bounded launch context lives in the canonical template. A raw launch
+# command is the unverified-adapter escape hatch and would run whatever it
+# names verbatim, so a raw command whose executable is called claude-local
+# would pass the local-model gates and then launch with no endpoint pin, no
+# model pin, and no context bound. It is refused, and the refusal names the
+# form that does carry the bounds.
+test_raw_claude_local_command_is_refused() {
+  local home fakebin endpoint case_dir id out
+  read -r home fakebin endpoint case_dir <<<"$(make_world raw)"
+  id="cl-raw-x1"
+  fm_test_spawn_brief "$home" "$id" "tiny brief"
+
+  run_spawn "$home" "$fakebin" "$endpoint" "$id" "$home/projects" \
+    "claude-local --model local-coder" --scout \
+    && fail "a raw claude-local launch command was accepted"
+  out=$(cat "$RUN_OUT")
+  case "$out" in
+    *"bypasses the bounded local-model launch context"*) : ;;
+    *) fail "the raw-command refusal did not name the bound it protects: $out" ;;
+  esac
+  case "$out" in
+    *"--harness claude-local"*) : ;;
+    *) fail "the raw-command refusal did not name the harness form to use instead: $out" ;;
+  esac
+  [ ! -e "$home/state/$id.meta" ] && [ ! -e "$home/state/$id.check.sh" ] \
+    || fail "a refused raw claude-local command left task state behind"
+
+  pass "a raw launch command named claude-local is refused in favour of the harness form"
+}
+
+# A tmux and ps pair that answers the endpoint's agent-state classifier with
+# exactly one verdict per FM_FAKE_AGENT value: `alive` shows the window with a
+# claude foreground process, `missing` reports the session gone, and
+# `unreadable` fails the inventory with an unclassifiable error.
+make_agent_state_fakebin() {  # <dir> -> echoes the fakebin path
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows)
+    case "${FM_FAKE_AGENT:-}" in
+      alive) printf 'fm-%s\n' "$FM_FAKE_TASK"; exit 0 ;;
+      missing) printf "can't find session: firstmate\n" >&2; exit 1 ;;
+      *) printf 'inventory unavailable\n' >&2; exit 1 ;;
+    esac
+    ;;
+  display-message)
+    case "$*" in
+      *pane_tty*) printf '/dev/ttyfake\n' ;;
+      *pane_current_command*) printf 'claude\n' ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" -t "*) printf '1 1 1 claude\n' ;;
+  *" -p "*) printf 'claude\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+# run_check <check> <agent-verdict> <id>
+# Runs the registered check with the endpoint answering <agent-verdict>.
+# Captures its stdout into the file named by CHECK_OUT and RETURNS the check's
+# exit status, for the same reason run_spawn does not print.
+CHECK_OUT=
+run_check() {
+  local check=$1 verdict=$2 id=$3 agentbin
+  agentbin=$(make_agent_state_fakebin "$TMP_ROOT/agent-$verdict-$id")
+  CHECK_OUT="$TMP_ROOT/check-out.$$"
+  PATH="$agentbin:$PATH" FM_FAKE_AGENT="$verdict" FM_FAKE_TASK="$id" "$check" > "$CHECK_OUT"
+}
+
+# The watcher exists to make a stall under a LIVE worker loud. An ordinary
+# idle unload after the worker has finished is not a stall, and wake() has no
+# dedup, so that case must be silent. The asymmetry is deliberate: silence
+# needs a CONFIDENT dead verdict. An endpoint that cannot be read, combined
+# with an evicted model, is exactly when a silent stall is most likely, so the
+# unknown verdict stays loud. All three are asserted because a check that was
+# disabled outright would pass the silence half alone.
+test_eviction_check_is_gated_on_worker_liveness() {
+  local home fakebin endpoint case_dir project worktree id check out status
+  read -r home fakebin endpoint case_dir <<<"$(make_world liveness)"
+  id="cl-live-x1"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  fm_test_spawn_brief "$home" "$id" "tiny brief"
+  fm_git_worktree "$project" "$worktree" "fm/$id"
+  status=0
+  FM_FAKE_PANE_PATH="$worktree" run_spawn "$home" "$fakebin" "$endpoint" \
+    "$id" "$project" --scout --harness claude-local --model local-coder || status=$?
+  [ "$status" -eq 0 ] || fail "claude-local spawn did not arm its watcher check: $(cat "$RUN_OUT")"
+  check="$home/state/$id.check.sh"
+  set_model_state "$case_dir" not-loaded 0
+
+  run_check "$check" alive "$id" || fail "the check did not run against a live worker"
+  out=$(cat "$CHECK_OUT")
+  case "$out" in
+    blocked:*"no longer loaded"*) : ;;
+    *) fail "an evicted model under a live worker must stay loud, got: '$out'" ;;
+  esac
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the live-worker alarm must be exactly one line"
+
+  run_check "$check" missing "$id" || fail "the check must exit cleanly for a confidently dead worker"
+  out=$(cat "$CHECK_OUT")
+  [ -z "$out" ] || fail "an idle unload after the worker is gone must be silent, got: '$out'"
+
+  run_check "$check" unreadable "$id" || fail "the check did not run against an unreadable endpoint"
+  out=$(cat "$CHECK_OUT")
+  case "$out" in
+    blocked:*"no longer loaded"*) : ;;
+    *) fail "an evicted model under an unreadable endpoint must stay loud, got: '$out'" ;;
+  esac
+
+  set_model_state "$case_dir" loaded 131072
+  run_check "$check" alive "$id" || fail "the check did not run against a loaded model"
+  out=$(cat "$CHECK_OUT")
+  [ -z "$out" ] || fail "a loaded model under a live worker must be silent, got: '$out'"
+
+  pass "the eviction check is silent only for a confidently dead worker and loud for alive and unknown"
+}
+
 test_home_default_cannot_select_it
 test_secondmate_is_refused_in_both_planes
 test_no_mistakes_mode_is_refused
@@ -281,3 +416,5 @@ test_missing_model_is_refused
 test_it_inherits_claudes_verified_tables
 test_it_uses_claudes_shared_busy_signature
 test_spawn_arms_an_executable_eviction_check
+test_raw_claude_local_command_is_refused
+test_eviction_check_is_gated_on_worker_liveness
