@@ -271,6 +271,29 @@ test_spawn_removes_its_temp_root_when_it_aborts_unrecorded() {
   pass "fm-spawn: a spawn that aborts before recording its temp root removes that root"
 }
 
+test_spawn_keeps_a_temp_root_it_did_not_create_when_it_aborts() {
+  # The other half of the pair above: this spawn did not create the root, it
+  # accepted one already there, which is what a live task of the same id would
+  # own. Its record names the path and outlives this abort, so the abort must
+  # leave it alone - removing it would destroy that agent's running scratch.
+  local id rec out rc task_tmp scratch
+  id=kimi-tmp-abort-existing-z11
+  rec=$(make_spawn_case tmp-abort-existing "$id")
+  read_spawn_record "$rec"
+  task_tmp=$(fm_test_task_tmp_root "$HOME_DIR" "$id")
+  scratch="$task_tmp/claude-1000/-slot/session/index.db"
+  mkdir -p "${scratch%/*}"
+  printf 'live scratch\n' > "$scratch"
+  mkdir -p "$HOME_DIR/state/$id.meta"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "spawn succeeded although its task record could not be published"
+  assert_contains "$out" "could not be published" "spawn omitted the record-publication failure"
+  [ -d "$task_tmp" ] || fail "aborted spawn removed a temp root it did not create: $task_tmp"
+  [ -f "$scratch" ] || fail "aborted spawn destroyed the scratch inside a temp root it did not create"
+  pass "fm-spawn: a spawn that aborts over a temp root it did not create leaves that root intact"
+}
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
   local home config original once stripped count
   home="$TMP_ROOT/config-surgery"
@@ -727,6 +750,7 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_spawn_refuses_a_planted_temp_root_symlink
 test_spawn_removes_its_temp_root_when_it_aborts_unrecorded
+test_spawn_keeps_a_temp_root_it_did_not_create_when_it_aborts
 test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation

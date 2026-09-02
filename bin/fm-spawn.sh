@@ -2506,12 +2506,13 @@ TASK_TMP=$(fm_task_tmp_root "$ID") || { echo "error: cannot derive a temp root f
 # build temp always, and the agent's whole scratch tree when the TMPDIR pin
 # below is enabled. Refuse the spawn rather than write through it.
 fm_task_tmp_create "$TASK_TMP" || exit 1
-# A fresh spawn owns this root before anything records it. If the spawn aborts
-# between here and the meta publish below, no record would name the path and no
-# later teardown could find it, so the abort trap removes it - the same leak this
-# root exists to close. A relaunch is deliberately not armed: the root is already
-# the recorded root of the task being relaunched, whose record outlives the abort.
-[ "$RELAUNCH" -eq 1 ] || TASK_TMP_ABORT_CLEANUP=1
+# Arm the abort trap only for a root this spawn created itself, which is the one
+# case where no record can name the path yet (FM_TASK_TMP_CREATED, contract in
+# bin/fm-task-tmp-lib.sh). A relaunch, and a spawn that accepted a root already
+# there, keep a root whose record outlives the abort.
+if [ "$RELAUNCH" -eq 0 ] && [ "$FM_TASK_TMP_CREATED" -eq 1 ]; then
+  TASK_TMP_ABORT_CLEANUP=1
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks

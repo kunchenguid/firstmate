@@ -420,7 +420,9 @@ test_teardown_survives_an_unremovable_tasktmp() {
 
 # Create a canonical root the way fm-spawn does: same library, same
 # FM_HOME/FM_ROOT, same sandbox base, in a subshell so the fake home does not
-# leak into the rest of the suite.
+# leak into the rest of the suite. On success it prints which of the two
+# outcomes happened, `created` or `existing`, which is what fm-spawn reads to
+# decide whether an aborting spawn may remove the root.
 create_task_tmp() {  # <fake-home> <root>
   local fake=$1 root=$2
   (
@@ -428,7 +430,12 @@ create_task_tmp() {  # <fake-home> <root>
     FM_ROOT=$fake
     # shellcheck source=bin/fm-task-tmp-lib.sh
     . "$ROOT/bin/fm-task-tmp-lib.sh"
-    fm_task_tmp_create "$root"
+    fm_task_tmp_create "$root" || exit 1
+    if [ "$FM_TASK_TMP_CREATED" -eq 1 ]; then
+      echo created
+    else
+      echo existing
+    fi
   )
 }
 
@@ -442,19 +449,27 @@ task_tmp_mode() {  # <path>
 }
 
 test_create_makes_a_private_root_and_accepts_its_own() {
-  local id=create-z9 fake task_tmp mode
+  # The two outcomes are asserted as well as the directory state, because they
+  # are what fm-spawn arms its abort cleanup on: only a root this spawn created
+  # itself can be removed on abort, since a root that was already there may be a
+  # live task's own scratch (bin/fm-task-tmp-lib.sh owns that contract).
+  local id=create-z9 fake task_tmp mode outcome
   fake="$TMP_ROOT/$id"
   task_tmp=$(canonical_task_tmp "$fake" "$id")
-  create_task_tmp "$fake" "$task_tmp" || fail "creating a fresh temp root failed"
+  outcome=$(create_task_tmp "$fake" "$task_tmp") \
+    || fail "creating a fresh temp root failed"
+  [ "$outcome" = created ] || fail "a fresh temp root was not reported as created ($outcome)"
   [ -d "$task_tmp/gotmp" ] || fail "creation did not make the Go temp directory"
   mode=$(task_tmp_mode "$task_tmp")
   [ "$mode" = 700 ] || fail "temp root is not private to its owner (mode $mode)"
   # A relaunch reuses its task's own root, so an already-owned root is accepted
   # with everything already in it.
   printf 'scratch\n' > "$task_tmp/scratch"
-  create_task_tmp "$fake" "$task_tmp" || fail "re-creating this task's own temp root failed"
+  outcome=$(create_task_tmp "$fake" "$task_tmp") \
+    || fail "re-creating this task's own temp root failed"
+  [ "$outcome" = existing ] || fail "an already-present temp root was reported as created"
   [ -f "$task_tmp/scratch" ] || fail "re-creating the temp root discarded its contents"
-  pass "fm-task-tmp-lib creates a private per-task root and accepts its own on reuse"
+  pass "fm-task-tmp-lib creates a private per-task root, reports which outcome, and accepts its own on reuse"
 }
 
 test_create_refuses_a_planted_symlink() {
@@ -468,7 +483,7 @@ test_create_refuses_a_planted_symlink() {
   task_tmp=$(canonical_task_tmp "$fake" "$id")
   mkdir -p "$target"
   ln -s "$target" "$task_tmp"
-  create_task_tmp "$fake" "$task_tmp" 2> "$err" \
+  create_task_tmp "$fake" "$task_tmp" > /dev/null 2> "$err" \
     && fail "creation wrote through a symlink planted at the temp root"
   [ -z "$(ls -A "$target")" ] || fail "creation created directories through the planted symlink"
   [ -L "$task_tmp" ] || fail "creation removed the planted symlink instead of refusing"
@@ -482,7 +497,7 @@ test_create_refuses_a_non_directory() {
   err="$TMP_ROOT/$id.err"
   task_tmp=$(canonical_task_tmp "$fake" "$id")
   printf 'not a directory\n' > "$task_tmp"
-  create_task_tmp "$fake" "$task_tmp" 2> "$err" \
+  create_task_tmp "$fake" "$task_tmp" > /dev/null 2> "$err" \
     && fail "creation accepted a non-directory at the temp root"
   grep -q "refusing to use it" "$err" || fail "creation did not report the refused temp root"
   pass "fm-task-tmp-lib refuses a non-directory at the temp root"

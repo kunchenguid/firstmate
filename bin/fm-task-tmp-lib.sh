@@ -137,15 +137,27 @@ fm_task_tmp_remove() {
 # and an already-present root - a relaunch reuses its task's root - is accepted
 # only when it is a real directory owned by this user. Mode 0700 keeps the
 # scratch out of other users' reach once the directory is ours.
+#
+# Success covers two materially different outcomes, reported in
+# FM_TASK_TMP_CREATED: 1 when this call created the root itself, 0 when it
+# accepted a root that was already there. Only the first means nothing can name
+# the path yet, so only the first may be removed by an aborting spawn. Accepting
+# an existing root can mean a live task of the same id already owns it - the
+# exact-match guard would pass, because the path genuinely is that id's canonical
+# root - and removing it would destroy a running agent's scratch, the one harm
+# this whole path exists to prevent.
 fm_task_tmp_create() {
   local root=${1:-}
+  # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+  FM_TASK_TMP_CREATED=0
   case "$root" in /*) ;; *) return 1 ;; esac
   mkdir -p -- "${root%/*}" || return 1
-  if ! mkdir -m 700 -- "$root" 2>/dev/null; then
-    if [ -L "$root" ] || [ ! -d "$root" ] || [ ! -O "$root" ]; then
-      echo "error: temp root $root could not be created as a directory owned by this user; refusing to use it" >&2
-      return 1
-    fi
+  if mkdir -m 700 -- "$root" 2>/dev/null; then
+    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+    FM_TASK_TMP_CREATED=1
+  elif [ -L "$root" ] || [ ! -d "$root" ] || [ ! -O "$root" ]; then
+    echo "error: temp root $root could not be created as a directory owned by this user; refusing to use it" >&2
+    return 1
   fi
   mkdir -p -- "$root/gotmp" || return 1
   return 0
