@@ -44,7 +44,7 @@ That is deliberate: the host-agnostic property is a property of the stored recor
 GitLab runs mostly on self-hosted instances, so a merge request can live under any host.
 A GitLab project also sits under at least one group at no fixed depth, so no owner-and-repository pair can address one the way it can on GitHub.
 The stored record therefore carries `provider`, `url`, `host`, `path`, and `number`, and every consumer rebuilds the URL from those parts and refuses any record that does not reconstruct the stored URL exactly.
-`tests/fm-pr-check-security.test.sh` asserts that neither `bin/fm-pr-lib.sh` nor `bin/fm-pr-poll.sh` contains the string `gitlab.com` at all.
+`tests/fm-pr-check-security.test.sh` proves the same point behaviorally: a poll armed for the placeholder host carries it through the stored record, and the poll addresses `glab` by the project URL rebuilt from that record rather than any constant.
 
 ## How plain glab is invoked, and why
 
@@ -289,8 +289,8 @@ It skips only that prompt; the conditions above are what authorize the merge.
 
 ## Why a recorded head is not the authority
 
-`bin/fm-pr-check.sh` records `pr_head=` only for GitHub, where `gh` exposes the head commit as a selectable field.
-It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+`bin/fm-pr-check.sh` records `pr_head=` for GitHub, where `gh` exposes the head commit as a selectable field, and for Codebase, where arming verifies and records the exact source head through the official read-only CLI.
+A GitLab task records none, and the other consumers treat a recorded head as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
 
 The merge path does not record one either, and deliberately does not depend on one.
 A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.
