@@ -1233,6 +1233,40 @@ The observable difference on the ordinary verbs is that a parked session's
 exit 1
 ```
 
+### Native state for a Firstmate-launched agent
+
+thurbox's status hooks are launch arguments, appended from `agents.toml` only
+when thurbox builds the command line. Firstmate types the harness into a shell
+it created, so before 2.11.1 exposed `agent launch-args` there was no way to
+obtain them and every Firstmate-spawned session reported no state.
+
+Verified 2026-09-02 on a real `fm-spawn.sh --backend thurbox` task. The typed
+launch carried the arguments:
+
+```text
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+  claude '--settings' '/home/<user>/.config/thurbox/hooks/claude.json' \
+  --dangerously-skip-permissions "$(... encode launch-brief < .../brief.md)"
+```
+
+and the session then reported hook state rather than a process guess:
+
+```text
+{"state":"done","state_source":"hook","hook_reported":true,"hook_state":"done"}
+```
+
+`fm_backend_thurbox_busy_state` answered `busy` during a turn and `idle` between
+turns, where it previously answered `unknown`, and `watch --session` pushed the
+matching `changed working` transition.
+
+Per-harness resolution against the installed `agents.toml`:
+
+| Harness | `agent launch-args` | Effect |
+| --- | --- | --- |
+| claude | `--settings <hooks>.json` | Passed through; native state works |
+| codex, opencode, pi | registered, empty `args` | Nothing to pass; thurbox installs their hooks by writing the agent's own config, and coverage stays as thurbox reports it |
+| grok, kimi, cursor, muse | not in `agents.toml` | No native state; one notice at spawn, and the pane read is used |
+
 ### Metadata output shape
 
 `session meta get` prints the record, not the bare value, unless output is forced.

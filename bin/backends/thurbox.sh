@@ -226,6 +226,42 @@ fm_backend_thurbox_is_current_runtime() {
   [ "$sock" = "$name" ]
 }
 
+# fm_backend_thurbox_agent_launch_args: the argv thurbox would append when IT
+# launches <agent>, one argument per line, or nothing.
+#
+# This is what makes native state reporting reachable at all. thurbox's status
+# hooks are ARGUMENTS (`--settings <hooks>.json` for claude), appended from
+# agents.toml only when thurbox builds the command line. Firstmate's spawn
+# contract creates a shell and TYPES the harness in, so nothing appended them
+# and every firstmate-spawned session reported no state and never appeared in
+# `watch`. Passing these through closes that: verified 2026-09-02 that a typed
+# `claude --settings <hooks>.json` reports state_source=hook and transitions
+# working/done exactly as a thurbox-launched agent does.
+#
+# Only the `args` are taken. The `env` the verb also reports names this thurbox
+# instance, and the pane already carries it - thurbox injects THURBOX_SESSION
+# into every pane it creates, which is the identity `session signal` resolves.
+# `--session` is deliberately NOT passed: it would additionally pin the agent's
+# conversation id, making thurbox a second owner of resume alongside firstmate's
+# own relaunch path.
+#
+# Returns 1 when the agent is not in agents.toml, which is the normal case for a
+# harness thurbox does not know (grok, kimi, cursor, muse). That is not a spawn
+# failure - the session simply reports no native state, exactly as before this
+# wiring existed - so every caller treats a failure here as "no args".
+#
+# Success with NO args is a different answer and must not be read as the same
+# one: thurbox delivers some agents' hooks out of band by writing their own
+# config rather than through argv, and opencode and pi both report full hook
+# coverage with an empty `args` (verified 2026-09-02). Those sessions report
+# state normally with nothing appended.
+fm_backend_thurbox_agent_launch_args() {  # <agent> -> one arg per line
+  local agent=$1 raw
+  [ -n "$agent" ] || return 1
+  raw=$(fm_backend_thurbox_json agent launch-args "$agent") || return 1
+  printf '%s' "$raw" | jq -r '.args[]? // empty' 2>/dev/null
+}
+
 # --- target handling ---------------------------------------------------------
 
 # fm_backend_thurbox_parse_target: split "thurbox:<uuid>" and export the uuid
@@ -404,6 +440,17 @@ fm_backend_thurbox_current_path() {  # <target>
   local raw path
   raw=$(fm_backend_thurbox_json session capture "$FM_BACKEND_THURBOX_SESSION" --lines 0) || return 1
   path=$(printf '%s' "$raw" | jq -r '.foreground_cwd // empty' 2>/dev/null)
+  # A cwd whose directory has been unlinked out from under the process comes
+  # back from the kernel with a " (deleted)" suffix (Linux /proc/<pid>/cwd), so
+  # what arrives is not a path at all. Observed live 2026-09-02 when a task's
+  # worktree was removed while its shell was still inside it. REFUSE rather than
+  # fall back to the session row's creation-time cwd: that path may well still
+  # exist, and answering with it would tell the caller a live directory is the
+  # pane's working directory when the real one is gone - which is exactly the
+  # answer fm-spawn.sh's worktree-isolation assertion must never be given.
+  case "$path" in
+    *' (deleted)') return 1 ;;
+  esac
   if [ -z "$path" ]; then
     path=$(fm_backend_thurbox_field '.cwd' session get "$FM_BACKEND_THURBOX_SESSION") || return 1
   fi

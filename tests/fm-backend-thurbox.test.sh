@@ -14,6 +14,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the thurbox adapter)"; exit 0; }
 
@@ -332,6 +334,29 @@ assert_log_args "a key gated on the readiness check must address the session the
   session key 11111111-2222-3333-4444-555555555555 enter
 pass "a key gated on the readiness check still addresses the target's own session"
 
+# --- current path ------------------------------------------------------------
+
+new_case current-path-live; d=$CASE_DIR
+respond "$d" 1 '{"foreground_cwd":"/tmp/wt/proj","output":""}'
+out=$(adapter "$d" "fm_backend_thurbox_current_path '$TARGET'")
+[ "$out" = /tmp/wt/proj ] || fail "the live foreground cwd must be returned (got: $out)"
+pass "the pane's live foreground cwd is what current-path reports"
+
+# The kernel appends " (deleted)" to /proc/<pid>/cwd when the directory is
+# unlinked under a running process, so what arrives is not a path. Observed live
+# when a task worktree was removed while its shell was still inside it. Falling
+# back to the session row's creation-time cwd would be worse than failing: that
+# path may still exist, and fm-spawn's worktree-isolation assertion would then be
+# handed a live directory that is not where the pane actually is.
+new_case current-path-deleted; d=$CASE_DIR
+respond "$d" 1 '{"foreground_cwd":"/tmp/wt/proj (deleted)","output":""}'
+respond "$d" 2 '{"id":"11111111-2222-3333-4444-555555555555","cwd":"/tmp/still-here"}'
+out=$(adapter "$d" "fm_backend_thurbox_current_path '$TARGET'; echo rc=\$?")
+assert_contains "$out" 'rc=1' "a deleted working directory must fail, not resolve"
+assert_not_contains "$out" '/tmp/still-here' "a deleted cwd must not fall back to the creation-time directory"
+assert_not_contains "$out" 'deleted' "the kernel's suffix must never be handed on as a path"
+pass "a working directory deleted under the pane fails closed instead of resolving to a stale path"
+
 # --- teardown ----------------------------------------------------------------
 
 new_case kill-forces; d=$CASE_DIR
@@ -540,5 +565,167 @@ out=$(THURBOX_SESSION=abc TMUX=/tmp/tmux-1000/thurbox,123,0 \
   bash -c '. "'"$ROOT"'/bin/fm-backend.sh"; fm_backend_detect' 2>/dev/null)
 [ "$out" = thurbox ] || fail "detection must reach the thurbox arm before tmux (got: $out)"
 pass "the thurbox arm is evaluated before tmux, so a thurbox pane is never misread as plain tmux"
+
+
+# --- spawn wiring: the agent's own hook args reach the typed launch ----------
+#
+# thurbox reports `state` and emits `watch` events only for an agent whose
+# status hooks fired, and those hooks are ARGUMENTS: thurbox appends an agent's
+# `args` from agents.toml when IT builds the command line. Firstmate's spawn
+# contract creates a shell and TYPES the harness in, so nothing appended them
+# and every firstmate-spawned session reported no state at all.
+#
+# `thurbox-cli agent launch-args <agent>` exists to close that, so the property
+# under test is that those args reach the command actually typed into the pane.
+# Asserted on the typed text, never on the template, so the placeholder
+# plumbing cannot pass while delivering nothing.
+
+make_spawn_thurbox_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb
+  fb=$(make_spawn_fakebin "$dir/fake" gh-axi gh)
+  cat > "$fb/thurbox-cli" <<'SH'
+#!/usr/bin/env bash
+set -u
+{ for a in "$@"; do printf '%s\x1f' "$a"; done; printf '\n'; } >> "${FM_THURBOX_LOG:?}"
+case "${1:-}:${2:-}" in
+  version:*)  printf '{"version":"2.11.1","tmux_socket":"thurbox"}\n' ;;
+  agent:launch-args)
+    # Only `claude` is a registered agent here, mirroring a real agents.toml
+    # that carries no entry for every firstmate harness.
+    case "${3:-}" in
+      claude)
+        printf '{"agent":"claude","command":"claude","args":["--settings","/hooks/claude.json"],"env":{},"hooks_enabled":true,"hook_coverage":"full"}\n' ;;
+      opencode)
+        # Registered with FULL coverage and no args: thurbox installs this
+        # agent's hooks out of band, so nothing is appended and state still works.
+        printf '{"agent":"opencode","command":"opencode","args":[],"env":{},"hooks_enabled":true,"hook_coverage":"full"}\n' ;;
+      *)
+        printf '{"error":"no agent named '"'"'%s'"'"' in agents.toml"}\n' "${3:-}"; exit 1 ;;
+    esac
+    ;;
+  session:list)   printf '[]\n' ;;
+  session:create) printf '{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","name":"x"}\n' ;;
+  session:get)    printf '{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","state":"uncovered","stopped":false,"cwd":"/tmp"}\n' ;;
+  session:capture) printf '{"output":"","cursor_row":0,"foreground_process":"bash","foreground_command":"/bin/bash -i","foreground_cwd":"%s"}\n' "${FM_THURBOX_FAKE_CWD:-/tmp}" ;;
+  *) printf '{}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/thurbox-cli"
+  printf '%s\n' "$fb"
+}
+
+run_thurbox_spawn() {  # <home> <wt> <fakebin> <args...>
+  local home=$1 wt=$2 fakebin=$3
+  shift 3
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="${TMUX:-fake,1,0}" \
+    FM_BACKEND=thurbox \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
+}
+
+# Sets SPAWN_HOME/SPAWN_PROJ/SPAWN_WT/SPAWN_FB/SPAWN_ID and the fake's env.
+# Called DIRECTLY, never in a command substitution: the exports have to land in
+# this shell, or the fake answers with a cwd the isolation guard rejects.
+spawn_case_thurbox() {  # <name>
+  local name=$1 case_dir
+  case_dir="$TMP_ROOT/spawn-$name"
+  SPAWN_HOME="$case_dir/home"
+  SPAWN_PROJ="$case_dir/project"
+  SPAWN_WT="$case_dir/wt"
+  SPAWN_ID="tbx-$name-x1"
+  SPAWN_FB=$(make_spawn_thurbox_fakebin "$case_dir")
+  fm_test_spawn_home "$SPAWN_HOME"
+  fm_test_spawn_brief "$SPAWN_HOME" "$SPAWN_ID" brief
+  fm_git_worktree "$SPAWN_PROJ" "$SPAWN_WT" "fm/$SPAWN_ID"
+  export FM_THURBOX_LOG="$case_dir/thurbox-log"
+  export FM_THURBOX_FAKE_CWD="$SPAWN_WT"
+  : > "$FM_THURBOX_LOG"
+}
+
+# The launch command is typed through `session send`, so the log's send lines
+# are exactly what the pane received.
+thurbox_typed_lines() {
+  tr '\037' ' ' < "$FM_THURBOX_LOG" | grep '^session send ' || true
+}
+
+spawn_case_thurbox hookargs
+out=$(run_thurbox_spawn "$SPAWN_HOME" "$SPAWN_WT" "$SPAWN_FB" "$SPAWN_ID" "$SPAWN_PROJ" claude --mode no-mistakes --yolo off)
+status=$?
+[ "$status" -eq 0 ] || { printf '%s\n' "--- spawn output ---" "$out" >&2; fail "thurbox spawn should succeed"; }
+typed=$(thurbox_typed_lines)
+assert_contains "$typed" 'claude' "the harness launch must be typed into the pane"
+# Each argument is shell-quoted individually, because a hooks path may contain
+# spaces and the launch is typed into a shell rather than exec'd.
+assert_contains "$typed" "'--settings' '/hooks/claude.json'" \
+  "the agent's own hook args must reach the typed launch, or thurbox reports no state for the session"
+assert_contains "$typed" "claude '--settings'" \
+  "the hook args must sit directly after the binary, not after the brief positional"
+pass "a thurbox spawn types the agent's hook args, so the session reports state and appears in watch"
+
+# A harness thurbox has no agents.toml entry for must still spawn. The lookup
+# fails by design there, and a failed lookup is not a spawn failure - it only
+# means that session reports no native state, exactly as before this wiring.
+spawn_case_thurbox unknownagent
+out=$(run_thurbox_spawn "$SPAWN_HOME" "$SPAWN_WT" "$SPAWN_FB" "$SPAWN_ID" "$SPAWN_PROJ" grok --mode no-mistakes --yolo off)
+status=$?
+[ "$status" -eq 0 ] || { printf '%s\n' "--- spawn output ---" "$out" >&2; fail "a spawn whose harness is not a registered thurbox agent must still succeed"; }
+typed=$(thurbox_typed_lines)
+assert_contains "$typed" 'grok' "the harness launch must still be typed"
+assert_not_contains "$typed" '--settings' "no hook args exist for an unregistered agent; none must be invented"
+pass "a harness thurbox does not register still spawns, simply without native state reporting"
+
+# An agent thurbox registers but ships no launch args still spawns clean and
+# raises no notice: thurbox installs those hooks by writing the agent's own
+# config, so the session reports state with nothing appended. Warning here would
+# tell the operator their supervision is degraded when it is not.
+spawn_case_thurbox hooklessagent
+out=$(run_thurbox_spawn "$SPAWN_HOME" "$SPAWN_WT" "$SPAWN_FB" "$SPAWN_ID" "$SPAWN_PROJ" opencode --mode no-mistakes --yolo off)
+status=$?
+[ "$status" -eq 0 ] || { printf '%s\n' "--- spawn output ---" "$out" >&2; fail "a registered agent with no launch args must spawn"; }
+typed=$(thurbox_typed_lines)
+assert_contains "$typed" 'opencode' "the harness launch must be typed"
+assert_not_contains "$typed" '--settings' "an agent with no launch args must have none invented"
+assert_not_contains "$out" 'no agents.toml entry' \
+  "a registered agent with no args must not be reported as losing native state"
+pass "a registered agent whose hooks are installed out of band spawns clean and raises no notice"
+
+# The notice fires only for an agent thurbox genuinely does not know.
+spawn_case_thurbox unknownnotice
+out=$(run_thurbox_spawn "$SPAWN_HOME" "$SPAWN_WT" "$SPAWN_FB" "$SPAWN_ID" "$SPAWN_PROJ" grok --mode no-mistakes --yolo off)
+assert_contains "$out" 'no agents.toml entry' \
+  "an unregistered harness must say plainly that this session reports no native state"
+pass "an unregistered harness raises one notice naming the consequence"
+
+# The slot must cost every OTHER backend nothing. It resolves to the empty
+# string off thurbox, so a literal space beside it in a template silently
+# doubles up in the command every tmux, herdr, zellij, cmux and orca task runs -
+# which is exactly what happened to the pi template on the first attempt. This
+# pins the invariant directly rather than relying on another suite noticing.
+for _tbx_h in claude codex opencode; do
+  _tbx_dir="$TMP_ROOT/slot-cost-$_tbx_h"
+  _tbx_home="$_tbx_dir/home"; _tbx_proj="$_tbx_dir/project"; _tbx_wt="$_tbx_dir/wt"
+  _tbx_id="slot-$_tbx_h-x1"
+  _tbx_fb=$(make_spawn_fakebin "$_tbx_dir/fake" gh-axi gh opencode codex)
+  fm_test_spawn_home "$_tbx_home"
+  fm_test_spawn_brief "$_tbx_home" "$_tbx_id" brief
+  fm_git_worktree "$_tbx_proj" "$_tbx_wt" "fm/$_tbx_id"
+  FM_FAKE_LAUNCH_LOG="$_tbx_dir/launch.log"
+  export FM_FAKE_LAUNCH_LOG
+  : > "$FM_FAKE_LAUNCH_LOG"
+  fm_test_run_spawn "$_tbx_home" "$_tbx_wt" "$_tbx_fb" \
+    "$_tbx_id" "$_tbx_proj" "$_tbx_h" --mode no-mistakes --yolo off >/dev/null 2>&1
+  _tbx_launch=$(grep -F "$_tbx_h" "$FM_FAKE_LAUNCH_LOG" 2>/dev/null | tail -1)
+  [ -n "$_tbx_launch" ] || fail "no $_tbx_h launch was typed on the tmux backend"
+  assert_not_contains "$_tbx_launch" '__THURBOXARGS__' \
+    "the thurbox slot must be substituted away on every backend, not left in the typed command"
+  assert_not_contains "$_tbx_launch" '  ' \
+    "an empty thurbox slot must leave no stray whitespace in the $_tbx_h launch on a non-thurbox backend"
+  unset FM_FAKE_LAUNCH_LOG
+done
+pass "the thurbox launch slot costs a non-thurbox backend nothing: no placeholder, no stray whitespace"
 
 echo "all fm-backend-thurbox tests passed"

@@ -110,10 +110,20 @@ The stream removes Firstmate's poll, but thurbox samples its own state internall
 A thurbox session row carries a `state` of `working`, `blocked`, `done`, or `idle`, reported by the agent's own hooks through `thurbox-cli session signal`.
 That is a semantic signal rather than a rendering, so it is strictly better than reading a pane with a regular expression.
 
-It is not always present, and the reason matters.
+Getting it requires one thing Firstmate has to do deliberately.
 thurbox installs those hooks by appending an agent's `args` from `agents.toml` when **thurbox** launches the agent, for example `--settings <hooks>.json` for Claude.
-Firstmate's spawn contract is uniform across every backend: create a shell endpoint, type exports into it, then type the harness launch command.
-An agent Firstmate launched that way carries no thurbox hook wiring and reports no state.
+Firstmate's spawn contract is uniform across every backend: create a shell endpoint, type exports into it, then type the harness launch command, so nothing appends them on its own.
+
+`thurbox-cli agent launch-args <agent>` closes that.
+`fm_backend_thurbox_agent_launch_args` asks it what thurbox would launch the harness with, and `bin/fm-spawn.sh` types those arguments into the launch command through the `__THURBOXARGS__` slot in each harness template.
+Only the `args` are taken: the `env` the verb also reports names this thurbox instance, and the pane already carries it, since thurbox injects `THURBOX_SESSION` into every pane it creates and that is the identity `session signal` resolves.
+`--session` is deliberately not passed, because it would additionally pin the agent's conversation id and make thurbox a second owner of resume alongside Firstmate's own relaunch path.
+
+Verified 2026-09-02 on a real `fm-spawn.sh --backend thurbox` task: the session reports `state_source: hook`, `busy_state` answers `busy` during a turn and `idle` between them, and the session's transitions appear in `watch`.
+
+Two outcomes are not the same and only one is worth a notice.
+An agent thurbox does not know at all (grok, kimi, cursor, muse) has no arguments to pass, so that session reports no native state and the spawn says so once.
+An agent thurbox knows but ships no launch arguments still reports state normally, because thurbox installs those hooks by writing the agent's own config instead - opencode and pi both report full hook coverage with an empty `args`.
 
 The adapter therefore gates the signal rather than trusting the row:
 
@@ -188,7 +198,7 @@ On 2.11.0 neither read could answer, which is what the version floor exists to r
 - **No secondmate spawns.** `--secondmate` is refused on this backend, matching cmux. The path is not verified.
 - **`session exec` does not carry the session's environment.** It sets the cwd and host but inherits the *caller's* environment, so `--env` values from `session create` are absent and the caller's own `THURBOX_SESSION` leaks into the child. A `thurbox-cli session signal` run through `session exec` would report state for the caller's session rather than the target's. The adapter does not use `session exec`; the pane's own environment is correct, and a pane created for a task carries that task's `THURBOX_SESSION`, not its parent's.
 - **Hook coverage requires thurbox to launch the agent.** See "Agent state and hook coverage" above. Native busy state is unavailable for Firstmate-launched agents until the hook payload can be applied to an externally launched one.
-- **Native busy state still needs thurbox to launch the agent.** See "Agent state and hook coverage". From 2.11.1 `thurbox-cli agent launch-args <name>` reports the `command`, `args` and `env` thurbox would launch an agent with, which is the missing piece; the adapter does not apply them yet, so a firstmate-spawned agent still reports no hook state.
+- **A harness thurbox does not register reports no native state.** Firstmate passes through whatever `agent launch-args` reports, so an agent absent from `agents.toml` has nothing to pass and its sessions fall back to the pane read. Adding an entry for that agent in `agents.toml` is all it takes; Firstmate needs no change.
 
 ## Verification
 
