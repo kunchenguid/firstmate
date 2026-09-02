@@ -6,12 +6,14 @@ import { readdirSync, readFileSync } from "node:fs";
 // pi.events so neither extension imports the other.
 //
 // Contract: the watcher builds one offer per actionable wake and emits it on
-// FM_BRANCH_DISPATCH_EVENT. A live, enabled branch extension calls accept()
+// FM_BRANCH_DISPATCH_EVENT. A live, enabled, IDLE branch extension first
+// publishes the exact identity-bound row grant, then calls accept()
 // SYNCHRONOUSLY inside its handler (the event bus invokes handlers
-// synchronously up to their first await), so after emit returns the watcher
-// reads `accepted`: true means the branch now owns delivering and handling the
-// wake (including its own fallback back to main on a later failure); false
-// means no branch took it and the watcher delivers to main exactly as it did
+// synchronously up to their first await). After emit returns, accepted=true
+// therefore means the branch already owns exact durable rows and now owns
+// handling the wake, including one fallback to main on a later failure. A
+// busy branch does not accept eventual serialized capacity: accepted=false
+// leaves delivery with the watcher, which sends it to main exactly as it did
 // before the branch existed. Watcher-failure alarms are never offered - only
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
 
@@ -217,7 +219,7 @@ export interface BranchDispatchOffer {
   heartbeat: boolean;
   /** True only when at least one currently unread row is safe for branch handling. */
   eligible: boolean;
-  /** Set by accept(); read by the watcher after emit returns. */
+  /** Set by accept() only after an exact branch row grant exists. */
   accepted: boolean;
   accept(): void;
 }
