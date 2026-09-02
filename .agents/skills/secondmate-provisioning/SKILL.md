@@ -109,7 +109,19 @@ Because these paths are gitignored, that propagation is a separate, primary-auth
 Propagation failures warn without blocking secondmate launch or session-start continuation, and the destination keeps whatever safely validated state the helper left behind.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
 Inherited `config/backend` becomes that secondmate home's local runtime-backend default for future spawns only; it never retargets, rewrites, migrates, stops, or restarts an already-live worker endpoint.
-A present primary value always converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection.
+Absent an honored deviation record, a present primary value converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection.
+
+That primary authority has exactly one sanctioned, opt-in escape: a home may hold its own value for a declared deviable item by writing an explicit deviation record beside it, `config/<item>.deviation`, and `config/backend` is the only deviable item today.
+The deviating value stays in the config item itself, where every consumer already reads it, so the record only states that this home holds its own value there.
+The record must carry evidence: its first non-blank line is the reason, and a record with no such line is refused.
+Where the two values actually differ, convergence leaves the home's value alone and reports the divergence to the primary as one `SECONDMATE_SYNC:` line naming the home, the item, the local and primary values, and that evidence, on every sync rather than only the first.
+A record for a non-deviable item, without an evidence line, or stored as a symlinked, non-ordinary, hardlinked, or oversized file is refused with its concrete reason.
+A record is also refused when the held value is symlinked, non-ordinary, or hardlinked; the item then converges to the primary value, so neither honoring nor reverting is ever silent.
+Reported local and primary values and evidence are bounded and stripped of control characters before they reach the primary.
+A record whose value already agrees with the primary diverges from nothing and reports nothing.
+The primary revokes a deviation by removing that record, after which the next convergence restores the primary value as an ordinary push.
+Remote homes behave identically: their own receiver honors the record, reports it as `deviation:` or `deviation-rejected:`, and the pushing primary relays that as the same `SECONDMATE_SYNC:` divergence line.
+This is a record the home writes, never a value the primary can push, so no default changes and inheritance stays primary-authoritative for every home that holds no record.
 Explicit per-spawn `--backend` and `FM_BACKEND` remain stronger than every home's local `config/backend`, including an inherited default.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
 `data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
@@ -141,7 +153,7 @@ The parent records that nudge before delivery, retains it after a failed send, a
 It does not receive a pointer to a primary-local generation path that cannot exist on that host.
 These config values remain defaults and rules only; they must not harden `fm-spawn` to reject a deliberate runtime choice that differs from the configured defaults.
 For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward.
-It uses the same live-home discovery and propagation helper as bootstrap, reports each item as `pushed`, `unchanged`, `skipped`, or `error`, and follows the config-reread contract above for changed or pending generations.
+It uses the same live-home discovery and propagation helper as bootstrap, reports each item as `pushed`, `unchanged`, `deviated`, `skipped`, or `error`, and follows the config-reread contract above for changed or pending generations.
 `bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
 
 Direct seed without a preexisting brief requires `FM_SECONDMATE_CHARTER`.

@@ -251,6 +251,7 @@ family_for_basename() {
     fm-secondmate-liveness.test.sh|fm-secondmate-reconcile.test.sh|\
     fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|fm-stow-cascade.test.sh|\
+    fm-config-deviation.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
       printf '%s\n' secondmate
       ;;

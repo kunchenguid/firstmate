@@ -8,6 +8,8 @@
 # Only the inherited-material allowlist is writable or removable. Writes are
 # atomic ordinary-file replacements. Divergent data/captain-shared.md bytes are
 # quarantined before replacement or removal and its converged copy is read-only.
+# A config item this home holds under an evidence-backed deviation record is left
+# at the home's own value and reported as "deviation: <path> ..." instead.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
@@ -21,9 +23,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
-file_link_count() {
-  if [ "$(uname)" = Darwin ]; then stat -f %l "$1" 2>/dev/null; else stat -c %h "$1" 2>/dev/null; fi
-}
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
 }
@@ -66,11 +65,6 @@ mkdir -p "$PARENT" || die "cannot create inherited destination parent"
 PARENT_REAL=$(CDPATH='' cd -- "$PARENT" && pwd -P)
 case "$PARENT_REAL" in "$HOME_REAL/config"|"$HOME_REAL/data") ;; *) die "inherited destination escapes FM_HOME" ;; esac
 DEST="$PARENT_REAL/$(basename "$REL")"
-[ ! -L "$DEST" ] || die "inherited destination is a symlink"
-if [ -e "$DEST" ]; then
-  [ -f "$DEST" ] || die "inherited destination is not a regular file"
-  [ "$(file_link_count "$DEST")" = 1 ] || die "inherited destination is hardlinked"
-fi
 
 BASE=$(basename "$REL")
 LOCK="$PARENT_REAL/.fm-inherit-$BASE.lock"
@@ -78,6 +72,7 @@ GENERATION_FILE="$PARENT_REAL/.fm-inherit-$BASE.generation"
 fm_lock_acquire_wait "$LOCK" || die "cannot lock inherited destination"
 TMP=
 GENERATION_TMP=
+GENERATION_ALREADY_COMMITTED=0
 cleanup() {
   [ -z "$TMP" ] || rm -f -- "$TMP"
   [ -z "$GENERATION_TMP" ] || rm -f -- "$GENERATION_TMP"
@@ -85,7 +80,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-commit_generation() {
+validate_generation() {
   local existing_generation existing_bytes existing_hash existing_command
   if [ -e "$GENERATION_FILE" ] || [ -L "$GENERATION_FILE" ]; then
     [ -f "$GENERATION_FILE" ] && [ ! -L "$GENERATION_FILE" ] || die "inheritance generation record is unsafe"
@@ -110,9 +105,14 @@ commit_generation() {
         && [ "$existing_hash" = "$EXPECTED_HASH" ] \
         && [ "$existing_command" = "$COMMAND" ] \
         || die "inheritance generation conflicts with its committed payload"
+      GENERATION_ALREADY_COMMITTED=1
       return 0
     fi
   fi
+}
+
+commit_generation() {
+  [ "$GENERATION_ALREADY_COMMITTED" -eq 0 ] || return 0
   GENERATION_TMP=$(umask 077; mktemp "$PARENT_REAL/.inherit-generation.XXXXXX") \
     || die "cannot stage inheritance generation"
   printf '%s\n%s\n%s\n%s\n' "$GENERATION" "$EXPECTED_BYTES" "$EXPECTED_HASH" "$COMMAND" > "$GENERATION_TMP" \
@@ -120,6 +120,59 @@ commit_generation() {
   chmod 600 "$GENERATION_TMP" || die "cannot secure inheritance generation"
   mv -f -- "$GENERATION_TMP" "$GENERATION_FILE" || die "cannot publish inheritance generation"
   GENERATION_TMP=
+}
+
+# The destination home's OWN deviation record keeps a deviable config item at
+# this home's value. Reported on stdout, where the pushing primary already reads
+# pushed/removed/unchanged, so a remote divergence is as visible as a local one
+# (bin/fm-config-inherit-lib.sh owns the record contract).
+DEVIATION_REJECTED=0
+deviation_holds() {
+  local primary=$1 item answer rc rejection
+  case "$REL" in
+    config/*) item=${REL#config/} ;;
+    *) return 1 ;;
+  esac
+  answer=$(fm_config_deviation_evidence "$PARENT_REAL" "$item") && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ] && rejection=$(fm_config_deviation_value_rejection "$DEST"); then
+    answer=$rejection
+    rc=2
+  fi
+  case "$rc" in
+    0)
+      printf 'deviation: %s held locally at %s against primary %s: %s\n' \
+        "$REL" "$(fm_config_deviation_display "$DEST")" \
+        "$(fm_config_deviation_display "$primary")" "$answer"
+      return 0
+      ;;
+    2)
+      printf 'deviation-rejected: %s deviation record rejected (%s); converging to the primary value\n' \
+        "$REL" "$answer"
+      DEVIATION_REJECTED=1
+      ;;
+  esac
+  return 1
+}
+
+# Preserve the receiver's ordinary refusal for unsafe inherited destinations.
+# A rejected deviation is the narrow exception: it has already been named to
+# the primary and must now converge through the same replacement boundary as a
+# safe ordinary file. An empty directory can be removed without discarding
+# data; a nonempty directory still fails closed after the named rejection.
+refuse_unsafe_destination() {
+  local rejection
+  rejection=$(fm_config_deviation_value_rejection "$DEST") || return 0
+  case "$rejection" in
+    "held value is a symlink") die "inherited destination is a symlink" ;;
+    "held value is not an ordinary file") die "inherited destination is not a regular file" ;;
+    *) die "inherited destination is hardlinked" ;;
+  esac
+}
+
+prepare_rejected_deviation_destination() {
+  if [ -d "$DEST" ] && [ ! -L "$DEST" ]; then
+    rmdir -- "$DEST" || die "cannot replace rejected deviation destination"
+  fi
 }
 
 quarantine_shared() {
@@ -146,10 +199,24 @@ case "$COMMAND" in
     [ "$BYTES" -eq "$EXPECTED_BYTES" ] || die "inherited material length does not match its commitment"
     ACTUAL_HASH=$(sha256_file "$TMP") || die "cannot hash inherited material"
     [ "$ACTUAL_HASH" = "$EXPECTED_HASH" ] || die "inherited material digest does not match its commitment"
-    commit_generation
-    if [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
+    validate_generation
+    DESTINATION_UNSAFE=0
+    if fm_config_deviation_value_rejection "$DEST" >/dev/null; then
+      DESTINATION_UNSAFE=1
+      deviation_holds "$TMP" && exit 0
+      [ "$DEVIATION_REJECTED" -eq 1 ] || refuse_unsafe_destination
+    fi
+    if [ "$DESTINATION_UNSAFE" -eq 1 ]; then
+      prepare_rejected_deviation_destination
+    fi
+    if [ "$DESTINATION_UNSAFE" -eq 0 ] && [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
       [ "$REL" != data/captain-shared.md ] || chmod 444 "$DEST"
+      commit_generation
       printf 'unchanged: %s\n' "$REL"
+      exit 0
+    fi
+    if [ "$DEVIATION_REJECTED" -eq 0 ] && deviation_holds "$TMP"; then
+      commit_generation
       exit 0
     fi
     quarantine_shared replaced
@@ -157,6 +224,7 @@ case "$COMMAND" in
     mv -f -- "$TMP" "$DEST" || die "cannot publish inherited material"
     TMP=
     [ "$REL" != data/captain-shared.md ] || chmod 444 "$DEST"
+    commit_generation
     printf 'pushed: %s\n' "$REL"
     ;;
   absent)
@@ -166,13 +234,28 @@ case "$COMMAND" in
     EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload"
     rm -f -- "$EMPTY"
     [ "$EMPTY_HASH" = "$EXPECTED_HASH" ] || die "absent inheritance digest is not the empty payload"
-    commit_generation
-    if [ ! -e "$DEST" ]; then
+    validate_generation
+    DESTINATION_UNSAFE=0
+    if fm_config_deviation_value_rejection "$DEST" >/dev/null; then
+      DESTINATION_UNSAFE=1
+      deviation_holds "$EMPTY" && exit 0
+      [ "$DEVIATION_REJECTED" -eq 1 ] || refuse_unsafe_destination
+    fi
+    if [ "$DESTINATION_UNSAFE" -eq 1 ]; then
+      prepare_rejected_deviation_destination
+    fi
+    if [ "$DESTINATION_UNSAFE" -eq 0 ] && [ ! -e "$DEST" ] && [ ! -L "$DEST" ]; then
+      commit_generation
       printf 'unchanged: %s\n' "$REL"
+      exit 0
+    fi
+    if [ "$DEVIATION_REJECTED" -eq 0 ] && deviation_holds "$EMPTY"; then
+      commit_generation
       exit 0
     fi
     quarantine_shared removed
     rm -f -- "$DEST" || die "cannot remove absent inherited material"
+    commit_generation
     printf 'removed: %s\n' "$REL"
     ;;
   *) usage ;;

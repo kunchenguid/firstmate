@@ -440,7 +440,7 @@ else
 fi
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home harness positional model effort backend out rc meta tmp inherit_out
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
@@ -573,10 +573,10 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id inheritance generation could not be published" >&2
     return 1
   fi
-  if "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" >/dev/null; then
-    :
-  else
-    rc=$?
+  rc=0
+  inherit_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation") || rc=$?
+  printf '%s\n' "$inherit_out" | fm_config_relay_remote_deviations "$id"
+  if [ "$rc" -ne 0 ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true

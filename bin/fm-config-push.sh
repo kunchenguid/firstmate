@@ -13,6 +13,8 @@
 # fm-config-inherit-lib.sh. Remote routes receive one durable marked reread nudge
 # through their SSH route. Unchanged config and data/captain-shared.md-only
 # updates send no reread unless a previous send failure is pending for that home.
+# An item a home holds under its own evidence-backed deviation record is
+# reported as a named divergence line and left alone (fm-config-inherit-lib.sh).
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
 set -u
 
@@ -29,7 +31,7 @@ This is local-material-only:
     one durable marked remote reread nudge
     (no message when config is unchanged unless a previous send failure is pending)
   - reports each live home and each inheritable item as pushed, unchanged,
-    skipped, or error
+    deviated, skipped, or error
   - exits non-zero for real propagation errors or reread-send failures
 
 Live homes come from state/*.meta records with kind=secondmate.
@@ -145,9 +147,22 @@ while IFS='|' read -r id home _window meta; do
       fm_lock_release "$remote_lock" || true
       continue
     fi
-    if remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
-      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
-      printf '%s\n' "$remote_out" | sed 's/^/  /'
+    remote_status=0
+    remote_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1) \
+      || remote_status=$?
+    printf '%s\n' "$remote_out" | fm_config_relay_remote_deviations "$id"
+    if [ -n "$remote_out" ]; then
+      while IFS= read -r remote_line; do
+        case "$remote_line" in
+          deviation:*|deviation-rejected:*) ;;
+          *) printf '  %s\n' "$remote_line" ;;
+        esac
+      done <<EOF
+$remote_out
+EOF
+    fi
+    if [ "$remote_status" -eq 0 ]; then
       remote_nudge=0
       if printf '%s\n' "$remote_out" | grep -Eq '^(pushed|removed):'; then remote_nudge=1; fi
       [ "$remote_pending" -eq 0 ] || remote_nudge=1
@@ -164,7 +179,6 @@ while IFS='|' read -r id home _window meta; do
         rm -f -- "$remote_marker"
       fi
     else
-      [ -z "$remote_out" ] || printf '%s\n' "$remote_out" | sed 's/^/  /'
       errors=1
     fi
     fm_lock_release "$remote_lock" || true
