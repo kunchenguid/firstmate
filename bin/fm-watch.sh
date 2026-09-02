@@ -82,8 +82,11 @@
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
-#                          FM_SECONDMATE_WAKE_STALL_SECS; observation is read-only
-#                          and one parent receipt suppresses repeats for that row
+#                          FM_SECONDMATE_WAKE_STALL_SECS without a later durable
+#                          actionable-wake handoff in that home; a handoff at or
+#                          after the row keeps the detector quiet at any row age.
+#                          Observation is read-only and one parent receipt
+#                          suppresses repeats for that row
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -215,7 +218,8 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A local secondmate's foreign queue is checked on every poll, but only after this
-# bounded age can it produce a parent notification.
+# bounded age, and only without a later actionable-wake handoff in that home, can
+# it produce a parent notification.
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
@@ -625,7 +629,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
+  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age progress progress_state _progress_epoch progress_seq _progress_writer_pid progress_pid _progress_token progress_age extra tab reason
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -660,6 +664,40 @@ EOF
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     age=$((now - epoch))
     [ "$age" -ge "$threshold" ] || continue
+    progress=
+    if [ -f "$home/state/.watch-delivery-progress" ] && [ ! -L "$home/state/.watch-delivery-progress" ]; then
+      progress=$(awk -F '\t' '
+        NR == 1 && NF == 6 && ($1 == "inflight" || $1 == "committed") && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $6 ~ /^[A-Za-z0-9._-]+$/ { value = $0 }
+        END { if (NR == 1) print value }
+      ' "$home/state/.watch-delivery-progress" 2>/dev/null || true)
+    fi
+    tab=$(printf '\t')
+    IFS="$tab" read -r progress_state _progress_epoch progress_seq _progress_writer_pid progress_pid _progress_token extra <<EOF
+$progress
+EOF
+    case "$progress_seq" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ -z "$extra" ] && [ "$progress_seq" -ge "$seq" ]; then
+          case "$progress_state" in
+            committed)
+              continue
+              ;;
+            inflight)
+              progress_age=$(fm_path_age "$home/state/.watch-delivery-progress")
+              case "$progress_age" in
+                ''|*[!0-9]*) ;;
+                *)
+                  if [ "$progress_age" -ge 0 ] && [ "$progress_age" -lt "$WATCH_DELIVERY_INFLIGHT_MAX_AGE" ] && fm_pid_alive "$progress_pid"; then
+                    continue
+                  fi
+                  ;;
+              esac
+              ;;
+          esac
+        fi
+        ;;
+    esac
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then
@@ -1051,7 +1089,6 @@ procevent_surface_after_output() {
       fi
     done
   fi
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 
@@ -1059,14 +1096,14 @@ procevent_surface_queued() {
   local key reason
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  watch_delivery_serialization_acquire || return 1
   while IFS= read -r key; do
     case "$key" in procevent:*) ;; *) continue ;; esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
   done < <(fm_wake_queued_keys_locked check)
   if [ -z "$PROCEVENT_SURFACED" ]; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    watch_delivery_serialization_release
     return 0
   fi
   reason="check: process-event result captured:$PROCEVENT_SURFACED"

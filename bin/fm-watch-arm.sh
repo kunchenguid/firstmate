@@ -104,6 +104,13 @@ lock_snapshot() {
 WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
 WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
 
+confirm_watch_delivery() {
+  local token=${1:-} watcher_pid=${2:-}
+  FM_STATE_OVERRIDE="$STATE" FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    bash -c '. "$1"; watch_delivery_progress_confirm "$2" "$3"' \
+    _ "$SCRIPT_DIR/fm-push-transition-lib.sh" "$token" "$watcher_pid"
+}
+
 cycle_active=0
 cycle_watcher_pid=none
 cycle_watcher_identity=none
@@ -298,7 +305,9 @@ close_unobserved_cycle() {
   fi
   fm_lock_release "$WATCH_DELIVERY_LOCK"
   if [ -n "$reason" ]; then
-    printf '%s\n' "$reason"
+    if printf '%s\n' "$reason"; then
+      confirm_watch_delivery "" "$cycle_watcher_pid" >/dev/null 2>&1 || true
+    fi
     return 0
   fi
   fail_unexplained_cycle
@@ -368,8 +377,14 @@ watch_output_reason_type() {
 }
 
 print_watch_output() {
-  local out=$1
-  [ -s "$out" ] && cat "$out"
+  local out=$1 status
+  [ -s "$out" ] || return 1
+  cat "$out"
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    confirm_watch_delivery "${child_confirm_token:-}" "${child:-}" >/dev/null 2>&1 || true
+  fi
+  return "$status"
 }
 
 handling_successor_generation() {
@@ -448,6 +463,7 @@ fi
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
 child_out=
+child_confirm_token=
 cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
@@ -478,10 +494,11 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
+child_confirm_token="${BASHPID:-$$}.$(date +%s).${RANDOM:-0}"
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
-  FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
+  FM_WATCH_DELIVERY_CONFIRM_TOKEN="$child_confirm_token" FM_WATCH_DELIVERY_CONFIRM_PID="$ARM_PID" FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
-  "$WATCH" >"$child_out" &
+  FM_WATCH_DELIVERY_CONFIRM_TOKEN="$child_confirm_token" FM_WATCH_DELIVERY_CONFIRM_PID="$ARM_PID" "$WATCH" >"$child_out" &
 fi
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"

@@ -3,7 +3,7 @@
 #
 # The watcher and event-wait smoke tests source this library instead of loading
 # the whole watcher to obtain handle_push_transition. Its source list is limited
-# to the four production boundaries the transition handler actually calls.
+# to the production boundaries the transition handler actually calls.
 
 FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -15,6 +15,8 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-transition-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-timeout-lib.sh"
 
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
@@ -25,8 +27,13 @@ FM_WAKE_POST_OUTPUT_ACTION=
 FM_WATCH_DELIVERED_REASON=
 FM_WATCH_DELIVERY_PID=
 FM_WATCH_DELIVERY_IDENTITY=
+FM_WAKE_QUEUE_LOCK_HELD=0
+FM_WAKE_PROGRESS_LOCK_HELD=0
 WATCH_DELIVERY_LOG="$STATE/.watch-deliveries.log"
 WATCH_DELIVERY_LOCK="$STATE/.watch-deliveries.lock"
+WATCH_DELIVERY_PROGRESS="$STATE/.watch-delivery-progress"
+WATCH_DELIVERY_PROGRESS_LOCK="$STATE/.watch-delivery-progress.lock"
+WATCH_DELIVERY_INFLIGHT_MAX_AGE=5
 WATCH_DELIVERY_MAX_BYTES=${FM_WATCH_DELIVERY_MAX_BYTES:-65536}
 WATCH_DELIVERY_KEEP_LINES=${FM_WATCH_DELIVERY_KEEP_LINES:-64}
 case "$WATCH_DELIVERY_MAX_BYTES" in ''|*[!0-9]*|0) WATCH_DELIVERY_MAX_BYTES=65536 ;; esac
@@ -38,6 +45,118 @@ watch_delivery_clean_identity() {
 
 watch_delivery_clean_reason() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-4096
+}
+
+watch_delivery_lock_acquire_bounded() {
+  local lock=$1 i=0
+  while ! fm_lock_try_acquire "$lock"; do
+    [ "$i" -lt 20 ] || return 1
+    sleep 0.02
+    i=$((i + 1))
+  done
+}
+
+watch_delivery_serialization_acquire() {
+  case "$FM_WAKE_QUEUE_LOCK_HELD:$FM_WAKE_PROGRESS_LOCK_HELD" in
+    0:0)
+      watch_delivery_lock_acquire_bounded "$WATCH_DELIVERY_PROGRESS_LOCK" || return 1
+      FM_WAKE_PROGRESS_LOCK_HELD=1
+      watch_delivery_lock_acquire_bounded "$FM_WAKE_QUEUE_LOCK" || {
+        fm_lock_release "$WATCH_DELIVERY_PROGRESS_LOCK"
+        FM_WAKE_PROGRESS_LOCK_HELD=0
+        return 1
+      }
+      FM_WAKE_QUEUE_LOCK_HELD=1
+      ;;
+    1:1) ;;
+    *) return 1 ;;
+  esac
+}
+
+watch_delivery_serialization_release() {
+  if [ "$FM_WAKE_QUEUE_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    FM_WAKE_QUEUE_LOCK_HELD=0
+  fi
+  if [ "$FM_WAKE_PROGRESS_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$WATCH_DELIVERY_PROGRESS_LOCK"
+    FM_WAKE_PROGRESS_LOCK_HELD=0
+  fi
+}
+
+watch_delivery_progress_watermark_locked() {
+  local watermark
+  watermark=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || echo 0)
+  case "$watermark" in ''|*[!0-9]*) watermark=0 ;; esac
+  printf '%s\n' "$watermark"
+}
+
+watch_delivery_progress_publish_locked() {
+  local state=$1 watermark=$2 token=$3 owner_pid=$4 transition previous previous_state previous_transition previous_watermark previous_writer_pid previous_owner_pid previous_token extra tab tmp status=0 writer_pid
+  case "$state" in inflight|committed) ;; *) return 1 ;; esac
+  case "$watermark" in ''|*[!0-9]*) return 1 ;; esac
+  case "$token" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  transition=$(date +%s 2>/dev/null) || return 1
+  case "$transition" in ''|*[!0-9]*) return 1 ;; esac
+  case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+  writer_pid=${BASHPID:-$$}
+  case "$writer_pid" in ''|*[!0-9]*) return 1 ;; esac
+  previous=$(awk -F '\t' '
+    NR == 1 && NF == 6 && ($1 == "inflight" || $1 == "committed") && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $6 ~ /^[A-Za-z0-9._-]+$/ { value = $0 }
+    END { if (NR == 1) print value }
+  ' "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true)
+  tab=$(printf '\t')
+  IFS="$tab" read -r previous_state previous_transition previous_watermark previous_writer_pid previous_owner_pid previous_token extra <<EOF
+$previous
+EOF
+  if [ -z "$extra" ] && { [ "$previous_state" = inflight ] || [ "$previous_state" = committed ]; }; then
+    case "$previous_transition:$previous_watermark:$previous_writer_pid:$previous_owner_pid:$previous_token" in
+      *[!A-Za-z0-9._:-]*) ;;
+      *)
+        if [ "$previous_transition" -gt "$transition" ]; then
+          transition=$previous_transition
+        fi
+        ;;
+    esac
+  fi
+  tmp=$(umask 077; mktemp "$STATE/.watch-delivery-progress.XXXXXX" 2>/dev/null) || status=1
+  if [ "$status" -eq 0 ]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$state" "$transition" "$watermark" "$writer_pid" "$owner_pid" "$token" > "$tmp" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    mv -f -- "$tmp" "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || status=1
+  fi
+  [ "$status" -eq 0 ] || rm -f -- "${tmp:-}" 2>/dev/null || true
+  return "$status"
+}
+
+watch_delivery_progress_confirm() {
+  local token=${1:-} expected_pid=${2:-} record state transition watermark writer_pid owner_pid record_token extra tab tmp status=1
+  case "$token" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$expected_pid" in ''|*[!0-9]*) expected_pid= ;; esac
+  [ -n "$token$expected_pid" ] || return 1
+  watch_delivery_lock_acquire_bounded "$WATCH_DELIVERY_PROGRESS_LOCK" || return 1
+  record=$(awk -F '\t' '
+    NR == 1 && NF == 6 && $1 == "inflight" && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $6 ~ /^[A-Za-z0-9._-]+$/ { value = $0 }
+    END { if (NR == 1) print value }
+  ' "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true)
+  tab=$(printf '\t')
+  IFS="$tab" read -r state transition watermark writer_pid owner_pid record_token extra <<EOF
+$record
+EOF
+  if [ -z "$extra" ] && [ "$state" = inflight ] \
+    && { { [ -n "$token" ] && [ "$record_token" = "$token" ]; } \
+      || { [ -n "$expected_pid" ] && [ "$writer_pid" = "$expected_pid" ]; }; }; then
+    tmp=$(umask 077; mktemp "$STATE/.watch-delivery-progress.XXXXXX" 2>/dev/null) || tmp=
+    if [ -n "$tmp" ]; then
+      printf 'committed\t%s\t%s\t%s\t%s\t%s\n' "$transition" "$watermark" "$writer_pid" "$owner_pid" "$record_token" > "$tmp" \
+        && mv -f -- "$tmp" "$WATCH_DELIVERY_PROGRESS" 2>/dev/null \
+        && status=0
+      [ "$status" -eq 0 ] || rm -f -- "$tmp" 2>/dev/null || true
+    fi
+  fi
+  fm_lock_release "$WATCH_DELIVERY_PROGRESS_LOCK"
+  return "$status"
 }
 
 watch_delivery_publish() {
@@ -86,23 +205,44 @@ triage_log() {
 
 # Exit after reporting one actionable wake. Tests override this callback.
 wake() {
-  local output_status=0
+  local output_status=0 progress_watermark=0 serialized=0 inflight=0 confirm_token=${FM_WATCH_DELIVERY_CONFIRM_TOKEN:-direct} progress_owner_pid=${FM_WATCH_DELIVERY_CONFIRM_PID:-${BASHPID:-$$}}
   case "$1" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
+  if watch_delivery_serialization_acquire; then
+    serialized=1
+    progress_watermark=$(watch_delivery_progress_watermark_locked)
+    if watch_delivery_progress_publish_locked inflight "$progress_watermark" "$confirm_token" "$progress_owner_pid"; then
+      inflight=1
+    else
+      printf 'fm-watch: could not publish in-flight actionable wake progress.\n' >&2
+    fi
+  else
+    printf 'fm-watch: actionable wake progress serialization unavailable.\n' >&2
+  fi
   trap '' HUP INT TERM
   [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
-  if echo "$1"; then
+  if fm_run_timed "$((WATCH_DELIVERY_INFLIGHT_MAX_AGE - 3))" bash -c "printf '%s' \"\$1\" && sleep 0.02 && printf '\\n'" _ "$1"; then
     output_status=0
-    watch_delivery_publish "$1" || true
     # shellcheck disable=SC2034 # Read by bin/fm-watch.sh's EXIT cleanup.
     FM_WATCH_DELIVERED_REASON=$1
+    if [ "$inflight" -eq 1 ] && [ "$confirm_token" = direct ] \
+      && ! watch_delivery_progress_publish_locked committed "$progress_watermark" "$confirm_token" "$progress_owner_pid"; then
+      printf 'fm-watch: could not commit actionable wake progress.\n' >&2
+    fi
   else
     output_status=1
+    if [ "$inflight" -eq 1 ]; then
+      rm -f -- "$WATCH_DELIVERY_PROGRESS" 2>/dev/null || true
+    fi
   fi
   if [ -n "$FM_WAKE_POST_OUTPUT_ACTION" ]; then
     "$FM_WAKE_POST_OUTPUT_ACTION" "$output_status" || true
+  fi
+  [ "$serialized" -eq 0 ] || watch_delivery_serialization_release
+  if [ "$output_status" -eq 0 ]; then
+    watch_delivery_publish "$1" || true
   fi
   [ "$output_status" -eq 0 ] || exit "$output_status"
   exit 0

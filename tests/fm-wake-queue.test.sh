@@ -14,6 +14,7 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 GRANT="$ROOT/bin/fm-wake-grant.sh"
+DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
@@ -311,6 +312,350 @@ SH
   ! grep -F 'secondmate wake-loop stalled' "$dir/watch-healthy.out" >/dev/null \
     || fail "a healthy foreign queue produced a stall notification"
   pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
+}
+
+test_secondmate_stall_follows_actionable_handoff_progress() {
+  local dir state sub fakebin transitionbin now aged handoff same oldest i holder_pid holder_ready lock_pid lock_ready lock_release queue_pid queue_ready queue_release inflight_pid future_pid
+  dir=$(make_case secondmate-stall-handoff)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state" "$sub/data" "$sub/bin"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  now=$(date +%s)
+  aged=$((now - 700))
+  handoff=$((now - 800))
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$aged" > "$sub/state/.wake-queue"
+  printf '7\n' > "$sub/state/.wake-queue.seq"
+  fakebin="$dir/fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' "${FM_FAKE_TMUX_WINDOW:-}" ;;
+  capture-pane) cat "${FM_FAKE_TMUX_CAPTURE:-/dev/null}" ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  transitionbin="$dir/transitionbin"
+  mkdir -p "$transitionbin"
+  cat > "$transitionbin/date" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = '+%s' ] || exit 1
+printf '%s\n' "$FM_FAKE_NOW"
+SH
+  chmod +x "$transitionbin/date"
+
+  PATH="$transitionbin:$PATH" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_NOW="$handoff" \
+    bash -c '. "$1"; wake "check: sustained handoff"' \
+    _ "$ROOT/bin/fm-push-transition-lib.sh" > "$dir/handoff.out" \
+    || fail "the actionable handoff boundary failed"
+  grep -Fx 'check: sustained handoff' "$dir/handoff.out" >/dev/null \
+    || fail "the actionable handoff was not delivered"
+  touch -t 202001010000 "$sub/state/.last-watcher-beat"
+  i=1
+  while [ "$i" -le 3 ]; do
+    append_wake "$sub/state" check "traffic-$i" "check: sustained row $i" \
+      || fail "sustained traffic append $i failed"
+    i=$((i + 1))
+  done
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/served.out" 2> "$dir/served.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/served.out" >/dev/null \
+    || fail "a handed-off foreign queue alerted after a clock rollback during a long handling turn: $(cat "$dir/served.out")"
+  if [ -s "$state/.wake-queue" ]; then
+    ! grep -F 'secondmate-wake-loop-mate-' "$state/.wake-queue" >/dev/null \
+      || fail "a handed-off foreign queue published a durable stall notification"
+  fi
+  [ ! -e "$state/.secondmate-wake-stall-mate" ] \
+    || fail "a suppressed row wrote its notification marker, which would silence a later genuine lapse"
+  oldest=$(awk -F '\t' 'NF >= 5 && (!found || $2 < seq) { found = 1; seq = $2 } END { print seq + 0 }' \
+    "$sub/state/.wake-queue")
+  [ "$oldest" -eq 7 ] \
+    || fail "the sustained appends displaced the aged row, so the served leg proved nothing (oldest=$oldest)"
+
+  printf 'malformed\n' > "$sub/state/.watch-delivery-progress"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/abandoned.out" 2> "$dir/abandoned.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/abandoned.out" >/dev/null \
+    || fail "an abandoned foreign queue lost its stall notification: $(cat "$dir/abandoned.out"); err=$(cat "$dir/abandoned.err")"
+
+  : > "$sub/state/.wake-queue"
+  same=$((now - 500))
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check before "check: before same-second handoff"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the pre-handoff same-second append failed"
+  holder_ready="$dir/ledger-ready"
+  FM_STATE_OVERRIDE="$sub/state" bash -c \
+    '. "$1"; fm_lock_acquire_wait "$STATE/.watch-deliveries.lock"; : > "$2"; sleep 2; fm_lock_release "$STATE/.watch-deliveries.lock"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$holder_ready" &
+  holder_pid=$!
+  while [ ! -e "$holder_ready" ]; do sleep 0.02; done
+  PATH="$transitionbin:$PATH" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_NOW="$same" \
+    bash -c '. "$1"; FM_WATCH_DELIVERY_PID=$$; FM_WATCH_DELIVERY_IDENTITY=fixture; wake "check: locked-ledger handoff"' \
+    _ "$ROOT/bin/fm-push-transition-lib.sh" > "$dir/locked-handoff.out" \
+    || fail "the handoff failed while its diagnostic ledger was locked"
+  wait "$holder_pid" || fail "the diagnostic-ledger lock holder failed"
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check after "check: after same-second handoff"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the post-handoff same-second append failed"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/pre-handoff.out" 2> "$dir/pre-handoff.err" || true
+  ! grep -F 'secondmate wake-loop stalled: mate=mate row=11' "$dir/pre-handoff.out" >/dev/null \
+    || fail "a row preceding a same-second handoff alerted despite progress: $(cat "$dir/pre-handoff.out")"
+  tail -n +2 "$sub/state/.wake-queue" > "$sub/state/.wake-queue.next"
+  mv "$sub/state/.wake-queue.next" "$sub/state/.wake-queue"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/post-handoff.out" 2> "$dir/post-handoff.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=12' "$dir/post-handoff.out" >/dev/null \
+    || fail "a row following a same-second handoff was blinded: $(cat "$dir/post-handoff.out"); err=$(cat "$dir/post-handoff.err")"
+
+  : > "$sub/state/.wake-queue"
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check abandoned-inflight "check: abandoned in-flight publication"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the abandoned in-flight append failed"
+  sleep 5 &
+  inflight_pid=$!
+  printf 'inflight\t%s\t13\t%s\t%s\tfixture-active\n' "$same" "$inflight_pid" "$inflight_pid" > "$sub/state/.watch-delivery-progress"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/active-inflight.out" 2> "$dir/active-inflight.err" || true
+  ! grep -F 'secondmate wake-loop stalled: mate=mate row=13' "$dir/active-inflight.out" >/dev/null \
+    || fail "an active in-flight publication alerted before it could commit: $(cat "$dir/active-inflight.out")"
+  kill "$inflight_pid" 2>/dev/null || true
+  wait "$inflight_pid" 2>/dev/null || true
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/abandoned-inflight.out" 2> "$dir/abandoned-inflight.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=13' "$dir/abandoned-inflight.out" >/dev/null \
+    || fail "an abandoned in-flight publication blinded its row: $(cat "$dir/abandoned-inflight.out"); err=$(cat "$dir/abandoned-inflight.err")"
+
+  : > "$sub/state/.wake-queue"
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check future-inflight "check: future-dated in-flight publication"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the future-dated in-flight append failed"
+  sleep 5 &
+  future_pid=$!
+  printf 'inflight\t%s\t14\t%s\t%s\tfixture-future\n' "$same" "$future_pid" "$future_pid" > "$sub/state/.watch-delivery-progress"
+  touch -t 209901010000 "$sub/state/.watch-delivery-progress"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/future-inflight.out" 2> "$dir/future-inflight.err" || true
+  kill "$future_pid" 2>/dev/null || true
+  wait "$future_pid" 2>/dev/null || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=14' "$dir/future-inflight.out" >/dev/null \
+    || fail "a future-dated in-flight publication blinded its row: $(cat "$dir/future-inflight.out"); err=$(cat "$dir/future-inflight.err")"
+
+  : > "$sub/state/.wake-queue"
+  PATH="$transitionbin:$PATH" FM_FAKE_NOW="$same" FM_STATE_OVERRIDE="$sub/state" \
+    bash -c '. "$1"; fm_wake_append check blocked-progress "check: blocked progress lock"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail "the blocked-progress append failed"
+  lock_ready="$dir/progress-lock-ready"
+  lock_release="$dir/progress-lock-release"
+  FM_STATE_OVERRIDE="$sub/state" bash -c \
+    '. "$1"; fm_lock_acquire_wait "$STATE/.watch-delivery-progress.lock"; : > "$2"; while [ ! -e "$3" ]; do sleep 0.02; done; fm_lock_release "$STATE/.watch-delivery-progress.lock"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$lock_ready" "$lock_release" &
+  lock_pid=$!
+  while [ ! -e "$lock_ready" ]; do sleep 0.02; done
+  PATH="$transitionbin:$PATH" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_NOW="$same" \
+    bash -c '. "$1"; wake "check: bounded progress fallback"' \
+    _ "$ROOT/bin/fm-push-transition-lib.sh" > "$dir/bounded-fallback.out" \
+    || fail "the actionable wake failed when progress serialization was unavailable"
+  grep -Fx 'check: bounded progress fallback' "$dir/bounded-fallback.out" >/dev/null \
+    || fail "the actionable wake was not delivered through bounded progress fallback"
+  kill -0 "$lock_pid" 2>/dev/null \
+    || fail "the actionable wake waited for the blocked progress lock instead of falling back"
+  touch "$lock_release"
+  wait "$lock_pid" || fail "the progress-lock holder failed"
+  queue_ready="$dir/queue-lock-ready"
+  queue_release="$dir/queue-lock-release"
+  FM_STATE_OVERRIDE="$sub/state" bash -c \
+    '. "$1"; fm_lock_acquire_wait "$STATE/.wake-queue.lock"; : > "$2"; while [ ! -e "$3" ]; do sleep 0.02; done; fm_lock_release "$STATE/.wake-queue.lock"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$queue_ready" "$queue_release" &
+  queue_pid=$!
+  while [ ! -e "$queue_ready" ]; do sleep 0.02; done
+  PATH="$transitionbin:$PATH" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_NOW="$same" \
+    bash -c '. "$1"; wake "check: bounded queue fallback"' \
+    _ "$ROOT/bin/fm-push-transition-lib.sh" > "$dir/bounded-queue-fallback.out" \
+    || fail "the actionable wake failed when queue serialization was unavailable"
+  grep -Fx 'check: bounded queue fallback' "$dir/bounded-queue-fallback.out" >/dev/null \
+    || fail "the actionable wake was not delivered through bounded queue fallback"
+  kill -0 "$queue_pid" 2>/dev/null \
+    || fail "the actionable wake waited for the blocked queue lock instead of falling back"
+  touch "$queue_release"
+  wait "$queue_pid" || fail "the queue-lock holder failed"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/blocked-progress.out" 2> "$dir/blocked-progress.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=15' "$dir/blocked-progress.out" >/dev/null \
+    || fail "unavailable progress serialization published optimistic state: $(cat "$dir/blocked-progress.out"); err=$(cat "$dir/blocked-progress.err")"
+  pass "foreign queue stalls distinguish committed handoffs from abandoned progress"
+}
+
+test_secondmate_unforwarded_checkpoint_does_not_commit_progress() {
+  local dir state sub direct fakebin crashbin wrapper_rc=0 now
+  dir=$(make_case secondmate-unforwarded-checkpoint)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state" "$sub/data" "$sub/bin"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  now=$(date +%s)
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$((now - 600))" > "$sub/state/.wake-queue"
+  printf '7\n' > "$sub/state/.wake-queue.seq"
+  crashbin="$dir/crashbin"
+  mkdir -p "$crashbin"
+  REAL_CAT=$(command -v cat)
+  export REAL_CAT
+  cat > "$crashbin/cat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */fm-watch-checkpoint.out.*) exit 1 ;;
+esac
+exec "$REAL_CAT" "$@"
+SH
+  chmod +x "$crashbin/cat"
+  PATH="$crashbin:$PATH" FM_HOME="$sub" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/unforwarded.out" 2> "$dir/unforwarded.err" \
+    || wrapper_rc=$?
+  [ "$wrapper_rc" -ne 0 ] || fail "the checkpoint forwarding fault unexpectedly succeeded"
+  [ ! -s "$dir/unforwarded.out" ] || fail "the failed checkpoint unexpectedly forwarded its wake"
+
+  fakebin="$dir/fakebin"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/unforwarded-stall.out" 2> "$dir/unforwarded-stall.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/unforwarded-stall.out" >/dev/null \
+    || fail "an unforwarded checkpoint wake committed optimistic progress: $(cat "$dir/unforwarded-stall.out"); err=$(cat "$dir/unforwarded-stall.err")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/parent-drain.out" 2> "$dir/parent-drain.err" \
+    || fail "the unforwarded checkpoint alert could not be drained"
+  ack_drain_err "$state" "$dir/parent-drain.err" \
+    || fail "the unforwarded checkpoint alert could not be acknowledged"
+
+  direct="$dir/directmate"
+  mkdir -p "$direct/state" "$direct/data" "$direct/bin"
+  printf '# Firstmate\n' > "$direct/AGENTS.md"
+  printf 'directmate\n' > "$direct/.fm-secondmate-home"
+  printf 'window=firstmate:fm-directmate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$direct" > "$state/directmate.meta"
+  printf '%s\t8\tcheck\tdirect\tcheck: direct row\n' "$((now - 600))" > "$direct/state/.wake-queue"
+  printf '8\n' > "$direct/state/.wake-queue.seq"
+  PATH="$fakebin:$PATH" FM_HOME="$direct" FM_STATE_OVERRIDE="$direct/state" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$dir/direct.out" 2> "$dir/direct.err" \
+    || fail "direct watcher invocation failed: $(cat "$dir/direct.err")"
+  grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$dir/direct.out" >/dev/null \
+    || fail "direct watcher invocation did not deliver its wake: $(cat "$dir/direct.out"); err=$(cat "$dir/direct.err")"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-directmate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/direct-stall.out" 2> "$dir/direct-stall.err" || true
+  ! grep -F 'secondmate wake-loop stalled: mate=directmate row=8' "$dir/direct-stall.out" >/dev/null \
+    || fail "a directly delivered wake did not commit handoff progress: $(cat "$dir/direct-stall.out")"
+  pass "checkpoint progress commits only after forwarding while direct delivery still commits"
+}
+
+test_secondmate_away_daemon_crash_does_not_commit_progress() {
+  local dir state sub fakebin daemon_pid i marker_state
+  dir=$(make_case secondmate-away-daemon-crash)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state" "$sub/data" "$sub/bin"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  : > "$sub/state/.afk"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf 'fakepane\n' ;;
+  list-windows) printf 'firstmate:fm-mate\n' ;;
+  capture-pane) printf 'idle prompt $\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_HOME="$sub" FM_STATE_OVERRIDE="$sub/state" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=firstmate:0 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_HOUSEKEEPING_TICK=999999 \
+    "$DAEMON" > "$dir/daemon.out" 2> "$dir/daemon.err" &
+  daemon_pid=$!
+  i=0
+  while [ ! -s "$sub/state/.watch.lock/pid" ] && [ "$i" -lt 100 ]; do
+    kill -0 "$daemon_pid" 2>/dev/null || fail "the away daemon exited before starting its watcher: $(cat "$dir/daemon.err")"
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$sub/state/.watch.lock/pid" ] || fail "the away daemon did not start its watcher"
+  kill -STOP "$daemon_pid" || fail "the away daemon could not be paused before durable handling"
+  append_wake "$sub/state" check routed "check: routed row" \
+    || fail "the away daemon crash fixture could not append its wake"
+  i=0
+  marker_state=
+  while [ "$i" -lt 100 ]; do
+    marker_state=$(awk -F '\t' 'NR == 1 { print $1 }' "$sub/state/.watch-delivery-progress" 2>/dev/null || true)
+    [ "$marker_state" = inflight ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$marker_state" = inflight ] || fail "the daemon-managed watcher did not publish in-flight progress"
+  kill -KILL "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  awk -F '\t' -v OFS='\t' -v old="$(( $(date +%s) - 600 ))" 'NR == 1 { $1 = old } { print }' \
+    "$sub/state/.wake-queue" > "$sub/state/.wake-queue.aged"
+  mv "$sub/state/.wake-queue.aged" "$sub/state/.wake-queue"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 > "$dir/daemon-crash-stall.out" \
+    2> "$dir/daemon-crash-stall.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=1' "$dir/daemon-crash-stall.out" >/dev/null \
+    || fail "an away daemon crash committed optimistic progress: $(cat "$dir/daemon-crash-stall.out"); err=$(cat "$dir/daemon-crash-stall.err")"
+  pass "away daemon progress remains uncommitted until durable handling"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {
@@ -1442,6 +1787,9 @@ test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
+test_secondmate_stall_follows_actionable_handoff_progress
+test_secondmate_unforwarded_checkpoint_does_not_commit_progress
+test_secondmate_away_daemon_crash_does_not_commit_progress
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
