@@ -50,6 +50,7 @@ The turn-end guard remains the final backstop rather than the normal continuity 
 
 A recovery episode is one generation of `state/.watcher-down`, and it is retired only by the generation-bound acknowledgement the drain prints as `WAKE_ACK_REQUIRED`.
 An unacknowledged downtime generation is announced at most once: the first recovery marks that generation announced, and later arms wait until a new down stretch mints a new generation.
+The announcement itself is delivered as a `check: rearm-resurface` wake only when the drain it triggers has something to present - an unacknowledged durable queue row or a still-open decision in a status log - or when the watcher reclaimed a stale lock from a predecessor that died without cleanup; otherwise the generation is consumed silently with one `absorbed rearm-resurface` triage line, so a routine turn-end re-arm gap costs no supervision turn.
 A non-successor watcher start after an announced-but-unacked episode is a new down stretch and mints a fresh generation so buried decisions still resurface once.
 Every watcher close and every durable queue append publishes downtime, so a downtime republication of any pending episode reuses its generation instead of minting a new one, and an already-announced generation stays announced.
 That reuse keeps a watcher close inside the handling window from orphaning the acknowledgement already presented and trapping later arms in repeated recovery presentation.

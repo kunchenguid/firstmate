@@ -3299,6 +3299,76 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
   pass "both first-sight paths through a captain-relevant status drop a finished write-deferral chain with the idle window"
 }
 
+# --- recovery re-surface is delivered only with something to present ----------
+# The live 2026-09-02 case: a Cursor primary re-arms a watcher cycle at every
+# turn end, the new cycle reads the gap as downtime, and the recovery marker
+# said recover - so `check: rearm-resurface` woke firstmate into a drain that
+# printed `--ack-through 0` and nothing else, five times between 10:44 and
+# 12:08. The generation is still consumed exactly as before; only the wake is
+# gated on an unacknowledged queue row or a still-open decision.
+
+recovery_watch_bg() {  # <state> <fakebin> <out>
+  local state=$1 fakebin=$2 out=$3
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+}
+
+test_rearm_resurface_absorbed_when_nothing_to_present() {
+  local dir state fakebin out pid
+  dir=$(make_case rearm-resurface-empty); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'pending:downtime:fixture-gen\n' > "$state/.watcher-down"
+
+  recovery_watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an empty-queue recovery woke firstmate: $(cat "$out")"
+  fi
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an empty-queue recovery woke firstmate on a later poll: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an empty-queue recovery printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an empty-queue recovery enqueued a wake"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'announced:downtime:fixture-gen' ] \
+    || fail "the recovery marker was not consumed to its announced state: $(cat "$state/.watcher-down" 2>/dev/null)"
+  [ "$(grep -cF 'absorbed rearm-resurface' "$state/.watch-triage.log" 2>/dev/null || true)" = 1 ] \
+    || fail "the silent recovery was not logged exactly once: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  reap "$pid"
+  pass "a recovery generation with an empty queue and no open decision is consumed silently"
+}
+
+test_rearm_resurface_delivered_for_queued_row() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case rearm-resurface-queued); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'pending:downtime:fixture-gen\n' > "$state/.watcher-down"
+  append_wake "$state" check startup-network 'check: startup-network queued during downtime' \
+    || fail "could not seed the durable queue"
+
+  recovery_watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a recovery with a queued row did not wake firstmate: $(cat "$out")"
+  grep -Fx 'check: rearm-resurface' "$out" >/dev/null || fail "the queued row was not announced as a recovery wake: $(cat "$out")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'announced:downtime:fixture-gen' ] \
+    || fail "the delivered recovery did not keep its announced generation: $(cat "$state/.watcher-down" 2>/dev/null)"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the recovery wake failed"
+  grep "$(printf '\tcheck\tstartup-network\t')" "$drain_out" >/dev/null || fail "the queued row was not drained"
+  pass "a recovery generation with an unacknowledged queue row is still announced and drained"
+}
+
+test_rearm_resurface_delivered_for_open_decision() {
+  local dir state fakebin out pid
+  dir=$(make_case rearm-resurface-decision); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'needs-decision [key=ship-it]: merge now or wait for the design review\n' > "$state/held.status"
+  printf '%s' "$(seen_sig "$state/held.status")" > "$state/.seen-held_status"
+  printf 'pending:downtime:fixture-gen\n' > "$state/.watcher-down"
+
+  recovery_watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a recovery over a still-open decision did not wake firstmate: $(cat "$out")"
+  grep -Fx 'check: rearm-resurface' "$out" >/dev/null || fail "the open decision was not announced as a recovery wake: $(cat "$out")"
+  pass "a recovery generation with an empty queue but a still-open decision is still announced"
+}
+
 # --- triage debug log stays size capped -------------------------------------
 
 test_triage_log_size_cap_accepts_spaced_wc_counts() {
@@ -3875,6 +3945,9 @@ test_write_deferral_resurfaces_on_the_bounded_cadence
 test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
+test_rearm_resurface_absorbed_when_nothing_to_present
+test_rearm_resurface_delivered_for_queued_row
+test_rearm_resurface_delivered_for_open_decision
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled

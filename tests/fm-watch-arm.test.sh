@@ -540,6 +540,12 @@ test_malformed_marker_is_quarantined_once() {
   fakebin="$dir/fakebin"
   mkdir -p "$home/data" "$state/.watcher-down"
   printf 'foreign state\n' > "$state/.watcher-down/payload"
+  # A durable row gives the quarantined marker's recovery something to present;
+  # with an empty queue the announcement is absorbed (fm-watch-triage covers that).
+  # Written directly because the production appender refuses to publish
+  # downtime while the marker path is a directory.
+  printf '1700000000\t7\tcheck\tstartup-network\tcheck: startup-network behind a malformed marker\n' \
+    > "$state/.wake-queue"
 
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/recovery-arm.out"
   wait_for_exit "$ARM_PID" 80 || fail "malformed marker did not produce a bounded recovery wake"

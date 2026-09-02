@@ -1352,8 +1352,17 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 WATCHER_RECOVERY_PENDING=0
+# A reclaimed stale lock is a watcher that died without cleanup, so its recovery
+# wake is delivered even to an empty drain; the routine marker-driven recovery
+# below is gated on presentable work instead (resurface_after_downtime). The
+# lock library reports its own dead-pid reclaim, and bin/fm-watch-arm.sh sets
+# FM_WATCH_LOCK_RECLAIMED for the child it starts after clearing a reused-pid lock.
+WATCHER_LOCK_RECOVERED=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
+  WATCHER_LOCK_RECOVERED=1
+elif [ "${FM_WATCH_LOCK_RECLAIMED:-0}" = 1 ]; then
+  WATCHER_LOCK_RECOVERED=1
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
@@ -1483,6 +1492,16 @@ retire_merged_pr_poll() {  # <id>
   fi
 }
 
+# 0 when the drain a recovery wake triggers has something to present: an
+# unacknowledged durable queue row, or a decision still open in a status log
+# (the buried-decision case docs/watcher-continuity.md's recovery episode
+# exists for). Both reads are pure; the open-decision fold is the whole-file
+# owner in fm-classify-lib.sh, so this never advances the drain's cursors.
+recovery_has_presentable_work() {
+  [ -s "$FM_WAKE_QUEUE" ] && return 0
+  [ -n "$(scan_open_decisions "$STATE")" ]
+}
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -1497,7 +1516,15 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
-  wake "check: rearm-resurface"
+  if [ "$WATCHER_LOCK_RECOVERED" -eq 1 ] || recovery_has_presentable_work; then
+    wake "check: rearm-resurface"
+  fi
+  # Nothing to present: the marker was consumed above exactly as before (the
+  # generation is already announced), so the routine re-arm gap a Cursor or
+  # Claude primary opens at every turn end costs no supervision turn. A later
+  # append reuses that announced generation and its drain acknowledges it.
+  WATCHER_RECOVERY_PENDING=0
+  triage_log "absorbed rearm-resurface (queue empty, no open decisions)"
 }
 
 while :; do
