@@ -421,6 +421,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/pi-watch-extension-reply-recovery.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/process-event-sources.md",
       "audience": "maintainer-verification"
     },
