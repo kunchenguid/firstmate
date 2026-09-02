@@ -210,36 +210,69 @@ SH
 # argv[0], so a symlink carries it - and a copy is actively wrong there, because
 # copying Apple's signed /bin/bash produces a binary that still claims
 # Identifier=com.apple.bash but no longer validates, and the platform SIGKILLs
-# it (exit 137) the moment it is executed. Each construction is therefore TRIED
-# and PROVEN by asking the copy/symlink to report its own name, rather than
-# selected from a guess about the host.
+# it the moment it is executed. The winning construction is PROVEN by asking the
+# result to report its own name, never guessed from the host.
+#
+# Which construction wins is a property of the HOST, not of <name>, so it is
+# resolved once and cached. That matters for cost, not tidiness: on macOS the
+# copy attempt is doomed, and every doomed attempt pays a full code-signature
+# evaluation before the kernel kills it, which measurably slowed a suite that
+# builds a dozen named processes.
+#
+# The cache is a file rather than a shell variable because callers capture the
+# echoed path with command substitution, and an assignment made inside that
+# subshell would never reach the caller - the cache would silently never hit.
+# A stale or unreadable cache is harmless: the recorded method is still proven
+# on every call, and a method that stops working falls back to a full search
+# and re-records the winner.
 #
 # The probe deliberately runs TWO statements. A bash `-c` carrying a single
 # command is exec'd in place, which replaces the very process name being
 # measured, so a one-statement probe reports the probe tool instead.
+# Host-scoped cache path. Keyed by the resolved bash, so a different bash on the
+# same host is resolved independently rather than inheriting a stale verdict.
+fm_test_named_interpreter_cache() {  # <real-bash>
+  local key
+  key=$(printf '%s' "$1" | tr -c '[:alnum:]' '_')
+  printf '%s/fm-test-named-interp.%s.%s' "${TMPDIR:-/tmp}" "${UID:-0}" "$key"
+}
+
+# Build <dir>/<name> with <method> and echo it when the process table agrees.
+fm_test_named_interpreter_try() {  # <method> <dir> <name> <real-bash>
+  local method=$1 path="$2/$3" name=$3 real=$4 reported
+  rm -f "$path"
+  case "$method" in
+    copy) cp "$real" "$path" 2>/dev/null && chmod +x "$path" 2>/dev/null || return 1 ;;
+    symlink) ln -s "$real" "$path" 2>/dev/null || return 1 ;;
+    *) return 1 ;;
+  esac
+  # shellcheck disable=SC2016  # the probe body is evaluated by the CHILD shell, not this one
+  reported=$("$path" -c 'p=$(ps -o comm= -p $$); printf "%s" "$p"' 2>/dev/null || true)
+  [ "$(basename -- "${reported:-}")" = "$name" ] && return 0
+  rm -f "$path"
+  return 1
+}
+
 fm_test_named_interpreter() {  # <dir> <name>
-  local dir=$1 name=$2 path="$1/$2" real reported
+  local dir=$1 name=$2 real method cache cached=
   real=$(command -v bash) || return 1
   mkdir -p "$dir"
-  rm -f "$path"
-  if cp "$real" "$path" 2>/dev/null && chmod +x "$path" 2>/dev/null; then
-    # shellcheck disable=SC2016  # the probe body is evaluated by the CHILD shell, not this one
-    reported=$("$path" -c 'p=$(ps -o comm= -p $$); printf "%s" "$p"' 2>/dev/null || true)
-    if [ "$(basename -- "${reported:-}")" = "$name" ]; then
-      printf '%s\n' "$path"
+  cache=$(fm_test_named_interpreter_cache "$real")
+  [ -f "$cache" ] && IFS= read -r cached < "$cache" 2>/dev/null
+  if [ -n "$cached" ] && fm_test_named_interpreter_try "$cached" "$dir" "$name" "$real"; then
+    printf '%s\n' "$dir/$name"
+    return 0
+  fi
+  for method in copy symlink; do
+    if fm_test_named_interpreter_try "$method" "$dir" "$name" "$real"; then
+      # Best effort: a host that cannot cache simply re-searches next time.
+      if printf '%s\n' "$method" > "$cache.$$" 2>/dev/null; then
+        mv -f "$cache.$$" "$cache" 2>/dev/null || rm -f "$cache.$$" 2>/dev/null
+      fi
+      printf '%s\n' "$dir/$name"
       return 0
     fi
-  fi
-  rm -f "$path"
-  if ln -s "$real" "$path" 2>/dev/null; then
-    # shellcheck disable=SC2016  # the probe body is evaluated by the CHILD shell, not this one
-    reported=$("$path" -c 'p=$(ps -o comm= -p $$); printf "%s" "$p"' 2>/dev/null || true)
-    if [ "$(basename -- "${reported:-}")" = "$name" ]; then
-      printf '%s\n' "$path"
-      return 0
-    fi
-  fi
-  rm -f "$path"
+  done
   return 1
 }
 

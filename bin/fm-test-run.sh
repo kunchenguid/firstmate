@@ -509,7 +509,7 @@ list_portable_serial() {
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-inject-e2e.test.sh 35792
-tests/fm-agy-harness.test.sh 23900
+tests/fm-agy-harness.test.sh 58800
 tests/fm-agy-surface-live-e2e.test.sh 25
 tests/fm-afk-pi-herdr-return-e2e.test.sh 100
 tests/fm-afk-return.test.sh 1837
