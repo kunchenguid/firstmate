@@ -853,4 +853,6 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
-exit "$outcome_rc"
+# The merge landed: the actionable line above is the loud report for a failed
+# outcome record, never a failed merge exit code. The armed poll and the
+# durable wake row own at-least-once recovery of the record.

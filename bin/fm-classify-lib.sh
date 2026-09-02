@@ -1504,7 +1504,11 @@ crew_worktree_custody_lost() {  # <id> <state>
     1) return 1 ;;
   esac
   canonical=$(crew_worktree_custody_canonical_id "$state" "$abs" 2>/dev/null || true)
-  [ -n "$canonical" ] || return 0
+  # No treehouse holder and no recorded lease anywhere means there is no
+  # evidence another task holds this worktree: unpinned legacy metadata may
+  # share a path, and fail-closed displacement needs a named holder, not the
+  # mere absence of one. Trust the recorded worktree in that case.
+  [ -n "$canonical" ] || return 1
   [ "$canonical" = "$id" ] || return 0
   return 1
 }

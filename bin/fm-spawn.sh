@@ -3711,26 +3711,22 @@ OWNED_TASK_TMP=$TASK_TMP
 # mandatory: installation or runtime failure refuses the commit so a forbidden
 # agent trailer cannot enter permanent history.
 install_agent_coauthor_sanitizer() {
-  local hooks=$TASK_TMP/git-hooks original_hooks prior_count next_count hook original relay raw_count
+  local hooks=$TASK_TMP/git-hooks original_hooks prior_count next_count hook original relay
   local -a task_git
   if [ "$ACCESS" = reader ]; then
     task_git=(git --git-dir="$WT/repo.git")
   else
     task_git=(git -C "$WT")
   fi
-  raw_count=${GIT_CONFIG_COUNT:-0}
-  case "$raw_count" in
-    ''|*[!0-9]*)
-      echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
-      return 1
-      ;;
-  esac
-  prior_count=$((10#$raw_count))
-  next_count=$((prior_count + 1))
+  # The parent process may use an in-memory Git config overlay for its own
+  # hooks. It must not hide the project's configured hooks while this task's
+  # relay is composed, nor leak into the worker's launch environment.
+  prior_count=0
+  next_count=1
   hook=$hooks/commit-msg
-  original_hooks=$("${task_git[@]}" config --path --get core.hooksPath 2>/dev/null || true)
+  original_hooks=$(GIT_CONFIG_COUNT=0 "${task_git[@]}" config --path --get core.hooksPath 2>/dev/null || true)
   if [ -z "$original_hooks" ]; then
-    original_hooks=$("${task_git[@]}" rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
+    original_hooks=$(GIT_CONFIG_COUNT=0 "${task_git[@]}" rev-parse --path-format=absolute --git-path hooks 2>/dev/null) || {
       echo "error: agent co-author sanitizer installation failed; refusing worker launch" >&2
       return 1
     }

@@ -875,6 +875,20 @@ test_concurrent_watcher_sees_only_complete_publication() {
   while [ "$n" -le 3 ]; do
     dir=$(make_case "concurrent-$n")
     write_task_meta "$dir"
+    # The fork's watcher stale-triages an unreadable endpoint on first sight
+    # (fm-watch.sh's endpoint-gone path, pinned by the watch-triage suite), so
+    # this publication-atomicity fixture must give the task a readable pane -
+    # the same stub shape sibling fixtures in this file use - or the watcher
+    # exits on a stale wake before the direct arming finishes publishing.
+    cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  capture-pane) printf 'all quiet\n> \n' ;;
+  display-message) printf '%%1\n' ;;
+esac
+exit 0
+SH
+    chmod +x "$dir/fakebin/tmux"
     cat > "$dir/fakebin/cp" <<SH
 #!/usr/bin/env bash
 '$REAL_CP' "\$@" || exit 1

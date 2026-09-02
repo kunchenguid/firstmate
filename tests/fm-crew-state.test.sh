@@ -1687,6 +1687,42 @@ test_duplicate_metadata_without_treehouse_holder_selects_latest_lease() {
   pass "duplicate metadata without a treehouse holder selects the latest lease"
 }
 
+# Unpinned duplicate metadata (no treehouse_lease anywhere, no treehouse holder)
+# carries no evidence that another task holds the worktree. Custody must not fail
+# closed on the mere absence of a holder: that displaced every legacy shared-path
+# task (the regression behind the bearings "live blocked work projected as queued"
+# failure). Each claimant keeps observing its own recorded state.
+test_unpinned_duplicate_metadata_keeps_custody() {
+  reset_fakes
+  local d fb wt out
+  d=$(new_case unpinned-duplicates-keep-custody)
+  fb=$(make_fakebin "$d")
+  wt="$d/wt"
+  mkdir -p "$wt" "$d/project"
+  wt=$(CDPATH='' cd "$wt" && pwd -P)
+  fm_write_meta "$d/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" \
+    "worktree=$wt" \
+    "project=$d/project" \
+    "kind=ship" \
+    "harness=claude"
+  fm_write_meta "$d/state/scout-x.meta" \
+    "window=firstmate:fm-scout-x" \
+    "worktree=$wt" \
+    "project=$d/project" \
+    "kind=scout" \
+    "harness=claude"
+  printf 'blocked: waiting on a token refresh\n' > "$d/state/ship-task.status"
+  arm_idle_record "$d/state" ship-task
+  out=$(PATH="$fb:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CLASSIFY_TREEHOUSE_STATUS_JSON='[]' "$CREW_STATE" ship-task)
+  assert_not_contains "$out" "worktree custody lost" \
+    "unpinned duplicate metadata must not displace a task for lack of a holder"
+  assert_contains "$out" "state: blocked" \
+    "a retained task still projects its own status-log state"
+  pass "unpinned duplicate metadata keeps custody when no holder or lease exists"
+}
+
 test_recycled_slot_worker_liveness_reports_absent_endpoint() {
   reset_fakes
   local d fb wt json out repo
@@ -1843,6 +1879,7 @@ test_non_pipeline_owned_unresolvable_head_not_attributed
 test_pipeline_owned_terminal_run_not_exempt
 test_recycled_slot_custody_lost_for_stale_task
 test_duplicate_metadata_without_treehouse_holder_selects_latest_lease
+test_unpinned_duplicate_metadata_keeps_custody
 test_recycled_slot_worker_liveness_reports_absent_endpoint
 test_recycled_slot_worker_liveness_reports_live_endpoint
 test_missing_run_head_falls_back_to_current_state

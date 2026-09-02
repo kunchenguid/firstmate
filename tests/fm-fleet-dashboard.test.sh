@@ -26,6 +26,12 @@ export PATH="$TEST_BOOTSTRAP_BIN:$PATH"
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 FM_TEST_CLEANUP_DIRS+=("$TEST_BOOTSTRAP_BIN")
 
+# The dashboard derives its state directory from FM_STATE_OVERRIDE ahead of
+# FM_HOME (the fleet override contract), so an ambient override from a caller's
+# safety wrapper would silently swap the fixture home's state for scratch and
+# blank every render. These renders are read-only, so pin the override away.
+unset FM_STATE_OVERRIDE
+
 DASHBOARD=${FM_DASHBOARD_UNDER_TEST:-"$ROOT/bin/fm-fleet-dashboard.mjs"}
 if [ -n "${FM_DASHBOARD_TEST_TMP_ROOT:-}" ]; then
   TMP_ROOT=$FM_DASHBOARD_TEST_TMP_ROOT

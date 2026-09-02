@@ -448,8 +448,12 @@ glab_merge_line() {
 
 run_pr_merge() {
   local case_dir=$1 rc; shift
+  # The fallback home must stay inside the case scratch: a checkout carrying
+  # secondmate identity markers would otherwise route landed-merge outcomes
+  # into that marker's parent home (a live fleet home).
+  mkdir -p "$case_dir/home"
   FM_ROOT_OVERRIDE="$ROOT" \
-  FM_HOME="${FM_TEST_HOME:-$ROOT}" \
+  FM_HOME="${FM_TEST_HOME:-$case_dir/home}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
@@ -1975,6 +1979,79 @@ test_secondmate_merge_reports_on_the_local_route() {
   pass "a locally routed secondmate home reports the landed PR into its parent's own channel"
 }
 
+# Regression: run_pr_merge's FM_HOME fallback pointed at the repository checkout,
+# so a worktree carrying secondmate identity markers (.fm-secondmate-home plus a
+# route=local parent record) routed landed-merge outcome lines into that marker's
+# live parent home - false merge events against a real fleet home. The fallback
+# home must stay inside the case scratch so no ambient marker can redirect an
+# outcome write outside it.
+test_fallback_home_never_routes_outcomes_through_ambient_markers() {
+  local case_dir url marker parent_record parent_home ambient_status before_tmp rc created_identity
+  url=https://github.com/example/repo/pull/78
+  case_dir=$(make_case fallback-home-isolation)
+  add_gh_mocks "$case_dir" 7878787878787878787878787878787878787878
+  : >"$case_dir/gh-axi.log"
+
+  marker="$ROOT/.fm-secondmate-home"
+  parent_record="$ROOT/.fm-secondmate-parent"
+  created_identity=0
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ] && [ ! -e "$parent_record" ] && [ ! -L "$parent_record" ]; then
+    parent_home="$case_dir/ambient-parent"
+    mkdir -p "$parent_home/state"
+    printf '%s\n' fallback-home-test > "$marker"
+    {
+      printf 'schema=fm-secondmate-parent.v1\n'
+      printf 'route=local\n'
+      printf 'parent_home=%s\n' "$parent_home"
+    } > "$parent_record"
+    created_identity=1
+  elif [ ! -f "$marker" ] || [ ! -f "$parent_record" ] || ! grep -q '^route=local$' "$parent_record"; then
+    fail "fallback-home-isolation: cannot establish a safe local-route identity fixture at the test root"
+  fi
+  ambient_status=
+  before_tmp=
+  parent_home=$(sed -n 's/^parent_home=//p' "$parent_record" | tail -1)
+  if [ -n "$parent_home" ]; then
+    ambient_status="$parent_home/state/$(cat "$marker").status"
+    before_tmp=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-ambient.XXXXXX")
+    if [ -f "$ambient_status" ]; then
+      cp "$ambient_status" "$before_tmp"
+    else
+      : > "$before_tmp"
+    fi
+  fi
+
+  # FM_TEST_HOME deliberately unset: this is the fallback-home path the defect used.
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || {
+      [ "$created_identity" -eq 1 ] && rm -f "$marker" "$parent_record"
+      fail "fallback-home-isolation: merge failed"
+    }
+
+  if [ -n "$ambient_status" ]; then
+    leaked=0
+    if [ -e "$ambient_status" ]; then
+      cmp -s "$before_tmp" "$ambient_status" 2>/dev/null || leaked=1
+    elif [ -s "$before_tmp" ]; then
+      leaked=1
+    fi
+    if [ "$leaked" -eq 1 ]; then
+      # Restore the ambient home byte-for-byte so a red run leaves no fleet pollution.
+      cp "$before_tmp" "$ambient_status"
+      [ -s "$ambient_status" ] || rm -f "$ambient_status"
+      rm -f "$before_tmp"
+      [ "$created_identity" -eq 1 ] && rm -f "$marker" "$parent_record"
+      fail "fallback-home-isolation: the fallback home's ambient secondmate markers routed a landed-merge outcome into $ambient_status"
+    fi
+    rm -f "$before_tmp"
+  fi
+  [ "$created_identity" -eq 1 ] && rm -f "$marker" "$parent_record"
+  assert_grep "$url" "$case_dir/state/.wake-queue" \
+    "fallback-home-isolation: the fallback home's outcome did not stay inside the case scratch"
+  pass "the merge entrypoint's fallback home never reports outcomes through ambient identity markers"
+}
+
 test_failed_merge_reports_nothing() {
   local case_dir rc
   case_dir=$(make_home_case failed-merge-silent remote)
@@ -2178,7 +2255,7 @@ SH
     >"$case_dir/stdout-1" 2>"$case_dir/stderr-1"
   rc=$?
   set -e
-  expect_code 1 "$rc" "uncommitted-wake-retry: outcome publication failure should propagate"
+  expect_code 0 "$rc" "uncommitted-wake-retry: the merge itself landed and must not be reported as failed"
   assert_grep 'could not record the outcome' "$case_dir/stderr-1" \
     "uncommitted-wake-retry: failed marker commit was not loud"
   [ -f "$case_dir/state/task-x1.check.sh" ] \
@@ -2217,7 +2294,7 @@ test_secondmate_without_parent_binding_is_loud() {
   rc=$?
   set -e
 
-  expect_code 3 "$rc" "unbound-secondmate: outcome publication failure should propagate"
+  expect_code 0 "$rc" "unbound-secondmate: the merge itself landed and must not be reported as failed"
   assert_grep 'could not report it upward' "$case_dir/stderr" \
     "unbound-secondmate: a merge that could not be reported upward said nothing about it"
   assert_absent "$case_dir/state/.wake-queue" \
@@ -2687,6 +2764,7 @@ test_gitlab_missing_tool_refuses_before_recording
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
+test_fallback_home_never_routes_outcomes_through_ambient_markers
 test_gitlab_merge_reports_upward
 test_queued_gitlab_merge_leaves_the_poll_armed
 test_gitlab_post_merge_confirmation_failures_leave_poll_armed
