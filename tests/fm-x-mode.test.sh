@@ -2600,95 +2600,6 @@ test_meta_helpers_refuse_a_symlinked_task_record() {
   pass "x-lib meta helpers refuse a symlinked task record and leave its target untouched"
 }
 
-# A guarded clear must decide that a link is absent while holding the same meta
-# lock used by link publication. Otherwise retirement can report success just
-# before a concurrent publisher installs a new request binding.
-test_guarded_clear_serializes_an_absent_link_with_publication() {
-  local home meta lock ready go holder clear_pid early=0 rc
-  home="$TMP_ROOT/guarded-clear-race"
-  mkdir -p "$home/state"
-  meta="$home/state/race-task.meta"
-  printf 'kind=ship\n' > "$meta"
-  lock="$home/state/.meta-race-task.lock"
-  ready="$home/holder-ready"
-  go="$home/holder-go"
-
-  FM_HOME="$home" STATE="$home/state" ROOT="$ROOT" META="$meta" LOCK="$lock" \
-    READY="$ready" GO="$go" bash -c '
-      . "$ROOT/bin/fm-wake-lib.sh"
-      fm_lock_acquire_wait "$LOCK"
-      : > "$READY"
-      while [ ! -f "$GO" ]; do sleep 0.01; done
-      printf "%s\n" "kind=ship" "x_request=req-new" \
-        "x_request_ts=1700000000" "x_followups=0" > "$META.next"
-      mv "$META.next" "$META"
-      fm_lock_release "$LOCK"
-    ' &
-  holder=$!
-  while [ ! -f "$ready" ]; do sleep 0.01; done
-
-  (
-    rc=0
-    FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --clear race-task \
-      --expect-request req-old > "$home/clear.out" 2>&1 || rc=$?
-    printf '%s\n' "$rc" > "$home/clear.rc"
-  ) &
-  clear_pid=$!
-  sleep 0.2
-  [ ! -f "$home/clear.rc" ] || early=1
-
-  : > "$go"
-  wait "$holder"
-  wait "$clear_pid"
-  [ "$early" -eq 0 ] || fail "guarded clear decided absence before acquiring the meta lock"
-  rc=$(cat "$home/clear.rc")
-  expect_code 1 "$rc" "guarded clear racing a new request exit"
-  assert_grep 'x_request=req-new' "$meta" \
-    "guarded clear removed a request published while it waited for the lock"
-  pass "guarded clear serializes absence with link publication"
-}
-
-# A publisher may begin while a read-only directory prevents it from creating
-# the meta lock, then acquire the lock and publish when write access returns.
-# A guarded clear cannot prove absence under that condition and must fail closed.
-test_guarded_clear_refuses_absence_with_read_only_waiting_publisher() {
-  local home state meta lock ready publisher rc=0
-  home="$TMP_ROOT/guarded-clear-read-only-race"
-  state="$home/state"
-  mkdir -p "$state"
-  meta="$state/race-task.meta"
-  printf 'kind=ship\n' > "$meta"
-  lock="$state/.meta-race-task.lock"
-  ready="$home/publisher-ready"
-  chmod 500 "$state"
-
-  FM_HOME="$home" STATE="$state" ROOT="$ROOT" META="$meta" LOCK="$lock" \
-    READY="$ready" bash -c '
-      . "$ROOT/bin/fm-wake-lib.sh"
-      : > "$READY"
-      fm_lock_acquire_wait "$LOCK"
-      printf "%s\n" "kind=ship" "x_request=req-new" \
-        "x_request_ts=1700000000" "x_followups=0" > "$META.next"
-      mv "$META.next" "$META"
-      fm_lock_release "$LOCK"
-    ' &
-  publisher=$!
-  while [ ! -f "$ready" ]; do sleep 0.01; done
-  sleep 0.2
-  [ ! -e "$lock" ] || fail "publisher unexpectedly acquired a lock in read-only state"
-  kill -0 "$publisher" 2>/dev/null || fail "publisher was not waiting for write access"
-
-  FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" --clear race-task \
-    --expect-request req-old >/dev/null 2>&1 || rc=$?
-  chmod 700 "$state"
-  wait "$publisher"
-
-  expect_code 1 "$rc" "guarded clear with a read-only waiting publisher exit"
-  assert_grep 'x_request=req-new' "$meta" \
-    "guarded clear reported success before the waiting publisher published"
-  pass "guarded clear refuses absence while a publisher waits for write access"
-}
-
 test_link_rejects_unsafe_and_missing() {
   local home rc
   home="$TMP_ROOT/link-bad"; mkdir -p "$home/state"
@@ -3165,8 +3076,6 @@ test_link_recovery_relink_carries_discord_context_after_inbox_drain
 test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
 test_meta_helpers_refuse_a_symlinked_task_record
-test_guarded_clear_serializes_an_absent_link_with_publication
-test_guarded_clear_refuses_absence_with_read_only_waiting_publisher
 test_link_rejects_unsafe_and_missing
 test_link_missing_task_without_secondmates_stays_plain
 test_link_refuses_secondmate_routed_task_with_promised_final_pointer

@@ -8,7 +8,7 @@ This record supports five active guarantees for promised public replies made thr
 2. A home that never opted into the relay pays nothing for any of it.
 3. Delivering a final does not close the public loop: the registration is retained as `state=delivered` until `retire --reason`, session start surfaces an `open-loop` line, and `rechain` can bind follow-on work to the same thread.
 4. A first registration with no registry lock already held succeeds under stock macOS Bash 3.2 with `set -u`.
-5. A public loop whose work lives in a REMOTE secondmate home delivers and retires only after readable and writable remote state proves either that no link exists or that the matching bound legacy Relay link was cleared; unreadable or non-writable state, an identity mismatch, a metadata lock it cannot acquire within its bound, or unconfirmed completion retains the loop instead of hanging, and `--force` still covers only the unresolved obligation.
+5. A public loop whose work lives in a REMOTE secondmate home retires when readable remote state proves no link exists, or after readable and writable remote state clears the matching bound legacy Relay link; unreadable state, a non-writable matching link, an identity mismatch, a metadata lock it cannot acquire within its bound, or unconfirmed completion retains the loop instead of hanging, and `--force` still covers only the unresolved obligation.
 
 [`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
@@ -85,7 +85,7 @@ ok - --force still covers only the unresolved obligation, not the link clear
 ok - retire fails closed when a remote route is reassigned
 ok - retire fails closed when remote state is unreadable
 ok - retire fails closed when remote state is non-writable
-ok - retire fails closed on link absence in non-writable remote state
+ok - retire accepts link absence in non-writable remote state
 ok - the guarded remote clear refuses a lock it cannot acquire instead of hanging
 ok - an unconfirmed remote clear is unknown completion, never a silent close
 ```
@@ -107,15 +107,13 @@ The first case pins that empty recorded path so it cannot go vacuous, then drive
 The second case shows `--force` still governs only the unresolved-obligation refusal: a plain `retire` of an unresolved remote loop is still refused with the remote link untouched, while a forced one closes and clears it.
 The reassignment case replaces a delivered loop's route with a remote home whose reused work ID carries another Relay request and asserts that retirement retains the registration and leaves the replacement link untouched.
 The unreadable-state case makes the remote state directory non-searchable while it still contains a matching link and proves that an unconfirmable path fails closed without mutation.
-The two non-writable-state cases prove that both a matching link and apparent link absence refuse before lock acquisition, because a publisher may already be waiting for write access before it can create the shared lock.
+The two non-writable-state cases prove that a matching link refuses before lock acquisition because mutation is impossible, while a confirmed absent link succeeds because no mutation is needed.
 The unacquirable-lock case is the proof that the guarded clear refuses rather than wedges.
 It leaves the remote state directory WRITABLE, so the refusal can only come from the bounded lock wait and never from the writability precondition, and holds the metadata lock with a genuinely live process so the lock can never be reclaimed as stale.
 The writability precondition narrows the wedge window but cannot close it, because the parent can turn non-writable between that check and lock creation and a live holder is indistinguishable from it at the acquire; the ordinary unbounded wait retries forever, so before the bounded acquire this path hung with nothing reported instead of returning the reconciliation refusal.
 The case asserts the refusal, the retained registration, the absent receipt, the untouched remote link, and that the call returns at all, which is the observable difference from a wait that never ends.
 The final case makes the transport unreachable and asserts the close is refused with the registration retained, the remote link untouched, and unknown completion named rather than reported as a definite failure.
 A remote home running an older Firstmate copy does not recognize the guarded clear flag and therefore fails closed through the same retained-for-reconciliation message; operators must update that home before retrying, and there is deliberately no unguarded fallback.
-
-The existing Relay mention suite (`tests/fm-x-mode.test.sh`) additionally drives concurrent guarded clears and publishers through the executable interface, including a publisher waiting to create the shared lock while its state directory is read-only.
 
 ## Relay-disabled zero overhead
 

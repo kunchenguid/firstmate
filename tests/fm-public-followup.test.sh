@@ -2577,7 +2577,7 @@ test_remote_retire_refuses_nonwritable_state() {
   pass "retire fails closed when remote state is non-writable"
 }
 
-test_remote_retire_refuses_nonwritable_absence() {
+test_remote_retire_accepts_nonwritable_absence() {
   local home remote rc
   remote_fixture_prepare
   home=$(make_home remote-no-link)
@@ -2589,14 +2589,14 @@ test_remote_retire_refuses_nonwritable_absence() {
   rc=0
   run_pf_remote "$home" retire pf-remote-no-link --reason "already cleared" --force >/dev/null 2>&1 || rc=$?
   chmod 700 "$remote/state"
-  [ "$rc" -ne 0 ] || fail "retire must refuse absence it cannot serialize in non-writable state"
-  assert_absent "$home/state/public-followup/retired/pf-remote-no-link" \
-    "an unserialized absent link must not permit a retirement receipt"
-  assert_present "$home/state/public-followup/registry/pf-remote-no-link" \
-    "an unserialized absent link must retain the registration"
+  [ "$rc" -eq 0 ] || fail "retire must accept an absent link without requiring write access"
+  assert_present "$home/state/public-followup/retired/pf-remote-no-link" \
+    "an absent link must permit a retirement receipt"
+  assert_absent "$home/state/public-followup/registry/pf-remote-no-link" \
+    "an absent link must close the registration"
   assert_no_grep 'x_request=' "$remote/state/work-no-link.meta" \
-    "a refused already-cleared remote task must remain unlinked"
-  pass "retire fails closed on link absence in non-writable remote state"
+    "an already-cleared remote task must remain unlinked"
+  pass "retire accepts link absence in non-writable remote state"
 }
 
 # The guarded clear runs unattended over the transport, so it must REFUSE rather
@@ -2749,6 +2749,6 @@ test_remote_retire_force_semantics_unchanged
 test_remote_retire_refuses_reassigned_route
 test_remote_retire_refuses_unreadable_state
 test_remote_retire_refuses_nonwritable_state
-test_remote_retire_refuses_nonwritable_absence
+test_remote_retire_accepts_nonwritable_absence
 test_remote_retire_refuses_unacquirable_lock_without_hanging
 test_remote_unconfirmed_clear_is_unknown_completion

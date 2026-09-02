@@ -993,11 +993,21 @@ fmx_meta_link_clear() {
     parent=${meta%/*}
     [ "$parent" != "$meta" ] || parent=.
     [ -d "$parent" ] && [ ! -L "$parent" ] && [ -r "$parent" ] \
-      && [ -w "$parent" ] && [ -x "$parent" ] || return 1
+      && [ -x "$parent" ] || return 1
     fm_backlog_record_parent_authorized "$meta" "task record" "$STATE" || return 1
   fi
   [ ! -L "$meta" ] || return 1
   [ -f "$meta" ] || return 0
+  if [ "$expected_set" -eq 1 ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        x_request=*) link_present=1; rid=${line#*=} ;;
+      esac
+    done < "$meta" || return 1
+    [ "$link_present" -eq 1 ] || return 0
+    [ -n "$expected" ] && [ -n "$rid" ] && [ "$rid" = "$expected" ] || return 1
+    [ -w "$parent" ] || return 1
+  fi
   lock=$(fm_meta_lock_path "$meta") || return 1
   if [ "$expected_set" -eq 1 ]; then
     # A guarded clear runs unattended over the secondmate transport, so it must
