@@ -285,6 +285,78 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# A task record's PR identity block - its single `pr=` line and any `pr_head=`
+# line after it - is terminal. The parser below permits only that `pr_head=` and
+# the five named Relay keys after `pr=`; every other trailing key is invalid.
+# A `pr_head=` before `pr=` is outside the identity block and remains in place.
+# This rule makes an append to a record whose merge poll is already armed evident
+# rather than silent, and it is the only structural check the record carries,
+# because a record must stay mutable across a relaunch and so cannot be bound by
+# hash the way the sidecar and the poll source are.
+#
+# Every writer that rewrites or extends a task record validates the live record
+# before staging its own change, then passes both records here before publishing
+# the result. The restage validates the live record again before moving anything,
+# preserving evidence of an earlier accidental append regardless of its key
+# name. It otherwise moves lines and nothing else: no key is added, dropped, or
+# rewritten, the relative order of every other line is preserved, and a record
+# carrying no `pr=` line is left untouched. A record carrying more than one
+# `pr=` line stays invalid, because moving the duplicates does not merge them.
+fm_pr_meta_terminal_validate() {
+  local file=$1 line key shown_key invalid='' seen_pr=0
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      pr=*) seen_pr=1 ;;
+      pr_head=*|x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*) ;;
+      *)
+        if [ "$seen_pr" -eq 1 ]; then
+          key=${line%%=*}
+          shown_key=${key:-'<empty>'}
+          case " $invalid " in
+            *" $shown_key "*) ;;
+            *) invalid="${invalid}${invalid:+, }$shown_key" ;;
+          esac
+        fi
+        ;;
+    esac
+  done < "$file"
+  if [ -n "$invalid" ]; then
+    printf 'error: task record has invalid key(s) after pr=: %s\n' "$invalid" >&2
+    return 1
+  fi
+}
+
+fm_pr_meta_terminal_restage() {
+  local source=$1 file=$2 line rest='' identity='' seen_pr=0
+  fm_pr_meta_terminal_validate "$source" || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      pr=*)
+        seen_pr=1
+        identity="$identity$line
+"
+        ;;
+      pr_head=*)
+        if [ "$seen_pr" -eq 1 ]; then
+          identity="$identity$line
+"
+        else
+          rest="$rest$line
+"
+        fi
+        ;;
+      *)
+        rest="$rest$line
+"
+        ;;
+    esac
+  done < "$file"
+  [ "$seen_pr" -eq 1 ] || return 0
+  printf '%s%s' "$rest" "$identity" > "$file"
+}
+
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=

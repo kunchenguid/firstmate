@@ -140,10 +140,16 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
+CAPTAIN_META_TMP=
 captain_hold_cleanup() {
+  [ -z "$CAPTAIN_META_TMP" ] || rm -f -- "$CAPTAIN_META_TMP"
+  CAPTAIN_META_TMP=
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
     CAPTAIN_META_LOCK_HELD=0
@@ -767,7 +773,7 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta meta_mode previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -813,7 +819,27 @@ EOF
 
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      # Staged rather than appended in place: the review keys must not land
+      # behind the record's PR identity block, which stays terminal so that an
+      # append to a record whose merge poll is armed is evident
+      # (bin/fm-pr-lib.sh owns that contract). The rename lands under the meta
+      # lock this command already holds.
+      CAPTAIN_META_TMP="$STATE/.$origin.meta.captain-hold.${BASHPID:-$$}"
+      fm_pr_meta_terminal_validate "$meta" \
+        || fail "could not validate the task record for $origin"
+      meta_mode=$(fm_pr_file_mode "$meta") \
+        || fail "could not read the task record mode for $origin"
+      cp -- "$meta" "$CAPTAIN_META_TMP" \
+        || fail "could not stage the review record for $origin"
+      chmod "$meta_mode" "$CAPTAIN_META_TMP" \
+        || fail "could not stage the review record for $origin"
+      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$CAPTAIN_META_TMP" \
+        || fail "could not stage the review record for $origin"
+      fm_pr_meta_terminal_restage "$meta" "$CAPTAIN_META_TMP" \
+        || fail "could not stage the review record for $origin"
+      mv -f -- "$CAPTAIN_META_TMP" "$meta" \
+        || fail "could not record the reviewed decisions for $origin"
+      CAPTAIN_META_TMP=
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0

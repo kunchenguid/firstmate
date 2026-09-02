@@ -2838,6 +2838,7 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
+  fm_pr_meta_terminal_validate "$RELAUNCH_META" || exit 1
 else
   SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
   SPAWN_FRESH_COMMIT_PENDING=1
@@ -2904,6 +2905,17 @@ preserve_relaunch_meta() {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
   exit 1
 }
+# A relaunch carries the previous record's `pr=` forward through
+# preserve_relaunch_meta and then writes this launch's own keys, so the staged
+# record is restaged to keep the PR identity block terminal before publication
+# (bin/fm-pr-lib.sh owns that contract). Without it a relaunch after the PR was
+# recorded leaves the task's merge poll refusing to validate.
+if [ "$RELAUNCH" -eq 1 ]; then
+  fm_pr_meta_terminal_restage "$RELAUNCH_META" "$SPAWN_META_PATH" || {
+    echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
+    exit 1
+  }
+fi
 if [ "$RELAUNCH" -eq 0 ]; then
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
@@ -3018,11 +3030,15 @@ spawn_record_traceparent() {
     SPAWN_META_LOCK_HELD=1
     acquired=1
   fi
+  if ! fm_pr_meta_terminal_validate "$meta"; then
+    status=2
+  fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
-  if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
+  if [ "$status" -eq 0 ] && { [ ! -f "$meta" ] || [ ! -w "$meta" ] \
      || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
      || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
-     || ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
+     || ! fm_pr_meta_terminal_restage "$meta" "$SPAWN_META_TMP" \
+     || ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; }; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
   fi
@@ -3043,7 +3059,11 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # entirely when trace context is off.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    if ! spawn_record_traceparent; then
+    if spawn_record_traceparent; then
+      :
+    else
+      TRACE_RECORD_STATUS=$?
+      [ "$TRACE_RECORD_STATUS" -ne 2 ] || exit 1
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
   else

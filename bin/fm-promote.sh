@@ -127,6 +127,7 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+fm_pr_meta_terminal_validate "$META" || exit 1
 
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
@@ -163,6 +164,15 @@ grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
 } >> "$TMP"
+# Keep the PR identity block terminal in the staged record (bin/fm-pr-lib.sh).
+# A promotion normally precedes the PR, but a scout that already recorded one
+# would otherwise have its merge poll refuse to validate after this rewrite.
+if ! fm_pr_meta_terminal_restage "$META" "$TMP"; then
+  rm -f -- "$TMP"
+  TMP=
+  echo "error: task record for $ID could not be prepared" >&2
+  exit 1
+fi
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
   TMP=

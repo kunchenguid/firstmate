@@ -394,6 +394,58 @@ EOF
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
 }
 
+# The restage every task-record writer runs before publishing. It exists so a
+# writer's own key cannot land behind the PR identity block and silently cost
+# the task its merge poll, and it must do that by moving lines only.
+test_meta_terminal_restage_moves_lines_and_nothing_else() {
+  local dir file before after
+  dir="$TMP_ROOT/meta-restage"
+  mkdir -p "$dir"
+
+  file="$dir/appended.meta"
+  printf '%s\n' 'window=fm-a' 'pr=https://github.com/o/r/pull/7' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' > "$dir/appended-original.meta"
+  printf '%s\n' 'window=fm-a' 'pr=https://github.com/o/r/pull/7' \
+    'pr_head=0123456789abcdef0123456789abcdef01234567' 'control_relaunch_tx=abc' > "$file"
+  fm_pr_metadata_identity_parse "$file" \
+    && fail "a key appended behind the PR identity block should not parse"
+  fm_pr_meta_terminal_restage "$dir/appended-original.meta" "$file" || fail "restaging an appended record failed"
+  fm_pr_metadata_identity_parse "$file" \
+    || fail "restaging did not restore a record a writer had appended to"
+  [ "$FM_PR_META_URL" = https://github.com/o/r/pull/7 ] \
+    || fail "restaging changed the recorded PR"
+  [ "$(sort "$file" | tr '\n' ' ')" \
+    = "$(printf '%s\n' 'window=fm-a' 'pr=https://github.com/o/r/pull/7' \
+      'pr_head=0123456789abcdef0123456789abcdef01234567' 'control_relaunch_tx=abc' | sort | tr '\n' ' ')" ] \
+    || fail "restaging added, dropped, or rewrote a line instead of only moving one"
+  [ "$(tail -2 "$file" | head -1)" = 'pr=https://github.com/o/r/pull/7' ] \
+    && [ "$(tail -1 "$file")" = 'pr_head=0123456789abcdef0123456789abcdef01234567' ] \
+    || fail "restaging did not leave the PR identity block terminal"
+
+  file="$dir/ordering.meta"
+  printf '%s\n' 'a=1' 'pr=https://github.com/o/r/pull/7' > "$dir/ordering-original.meta"
+  printf '%s\n' 'a=1' 'pr=https://github.com/o/r/pull/7' 'b=2' 'c=3' > "$file"
+  fm_pr_meta_terminal_restage "$dir/ordering-original.meta" "$file" || fail "restaging an ordered record failed"
+  [ "$(tr '\n' ' ' < "$file")" = 'a=1 b=2 c=3 pr=https://github.com/o/r/pull/7 ' ] \
+    || fail "restaging did not preserve the relative order of the other keys"
+
+  file="$dir/no-pr.meta"
+  printf '%s\n' 'window=fm-a' 'kind=ship' > "$file"
+  before=$(shasum -a 256 "$file" | awk '{print $1}')
+  fm_pr_meta_terminal_restage "$file" "$file" || fail "restaging a record with no PR failed"
+  after=$(shasum -a 256 "$file" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "restaging rewrote a record that records no PR"
+
+  file="$dir/duplicate.meta"
+  printf '%s\n' 'pr=https://github.com/o/r/pull/7' > "$dir/duplicate-original.meta"
+  printf '%s\n' 'pr=https://github.com/o/r/pull/7' 'x=1' 'pr=https://github.com/o/r/pull/8' > "$file"
+  fm_pr_meta_terminal_restage "$dir/duplicate-original.meta" "$file" \
+    || fail "restaging a duplicated record failed"
+  fm_pr_metadata_identity_parse "$file" \
+    && fail "restaging merged two recorded PRs into a record that parses"
+  pass "task-record restage moves the PR identity block to the end and changes nothing else"
+}
+
 test_invalid_entrypoints_have_zero_side_effects() {
   local dir before after value rc
   dir=$(make_case invalid-entrypoints)
@@ -2135,6 +2187,7 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_meta_terminal_restage_moves_lines_and_nothing_else
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

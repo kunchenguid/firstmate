@@ -11,6 +11,8 @@ set -u
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-captain-hold)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
@@ -518,6 +520,71 @@ test_visual_review_uses_shared_completion_owner() {
   [ ! -e "$home/data/visual-review-decisions.json" ] \
     || fail "visual review created a second decision database"
   pass "ended visual review follows the same captain-hold completion owner"
+}
+
+# Recording the reviewed inventory extends the origin's task record, and a task
+# that reached a PR has an armed merge poll validating against that record. So
+# attesting completion must not cost the task its merge detection.
+test_completion_attestation_keeps_an_armed_merge_poll_recognised() {
+  local home id url=https://github.com/example/repo/pull/51
+  home=$(make_home completion-merge-poll)
+  id=sample-poll-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review the sample poll" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: investigation complete\n' > "$home/state/$id.status"
+  printf '# Sample poll investigation\n\nNo captain choice remains.\n' > "$home/data/$id/report.md"
+  {
+    printf 'pr=%s\n' "$url"
+    printf 'pr_head=%s\n' 0123456789abcdef0123456789abcdef01234567
+  } >> "$home/state/$id.meta"
+  fm_pr_url_parse "$url" || fail "the merge-poll fixture URL was invalid"
+  fm_pr_poll_prepare "$home/state" "$id" "$FM_PR_PROVIDER" "$url" "$FM_PR_HOST" \
+    "$FM_PR_PATH" "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the merge-poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not arm the merge-poll fixture"
+  # fm-watch.sh recognises the poll by capturing this snapshot; a failed capture
+  # is what makes it wake with a rejection instead of polling for the merge.
+  fm_pr_poll_snapshot_capture "$home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the fixture merge poll should be recognised before the attestation"
+
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "the completion gate failed on a task carrying a recorded PR"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
+  [ "$(grep -c '^pr=' "$home/state/$id.meta")" = 1 ] \
+    || fail "the attestation disturbed the recorded PR"
+  fm_pr_poll_snapshot_capture "$home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the attestation left the merge poll unrecognised: the watcher would reject it as an unauthenticated check instead of polling for the merge"
+  pass "recording a reviewed inventory keeps an armed merge poll recognised"
+}
+
+test_completion_attestation_refuses_its_own_preexisting_suffix_key() {
+  local home id out rc before after url=https://github.com/example/repo/pull/54
+  home=$(make_home completion-own-invalid-suffix)
+  id=sample-invalid-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review the invalid sample poll" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: investigation complete\n' > "$home/state/$id.status"
+  printf '# Sample investigation\n\nNo captain choice remains.\n' > "$home/data/$id/report.md"
+  {
+    printf 'pr=%s\n' "$url"
+    printf 'pr_head=%s\n' 0123456789abcdef0123456789abcdef01234567
+    printf 'decisions_reviewed=0\n'
+  } >> "$home/state/$id.meta"
+  before=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+
+  if out=$(run_captain "$home" complete "$id" --none 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "completion attestation should refuse its own pre-existing suffix key"
+  printf '%s\n' "$out" | grep -q 'decisions_reviewed' \
+    || fail "the completion refusal did not name decisions_reviewed: $out"
+  after=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "completion attestation normalised its own pre-existing suffix key"
+  pass "completion attestation names and preserves its own pre-existing suffix key"
 }
 
 test_none_inventory_and_resolved_prose_do_not_create_holds() {
@@ -1175,6 +1242,8 @@ test_release_frees_held_work
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
+test_completion_attestation_keeps_an_armed_merge_poll_recognised
+test_completion_attestation_refuses_its_own_preexisting_suffix_key
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home

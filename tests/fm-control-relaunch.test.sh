@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -312,10 +314,10 @@ test_relaunch_preserves_durable_task_metadata() {
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
   {
+    printf '%s\n' 'decisions_reviewed=1'
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
-    printf '%s\n' 'decisions_reviewed=1'
   } >> "$dir/home/state/rl19.meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
@@ -329,6 +331,206 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# Record a PR on <id> and arm its merge poll exactly as bin/fm-pr-check.sh does:
+# the identity in the record, the same identity in the private sidecar, and the
+# registration binding the published poll to both.
+arm_merge_poll() {  # <case-dir> <id> <url>
+  local dir=$1 id=$2 url=$3 state
+  state="$dir/home/state"
+  {
+    printf 'pr=%s\n' "$url"
+    printf 'pr_head=%s\n' 0123456789abcdef0123456789abcdef01234567
+  } >> "$state/$id.meta"
+  fm_pr_url_parse "$url" || fail "the merge-poll fixture URL was invalid"
+  fm_pr_poll_prepare "$state" "$id" "$FM_PR_PROVIDER" "$url" "$FM_PR_HOST" \
+    "$FM_PR_PATH" "$FM_PR_NUMBER" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the merge-poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not arm the merge-poll fixture"
+}
+
+# fm-watch.sh recognises a task's merge poll by capturing this snapshot; when the
+# capture fails it classifies the poll as an unauthenticated check, wakes with a
+# rejection, and never runs it. So this is the watcher's own gate, not a
+# restatement of the record's shape.
+assert_merge_poll_recognised() {  # <case-dir> <id> <message>
+  fm_pr_poll_snapshot_capture "$1/home/state" "$2" "$ROOT/bin/fm-pr-poll.sh" || fail "$3"
+}
+
+# A task that reaches a PR and is then relaunched keeps merge detection. The
+# replacement record is published whole, so every key this launch owns must land
+# ahead of the PR identity block the poll validates against.
+test_relaunch_keeps_the_armed_merge_poll_recognised() {
+  local dir out rc url=https://github.com/example/repo/pull/46
+  dir=$(new_case merge-poll rl46)
+  add_ship_task "$dir" rl46 claude
+  arm_merge_poll "$dir" rl46 "$url"
+  assert_merge_poll_recognised "$dir" rl46 "the fixture merge poll should be recognised before the relaunch"
+
+  out=$(run_control "$dir" rl46 relaunch --note "resuming after the PR was opened"); rc=$?
+  expect_code 0 "$rc" "a relaunch on a task with a recorded PR should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl46 pr)" = "$url" ] || fail "the task PR must survive relaunch"
+  [ -n "$(meta_field "$dir" rl46 control_relaunch_tx)" ] \
+    || fail "the relaunch should have recorded its transaction, or this case no longer covers the writer"
+  assert_merge_poll_recognised "$dir" rl46 \
+    "the relaunch left the merge poll unrecognised: the watcher would reject it as an unauthenticated check instead of polling for the merge"
+  pass "fm-control relaunch: an armed merge poll survives replacing the agent"
+}
+
+test_relaunch_keeps_a_pre_pr_head_outside_the_identity_block() {
+  local dir meta staged out rc url=https://github.com/example/repo/pull/53
+  dir=$(new_case merge-poll-pre-pr-head rl53)
+  add_ship_task "$dir" rl53 claude
+  arm_merge_poll "$dir" rl53 "$url"
+  meta="$dir/home/state/rl53.meta"
+  staged="$dir/rl53.meta.staged"
+  {
+    printf 'pr_head=not-a-sha\n'
+    cat "$meta"
+  } > "$staged"
+  mv "$staged" "$meta"
+  assert_merge_poll_recognised "$dir" rl53 \
+    "the fixture with a pre-PR head should be recognised before the relaunch"
+
+  out=$(run_control "$dir" rl53 relaunch --note "preserve the parser's identity boundary"); rc=$?
+  expect_code 0 "$rc" "a relaunch with a pre-PR head should succeed"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl53 control_relaunch_tx)" ] \
+    || fail "the relaunch should have recorded its transaction, or this case no longer covers the writer"
+  assert_merge_poll_recognised "$dir" rl53 \
+    "the relaunch moved a pre-PR head into the identity block and disarmed the merge poll"
+  pass "fm-control relaunch: a pre-PR head stays outside the merge-poll identity block"
+}
+
+# A suffix that predates the relaunch is evidence of an unaware writer. The
+# relaunch must report it and leave the live record untouched instead of making
+# the anomalous record valid while preparing its own replacement.
+test_relaunch_refuses_a_preexisting_invalid_pr_suffix() {
+  local dir before after out rc url=https://github.com/example/repo/pull/49
+  dir=$(new_case merge-poll-invalid-suffix rl49)
+  add_ship_task "$dir" rl49 claude
+  arm_merge_poll "$dir" rl49 "$url"
+  printf 'x_unaware=unexpected\n' >> "$dir/home/state/rl49.meta"
+  before=$(shasum -a 256 "$dir/home/state/rl49.meta" | awk '{print $1}')
+
+  out=$(run_control "$dir" rl49 relaunch --note "must reject the anomalous record"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a relaunch should refuse a pre-existing invalid PR suffix"
+  printf '%s\n' "$out" | grep -q 'x_unaware' \
+    || fail "the relaunch refusal did not name the offending metadata key: $out"
+  after=$(shasum -a 256 "$dir/home/state/rl49.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "the refused relaunch normalised or otherwise changed the anomalous record"
+  fm_pr_metadata_identity_parse "$dir/home/state/rl49.meta" \
+    && fail "the refused relaunch made the anomalous record parse"
+  pass "fm-control relaunch: a pre-existing invalid PR suffix is named and preserved"
+}
+
+test_relaunch_refuses_its_own_preexisting_suffix_key() {
+  local dir before after out rc url=https://github.com/example/repo/pull/50
+  dir=$(new_case merge-poll-own-invalid-suffix rl50)
+  add_ship_task "$dir" rl50 claude
+  arm_merge_poll "$dir" rl50 "$url"
+  printf 'control_relaunch_tx=old\n' >> "$dir/home/state/rl50.meta"
+  before=$(shasum -a 256 "$dir/home/state/rl50.meta" | awk '{print $1}')
+
+  out=$(run_control "$dir" rl50 relaunch --note "must reject its own old suffix"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a relaunch should refuse its own pre-existing suffix key"
+  printf '%s\n' "$out" | grep -q 'control_relaunch_tx' \
+    || fail "the relaunch refusal did not name control_relaunch_tx: $out"
+  after=$(shasum -a 256 "$dir/home/state/rl50.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "the refused relaunch normalised its own pre-existing suffix key"
+  pass "fm-control relaunch: its own pre-existing suffix key is named and preserved"
+}
+
+test_trace_recording_refuses_its_own_preexisting_suffix_key() {
+  local dir before after out rc pid prepare release i=0 url=https://github.com/example/repo/pull/52
+  dir=$(new_case merge-poll-trace-own-invalid-suffix rl52)
+  add_ship_task "$dir" rl52 claude
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+  arm_merge_poll "$dir" rl52 "$url"
+  prepare="$dir/trace-own-prepare"
+  release="$dir/trace-own-release"
+  FM_FAKE_TRACE_PREPARE="$prepare" FM_FAKE_TRACE_RELEASE="$release" \
+    run_control "$dir" rl52 relaunch --note "must reject the old carrier suffix" > "$dir/trace-own.out" &
+  pid=$!
+  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$prepare" ] || fail "the relaunch did not reach trace recording"
+  printf 'traceparent=old\n' >> "$dir/home/state/rl52.meta"
+  before=$(shasum -a 256 "$dir/home/state/rl52.meta" | awk '{print $1}')
+  : > "$release"
+  wait "$pid"; rc=$?
+  out=$(cat "$dir/trace-own.out")
+  [ "$rc" -ne 0 ] || fail "trace recording should refuse its own pre-existing suffix key"
+  printf '%s\n' "$out" | grep -q 'traceparent' \
+    || fail "the trace recording refusal did not name traceparent: $out"
+  after=$(shasum -a 256 "$dir/home/state/rl52.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "trace recording normalised its own pre-existing suffix key"
+  pass "fm-spawn trace recording: its own pre-existing suffix key is named and preserved"
+}
+
+# The same guarantee on the path that also writes a carrier after the record is
+# rebuilt, which is a second writer of the same record in the same relaunch.
+test_relaunch_with_trace_context_keeps_the_merge_poll_recognised() {
+  local dir out rc url=https://github.com/example/repo/pull/47
+  dir=$(new_case merge-poll-trace rl47)
+  add_ship_task "$dir" rl47 claude
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+  arm_merge_poll "$dir" rl47 "$url"
+  assert_merge_poll_recognised "$dir" rl47 "the fixture merge poll should be recognised before the relaunch"
+
+  out=$(run_control "$dir" rl47 relaunch --note "resuming with a carrier"); rc=$?
+  expect_code 0 "$rc" "a relaunch with trace context on should succeed"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl47 traceparent)" ] \
+    || fail "the relaunch should have recorded a carrier, or this case no longer covers the writer"
+  assert_merge_poll_recognised "$dir" rl47 \
+    "recording the carrier left the merge poll unrecognised: the watcher would reject it as an unauthenticated check instead of polling for the merge"
+  pass "fm-control relaunch: recording a carrier keeps an armed merge poll recognised"
+}
+
+# A promotion republishes the record too, and a scout that already recorded a PR
+# must not lose merge detection by being promoted.
+test_promotion_keeps_the_armed_merge_poll_recognised() {
+  local dir out rc url=https://github.com/example/repo/pull/48
+  dir=$(new_case merge-poll-promote rl48)
+  add_ship_task "$dir" rl48 claude
+  # fm-promote.sh promotes a scout, so this fixture is one that already reached
+  # a PR - a scout that opened one before implementation was authorised.
+  sed 's/^kind=ship$/kind=scout/' "$dir/home/state/rl48.meta" > "$dir/rl48.meta.scout"
+  mv "$dir/rl48.meta.scout" "$dir/home/state/rl48.meta"
+  arm_merge_poll "$dir" rl48 "$url"
+  assert_merge_poll_recognised "$dir" rl48 "the fixture merge poll should be recognised before the promotion"
+
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    "$PROMOTE" rl48 --mode direct-PR --yolo off 2>&1); rc=$?
+  expect_code 0 "$rc" "promoting a scout that already recorded a PR should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl48 kind)" = ship ] || fail "the promotion should have rewritten kind"
+  assert_merge_poll_recognised "$dir" rl48 \
+    "the promotion left the merge poll unrecognised: the watcher would reject it as an unauthenticated check instead of polling for the merge"
+  pass "fm-promote: promoting a task that already recorded a PR keeps its merge poll recognised"
+}
+
+test_promotion_refuses_its_own_preexisting_suffix_key() {
+  local dir before after out rc url=https://github.com/example/repo/pull/53
+  dir=$(new_case merge-poll-promote-own-invalid-suffix rl53)
+  add_ship_task "$dir" rl53 claude
+  sed 's/^kind=ship$/kind=scout/' "$dir/home/state/rl53.meta" > "$dir/rl53.meta.scout"
+  mv "$dir/rl53.meta.scout" "$dir/home/state/rl53.meta"
+  arm_merge_poll "$dir" rl53 "$url"
+  printf 'kind=scout\n' >> "$dir/home/state/rl53.meta"
+  before=$(shasum -a 256 "$dir/home/state/rl53.meta" | awk '{print $1}')
+
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    "$PROMOTE" rl53 --mode direct-PR --yolo off 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "promotion should refuse its own pre-existing suffix key"
+  printf '%s\n' "$out" | grep -q 'kind' \
+    || fail "the promotion refusal did not name kind: $out"
+  after=$(shasum -a 256 "$dir/home/state/rl53.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "promotion normalised its own pre-existing suffix key"
+  pass "fm-promote: its own pre-existing suffix key is named and preserved"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1479,6 +1681,14 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_the_armed_merge_poll_recognised
+test_relaunch_keeps_a_pre_pr_head_outside_the_identity_block
+test_relaunch_refuses_a_preexisting_invalid_pr_suffix
+test_relaunch_refuses_its_own_preexisting_suffix_key
+test_relaunch_with_trace_context_keeps_the_merge_poll_recognised
+test_trace_recording_refuses_its_own_preexisting_suffix_key
+test_promotion_keeps_the_armed_merge_poll_recognised
+test_promotion_refuses_its_own_preexisting_suffix_key
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
