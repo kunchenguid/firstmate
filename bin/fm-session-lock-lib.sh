@@ -120,7 +120,12 @@ fm_harness_ancestry_pids() {
       break
     fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+    # Examine the top of the chain before stopping. Inside a PID namespace the
+    # harness itself is pid 1, so stopping as soon as the next pid is 1 hides the
+    # very process this walk exists to find. A host's real pid 1 (init, systemd,
+    # launchd) is not harness-shaped, so fm_harness_process_matches rejects it.
+    case "$pid" in '' | *[!0-9]*) break ;; esac
+    [ "$pid" -ge 1 ] || break
   done
   [ "$printed" -eq 1 ]
 }

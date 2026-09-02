@@ -215,10 +215,15 @@ make_fake_ps_claude() {
 
 make_fake_ps_harness() {
   local fakebin=$1 harness=$2
-  cat > "$fakebin/ps" <<'SH'
+  cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
-harness=${FM_FAKE_HARNESS:-claude}
+# The ancestry this stub reports defaults to the harness the fixture was built
+# for, so a case that builds a pi (or codex) fixture gets pi (or codex) ancestry
+# without having to repeat it per run; FM_FAKE_HARNESS still overrides it.
+harness=\${FM_FAKE_HARNESS:-$harness}
+SH
+  cat >> "$fakebin/ps" <<'SH'
 pid=
 previous=
 for argument in "$@"; do
