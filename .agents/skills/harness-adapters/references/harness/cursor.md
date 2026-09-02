@@ -8,15 +8,16 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 | Fact | Value |
 |---|---|
 | Binary | `fm_cursor_resolve_binary` in `../../../bin/fm-cursor-lib.sh` resolves stable launcher `cursor-agent` or legacy `agent`, never `cursor`; both symlink into `~/.local/share/cursor-agent/versions/<version>/cursor-agent`, whose target auto-update replaces. |
-| Launch | Positional instructions with `--trust`, `--yolo`, optional `--model <model>`, and `--workspace <absolute-task-worktree>`, after clearing foreign primary markers. |
+| Launch | Positional instructions with `--trust`, `--auto-review`, `--sandbox enabled`, optional `--model <model>`, and `--workspace <absolute-task-worktree>`, after clearing foreign primary markers. |
 | Models | Use current-account `cursor-agent --list-models` or legacy `agent --list-models`; the drifting observed list had only `cursor-grok-4.5-high` and `cursor-grok-4.5-high-fast` for Grok plus several `xhigh` ids, so choose a returned reasoning id and never assume low or medium Grok. |
 | Busy state | `../../../bin/fm-busy-lib.sh` folds the per-conversation transcript as `cursor-transcript`: `role:user` opens and typed `turn_ended` closes success or abort, covering manual interrupt; nothing is armed or seeded, and this backend-agnostic source was identical on tmux and Herdr. |
 | Exit command | `/exit`. |
 | Interrupt | Single Escape returns the placeholder with no clear key; control makes no cancellation claim because an aborted transcript close appeared within seconds in some runs and not within twenty in others. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Cursor discovers Firstmate's user skills. |
 | Resume | No verified native pane resume; use deterministic relaunch. |
-| Autonomy | `--yolo`, documented alias for `--force`; footer `Run Everything`. |
-| Trust | `--trust` suppresses the dialog; `--yolo` does not, and every task has a fresh path. |
+| Autonomy | `--auto-review --sandbox enabled`, so the worker runs under Cursor's own review and sandbox controls. This replaced `--yolo` (the documented `--force` alias, footer `Run Everything`), which switched both off. Measured on 2026.08.25: `--sandbox enabled` genuinely confines writes under `--auto-review`, but `--force` overrides that confinement at any flag order, so Firstmate never passes `--force` or `--yolo`. |
+| Trust | `--trust` suppresses the dialog; the autonomy flags do not, and every task has a fresh path. |
+| Unattended work | Cursor is REFUSED for EVERY ordinary unattended kind: ship, scout, AND secondmate. `--auto-review` prompts for whatever its classifier does not deem safe, an unattended pane has no approver, and the `cursor-transcript` fold keeps a parked pane reading as working, so the stall never surfaces as a hold; a secondmate is the worst case because a whole Firstmate instance stalls invisibly. `fm_control_harness_supports_kind` in `../../../bin/fm-control-lib.sh` owns the rule for both the launch owner and the control plane, so a relaunch is refused before the running agent is stopped. The only opt-in is the per-spawn flag `--cursor-exemption attended` (a person is in the pane) or `--cursor-exemption envelope:<name>` (the named outer isolation envelope that governs the worker), which is recorded as `cursor_exemption=` in the task meta; use Codex or Claude for ordinary unattended work. |
 | Marker | `CURSOR_INVOKED_AS=cursor-agent` on agent and children, plus `CURSOR_AGENT=1` on child or tool processes; other `CURSOR_*` variables are not identity markers. |
 | Effort | No verified flag; `references/common/model-and-effort.md` owns unsupported-value handling. |
 | Composer | Bare borderless row with `→` (U+2192); de-emphasized placeholders `Plan, search, build anything` when fresh and `Add a follow-up` later. |
@@ -57,12 +58,23 @@ Reverse-video placeholder remnants and Herdr half-block edges belong to `../../.
 `../../../docs/verification/runtime-backends.md` owns captures.
 Refresh with `FM_HARNESS_LIVENESS_DRIFT=1 ../../../bin/fm-test-run.sh ../../../tests/fm-harness-liveness-drift-live-e2e.test.sh`.
 
-## Worktree boundary
+## Worktree boundary and exemption grants
 
 Firstmate enters its acquired worktree and passes the same absolute path through `--workspace`.
 Never pass Cursor `-w` or `--worktree`, which allocates a second copy under `~/.cursor/worktrees` and breaks isolation.
 The CLI supports repeatable `--add-dir`, but the adapter adds none; positional instructions need no grant to their private directory.
-Example: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high`.
+Example of the ordinary case, which is REFUSED because nobody is watching a scout pane: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high`.
+Pass a grant only when it is true of this launch, because `attended` is an attestation that a person is sitting in the pane and `envelope:<name>` names the outer isolation envelope an audit can go check.
+The grant is per invocation and never ambient, so neither an exported variable nor an earlier attended launch can silently exempt a later unattended spawn.
+A captain who will watch the pane themself adds `--cursor-exemption attended`; a worker running inside the approved routing benchmark adds `--cursor-exemption envelope:routing-benchmark` instead.
+An envelope name is bounded to letters, digits, `.`, `_`, and `-` starting on a letter or digit, so a grant cannot be unauditable or carry a line break into the task record.
+An explicitly passed grant is refused on a non-cursor harness rather than recorded, on the local and remote spawn routes alike, while one inherited from a task's own record is dropped when that task restarts onto another harness.
+Across a relaunch or a `--secondmate` respawn, the two paths that restart a task from its own record, an `envelope:<name>` grant is inherited while an `attended` one is not, because the person who attested may be gone by the time stuck-worker recovery relaunches; a fresh spawn always needs the flag.
+A remote `--secondmate` route accepts `envelope:<name>` only and refuses `attended`, because that attestation describes a person at this pane and says nothing about a worker started on another host.
+A remote host that finds its endpoint already alive returns that route without applying a newly passed grant, so the parent records the grant the endpoint reports back rather than the one it requested and says on stderr that the request did not take effect; recovery then inherits the envelope that actually governs the running worker.
+Automatic recovery of an enveloped cursor secondmate works on the remote route only, since the local liveness sweep does not act on a cursor endpoint.
+A relaunch that needs a fresh attestation takes the grant on the verb itself: `../../../bin/fm-control.sh <id> relaunch --cursor-exemption attended`.
+Without that flag the spawn is refused, so route ordinary unattended scouting to Codex or Claude instead.
 
 ## Primary integration
 
