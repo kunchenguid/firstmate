@@ -7,7 +7,8 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
-#                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "MISSING_MANUAL: <tool> (instructions: <url or commands>)",
+#                 "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -64,6 +65,10 @@
 #          nonvisual dispatch continues with plain-text decisions and reports,
 #          but Lavish use still requires a compatible build at or above its floor.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
+#          perl JSON::PP is also reported as MISSING_MANUAL when `perl -MJSON::PP
+#          -e1` fails; its instructions field carries OS package commands instead
+#          of a URL, since the perl consumers need the module installed, not a single
+#          canonical download location.
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -884,6 +889,19 @@ manual_install_url() {
   esac
 }
 
+# Three surfaces decode or encode JSON through `perl -MJSON::PP`:
+# bin/fm-captain-hold.sh's answer/show path, bin/fm-procevent-lavish.sh, and
+# bin/fm-procevent-extension-capture.pl. JSON::PP ships with a full perl
+# distribution but is packaged separately on minimal installs (observed on
+# Seen 2026-08-31 on a Fedora host: bare Fedora perl, module absent), so a home can have perl
+# and still fail mid-run with a raw "Can't locate JSON/PP.pm" trace. This
+# check is detect-only, matching the rest of bootstrap: never installs
+# without captain consent.
+perl_jsonpp_diagnostic() {
+  perl -MJSON::PP -e1 >/dev/null 2>&1 && return 0
+  echo "MISSING_MANUAL: perl JSON::PP module (instructions: install the OS package - Fedora/RHEL: 'sudo dnf install perl-JSON-PP', Debian/Ubuntu: 'sudo apt install libjson-pp-perl', macOS/other: 'cpan JSON::PP'; required by bin/fm-captain-hold.sh, bin/fm-procevent-lavish.sh, and bin/fm-procevent-extension-capture.pl)"
+}
+
 missing_tool_diagnostic() {
   local tool=$1 instructions
   if instructions=$(manual_install_url "$tool"); then
@@ -1450,6 +1468,7 @@ detect_local_tools() {
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
   fi
+  perl_jsonpp_diagnostic
 }
 
 detect_local_config() {
