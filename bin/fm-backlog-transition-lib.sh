@@ -242,6 +242,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
+    FM_BACKLOG_ROW_TITLE=
     FM_BACKLOG_ROW_ERROR="data directory cannot be resolved: $1"
     return 1
   fi
