@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # fm-usage-harvest.sh - append one fleet usage-ledger row for a finished task.
 #
-# Usage: fm-usage-harvest.sh <task-id>
+# Usage: fm-usage-harvest.sh [--scan-to <file>|--append-from <file>] <task-id>
+#
+# With no flag the command scans and appends in one shot. The two flags split
+# that into phases for a caller whose own work can still fail after the scan:
+# --scan-to measures the task and writes the finished row to <file> without
+# touching the ledger, and --append-from appends a row staged that way. See the
+# two-phase contract below.
 #
 # Reads state/<task-id>.meta (harness=, model=, effort=, worktree=; the
 # backend window= line is intentionally not consumed because the ledger has no
@@ -83,11 +89,11 @@
 # after the append returns, and matching at file granularity against
 # completed_at drops the whole log rather than its tail. The harvest instant
 # bounds that extension without an arbitrary grace period, and teardown is
-# ordered so that bound is safe: bin/fm-teardown.sh runs the harvest BEFORE it
-# returns the worktree to the treehouse pool, on the main path and on the
+# ordered so that bound is safe: bin/fm-teardown.sh runs the SCAN phase BEFORE
+# it returns the worktree to the treehouse pool, on the main path and on the
 # local secondmate child path alike, so the task still holds its pooled
 # worktree and no later occupant of that slot can have written a session log
-# yet. Callers that harvest out of that order forfeit the guarantee.
+# yet. Callers that scan out of that order forfeit the guarantee.
 # wall_secs, spawned_at and completed_at are unaffected and still rest on the
 # status file.
 # Turn estimate: count of "^working:" lines in the status file.
@@ -165,6 +171,18 @@
 # Idempotent: if the ledger already contains a line whose "task" is
 # <task-id>, the command exits 0 without appending.
 #
+# Two-phase contract: measuring and appending are separable because the ledger
+# row is permanent while the caller's own work may still fail. --scan-to reads
+# the meta, the status log and the session logs and writes the row it would
+# have appended; --append-from reads nothing but that file and appends it under
+# the same lock and the same idempotency guard. A caller that aborts between
+# the phases therefore leaves NO row, so its retry measures the task again
+# rather than inheriting the abandoned attempt's numbers. The staging file
+# belongs to the caller, which owns creating it, keeping it private to one task
+# and one run, and removing it on every exit path; --append-from refuses a file
+# that is missing, unparseable, or names another task rather than appending
+# something it cannot attribute.
+#
 # Overrides (test seams and alternate homes):
 #   FM_ROOT_OVERRIDE, FM_HOME, FM_STATE_OVERRIDE, FM_DATA_OVERRIDE  as usual
 #   FM_USAGE_CLAUDE_DIR   default $HOME/.claude/projects
@@ -174,9 +192,10 @@
 #   FM_USAGE_HARVEST_APPEND_DELAY  test-only delay inside the ledger critical section
 #
 # Exit status: 0 on a successful or already-present harvest, 1 on a missing
-# task record, missing jq, an unwritable ledger, or a ledger lock still held by
-# a live concurrent harvest past FM_USAGE_LEDGER_LOCK_WAIT. Callers that must
-# not block (teardown) own their own guard.
+# task record, missing jq, an unwritable ledger, an unusable staging file, or a
+# ledger lock still held by a live concurrent harvest past
+# FM_USAGE_LEDGER_LOCK_WAIT. Callers that must not block (teardown) own their
+# own guard.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -198,8 +217,22 @@ PI_DIR="${FM_USAGE_PI_DIR:-${HOME:-}/.pi/agent/sessions}"
 
 err() { printf 'error: %s\n' "$1" >&2; }
 
-if [ "$#" -ne 1 ] || [ -z "$1" ] || case "$1" in *[!A-Za-z0-9._-]*) true ;; *) false ;; esac; then
-  err "usage: fm-usage-harvest.sh <task-id>"
+STAGE_MODE=
+STAGE_FILE=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --scan-to|--append-from)
+      case "$1" in --scan-to) STAGE_MODE=scan ;; *) STAGE_MODE=append ;; esac
+      STAGE_FILE=${2:-}
+      shift
+      [ "$#" -eq 0 ] || shift
+      ;;
+    *) break ;;
+  esac
+done
+if [ "$#" -ne 1 ] || [ -z "$1" ] || case "$1" in *[!A-Za-z0-9._-]*) true ;; *) false ;; esac \
+  || { [ -n "$STAGE_MODE" ] && [ -z "$STAGE_FILE" ]; }; then
+  err "usage: fm-usage-harvest.sh [--scan-to <file>|--append-from <file>] <task-id>"
   exit 1
 fi
 command -v jq >/dev/null 2>&1 || { err "jq is required"; exit 1; }
@@ -207,6 +240,77 @@ command -v jq >/dev/null 2>&1 || { err "jq is required"; exit 1; }
 ID=$1
 META="$STATE/$ID.meta"
 STATUS="$STATE/$ID.status"
+LEDGER="$DATA/usage-ledger.jsonl"
+
+REFDIR=
+LEDGER_LOCK=
+LEDGER_LOCK_HELD=0
+harvest_cleanup() {
+  local rc=$?
+  [ "$LEDGER_LOCK_HELD" != 1 ] || fm_lock_release "$LEDGER_LOCK" || true
+  [ -z "$REFDIR" ] || rm -rf -- "$REFDIR"
+  return "$rc"
+}
+trap harvest_cleanup EXIT
+
+# ledger_append_row <row-json> : the whole critical section, shared by the
+# one-shot harvest and by --append-from.
+#
+# Serialize the check-and-append as one critical section: acquire the ledger
+# lock, then test for an existing row for this task and append only when
+# absent. Two concurrent harvests of the same task cannot both pass the
+# existence test and each append a duplicate row.
+#
+# The acquire is BOUNDED, not fm_lock_acquire_wait's unbounded spin, because
+# this runs synchronously inside teardown: a wedged live holder must never
+# block teardown from retiring the task. fm_lock_try_acquire already steals a
+# dead owner's lock, so only a live concurrent harvest makes us wait, and its
+# critical section is one ledger scan plus an append. If the lock stays busy
+# past the bound we give up best-effort (exit 1, which teardown warns on and
+# continues) rather than duplicate the row by appending unserialized.
+ledger_append_row() {  # <row-json>
+  local row=$1 lock_deadline
+  mkdir -p -- "$DATA"
+  LEDGER_LOCK="$DATA/.usage-ledger.lock"
+  LEDGER_LOCK_WAIT=${FM_USAGE_LEDGER_LOCK_WAIT:-30}
+  lock_deadline=$(( $(date +%s) + LEDGER_LOCK_WAIT ))
+  until fm_lock_try_acquire "$LEDGER_LOCK"; do
+    if [ "$(date +%s)" -ge "$lock_deadline" ]; then
+      err "ledger lock busy after ${LEDGER_LOCK_WAIT}s; skipping harvest for $ID"
+      return 1
+    fi
+    sleep 0.1
+  done
+  LEDGER_LOCK_HELD=1
+  # The identity test parses each ledger line and compares the task field's own
+  # value, so exactness is structural rather than resting on the punctuation
+  # that happens to surround the field today: it stays exact if the schema or
+  # the key order ever changes. A line this cannot parse simply does not match,
+  # which risks a duplicate row rather than a lost one.
+  if [ -f "$LEDGER" ] && jq -Rn --exit-status --arg id "$ID" \
+      'any(inputs | try (fromjson | objects) catch empty; .task == $id)' \
+      "$LEDGER" >/dev/null 2>&1; then
+    return 0
+  fi
+  # Test seam: widen the check-to-append window so a concurrency regression (a
+  # removed lock) is observable deterministically; unset in production.
+  [ -z "${FM_USAGE_HARVEST_APPEND_DELAY:-}" ] || sleep "$FM_USAGE_HARVEST_APPEND_DELAY"
+  printf '%s\n' "$row" >> "$LEDGER"
+}
+
+# --append-from needs nothing but the staged row: no meta, no status log, no
+# session-log scan. That is what lets teardown run it after its fail-closed
+# refusals, long after the worktree it scanned has been returned.
+if [ "$STAGE_MODE" = append ]; then
+  [ -f "$STAGE_FILE" ] || { err "no staged usage row for $ID at $STAGE_FILE"; exit 1; }
+  STAGED_ROW=$(head -n 1 -- "$STAGE_FILE" 2>/dev/null || true)
+  printf '%s' "$STAGED_ROW" | jq -e --arg id "$ID" \
+    'objects | select(.task == $id)' >/dev/null 2>&1 \
+    || { err "staged usage row for $ID is unreadable or names another task"; exit 1; }
+  ledger_append_row "$STAGED_ROW"
+  exit 0
+fi
+
 [ -f "$META" ] || { err "no task record: $META"; exit 1; }
 
 meta_get() {  # <key>
@@ -297,15 +401,6 @@ case "$SCAN_END_EPOCH" in ''|*[!0-9]*) SCAN_END_EPOCH=$END_EPOCH ;; esac
 # Ref files pin find's mtime window portably (BSD and GNU find both compare
 # against -newer file mtimes, and touch -t exists on both).
 REFDIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-usage-harvest.XXXXXX")
-LEDGER_LOCK=
-LEDGER_LOCK_HELD=0
-harvest_cleanup() {
-  local rc=$?
-  [ "$LEDGER_LOCK_HELD" != 1 ] || fm_lock_release "$LEDGER_LOCK" || true
-  rm -rf -- "$REFDIR"
-  return "$rc"
-}
-trap harvest_cleanup EXIT
 epoch_to_touch() {  # <epoch>
   # Both renderings are LOCAL time because that is what touch -t reads; a UTC
   # stamp would shift both window refs by the host's offset and drop real logs.
@@ -501,44 +596,7 @@ EFFORT=$EFFORT_META
 SPAWNED=$(iso_from_epoch "$START_EPOCH" || true)
 COMPLETED=$(iso_from_epoch "$END_EPOCH" || true)
 
-mkdir -p -- "$DATA"
-# Serialize the check-and-append as one critical section: acquire the ledger
-# lock, then test for an existing row for this task and append only when
-# absent. Two concurrent harvests of the same task cannot both pass the
-# existence test and each append a duplicate row.
-#
-# The acquire is BOUNDED, not fm_lock_acquire_wait's unbounded spin, because
-# this runs synchronously inside teardown: a wedged live holder must never
-# block teardown from retiring the task. fm_lock_try_acquire already steals a
-# dead owner's lock, so only a live concurrent harvest makes us wait, and its
-# critical section is one ledger scan plus an append. If the lock stays busy past the
-# bound we give up best-effort (exit 1, which teardown warns on and continues)
-# rather than duplicate the row by appending unserialized.
-LEDGER_LOCK="$DATA/.usage-ledger.lock"
-LEDGER_LOCK_WAIT=${FM_USAGE_LEDGER_LOCK_WAIT:-30}
-lock_deadline=$(( $(date +%s) + LEDGER_LOCK_WAIT ))
-until fm_lock_try_acquire "$LEDGER_LOCK"; do
-  if [ "$(date +%s)" -ge "$lock_deadline" ]; then
-    err "ledger lock busy after ${LEDGER_LOCK_WAIT}s; skipping harvest for $ID"
-    exit 1
-  fi
-  sleep 0.1
-done
-LEDGER_LOCK_HELD=1
-# The identity test parses each ledger line and compares the task field's own
-# value, so exactness is structural rather than resting on the punctuation
-# that happens to surround the field today: it stays exact if the schema or
-# the key order ever changes. A line this cannot parse simply does not match,
-# which risks a duplicate row rather than a lost one.
-if [ -f "$LEDGER" ] && jq -Rn --exit-status --arg id "$ID" \
-    'any(inputs | try (fromjson | objects) catch empty; .task == $id)' \
-    "$LEDGER" >/dev/null 2>&1; then
-  exit 0
-fi
-# Test seam: widen the check-to-append window so a concurrency regression (a
-# removed lock) is observable deterministically; unset in production.
-[ -z "${FM_USAGE_HARVEST_APPEND_DELAY:-}" ] || sleep "$FM_USAGE_HARVEST_APPEND_DELAY"
-jq -cn \
+ROW=$(jq -cn \
   --arg task "$ID" --arg harness "$HARNESS" \
   --arg model "$MODEL" --arg effort "$EFFORT" \
   --arg spawned "$SPAWNED" --arg completed "$COMPLETED" \
@@ -552,4 +610,15 @@ jq -cn \
     completed_at:(if $completed == "" then null else $completed end),
     wall_secs:$wall, turns:$turns,
     input_tokens:$it, cached_input_tokens:$ct, output_tokens:$ot,
-    reasoning_tokens:$rt, source:$source}' >> "$LEDGER"
+    reasoning_tokens:$rt, source:$source}')
+
+# --scan-to stops here: the row is staged for a later --append-from and the
+# ledger is untouched, so a caller that aborts between the two phases leaves no
+# row to freeze. The staging write is atomic within this run: a partial file
+# fails --append-from's own parse rather than appending half a row.
+if [ "$STAGE_MODE" = scan ]; then
+  printf '%s\n' "$ROW" > "$STAGE_FILE"
+  exit 0
+fi
+
+ledger_append_row "$ROW"

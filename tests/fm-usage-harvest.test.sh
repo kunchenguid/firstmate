@@ -16,8 +16,9 @@
 # documented harness-switch narrowing, deterministic final-incarnation model
 # attribution, the log scan that reaches the harness's closing write without
 # absorbing a later occupant of the same worktree path, the teardown ordering
-# that keeps that scan bound safe, and the harvest of a secondmate's children
-# before a forced cleanup retires them.
+# that keeps that scan bound safe, the harvest of a secondmate's children
+# before a forced cleanup retires them, and the scan-then-append split that
+# keeps an aborted teardown from freezing a row its rerun could not correct.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1087,6 +1088,84 @@ JSON
   pass "teardown integration: the harvest precedes the worktree return and never blocks it"
 }
 
+# Teardown's refusals exit while deliberately retaining the task's records so
+# the operator can rerun, and the ledger's idempotency guard means a row
+# written before those refusals could never be corrected by that rerun. So an
+# aborted teardown must leave no row at all, and the rerun must MEASURE the
+# task again rather than replay whatever the aborted attempt had computed.
+teardown_refusal_case() {
+  local proj wt id fb state data config out status row encoded logdir base failflag
+  id=usageharvrefuse1
+  proj="$TMP_ROOT/refuse-proj"; wt="$TMP_ROOT/refuse-wt"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$TMP_ROOT/refuse-fake-claude/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgRF","model":"claude-refuse","usage":{"input_tokens":17,"output_tokens":2}}}
+JSON
+  # The worktree return refuses while this flag exists, which is one of
+  # teardown's fail-closed exits.
+  failflag="$TMP_ROOT/refuse-treehouse-fails"
+  : > "$failflag"
+  fb="$TMP_ROOT/refuse-fakebin"
+  mkdir -p "$fb"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/tmux"
+  cat > "$fb/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = return ] && [ -e "$failflag" ]; then
+  echo "treehouse: pool return refused" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse"
+  state="$TMP_ROOT/refuse-state"; config="$TMP_ROOT/refuse-config"; data="$TMP_ROOT/refuse-data"
+  mkdir -p "$state" "$config" "$data/$id"
+  printf 'scout findings\n' > "$data/$id/report.md"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" \
+    "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "decisions_reviewed=1" "decision_keys="
+  printf 'working: scouting\n' > "$state/$id.status"
+  base=$(file_mtime_epoch "$state/$id.status")
+  printf 'spawn_gen=s%s.66.1\n' "$((base - 400))" >> "$state/$id.meta"
+  touch -t "$(touch_stamp $((base - 100)))" "$logdir/session.jsonl"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/refuse-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/refuse-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/refuse-fake-pi" \
+    "$TEARDOWN" "$id" 2>&1)
+  status=$?
+  expect_code 1 "$status" "a refused worktree return must abort teardown"$'\n'"$out"
+  [ -f "$state/$id.status" ] \
+    || fail "the refusal did not retain the task's status log for a rerun"$'\n'"$out"
+  [ ! -s "$data/usage-ledger.jsonl" ] \
+    || fail "an aborted teardown left a ledger row: $(cat "$data/usage-ledger.jsonl")"
+
+  # The task keeps working before the operator reruns teardown, so a rerun that
+  # replayed the aborted attempt's row would report the old turn count.
+  printf 'working: resumed\n' >> "$state/$id.status"
+  touch -t "$(touch_stamp "$base")" "$state/$id.status"
+  rm -f "$failflag"
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/refuse-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/refuse-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/refuse-fake-pi" \
+    "$TEARDOWN" "$id" 2>&1)
+  expect_code 0 "$?" "the rerun should complete once the return succeeds"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  [ "$(wc -l < "$data/usage-ledger.jsonl" | tr -d ' ')" = 1 ] \
+    || fail "the rerun wrote more than one row"$'\n'"$row"
+  assert_contains "$row" '"turns":2' \
+    "the rerun re-measured the task instead of replaying the aborted attempt"
+  assert_contains "$row" '"input_tokens":17' "the rerun's row carries the task's usage"
+  assert_contains "$row" '"source":"claude-projects"' "the rerun's row names its source"
+  pass "teardown integration: an aborted teardown writes no row and the rerun re-measures"
+}
+
 teardown_case() {
   local proj wt id fb state data config out
   id=usageharvtd1
@@ -1512,4 +1591,5 @@ report_malformed_case
 teardown_status_case
 teardown_child_case
 teardown_pool_order_case
+teardown_refusal_case
 teardown_case

@@ -1,22 +1,32 @@
 #!/usr/bin/env bash
-# Tear down a finished task: harvest the task's fleet usage-ledger row, then
-# return the treehouse worktree, release the Orca worktree, or retire a
-# secondmate home; kill the recorded runtime endpoint, clear volatile state,
-# and transition this home's backlog item for ship and scout tasks before
-# reporting success (a secondmate teardown transitions none, since secondmates
-# are not backlog items), then refresh/prune the project's clone for PR-based
-# ship tasks.
-# The harvest runs FIRST of those steps deliberately, and that order is
-# load-bearing rather than incidental: it precedes the worktree release so the
-# task still holds its pooled slot and no later occupant of that slot can be
-# scanned into its row, and it precedes the status retirement that deletes
-# state/<id>.status along with the task window and the turn count.
-# bin/fm-usage-harvest.sh owns that ledger and states the same ordering
-# contract from its own side. The harvest is best effort: a failure only warns
-# on stderr and never blocks teardown or the worktree release. A forced
-# secondmate teardown harvests each of that home's children the same way,
-# before each child's own worktree release and record retirement, but a
-# retired secondmate home's own ledger is not migrated into this home's.
+# Tear down a finished task: measure the task's fleet usage, return the
+# treehouse worktree, release the Orca worktree, or retire a secondmate home;
+# kill the recorded runtime endpoint, record the usage-ledger row, clear
+# volatile state, and transition this home's backlog item for ship and scout
+# tasks before reporting success (a secondmate teardown transitions none, since
+# secondmates are not backlog items), then refresh/prune the project's clone
+# for PR-based ship tasks.
+# The usage harvest is best effort everywhere - a failure only warns on stderr
+# and never blocks teardown, a worktree release or a cleanup - and
+# bin/fm-usage-harvest.sh owns the ledger and the two-phase contract. This
+# script has THREE harvest sites, and their ordering differs by path, so each
+# is stated here rather than as one rule.
+# On the local task path the harvest is SPLIT. Its scan runs before the
+# worktree release, which is load-bearing: the task still holds its pooled
+# slot there, so no later occupant of that slot can be scanned into its row.
+# Its append runs after every fail-closed refusal below and immediately before
+# the status retirement that deletes state/<id>.status along with the task
+# window and the turn count. The split is what keeps an aborted teardown from
+# freezing a row a rerun could never correct, since each of those refusals
+# exits while deliberately retaining the task's records.
+# The forced secondmate child cleanup splits the same way and for the same two
+# reasons, per child.
+# The remote secondmate path harvests in ONE shot, LAST, after the remote home
+# has already been retired on the far host and the registry route removed. That
+# is sound rather than an oversight: no refusal remains between it and the
+# status retirement it precedes, and a remote task's logs live on another
+# machine, so its row is source=unavailable with no local worktree to scan.
+# A retired secondmate home's own ledger is not migrated into this home's.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -246,6 +256,19 @@ DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
+# Staging for the two-phase usage harvest (bin/fm-usage-harvest.sh owns that
+# contract). The scan phase writes one task-scoped row file here and the append
+# phase reads it back after this teardown's fail-closed refusals have passed.
+# The directory is private to this run and the exit trap removes it on every
+# path, including an aborted teardown, so a retry can never read a row measured
+# by an earlier attempt.
+USAGE_STAGE_DIR=
+usage_stage_path() {  # <task-id> : print this run's staging path for that task
+  if [ -z "$USAGE_STAGE_DIR" ]; then
+    USAGE_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-usage-stage.XXXXXX") || return 1
+  fi
+  printf '%s/%s.row\n' "$USAGE_STAGE_DIR" "$1"
+}
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -276,6 +299,8 @@ teardown_release_locks() {
     CONTROL_LOCK_HELD=0
   fi
   fm_lease_guard_release || true
+  [ -z "$USAGE_STAGE_DIR" ] || rm -rf -- "$USAGE_STAGE_DIR"
+  USAGE_STAGE_DIR=
   return "$status"
 }
 trap teardown_release_locks EXIT
@@ -725,7 +750,11 @@ remote_secondmate_teardown() {
   # Best-effort fleet usage harvest runs while the task's state files still
   # exist. It must precede the status retirement below, which deletes
   # state/<id>.status: without that log the harvest has no task window and no
-  # turn count. A harvest failure must never block teardown.
+  # turn count. This path harvests in ONE shot rather than the scan-and-append
+  # split the other two sites use, because no refusal remains between here and
+  # that retirement, and a remote task has no local worktree to scan: its row
+  # is source=unavailable without any log scan at all. A harvest failure must
+  # never block teardown.
   "$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
     || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
   status_retire_presentation_task "$STATE" "$ID" || return 1
@@ -2499,7 +2528,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_usage_stage
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2545,15 +2574,23 @@ cleanup_firstmate_home_children() {
     # logs are here to harvest. The child's records are read from its own
     # home, and the row is appended to the ledger of the home running this
     # cleanup, which is the one that outlives the child home removed below.
-    # This runs BEFORE the worktree release below: while the child still holds
-    # its pooled worktree, no later task can have written a session log into
-    # that slot, which is what lets the scan run to the harvest instant. It
-    # also precedes the status retirement, which deletes the log carrying the
-    # task window and the turn count. Best effort, exactly as at the other
-    # sites: a failure warns and never changes this cleanup's own outcome.
-    FM_STATE_OVERRIDE="$sub_state" FM_DATA_OVERRIDE="$DATA" \
-      "$FM_ROOT/bin/fm-usage-harvest.sh" "$child_id" >/dev/null \
-      || echo "warning: usage harvest for $child_id failed; continuing cleanup" >&2
+    # This SCAN runs BEFORE the worktree release below: while the child still
+    # holds its pooled worktree, no later task can have written a session log
+    # into that slot, which is what lets the scan run to the harvest instant.
+    # The row is only staged here because this loop still has refusals ahead of
+    # it that return 1 and leave the child's records for a rerun; it is
+    # appended further down, once they have passed and before the status
+    # retirement that deletes the log carrying the window and the turn count.
+    # Best effort, exactly as at the other sites: a failure warns and never
+    # changes this cleanup's own outcome.
+    child_usage_stage=$(usage_stage_path "$child_id" 2>/dev/null || true)
+    if [ -n "$child_usage_stage" ]; then
+      FM_STATE_OVERRIDE="$sub_state" FM_DATA_OVERRIDE="$DATA" \
+        "$FM_ROOT/bin/fm-usage-harvest.sh" --scan-to "$child_usage_stage" "$child_id" >/dev/null \
+        || echo "warning: usage harvest for $child_id failed; continuing cleanup" >&2
+    else
+      echo "warning: usage harvest for $child_id failed; continuing cleanup" >&2
+    fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2595,6 +2632,11 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
+    if [ -n "$child_usage_stage" ]; then
+      FM_DATA_OVERRIDE="$DATA" \
+        "$FM_ROOT/bin/fm-usage-harvest.sh" --append-from "$child_usage_stage" "$child_id" >/dev/null \
+        || echo "warning: usage harvest for $child_id failed; continuing cleanup" >&2
+    fi
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" \
@@ -2795,8 +2837,8 @@ fi
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
-# Best-effort fleet usage harvest, placed here for two ordering reasons. It
-# runs BEFORE the worktree release below, so the task still holds its pooled
+# Best-effort fleet usage SCAN, placed here for two ordering reasons. It runs
+# BEFORE the worktree release below, so the task still holds its pooled
 # worktree and no later task can have written a session log into that slot,
 # which is what lets the scan run to the harvest instant; and it runs before
 # the status retirement further below, which deletes state/<id>.status and
@@ -2804,10 +2846,18 @@ fi
 # landed by this point on both kinds reaching this line, for different
 # reasons: a task teardown has already run the worktree process reap above,
 # while a secondmate teardown skips that reap and relies on the secondmate
-# having finished before teardown was invoked at all. A harvest failure must
-# never block teardown or the worktree return.
-"$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
-  || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
+# having finished before teardown was invoked at all. The measured row is only
+# STAGED here, because every fail-closed refusal below exits while retaining
+# the task's records for a rerun, and a row appended before those refusals
+# could never be corrected by that rerun. A scan failure must never block
+# teardown or the worktree return.
+USAGE_STAGE_MAIN=$(usage_stage_path "$ID" 2>/dev/null || true)
+if [ -n "$USAGE_STAGE_MAIN" ]; then
+  "$FM_ROOT/bin/fm-usage-harvest.sh" --scan-to "$USAGE_STAGE_MAIN" "$ID" >/dev/null \
+    || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
+else
+  echo "warning: usage harvest for $ID failed; continuing teardown" >&2
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -2957,6 +3007,13 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# Append phase of the harvest: every fail-closed refusal is behind us, so this
+# teardown is committed and the staged row can become permanent. It still
+# precedes the status retirement below, and it stays best effort.
+if [ -n "${USAGE_STAGE_MAIN:-}" ]; then
+  "$FM_ROOT/bin/fm-usage-harvest.sh" --append-from "$USAGE_STAGE_MAIN" "$ID" >/dev/null \
+    || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
+fi
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
