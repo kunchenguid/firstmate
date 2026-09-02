@@ -10,8 +10,9 @@
 # `# Definition of done` before an fm-control relaunch marker when that section
 # exists, otherwise the brief prefix before that marker so older one-line
 # records keep working. A marker copied into replaceable {TASK} text does not
-# count: it still sits before the generated Setup pair. A relaunch progress
-# note is never scanned. When the
+# count: it still sits before the first `Scaffold bound: generated` line, or
+# before the generated Setup pair on older briefs that lack that line. A
+# relaunch progress note is never scanned. When the
 # crew-branch line is absent from that region, this
 # script still uses fm/<id>. When the base-branch line is absent, it still
 # lands on the project's default branch. Omitted flags therefore stay
@@ -66,14 +67,16 @@ default_branch() {
 # Generated contracts live in the last `# Definition of done` before an
 # fm-control relaunch marker. Truncation anchors on the exact generated marker
 # (`## Progress note (ISO-timestamp)` followed by `This task was relaunched.`)
-# only when that marker is not followed by a generated Setup pair
-# (`# Setup` then `You are in a disposable git worktree of `). A copy of
-# the marker or the worktree line alone therefore cannot hide or extend
-# the generated section, while a real fm-control append after Setup still
-# ends the scan. Heading text alone is not a boundary.
+# only when that marker sits after the first `Scaffold bound: generated` line
+# written by bin/fm-brief.sh. A progress note that copies `# Setup` and the
+# disposable-worktree line therefore cannot move the bound. Briefs without
+# that line keep the older rule: the marker is structural only when it is
+# not followed by a generated Setup pair (`# Setup` then `You are in a
+# disposable git worktree of `). Heading text alone is not a boundary.
 brief_dod_section() {
   awk '
     FNR==NR {
+      if (!scaffold_end && $0 == "Scaffold bound: generated") scaffold_end=FNR
       if (pending_setup && /^[[:space:]]*$/) next
       if (pending_setup) {
         if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
@@ -86,7 +89,11 @@ brief_dod_section() {
     pending_relaunch && /^[[:space:]]*$/ { next }
     pending_relaunch {
       if ($0 ~ /^This task was relaunched\./) {
-        if (!last_setup || FNR > last_setup) exit
+        if (scaffold_end) {
+          if (FNR > scaffold_end) exit
+        } else if (!last_setup || FNR > last_setup) {
+          exit
+        }
       }
       pending_relaunch=0
     }
@@ -101,12 +108,13 @@ brief_dod_section() {
   ' "$1" "$1"
 }
 
-# Brief body before the first fm-control relaunch marker that is not followed
-# by generated Setup. Progress notes after that marker are untrusted free
-# text for contract lookup.
+# Brief body before the first fm-control relaunch marker after the generated
+# scaffold bound (or, on older briefs, after generated Setup). Progress notes
+# after that marker are untrusted free text for contract lookup.
 brief_truncated_prefix() {
   awk '
     FNR==NR {
+      if (!scaffold_end && $0 == "Scaffold bound: generated") scaffold_end=FNR
       if (pending_setup && /^[[:space:]]*$/) next
       if (pending_setup) {
         if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
@@ -119,7 +127,11 @@ brief_truncated_prefix() {
     pending_relaunch && /^[[:space:]]*$/ { next }
     pending_relaunch {
       if ($0 ~ /^This task was relaunched\./) {
-        if (!last_setup || FNR > last_setup) exit
+        if (scaffold_end) {
+          if (FNR > scaffold_end) exit
+        } else if (!last_setup || FNR > last_setup) {
+          exit
+        }
       }
       pending_relaunch=0
     }

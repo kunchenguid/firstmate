@@ -66,6 +66,15 @@
 # bin/fm-review-diff.sh (prefers `fm/<id>`, then falls back to the worktree HEAD).
 # bin/fm-spawn.sh, bin/fm-teardown.sh, bin/fm-control.sh, and
 # bin/fm-crew-state.sh do not reconstruct that pattern.
+# After the generated Definition of done, every ship and scout scaffold writes
+# the exact line `Scaffold bound: generated`. bin/fm-spawn.sh and
+# bin/fm-merge-local.sh treat the first such line as the end of generated
+# scaffold: only an fm-control relaunch marker after that line is a structural
+# cutoff. A progress note that copies `# Setup` and the disposable-worktree
+# line therefore cannot move the bound. Briefs scaffolded before this line
+# keep the older Setup-pair fallback in those readers. A {TASK} body that
+# copies the Definition of done and this exact line can still hide later
+# generated contracts; that residual is accepted.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -447,6 +456,8 @@ If your deliverable is a visual artifact the captain will review and iterate on,
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.$BASE_BRANCH_CONTRACT
+
+Scaffold bound: generated
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
@@ -537,5 +548,7 @@ If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, ad
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
+
+Scaffold bound: generated
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

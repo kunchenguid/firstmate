@@ -1834,15 +1834,18 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # may mention the same phrases or headings, and a later progress note must not
 # override them. Truncation anchors on the exact generated marker (`## Progress
 # note (ISO-timestamp)` followed by `This task was relaunched.`) only when that
-# marker is not followed by a generated Setup pair (`# Setup` then `You are in
-# a disposable git worktree of `). A copy of the marker or the worktree line
-# alone therefore cannot hide or extend the generated section. Heading text
-# alone is not a boundary. When that
+# marker sits after the first `Scaffold bound: generated` line written by
+# bin/fm-brief.sh. A progress note that copies `# Setup` and the disposable
+# worktree line therefore cannot move the bound. Briefs without that line keep
+# the older rule: the marker is structural only when it is not followed by a
+# generated Setup pair (`# Setup` then `You are in a disposable git worktree
+# of `). Heading text alone is not a boundary. When that
 # section is missing, older one-line records are read from the brief prefix
 # before that marker only. bin/fm-merge-local.sh uses the same rule for landing.
 brief_dod_section() {
   awk '
     FNR==NR {
+      if (!scaffold_end && $0 == "Scaffold bound: generated") scaffold_end=FNR
       if (pending_setup && /^[[:space:]]*$/) next
       if (pending_setup) {
         if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
@@ -1855,7 +1858,11 @@ brief_dod_section() {
     pending_relaunch && /^[[:space:]]*$/ { next }
     pending_relaunch {
       if ($0 ~ /^This task was relaunched\./) {
-        if (!last_setup || FNR > last_setup) exit
+        if (scaffold_end) {
+          if (FNR > scaffold_end) exit
+        } else if (!last_setup || FNR > last_setup) {
+          exit
+        }
       }
       pending_relaunch=0
     }
@@ -1873,6 +1880,7 @@ brief_dod_section() {
 brief_truncated_prefix() {
   awk '
     FNR==NR {
+      if (!scaffold_end && $0 == "Scaffold bound: generated") scaffold_end=FNR
       if (pending_setup && /^[[:space:]]*$/) next
       if (pending_setup) {
         if ($0 ~ /^You are in a disposable git worktree of /) last_setup=FNR
@@ -1885,7 +1893,11 @@ brief_truncated_prefix() {
     pending_relaunch && /^[[:space:]]*$/ { next }
     pending_relaunch {
       if ($0 ~ /^This task was relaunched\./) {
-        if (!last_setup || FNR > last_setup) exit
+        if (scaffold_end) {
+          if (FNR > scaffold_end) exit
+        } else if (!last_setup || FNR > last_setup) {
+          exit
+        }
       }
       pending_relaunch=0
     }
