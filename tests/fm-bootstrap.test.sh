@@ -21,6 +21,9 @@
 # one run into its local and network halves, and the one-hop tasks-axi
 # compatibility handoff that keeps a session start from paying for that verdict
 # twice.
+# Dedicated perl-JSON::PP cases pin the 'MISSING_MANUAL: perl JSON::PP module
+# (instructions: ...)' diagnostic against a stubbed perl, hermetic to whatever
+# the host actually has installed.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -45,6 +48,7 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
+  fm_fake_json_capable_perl "$fakebin"
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -628,6 +632,42 @@ test_cmux_bundled_cli_satisfies_dependency() {
   pass "bootstrap: the bundled cmux CLI satisfies the active backend dependency"
 }
 
+test_perl_jsonpp_missing_reports_manual_diagnostic() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/perl-jsonpp-missing"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/perl"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" \
+    "MISSING_MANUAL: perl JSON::PP module (instructions: install the OS package - Fedora/RHEL: 'sudo dnf install perl-JSON-PP', Debian/Ubuntu: 'sudo apt install libjson-pp-perl', macOS/other: 'cpan JSON::PP'; required by bin/fm-captain-hold.sh, bin/fm-procevent-lavish.sh, and bin/fm-procevent-extension-capture.pl)" \
+    "bootstrap should report the perl JSON::PP module as missing with per-platform install instructions"
+  pass "bootstrap: a missing perl JSON::PP module reports an actionable manual diagnostic"
+}
+
+test_perl_jsonpp_present_is_silent() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/perl-jsonpp-present"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/perl"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a usable perl JSON::PP module should not be reported, got: $out"
+  pass "bootstrap: a present perl JSON::PP module stays silent"
+}
+
 test_unknown_backend_reports_invalid_configuration() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/unknown-backend"
@@ -1160,6 +1200,8 @@ test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
+test_perl_jsonpp_missing_reports_manual_diagnostic
+test_perl_jsonpp_present_is_silent
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
