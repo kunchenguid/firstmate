@@ -37,6 +37,7 @@ fm_procevent_claim_root() {
 
 fm_procevent_registry_dir() { printf '%s\n' "$1/procevent"; }
 fm_procevent_inbox_dir()    { printf '%s\n' "$1/procevent-inbox"; }
+fm_procevent_capture_reservation_dir() { printf '%s\n' "$1/procevent-capture-reservations"; }
 
 # A source id names a private file and a bounded wake slug, so it is held to the
 # same path-safe shape as a task id. Adapters derive it from canonical source
@@ -53,6 +54,41 @@ fm_procevent_adapter_valid() {
     ''|*[!a-z0-9-]*) return 1 ;;
   esac
   [ "${#a}" -le 32 ]
+}
+
+fm_procevent_extension_id_valid() {
+  local id=${1-}
+  case "$id" in
+    ''|[!a-z0-9]*|*[-.]|*[!a-z0-9.-]*|*..*|*.-*|*-.*|*--*) return 1 ;;
+  esac
+  [ "${#id}" -le 128 ]
+}
+
+fm_procevent_extension_version_valid() {
+  local version=${1-}
+  case "$version" in
+    ''|*[!A-Za-z0-9.+-]*) return 1 ;;
+  esac
+  [ "${#version}" -le 128 ]
+}
+
+fm_procevent_digest_valid() {
+  local digest=${1-} hex
+  case "$digest" in sha256:*) ;; *) return 1 ;; esac
+  hex=${digest#sha256:}
+  [ "${#hex}" -eq 64 ] || return 1
+  case "$hex" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+fm_procevent_extension_config_ref_valid() {
+  local ref=${1-}
+  local LC_ALL=C
+  [ -n "$ref" ] && [ "${#ref}" -le 512 ] || return 1
+  ! printf '%s' "$ref" | grep -q '[[:cntrl:]]'
+}
+
+fm_procevent_extension_registration_token_valid() {
+  fm_procevent_digest_valid "${1-}"
 }
 
 # fm_procevent_any_registered <state>
@@ -119,8 +155,131 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   return 1
 }
 
+# Publish one extension-owned registration. Its identity fields and random
+# registration token are immutable owner evidence; the executable argv is never
+# stored because the tracked host constructs that command at run time.
+fm_procevent_extension_registration_publish_locked() {  # <state> <adapter> <source-id> <extension-id> <extension-version> <capability-version> <package-digest> <binding-digest> <config-ref> <registration-token>
+  local state=$1 adapter=$2 id=$3 extension_id=$4 extension_version=$5 capability_version=$6
+  local package_digest=$7 binding_digest=$8 config_ref=$9 registration_token=${10} reg dest tmp
+  fm_procevent_adapter_valid "$adapter" || return 1
+  fm_procevent_source_id_valid "$id" || return 1
+  fm_procevent_extension_id_valid "$extension_id" || return 1
+  fm_procevent_extension_version_valid "$extension_version" || return 1
+  [ "$capability_version" = 1 ] || return 1
+  fm_procevent_digest_valid "$package_digest" || return 1
+  fm_procevent_digest_valid "$binding_digest" || return 1
+  fm_procevent_extension_config_ref_valid "$config_ref" || return 1
+  fm_procevent_extension_registration_token_valid "$registration_token" || return 1
+  reg=$(fm_procevent_registry_dir "$state")
+  (umask 077; mkdir -p "$reg") || return 1
+  [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  dest="$reg/$id.source"
+  tmp=$(umask 077; mktemp "$reg/.source.XXXXXX") || return 1
+  if {
+    printf 'adapter=%s\n' "$adapter"
+    printf 'owner=extension\n'
+    printf 'extension_schema=fm-procevent-extension-owner.v1\n'
+    printf 'extension_id=%s\n' "$extension_id"
+    printf 'extension_version=%s\n' "$extension_version"
+    printf 'capability_version=%s\n' "$capability_version"
+    printf 'package_digest=%s\n' "$package_digest"
+    printf 'binding_digest=%s\n' "$binding_digest"
+    printf 'config_ref=%s\n' "$config_ref"
+    printf 'registration_token=%s\n' "$registration_token"
+    printf 'argc=0\n'
+    printf 'argv:\n'
+  } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
+# Load an extension-owned registration under the caller's source lock.
+# 0 = valid extension owner, 1 = ordinary built-in registration, 2 = malformed
+# extension owner. Sets FM_PROCEVENT_EXTENSION_* on success.
+fm_procevent_extension_registration_load_locked() {  # <state> <source-id>
+  local state=$1 id=$2 file adapter_line owner_line schema_line id_line version_line capability_line
+  local package_line binding_line config_line token_line argc_line argv_line extra
+  file="$(fm_procevent_registry_dir "$state")/$id.source"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 2
+  owner_line=$(sed -n '2p' "$file") || return 2
+  [ "$owner_line" = owner=extension ] || return 1
+  [ "$(fm_pr_file_mode "$file")" = 600 ] \
+    && [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 2
+  {
+    IFS= read -r adapter_line \
+      && IFS= read -r owner_line \
+      && IFS= read -r schema_line \
+      && IFS= read -r id_line \
+      && IFS= read -r version_line \
+      && IFS= read -r capability_line \
+      && IFS= read -r package_line \
+      && IFS= read -r binding_line \
+      && IFS= read -r config_line \
+      && IFS= read -r token_line \
+      && IFS= read -r argc_line \
+      && IFS= read -r argv_line \
+      && ! IFS= read -r extra
+  } < "$file" || return 2
+  [ "$owner_line" = owner=extension ] || return 2
+  [ "$schema_line" = extension_schema=fm-procevent-extension-owner.v1 ] || return 2
+  [ "$capability_line" = capability_version=1 ] || return 2
+  [ "$argc_line" = argc=0 ] && [ "$argv_line" = argv: ] || return 2
+  FM_PROCEVENT_EXTENSION_ADAPTER=${adapter_line#adapter=}
+  FM_PROCEVENT_EXTENSION_ID=${id_line#extension_id=}
+  FM_PROCEVENT_EXTENSION_VERSION=${version_line#extension_version=}
+  # shellcheck disable=SC2034 # Public loader output consumed by fm-procevent.sh.
+  FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION=${capability_line#capability_version=}
+  FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST=${package_line#package_digest=}
+  FM_PROCEVENT_EXTENSION_BINDING_DIGEST=${binding_line#binding_digest=}
+  FM_PROCEVENT_EXTENSION_CONFIG_REF=${config_line#config_ref=}
+  FM_PROCEVENT_EXTENSION_REGISTRATION_TOKEN=${token_line#registration_token=}
+  [ "$adapter_line" = "adapter=$FM_PROCEVENT_EXTENSION_ADAPTER" ] || return 2
+  [ "$id_line" = "extension_id=$FM_PROCEVENT_EXTENSION_ID" ] || return 2
+  [ "$version_line" = "extension_version=$FM_PROCEVENT_EXTENSION_VERSION" ] || return 2
+  [ "$package_line" = "package_digest=$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST" ] || return 2
+  [ "$binding_line" = "binding_digest=$FM_PROCEVENT_EXTENSION_BINDING_DIGEST" ] || return 2
+  [ "$config_line" = "config_ref=$FM_PROCEVENT_EXTENSION_CONFIG_REF" ] || return 2
+  [ "$token_line" = "registration_token=$FM_PROCEVENT_EXTENSION_REGISTRATION_TOKEN" ] || return 2
+  fm_procevent_adapter_valid "$FM_PROCEVENT_EXTENSION_ADAPTER" || return 2
+  fm_procevent_extension_id_valid "$FM_PROCEVENT_EXTENSION_ID" || return 2
+  fm_procevent_extension_version_valid "$FM_PROCEVENT_EXTENSION_VERSION" || return 2
+  fm_procevent_digest_valid "$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST" || return 2
+  fm_procevent_digest_valid "$FM_PROCEVENT_EXTENSION_BINDING_DIGEST" || return 2
+  fm_procevent_extension_config_ref_valid "$FM_PROCEVENT_EXTENSION_CONFIG_REF" || return 2
+  fm_procevent_extension_registration_token_valid "$FM_PROCEVENT_EXTENSION_REGISTRATION_TOKEN" || return 2
+}
+
+# Exact legacy registration comparison used by conditional built-in retirement.
+fm_procevent_registration_matches_locked() {  # <state> <adapter> <source-id> <argv...>
+  local state=$1 adapter=$2 id=$3 reg dest tmp arg status=1
+  shift 3
+  fm_procevent_adapter_valid "$adapter" || return 1
+  fm_procevent_source_id_valid "$id" || return 1
+  [ "$#" -ge 1 ] || return 1
+  for arg in "$@"; do
+    case "$arg" in *$'\n'*) return 1 ;; esac
+  done
+  reg=$(fm_procevent_registry_dir "$state")
+  [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  dest="$reg/$id.source"
+  [ -f "$dest" ] && [ ! -L "$dest" ] || return 1
+  tmp=$(umask 077; mktemp "$reg/.source-match.XXXXXX") || return 1
+  if {
+    printf 'adapter=%s\n' "$adapter"
+    printf 'argc=%s\n' "$#"
+    printf 'argv:\n'
+    printf '%s\n' "$@"
+  } > "$tmp" && cmp -s -- "$tmp" "$dest"; then
+    status=0
+  fi
+  rm -f -- "$tmp"
+  return "$status"
+}
+
 fm_procevent_claim_load_locked() {  # <source-id>
-  local claim home pid token identity reg_dir reg_identity terminal extra
+  local claim home pid token identity reg_dir reg_identity terminal state_root state_device state_inode state_owner state_mode extra
   claim=$(fm_procevent_claim_path "$1")
   [ -f "$claim" ] && [ ! -L "$claim" ] || return 1
   {
@@ -130,8 +289,20 @@ fm_procevent_claim_load_locked() {  # <source-id>
       && IFS= read -r identity \
       && { IFS= read -r reg_dir || reg_dir=; } \
       && { IFS= read -r reg_identity || reg_identity=; } \
-      && { IFS= read -r terminal || terminal=active; } \
-      && ! IFS= read -r extra
+      && { IFS= read -r terminal || terminal=active; }
+    if IFS= read -r state_root; then
+      IFS= read -r state_device \
+        && IFS= read -r state_inode \
+        && IFS= read -r state_owner \
+        && IFS= read -r state_mode \
+        && ! IFS= read -r extra
+    else
+      state_root=
+      state_device=
+      state_inode=
+      state_owner=
+      state_mode=
+    fi
   } < "$claim" || return 1
   [ -n "$home" ] || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -140,6 +311,17 @@ fm_procevent_claim_load_locked() {  # <source-id>
   case "$reg_dir" in ''|/*) ;; *) return 1 ;; esac
   case "$reg_identity" in ''|*:* ) ;; *) return 1 ;; esac
   case "$terminal" in active|terminal) ;; *) return 1 ;; esac
+  if [ -n "$state_root" ]; then
+    case "$state_root" in /*) ;; *) return 1 ;; esac
+    fm_procevent_claim_state_root_field_valid "$state_root" || return 1
+    case "$state_device" in ''|*[!0-9]*) return 1 ;; esac
+    case "$state_inode" in ''|*[!0-9]*) return 1 ;; esac
+    case "$state_owner" in ''|*[!0-9]*) return 1 ;; esac
+    case "$state_mode" in ''|*[!0-7]*) return 1 ;; esac
+    [ $((8#$state_mode & 8#022)) -eq 0 ] || return 1
+  elif [ -n "$state_device$state_inode$state_owner$state_mode" ]; then
+    return 1
+  fi
   FM_PROCEVENT_CLAIM_HOME=$home
   FM_PROCEVENT_CLAIM_PID=$pid
   FM_PROCEVENT_CLAIM_TOKEN=$token
@@ -147,6 +329,55 @@ fm_procevent_claim_load_locked() {  # <source-id>
   FM_PROCEVENT_CLAIM_REG_DIR=$reg_dir
   FM_PROCEVENT_CLAIM_REG_IDENTITY=$reg_identity
   FM_PROCEVENT_CLAIM_TERMINAL=$terminal
+  FM_PROCEVENT_CLAIM_STATE_ROOT=$state_root
+  FM_PROCEVENT_CLAIM_STATE_DEVICE=$state_device
+  FM_PROCEVENT_CLAIM_STATE_INODE=$state_inode
+  FM_PROCEVENT_CLAIM_STATE_OWNER=$state_owner
+  FM_PROCEVENT_CLAIM_STATE_MODE=$state_mode
+}
+
+fm_procevent_claim_state_root_field_valid() {  # <canonical-state-root>
+  local value=$1 LC_ALL=C
+  case "$value" in *[[:cntrl:]]*) return 1 ;; esac
+  return 0
+}
+
+fm_procevent_claim_state_root_identity() {  # <state-root>
+  local state=$1 canonical device inode owner mode
+  canonical=$(fm_procevent_state_root_resolve "$state") || return 1
+  fm_procevent_claim_state_root_field_valid "$canonical" || return 1
+  device=$(fm_pr_file_device "$canonical") || return 1
+  inode=$(fm_pr_file_inode "$canonical") || return 1
+  owner=$(id -u) || return 1
+  mode=$(fm_pr_file_mode "$canonical") || return 1
+  printf '%s\t%s\t%s\t%s\t%s\n' "$canonical" "$device" "$inode" "$owner" "$mode"
+}
+
+fm_procevent_claim_owned_by_state() {  # <state-root> <legacy-home>
+  if [ -n "${FM_PROCEVENT_CLAIM_STATE_ROOT:-}" ]; then
+    [ "$FM_PROCEVENT_CLAIM_STATE_ROOT" = "$1" ]
+  else
+    [ "$FM_PROCEVENT_CLAIM_HOME" = "$2" ]
+  fi
+}
+
+fm_procevent_claim_recorded_state_root_valid() {
+  local identity state_root state_device state_inode state_owner state_mode
+  state_root=${FM_PROCEVENT_CLAIM_STATE_ROOT:-}
+  [ -n "$state_root" ] || return 0
+  identity=$(fm_procevent_claim_state_root_identity "$state_root") || return 1
+  IFS=$'\t' read -r state_root state_device state_inode state_owner state_mode <<< "$identity"
+  [ "$state_root" = "$FM_PROCEVENT_CLAIM_STATE_ROOT" ] \
+    && [ "$state_device" = "$FM_PROCEVENT_CLAIM_STATE_DEVICE" ] \
+    && [ "$state_inode" = "$FM_PROCEVENT_CLAIM_STATE_INODE" ] \
+    && [ "$state_owner" = "$FM_PROCEVENT_CLAIM_STATE_OWNER" ] \
+    && [ "$state_mode" = "$FM_PROCEVENT_CLAIM_STATE_MODE" ]
+}
+
+fm_procevent_claim_capture_reservation_remove_locked() {
+  [ -n "${FM_PROCEVENT_CLAIM_STATE_ROOT:-}" ] || return 0
+  fm_procevent_claim_recorded_state_root_valid || return 1
+  fm_procevent_capture_reservation_remove_claim "$FM_PROCEVENT_CLAIM_STATE_ROOT" "$FM_PROCEVENT_CLAIM_TOKEN"
 }
 
 # fm_procevent_group_alive <pid>
@@ -199,10 +430,10 @@ fm_procevent_claim_state_locked() {
   fm_procevent_pid_state "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_IDENTITY"
 }
 
-# fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration>
+# fm_procevent_claim_acquire_locked <source-id> <home> <pid> <registration> <state-root>
 # 0 acquired, 1 error, 2 held by a live owner (possibly another home).
 fm_procevent_claim_acquire_locked() {
-  local id=$1 home=$2 pid=$3 registration=$4 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage
+  local id=$1 home=$2 pid=$3 registration=$4 state=$5 root claim tmp identity token status claim_state old_home old_token old_reg_dir reg_dir reg_identity stage state_root state_device state_inode state_owner state_mode
   fm_procevent_source_id_valid "$id" || return 1
   [ -f "$registration" ] && [ ! -L "$registration" ] || return 1
   reg_dir=${registration%/*}
@@ -237,6 +468,9 @@ fm_procevent_claim_acquire_locked() {
               status=1
             fi
           fi
+          if [ "$status" -eq 0 ]; then
+            fm_procevent_claim_capture_reservation_remove_locked || status=1
+          fi
           [ "$status" -ne 0 ] || rm -f -- "$claim" || status=1
         else
           status=1
@@ -252,18 +486,22 @@ fm_procevent_claim_acquire_locked() {
     tmp=$(umask 077; mktemp "$root/.claim.XXXXXX") || status=1
   fi
   if [ "$status" -eq 0 ]; then
+    IFS=$'\t' read -r state_root state_device state_inode state_owner state_mode \
+      < <(fm_procevent_claim_state_root_identity "$state") || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
     token=${tmp##*/}-$pid
-    printf '%s\n%s\n%s\n%s\n%s\n%s\nactive\n' \
-      "$home" "$pid" "$token" "$identity" "$reg_dir" "$reg_identity" > "$tmp" || status=1
+    printf '%s\n%s\n%s\n%s\n%s\n%s\nactive\n%s\n%s\n%s\n%s\n%s\n' \
+      "$home" "$pid" "$token" "$identity" "$reg_dir" "$reg_identity" \
+      "$state_root" "$state_device" "$state_inode" "$state_owner" "$state_mode" > "$tmp" || status=1
     [ "$status" -ne 0 ] || chmod 0600 "$tmp" || status=1
     [ "$status" -ne 0 ] || mv -f -- "$tmp" "$claim" || status=1
     if [ "$status" -eq 0 ]; then
       FM_PROCEVENT_CLAIM_TOKEN=$token
       FM_PROCEVENT_CLAIM_REG_IDENTITY=$reg_identity
-    else
-      rm -f -- "$tmp"
     fi
   fi
+  [ "$status" -eq 0 ] || { [ -z "${tmp:-}" ] || rm -f -- "$tmp"; }
   return "$status"
 }
 
@@ -277,6 +515,21 @@ fm_procevent_claim_mark_terminal_locked() {
     && [ -n "$FM_PROCEVENT_CLAIM_REG_IDENTITY" ] || return 1
   root=$(fm_procevent_claim_root)
   tmp=$(umask 077; mktemp "$root/.claim.XXXXXX") || return 1
+  if [ -n "$FM_PROCEVENT_CLAIM_STATE_ROOT" ]; then
+    if printf '%s\n%s\n%s\n%s\n%s\n%s\nterminal\n%s\n%s\n%s\n%s\n%s\n' \
+      "$FM_PROCEVENT_CLAIM_HOME" "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_TOKEN" \
+      "$FM_PROCEVENT_CLAIM_IDENTITY" "$FM_PROCEVENT_CLAIM_REG_DIR" \
+      "$FM_PROCEVENT_CLAIM_REG_IDENTITY" "$FM_PROCEVENT_CLAIM_STATE_ROOT" \
+      "$FM_PROCEVENT_CLAIM_STATE_DEVICE" "$FM_PROCEVENT_CLAIM_STATE_INODE" \
+      "$FM_PROCEVENT_CLAIM_STATE_OWNER" "$FM_PROCEVENT_CLAIM_STATE_MODE" > "$tmp" \
+      && chmod 0600 "$tmp" \
+      && mv -f -- "$tmp" "$claim"; then
+      return 0
+    else
+      rm -f -- "$tmp"
+      return 1
+    fi
+  fi
   if printf '%s\n%s\n%s\n%s\n%s\n%s\nterminal\n' \
     "$FM_PROCEVENT_CLAIM_HOME" "$FM_PROCEVENT_CLAIM_PID" "$FM_PROCEVENT_CLAIM_TOKEN" \
     "$FM_PROCEVENT_CLAIM_IDENTITY" "$FM_PROCEVENT_CLAIM_REG_DIR" \
@@ -300,6 +553,7 @@ fm_procevent_claim_release_locked() {
     && [ "$FM_PROCEVENT_CLAIM_HOME" = "$home" ] \
     && [ "$FM_PROCEVENT_CLAIM_PID" = "$pid" ] \
     && [ "$FM_PROCEVENT_CLAIM_TOKEN" = "$token" ]; then
+    fm_procevent_claim_capture_reservation_remove_locked || return 1
     rm -f -- "$claim"
     return $?
   fi
@@ -308,28 +562,206 @@ fm_procevent_claim_release_locked() {
 
 # --- durable capture and publication ----------------------------------------
 
+fm_procevent_path_normalize() {
+  local path=${1-} part
+  local -a parts normalized=()
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) path="$(pwd -P)/$path" ;;
+  esac
+  IFS=/ read -r -a parts <<< "$path"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) ;;
+      ..) [ "${#normalized[@]}" -gt 0 ] && unset 'normalized[${#normalized[@]}-1]' ;;
+      *) normalized+=("$part") ;;
+    esac
+  done
+  printf '/%s\n' "$(IFS=/; printf '%s' "${normalized[*]}")"
+}
+
+fm_procevent_directory_owned_by_current_user() {
+  local owner
+  if [ "$(uname)" = Darwin ]; then
+    owner=$(stat -f %u "$1" 2>/dev/null)
+  else
+    owner=$(stat -c %u "$1" 2>/dev/null)
+  fi
+  [ "$owner" = "$(id -u)" ]
+}
+
+# fm_procevent_state_root_resolve <state-root>
+# Print the physical private directory this module operates on, or fail. A home
+# is legitimately spelled through a symlinked ancestor - /tmp and $TMPDIR are
+# symlinks on macOS - so the caller's spelling is resolved exactly once here and
+# every derived path, recorded claim identity, and later confinement check uses
+# the physical root instead. Resolving before validating is what makes the
+# private-directory contract hold for the directory actually operated on, rather
+# than only for callers that already spelled it physically.
+fm_procevent_state_root_resolve() {  # <state-root>
+  local state=$1 canonical
+  canonical=$(CDPATH='' cd -P -- "$state" 2>/dev/null && pwd -P) || return 1
+  fm_procevent_private_directory_valid "$canonical" 0 || return 1
+  printf '%s\n' "$canonical"
+}
+
+fm_procevent_private_directory_valid() {
+  local directory=$1 exact_mode=$2 canonical normalized mode
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  fm_procevent_directory_owned_by_current_user "$directory" || return 1
+  mode=$(fm_pr_file_mode "$directory") || return 1
+  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+  if [ "$exact_mode" = 1 ]; then
+    [ "$mode" = 700 ] || return 1
+  elif [ $((8#$mode & 8#022)) -ne 0 ]; then
+    return 1
+  fi
+  canonical=$(cd -P -- "$directory" && pwd -P) || return 1
+  normalized=$(fm_procevent_path_normalize "$directory") || return 1
+  [ "$canonical" = "$normalized" ]
+}
+
+fm_procevent_capture_inbox_prepare() {
+  local state=$1 inbox
+  state=$(fm_procevent_state_root_resolve "$state") || return 1
+  inbox=$(fm_procevent_inbox_dir "$state")
+  if [ ! -e "$inbox" ] && [ ! -L "$inbox" ]; then
+    (umask 077; mkdir "$inbox") || return 1
+  fi
+  fm_procevent_private_directory_valid "$inbox" 1 || return 1
+  printf '%s\n' "$inbox"
+}
+
+# Print the validated physical registry directory, like the inbox and
+# reservation preparers beside it, so a caller that pins the boundary with
+# `pwd -P` compares against the same physical path this validated.
+fm_procevent_extension_staging_prepare() {
+  local state=$1 registry
+  state=$(fm_procevent_state_root_resolve "$state") || return 1
+  registry=$(fm_procevent_registry_dir "$state")
+  fm_procevent_private_directory_valid "$registry" 1 || return 1
+  printf '%s\n' "$registry"
+}
+
+fm_procevent_capture_reservation_prepare() {
+  local state=$1 reservation
+  state=$(fm_procevent_state_root_resolve "$state") || return 1
+  reservation=$(fm_procevent_capture_reservation_dir "$state")
+  if [ ! -e "$reservation" ] && [ ! -L "$reservation" ]; then
+    (umask 077; mkdir "$reservation") || return 1
+  fi
+  fm_procevent_private_directory_valid "$reservation" 1 || return 1
+  printf '%s\n' "$reservation"
+}
+
+fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>
+  local state=$1 token=$2 reservation record
+  case "$token" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  reservation=$(fm_procevent_capture_reservation_dir "$state")
+  [ -d "$reservation" ] || return 0
+  fm_procevent_private_directory_valid "$reservation" 1 || return 1
+  for record in "$reservation"/.extension-capture-"$token".*.json \
+    "$reservation"/.extension-capture-"$token".*.consumed-*; do
+    [ -e "$record" ] || continue
+    [ -f "$record" ] && [ ! -L "$record" ] || return 1
+    rm -f -- "$record" || return 1
+  done
+}
+
 # fm_procevent_capture <state> <source-id> <adapter> <output-file>
+#   [<extension-id> <extension-version> <capability-version> <package-digest> <binding-digest>]
 # Atomically store the completed output at 0600 and print its durable path. The
 # rename is the commit point; nothing referencing this result may be published
-# before it returns successfully.
+# before it returns successfully. Extension captures retain immutable package
+# identity beside the legacy adapter sidecar, so later classification cannot
+# silently move to a replacement binding.
 fm_procevent_capture() {
-  local state=$1 id=$2 adapter=$3 src=$4 inbox seq dest tmp adapter_dest adapter_tmp
+  local state=$1 id=$2 adapter=$3 src=$4 extension_id=${5-} extension_version=${6-}
+  local capability_version=${7-} package_digest=${8-} binding_digest=${9-}
+  local inbox seq dest tmp adapter_dest adapter_tmp extension_dest='' extension_tmp=''
+  [ "$#" -eq 4 ] || [ "$#" -eq 9 ] || return 1
   fm_procevent_source_id_valid "$id" || return 1
   fm_procevent_adapter_valid "$adapter" || return 1
-  inbox=$(fm_procevent_inbox_dir "$state")
-  (umask 077; mkdir -p "$inbox") || return 1
+  if [ "$#" -eq 9 ]; then
+    fm_procevent_extension_id_valid "$extension_id" || return 1
+    fm_procevent_extension_version_valid "$extension_version" || return 1
+    [ "$capability_version" = 1 ] || return 1
+    fm_procevent_digest_valid "$package_digest" || return 1
+    fm_procevent_digest_valid "$binding_digest" || return 1
+  fi
+  if [ "$#" -eq 9 ]; then
+    if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" != 1 ]; then
+      inbox=$(fm_procevent_capture_inbox_prepare "$state") || return 1
+      (
+        CDPATH='' cd -- "$inbox" 2>/dev/null || exit 1
+        [ "$(pwd -P)" = "$inbox" ] || exit 1
+        FM_PROCEVENT_CAPTURE_PINNED_INBOX=1 \
+          FM_PROCEVENT_CAPTURE_ABSOLUTE_INBOX="$inbox" \
+          fm_procevent_capture "$@"
+      )
+      return $?
+    fi
+    inbox=.
+  else
+    inbox=$(fm_procevent_inbox_dir "$state")
+    (umask 077; mkdir -p "$inbox") || return 1
+  fi
   seq=1
   while [ -e "$inbox/$id.$seq.result" ]; do seq=$((seq + 1)); done
   dest="$inbox/$id.$seq.result"
   adapter_dest="$inbox/$id.$seq.adapter"
+  if [ "$#" -eq 9 ]; then
+    [ ! -e "$dest" ] && [ ! -L "$dest" ] \
+      && [ ! -e "$adapter_dest" ] && [ ! -L "$adapter_dest" ] || return 1
+  fi
   tmp=$(umask 077; mktemp "$inbox/.capture.XXXXXX") || return 1
   adapter_tmp=$(umask 077; mktemp "$inbox/.adapter.XXXXXX") || { rm -f -- "$tmp"; return 1; }
-  if ! cat "$src" > "$tmp"; then rm -f -- "$tmp" "$adapter_tmp"; return 1; fi
-  if ! printf '%s\n' "$adapter" > "$adapter_tmp"; then rm -f -- "$tmp" "$adapter_tmp"; return 1; fi
-  if ! chmod 0600 "$tmp" "$adapter_tmp"; then rm -f -- "$tmp" "$adapter_tmp"; return 1; fi
-  if ! mv -f -- "$adapter_tmp" "$adapter_dest"; then rm -f -- "$tmp" "$adapter_tmp"; return 1; fi
-  if ! mv -f -- "$tmp" "$dest"; then rm -f -- "$tmp" "$adapter_dest"; return 1; fi
-  printf '%s\n' "$dest"
+  if [ "$#" -eq 9 ]; then
+    extension_dest="$inbox/$id.$seq.extension"
+    [ ! -e "$extension_dest" ] && [ ! -L "$extension_dest" ] || {
+      rm -f -- "$tmp" "$adapter_tmp"
+      return 1
+    }
+    extension_tmp=$(umask 077; mktemp "$inbox/.extension.XXXXXX") \
+      || { rm -f -- "$tmp" "$adapter_tmp"; return 1; }
+  fi
+  if ! cat "$src" > "$tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
+  if ! printf '%s\n' "$adapter" > "$adapter_tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
+  if [ "$#" -eq 9 ] && ! {
+    printf 'schema=fm-procevent-extension-owner.v1\n'
+    printf 'extension_id=%s\n' "$extension_id"
+    printf 'extension_version=%s\n' "$extension_version"
+    printf 'capability_version=%s\n' "$capability_version"
+    printf 'package_digest=%s\n' "$package_digest"
+    printf 'binding_digest=%s\n' "$binding_digest"
+  } > "$extension_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    return 1
+  fi
+  if ! chmod 0600 "$tmp" "$adapter_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    return 1
+  fi
+  if [ "$#" -eq 9 ] && ! chmod 0600 "$extension_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    return 1
+  fi
+  if ! mv -f -- "$adapter_tmp" "$adapter_dest"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
+  if [ "$#" -eq 9 ] && ! mv -f -- "$extension_tmp" "$extension_dest"; then
+    rm -f -- "$tmp" "$adapter_dest" "$extension_tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp" "$adapter_dest"
+    [ -z "$extension_dest" ] || rm -f -- "$extension_dest"
+    return 1
+  fi
+  if [ "$#" -eq 9 ]; then
+    printf '%s\n' "$FM_PROCEVENT_CAPTURE_ABSOLUTE_INBOX/$id.$seq.result"
+  else
+    printf '%s\n' "$dest"
+  fi
 }
 
 # fm_procevent_pending <state>
@@ -367,6 +799,10 @@ fm_procevent_event_line() {
 
 # fm_procevent_handled_marker <state> <source-id> <sequence>
 fm_procevent_handled_marker() {
+  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" = 1 ]; then
+    printf './%s.%s.handled\n' "$2" "$3"
+    return
+  fi
   printf '%s/%s.%s.handled\n' "$(fm_procevent_inbox_dir "$1")" "$2" "$3"
 }
 
@@ -391,7 +827,11 @@ fm_procevent_mark_handled() {
   local state=$1 id=$2 seq=$3 inbox result adapter_file marker tmp
   fm_procevent_source_id_valid "$id" || return 2
   case "$seq" in ''|*[!0-9]*) return 2 ;; esac
-  inbox=$(fm_procevent_inbox_dir "$state")
+  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" = 1 ]; then
+    inbox=.
+  else
+    inbox=$(fm_procevent_inbox_dir "$state")
+  fi
   result="$inbox/$id.$seq.result"
   adapter_file="$inbox/$id.$seq.adapter"
   [ -f "$result" ] && [ ! -L "$result" ] || return 2
@@ -436,4 +876,41 @@ fm_procevent_result_adapter() {
   [ -z "$extra" ] || return 1
   fm_procevent_adapter_valid "$adapter" || return 1
   printf '%s\n' "$adapter"
+}
+
+# Load immutable extension identity for one captured result.
+# 0 = valid extension sidecar, 1 = built-in result (sidecar absent),
+# 2 = malformed or unsafe extension sidecar.
+fm_procevent_result_extension_load() {  # <result-path>
+  local result=$1 file="${1%.result}.extension" schema_line id_line version_line capability_line
+  local package_line binding_line extra
+  [ -e "$file" ] || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 2
+  [ "$(fm_pr_file_mode "$file")" = 600 ] \
+    && [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 2
+  {
+    IFS= read -r schema_line \
+      && IFS= read -r id_line \
+      && IFS= read -r version_line \
+      && IFS= read -r capability_line \
+      && IFS= read -r package_line \
+      && IFS= read -r binding_line \
+      && ! IFS= read -r extra
+  } < "$file" || return 2
+  [ "$schema_line" = schema=fm-procevent-extension-owner.v1 ] || return 2
+  [ "$capability_line" = capability_version=1 ] || return 2
+  FM_PROCEVENT_RESULT_EXTENSION_ID=${id_line#extension_id=}
+  FM_PROCEVENT_RESULT_EXTENSION_VERSION=${version_line#extension_version=}
+  # shellcheck disable=SC2034 # Public loader output consumed by fm-procevent.sh.
+  FM_PROCEVENT_RESULT_EXTENSION_CAPABILITY_VERSION=${capability_line#capability_version=}
+  FM_PROCEVENT_RESULT_EXTENSION_PACKAGE_DIGEST=${package_line#package_digest=}
+  FM_PROCEVENT_RESULT_EXTENSION_BINDING_DIGEST=${binding_line#binding_digest=}
+  [ "$id_line" = "extension_id=$FM_PROCEVENT_RESULT_EXTENSION_ID" ] || return 2
+  [ "$version_line" = "extension_version=$FM_PROCEVENT_RESULT_EXTENSION_VERSION" ] || return 2
+  [ "$package_line" = "package_digest=$FM_PROCEVENT_RESULT_EXTENSION_PACKAGE_DIGEST" ] || return 2
+  [ "$binding_line" = "binding_digest=$FM_PROCEVENT_RESULT_EXTENSION_BINDING_DIGEST" ] || return 2
+  fm_procevent_extension_id_valid "$FM_PROCEVENT_RESULT_EXTENSION_ID" || return 2
+  fm_procevent_extension_version_valid "$FM_PROCEVENT_RESULT_EXTENSION_VERSION" || return 2
+  fm_procevent_digest_valid "$FM_PROCEVENT_RESULT_EXTENSION_PACKAGE_DIGEST" || return 2
+  fm_procevent_digest_valid "$FM_PROCEVENT_RESULT_EXTENSION_BINDING_DIGEST" || return 2
 }

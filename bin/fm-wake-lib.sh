@@ -15,6 +15,23 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 mkdir -p "$STATE"
 
+# Most wake-library consumers need only queue and lock primitives, including
+# deliberately minimal recovery fixtures and remote installations.
+# Load the classifier only when a status presentation helper is actually used.
+_fm_wake_require_classify() {
+  command -v status_observed_signature >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-classify-lib.sh"
+}
+
+# Load the bounded-execution owner only for callers that use the presentation
+# lock deadline. Most wake-library consumers need no timeout machinery.
+_fm_wake_require_timeout() {
+  command -v fm_run_timed >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-timeout-lib.sh"
+}
+
 fm_current_pid() {
   printf '%s\n' "${BASHPID:-$$}"
 }
@@ -890,6 +907,95 @@ fm_lock_acquire_wait() {
   done
 }
 
+# Acquire in the timed helper process, then transfer the lock record to the
+# waiting caller before exiting. The lock's ordinary stale-owner recovery makes
+# every interruption safe: before transfer the helper is the owner; after
+# transfer the still-live caller is the owner.
+_fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
+  local lockdir=$1 caller_pid=$2 ownerdir current back
+  case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$caller_pid" || return 1
+  trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
+  fm_lock_acquire_wait "$lockdir" || return 1
+  if [ -L "$lockdir" ]; then
+    ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || {
+      fm_lock_release "$lockdir"
+      return 1
+    }
+  else
+    ownerdir=$lockdir
+  fi
+  current=${BASHPID:-$$}
+  back=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  if [ "$back" != "$current" ] \
+    || ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
+    || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
+    fm_lock_release "$lockdir"
+    return 1
+  fi
+  trap - TERM INT
+}
+
+# fm_lock_acquire_wait_bounded <lockdir> <positive-seconds>
+#
+# Bounded acquire variant. It preserves the ordinary wait/reclaim behavior
+# until fm-timeout-lib.sh's hard deadline, returns 124 when a live holder still
+# owns the lock, and leaves FM_LOCK_HELD_PID naming that holder.
+# Use it where a caller must refuse rather than block: wake presentation, and
+# the guarded remote link clear, whose whole contract is to return a
+# reconciliation refusal instead of wedging an unattended close.
+# Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
+fm_lock_acquire_wait_bounded() {
+  local lockdir=$1 seconds=$2 caller_pid rc owner_pid
+  case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
+  _fm_wake_require_timeout || return 1
+  if fm_lock_try_acquire "$lockdir"; then
+    return 0
+  fi
+
+  caller_pid=${BASHPID:-$$}
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  if fm_run_timed "$seconds" env \
+    "FM_STATE_OVERRIDE=$STATE" \
+    "FM_ROOT_OVERRIDE=$FM_ROOT" \
+    "FM_LOCK_STALE_AFTER=$FM_LOCK_STALE_AFTER" \
+    bash -c '. "$1"; _fm_lock_acquire_wait_handoff "$2" "$3"' \
+      _ "$FM_WAKE_LIB_DIR/fm-wake-lib.sh" "$lockdir" "$caller_pid" \
+      </dev/null >/dev/null 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  if [ "$owner_pid" = "$caller_pid" ]; then
+    return 0
+  fi
+  [ "$rc" -ne 0 ] || rc=1
+  # A deadline can kill the helper just after it acquired and before handoff.
+  # Give ordinary stale-owner recovery one final non-blocking chance so that
+  # helper cleanup cannot manufacture a false contention advisory.
+  if fm_lock_try_acquire "$lockdir"; then
+    return 0
+  fi
+  if [ "$rc" -eq 124 ]; then
+    owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    case "$owner_pid" in
+      ''|*[!0-9]*|0) ;;
+      *)
+        if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_pid_alive "$owner_pid"; then
+          FM_LOCK_HELD_PID=$owner_pid
+          return 124
+        fi
+        ;;
+    esac
+    # shellcheck disable=SC2034 # Output read by callers after bounded acquisition.
+    FM_LOCK_HELD_PID=
+    return 1
+  fi
+  return "$rc"
+}
+
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
   current=${BASHPID:-$$}
@@ -1511,35 +1617,95 @@ fm_wake_print_deduped() {
 # --- signal announcement signatures -----------------------------------------
 #
 # The watcher's per-file signal scan (bin/fm-watch.sh scan_signals) detects a
-# status or turn-ended change by comparing a size:mtime signature against a
-# persisted state/.seen-* marker, and advances that marker only after the change
-# has been surfaced to firstmate or deliberately absorbed by the signal triage.
-# These three helpers plus the guarded append below are the ONE owner of that
-# signature and marker format, shared by the scan itself, by the drain-time
-# historical-annotation staleness check, and by this home's own bookkeeping
-# writers.
+# status or turn-ended change by comparing a file signature against a persisted
+# state/.seen-* marker.
+# fm-classify-lib.sh's header owns the status marker contract, including its
+# independent reported signature and classified position.
+# These helpers own wake-facing marker routing, the legacy turn-ended signature,
+# drain-time staleness checks, and guarded bookkeeping writes.
 
-fm_wake_signal_sig() {  # <file> -> "size:mtime"
-  if [ "$_FM_UNAME" = Darwin ]; then
-    stat -f '%z:%Fm' "$1" 2>/dev/null
-  else
-    stat -c '%s:%Y' "$1" 2>/dev/null
-  fi
+fm_wake_signal_sig() {  # <file> -> reported-state signature
+  case "$1" in
+    *.status)
+      _fm_wake_require_classify || return 1
+      status_observed_signature "$1"
+      ;;
+    *)
+      if [ "$_FM_UNAME" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
+      ;;
+  esac
 }
 
 fm_wake_signal_seen_path() {  # <state> <file>
-  printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')"
+  local task
+  case "$2" in
+    *.status)
+      task=$(basename "$2"); task=${task%.status}
+      printf '%s/.seen-%s' "$1" "$(printf '%s.status' "$task" | tr '.' '_')"
+      ;;
+    *) printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')" ;;
+  esac
 }
 
-# 0 when <file>'s current signature exactly matches its recorded seen marker,
-# meaning every byte in it was already surfaced or deliberately absorbed.
-# A missing marker or unreadable signature is NOT a match, so uncertainty reads
-# as "unannounced bytes present".
+# The byte size recorded in <file>'s seen marker, or 0 when no marker exists, it
+# cannot be read, or it does not hold the supported presentation-marker format.
+# That size is the position the watcher has already classified, independently of
+# the file signature it has already reported. A 0 means "classify the whole
+# file", which surfaces events rather than losing them.
+fm_wake_signal_seen_size() {  # <state> <file>
+  local marker sig size
+  marker=$(fm_wake_signal_seen_path "$1" "$2")
+  case "$2" in
+    *.status)
+      _fm_wake_require_classify || { printf '0'; return 0; }
+      status_presentation_marker_offset "$marker" "$2"
+      ;;
+    *)
+      sig=$(cat "$marker" 2>/dev/null) || { printf '0'; return 0; }
+      case "$sig" in *:*) size=${sig%%:*} ;; *) size=0 ;; esac
+      case "$size" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$size" ;; esac
+      ;;
+  esac
+}
+
+# 0 when <file>'s current signature matches its recorded reported state.
+# For a status file this means the current state was already reported, not that
+# every byte was successfully classified; the separate classified position owns
+# that fact.
+# A missing marker or unreadable signature is not a match, so uncertainty reads
+# as an unreported state.
 fm_wake_signal_seen_current() {  # <state> <file>
-  local sig
+  local sig marker
   sig=$(fm_wake_signal_sig "$2") || return 1
   [ -n "$sig" ] || return 1
-  [ "$(cat "$(fm_wake_signal_seen_path "$1" "$2")" 2>/dev/null)" = "$sig" ]
+  marker=$(fm_wake_signal_seen_path "$1" "$2")
+  case "$2" in
+    *.status)
+      _fm_wake_require_classify || return 1
+      status_presentation_marker_reported_matches "$marker" "$sig"
+      ;;
+    *) [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] ;;
+  esac
+}
+
+fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>
+  _fm_wake_require_classify || return 1
+  status_presentation_marker_report "$(fm_wake_signal_seen_path "$1" "$2")" "$3"
+}
+
+fm_wake_status_seen_commit() {  # <state> <status-file> <captured-end> <captured-identity>
+  _fm_wake_require_classify || return 1
+  status_presentation_marker_commit "$(fm_wake_signal_seen_path "$1" "$2")" "$2" "$3" "$4"
+}
+
+# Mark the current complete status snapshot as both reported and classified.
+# This is the public setup primitive for consumers that adopt an existing log.
+fm_wake_status_mark_current() {  # <state> <status-file>
+  local size ident
+  _fm_wake_require_classify || return 1
+  size=$(_fm_status_file_size "$2") || return 1
+  ident=$(_fm_open_decisions_file_ident "$2") || return 1
+  fm_wake_status_seen_commit "$1" "$2" "$size" "$ident"
 }
 
 # Guarded self-announced status append - the one dedup primitive for a status
@@ -1561,22 +1727,25 @@ fm_wake_signal_seen_current() {  # <state> <file>
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
-  local state=$1 file=$2 line=$3 marker pre_sig='' post_sig pre_size post_size
+  local state=$1 file=$2 line=$3 marker pre_sig='' pre_size='' pre_ident='' post_size post_ident
   local LC_ALL=C
+  _fm_wake_require_classify || return 1
   marker=$(fm_wake_signal_seen_path "$state" "$file")
   if [ -e "$file" ]; then
     pre_sig=$(fm_wake_signal_sig "$file") || pre_sig=''
+    pre_size=$(_fm_status_file_size "$file") || pre_size=''
+    pre_ident=$(_fm_open_decisions_file_ident "$file") || pre_ident=''
   fi
   printf '%s\n' "$line" >> "$file" || return 2
   [ -n "$pre_sig" ] || return 1
-  [ "$(cat "$marker" 2>/dev/null)" = "$pre_sig" ] || return 1
-  post_sig=$(fm_wake_signal_sig "$file") || return 1
-  [ -n "$post_sig" ] || return 1
-  pre_size=${pre_sig%%:*}
-  post_size=${post_sig%%:*}
+  status_presentation_marker_reported_matches "$marker" "$pre_sig" || return 1
+  [ "$(status_presentation_marker_offset "$marker" "$file")" = "$pre_size" ] || return 1
+  post_size=$(_fm_status_file_size "$file") || return 1
+  post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
   case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
   [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
-  printf '%s' "$post_sig" > "$marker" 2>/dev/null || return 1
+  fm_wake_status_seen_commit "$state" "$file" "$post_size" "$post_ident" || return 1
   return 0
 }
 

@@ -12,6 +12,8 @@
 #   state/x-context/            the private full request context (fm-x-lib.sh).
 #   bin/fm-x-reply.sh           posting to the relay, thread splitting, dry run.
 #   bin/fm-public-followup-lib.sh  the activation gate and private transport.
+#   bin/fm-on.sh                the SSH route to a REMOTE secondmate home, whose
+#                               state no local path can reach.
 # This script composes them; it never restates their contracts or schemas.
 #
 # ZERO OVERHEAD FOR HOMES THAT DO NOT USE THE RELAY: every subcommand gates
@@ -105,7 +107,12 @@
 #   fm-public-followup.sh retire <obligation-id> --reason "<why the loop is done>" [--force]
 #       The only close. Drops the registration after recording --reason.
 #       --force is the explicit discard-approved escape hatch for an unresolved
-#       or missing obligation. --reason is required.
+#       or missing obligation. --reason is required. --force never covers
+#       clearing the bound legacy X link: a loop whose link is still verifiably
+#       in place is retained for reconciliation either way. When the bound work
+#       lives in a REMOTE secondmate home, that clear runs over the route's SSH
+#       transport, and a remote that never confirms it is reported as unknown
+#       completion to reconcile on that host, not as a definite failure.
 #
 # Requires jq and a compatible tasks-axi for registration, briefs,
 # reconciliation, delivery, cleanup guards, and retirement; only `active`
@@ -141,7 +148,8 @@ PF_TEMP_FILES=()
 PF_REGISTRY_LOCK_IDS=()
 pf_registry_lock_held() {
   local wanted=$1 held
-  for held in "${PF_REGISTRY_LOCK_IDS[@]}"; do
+  # bash 3.2 + set -u treats "${arr[@]}" on an empty array as unbound.
+  for held in ${PF_REGISTRY_LOCK_IDS[@]+"${PF_REGISTRY_LOCK_IDS[@]}"}; do
     [ "$held" = "$wanted" ] && return 0
   done
   return 1
@@ -157,10 +165,10 @@ pf_registry_lock_release() {
   local -a remaining=()
   pf_registry_lock_held "$id" || return 0
   fm_pf_registry_lock_release "$STATE" "$id"
-  for held in "${PF_REGISTRY_LOCK_IDS[@]}"; do
+  for held in ${PF_REGISTRY_LOCK_IDS[@]+"${PF_REGISTRY_LOCK_IDS[@]}"}; do
     [ "$held" = "$id" ] || remaining+=("$held")
   done
-  PF_REGISTRY_LOCK_IDS=("${remaining[@]}")
+  PF_REGISTRY_LOCK_IDS=(${remaining[@]+"${remaining[@]}"})
 }
 pf_cleanup() {
   local i
@@ -697,11 +705,47 @@ public_followup_secondmate_home() {
   printf '%s\n' "$home"
 }
 
+# public_followup_route_is_remote <secondmate-id>: 0 when data/secondmates.md
+# holds a genuine REMOTE route for that id. The registry is the route authority
+# here for the same reason fm-on.sh and fm-send.sh treat it as one: a remote home
+# has no local path, so nothing on this disk can answer the question. Resolving
+# it live also means a registration written before this check (they all record an
+# empty work_home_path for a remote route) still retires.
+public_followup_route_is_remote() {
+  local id=$1 remote
+  fm_pf_home_id_valid "secondmate:$id" || return 1
+  [ -f "$DATA/secondmates.md" ] && [ ! -L "$DATA/secondmates.md" ] || return 1
+  remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null) || return 1
+  [ "$remote" = 1 ]
+}
+
+# clear_public_followup_link_remote <secondmate-id> <work-id> <request-id>:
+# clear the bound legacy X link inside a REMOTE secondmate home over that route's transport,
+# because the link lives in the remote home's state and no local path reaches it.
+# fm-on.sh returns ssh's status unchanged, so 255 is the established "delivered
+# but completion unknown" status this codebase already reconciles rather than
+# reads as done or refused (bin/fm-on.sh, bin/fm-remote-readiness-lib.sh,
+# bin/fm-teardown.sh). It is passed through so a caller can say the remote never
+# confirmed instead of claiming the clear definitely failed. The remote clear
+# is guarded by the registration's Relay request identity and remains idempotent
+# when the target has no link, so a reconciling retry is safe.
+clear_public_followup_link_remote() {
+  local id=$1 work_id=$2 request_id=$3 rc=0
+  "$FM_ROOT/bin/fm-on.sh" "$id" fm-x-followup.sh --clear "$work_id" \
+    --expect-request "$request_id" </dev/null >/dev/null || rc=$?
+  [ "$rc" -ne 255 ] || return 255
+  [ "$rc" -eq 0 ] || return 1
+  return 0
+}
+
+# Returns 0 when the link is cleared, 255 when a remote home never confirmed the
+# clear (completion unknown), and 1 for any other refusal.
 clear_public_followup_link() {
-  local id=$1 work_home work_home_path work_id home state rc
+  local id=$1 work_home work_home_path work_id request_id home state rc
   public_followup_registration_valid "$id" || return 1
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
+  request_id=$(fm_pf_registry_get "$STATE" "$id" request_id)
   [ -n "$work_home" ] && [ -n "$work_id" ] || return 1
   case "$work_home" in
     main)
@@ -709,6 +753,13 @@ clear_public_followup_link() {
       state=$STATE
       ;;
     secondmate:*)
+      # A remote route is decided from the registry BEFORE any local path is
+      # consulted: the recorded remote home path is meaningful only on its own
+      # host, so a same-named local directory must never stand in for it.
+      if public_followup_route_is_remote "${work_home#secondmate:}"; then
+        clear_public_followup_link_remote "${work_home#secondmate:}" "$work_id" "$request_id"
+        return $?
+      fi
       work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
       case "$work_home_path" in /*) ;; *) return 1 ;; esac
       case "$work_home_path" in *$'\n'*|*$'\r'*) return 1 ;; esac
@@ -731,6 +782,17 @@ clear_public_followup_link() {
   esac
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$FM_ROOT" \
     "$FM_ROOT/bin/fm-x-followup.sh" --clear "$work_id" >/dev/null
+}
+
+# pf_link_clear_note <rc>: the qualifier appended to a refusal when a bound
+# legacy X link is still in place. Empty for every local refusal, so those
+# messages are unchanged. A remote clear returns fm-on.sh's pass-through ssh
+# status, where 255 means the remote home never confirmed the clear: completion
+# is unknown and belongs to that host's reconciliation, never a definite failure
+# and never a silent success.
+pf_link_clear_note() {
+  [ "$1" -eq 255 ] || return 0
+  printf ' The remote home never confirmed the clear, so reconcile it on that host rather than assuming nothing changed.'
 }
 
 public_followup_legacy_link_status() {
@@ -832,7 +894,7 @@ cmd_deliver() {
     || die "this home has not opted into the myfirstmate relay, so it cannot post a public reply" 1
   require_tools
 
-  local payload delivery attempt request platform text tmp_text hash chunks rc receipt receipt_fields receipt_dry_run link_status
+  local payload delivery attempt request platform text tmp_text hash chunks rc receipt receipt_fields receipt_dry_run link_status link_rc
   local loop_retained=0
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] || die "no public-followup obligation '$id' in this home's backlog" 1
@@ -846,8 +908,10 @@ cmd_deliver() {
   case "$delivery" in
     posted|waived)
       if public_followup_registration_valid "$id"; then
-        if ! clear_public_followup_link "$id"; then
-          die "obligation '$id' is already $delivery, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+        link_rc=0
+        clear_public_followup_link "$id" || link_rc=$?
+        if [ "$link_rc" -ne 0 ]; then
+          die "obligation '$id' is already $delivery, but its legacy X link could not be cleared; the registration was retained for reconciliation$(pf_link_clear_note "$link_rc")" 1
         fi
       else
         link_status=1
@@ -938,8 +1002,10 @@ EOF
       die "dry-run for '$id' did not post; recorded as retryable and left the obligation open" 1
     fi
     if record_posted "$id" "$attempt" "$request" "$platform" "$chunks"; then
-      if ! clear_public_followup_link "$id"; then
-        die "the public reply for '$id' POSTED and its receipt was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+      link_rc=0
+      clear_public_followup_link "$id" || link_rc=$?
+      if [ "$link_rc" -ne 0 ]; then
+        die "the public reply for '$id' POSTED and its receipt was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation$(pf_link_clear_note "$link_rc")" 1
       fi
       if mark_loop_delivered "$id"; then loop_retained=1; fi
       printf 'delivered %s request=%s platform=%s chunks=%s\n' "$id" "$request" "$platform" "$chunks"
@@ -968,7 +1034,7 @@ EOF
 # --- subcommand: record-posted ---------------------------------------------
 
 cmd_record_posted() {
-  local id=${1:-} attempt='' chunks=''
+  local id=${1:-} attempt='' chunks='' link_rc
   [ -n "$id" ] || { usage; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -996,8 +1062,10 @@ cmd_record_posted() {
 
   record_posted "$id" "$attempt" "$request" "$platform" "$chunks" \
     || die "tasks-axi refused the receipt for '$id' attempt $attempt; the recorded attempt must match exactly" 1
-  if ! clear_public_followup_link "$id"; then
-    die "the receipt for '$id' was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+  link_rc=0
+  clear_public_followup_link "$id" || link_rc=$?
+  if [ "$link_rc" -ne 0 ]; then
+    die "the receipt for '$id' was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation$(pf_link_clear_note "$link_rc")" 1
   fi
   if mark_loop_delivered "$id"; then loop_retained=1; fi
   printf 'recorded %s attempt=%s request=%s\n' "$id" "$attempt" "$request"
@@ -1250,7 +1318,7 @@ cmd_rechain() {
 # --- subcommand: retire -----------------------------------------------------
 
 cmd_retire() {
-  local id=${1:-} force=0 reason='' payload delivery task_state registry_file retired_dir retired_at
+  local id=${1:-} force=0 reason='' payload delivery task_state registry_file retired_dir retired_at link_rc
   local retirement_rc=0
   [ -n "$id" ] || { usage; exit 2; }
   shift
@@ -1283,8 +1351,10 @@ cmd_retire() {
         ;;
     esac
   fi
-  if ! clear_public_followup_link "$id"; then
-    die "could not clear the legacy X link for '$id'; its registration was retained for reconciliation" 1
+  link_rc=0
+  clear_public_followup_link "$id" || link_rc=$?
+  if [ "$link_rc" -ne 0 ]; then
+    die "could not clear the legacy X link for '$id'; its registration was retained for reconciliation$(pf_link_clear_note "$link_rc")" 1
   fi
   retired_dir=$(fm_pf_retired_dir "$STATE")
   retired_at=$(now_rfc3339)

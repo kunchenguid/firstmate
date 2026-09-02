@@ -11,13 +11,14 @@
 # output, it never removes them from - or otherwise weakens - the canonical snapshot,
 # which stays complete.
 #
-# LOCAL-ONLY by default: a normal invocation makes ZERO GitHub/network/auth calls.
-# It MAY surface PR URLs already recorded locally in task meta (recorded_prs), but it
-# performs no live discovery or checks. Live PR discovery/checks happen ONLY under
-# --include-prs, which is the sole path that touches the network; all gh coupling
-# lives in that branch and never in the canonical snapshot. The default output states
-# explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
-# absence is never ambiguous.
+# By default the canonical snapshot performs bounded concurrent remote-ledger reads
+# for registered remote homes under one shared collection budget and may atomically
+# refresh its parent-side ledger cache. It MAY surface PR URLs already recorded in
+# task meta (recorded_prs), but performs no live GitHub discovery or checks. Live PR
+# discovery/checks happen ONLY under --include-prs; all gh coupling lives in that
+# branch and never in the canonical snapshot. The default output states explicitly
+# (the prs: line and the omitted[] surfaces) what was not requested, so an absence is
+# never ambiguous.
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
 # backlog roles, unresolved blockers, and captain actionability. It never infers
@@ -39,16 +40,16 @@
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
 # a per-home cap and an overall cap, with omitted[] disclosure of both and of any
-# secondmate home whose backlog was unreadable; no GitHub/network call is involved.
+# secondmate home whose backlog was unreadable; no live GitHub call is involved.
 # The default landed baseline is balanced across homes: each home keeps its internal
 # newest-first ordering, homes iterate in deterministic id order, sparse homes do not
 # waste capacity, and --all-landed switches back to the complete global newest-first
 # order.
 #
 # Flags:
-#   (default)        compact projection, TOON, local-only
+#   (default)        compact projection with bounded remote-ledger collection, TOON
 #   --json           the same projected model as JSON (machine/debug; parity form)
-#   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
+#   --include-prs    ALSO do live GitHub open-PR discovery + checks
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
@@ -61,7 +62,8 @@
 #   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
 #
-# Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+# Output contract: `fm-bearings.v1`. No locks or reports; the underlying snapshot's
+# parent-side remote-ledger cache refresh is the only default fleet-state mutation.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,7 +111,9 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
                                [--all-pr-repos]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
-Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
+Default collection performs bounded concurrent remote-ledger reads for registered
+remote homes under one shared snapshot budget and may refresh the parent-side cache.
+--include-prs additionally performs live GitHub discovery and checks.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
@@ -125,7 +129,8 @@ landed merges this home's Done with registered secondmate homes' Done, bounded b
 For every registered secondmate, readable structured facts from its own home are
   authoritative, including independently trustworthy surfaces from a partial summary.
   Parent events and bounded terminal reads are labeled fallback or contradiction
-  evidence and never become current work.
+  evidence and never become current work. The provenance and freshness fields
+  distinguish live ledgers, cached ledgers, and mixed-fleet summary fallbacks.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
@@ -186,7 +191,7 @@ fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
 
-# --- optional live PR enrichment (the ONLY network path) --------------------
+# --- optional live GitHub PR enrichment -------------------------------------
 PR_STATUS='not_requested (run: /bearings include PRs)'
 CANDIDATE_PRS='[]'
 PR_REPOS_TOTAL=0
@@ -377,7 +382,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                     ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
                   elif .bearings_state == "no_active_work" then "No active child work"
                   else (.current.reason // "Current home state unavailable") end) | trunc(120)),
-          provenance:.provenance.selected,freshness:.freshness.status,
+          provenance:(if .provenance.summary_source == "remote-ledger-cache" then "structured-home-cache"
+                      else .provenance.selected end),freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-")} ]) as $secondmates_all
   | ([ .tasks[]
@@ -491,6 +497,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
         (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
         (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),
+        (($snap.secondmate_current.records // [])[]
+         | select(.provenance.summary_source == "remote-ledger-cache")
+         | {surface:("secondmate " + .id + " served from cached home ledger"),reveal:"inspect the home ledger publication and remote route"}),
+        (($snap.secondmate_current.records // [])[]
+         | select(.provenance.summary_source == "legacy-remote-summary" or .provenance.summary_source == "legacy-local-summary")
+         | {surface:("secondmate " + .id + " used mixed-fleet summary fallback"),reveal:"publish state/home-summary.json in that home"}),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.input_truncated == true or .parent_event.activity_scan.retained_truncated == true)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence truncated for \($n) record(s)"), reveal:"raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"} else empty end),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),

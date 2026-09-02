@@ -63,6 +63,9 @@ An acknowledged episode does not freeze the generation, because the next downtim
 
 `bin/fm-wake-drain.sh` consumes the queue per actor, not per whole-queue cutoff, using `bin/fm-lease-lib.sh`'s existing `fm_lease_actor` identity (`FM_SUPERVISION_ACTOR`, unset or `main` for every non-Pi harness and Pi's own main session; `branch` only inside the Pi supervision branch's own bash tool calls, injected deterministically by the extension - never agent memory).
 Every presented row is claimed to exactly one actor under the durable queue lock.
+An ordinary presentation drain bounds both its initial queue-lock acquire and its later status-presentation-lock acquire at the deadline owned by the script header.
+A live initial queue-lock holder produces one PID-naming advisory and skips the whole drain before any claim or mutation, while a live status-presentation-lock holder produces one such advisory after raw wake presentation and leaves status annotations, sections, and cursors retriable on the next drain.
+Acknowledgement invocations and every other mutation-critical queue-lock acquire retain blocking semantics, so acknowledgement atomicity is unchanged.
 Main records its presented set in `state/.main-eligible-rows`.
 A branch grant is published through `bin/fm-wake-grant.sh` under that same lock in `state/.branch-eligible-rows`, bound to the live branch process and extension generation recorded in `state/.branch-eligible-owner`, and publication is refused if main already claimed any requested row.
 A main drain validates that owner evidence under the queue lock and reclaims the grant when its process is gone or its identity no longer matches.
@@ -75,7 +78,7 @@ A check-kind row is main-owned in every mode, including a heartbeat review, so i
 `fm-wake-drain.sh` never reclassifies a row itself: it filters the queue to the current actor's opaque claim before same-key deduplication, then presents and acknowledges only that actor-local view.
 A missing or empty branch snapshot is refused loudly rather than read as "nothing eligible", because reaching the drain without the non-empty handoff promised by the extension is a wiring bug.
 Because branch claims contain no check-kind rows, a branch acknowledgement skips check-specific receipt scans.
-`tests/fm-wake-queue.test.sh`'s mixed-queue actor tests drive both directions against the real scripts: branch acknowledgement cannot swallow a main row, and a concurrent main turn cannot present or acknowledge an active branch grant.
+`tests/fm-wake-queue.test.sh`'s mixed-queue actor and presentation-deadline tests drive the real scripts: branch acknowledgement cannot swallow a main row, a concurrent main turn cannot present or acknowledge an active branch grant, live-holder presentation contention stays bounded and retriable, and acknowledgement locking remains blocking.
 `tests/fm-pi-branch-extension.test.sh` pins extension-side classification, claim publication and release, and the pre-drain recheck.
 
 ## Arm-layer cycle contract

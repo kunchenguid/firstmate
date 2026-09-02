@@ -8,9 +8,9 @@
 # This is an adjunct to the existing watcher poll loop and session-start path,
 # not a watcher, daemon, PR poll, or forge client of its own.
 # `scan` evaluates at most once per FM_INACTIVE_RECONCILE_SECS (default 900,
-# valid 60..1800) per home, except that --startup performs the same cheap scan
-# immediately during a locked session start. Each scan uses an aggregate
-# FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
+# valid 60..1800) per home, except that --startup performs the same scan
+# immediately in the locked session start's deferred worker. Each scan uses an
+# aggregate FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
 # resumes after its last visited child on the next scan.
 # The scan enforces that budget itself through a whole-second deadline, and the
 # first due child of every scan is always visited with at least a one-second
@@ -201,29 +201,27 @@ queue_key_exists() { # <key>
   printf '%s\n' "$queued" | grep -Fx -- "$key" >/dev/null 2>&1
 }
 
+publish_actionable() { # <key> <payload>
+  local key=$1 payload=$2
+  queue_key_exists "$key" && return 1
+  fm_wake_append check "$key" "$payload" || return 2
+  printf 'actionable: %s\n' "$payload"
+}
+
 queue_notice_once() { # <record> <key> <payload>
-  local record=$1 key=$2 payload=$3 notified
+  local record=$1 key=$2 payload=$3 notified rc=0
   notified=$(record_value "$record" notice_emitted)
   [ "$notified" = 1 ] && return 1
-  if queue_key_exists "$key"; then
+  publish_actionable "$key" "$payload" || rc=$?
+  if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
     record_field_set "$record" notice_emitted 1 || return 2
-    return 1
   fi
-  fm_wake_append check "$key" "$payload" || return 2
-  record_field_set "$record" notice_emitted 1 || return 2
-  printf 'actionable: %s\n' "$payload"
-  return 0
+  return "$rc"
 }
 
 queue_presentation() { # <record> <fingerprint> <payload>
-  local record=$1 fingerprint=$2 payload=$3 key
-  key="inactive-outcome:$fingerprint"
-  if queue_key_exists "$key"; then
-    return 1
-  fi
-  fm_wake_append check "$key" "$payload" || return 2
-  printf 'actionable: %s\n' "$payload"
-  return 0
+  local record=$1 fingerprint=$2 payload=$3
+  publish_actionable "inactive-outcome:$fingerprint" "$payload"
 }
 
 last_activity_age() { # <meta> <status> <turn-ended>
@@ -445,7 +443,8 @@ scan() {
     marker_rc=$?
     self=''
     if [ "$marker_rc" -ne 1 ]; then
-      printf 'actionable: inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker\n'
+      publish_actionable "inactive-reconcile-diagnostic:invalid-secondmate-home" \
+        "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
       return 0
     fi
   fi

@@ -87,6 +87,9 @@ while IFS= read -r -d '' a; do rargs+=("$a"); done \
   < <(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$argv_b64")
 cmd=${rargs[0]}
 rc=0
+if [ "${FM_TEST_RECONCILE_REMOTE_DELAY:-0}" -gt 0 ]; then
+  sleep "$FM_TEST_RECONCILE_REMOTE_DELAY"
+fi
 env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
   "$FM_REMOTE_CODE_ROOT/bin/$cmd" "${rargs[@]:1}" || rc=$?
 exit "$rc"
@@ -279,17 +282,27 @@ SH
 }
 
 test_the_window_is_four_hours() {
-  local home mate fakebin snap out
+  local home mate fakebin snap out now
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home fourhours mate)
   snap="$home/snapshot.json"
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row"]}'
   run_notify "$home" "$fakebin" fourhours "$snap" >/dev/null || fail "the first ask failed"
+  now=$(date +%s)
+  cat > "$fakebin/date" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_TEST_DATE_NOW:-}" ] && [ "${1:-}" = +%s ]; then
+  printf '%s\n' "$FM_TEST_DATE_NOW"
+  exit 0
+fi
+exec /bin/date "$@"
+SH
+  chmod +x "$fakebin/date"
   # One second short of four hours is still inside; one second past is not.
-  age_cooldown "$home/state" mate 14399
-  out=$(run_notify "$home" "$fakebin" fourhours "$snap")
+  printf '%s\n' "$((now - 14399))" > "$home/state/mate.reconcile-nudged"
+  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "cooldown: mate" "the window was shorter than four hours: $out"
-  age_cooldown "$home/state" mate 14401
-  out=$(run_notify "$home" "$fakebin" fourhours "$snap")
+  printf '%s\n' "$((now - 14401))" > "$home/state/mate.reconcile-nudged"
+  out=$(FM_TEST_DATE_NOW=$now run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "sent: mate" "the window was longer than four hours: $out"
   pass "the cooldown window is four hours"
 }
@@ -405,7 +418,7 @@ test_a_failed_send_is_retried_on_the_next_run() {
 }
 
 test_busy_lifecycle_locks_never_hold_up_the_digest() {
-  local label home mate fakebin snap lock ready release holder notify out
+  local label home mate fakebin snap lock ready release holder notify out i
   for label in reconcile control meta; do
     { read -r home; read -r mate; read -r fakebin; } < <(make_main_home "busy-$label" mate)
     snap="$home/snapshot.json"
@@ -422,7 +435,11 @@ test_busy_lifecycle_locks_never_hold_up_the_digest() {
     while [ ! -f "$ready" ]; do sleep 0.01; done
     run_notify "$home" "$fakebin" "busy-$label" "$snap" > "$home/notify.out" 2>&1 &
     notify=$!
-    sleep 0.2
+    i=0
+    while kill -0 "$notify" 2>/dev/null && [ "$i" -lt 40 ]; do
+      i=$((i + 1))
+      sleep 0.05
+    done
     if kill -0 "$notify" 2>/dev/null; then
       : > "$release"
       wait "$notify" 2>/dev/null || true
@@ -702,6 +719,270 @@ test_a_row_with_no_identity_at_all_fails_loudly() {
   pass "a row with neither a spawn generation nor a host fails loudly instead of vanishing"
 }
 
+test_reconcile_request_rejects_an_unbounded_input_without_filling_storage() {
+  local home started elapsed files
+  { read -r home; read -r _; read -r _; } < <(make_main_home bounded-request bounded-request-mate)
+  started=$(date +%s)
+  if yes x | FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      FM_RECONCILE_REQUEST_MAX_BYTES=64 "$RECONCILE" request --snapshot - \
+      > "$home/request.out" 2> "$home/request.err"; then
+    fail "an oversized streaming request was accepted"
+  fi
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 3 ] || fail "an oversized streaming request did not stop at its byte bound"
+  files=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
+  [ "$files" -eq 0 ] || fail "an oversized streaming request left captured data behind"
+  pass "reconcile requests stop oversized streams at the capture bound"
+}
+
+test_reconcile_request_requires_one_snapshot_document() {
+  local home snap quiet stream files
+  { read -r home; read -r _; read -r _; } < <(make_main_home single-request-document single-document-mate)
+  snap="$home/mismatch.json"
+  quiet="$home/quiet.json"
+  stream="$home/stream.json"
+  write_snapshot "$snap" single-document-mate '{"kind":"orphan_in_flight","ids":["ghost"]}'
+  write_snapshot "$quiet" single-document-mate '{"kind":null,"ids":[]}'
+  cat "$snap" "$quiet" > "$stream"
+  if FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      "$RECONCILE" request --snapshot "$stream" > "$home/request.out" 2> "$home/request.err"; then
+    fail "a multi-document reconcile request was accepted"
+  fi
+  files=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$files" -eq 0 ] || fail "a multi-document request published partial durable work"
+  pass "reconcile requests require exactly one snapshot document"
+}
+
+test_reconcile_requests_coalesce_per_target_until_delivery() {
+  local home mate fakebin second_mate second_abs snap bearings requests remaining out i ready_a ready_b ready_b2 release_a release_b release_b2 holder_a holder_b holder_b2
+  { read -r home; read -r mate; read -r fakebin; } < <(make_main_home coalesced-requests coalesce-a)
+  second_mate="$TMP_ROOT/coalesced-requests-mate-b"
+  seed_secondmate_home_marker "$second_mate" coalesce-b
+  second_abs=$(cd "$second_mate" && pwd -P)
+  printf -- '- coalesce-b - fixture domain (home: %s; scope: fixture; projects: sample; added 2026-08-26)\n' \
+    "$second_abs" >> "$home/data/secondmates.md"
+  cat > "$home/state/coalesce-b.meta" <<META
+window=firstmate:fm-coalesce-b
+kind=secondmate
+harness=claude
+backend=tmux
+spawn_gen=spawn-coalesce-b
+home=$second_abs
+worktree=$second_abs
+META
+  snap="$home/coalesced-snapshot.json"
+  write_snapshot "$snap" coalesce-a '{"kind":"orphan_in_flight","ids":["a-1"]}'
+  jq '.secondmate_current.records += [(.secondmate_current.records[0]
+    | .id = "coalesce-b"
+    | .home = "/tmp/coalesce-b"
+    | .spawn_gen = "spawn-coalesce-b"
+    | .reconcile_inventory.ids = ["b-1"]
+    | .invalidity.ids = ["b-1"])]' "$snap" > "$snap.next"
+  mv "$snap.next" "$snap"
+
+  i=0
+  while [ "$i" -lt 4 ]; do
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      "$RECONCILE" request --snapshot "$snap" >/dev/null \
+      || fail "a repeated reconcile request could not be published"
+    i=$((i + 1))
+  done
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 2 ] || fail "repeated requests did not coalesce to one pending file per target"
+  bearings="$home/coalesced-bearings.json"
+  jq '{schema:"fm-bearings.v1",secondmate_reconcile:[.secondmate_current.records[] | {
+    id,spawn_gen,host:(.host // null),kind:.reconcile_inventory.kind,ids:.reconcile_inventory.ids}]}' \
+    "$snap" > "$bearings"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    "$RECONCILE" request --snapshot "$bearings" >/dev/null \
+    || fail "the equivalent Bearings request could not be published"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 2 ] || fail "equivalent fleet and Bearings requests used different target keys"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    "$RECONCILE" request --snapshot "$snap" >/dev/null \
+    || fail "the fleet request could not replace its Bearings representation"
+  jq '(.secondmate_current.records[] | select(.id == "coalesce-a") | .spawn_gen) = "spawn-coalesce-a-v2"' \
+    "$snap" > "$snap.next"
+  mv "$snap.next" "$snap"
+  awk '{ if ($0 ~ /^spawn_gen=/) print "spawn_gen=spawn-coalesce-a-v2"; else print }' \
+    "$home/state/coalesce-a.meta" > "$home/state/coalesce-a.meta.next"
+  mv "$home/state/coalesce-a.meta.next" "$home/state/coalesce-a.meta"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    "$RECONCILE" request --snapshot "$snap" >/dev/null \
+    || fail "the relaunched target request could not replace its predecessor"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 2 ] || fail "a target relaunch created an additional pending request"
+  jq -s -e '[.[].secondmate_current.records[] | select(.id == "coalesce-a")]
+    | length == 1 and .[0].spawn_gen == "spawn-coalesce-a-v2"' \
+    "$home/state/reconcile-notify"/request-*.json >/dev/null \
+    || fail "the relaunched target did not replace its pending identity payload"
+
+  out="$home/process.out"
+  ready_a="$home/lock-a-ready"
+  ready_b="$home/lock-b-ready"
+  release_a="$home/lock-a-release"
+  release_b="$home/lock-b-release"
+  hold_lock_until_released "$home/state/.coalesce-a.reconcile.lock" "$ready_a" "$release_a" &
+  holder_a=$!
+  hold_lock_until_released "$home/state/.coalesce-b.reconcile.lock" "$ready_b" "$release_b" &
+  holder_b=$!
+  while [ ! -f "$ready_a" ] || [ ! -f "$ready_b" ]; do sleep 0.01; done
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+      FM_FAKE_TMUX_WINDOW='' FM_FAKE_TMUX_LOG="$home/tmux.log" \
+      FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/coalesced-requests-fake/pane.txt" \
+      "$RECONCILE" process-requests > "$out"; then
+    : > "$release_a"
+    : > "$release_b"
+    wait "$holder_a" 2>/dev/null || true
+    wait "$holder_b" 2>/dev/null || true
+    fail "failed reconcile deliveries unexpectedly retired their requests"
+  fi
+  : > "$release_a"
+  : > "$release_b"
+  wait "$holder_a" 2>/dev/null || true
+  wait "$holder_b" 2>/dev/null || true
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 2 ] || fail "failed delivery did not preserve one request per target"
+
+  ready_b2="$home/lock-b2-ready"
+  release_b2="$home/lock-b2-release"
+  hold_lock_until_released "$home/state/.coalesce-b.reconcile.lock" "$ready_b2" "$release_b2" &
+  holder_b2=$!
+  while [ ! -f "$ready_b2" ]; do sleep 0.01; done
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    FM_FAKE_TMUX_WINDOW='firstmate:fm-coalesce-a' FM_FAKE_TMUX_LOG="$home/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/coalesced-requests-fake/pane.txt" \
+    "$RECONCILE" process-requests > "$out" 2>&1 || true
+  : > "$release_b2"
+  wait "$holder_b2" 2>/dev/null || true
+  [ -s "$home/state/coalesce-a.reconcile-nudged" ] \
+    || fail "successful delivery did not commit the first target cooldown"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 1 ] || fail "successful delivery did not retire only its target request"
+  remaining=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' -print -quit)
+  jq -e '.secondmate_current.records | length == 1 and .[0].id == "coalesce-b"' "$remaining" >/dev/null \
+    || fail "delivery of one target did not preserve the other target independently"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    FM_FAKE_TMUX_WINDOW='firstmate:fm-coalesce-b' FM_FAKE_TMUX_LOG="$home/tmux.log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/coalesced-requests-fake/pane.txt" \
+    "$RECONCILE" process-requests > "$out" 2>&1 \
+    || fail "the remaining target request could not be delivered"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 0 ] || fail "successful delivery did not clear the remaining coalesced request"
+  pass "reconcile requests coalesce per target and retire independently after delivery"
+}
+
+test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later() {
+  local home rhome fakebin snap warm started elapsed watcher i requests beat_before beat_after processing beacon_advanced=0
+  fakebin=$(make_remote_ssh_stub "$TMP_ROOT/remote-offpath")
+  rhome=$(make_remote_secondmate_home remote-offpath-mate)
+  rhome=$(cd "$rhome" && pwd -P)
+  home=$(make_remote_parent_home remote-offpath remote-offpath-mate "$rhome" remote-offpath-host)
+  jq -n --arg home "$rhome" '{
+    schema:"fm-secondmate-home-summary.v1",generated:"2026-09-01T22:00:00Z",generated_epoch:1900,home:$home,
+    valid:false,reason:"in-flight backlog item has no child metadata: stale-row",
+    invalidity:{kind:"orphan_in_flight",ids:["stale-row"]},state:"no_active_work",
+    active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+    counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]
+  }' > "$rhome/state/home-summary.json"
+
+  warm=$(FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_SNAPSHOT_BUDGET=3 FM_SNAPSHOT_NOW_EPOCH=2000 \
+    FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
+    || fail "the initial remote ledger could not seed the parent cache"
+  printf '%s' "$warm" | jq -e '.secondmate_reconcile | any(.id == "remote-offpath-mate" and .kind == "orphan_in_flight")' >/dev/null \
+    || fail "the warm remote ledger did not carry its inventory mismatch"
+  touch "$home/state/home-summary.json"
+
+  started=$(date +%s)
+  snap=$(FM_TEST_RECONCILE_REMOTE_DELAY=30 \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_SNAPSHOT_BUDGET=1 FM_SNAPSHOT_NOW_EPOCH=2000 \
+    FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$ROOT/bin/fm-bearings-snapshot.sh" --json) \
+    || fail "Bearings failed while the remote queue was delayed"
+  printf '%s\n' "$snap" | FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    "$RECONCILE" request --snapshot - > "$home/request.out" \
+    || fail "the reconcile notify request could not be recorded"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 5 ] \
+    || fail "Bearings and request publication waited past the collector budget behind remote delivery (${elapsed}s)"
+  printf '%s' "$snap" | jq -e '.secondmates | any(.id == "remote-offpath-mate" and .freshness == "cached" and .age_seconds == 100)' >/dev/null \
+    || fail "the delayed queue did not leave an age-labeled cached mismatch row"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 1 ] || fail "the mismatched-home snapshot did not leave one durable notify request"
+  [ -z "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
+    || fail "the captain-facing request path sent to the mate inline"
+  for lock in \
+    "$home/state/.remote-offpath-mate.reconcile.lock" \
+    "$home/state/.control-remote-offpath-mate.lock" \
+    "$home/state/.meta-remote-offpath-mate.lock"; do
+    [ ! -e "$lock" ] || fail "the request path left a mate lifecycle lock held: $lock"
+  done
+
+  FM_TEST_RECONCILE_REMOTE_DELAY=4 \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2> "$home/watch.err" &
+  watcher=$!
+  i=0
+  processing=''
+  while [ "$i" -lt 100 ]; do
+    processing=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '.processing-*.json' -print -quit)
+    [ -n "$processing" ] && [ -e "$home/state/.last-watcher-beat" ] && break
+    kill -0 "$watcher" 2>/dev/null || break
+    i=$((i + 1))
+    sleep 0.05
+  done
+  [ -n "$processing" ] || fail "supervision did not claim the durable reconcile request"
+  beat_before=$(stat -c %Y "$home/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$home/state/.last-watcher-beat")
+  i=0
+  while [ -e "$processing" ] && [ "$i" -lt 70 ]; do
+    sleep 0.05
+    beat_after=$(stat -c %Y "$home/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$home/state/.last-watcher-beat")
+    if [ "$beat_after" -gt "$beat_before" ]; then
+      beacon_advanced=1
+      break
+    fi
+    i=$((i + 1))
+  done
+  [ "$beacon_advanced" -eq 1 ] \
+    || fail "the watcher beacon stalled behind delayed reconcile delivery"
+  # Delivery is detached from the watcher loop.
+  # Observe the durable lifecycle itself rather than using watcher liveness as a proxy.
+  # A watcher may exit after it has launched the delivery child.
+  i=0
+  while { [ -z "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
+      || [ ! -s "$home/state/remote-offpath-mate.reconcile-nudged" ] \
+      || [ "$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')" -gt 0 ]; } \
+      && [ "$i" -lt 600 ]; do
+    i=$((i + 1))
+    sleep 0.05
+  done
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  [ -n "$(remote_inbox_records "$rhome" remote-offpath-mate)" ] \
+    || fail "supervision did not deliver the durable reconcile request later: $(cat "$home/watch.err")"
+  [ -s "$home/state/remote-offpath-mate.reconcile-nudged" ] \
+    || fail "the delivered reconcile request did not commit its cooldown: $(cat "$home/watch.err")"
+  requests=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')
+  [ "$requests" -eq 0 ] || fail "the delivered one-shot reconcile request was not retired: $(cat "$home/watch.err")"
+  for lock in \
+    "$home/state/.remote-offpath-mate.reconcile.lock" \
+    "$home/state/.control-remote-offpath-mate.lock" \
+    "$home/state/.meta-remote-offpath-mate.lock"; do
+    [ ! -e "$lock" ] || fail "later supervision delivery left a mate lifecycle lock held: $lock"
+  done
+  pass "Bearings records locally, returns before a delayed remote queue, and supervision delivers later"
+}
+
+test_reconcile_request_rejects_an_unbounded_input_without_filling_storage
+test_reconcile_request_requires_one_snapshot_document
+test_reconcile_requests_coalesce_per_target_until_delivery
+test_bearings_request_returns_before_remote_delivery_and_supervision_sends_later
 test_an_inventory_mismatch_asks_the_mate_once_per_window
 test_a_mismatch_still_there_after_the_window_earns_one_more_nudge
 test_the_cooldown_starts_when_delivery_finishes

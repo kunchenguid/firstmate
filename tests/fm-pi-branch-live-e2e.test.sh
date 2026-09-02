@@ -10,17 +10,21 @@
 # resolves the supervision-branch model pin through the branch's REAL
 # ModelRuntime, so a pin the vendor cannot resolve is proven to refuse the
 # build rather than silently running the branch on main's model. A second
-# probe pins the vendor contract that pin rests on: an explicit model must beat
-# the model a reopened session recorded, proven against a local,
-# never-contacted fake provider. A third probe does the same for the
-# supervision-branch effort pin: Pi's own supported-level list is what the
-# picker offers, Pi's own clamp is what lowers a level a model cannot run, and
-# an explicit thinking level must beat the level a reopened session recorded.
+# branch probe intercepts the incident's post-construction 429 in-process and
+# proves that Pi's normally settled error turn returns the wake to main. The
+# model-precedence probe pins the vendor contract that the model pin rests on:
+# an explicit model must beat the model a reopened session recorded, proven
+# against a local, never-contacted fake provider. The effort-precedence probe
+# does the same for the supervision-branch effort pin: Pi's own supported-level
+# list is what the picker offers, Pi's own clamp is what lowers a level a model
+# cannot run, and an explicit thinking level must beat the level a reopened
+# session recorded.
 #
-# No provider call leaves the machine. The branch probe points
+# No provider call leaves the machine. The first branch probe points
 # PI_CODING_AGENT_DIR at an empty directory, so it reads no credentials and
-# model resolution stays empty by construction. The precedence probe reads
-# only a local placeholder key for its never-contacted fake provider. Run after
+# model resolution stays empty by construction. The 429 probe intercepts its
+# only request before transport, and the precedence probes read only a local
+# placeholder key for their never-contacted fake provider. Run after
 # every Pi upgrade and before trusting refreshed per-harness evidence
 # (docs/verification/runtime-backends.md).
 set -u
@@ -204,7 +208,144 @@ if [ "$status" -ne 0 ] || [ "$out" != "LIVE_OK" ]; then
 fi
 pass "real Pi SDK $PI_VERSION accepts the branch session construction and preserves an unpromptable wake"
 
-# Second probe: the vendor contract the supervision-branch model pin rests on.
+# Real-SDK Mode 2 guard: a constructed AgentSession receives the c1 429 shape
+# from Pi's real OpenAI-compatible adapter. Fetch is intercepted in-process,
+# so no provider request leaves the machine, but Pi still persists the error
+# assistant message and resolves session.prompt() through its production loop.
+errorhome="$TMP_ROOT/error-home"
+erroragentdir="$TMP_ROOT/error-agent-dir"
+mkdir -p "$errorhome/state" "$errorhome/config" "$erroragentdir"
+cat > "$erroragentdir/models.json" <<'JSON'
+{
+  "providers": {
+    "fm-live-error": {
+      "baseUrl": "https://fm-provider-error.invalid/v1",
+      "api": "openai-completions",
+      "apiKey": "fm-live-placeholder",
+      "models": [
+        { "id": "fm-live-error-model", "name": "fm live error", "contextWindow": 8192, "maxTokens": 512 }
+      ]
+    }
+  }
+}
+JSON
+PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$errorhome" FM_ROOT_OVERRIDE="$ROOT" \
+  PI_CODING_AGENT_DIR="$erroragentdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/error-output" 2>&1 <<'EOF'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const home = resolve(process.env.FM_HOME);
+const approvedProject = `${home}/projects/live-error-probe`;
+mkdirSync(approvedProject, { recursive: true });
+writeFileSync(`${home}/state/live-error-probe.meta`, `project=${approvedProject}\nwindow=fm-live-error-probe\n`);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-error-probe.status\tsignal: c1 429 probe\n");
+let providerRequests = 0;
+globalThis.fetch = async (input) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-provider-error.invalid/")) {
+    throw new Error(`unexpected network request in provider-free guard: ${url}`);
+  }
+  providerRequests += 1;
+  return new Response(
+    JSON.stringify({ error: { message: "Monthly usage limit reached", type: "insufficient_quota" } }),
+    { status: 429, headers: { "content-type": "application/json" } },
+  );
+};
+
+const busHandlers = new Map();
+const bus = {
+  on(channel, handler) {
+    busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of busHandlers.get(channel) ?? []) handler(data);
+  },
+};
+const piHandlers = new Map();
+const mainUserMessages = [];
+const pi = {
+  events: bus,
+  on(event, handler) {
+    piHandlers.set(event, [...(piHandlers.get(event) ?? []), handler]);
+  },
+  registerTool() {},
+  registerCommand() {},
+  registerMessageRenderer() {},
+  sendMessage() {},
+  sendUserMessage(content, options) {
+    mainUserMessages.push({ content, options: options ?? {} });
+  },
+  getThinkingLevel() {
+    return "off";
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const sessionCtx = {
+  model: { provider: "fm-live-error", id: "fm-live-error-model" },
+  sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => [] },
+};
+for (const handler of piHandlers.get("session_start") ?? []) await handler({}, sessionCtx);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const offer = {
+  message: "signal: c1 429 probe",
+  projects: [approvedProject],
+  heartbeat: false,
+  eligible: true,
+  accepted: false,
+  accept() {
+    offer.accepted = true;
+  },
+};
+bus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("real-SDK provider-error wake was not accepted after branch construction");
+for (let i = 0; i < 600 && mainUserMessages.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+if (mainUserMessages.length !== 1) throw new Error("settled real-SDK provider error did not fall back to main");
+const fallback = mainUserMessages[0].content;
+if (!fallback.includes("FIRSTMATE WATCHER WAKE: signal: c1 429 probe") ||
+    !fallback.includes("provider failed after construction") ||
+    !fallback.includes("Monthly usage limit reached")) {
+  throw new Error(`real-SDK fallback did not detect the normally settled 429 turn: ${fallback}`);
+}
+if (mainUserMessages[0].options.deliverAs !== "followUp") {
+  throw new Error("real-SDK provider-error fallback was not delivered as a follow-up");
+}
+if (providerRequests !== 1) throw new Error(`non-retryable 429 made ${providerRequests} provider attempts instead of one`);
+if (existsSync(`${home}/state/.branch-eligible-rows`)) {
+  throw new Error("real-SDK provider-error fallback left the claimed row grant active");
+}
+if (existsSync(`${home}/state/branch-outcomes.jsonl`)) {
+  throw new Error("real-SDK provider error fabricated a durable branch outcome");
+}
+const queue = readFileSync(`${home}/state/.wake-queue`, "utf8");
+if (!queue.includes("\tsignal\tlive-error-probe.status\t")) {
+  throw new Error(`real-SDK provider-error fallback lost the durable wake row: ${queue}`);
+}
+const pointer = readFileSync(`${home}/state/.branch-session`, "utf8").trim();
+const { SessionManager } = await import(pathToFileURL(`${process.env.PI_PACKAGE_DIR}/dist/index.js`).href);
+const persistedContext = SessionManager.open(pointer, `${home}/state/branch-session`).buildSessionContext();
+const persistedError = persistedContext.messages
+  .filter((message) => message.role === "assistant")
+  .at(-1);
+if (persistedError?.stopReason !== "error" || !persistedError.errorMessage?.includes("Monthly usage limit reached")) {
+  throw new Error(`real SessionManager did not restore the settled provider error: ${JSON.stringify(persistedError)}`);
+}
+console.log("ERROR_FALLBACK_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/error-output")
+if [ "$status" -ne 0 ] || [ "$out" != "ERROR_FALLBACK_OK" ]; then
+  fail "real-SDK Pi settled-provider-error guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION returns a post-construction 429 wake to main without losing its durable row"
+
+# Third probe: the vendor contract the supervision-branch model pin rests on.
 # An explicit model must beat the model a reopened session recorded, or a pin
 # would silently stop applying the first time the branch reopens. Proven with
 # a local, never-contacted fake provider with a placeholder key, so no request
@@ -291,7 +432,7 @@ if [ "$status" -ne 0 ] || [ "$out" != "MODEL_OK" ]; then
 fi
 pass "real Pi SDK $PI_VERSION applies an explicit branch model on create and over a reopened session's recorded model"
 
-# Third probe: the vendor contract the supervision-branch EFFORT pin rests on.
+# Fourth probe: the vendor contract the supervision-branch EFFORT pin rests on.
 # Same never-contacted local provider, now declaring models with different
 # reasoning ceilings so Pi's own supported-level list and clamp are exercised
 # for real. The recorded-level case needs a session file on disk, and Pi
@@ -458,70 +599,107 @@ if [ "$status" -ne 0 ] || [ "$out" != "EFFORT_OK" ]; then
 fi
 pass "real Pi SDK $PI_VERSION reports its own supported effort levels and applies an explicit branch effort over a reopened session's recorded level"
 
-# Fourth probe: the vendor contract the captain-outcome envelope rests on. Pi
-# keeps ONLY `content` when it converts a custom message for the provider, so
-# `content` is the entire payload main's model receives and is the only place a
-# captain outcome can carry its own identity. When it carried none, main could
-# not tell an incoming outcome from its own earlier answer and re-emitted that
-# answer instead of relaying the outcome. This runs the real SDK's own
-# convertToLlm over bytes the REAL protocol encoder produced, then hands the
-# model-visible text back to the real parser, proving the delivery path end to
-# end instead of assuming it.
-captain_payload=$(printf 'relay this\n\ntask-9: PR ready' \
-  | "$ROOT/bin/fm-operational-input.sh" encode branch-outcome) \
-  || fail "the operational-input owner does not encode the branch-outcome kind"
-CAPTAIN_PAYLOAD="$captain_payload" ROUTINE_PAYLOAD="⛵ task-9: worker healthy" \
-  DELIVERY_DIR="$TMP_ROOT" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+# Fifth probe: the real SDK contract deterministic captain delivery rests on.
+# ExtensionAPI.appendEntry must synchronously insert the registered custom entry
+# into an active InteractiveMode transcript, persist it across SessionManager
+# reopen, and keep it out of model context. No model is selected or prompted.
+PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" DELIVERY_DIR="$TMP_ROOT/delivery-sessions" \
+  DELIVERY_AGENT_DIR="$TMP_ROOT/delivery-agent-dir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
   node --input-type=module > "$TMP_ROOT/delivery-output" 2>&1 <<'EOF'
-import { writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const pkg = resolve(process.env.PI_PACKAGE_DIR);
-const { convertToLlm } = await import(pathToFileURL(`${pkg}/dist/index.js`).href);
-if (typeof convertToLlm !== "function") {
-  throw new Error("this Pi no longer exports convertToLlm: the delivery contract is unproven");
+const {
+  DefaultResourceLoader,
+  InteractiveMode,
+  SessionManager,
+  SettingsManager,
+  createAgentSession,
+  initTheme,
+} = await import(
+  pathToFileURL(`${pkg}/dist/index.js`).href
+);
+initTheme("dark");
+const sessions = resolve(process.env.DELIVERY_DIR);
+const agentDir = resolve(process.env.DELIVERY_AGENT_DIR);
+mkdirSync(sessions, { recursive: true });
+mkdirSync(agentDir, { recursive: true });
+const manager = SessionManager.create(process.cwd(), sessions);
+manager.appendMessage({
+  role: "assistant",
+  content: [{ type: "text", text: "The retry safe-stopped; diagnosis is underway." }],
+  api: "openai-completions",
+  provider: "local-none",
+  model: "no-provider-call",
+  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  stopReason: "stop",
+});
+const settings = SettingsManager.create(process.cwd(), agentDir);
+let capturedApi;
+const loader = new DefaultResourceLoader({
+  cwd: process.cwd(),
+  agentDir,
+  settingsManager: settings,
+  additionalExtensionPaths: [process.env.PLUGIN],
+  extensionFactories: [{ name: "append-entry-probe", factory: (pi) => { capturedApi = pi; } }],
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+  noContextFiles: true,
+});
+await loader.reload();
+const created = await createAgentSession({
+  cwd: process.cwd(),
+  sessionManager: manager,
+  settingsManager: settings,
+  resourceLoader: loader,
+  tools: [],
+});
+const runtimeHost = {
+  session: created.session,
+  setBeforeSessionInvalidate() {},
+  setRebindSession() {},
+};
+const interactive = new InteractiveMode(runtimeHost, { tuiMode: "alt-screen" });
+interactive.isInitialized = true;
+interactive.subscribeToAgent();
+const record = {
+  version: 1,
+  seq: 234,
+  task: "email-intake-canary-next-page-diagnosis-v1",
+  verdict: "captain",
+  summary: "Completed diagnosis proves the prior assistant response was unrelated.",
+  silent: false,
+};
+capturedApi.appendEntry("fm-branch-visible-outcome", record);
+
+const rendered = interactive.chatContainer.render(240).join("\n");
+if (!rendered.includes("⚓") || !rendered.includes(`[seq ${record.seq}]`) || !rendered.includes(record.task) || !rendered.includes(record.summary)) {
+  throw new Error(`active Pi transcript did not immediately render the exact outcome: ${rendered}`);
+}
+if (rendered.split(record.summary).length !== 2) {
+  throw new Error(`active Pi transcript rendered the outcome more than once: ${rendered}`);
 }
 
-const captainContent = process.env.CAPTAIN_PAYLOAD;
-const routineContent = process.env.ROUTINE_PAYLOAD;
-const converted = convertToLlm([
-  { role: "custom", customType: "fm-branch-merge", content: captainContent, display: false, timestamp: 1 },
-  { role: "custom", customType: "fm-branch-merge", content: routineContent, display: true, timestamp: 2 },
-]);
-if (converted.length !== 2) {
-  throw new Error(`Pi no longer delivers one provider message per custom message: ${converted.length}`);
+const reopened = SessionManager.open(manager.getSessionFile(), sessions);
+const entries = reopened.getEntries();
+const entry = entries.find((candidate) => candidate.type === "custom" && candidate.customType === "fm-branch-visible-outcome");
+if (!entry || JSON.stringify(entry.data) !== JSON.stringify(record)) {
+  throw new Error(`appendEntry did not persist the exact record across reopen: ${JSON.stringify(entry)}`);
 }
-for (const message of converted) {
-  if (message.role !== "user") {
-    throw new Error(`Pi delivers a custom message as role ${message.role}, not user`);
-  }
-  if ("customType" in message || "display" in message) {
-    throw new Error("Pi now forwards customType or display, so content is no longer the whole payload");
-  }
+if (reopened.buildSessionContext().messages.some((message) => JSON.stringify(message).includes(record.summary))) {
+  throw new Error("a custom session entry entered model context");
 }
-const textOf = (message) =>
-  typeof message.content === "string"
-    ? message.content
-    : message.content.map((block) => block.text ?? "").join("");
-if (textOf(converted[0]) !== captainContent || textOf(converted[1]) !== routineContent) {
-  throw new Error("Pi altered custom-message content on the way to the provider");
-}
-writeFileSync(`${process.env.DELIVERY_DIR}/live-delivered-captain`, textOf(converted[0]));
-writeFileSync(`${process.env.DELIVERY_DIR}/live-delivered-routine`, textOf(converted[1]));
+interactive.unsubscribe();
+await created.session.dispose();
 console.log("DELIVERY_OK");
 process.exit(0);
 EOF
 status=$?
 out=$(cat "$TMP_ROOT/delivery-output")
 if [ "$status" -ne 0 ] || [ "$out" != "DELIVERY_OK" ]; then
-  fail "real-SDK custom-message delivery guard failed against pi-coding-agent $PI_VERSION: $out"
+  fail "real-SDK visible outcome delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
-delivered_kind=$("$ROOT/bin/fm-operational-input.sh" kind < "$TMP_ROOT/live-delivered-captain") \
-  || fail "pi-coding-agent $PI_VERSION delivered the captain outcome as text the protocol cannot type"
-[ "$delivered_kind" = branch-outcome ] \
-  || fail "pi-coding-agent $PI_VERSION delivered the captain outcome as kind '$delivered_kind'"
-if "$ROOT/bin/fm-operational-input.sh" kind < "$TMP_ROOT/live-delivered-routine" >/dev/null 2>&1; then
-  fail "a routine note survived Pi conversion as typed operational input"
-fi
-pass "real Pi SDK $PI_VERSION delivers a custom message to the provider as user text carrying only content, so the captain outcome's typed envelope is what reaches the model"
+pass "real Pi SDK $PI_VERSION immediately renders appendEntry in the active transcript, persists it across reopen, and excludes it from model context"

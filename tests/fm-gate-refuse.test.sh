@@ -27,8 +27,8 @@
 # agents' project instructions on the no-mistakes side).
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -133,40 +133,18 @@ test_helper_normal_is_noop() {
 
 # --- fm-spawn ---------------------------------------------------------------
 
-# A fake tmux/treehouse so fm-spawn resolves the crew worktree from a controlled
-# pane path and completes without a live terminal (mirrors tests/fm-tangle-guard).
-make_spawn_fakebin() {
-  local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|set-window-option) exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
-  printf '%s\n' "$fakebin"
-}
-
 # run_spawn <cwd> <home> <id> <proj> <pane> <fakebin> [ASSIGN...] -> combined output
+# Gate-refuse cases must cd into a controlled cwd and drop both refusal signals
+# so the suite stays hermetic when it itself runs inside a real gate worktree.
 run_spawn() {
   local cwd=$1 home=$2 id=$3 proj=$4 pane=$5 fakebin=$6; shift 6
-  mkdir -p "$home/data/$id"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  fm_test_spawn_brief "$home" "$id" brief
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
-      "FM_ROOT_OVERRIDE=" "FM_HOME=$home" \
-      "FM_STATE_OVERRIDE=$home/state" "FM_DATA_OVERRIDE=$home/data" \
-      "FM_PROJECTS_OVERRIDE=$home/projects" "FM_CONFIG_OVERRIDE=$home/config" \
-      "FM_SPAWN_NO_GUARD=1" "FM_FAKE_PANE_PATH=$pane" "TMUX=fake,1,0" \
-      "PATH=$fakebin:$PATH" "$@" \
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX=fake,1,0 \
+      PATH="$fakebin:$PATH" "$@" \
       "$SPAWN" "$id" "$proj" codex --mode no-mistakes --yolo off ) 2>&1
 }
 
@@ -291,7 +269,7 @@ test_send_refuses_and_admits() {
 make_teardown_case() {
   local name=$1 case_dir fakebin t
   case_dir="$TMP/$name"; fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
   for t in treehouse tmux; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
     chmod +x "$fakebin/$t"
@@ -327,7 +305,7 @@ SH
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" "project=$case_dir/project" \
-    "kind=ship" "mode=no-mistakes"
+    "kind=ship" "mode=no-mistakes" "spawn_gen=spawn-gate-refuse-task-x1"
   touch "$case_dir/state/.last-watcher-beat"
   printf '%s\n' "$case_dir"
 }
@@ -337,7 +315,8 @@ run_teardown() {
   local cwd=$1 case_dir=$2; shift 2
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
       "FM_ROOT_OVERRIDE=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
-      "FM_CONFIG_OVERRIDE=$case_dir/config" "PATH=$case_dir/fakebin:$PATH" "$@" \
+      "FM_DATA_OVERRIDE=$case_dir/data" "FM_CONFIG_OVERRIDE=$case_dir/config" \
+      "PATH=$case_dir/fakebin:$PATH" "$@" \
       "$TEARDOWN" task-x1 ) 2>&1
 }
 

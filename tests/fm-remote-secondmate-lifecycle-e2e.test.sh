@@ -1031,8 +1031,8 @@ if ! printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "
   printf 'secondmate projection:\n%s\n' "$(printf '%s' "$SNAPSHOT" | jq '.secondmate_current')" >&2
   fail "fleet snapshot did not select the remote structured-home projection"
 fi
-printf '%s' "$SNAPSHOT" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == true' >/dev/null \
-  || fail "remote structured observation did not prove the remote home present"
+printf '%s' "$SNAPSHOT" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null and .endpoint.agent_alive == "unknown"' >/dev/null \
+  || fail "the fleet snapshot performed or invented a remote endpoint-liveness probe"
 printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "local" and .remote == false)' >/dev/null \
   || fail "fleet snapshot lost the existing local secondmate route"
 pass "fleet snapshot projects mixed local and remote structured state"
@@ -1107,7 +1107,9 @@ mv -f "$TMP_ROOT/remote-ios-before-liveness-legacy.meta" "$remote_route_meta"
 rm -f "$TMUX_STATE"
 pass "startup reports alive legacy backends without changing their routes"
 
-# Host loss maps to unknown/unavailable and never creates a local replacement.
+# Host loss never creates a local replacement. This legacy fixture has no
+# published ledger to cache, so the structured-home read degrades explicitly;
+# endpoint liveness remains the startup supervisor's concern.
 launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 rm -rf -- "$PARENT/state/.watch.lock"
 rm -f -- "$PARENT/state/.last-watcher-beat"
@@ -1115,16 +1117,18 @@ BOOT_UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-bootstr
 assert_contains "$BOOT_UNAVAILABLE" 'SECONDMATE_LIVENESS: secondmate ios: skipped: remote host unavailable or endpoint state unknown' \
   "bootstrap did not preserve an unreachable remote endpoint as unknown"
 UNAVAILABLE=$(FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
-printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "ios" and .current.state == "unknown")' >/dev/null \
-  || fail "unreachable remote host was not projected unknown"
-printf '%s' "$UNAVAILABLE" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null' >/dev/null \
-  || fail "unreachable remote home presence was not projected unknown"
+printf '%s' "$UNAVAILABLE" | jq -e '.secondmate_current.records | any(.id == "ios"
+  and .current.state == "unknown" and .provenance.selected != "structured-home"
+  and (.current.reason | test("failed|timed out")))' >/dev/null \
+  || fail "unreachable no-ledger remote home did not degrade to explicit unknown state"
+printf '%s' "$UNAVAILABLE" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.present == null and .endpoint.agent_alive == "unknown"' >/dev/null \
+  || fail "unreachable remote endpoint liveness was not left to supervision"
 rm -f "$PARENT/state/.wake-queue"
 launches_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$launches_before" -eq "$launches_after" ] || fail "unreachable projection attempted a replacement launch"
 assert_present "$PARENT/state/ios.meta" "unreachable readiness removed the parent route metadata"
 assert_grep '- ios ' "$PARENT/data/secondmates.md" "unreachable readiness removed the registry route"
-pass "unreachable remote state remains unknown with no local respawn or failover"
+pass "unreachable no-ledger remote state remains explicit with no local respawn or failover"
 
 # Retirement delegates its safety check to the remote home. An in-flight child
 # record refuses cleanup and preserves both machines' durable routes.
