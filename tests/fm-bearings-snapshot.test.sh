@@ -2163,6 +2163,63 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_task_teardown_during_metadata_capture_does_not_abort_snapshot() {
+  local home fakebin real_cp output snapshot_pid i
+  home=$(make_home metadata-teardown-race)
+  fakebin=$(make_fakebin "$home")
+  real_cp=$(command -v cp)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] a-hold - Stable local worker (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/a-hold.meta" \
+    "window=fixture:a-hold" "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/z-gone.meta" \
+    "window=fixture:z-gone" "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  printf 'working: stable fixture\n' > "$home/state/a-hold.status"
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */a-hold.meta)
+      : > "$FAKE_CP_STARTED"
+      while [ ! -e "$FAKE_CP_RELEASE" ]; do sleep 0.01; done
+      break
+      ;;
+  esac
+done
+exec "$REAL_CP" "$@"
+SH
+  chmod +x "$fakebin/cp"
+
+  REAL_CP="$real_cp" FAKE_CP_STARTED="$home/cp-started" FAKE_CP_RELEASE="$home/cp-release" \
+    run "$home" "$fakebin" --json > "$home/snapshot.json" &
+  snapshot_pid=$!
+  i=0
+  while [ ! -e "$home/cp-started" ] && [ "$i" -lt 500 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$home/cp-started" ]; then
+    kill "$snapshot_pid" 2>/dev/null || true
+    wait "$snapshot_pid" 2>/dev/null || true
+    fail "snapshot never entered metadata capture"
+  fi
+  rm -f "$home/state/z-gone.meta"
+  : > "$home/cp-release"
+  wait "$snapshot_pid" || fail "task teardown aborted the public Bearings snapshot"
+  output=$(<"$home/snapshot.json")
+  printf '%s' "$output" | jq -e '
+    .schema == "fm-bearings.v1"
+      and ([.in_flight[].id] | sort) == ["a-hold"]
+  ' >/dev/null || fail "snapshot after concurrent teardown was not usable: $output"
+  pass "task teardown during metadata capture is omitted without aborting the snapshot"
+}
+
 test_large_local_snapshot_composes_under_five_seconds_without_projection_drift() {
   local home fakebin worktree serial parallel parallel_file snapshot_pid started elapsed i
   home=$(make_home large-local-snapshot)
@@ -2361,6 +2418,7 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_large_local_snapshot_composes_under_five_seconds_without_projection_drift
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute

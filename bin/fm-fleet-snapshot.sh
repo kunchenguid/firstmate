@@ -528,10 +528,19 @@ prefetch_task_current_states() {
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
     captured_meta="$SNAPSHOT_TASK_DIR/$id.meta"
-    cp -- "$meta" "$captured_meta" || {
+    if ! cp -- "$meta" "$captured_meta" 2>"$captured_meta.copy-error"; then
+      # Teardown may unlink a task after the glob selected it but before cp opens
+      # it. That task is no longer in the inventory; other copy failures remain
+      # fatal rather than silently producing a partial snapshot.
+      if [ ! -e "$meta" ]; then
+        rm -f -- "$captured_meta" "$captured_meta.copy-error"
+        continue
+      fi
+      cat "$captured_meta.copy-error" >&2
       snapshot_task_cleanup
       return 1
-    }
+    fi
+    rm -f -- "$captured_meta.copy-error"
     SNAPSHOT_TASK_METAS[SNAPSHOT_TASK_META_COUNT]=$captured_meta
     SNAPSHOT_TASK_META_COUNT=$((SNAPSHOT_TASK_META_COUNT + 1))
   done
