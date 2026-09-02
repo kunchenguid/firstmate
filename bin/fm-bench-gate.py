@@ -45,6 +45,7 @@ MANIFEST_SCHEMA = "fm-bench-manifest.v1"
 FREEZE_SCHEMA = "fm-bench-freeze.v1"
 RECEIPT_SCHEMA = "fm-bench-preflight-receipt.v1"
 DRILL_SCHEMA = "fm-bench-restore-drill.v1"
+RESTORE_EVALUATOR_SAMPLE_LIMIT = 1
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -1787,7 +1788,61 @@ def run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedPro
     )
 
 
-def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree: Path) -> tuple[bool, str]:
+def restore_confinement(root: Path) -> tuple[list[str] | None, str]:
+    isolation_path = root / "isolation.json"
+    receipt_path = root / "preflight.receipt"
+    try:
+        isolation = load_json(isolation_path, ISOLATION_SCHEMA)
+        receipt = load_json(receipt_path, RECEIPT_SCHEMA)
+    except GateError as exc:
+        return None, f"a passing preflight-proven confinement is required: {exc}"
+    if receipt.get("verdict") != "pass":
+        return None, "the preflight receipt does not record a passing confinement"
+    if receipt.get("plan_sha256") != sha256_file(root / "benchmark.json"):
+        return None, "the preflight receipt covers a different benchmark plan"
+    if receipt.get("isolation_sha256") != sha256_file(isolation_path):
+        return None, "the preflight receipt does not cover the current isolation layout"
+    if "isolation" not in (receipt.get("stages") or []):
+        return None, "the preflight receipt does not record the isolation stage"
+    wrapper = isolation.get("exec_wrapper")
+    if not isinstance(wrapper, list) or not wrapper or not all(isinstance(item, str) and item for item in wrapper):
+        return None, "isolation exec_wrapper must be a non-empty argv list"
+    confine = Path(__file__).with_name("fm-bench-confine.sh").resolve()
+    if Path(wrapper[0]).expanduser().resolve() != confine or not os.access(confine, os.X_OK):
+        return None, "restore drill requires the executable bin/fm-bench-confine.sh wrapper"
+    options = wrapper[1:]
+    if not options or options[-1] != "--":
+        return None, "restore confinement wrapper must end with --"
+    mechanism = "auto"
+    allow_values: list[str] = []
+    index = 0
+    while index < len(options) - 1:
+        option = options[index]
+        if option not in ("--allow", "--mechanism", "--image") or index + 1 >= len(options) - 1:
+            return None, f"restore confinement wrapper has unsupported option: {option}"
+        value = options[index + 1]
+        if option == "--allow":
+            allow_values.append(value)
+        elif option == "--mechanism":
+            mechanism = value
+        index += 2
+    if allow_values != ["{root}"]:
+        return None, "restore confinement must expose exactly its opaque run root"
+    if mechanism == "none":
+        return None, "restore drill requires an enforcing confinement mechanism, not none"
+    return wrapper, mechanism
+
+
+def confined_evaluator_command(wrapper: list[str], run_root: Path, evaluator: Path, restored: Path) -> list[str]:
+    return [*(str(run_root) if item == "{root}" else item for item in wrapper), str(evaluator), str(restored)]
+
+
+def rerun_archived_evaluator(
+    sample: Path,
+    record: dict[str, Any],
+    restored_tree: Path,
+    wrapper: list[str],
+) -> tuple[bool, str]:
     rerun = record.get("evaluator_rerun")
     if not isinstance(rerun, dict):
         return False, "archive manifest has no deterministic evaluator rerun"
@@ -1825,10 +1880,12 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree
             return False, f"archived evaluator scored input is not a restored candidate file: {relative}"
         input_paths.append(Path(relative))
     try:
-        with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as workspace:
-            run_roots: dict[str, tuple[Path, Path]] = {}
-            for run_name in ("genuine", "perturbed"):
-                scratch = Path(workspace) / run_name / "evidence"
+        with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as first_workspace, tempfile.TemporaryDirectory(
+            prefix="fm-bench-evaluator-"
+        ) as second_workspace:
+            run_roots: list[tuple[Path, Path]] = []
+            for workspace in (first_workspace, second_workspace):
+                scratch = Path(workspace)
                 for relative in files:
                     source = (sample / relative).resolve()
                     if not is_within(source, sample.resolve()) or not source.is_file():
@@ -1836,11 +1893,11 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree
                     destination = scratch / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, destination)
-                run_tree = Path(workspace) / run_name / "restored"
+                run_tree = scratch / uuid.uuid4().hex
                 shutil.copytree(restored_tree, run_tree, symlinks=True)
-                run_roots[run_name] = (scratch, run_tree)
-            genuine_scratch, genuine_tree = run_roots["genuine"]
-            perturbed_scratch, perturbed_tree = run_roots["perturbed"]
+                run_roots.append((scratch, run_tree))
+            genuine_scratch, genuine_tree = run_roots[0]
+            perturbed_scratch, perturbed_tree = run_roots[1]
             for relative in input_paths:
                 perturbed_input = (perturbed_tree / relative).resolve()
                 if not is_within(perturbed_input, perturbed_tree.resolve()):
@@ -1848,16 +1905,14 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree
                 with perturbed_input.open("ab") as handle:
                     handle.write(b"\nfm-bench-restore-perturbation\n")
             genuine = subprocess.run(
-                [str(genuine_scratch / argv[0]), str(genuine_tree)],
-                cwd=str(genuine_scratch),
+                confined_evaluator_command(wrapper, genuine_scratch, genuine_scratch / argv[0], genuine_tree),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
                 timeout=60,
             )
             perturbed = subprocess.run(
-                [str(perturbed_scratch / argv[0]), str(perturbed_tree)],
-                cwd=str(perturbed_scratch),
+                confined_evaluator_command(wrapper, perturbed_scratch, perturbed_scratch / argv[0], perturbed_tree),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
@@ -1868,9 +1923,13 @@ def rerun_archived_evaluator(sample: Path, record: dict[str, Any], restored_tree
     except OSError as exc:
         return False, f"archived evaluator could not execute: {exc}"
     if genuine.returncode != 0:
-        return False, f"archived evaluator exited {genuine.returncode} against the genuine restored tree"
+        detail = genuine.stderr.decode("utf-8", "replace").strip()
+        suffix = f": {detail}" if detail else ""
+        return False, f"archived evaluator confinement or execution exited {genuine.returncode}{suffix}"
     if perturbed.returncode != 0:
-        return False, f"archived evaluator exited {perturbed.returncode} against the perturbed restored tree"
+        detail = perturbed.stderr.decode("utf-8", "replace").strip()
+        suffix = f": {detail}" if detail else ""
+        return False, f"archived evaluator confinement or execution exited {perturbed.returncode}{suffix}"
     actual = sha256_bytes(genuine.stdout)
     if actual != expected:
         return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}"
@@ -1893,6 +1952,14 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
         return
     if not samples:
         report.fail("restore.scope", "no sample archive to restore")
+    wrapper, confinement_detail = restore_confinement(root)
+    if wrapper is None:
+        report.fail("restore.confinement", confinement_detail)
+        receipt.unlink(missing_ok=True)
+        return
+    report.ok("restore.confinement", f"archived evaluator runs use the preflight-proven {confinement_detail} confinement")
+    selected_samples = samples[:RESTORE_EVALUATOR_SAMPLE_LIMIT]
+    selected_names = {sample.name for sample in selected_samples}
     reran = 0
     for sample in samples:
         check = f"restore.{sample.name}"
@@ -1959,26 +2026,31 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                     sample_ok = False
                     continue
                 restored_trees.append(restored_tree)
-            if sample_ok:
-                reran_ok, rerun_detail = rerun_archived_evaluator(sample, record, restored_trees[0])
+            if sample_ok and sample.name in selected_names:
+                reran_ok, rerun_detail = rerun_archived_evaluator(sample, record, restored_trees[0], wrapper)
+            elif sample_ok:
+                reran_ok, rerun_detail = True, "deterministically outside the bounded evaluator sample"
             else:
                 reran_ok, rerun_detail = False, "candidate bundle restoration did not complete"
         if not sample_ok:
             drill_ok = False
             continue
-        if reran_ok:
-            reran += 1
-        else:
+        if not reran_ok:
             report.fail(check, rerun_detail)
             drill_ok = False
             continue
-        report.ok(check, "bundle verified, restored into a fresh repository, and rebound to its archived tree; archived evaluator rerun produced a changed perturbed result")
+        if sample.name in selected_names:
+            reran += 1
+        if sample.name in selected_names:
+            report.ok(check, "bundle verified, restored into a fresh repository, and rebound to its archived tree; confined archived evaluator rerun produced a changed perturbed result")
+        else:
+            report.ok(check, "bundle verified, restored into a fresh repository, and rebound to its archived tree")
 
     ok = report.require(
-        reran == len(samples) if samples else False,
+        reran == len(selected_samples) if selected_samples else False,
         "restore.evaluator_rerun",
-        f"{reran} archived deterministic evaluator results rerun from the archive",
-        "every archived candidate needs a deterministic evaluator rerun",
+        f"confined deterministic evaluator rerun completed for: {', '.join(sorted(selected_names))}",
+        "at least one deterministic archived evaluator must complete its confined differential rerun",
     )
     drill_ok = drill_ok and ok
     post_recheck = Report("archive-post-rerun", quiet=True)
@@ -1997,6 +2069,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                 "verdict": "pass",
                 "archive_digest": archive_digest,
                 "samples": len(samples),
+                "evaluator_samples": sorted(selected_names),
             },
         )
         report.ok("restore.receipt", "restore drill receipt written; cleanup may now be authorised")

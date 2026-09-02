@@ -35,9 +35,11 @@ ok - enforced isolation (container) denies file, worktree, object, unreachable-o
 ok - the same confinement still lets an entrant work in its own private clone
 ```
 
-The restore portion of `tests/fm-bench-gate.test.sh` executes only an executable evaluator listed in each sample's content-addressed capture-and-scoring evidence group, compares its genuine restored-tree output hash to the archived result hash, and requires a different successful output after perturbing the manifest's declared scored inputs.
-The genuine and perturbed executions receive separate freshly materialised evidence and working directories, so evaluator state cannot manufacture the required difference.
-It also proves that an absolute path, a parent traversal, a symlink escape, an empty or escaping scored-input declaration, an unlisted evidence file including nested `manifest.json`, an arbitrary command, an evaluator that ignores restored content, an unaddressed evaluator, a changed manifest binding, a changed evaluator result, and an archive mutation during the rerun all refuse before cleanup can be authorised.
+The restore portion of `tests/fm-bench-gate.test.sh` restores every sample but confines the differential evaluator proof to the first sample in stable lexical order, which bounds execution cost and records the exercised sample in the cleanup receipt.
+It executes only a content-addressed evaluator from the capture-and-scoring evidence group, compares its genuine restored-tree output hash to the archive, and requires a different successful output after perturbing the manifest's declared scored inputs.
+The genuine and perturbed executions receive independent opaque roots through the preflight-proven confinement wrapper, with networking disabled and no archive, repository, operator home, or wider user filesystem bind.
+It also proves that a role inferred from path or environment cannot manufacture a difference, and that an absolute path, a parent traversal, a symlink escape, an empty or escaping scored-input declaration, an unlisted evidence file including nested `manifest.json`, an arbitrary command, an evaluator that ignores restored content, an unaddressed evaluator, a changed manifest binding, a changed evaluator result, and an attempted archive mutation all refuse before cleanup can be authorised.
+On a host without `bwrap` or a usable preloaded container image, the portable archive checks still run and the restore fixture instead proves that the drill refuses before executing archived code.
 
 The same run under `--mechanism none` refuses with all seven probe classes reported `PROBE LEAKED`, which is what proves the probes are not vacuous.
 

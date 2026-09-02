@@ -44,8 +44,8 @@
 #                     veto to recorded results
 #   archive-verify    recompute every archived content address
 #   restore-drill     restore each bundle into a fresh repository, rebind its
-#                     tree, rerun its archived evaluator in independent scratch
-#                     copies against declared scored inputs, and write the receipt
+#                     tree, then rerun a deterministic archived evaluator twice
+#                     in confined, independent, blinded scratch copies
 #   cleanup-gate      authorise candidate and snapshot cleanup only from a
 #                     passing drill still bound to the archive as it stands
 #
