@@ -7,7 +7,7 @@ change what `fm-spawn.sh` does on success, and leave `bin/fm-home-seed.sh` alone
 - bin/fm-home-seed.sh is the secondmate seeding entry point; it is only named here.
 - The backup at bin/fm-spawn.sh.bak and the fork at my-fm-spawn.sh are unrelated files.
 - Design notes are in ~/firstmate-notes/preflight.md and
-  /Users/stoneevenson/firstmate-old/preflight.md - neither is the primary checkout.
+  __PRIMARY__-old/preflight.md - neither is the primary checkout.
 - Read `docs/specs/2026-07-03-wardroom-intake.md`, `gates/accepted-red.md` and
   `bin/fm-intake-lib.sh`; none of those are gitignored.
 - The upstream discussion is at https://github.com/example/repo/pull/12.

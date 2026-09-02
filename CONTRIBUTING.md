@@ -48,6 +48,11 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   A suite that must drive a real binary opts out of one refuser without the other, by setting `FM_TEST_ALLOW_LIVE_HERDR=1` and/or `FM_TEST_ALLOW_LIVE_TMUX=1` before sourcing `tests/lib.sh`.
   The tmux opt-in is still guarded: destructive verbs are allowed only against the throwaway session the suite exports in `FM_TEST_LIVE_TMUX_SESSION`, so a suite that names none has its kills refused rather than aimed at whatever session is current.
 - Changes to harness adapters (launch templates in `bin/fm-spawn.sh`, facts in `.agents/skills/harness-adapters/SKILL.md`) must be verified empirically against the real harness, never written from documentation alone.
+- A test must never assert a property of the machine it runs on.
+  A checkout root, `$HOME`, a username, a temp-dir layout: none of these are the subject under test, and an assertion that names one is green on the author's machine and undefined everywhere else.
+  This is not theoretical - a preflight fixture once hardcoded `/Users/<captain>/firstmate`, so the offender it named was under no checkout root on any other machine, was therefore never reported, and the assertion naming it passed on exactly one laptop while CI stayed red for the same reason.
+  Parameterise instead: have the suite choose the root, render it into the fixture, and assert against the root the run actually used.
+  Where a rule is *about* a location, prove it under two different ones - a single root cannot distinguish "the rule fires wherever the checkout lives" from "the rule fires here".
 - In Markdown, put each full sentence on its own line.
 
 ## The gate ledger
