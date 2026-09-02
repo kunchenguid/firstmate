@@ -48,7 +48,7 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
-It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
+It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, Muse, and agy process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
 For positive attribution, the probe combines two independent name sources rather than making either one load-bearing.
@@ -61,6 +61,7 @@ The same scoping covers multi-process launchers without a special case, so the P
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
+agy is anchored to its exact `agy` identity, never a substring, so ordinary words that contain it such as `magyar` and `stagy` remain ambiguous.
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
@@ -108,6 +109,7 @@ tests/fm-composer-ghost.test.sh
 tests/fm-kimi-harness.test.sh
 tests/fm-cursor-harness.test.sh
 tests/fm-muse-harness.test.sh
+tests/fm-agy-harness.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-bootstrap.test.sh
 ```

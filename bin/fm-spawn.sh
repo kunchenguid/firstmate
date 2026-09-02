@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -175,6 +175,11 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# agy uses a firstmate-owned global plugin under $HOME/.gemini/config/plugins
+# plus a gitignored .fm-agy-turnend worktree pointer and a state token. Its hook
+# fires only on a Stop payload carrying fullyIdle=true, because agy also ends a
+# turn while it waits on work it pushed into the background; agy is crewmate/scout
+# only and is refused for --secondmate.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse is crewmate/scout only and is refused for --secondmate.
@@ -1166,7 +1171,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1274,6 +1279,21 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # agy (Antigravity CLI): it REJECTS a positional prompt outright
+    # ("Error: unexpected argument"), and reads one only from -p/--print,
+    # -i/--prompt-interactive, or stdin. -i is the supervised interactive form,
+    # so the brief rides that flag rather than a bare argument.
+    # --dangerously-skip-permissions is what makes an unattended crewmate
+    # viable (footer shows `accept-edits`); it does NOT cover the workspace
+    # trust dialog, which agy_answer_trust_dialog below answers with a single
+    # Enter once the dialog is proven on screen.
+    # agy's turn-end signal rides neither the launch command nor a project
+    # config: it is a global Stop hook installed below as a firstmate-owned
+    # plugin plus a per-task worktree pointer, gated on `fullyIdle`.
+    # The foreign primary markers are cleared so an inherited CLAUDECODE cannot
+    # outrank agy's own ANTIGRAVITY_AGENT marker in a process that only reads
+    # the environment.
+    agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse
     # ships approval prompts AND a filesystem/network sandbox ON by default
@@ -1328,6 +1348,10 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
+    if [ "$HARNESS" = agy ] && [ "$KIND" != secondmate ]; then
+      echo "error: agy is selectable only as an explicit per-task choice; pass --harness agy for this crewmate or scout" >&2
+      exit 1
+    fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
@@ -1344,6 +1368,16 @@ esac
 # secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# agy is verified as a CREWMATE/SCOUT adapter only, for the same structural
+# reason: a secondmate is a firstmate instance and needs a primary supervision
+# protocol, and agy has none. Its Stop hook is a turn-end NOTIFICATION gated on
+# fullyIdle, not the model-reawakening surface a primary's supervision cycle is
+# built on, and no agy primary protocol exists under docs/supervision-protocols/.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = agy ]; then
+  echo "error: agy is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -1481,7 +1515,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1511,6 +1545,15 @@ effort_flag_for_harness() {
       # than passing a known-bad value.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    agy)
+      # agy 1.1.24 --effort accepts only low|medium|high and rejects anything
+      # else with an explicit message ("invalid --effort \"xhigh\" (valid: low,
+      # medium, high)"), so xhigh and max are omitted rather than passed as a
+      # known-bad value - the same shape as grok.
+      case "$effort" in
+        low|medium|high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi|pi-signed)
@@ -1576,6 +1619,18 @@ case "$LAUNCH" in
     fi
     ;;
 esac
+
+# jq is a hard requirement of the agy turn-end hook installed further below
+# rather than a nicety: the payload arrives as JSON on stdin, and
+# `select(.fullyIdle == true)` is an exact test where substring matching would be
+# guessing. Refused here, alongside every other adapter precondition, so a host
+# without jq is turned away before any endpoint, worktree lease, or partial
+# install exists (the same contract and the same placement as the Kimi
+# installer).
+if [ "$HARNESS" = agy ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: agy's turn-end hook requires jq to read its JSON Stop payload; install jq or select a different verified harness" >&2
+  exit 1
+fi
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -2345,7 +2400,8 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 
-kimi_capture() {
+# One pane read, shared by every launch-time readiness and delivery gate.
+spawn_pane_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
@@ -2364,7 +2420,7 @@ kimi_composer_is_empty() {
 kimi_wait_for_ready() {
   local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
-    pane=$(kimi_capture)
+    pane=$(spawn_pane_capture)
     if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' \
        || kimi_composer_is_empty; then
       return 0
@@ -2390,7 +2446,7 @@ kimi_delivery_is_confirmed() {  # <plain-pane-capture>
 kimi_wait_for_delivery() {
   local pane i=0 max=${FM_KIMI_DELIVERY_POLLS:-40} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
-    pane=$(kimi_capture)
+    pane=$(spawn_pane_capture)
     kimi_delivery_is_confirmed "$pane" && return 0
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -2398,9 +2454,68 @@ kimi_wait_for_delivery() {
   return 1
 }
 
-kimi_spawn_fail() {  # <detail>
+spawn_harness_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
+}
+
+# agy gates a workspace it has not seen before behind a trust dialog, and
+# --dangerously-skip-permissions does NOT suppress it (verified live, agy
+# 1.1.24). It blocks before the brief is read, and treehouse recycles pooled
+# worktrees, so the dialog appears on the FIRST agy task in a pool slot and
+# never again for that path. Leaving it unanswered is a SILENT hang: the only
+# Stop it fires carries fullyIdle=false, which the turn-end gate ignores, and agy
+# has no worker-state source, so the task would sit at `unknown agy-unverified`
+# forever with nothing to observe. One Enter resolves it (Yes is preselected).
+# Both of the dialog's own strings must be present, never the question alone:
+# agy renders the brief as the first message in the same pane, and a brief that
+# quotes the question - this adapter's own does - would otherwise draw an Enter
+# into a session that already started its turn.
+#
+# What the anchor actually excludes is narrower than a guarantee against the
+# rendered brief, and must not be described as one: it rejects the label with
+# letters around it, and it ACCEPTS the label on a bullet, numbered, or quoted
+# line, because a leading dash, digit, or quote is non-letter text the class
+# absorbs. docs/verification/agy.md carries the counter-examples verbatim.
+#
+# It stays this shape rather than tightening onto a selection marker, which
+# would be guessing at a TUI shape measured once. The two failure modes are not
+# symmetric: a row this anchor misses leaves the dialog unanswered and the
+# worker idle for ordinary stuck-worker detection to catch, losing no work,
+# while a looser match sends Enter blind into a TUI where a surplus Enter opens
+# another turn and spends the operator's quota.
+AGY_TRUST_QUESTION_REGEX='Do you trust the contents of this project'
+AGY_TRUST_OPTION_REGEX='^[^A-Za-z]*Yes, I trust this folder[^A-Za-z]*$'
+
+# Answering that dialog is the WHOLE launch step. Readiness is deliberately not
+# proven: a capture is recent output on both backends, so it guarantees neither
+# that what it shows was drawn by this incarnation nor that a repaint appends
+# rather than replaces, and no reading of it can settle a positive readiness
+# claim. agy therefore behaves like every adapter except Kimi - if the Enter
+# never lands, the worker sits idle and ordinary stuck-worker detection is what
+# catches it, rather than a launch gate that can hard-fail a healthy spawn.
+#
+# The poll ends the moment the Enter is sent, so exactly one is ever delivered.
+# A workspace agy already trusts never draws the dialog and therefore pays the
+# whole window, because the dialog's absence and a slow start read identically.
+# That is the steady state on a recycled pool slot and is accepted deliberately;
+# docs/verification/agy.md records the trade against a shorter window.
+agy_trust_dialog_visible() {  # <capture>
+  printf '%s\n' "$1" | grep -qE "$AGY_TRUST_QUESTION_REGEX" || return 1
+  printf '%s\n' "$1" | grep -qE "$AGY_TRUST_OPTION_REGEX"
+}
+
+agy_answer_trust_dialog() {
+  local i=0 max=${FM_AGY_TRUST_POLLS:-120} interval=${FM_AGY_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    if agy_trust_dialog_visible "$(spawn_pane_capture)"; then
+      spawn_send_key "$T" Enter || true
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 0
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -2516,8 +2631,9 @@ if [ "$KIND" != secondmate ]; then
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok stays on its isolated rendered-tail
-  # fallback and standalone Kimi stays unknown until fm_busy_kimi_verified
-  # opens, so neither is armed here.
+  # fallback, standalone Kimi stays unknown until fm_busy_kimi_verified opens,
+  # and agy has no usable worker-state source at all, so none of the three is
+  # armed here.
   BUSY_GEN=
   case "$HARNESS" in
     codex*)
@@ -2765,6 +2881,119 @@ EOF
         fi
       } > "$STATE/$ID.cursor-session"
       ;;
+    agy)
+      # agy fires a Stop hook when its execution loop terminates, and its global
+      # customization root ($HOME/.gemini/config) is always
+      # loaded with no trust grant - the same shape as grok's ~/.grok/hooks.
+      #
+      # Two agy-specific facts change the installation from grok's, and neither
+      # is optional:
+      #
+      # 1. agy's global hooks live in ONE shared hooks.json keyed by hook NAME,
+      #    which is the operator's own file. Firstmate installs a PLUGIN instead
+      #    (plugins/fm-turn-end/{plugin.json,hooks.json}), a firstmate-owned
+      #    directory agy discovers and enables on its own. Verified live: the
+      #    plugin's Stop hook fires and agy's config.json is left byte-identical,
+      #    so nothing firstmate writes can clobber operator configuration.
+      # 2. A Stop is NOT a turn end. agy pushes a long-running command into the
+      #    background after about ten seconds, ends the turn saying it will wait,
+      #    then wakes itself and ends a SECOND turn once the work lands. Only the
+      #    second carries fullyIdle=true. Measured on a real 90-second command:
+      #    a fullyIdle=false Stop arrived with workspacePaths ALREADY POPULATED,
+      #    81 seconds before the true end, so a grok-shaped hook keyed on the
+      #    workspace alone would have reported a validation run finished while it
+      #    was still going. The hook therefore gates on fullyIdle=true and treats
+      #    every other Stop as an event to ignore.
+      #
+      # The rest is grok's guarded pattern unchanged: the hook is a no-op for
+      # every non-firstmate agy session because it acts only when the payload's
+      # workspace holds a .fm-agy-turnend pointer matching firstmate's private
+      # registry. It leaves agy's own config.json and hooks.json and all project
+      # configuration untouched. Answering the trust dialog, by contrast, does
+      # change operator state: agy adds the task worktree to trustedWorkspaces
+      # and teardown deliberately leaves that entry, so those entries accumulate
+      # (docs/configuration.md records that for operators).
+      #
+      AGY_CONFIG_HOME="$HOME/.gemini/config"
+      AGY_PLUGIN_DIR="$AGY_CONFIG_HOME/plugins/fm-turn-end"
+      AGY_AUTH_DIR="$AGY_CONFIG_HOME/fm-turn-end.d"
+      mkdir -p "$AGY_PLUGIN_DIR"
+      old_umask=$(umask)
+      umask 077
+      mkdir -p "$AGY_AUTH_DIR"
+      auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.agy-turnend-token"
+      sq_agy_auth_dir=$(shell_quote "$AGY_AUTH_DIR")
+      agy_hook_tmp=$(mktemp "$AGY_PLUGIN_DIR/.fm-turn-end.sh.XXXXXXXXXXXX")
+      cat > "$agy_hook_tmp" <<EOF
+#!/usr/bin/env bash
+# Firstmate agy turn-end hook. Managed by bin/fm-spawn.sh.
+# Deliberately passive: every path is silent, prints one JSON object, exits zero.
+set +e
+exec 2>/dev/null
+# agy reads a hook's verdict from stdout and only the literal decision
+# "continue" blocks the stop, so an empty object always lets the agent stop.
+# Printed FIRST, before stdin is even read, so no later failure and no read
+# that blocks on a stdin the parent has not closed can withhold the verdict.
+printf '{}\n'
+# The WHOLE payload, never one line of it: this hook is agy's only turn-end
+# signal, so a Stop carrying newlines must still be readable rather than
+# silently truncated to its first line. The read is bounded by a WALL CLOCK
+# rather than by an iteration count, because each poll also forks cat and jq and
+# a counted loop therefore stretches with host load. Five seconds leaves the
+# whole hook well inside agy's own 10s timeout even when the writer keeps stdin
+# open and sends nothing.
+auth_dir=$sq_agy_auth_dir
+command -v jq >/dev/null 2>&1 || exit 0
+payload_file=\$(mktemp "\${TMPDIR:-/tmp}/fm-agy-stop.XXXXXXXXXXXX") || exit 0
+exec 3<&0
+cat <&3 > "\$payload_file" &
+reader=\$!
+exec 3<&-
+payload=
+SECONDS=0
+while [ "\$SECONDS" -lt 5 ]; do
+  payload=\$(cat "\$payload_file" 2>/dev/null)
+  jq -e . >/dev/null 2>&1 <<< "\$payload" && break
+  kill -0 "\$reader" 2>/dev/null || break
+  sleep 0.1
+done
+kill "\$reader" 2>/dev/null || true
+wait "\$reader" 2>/dev/null || true
+payload=\$(cat "\$payload_file" 2>/dev/null)
+rm -f "\$payload_file"
+# fullyIdle=true is the ONLY turn end. A false or absent value means agy is
+# still waiting on backgrounded work and will end another turn later.
+# Tested with == true, never with jq's // operator, which treats false as null.
+ws=\$(jq -er 'select(.fullyIdle == true) | .workspacePaths[0] | strings | select(length > 0)' <<< "\$payload" 2>/dev/null) || exit 0
+# The hook's cwd is the plugin directory, never the workspace, so the workspace
+# can only come from the payload.
+p="\$ws/.fm-agy-turnend"
+[ -f "\$p" ] || exit 0
+first=
+IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
+case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
+case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
+case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
+t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
+case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
+touch -- "\$t" 2>/dev/null || true
+exit 0
+EOF
+      chmod +x "$agy_hook_tmp"
+      mv -f "$agy_hook_tmp" "$AGY_PLUGIN_DIR/fm-turn-end.sh"
+      agy_hook_command=$(json_escape "bash $(shell_quote "$AGY_PLUGIN_DIR/fm-turn-end.sh")")
+      agy_hooks_tmp=$(mktemp "$AGY_PLUGIN_DIR/.hooks.json.XXXXXXXXXXXX")
+      printf '{"fm-turn-end":{"Stop":[{"type":"command","command":"%s","timeout":10}]}}\n' "$agy_hook_command" > "$agy_hooks_tmp"
+      mv -f "$agy_hooks_tmp" "$AGY_PLUGIN_DIR/hooks.json"
+      agy_plugin_tmp=$(mktemp "$AGY_PLUGIN_DIR/.plugin.json.XXXXXXXXXXXX")
+      printf '{"name":"fm-turn-end"}\n' > "$agy_plugin_tmp"
+      mv -f "$agy_plugin_tmp" "$AGY_PLUGIN_DIR/plugin.json"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-agy-turnend"
+      exclude_path '.fm-agy-turnend'
+      ;;
     kimi*)
       # Kimi's Stop hook is global, but it is inert unless cwd contains this
       # task's token pointer and the token resolves through Firstmate's private
@@ -2970,11 +3199,18 @@ case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+LAUNCH_SCRUB=
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+  claude|codex|opencode|pi|pi-signed|grok|kimi|muse|agy)
+    LAUNCH_SCRUB="$LAUNCH_SCRUB -u CURSOR_AGENT -u CURSOR_INVOKED_AS"
     ;;
 esac
+case "$HARNESS" in
+  claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    LAUNCH_SCRUB="$LAUNCH_SCRUB -u ANTIGRAVITY_AGENT"
+    ;;
+esac
+[ -z "$LAUNCH_SCRUB" ] || LAUNCH="env$LAUNCH_SCRUB $LAUNCH"
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
@@ -3063,9 +3299,12 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = agy ]; then
+  agy_answer_trust_dialog
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    spawn_harness_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
@@ -3075,15 +3314,15 @@ if [ "$HARNESS" = kimi ]; then
   if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
       "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
       "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_harness_fail "kimi brief pointer could not be submitted"
     exit 1
   fi
   if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_harness_fail "kimi brief pointer could not be submitted"
     exit 1
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    spawn_harness_fail "kimi brief pointer delivery was not confirmed"
     exit 1
   fi
 fi

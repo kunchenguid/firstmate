@@ -124,9 +124,46 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+# fm_test_named_interpreter proves a construction by asking the built process to
+# report its own name, and the platforms disagree about what that report can
+# contain: Linux's kernel comm field holds 15 usable characters, so any longer
+# name comes back truncated there while macOS returns it whole. Both verdicts
+# have to be exercised on ONE host, so the process table is faked and the real
+# helper is driven against it.
+named_interpreter_verdict() {  # <dir> <name> <reported-name> -> 0 accepted
+  local dir=$1 name=$2 reported=$3 fakebin method real
+  fakebin=$(fm_fakebin "$dir/ps")
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '$reported'
+SH
+  chmod +x "$fakebin/ps"
+  real=$(command -v bash)
+  mkdir -p "$dir/bin"
+  for method in copy symlink; do
+    if PATH="$fakebin:$PATH" \
+      fm_test_named_interpreter_try "$method" "$dir/bin" "$name" "$real"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+test_named_interpreter_accepts_a_truncated_report() {
+  local dir="$TMP_ROOT/namedinterp"
+  named_interpreter_verdict "$dir/trunc" muse-bin-test-version muse-bin-test-v \
+    || fail "a 15-character truncation of the requested name was rejected; on a host where no construction runs a child at all every suite using this helper already fails"
+  # Without the length gate a bare prefix rule would let the untouched
+  # interpreter's own name prove any name it happens to start.
+  named_interpreter_verdict "$dir/short" bash-x bash \
+    && fail "a short report was accepted as a truncation, so 'bash' would prove 'bash-x'"
+  pass "the named-interpreter proof accepts a platform truncation but not a short report"
+}
+
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers
 test_fake_gh_and_gh_axi
 test_spawn_tmux_and_fakebin
 test_send_stubs_and_ssh
 test_spawn_home_layout
+test_named_interpreter_accepts_a_truncated_report

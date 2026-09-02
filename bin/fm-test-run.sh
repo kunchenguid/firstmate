@@ -203,6 +203,7 @@ cpu_count() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
+    fm-agy-harness.test.sh|\
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
@@ -267,6 +268,7 @@ family_for_basename() {
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
+    fm-agy-surface-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
@@ -507,6 +509,8 @@ list_portable_serial() {
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-inject-e2e.test.sh 35792
+tests/fm-agy-harness.test.sh 58800
+tests/fm-agy-surface-live-e2e.test.sh 25
 tests/fm-afk-pi-herdr-return-e2e.test.sh 100
 tests/fm-afk-return.test.sh 1837
 tests/fm-ask-user-authority.test.sh 128

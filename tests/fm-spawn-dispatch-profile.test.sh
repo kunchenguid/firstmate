@@ -131,7 +131,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -150,6 +150,42 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
     "non-cursor launch must clear both inherited Cursor identity markers"
   pass "non-cursor launches clear inherited Cursor identity markers"
+}
+
+# bin/fm-harness.sh tests ANTIGRAVITY_AGENT ahead of CLAUDECODE and ahead of
+# every ancestry walk, and justifies that ordering by asserting the spawn clears
+# foreign markers at the launch boundary. A pane daemon that inherited the marker
+# from an agy tool process would otherwise hand it to every child, and a claude
+# crewmate launched there would answer `agy` - which also re-resolves crew and
+# secondmate selection, since both fall through to detect_own.
+# The assertion runs the emitted scrub for real rather than reading it.
+test_non_agy_launch_clears_inherited_antigravity_marker() {
+  local rec id out status launch prefix identity
+  id=profile-claude-agy-marker-z1c
+  rec=$(make_spawn_case profile-claude-agy-marker claude "$id")
+  read_case_record "$rec"
+
+  out=$(ANTIGRAVITY_AGENT=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn under the agy marker should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+
+  set -f
+  # shellcheck disable=SC2086
+  set -- $launch
+  set +f
+  [ "${1:-}" = env ] || fail "claude launch carried no env scrub at all: $launch"
+  shift
+  prefix="env"
+  while [ "${1:-}" = "-u" ]; do
+    prefix="$prefix -u $2"
+    shift 2
+  done
+  identity=$(ANTIGRAVITY_AGENT=1 CLAUDECODE=1 sh -c "$prefix \"\$0\"" "$ROOT/bin/fm-harness.sh")
+  [ "$identity" = claude ] \
+    || fail "a claude launch under an inherited agy marker identified as '$identity'; the scrub was '$prefix'"
+  pass "a non-agy launch clears an inherited ANTIGRAVITY_AGENT so the child keeps its own identity"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -736,7 +772,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ANTIGRAVITY_AGENT CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -794,6 +830,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
+test_non_agy_launch_clears_inherited_antigravity_marker
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths

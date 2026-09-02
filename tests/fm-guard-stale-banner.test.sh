@@ -666,7 +666,7 @@ test_pi_harness_routes_itself_to_the_extension_model() {
     pid=$!
     record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi extension session"
     touch "$home/state/.last-watcher-beat"
-    out=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
+    out=$(env -u CLAUDECODE -u ANTIGRAVITY_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
       "${pi_env[@]}" \
       FM_ROOT_OVERRIDE="$(case_root "$dir")" \
       FM_HOME="$home" \

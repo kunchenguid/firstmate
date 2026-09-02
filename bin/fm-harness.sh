@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|agy|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -50,6 +50,16 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # agy (Antigravity CLI) is checked BEFORE claude for the same reason cursor is:
+  # it sets ANTIGRAVITY_AGENT=1 for its child/tool processes but is NOT known to
+  # clear an inherited CLAUDECODE, so an agy crewmate launched from a claude
+  # primary could carry both and whichever is tested first wins. agy's own marker
+  # is unambiguous when present, so ordering it ahead of claude is what makes the
+  # verdict correct; bin/fm-spawn.sh additionally clears the foreign markers at
+  # the launch boundary. Both are kept: launch sanitization covers only sessions
+  # fm-spawn started, while this ordering also covers an agy session a human
+  # started by hand. Verified live on agy 1.1.24 (docs/verification/agy.md).
+  [ "${ANTIGRAVITY_AGENT:-}" = "1" ] && { echo agy; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -93,6 +103,14 @@ detect_own() {
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
+      # agy ships as a single native binary installed as ~/.local/bin/agy, so
+      # `ps -o comm=` reports the bare name with no version and no path
+      # component (verified live, agy 1.1.24). Anchored rather than globbed:
+      # a *agy* glob would classify ordinary commands whose names merely contain
+      # the substring, such as `magyar` or `stagy`, as this harness.
+      # The install path carries no `agy` component either, so the
+      # fm_harness_path_name fallback used elsewhere never fires for it.
+      agy) echo agy; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*)
