@@ -220,6 +220,139 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- Cygwin / Git-for-Windows layer ------------------------------------------
+#
+# Both of this platform's departures are reproduced here rather than assumed, so
+# these run identically on Linux and macOS CI: its ps rejects -o outright, and
+# every shell it reports has its parent link severed at 1 because the real parent
+# is a Windows process Cygwin cannot see.
+
+# A fakebin whose ps behaves like Cygwin's and whose uname reports MINGW.
+# The Windows-side table is supplied per case through FM_TEST_WIN_TABLE, in the
+# same column order the real `ps -W` prints.
+cygwin_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'MINGW64_NT-10.0-26200'
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+for a in "$@"; do
+  # Cygwin's ps has no -o option at all; it fails the whole invocation.
+  [ "$a" = "-o" ] && { echo "ps: unknown option -- o" >&2; exit 1; }
+done
+mode=p full=0 pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -W) mode=W; shift ;;
+    -f) full=1; shift ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$mode" = W ]; then
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+  [ -n "${FM_TEST_WIN_TABLE:-}" ] && printf '%s\n' "$FM_TEST_WIN_TABLE"
+  exit 0
+fi
+# The Cygwin-side table. 700 is an MSYS-native harness; everything else is an
+# ordinary shell whose parent link is severed exactly as the real ps reports it.
+case "$pid" in
+  700) comm='/opt/claude/versions/2.1.220'; ppid=1 ;;
+  *)   comm='/usr/bin/bash'; ppid=${FM_TEST_CYG_PPID:-1} ;;
+esac
+if [ "$full" = 1 ]; then
+  printf '%s\n' '     UID     PID    PPID  TTY        STIME COMMAND'
+  printf 'u %s %s ? 00:00:00 %s\n' "$pid" "$ppid" "$comm"
+else
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+  printf '%s %s %s 9999 ? 0 00:00:00 %s\n' "$pid" "$ppid" "$pid" "$comm"
+fi
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+# WINPID 7204 is the session harness. 4321 is an ordinary desktop process, and
+# 5150 is the path-shaped lookalike that must never read as a harness.
+WIN_TABLE='  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe
+  4198625       0       0       4321  ?              0 22:24:48 C:\Windows\explorer.exe
+  4199454       0       0       5150  ?              0 22:24:48 C:\tools\claude-notes\helper.exe'
+
+test_windows_session_is_identified_from_its_published_pid() {
+  local dir fakebin got
+  dir="$TMP_ROOT/win-published"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf 'win:7204\n' > "$dir/state/.lock"
+
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the session was not identified at all on a severed Cygwin parent link"
+  [ "$got" = 'win:7204' ] || fail "expected the tagged Windows session pid win:7204, got '$got'"
+  FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_pid_alive win:7204' \
+    || fail "a live Windows-side session was classified as a dead lock owner"
+  FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the session holding the lock did not recognize itself as the owner"
+  pass "session-lock: a Windows session is identified from its published pid across the severed parent link"
+}
+
+test_windows_published_pid_is_confirmed_before_it_is_trusted() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-unconfirmed"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # A published pid is a claim. Each of these shapes must be discarded rather
+  # than bound: a process that is gone, one that is not a harness at all, and a
+  # path that merely contains the harness name inside a longer component.
+  for claimed in 9999 4321 5150; do
+    if FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID="$claimed" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+      fail "published pid $claimed was bound as this session's harness without confirmation"
+    fi
+    if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" "fm_harness_pid_alive win:$claimed"; then
+      fail "published pid $claimed passed the harness-liveness predicate"
+    fi
+  done
+  pass "session-lock: a published Windows pid is confirmed against the process table before it is trusted"
+}
+
+test_windows_pid_is_never_resolved_as_a_cygwin_pid() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-namespace"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # 700 is a harness in the CYGWIN table and absent from the Windows one. The
+  # two namespaces overlap numerically, so resolving a tagged pid through the
+  # local table would bind a home to whatever unrelated process holds that
+  # number - which is exactly what the tag exists to prevent.
+  FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
+    || fail "fixture is vacuous: pid 700 must be a live harness in the Cygwin table"
+  if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive win:700'; then
+    fail "a tagged Windows pid was resolved against the Cygwin process table"
+  fi
+  pass "session-lock: a tagged Windows pid is never resolved against the Cygwin process table"
+}
+
+test_cygwin_ps_without_o_still_resolves_a_local_harness() {
+  local dir fakebin got
+  dir="$TMP_ROOT/cygwin-local"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # An MSYS-native harness lives in the same process table as this shell, so it
+  # must resolve through the ordinary walk and stay an untagged pid. This is
+  # what proves the walk survives a ps with no -o option at all.
+  got=$(FM_TEST_CYG_PPID=700 FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a harness in the local process table was not resolved when ps rejected -o"
+  [ "$got" = 700 ] || fail "expected the untagged local harness pid 700, got '$got'"
+  pass "session-lock: a harness in the local process table resolves untagged when ps has no -o option"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -360,6 +493,10 @@ test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_windows_session_is_identified_from_its_published_pid
+test_windows_published_pid_is_confirmed_before_it_is_trusted
+test_windows_pid_is_never_resolved_as_a_cygwin_pid
+test_cygwin_ps_without_o_still_resolves_a_local_harness
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
