@@ -834,6 +834,23 @@ EOF
       and (.invalidity.kind != "terminal_in_flight")
   ' >/dev/null || fail "secondmate-only home with a clean backlog must be VALID: $out"
 
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate - Registered secondmate home (repo: alpha) (kind: secondmate) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  printf 'done: delegated scope complete\n' > "$home/state/mate.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .reason == null
+      and .invalidity == {kind:null,ids:[]}
+      and (.invalidity.kind != "terminal_in_flight")
+  ' >/dev/null || fail "terminal secondmate with a matching in-flight row must not produce terminal_in_flight: $out"
+
   fm_write_meta "$home/state/unowned-ship.meta" \
     "window=firstmate:fm-unowned-ship" \
     "worktree=$home/projects/unowned" \
