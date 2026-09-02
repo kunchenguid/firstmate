@@ -34,7 +34,7 @@ Every mechanical fact lives with its existing owner; this skill only selects and
 - BITS command mechanics, exact flags, dry-run and confirmation semantics, project types, control-plane values, dedicated-PPE creation, deployments, and test reads are owned by the bytedcli skill, its BITS reference, and current `bytedcli bits ... --help`; consult them at use time and never freeze volatile syntax here.
 - Never use or reinstall removed `bitscli`, including for a Dev Task operation that an older reference still routes to it.
 - BITS Dev Task creation and reuse use the maintained `bytedcli bits develop` surface and its current help.
-- Browser-started E2E is the sole browser mutation in this lifecycle.
+- Browser-started test is the sole browser mutation in this lifecycle.
 - Reuse the already running authenticated GUI Chrome through installed `playwright-core` over CDP at `127.0.0.1:9333`; do not launch another browser, use `chrome-devtools-axi`, install an extension, or change browser configuration.
 - Use read-only browser inspection only when the official structured `bytedcli` response does not expose configuration required for the decision or readback.
 - No-mistakes invocation and branch-custody mechanics are owned by the installed no-mistakes skill and current AXI help; this skill owns when that validation may start and which delivery phases it must exclude.
@@ -77,14 +77,14 @@ An already-open MR may be evidence but is not a prerequisite for starting BITS-o
 Gather the authoritative evidence for every change in the set before any decision:
 
 - the exact repository, BITS project, BITS-owned source branch, local committed candidate, independent remote source head, and intended target branch;
-- any eligible Dev Task, project, Change Card, MR, pipeline, PPE, deployment, and E2E identities already present;
+- any eligible Dev Task, project, Change Card, MR, pipeline, PPE, deployment, and test-run identities already present;
 - for a release-train bugfix, the release ticket and its integration branch;
 - the complete deployment snapshot, including control plane, BOE setting, region, PPE identity, project configuration, and every unknown field;
 - the candidate's build, artifact, and deployed revision identity whenever BITS exposes them.
 
 Read this evidence from the live forge and BITS, never from memory or a stale status line.
 Record which source directly proves each fact, label any inference, and preserve a field as unknown when neither maintained `bytedcli` nor permitted read-only browser inspection exposes it.
-Any branch movement or identity mismatch invalidates the dependent prepare, deployment, E2E, or final-validation evidence.
+Any branch movement or identity mismatch invalidates the dependent prepare, deployment, test, or final-validation evidence.
 
 ## Create versus reuse
 
@@ -103,13 +103,13 @@ Never create, retarget, close, or bind an MR merely to satisfy BITS.
 
 ## Write discipline
 
-Every live delivery write, including source delivery and the browser-started E2E action, follows all applicable rules below.
+Every live delivery write, including source delivery and the browser-started test action, follows all applicable rules below.
 
 1. Full-snapshot preservation: any write that replaces a whole snapshot preserves `changes`, `projects`, `versionCode`, and every unknown field; never overwrite or drop a field you did not intend to change.
 2. Exact prepare or dry-run review: inspect the owner's exact payload or preview before submission, confirming repository, source, target, project type, control plane, BOE setting, region, dedicated environment, candidate head, and existing identities are precisely intended.
 3. Write authority: establish current task authority before every write, obtain any separate authority `AGENTS.md` requires before adding `--yes`, and treat one approval as authorizing one exact target rather than a later changed one.
 4. Shared immediate pre-write revalidation: immediately before every creation or mutation, independently re-read the exact live source head, target, expected object presence or absence, applicable MR identity, and every live field represented in the confirmed snapshot.
-5. Independent post-write readback: after every creation, source delivery, deployment, or test trigger, independently re-read the resulting Dev Task, projects, Change Cards, MR bindings, remote source head, pipeline, PPE, deployment, artifact, region, control plane, BOE setting, candidate identity, and E2E state that the operation could affect.
+5. Independent post-write readback: after every creation, source delivery, deployment, or test trigger, independently re-read the resulting Dev Task, projects, Change Cards, MR bindings, remote source head, pipeline, PPE, deployment, artifact, region, control plane, BOE setting, candidate identity, and test state that the operation could affect.
 6. Complete comparison: compare the intended mutation and every field confirmed or preserved from the pre-write snapshot, including unknown fields and exact identities; API acceptance is not success until independent readback confirms the complete result.
 7. Timeout is outcome-unknown: after a timeout or lost connection following transmission, reconcile the exact target by readback before any retry and never blindly re-issue a create, deployment, or test run.
 
