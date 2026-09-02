@@ -58,10 +58,13 @@ agy_payload() {  # <template> <workspace>
 #                     bottom rows: the footer is bottom-anchored while the
 #                     dialog sits further up, so a poll that reads only the tail
 #                     of the capture sees the footer and misses the dialog
+#   trust-hinted    - blocked on the dialog, but each option row carries a
+#                     trailing hint after its label, which is what a different
+#                     terminal width or a later agy build can render
 #   quoted-dialog   - a started session whose rendered brief QUOTES the dialog's
-#                     question and its answer text as prose, with no dialog on
-#                     screen: the capture agy draws when the task it was given
-#                     is about the trust dialog itself
+#                     question as prose, with no dialog on screen: the capture
+#                     agy draws when the task it was given is about the trust
+#                     dialog itself
 #   blank           - nothing renders at all, the pane that never starts
 #
 # FM_FAKE_AGY_PHASE, when set, makes the stub honour launch ORDER: the screen
@@ -93,11 +96,16 @@ render_agy() {
       while [ "$i" -lt 14 ]; do printf '  workspace row %s\n' "$i"; i=$((i + 1)); done
       printf '\n  >\n? for shortcuts\n'
       ;;
+    trust-hinted)
+      printf 'agy 1.1.24\n\nDo you trust the contents of this project?\n'
+      printf '> Yes, I trust this folder   (recommended)   enter to confirm\n'
+      printf '  No, browse in restricted mode   esc to go back\n'
+      ;;
     quoted-dialog)
       printf 'agy 1.1.24\n\n> Read the brief and follow it exactly.\n'
       printf '  The brief says agy asks this on an untrusted folder:\n'
       printf 'Do you trust the contents of this project?\n'
-      printf '  and the preselected row reads Yes, I trust this folder.\n'
+      printf '  with Yes preselected, and one Enter resolves it.\n'
       printf '\n  >\n? for shortcuts\n'
       ;;
     blank) : ;;
@@ -149,7 +157,7 @@ case "${1:-}" in
       agy_log 'key:Enter'
       case "$phase" in
         1) set_phase 2 ;;
-        2) case "$target" in trust|trust-tall) set_phase 3 ;; esac ;;
+        2) case "$target" in trust|trust-tall|trust-hinted) set_phase 3 ;; esac ;;
       esac
       break
     done
@@ -464,12 +472,35 @@ EOF
   pass "a trust dialog above the footer is answered rather than read past"
 }
 
+# The affirmative row was observed once, at one terminal width, as a marker
+# followed by the label and nothing else. Requiring it to END there would make a
+# trailing hint - a recommendation, a shortcut, a right-aligned status - leave
+# the dialog undetected, and an undetected dialog is the silent wedge the Enter
+# exists to prevent. Detection must therefore survive a row that continues past
+# the label.
+test_trust_dialog_with_a_trailing_hint_is_still_answered() {
+  local rec case_dir home proj wt fakebin agy_home id out enters
+  rec=$(make_spawn_case trust-hinted)
+  IFS='|' read -r case_dir home proj wt fakebin agy_home id <<EOF
+$rec
+EOF
+  out=$(FM_FAKE_AGY_SCREEN=trust-hinted FM_FAKE_AGY_PHASE="$case_dir/phase" \
+    FM_FAKE_AGY_EVENT_LOG="$case_dir/events.log" \
+    FM_AGY_POLL_INTERVAL=0 FM_AGY_TRUST_POLLS=6 \
+    run_agy_spawn "$home" "$proj" "$wt" "$fakebin" "$agy_home" "$id" \
+    --mode no-mistakes --yolo off) \
+    || fail "agy spawn failed on a dialog whose rows carry trailing hints: $out"
+  enters=$(agy_enters_after_launch "$case_dir/events.log")
+  [ "$enters" -eq 2 ] \
+    || fail "the spawn sent $enters Enters after the launch line to a dialog whose answer row carries a trailing hint; expected the launch submit plus exactly one answer"
+  pass "a trust dialog whose answer row continues past its label is still answered"
+}
+
 # agy renders the brief as the first message in the same pane, so a brief that
-# QUOTES the trust dialog puts its question, and even its answer text, into the
-# very capture the poll reads. Matching the question alone would then fire one
-# Enter into a session that has already started its turn. Only the dialog's
-# structure - the question together with the preselected answer as a row of its
-# own - counts as the dialog being on screen.
+# QUOTES the trust dialog puts its question into the very capture the poll
+# reads. Matching the question alone would then fire one Enter into a session
+# that has already started its turn. Both of the dialog's own strings must
+# appear before it counts as being on screen.
 test_a_brief_quoting_the_dialog_draws_no_enter() {
   local rec case_dir home proj wt fakebin agy_home id out enters
   rec=$(make_spawn_case quoted-dialog)
@@ -852,6 +883,7 @@ test_secondmate_is_refused
 test_secondmate_positional_agy_is_refused
 test_trust_dialog_is_answered_exactly_once
 test_trust_dialog_above_the_footer_is_still_answered
+test_trust_dialog_with_a_trailing_hint_is_still_answered
 test_a_brief_quoting_the_dialog_draws_no_enter
 test_a_pane_that_never_renders_still_completes_the_spawn
 test_turnend_requires_fully_idle

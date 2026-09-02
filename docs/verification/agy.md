@@ -143,9 +143,12 @@ A session blocked on this dialog still fires `Stop` hooks with `fullyIdle:false`
 
 An unanswered dialog is a silent hang: agy never reads the brief, its only `Stop` is ignored by the `fullyIdle` gate, and the busy classifier stays at `unknown agy-unverified`.
 `bin/fm-spawn.sh` therefore polls the pane after launch and sends one Enter once the dialog is proven on screen, and the poll ends on that Enter, so exactly one is ever delivered.
-What counts as proof is the dialog's structure, not its wording: the question must appear together with `Yes, I trust this folder` as a row of its own.
+What counts as proof is both of the dialog's own strings, the question AND `Yes, I trust this folder`, not the question alone.
 agy renders the brief as the first message in the same pane, so a brief that quotes the question - this adapter's own does - would otherwise draw an Enter into a session that has already started its turn.
-That row match assumes the plain-text capture both backends serve through `fm_backend_capture`, where tmux's `capture-pane -p` and herdr's default `pane read` carry no escape sequences; the ANSI form is a separate primitive neither this poll nor any other launch gate reads.
+Nothing is required about where the answer's row ends, deliberately.
+What the captured pane showed, at one terminal width and in agy 1.1.24, was the affirmative row rendered as a selection marker followed by the label, the alternative on the next row, and a navigate/confirm hint below.
+That is one observation and the row match has not been re-exercised against a live agy since, so a trailing hint, shortcut marker, or right-aligned status must not be allowed to defeat detection: a miss sends no Enter and wedges the worker on the modal, which is the failure the Enter exists to prevent.
+The match assumes only the plain-text capture both backends serve through `fm_backend_capture`, where tmux's `capture-pane -p` and herdr's default `pane read` carry no escape sequences; the ANSI form is a separate primitive neither this poll nor any other launch gate reads.
 
 How often that dialog actually appears was measured here against fresh lab directories, which is not how the fleet allocates a worktree.
 Treehouse pools and recycles worktrees for tmux, herdr, zellij, and cmux tasks, as [`docs/architecture.md`](../architecture.md) records; teardown returns each one to that pool, and `trustedWorkspaces` is keyed by path.

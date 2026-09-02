@@ -2467,13 +2467,16 @@ spawn_harness_fail() {  # <detail>
 # Stop it fires carries fullyIdle=false, which the turn-end gate ignores, and agy
 # has no worker-state source, so the task would sit at `unknown agy-unverified`
 # forever with nothing to observe. One Enter resolves it (Yes is preselected).
-# The match is the dialog's STRUCTURE, not its question: agy renders the brief
-# as the first message in the same pane, and a brief that quotes the question -
-# this adapter's own does - would otherwise draw an Enter into a session that
-# already started its turn. The question must therefore appear TOGETHER with the
-# preselected answer as a row of its own, which rendered prose is not.
+# Both of the dialog's own strings must be present, never the question alone:
+# agy renders the brief as the first message in the same pane, and a brief that
+# quotes the question - this adapter's own does - would otherwise draw an Enter
+# into a session that already started its turn. Only the two strings are
+# required, and nothing about where the answer's row ENDS: the rendered row was
+# observed once, at one width, and a trailing hint or right-aligned status must
+# not defeat detection, because a miss wedges the worker on the modal, which is
+# the failure this Enter exists to prevent.
 AGY_TRUST_QUESTION_REGEX='Do you trust the contents of this project'
-AGY_TRUST_OPTION_REGEX='^[^A-Za-z]*Yes, I trust this folder[^A-Za-z]*$'
+AGY_TRUST_OPTION_REGEX='Yes, I trust this folder'
 
 # Answering that dialog is the WHOLE launch step. Readiness is deliberately not
 # proven: a capture is recent output on both backends, so it guarantees neither

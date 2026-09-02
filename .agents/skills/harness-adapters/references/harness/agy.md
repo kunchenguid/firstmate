@@ -9,7 +9,7 @@ It is selectable only by an explicit per-task choice because it has no usable `s
 - Launch with `agy --dangerously-skip-permissions -i "<brief>"`; never pass the brief positionally.
 - Treat only the exact harness and process name `agy` as this verified adapter.
 - Detect child processes from `ANTIGRAVITY_AGENT=1`, ahead of inherited foreign markers.
-- Answer the workspace-trust dialog with one Enter, only once its question and its `Yes, I trust this folder` row are both on screen, so a brief that merely quotes the dialog cannot trigger it, and prove no readiness after it: a launch that never starts is ordinary stuck-worker territory.
+- Answer the workspace-trust dialog with one Enter, only once its question and its `Yes, I trust this folder` label are both on screen, so a brief that merely quotes the question cannot trigger it, and prove no readiness after it: a launch that never starts is ordinary stuck-worker territory.
 - Answering that dialog adds the worktree path to agy's own `trustedWorkspaces`, and teardown deliberately leaves the entry, so a reused path never shows the dialog again and the poll waits out its window there.
 - Count only a `Stop` payload with `fullyIdle: true` as a turn end; false, absent, malformed, and foreign-workspace payloads are no-ops.
 - Install the guarded global hook only in agy's firstmate-owned `plugins/fm-turn-end/` directory under the fixed `~/.gemini/config` root, require `jq`, and leave agy's own `config.json` and `hooks.json` and all project configuration untouched.
