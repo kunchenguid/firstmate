@@ -1738,6 +1738,13 @@ ${context.command}
           isError: true,
         };
       }
+      if (!processing || through > processing.through) {
+        return {
+          content: [{ type: "text", text: `acknowledgement refused: seq ${through} was not listed in the active processing request` }],
+          details: undefined,
+          isError: true,
+        };
+      }
       const marked = runOutcomeScript(["mark-processed", "--through", String(through)]);
       if (!marked.ok) {
         return {

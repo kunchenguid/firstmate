@@ -1268,6 +1268,13 @@ if (requests().length !== beforePair + 1 || !requests().at(-1).message.content.i
 const third = await report2.execute("captain-3", { task: "task-f", verdict: "captain", summary: "worker blocked on a missing credential" }, undefined, undefined, {});
 if (third.isError) throw new Error(`third captain report failed: ${JSON.stringify(third)}`);
 if (requests().length !== beforePair + 1) throw new Error("a widened sequence re-sent while the earlier request was pending");
+const unlisted = await processed.execute("ack-unlisted", { through: seqF }, undefined, undefined, {});
+if (!unlisted.isError || !unlisted.content.some((item) => item.type === "text" && item.text.includes("not listed in the active processing request"))) {
+  throw new Error(`an unlisted newer sequence was not clearly refused: ${JSON.stringify(unlisted)}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seqE, seqF])) {
+  throw new Error(`an unlisted acknowledgement closed outcomes: ${unprocessedSeqs()}`);
+}
 runOf();
 if (requests().length !== beforePair + 2) throw new Error("the widened sequence was not presented at the run boundary");
 const latest = requests().at(-1).message.content;
