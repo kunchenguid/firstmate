@@ -1168,11 +1168,15 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       ;;
     bin/fm-backend-hometag-lib.sh)
-      # The shared home tag: cmux/zellij titles (backend-dispatch,
-      # real-herdr-gated) and, since it also discriminates the per-task temp
-      # root, everything bin/fm-task-tmp-lib.sh covers below.
+      # The shared home tag: herdr workspace and session naming
+      # (backend-dispatch, real-herdr-gated), the cmux and zellij scoped titles,
+      # whose suites re-derive the prefix-and-hash shape byte for byte (cmux,
+      # zellij), and, since it also discriminates the per-task temp root,
+      # everything bin/fm-task-tmp-lib.sh covers below.
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
+      printf '%s\n' cmux
+      printf '%s\n' zellij
       printf '%s\n' pr-forge
       printf '%s\n' session-bootstrap
       printf '%s\n' orca
@@ -1245,7 +1249,15 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-teardown.sh)
+      # Teardown's own suite (pr-forge) plus fm-gotmp.test.sh
+      # (session-bootstrap), which drives the real teardown subprocess through
+      # the temp-root ownership refusals, the unremovable-root non-fatal path,
+      # and the live-sibling survival case.
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
