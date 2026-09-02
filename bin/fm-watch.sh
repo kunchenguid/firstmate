@@ -34,13 +34,19 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Unless afk is active. A pane whose own task
-#                          worktree was written during the quiet window is
-#                          deferred rather than escalated (wedge_defer_writing),
-#                          because files appearing there are liveness the pane and
-#                          the run step cannot show; that deferral still
-#                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
-#                          that writes nothing keeps the unchanged schedule.
+#                          resume. Unless afk is active. A pane whose attributed
+#                          no-mistakes run-step is still a running validation
+#                          (crew_run_step_is_active) is deferred rather than
+#                          escalated (wedge_defer_run_step), because pane
+#                          idleness between gates is expected while a background
+#                          shell holds the blocking axi call; a parked prompt
+#                          is not that signal and keeps the unchanged schedule.
+#                          A pane whose own task worktree was written during the
+#                          quiet window is also deferred (wedge_defer_writing),
+#                          because files appearing there are liveness the pane
+#                          cannot show; both deferrals still re-surface once per
+#                          PAUSE_RESURFACE_SECS, and a pane that is neither
+#                          validating nor writing keeps the unchanged schedule.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -715,12 +721,39 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
   wake "$reason"
 }
 
+# Defer ONE wedge escalation for a pane that went quiet while its attributed
+# no-mistakes run-step is still an in-progress pipeline round
+# (crew_run_step_is_active in fm-classify-lib.sh). Between gates the agent has
+# finished its turn and only a background shell holds the blocking axi call, so
+# pane idleness is expected and is not a wedge. Deliberately a DEFERRAL, not a
+# cancellation, and deliberately NOT a widening of pause_state_class's live-agent
+# exclusion: a live idle pane claiming to be paused could still be blocked at a
+# decision prompt, and silencing that would be worse than the noise. The run-step
+# is what distinguishes that prompt (parked) from a running round (working). The
+# idle timer restarts, the escalation counter is left alone, and a
+# .run-step-since-<key> marker ages the chain so the pane still re-surfaces once
+# every PAUSE_RESURFACE_SECS through the shared resurface_absorbed above - the
+# same bounded cadence a declared pause and a write deferral use - so a forgotten
+# or hung round cannot stay invisible.
+wedge_defer_run_step() {  # <window> <since-file> <triage-label> <idle-age>
+  local win=$1 since_file=$2 label=$3 age=$4 key rsf rage
+  key=$(window_key "$win")
+  rsf="$STATE/.run-step-since-$key"
+  [ -e "$rsf" ] || date +%s > "$rsf"
+  rage=$(age_of "$rsf")
+  date +%s > "$since_file"
+  resurface_absorbed "$win" "$STATE/.run-step-resurfaced-$key" "$rage" \
+    "stale: $win (idle ${age}s, run-step still validating, rechecked on a long cadence not a wedge; confirm the pipeline round is real progress)"
+  triage_log "absorbed $label (run-step still validating, idle ${age}s): $win"
+}
+
 # Defer ONE wedge escalation for a pane that went quiet while its own task
 # worktree is demonstrably still being written (crew_worktree_written_since in
-# fm-classify-lib.sh). The pane and the run step both say nothing is happening;
-# the worktree says otherwise, and files appearing in it is the harder signal to
-# fake, so the escalation is deferred rather than fired. Deliberately a DEFERRAL,
-# not a cancellation: the idle timer restarts, so the next window probes again,
+# fm-classify-lib.sh). Reached only after the run-step consult above reported no
+# in-progress validation; the worktree is then the remaining liveness the pane
+# cannot show, and files appearing in it is the harder signal to fake, so the
+# escalation is deferred rather than fired. Deliberately a DEFERRAL, not a
+# cancellation: the idle timer restarts, so the next window probes again,
 # and a .writing-since-<key> marker ages the whole deferral chain so the pane
 # still re-surfaces once every PAUSE_RESURFACE_SECS through the shared
 # resurface_absorbed above - literally the same bounded cadence a declared pause
@@ -741,25 +774,31 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
-# Drop a window's write-deferral chain wherever its stale bookkeeping resets, so
-# the bounded re-surface cadence is measured from the CURRENT quiet stretch and a
-# long-finished one cannot make the next deferral resurface immediately.
+# Drop a window's at-threshold deferral chains wherever its stale bookkeeping
+# resets, so the bounded re-surface cadence is measured from the CURRENT quiet
+# stretch and a long-finished chain cannot make the next deferral resurface
+# immediately. Covers both the worktree-write chain and the validating-run-step
+# chain; they share this reset because they share the idle-window timer.
 clear_write_tracking() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
+  rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key" \
+    "$STATE/.run-step-since-$key" "$STATE/.run-step-resurfaced-$key"
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
-# The worktree write probe runs ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
-# never per poll.
+# escalates once STALE_ESCALATE_SECS have elapsed. Shared by both places a hash
+# can be absorbed this way: the plain non-terminal path, and the
+# stale_is_terminal-overridden path (a captain-relevant status-log line that an
+# active run/busy pane outranked).
+# The at-threshold branch is the only place this re-reads current state, and
+# only with two bounded probes, never per poll: the attributed run-step
+# (crew_run_step_is_active, harness- and backend-agnostic) and the worktree
+# write walk. A running validation round defers instead of climbing the wedge
+# ladder on pane idleness alone; a parked decision prompt is not that signal
+# and keeps the unchanged schedule. A timed-out or failed run-step read is no
+# evidence, same as a walk that hits its bound.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -774,6 +813,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if crew_run_step_is_active "$task"; then
+          wedge_defer_run_step "$win" "$since_file" "$label" "$age"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0

@@ -33,7 +33,9 @@
 # to decide whether a crew that just stopped its turn or went stale is working,
 # deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
 # and first sighting of a stale hash, never on every wake, so the per-wake triage
-# stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
+# stays cheap. crew_run_step_is_active is the same reader, wrapped in a wall-clock
+# bound, and callers run it only at the moment they would otherwise wedge-escalate,
+# never per poll. status_open_decisions_incremental (see "incremental (cursor-backed)
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
@@ -1753,6 +1755,37 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# Wall-clock seconds the at-threshold run-step consult may take. The read runs
+# synchronously inside the poll that was about to escalate, so an unbounded
+# no-mistakes or pane call would stall the watcher that exists to notice a wedge.
+# Hitting the bound is a negative outcome like every other: it reads as no
+# evidence, so the caller's escalation schedule is untouched and a parked prompt
+# still alarms. A value that is not a positive integer is not a bound at all, so
+# the default applies instead.
+FM_WEDGE_RUN_STEP_TIMEOUT=${FM_WEDGE_RUN_STEP_TIMEOUT:-10}
+
+# 0 when bin/fm-crew-state.sh reports state=working from source=run-step: an
+# attributed no-mistakes round is still in progress (validating/fixing/ci), which
+# is the signal that distinguishes "inside a pipeline round" from "blocked at a
+# decision prompt" (parked). Pane-only working, status-log working, paused,
+# parked, failed, unknown, an empty id, a parse failure, and a timed-out or
+# failed read all return 1, so the caller's existing escalation schedule is
+# unchanged. NOT a pure status-file read: one wall-clock-bounded fm-crew-state.sh
+# call, which callers must reach only when they are otherwise about to escalate,
+# never on every poll. A hung read costs the escalation nothing but the bound.
+crew_run_step_is_active() {  # <id>
+  local id=$1 line state src bound
+  [ -n "$id" ] || return 1
+  bound=$FM_WEDGE_RUN_STEP_TIMEOUT
+  case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
+  line=$(fm_run_timed "$bound" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ]
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.
