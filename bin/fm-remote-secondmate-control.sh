@@ -33,6 +33,10 @@
 # the default-off path. print_route echoes the carrier the endpoint actually
 # holds, including for an already-alive endpoint that was not relaunched, so the
 # parent records the identity the agent really received rather than an intent.
+# The optional launch cursor exemption is echoed back on the same terms and for
+# the same reason: an already-alive endpoint is reused WITHOUT applying a newly
+# supplied grant, so the parent must record the envelope that actually governs
+# the running worker rather than the one this launch asked for.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -115,16 +119,18 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness traceparent
+  local id=$1 harness traceparent exemption
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
+  exemption=$(fm_meta_get "$REMOTE_ENDPOINT_META" cursor_exemption)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
+  [ -z "$exemption" ] || printf 'cursor_exemption=%s\n' "$exemption"
 }
 
 cmd_route() {
