@@ -2444,7 +2444,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
-  for _ in $(seq 1 60); do
+  TREEHOUSE_SETTLE_SECONDS=${FM_SPAWN_TREEHOUSE_TIMEOUT:-60}
+  for _ in $(seq 1 "$TREEHOUSE_SETTLE_SECONDS"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -2463,7 +2464,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: treehouse get did not enter a worktree within ${TREEHOUSE_SETTLE_SECONDS}s (FM_SPAWN_TREEHOUSE_TIMEOUT, default 60); inspect window $T" >&2
     exit 1
   fi
 
