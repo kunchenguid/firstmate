@@ -13,8 +13,10 @@
 # Also covers the one token convention every parser normalizes onto, the
 # first-line cwd probe that rejects an unrelated sibling session before
 # parsing it in full, the report's per-model grouping and column sums, the
-# documented harness-switch narrowing, and deterministic final-incarnation
-# model attribution.
+# documented harness-switch narrowing, deterministic final-incarnation model
+# attribution, the log scan that reaches the harness's closing write without
+# absorbing a later occupant of the same worktree path, and the harvest of a
+# secondmate's children before a forced cleanup retires them.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -925,6 +927,69 @@ teardown_status_case() {
 
 # --- teardown integration: harvest failure never blocks teardown ------------
 
+# A forced secondmate teardown retires that home's crewmate children and then
+# removes the home itself. Those children ran on this filesystem, so their
+# usage is harvestable, but only until their status log is retired with them.
+# The row lands in the ledger of the home running the teardown, which is the
+# one that outlives the child home.
+teardown_child_case() {
+  local id=usageharvsm1 child=usageharvsmchild1 fb state data config smhome out row
+  local wt encoded logdir now
+  fb="$TMP_ROOT/sm-fakebin"
+  mkdir -p "$fb"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/treehouse"
+  chmod +x "$fb/tmux" "$fb/treehouse"
+  state="$TMP_ROOT/sm-state"; config="$TMP_ROOT/sm-config"; data="$TMP_ROOT/sm-data"
+  smhome="$TMP_ROOT/sm-home"
+  mkdir -p "$state" "$config" "$data" "$smhome/state" "$smhome/data" "$smhome/config"
+  printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
+  mkdir -p "$TMP_ROOT/sm-proj"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$smhome" "project=$TMP_ROOT/sm-proj" \
+    "home=$smhome" "kind=secondmate" "mode=no-mistakes"
+  printf 'working: routing\n' > "$state/$id.status"
+
+  # The child crewmate task inside that secondmate home, with its own claude
+  # session log. Its worktree is already gone, as it is by teardown time.
+  wt="$TMP_ROOT/.no-mistakes/wt-$child"
+  fm_write_meta "$smhome/state/$child.meta" \
+    "window=firstmate:fm-$child" "worktree=$wt" "project=$TMP_ROOT/sm-proj" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "model=default" "effort=default"
+  {
+    printf 'working: started\n'
+    printf 'done: landed\n'
+  } > "$smhome/state/$child.status"
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$TMP_ROOT/sm-fake-claude/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgSM","model":"claude-child","usage":{"input_tokens":23,"output_tokens":4}}}
+JSON
+  now=$(date +%s)
+  printf 'spawn_gen=s%s.77.1\n' "$((now - 300))" >> "$smhome/state/$child.meta"
+  touch -t "$(touch_stamp $((now - 30)))" "$smhome/state/$child.status"
+  touch -t "$(touch_stamp $((now - 20)))" "$logdir/session.jsonl"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/sm-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/sm-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/sm-fake-pi" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  expect_code 0 "$?" "forced secondmate teardown should succeed"$'\n'"$out"
+  [ ! -e "$smhome/state/$child.status" ] \
+    || fail "the child's status log outlived the forced cleanup"
+  row=$(grep -F "\"task\":\"$child\"" "$data/usage-ledger.jsonl" 2>/dev/null || true)
+  [ -n "$row" ] || fail "the secondmate's child task left no ledger row"$'\n'"$out"
+  assert_contains "$row" '"source":"claude-projects"' \
+    "the child row is harvested from the child's own session log"
+  assert_contains "$row" '"input_tokens":23' "the child row carries the child's usage"
+  assert_contains "$row" '"turns":1' \
+    "the child row is read from the child home's own status log"
+  pass "teardown integration: a secondmate's children are harvested before they retire"
+}
+
 teardown_case() {
   local proj wt id fb state data config out
   id=usageharvtd1
@@ -1103,9 +1168,11 @@ JSON
 
 # A relaunch onto another model on the SAME harness leaves both incarnations'
 # logs in the window, and the row has one model field. It must be the final
-# incarnation's, and it must not depend on the order the filesystem enumerates
-# the logs in: the older log is created first here, so a first-log-wins rule
-# reports the superseded model.
+# incarnation's, chosen by WHEN the log was written rather than by its name:
+# real claude logs are UUID-named, so path order says nothing about
+# incarnation order. The newer log is deliberately named so it sorts EARLIER
+# than the older one, so a path-ordered scan, or a first-log-wins rule,
+# reports the superseded model and fails here.
 model_final_incarnation_case() {
   local id=usagemodelfinal wt="$TMP_ROOT/.no-mistakes/wt-usagemodelfinal"
   local data home state row out base encoded logdir
@@ -1118,28 +1185,77 @@ model_final_incarnation_case() {
   encoded=${encoded//./-}
   logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
   mkdir -p "$logdir"
-  cat > "$logdir/session-a-first.jsonl" <<'JSON'
+  cat > "$logdir/session-b-written-first.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgM1","model":"first-incarnation-model","usage":{"input_tokens":5,"output_tokens":1}}}
 JSON
-  cat > "$logdir/session-b-second.jsonl" <<'JSON'
+  cat > "$logdir/session-a-written-last.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgM2","model":"final-incarnation-model","usage":{"input_tokens":7,"output_tokens":2}}}
 JSON
 
   base=$(file_mtime_epoch "$state/$id.status")
   printf 'spawn_gen=s%s.4242.4\n' "$((base - 600))" >> "$state/$id.meta"
   touch -t "$(touch_stamp "$base")" "$state/$id.status"
-  touch -t "$(touch_stamp $((base - 400)))" "$logdir/session-a-first.jsonl"
-  touch -t "$(touch_stamp $((base - 100)))" "$logdir/session-b-second.jsonl"
+  touch -t "$(touch_stamp $((base - 400)))" "$logdir/session-b-written-first.jsonl"
+  touch -t "$(touch_stamp $((base - 100)))" "$logdir/session-a-written-last.jsonl"
 
   out=$("$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "model-attribution harvest should succeed"$'\n'"$out"
   row=$(cat "$data/usage-ledger.jsonl")
   assert_contains "$row" '"model":"final-incarnation-model"' \
-    "the row reports the last incarnation's model, not the first log's"
+    "the row reports the chronologically last incarnation's model"
   assert_contains "$row" '"input_tokens":12' \
     "both incarnations' usage is still summed on one harness (5+7)"
   assert_contains "$row" '"output_tokens":3' "both incarnations' output is summed (1+2)"
   pass "usage harvest: the model is the final incarnation's, whatever the scan order"
+}
+
+# The crewmate appends its last status line from inside an agent turn, so the
+# harness writes that turn's tool result and its closing assistant entry to the
+# session log AFTER the append returns. Matching logs against the status mtime
+# therefore rejected the whole file and reported a task whose usage was sitting
+# on disk as unavailable. The scan reaches the harvest instant instead, which
+# still excludes a log written after this task released its worktree - the case
+# that matters, because pooled worktree paths are reused by later tasks.
+closing_write_case() {
+  local id=usageclosingwrite wt="$TMP_ROOT/.no-mistakes/wt-usageclosingwrite"
+  local data home state row out now encoded logdir
+  data=$(harvest_case "$id" claude "$wt" default default)
+  home=$(dirname "$data")
+  state="$home/state"
+  export_harvest_env "$home"
+
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session-closing.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgW","model":"claude-test","usage":{"input_tokens":41,"output_tokens":3}}}
+JSON
+  # The same pooled worktree path, occupied by a LATER task whose logs are
+  # written after this harvest: they must never be absorbed into this row.
+  cat > "$logdir/session-next-occupant.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgNX","model":"claude-test","usage":{"input_tokens":999,"output_tokens":999}}}
+JSON
+
+  now=$(date +%s)
+  printf 'spawn_gen=s%s.4242.5\n' "$((now - 600))" >> "$state/$id.meta"
+  touch -t "$(touch_stamp $((now - 60)))" "$state/$id.status"
+  touch -t "$(touch_stamp $((now - 5)))" "$logdir/session-closing.jsonl"
+  touch -t "$(touch_stamp $((now + 3600)))" "$logdir/session-next-occupant.jsonl"
+
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "closing-write harvest should succeed"$'\n'"$out"
+  row=$(cat "$data/usage-ledger.jsonl")
+  assert_contains "$row" '"source":"claude-projects"' \
+    "a log flushed after the last status append is still matched"
+  assert_contains "$row" '"input_tokens":41' \
+    "the closing write's usage is summed and the next occupant's is not"
+  assert_contains "$row" '"output_tokens":3' "no later task's output leaks into the row"
+  assert_contains "$row" "\"completed_at\":\"$(iso_utc $((now - 60)))\"" \
+    "completed_at still rests on the last status append"
+  assert_contains "$row" '"wall_secs":540' \
+    "wall seconds still measure spawn to last status append, not the harvest"
+  pass "usage harvest: the log scan covers the harness's closing write, not a later task"
 }
 
 # --- corrupt lines: one bad line costs that line, not the file --------------
@@ -1288,6 +1404,7 @@ relaunch_scope_case
 relaunch_birthless_case
 harness_switch_case
 model_final_incarnation_case
+closing_write_case
 corrupt_line_case
 nonobject_line_case
 missing_model_case
@@ -1301,4 +1418,5 @@ report_model_totals_case
 report_no_harness_case
 report_malformed_case
 teardown_status_case
+teardown_child_case
 teardown_case

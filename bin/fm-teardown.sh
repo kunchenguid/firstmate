@@ -3,7 +3,9 @@
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # harvest the task's fleet usage-ledger row while its state files still exist
 # (best effort: bin/fm-usage-harvest.sh owns that ledger, and a harvest failure
-# only warns on stderr rather than blocking teardown),
+# only warns on stderr rather than blocking teardown; a forced secondmate
+# teardown harvests each of that home's children the same way before their own
+# records retire),
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -2573,6 +2575,15 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
+    # A local secondmate's children ran on this filesystem, so their session
+    # logs are here to harvest. The child's records are read from its own
+    # home, and the row is appended to the ledger of the home running this
+    # cleanup, which is the one that outlives the child home removed below.
+    # Best effort, exactly as at the other retirement sites: a failure warns
+    # and never changes this cleanup's own outcome.
+    FM_STATE_OVERRIDE="$sub_state" FM_DATA_OVERRIDE="$DATA" \
+      "$FM_ROOT/bin/fm-usage-harvest.sh" "$child_id" >/dev/null \
+      || echo "warning: usage harvest for $child_id failed; continuing cleanup" >&2
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" \

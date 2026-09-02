@@ -76,6 +76,17 @@
 # fabricated one.
 # A start later than the end (a spawn with no status append after it) is
 # pinned to the end so spawned_at never postdates completed_at.
+# The window the SESSION LOGS are matched against runs from that same start to
+# the HARVEST INSTANT, which is later than completed_at. A crewmate appends
+# its final status line from inside an agent turn, so the harness writes that
+# turn's tool result and its closing assistant entry into the session log
+# after the append returns, and matching at file granularity against
+# completed_at drops the whole log rather than its tail. The harvest instant
+# bounds that extension without an arbitrary grace period: the harvest runs
+# inside this task's own teardown, while the task still holds its worktree, so
+# a later task cannot yet have written into the same pooled worktree slot.
+# wall_secs, spawned_at and completed_at are unaffected and still rest on the
+# status file.
 # Turn estimate: count of "^working:" lines in the status file.
 #
 # Per-request usage sources:
@@ -267,6 +278,18 @@ WALL=$((END_EPOCH - START_EPOCH))
 TURNS=$(grep -c '^working:' "$STATUS" 2>/dev/null || true)
 case "$TURNS" in ''|*[!0-9]*) TURNS=0 ;; esac
 
+# The LOG-matching window ends at the harvest instant rather than at
+# END_EPOCH: a crewmate appends its final status line from inside an agent
+# turn, so the harness writes that turn's tool result and closing assistant
+# entry into its own session log after the append returns, and a file-level
+# filter cut at END_EPOCH drops the whole log rather than just its tail. The
+# harvest instant is bounded and owned by this task, because it runs inside
+# this task's own teardown while the task still holds its worktree, so no
+# later task can yet have written into the same pooled worktree slot.
+SCAN_END_EPOCH=$(date +%s 2>/dev/null || printf '%s' "$END_EPOCH")
+case "$SCAN_END_EPOCH" in ''|*[!0-9]*) SCAN_END_EPOCH=$END_EPOCH ;; esac
+[ "$SCAN_END_EPOCH" -ge "$END_EPOCH" ] 2>/dev/null || SCAN_END_EPOCH=$END_EPOCH
+
 # Ref files pin find's mtime window portably (BSD and GNU find both compare
 # against -newer file mtimes, and touch -t exists on both).
 REFDIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-usage-harvest.XXXXXX")
@@ -285,10 +308,10 @@ epoch_to_touch() {  # <epoch>
   date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$1" +%Y%m%d%H%M.%S
 }
 # find -newer compares sub-second mtimes, so the refs only narrow to
-# [START-1, END+1]; the per-file epoch filter below then applies the true
-# inclusive whole-second window [START_EPOCH, END_EPOCH].
+# [START-1, SCAN_END+1]; the per-file epoch filter below then applies the true
+# inclusive whole-second window [START_EPOCH, SCAN_END_EPOCH].
 touch -t "$(epoch_to_touch "$((START_EPOCH - 1))")" "$REFDIR/start"
-touch -t "$(epoch_to_touch "$((END_EPOCH + 1))")" "$REFDIR/end"
+touch -t "$(epoch_to_touch "$((SCAN_END_EPOCH + 1))")" "$REFDIR/end"
 
 LEDGER="$DATA/usage-ledger.jsonl"
 
@@ -305,7 +328,7 @@ matched_files() {  # <dir> <maxdepth-or-empty> : print in-window *.jsonl paths
   # depends on that order to resolve the model to the last incarnation's.
   while IFS= read -r f; do
     m=$(file_mtime_epoch "$f") || continue
-    if [ "$m" -ge "$START_EPOCH" ] && [ "$m" -le "$END_EPOCH" ]; then
+    if [ "$m" -ge "$START_EPOCH" ] && [ "$m" -le "$SCAN_END_EPOCH" ]; then
       printf '%s\t%s\n' "$m" "$f"
     fi
   done < <(find "$dir" ${depthargs[@]+"${depthargs[@]}"} -type f -name '*.jsonl' \
@@ -484,7 +507,7 @@ mkdir -p -- "$DATA"
 # this runs synchronously inside teardown: a wedged live holder must never
 # block teardown from retiring the task. fm_lock_try_acquire already steals a
 # dead owner's lock, so only a live concurrent harvest makes us wait, and its
-# critical section is a grep plus an append. If the lock stays busy past the
+# critical section is one ledger scan plus an append. If the lock stays busy past the
 # bound we give up best-effort (exit 1, which teardown warns on and continues)
 # rather than duplicate the row by appending unserialized.
 LEDGER_LOCK="$DATA/.usage-ledger.lock"
@@ -498,7 +521,14 @@ until fm_lock_try_acquire "$LEDGER_LOCK"; do
   sleep 0.1
 done
 LEDGER_LOCK_HELD=1
-if [ -f "$LEDGER" ] && grep -qF "\"task\":\"$ID\"" "$LEDGER" 2>/dev/null; then
+# The identity test parses each ledger line and compares the task field's own
+# value, so exactness is structural rather than resting on the punctuation
+# that happens to surround the field today: it stays exact if the schema or
+# the key order ever changes. A line this cannot parse simply does not match,
+# which risks a duplicate row rather than a lost one.
+if [ -f "$LEDGER" ] && jq -Rn --exit-status --arg id "$ID" \
+    'any(inputs | try (fromjson | objects) catch empty; .task == $id)' \
+    "$LEDGER" >/dev/null 2>&1; then
   exit 0
 fi
 # Test seam: widen the check-to-append window so a concurrency regression (a
