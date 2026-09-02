@@ -11,6 +11,8 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 RECONCILE="$ROOT/bin/fm-secondmate-reconcile.sh"
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-reconcile)
@@ -154,7 +156,8 @@ remote_inbox_records() {  # <remote-home> <mate-id>
 
 run_remote_notify() {  # <home> <fakebin> <snapshot>
   local home=$1 fakebin=$2 snap=$3
-  FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
+  fm_run_timed 30 env \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$ROOT" \
     PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" \
     "$RECONCILE" notify --snapshot "$snap"

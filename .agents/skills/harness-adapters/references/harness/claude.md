@@ -16,6 +16,11 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 Fresh-worktree or first-machine launch may show trust or bypass-permissions confirmation.
 Inspect within about 20 seconds, accept the required choice with `FM_HOME=<active-home> ../../../bin/fm-send.sh <window> --key Enter` unless already bound, and verify instructions started.
 
+## Crew sandbox
+
+A home with `config/crew-claude-config-dir` configured launches an ordinary Claude worker only after the estate posture check proves that crew-only configuration is boxed, while a missing or failing proof refuses the launch.
+[`docs/configuration.md`](../../../../../docs/configuration.md#crew-claude-sandbox-configcrew-claude-config-dir--configworker-sandbox-posture-check) owns setup, validation, host-local scope, and the unchanged default and secondmate behavior.
+
 ## Composer ghost
 
 Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane`.

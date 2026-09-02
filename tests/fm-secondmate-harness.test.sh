@@ -26,6 +26,10 @@
 #      It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
+#      Host-specific config/crew-claude-config-dir and
+#      config/worker-sandbox-posture-check paths are also deliberately NOT
+#      inherited; each secondmate home is configured on the worker host where
+#      those absolute paths and sandbox installation can be proven.
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do
 #      not spawn secondmates). After a successful push that changes allowlisted
 #      config under an already-running home, a literal-content reread instruction
@@ -367,16 +371,25 @@ test_propagate_lib() {
   [ -d "$dest/crew-harness" ] || fail "failed absence mirror removed the wrong path"
   rm -rf "$dest/crew-harness"
 
-  # 5. secondmate-harness is never inherited; backend still is
+  # 5. secondmate-harness and host-specific worker sandbox paths are never
+  # inherited; portable crew behavior such as backend selection still is.
   printf 'grok\n' > "$src/secondmate-harness"
+  printf '/primary/crew-claude\n' > "$src/crew-claude-config-dir"
+  printf '/primary/worker-sandbox-posture-check.sh\n' > "$src/worker-sandbox-posture-check"
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
   printf 'manual\n' > "$src/backlog-backend"
   printf 'herdr\n' > "$src/backend"
   rm -rf "$d/home2"
   mkdir -p "$d/home2/config" "$d/home2/state"
+  printf '/secondmate/crew-claude\n' > "$d/home2/config/crew-claude-config-dir"
+  printf '/secondmate/worker-sandbox-posture-check.sh\n' > "$d/home2/config/worker-sandbox-posture-check"
   propagate_inheritable_config "$src" "$d/home2/config"
   [ -e "$d/home2/config/secondmate-harness" ] && fail "secondmate-harness was inherited (must not be)"
+  [ "$(cat "$d/home2/config/crew-claude-config-dir")" = /secondmate/crew-claude ] \
+    || fail "host-specific crew-claude-config-dir was overwritten by primary inheritance"
+  [ "$(cat "$d/home2/config/worker-sandbox-posture-check")" = /secondmate/worker-sandbox-posture-check.sh ] \
+    || fail "host-specific worker-sandbox-posture-check was overwritten by primary inheritance"
   [ "$(cat "$d/home2/config/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated alongside"
   [ "$(cat "$d/home2/config/crew-harness")" = codex ] || fail "crew-harness not propagated alongside"
   [ "$(cat "$d/home2/config/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"
