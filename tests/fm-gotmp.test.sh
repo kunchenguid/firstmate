@@ -277,9 +277,16 @@ test_teardown_skips_gracefully_when_dir_missing() {
 # slot-scoped or pattern-scoped sweep unsafe.
 seed_task_scratch() {  # <root> <session> <payload>
   local root=$1 session=$2 payload=$3
-  mkdir -p "$root/gotmp" "$root/claude-1000/-home-cap--treehouse-proj-1/$session/scratchpad"
-  printf '%s\n' "$payload" \
-    > "$root/claude-1000/-home-cap--treehouse-proj-1/$session/scratchpad/index.db"
+  local dir="$root/claude-1000/-home-cap--treehouse-proj-1/$session/scratchpad"
+  mkdir -p "$root/gotmp" "$dir" || fail "could not seed task scratch under $root"
+  printf '%s\n' "$payload" > "$dir/index.db" \
+    || fail "could not seed scratch payload under $root"
+}
+
+# The seeded scratch file for one task root, so a test can hold the same literal
+# path across a teardown instead of rebuilding it on either side.
+task_scratch_file() {  # <root> <session>
+  printf '%s\n' "$1/claude-1000/-home-cap--treehouse-proj-1/$2/scratchpad/index.db"
 }
 
 test_teardown_leaves_live_sibling_session_untouched() {
@@ -295,12 +302,19 @@ test_teardown_leaves_live_sibling_session_untouched() {
   sibling=$(canonical_task_tmp "$TMP_ROOT/$id" td-sibling-live-z5)
   seed_task_scratch "$mine" 11111111-1111-1111-1111-111111111111 mine
   seed_task_scratch "$sibling" 22222222-2222-2222-2222-222222222222 live-sibling
+  local mine_file sibling_file
+  mine_file=$(task_scratch_file "$mine" 11111111-1111-1111-1111-111111111111)
+  sibling_file=$(task_scratch_file "$sibling" 22222222-2222-2222-2222-222222222222)
+  # Both halves must be able to fail: assert the state teardown is supposed to
+  # change, and the state it is supposed to leave alone, BEFORE it runs.
+  [ -f "$mine_file" ] || fail "this task's scratch was not seeded before teardown"
+  [ -f "$sibling_file" ] || fail "the live sibling's scratch was not seeded before teardown"
   local fake
   fake=$(make_fake_root "$id" "$mine")
   FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
     || fail "teardown exited non-zero with a live sibling task present"
   [ ! -e "$mine" ] || fail "teardown did not remove its own task's temp root"
-  [ -f "$sibling/claude-1000/-home-cap--treehouse-proj-1/22222222-2222-2222-2222-222222222222/scratchpad/index.db" ] \
+  [ -f "$sibling_file" ] \
     || fail "teardown destroyed a live sibling task's scratch in the same worktree slot"
   pass "fm-teardown removes its own task's scratch and leaves a live sibling session's intact"
 }

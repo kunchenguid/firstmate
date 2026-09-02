@@ -1271,11 +1271,13 @@ families_for_changed_path() {
       ;;
     bin/fm-task-tmp-lib.sh)
       # The per-task temp root: created by fm-spawn (backend-dispatch), removed
-      # by fm-teardown (pr-forge), covered directly by fm-gotmp.test.sh
-      # (session-bootstrap), and spelled out verbatim by the two spawn suites
-      # that pin the exact path - the Orca spawn (orca) and the Kimi spawn
-      # (pure-contract-unit), which assert the launch's TMPDIR, the pane's
-      # GOTMPDIR export, and the recorded tasktmp=.
+      # by fm-teardown (pr-forge), and covered directly by fm-gotmp.test.sh
+      # (session-bootstrap). Three spawn suites derive the exact path through
+      # this library's fm_test_task_tmp_root and assert it whole - the dispatch
+      # profile (backend-dispatch) on both sides of the pin flag, the Kimi spawn
+      # (pure-contract-unit) on the enabled pin and the recorded tasktmp=, and
+      # the Orca spawn (orca) on the pane's GOTMPDIR export, which is all it
+      # asserts because it never creates config/task-tmpdir-pin.
       printf '%s\n' backend-dispatch
       printf '%s\n' pr-forge
       printf '%s\n' session-bootstrap
