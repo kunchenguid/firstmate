@@ -1,0 +1,31 @@
+{
+  "arm_difference": {
+    "deleted_lines": [
+      "    canonical-boundaries:",
+      "      # Mirrored as a blocking CI step so a skipped local hook cannot bypass it.",
+      "      run: pnpm check:canonical"
+    ],
+    "path": "lefthook.yml"
+  },
+  "base_branch_sha": "0b6344006b270fcf2abaf1077e83fcd04b1071d6",
+  "base_sha": "bc14abd53e09d32c46a4b233067140d1ac5c6d13",
+  "copy_method": "copy-on-write",
+  "created_at": "2026-09-02T18:38:21.455603Z",
+  "detector_sha": "94fefd20594ccc01c766729e1a566b74c2255ca97bd502c7f52af4c421dd1ed6",
+  "mirror": "/Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/origins/artemis-fbce13501567.git",
+  "run_root": "/Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/runs",
+  "schema_version": "canonical-guard-workspace/v1",
+  "source_ref": "bc14abd53e09d32c46a4b233067140d1ac5c6d13",
+  "templates": {
+    "guard-off": {
+      "content_sha": "5a21e36fa660c7c66a3f36ad7e1559c583ae7e4430d7aa92f3b373c36011c8c5",
+      "path": "/Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/cgb-keyboard/template-guard-off",
+      "sha": "bc14abd53e09d32c46a4b233067140d1ac5c6d13"
+    },
+    "guard-on": {
+      "content_sha": "b5e4c304a2751462415950d64222d96aad0ecb00b8abde25d46139520373d849",
+      "path": "/Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/cgb-keyboard/template-guard-on",
+      "sha": "bc14abd53e09d32c46a4b233067140d1ac5c6d13"
+    }
+  }
+}

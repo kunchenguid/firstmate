@@ -1,0 +1,7 @@
+{"base_sha": "5a7db9a1243d17e3f11f2c0ca5df6811ca77b06a", "templates": {"guard-off": {"content_sha": "9a579a00af0eac2b8ecebe49438bec359b75868171d3bb21c46cf8be54c52499", "path": "/private/tmp/fm-cgb.PpQa2J/workspace/template-guard-off", "sha": "5a7db9a1243d17e3f11f2c0ca5df6811ca77b06a"}, "guard-on": {"content_sha": "84027c9869c14e7b48cb03dbbe3b8956b5370531d8f2e4db0c301253362cc314", "path": "/private/tmp/fm-cgb.PpQa2J/workspace/template-guard-on", "sha": "5a7db9a1243d17e3f11f2c0ca5df6811ca77b06a"}}, "workspace": "/private/tmp/fm-cgb.PpQa2J/workspace"}
+ok - init creates a local mirror and fully installed one-deletion templates
+{"fixture_results": "/private/tmp/fm-cgb.PpQa2J/workspace/fixture-results.jsonl", "outcomes": 3}
+ok - fixture check records the firing, sensitivity case, and subdirectory blind spot
+ok - all supported harness formats join positive and negative tool evidence
+a real diagnostic inside a transcript row was dropped: []
+not ok - the scored rule marker is not a plan-level parameter

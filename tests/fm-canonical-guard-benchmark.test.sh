@@ -308,6 +308,154 @@ then
 fi
 pass "all supported harness formats join positive and negative tool evidence"
 
+# The rule under measurement is a plan-level choice, not a property of the
+# scorer. Firing detection, remediation recovery, and the presented excerpt must
+# all follow the frozen plan's marker, and must behave identically to the
+# hard-coded duplicate-implementation wording when no plan names another rule.
+if ! python3 - "$ROOT" "$TMP_ROOT" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+tmp = pathlib.Path(sys.argv[2]) / "rule-marker"
+tmp.mkdir(parents=True, exist_ok=True)
+spec = importlib.util.spec_from_file_location("benchmark", root / "scripts/canonical-guard-benchmark/benchmark.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+default = module.rule_marker(None)
+if default != {"rule_id": "duplicate-implementation", "prose_patterns": ["duplicate implementation detected"]}:
+    raise SystemExit(f"default rule marker changed: {default}")
+if module.rule_marker({"runs": []}) != default:
+    raise SystemExit("a frozen plan without a rule marker must keep the default")
+keyboard = module.rule_marker({"rule_marker": {"rule_id": "keyboard-listener"}})
+if keyboard["rule_id"] != "keyboard-listener" or keyboard["prose_patterns"] != []:
+    raise SystemExit(f"a named rule must not inherit another rule's prose: {keyboard}")
+for broken in ({"rule_marker": {"rule_id": "not a safe id"}}, {"rule_marker": {"rule_id": "x", "prose_patterns": "text"}},
+               {"rule_marker": {"rule_id": "x", "prose_patterns": ["("]}}):
+    try:
+        module.rule_marker(broken)
+    except SystemExit:
+        continue
+    raise SystemExit(f"a malformed rule marker was accepted: {broken}")
+
+DUPLICATE = "packages/backend/api/logic/new.ts:1 [duplicate-implementation] duplicate implementation detected"
+KEYBOARD = ("packages/frontend/src/features/3d-viz-v2/api/hooks/use-step.ts:8 [keyboard-listener] "
+            "raw window.keydown listener is outside the engine boundary.")
+
+
+def capture(name: str, output: str) -> pathlib.Path:
+    path = tmp / f"{name}.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in [
+        {"timestamp": "2026-01-01T00:00:00Z", "type": "tool_use", "id": "c1", "name": "Bash",
+         "input": {"command": "git push origin HEAD"}},
+        {"timestamp": "2026-01-01T00:00:01Z", "type": "tool_result", "tool_use_id": "c1", "content": output},
+    ]))
+    return path
+
+
+absent = tmp / "absent-session.log"
+duplicate_capture = capture("duplicate", DUPLICATE)
+keyboard_capture = capture("keyboard", KEYBOARD)
+expected = [
+    (duplicate_capture, None, 1, "duplicate-implementation"),
+    (keyboard_capture, None, 0, None),
+    (keyboard_capture, keyboard, 1, "keyboard-listener"),
+    (duplicate_capture, keyboard, 0, None),
+]
+for path, marker, count, rule_id in expected:
+    arguments = () if marker is None else (marker,)
+    _, gate = module.behavior_and_gate([path], absent, [], *arguments)
+    if gate["firing_count"] != count:
+        raise SystemExit(f"{path.name} under {marker} fired {gate['firing_count']}, expected {count}")
+    if count and gate["firings"][0]["rule_id"] != rule_id:
+        raise SystemExit(f"{path.name} recorded rule id {gate['firings'][0]['rule_id']}, expected {rule_id}")
+
+bundle = tmp / "bundle"
+(bundle / "terminals").mkdir(parents=True, exist_ok=True)
+(bundle / "terminals" / "push.txt").write_text(f"{KEYBOARD}\nReplace with: useSceneElementEventListener(...)\n")
+manifest = {"gate": {"remediation_text_exact": []}}
+if module.captured_gate_remediations(bundle, manifest):
+    raise SystemExit("the default marker recovered another rule's remediation")
+recovered = module.captured_gate_remediations(bundle, manifest, keyboard)
+if len(recovered) != 1 or KEYBOARD not in recovered[0]:
+    raise SystemExit(f"the plan's marker did not recover its own remediation: {recovered}")
+
+# A candidate reads the rule's own source and tests, which quote the rule id in
+# the same bracketed shape the guard prints. Recovering those as guard output
+# invents a firing the guard never made, and a firing decides the run's outcome
+# class and its false-alarm flag.
+quoting = tmp / "quoting-bundle"
+(quoting / "terminals").mkdir(parents=True, exist_ok=True)
+(quoting / "terminals" / "read.txt").write_text(
+    "$ sed -n '1,40p' packages/frontend/src/features/3d-viz-v2/api/engine/__tests__/"
+    "keyboard-listener-boundaries.test.ts\n"
+    "    expect(formatRestrictedListenerViolation(violations[0]))"
+    ".toContain(`${source.path}:1 [keyboard-listener]`);\n"
+)
+quoted = module.captured_gate_remediations(quoting, {"gate": {"remediation_text_exact": []}}, keyboard)
+if quoted:
+    raise SystemExit(f"source quoting the rule id was recovered as guard output: {quoted}")
+
+# A transcript row carries the guard's whole output as one JSON string, so its
+# line breaks are escape sequences and the diagnostic never starts a raw line.
+# Anchoring against the undecoded row drops every real firing a JSONL harness
+# captured while still admitting terminal text, which is the worst of both.
+embedded = tmp / "embedded-bundle"
+(embedded / "transcripts").mkdir(parents=True, exist_ok=True)
+(embedded / "transcripts" / "rollout.jsonl").write_text(
+    json.dumps({"type": "tool_result", "content": f"$ git push\n{KEYBOARD}\nReplace with: the adapter.\n"}) + "\n"
+)
+recovered_row = module.captured_gate_remediations(embedded, {"gate": {"remediation_text_exact": []}}, keyboard)
+if len(recovered_row) != 1 or KEYBOARD not in recovered_row[0]:
+    raise SystemExit(f"a real diagnostic inside a transcript row was dropped: {recovered_row}")
+
+# The same decoding must not turn quoted source into a firing.
+quoting_row = tmp / "quoting-row-bundle"
+(quoting_row / "transcripts").mkdir(parents=True, exist_ok=True)
+(quoting_row / "transcripts" / "rollout.jsonl").write_text(
+    json.dumps({"type": "tool_result", "content":
+                "    expect(format(violations[0])).toContain(`${source.path}:1 [keyboard-listener]`);\n"}) + "\n"
+)
+if module.captured_gate_remediations(quoting_row, {"gate": {"remediation_text_exact": []}}, keyboard):
+    raise SystemExit("decoding a transcript row turned quoted source into a firing")
+
+# The gate is what writes firing_count into the manifest, and recovery trusts
+# what the manifest already holds. A terminal that only quotes the rule's own
+# source must not become a firing there either, or the false positive is
+# laundered through the manifest into the verdict.
+terminal_quote = tmp / "terminal-quote.txt"
+terminal_quote.write_text(
+    "$ sed -n '50,60p' packages/frontend/src/features/3d-viz-v2/api/engine/__tests__/"
+    "keyboard-listener-boundaries.test.ts\n"
+    "    expect(formatRestrictedListenerViolation(violations[0]))"
+    ".toContain(`${source.path}:1 [keyboard-listener]`);\n"
+)
+_, quote_gate = module.behavior_and_gate([], absent, [terminal_quote], keyboard)
+if quote_gate["firing_count"] != 0:
+    raise SystemExit(f"a terminal quoting the rule's source was recorded as a firing: {quote_gate}")
+
+# A real diagnostic in a terminal still has to be one.
+terminal_real = tmp / "terminal-real.txt"
+terminal_real.write_text(f"$ git push\n{KEYBOARD}\nReplace with: the adapter.\n")
+_, real_gate = module.behavior_and_gate([], absent, [terminal_real], keyboard)
+if real_gate["firing_count"] != 1 or real_gate["firings"][0]["rule_id"] != "keyboard-listener":
+    raise SystemExit(f"a real terminal diagnostic stopped being a firing: {real_gate}")
+
+noise = f"pre-guard chatter\n{KEYBOARD}\nReplace with: the adapter.\nELIFECYCLE  Command failed."
+excerpt = module.marker_excerpt(keyboard, noise)
+if not excerpt.startswith("packages/frontend") or "chatter" in excerpt or "ELIFECYCLE" in excerpt:
+    raise SystemExit(f"the presented excerpt did not follow the plan's marker: {excerpt!r}")
+if module.marker_excerpt(default, f"noise\n{DUPLICATE}\nexit status 1") != DUPLICATE:
+    raise SystemExit("the default excerpt no longer trims to the duplicate-implementation line")
+PY
+then
+  fail "the scored rule marker is not a plan-level parameter"
+fi
+pass "firing, remediation, and excerpt all follow the frozen plan's rule marker"
+
 # A candidate runtime installed under the operator's home (every one of them is:
 # ~/.nvm, ~/.local, ~/.bun) must still start. Resolving its own path stats every
 # ancestor, including the home directory node the profile denies, so denying that
@@ -514,6 +662,15 @@ JSONL
 printf '{"type":"item.completed","item":{"type":"agent_message","text":"Smoke delivery note."}}\n'
 SH
 chmod +x "$FAKEBIN/codex"
+# The run profile grants execute access only to the directory the resolved
+# candidate binary lives in, so a second fake candidate needs the whole fake
+# toolchain beside it or the pre-push hook's pnpm is denied.
+FAKEBIN_KEYBOARD="$TMP_ROOT/fakebin-keyboard"
+cp -R "$FAKEBIN" "$FAKEBIN_KEYBOARD"
+sed 's/\[duplicate-implementation\] duplicate implementation detected/[keyboard-listener] raw window.keydown listener is outside the engine boundary./' \
+  "$FAKEBIN/codex" >"$FAKEBIN_KEYBOARD/codex.new"
+mv "$FAKEBIN_KEYBOARD/codex.new" "$FAKEBIN_KEYBOARD/codex"
+chmod +x "$FAKEBIN_KEYBOARD/codex"
 mkdir -p "$TMP_ROOT/transcripts"
 printf '0.10 0.09 0.08\n' >"$TMP_ROOT/load"
 SMOKE_PROMPT="$TMP_ROOT/smoke-prompt.txt"
@@ -1134,6 +1291,11 @@ def plan(pair_count):
 legacy = plan(7)
 (root / "legacy-plan.json").write_text(json.dumps(legacy, indent=2, sort_keys=True) + "\n")
 (root / "valid-plan.json").write_text(json.dumps(legacy))
+(root / "bad-marker-plan.json").write_text(json.dumps(plan(7) | {"rule_marker": {"rule_id": "not a safe id"}}))
+(root / "null-marker-plan.json").write_text(json.dumps(plan(7) | {"rule_marker": None}))
+(root / "uncombinable-marker-plan.json").write_text(json.dumps(
+    plan(7) | {"rule_marker": {"rule_id": "keyboard-listener", "prose_patterns": ["plain", "(?i)keyboard"]}}))
+(root / "marker-plan.json").write_text(json.dumps(plan(7) | {"rule_marker": {"rule_id": "keyboard-listener"}}))
 v2 = plan(15)
 for item in v2["runs"]:
     item["wave"] = "high"
@@ -1209,6 +1371,33 @@ if before != after:
     raise SystemExit("legacy seven-pair plan changed during freeze")
 PY
 pass "freeze accepts arbitrary paired waves and preserves the legacy seven-pair plan"
+
+MARKER_WORKSPACE="$TMP_ROOT/marker-workspace"
+mkdir -p "$MARKER_WORKSPACE/bundles" "$MARKER_WORKSPACE/worktrees"
+cp "$WORKSPACE/workspace.json" "$MARKER_WORKSPACE/workspace.json"
+for broken in bad-marker null-marker uncombinable-marker; do
+  if "$BENCH" freeze --workspace "$MARKER_WORKSPACE" --file "$TMP_ROOT/$broken-plan.json" >/dev/null 2>&1; then
+    fail "freeze accepted a plan whose rule marker is unusable: $broken"
+  fi
+done
+"$BENCH" freeze --workspace "$MARKER_WORKSPACE" --file "$TMP_ROOT/marker-plan.json" >/dev/null
+jq -e '.rule_marker.rule_id == "keyboard-listener"' "$MARKER_WORKSPACE/frozen-plan.json" >/dev/null \
+  || fail "freeze did not bind the rule the slate measures"
+pass "freeze binds the measured rule and refuses an unusable marker"
+
+# A run that is not bound to the frozen slate - a labelled evasion arm is one -
+# still runs inside a workspace that measures one rule. Reading the marker only
+# when the run is plan-bound would score that arm against another rule's wording
+# and report a silent guard that never spoke.
+PATH="$FAKEBIN_KEYBOARD:$PATH" "$BENCH" run \
+  --workspace "$MARKER_WORKSPACE" --run-id marker-exploratory --arm guard-on \
+  --harness codex --model fake-model --prompt-file "$SMOKE_PROMPT" \
+  --helper-family smoke --stage exploratory --lane evasion-arm \
+  --load-file "$TMP_ROOT/load" --max-load 8 --timeout 30 >/dev/null
+jq -e '.gate.firing_count == 1 and .gate.firings[0].rule_id == "keyboard-listener"' \
+  "$MARKER_WORKSPACE/bundles/marker-exploratory/manifest.json" >/dev/null \
+  || fail "an unbound run did not score against the workspace's measured rule"
+pass "a run outside the frozen slate still scores against the workspace's measured rule"
 
 python3 - "$ROOT" "$TMP_ROOT" "$BASE_SHA" "$SMOKE_PROMPT" <<'PY'
 import hashlib

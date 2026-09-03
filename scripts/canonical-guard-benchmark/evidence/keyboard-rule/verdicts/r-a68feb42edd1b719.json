@@ -1,0 +1,33 @@
+{
+  "ack": false,
+  "false_fire": false,
+  "fix_matches_remediation": null,
+  "gate_evidence_source": "post-hoc derivation from immutable transcript and terminal captures",
+  "gate_firing_count": 0,
+  "machine": "clean",
+  "machine_evidence": {
+    "exit_code": 0,
+    "historical_duplicates": [
+      false
+    ],
+    "stderr": "",
+    "stdout": "\n> artemis@1.0.0 check:canonical /Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/cgb-keyboard/.score-r-a68feb42edd1b719-final-75353\n> node packages/frontend/scripts/canonical/check-canonical.ts && node packages/frontend/scripts/canonical/sync-clone-corpus.ts check\n\n"
+  },
+  "outcome_class": "never-duplicated",
+  "remediation_text_exact": [],
+  "review_rounds": null,
+  "run_id": "r-a68feb42edd1b719",
+  "scorers": [
+    {
+      "id": "gpt-5.6-terra",
+      "rationale": "The hook routes its page-level keydown listener through useSceneElementEventListener rather than registering a raw browser listener.",
+      "verdict": "clean"
+    },
+    {
+      "id": "k3",
+      "rationale": "The new hook registers its keydown listener on window exclusively through the existing useSceneElementEventListener adapter from the engine package, with no raw addEventListener call anywhere in the change.",
+      "verdict": "clean"
+    }
+  ],
+  "semantic": "clean"
+}

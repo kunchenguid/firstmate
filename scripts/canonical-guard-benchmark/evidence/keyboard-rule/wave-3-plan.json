@@ -1,0 +1,85 @@
+{
+  "amendment": "Diagnosis wave ordered by the repository owner after the primary slate returned zero raw listeners in both arms. It asks which of three explanations that result has: the payload steers models toward the existing adapter, the models reach for it unprompted, or the guard is silent. It is GUARD-OFF ONLY on the four live lanes, because the question is what a model writes when nothing stops it. The payload is the primary task with every pointer removed - no ownership helper, no sibling shortcuts, no helper of any kind named - while the deliverables, the page-level requirement and the two module paths stay identical, so the only difference between waves is the steer. The primary plan is not rewritten and none of its runs or outcomes change.",
+  "arm_note": "Single condition: guard-off only. There is no paired arm, so no with-versus-without claim is made from this wave.",
+  "max_load": 24,
+  "primary_plan_sha256": "70867b2e62e7d009cc72871d4587523475ad9721eb98cac376d2b1e05409ee25",
+  "primary_prompt_sha256": "8b2a823fce7fb8edf378071dbb152d2a11d216791084c8ad6670020aa95d8195",
+  "prompt_sha256": "3a408d76f841f10e1deea9ddf201cd58246aa4a4a6fec48e1b3442e2b5308a8c",
+  "ratified_at": "2026-09-02T23:03:30.840188Z",
+  "reads_out": "Per model: whether the final diff registers a raw scene keyboard listener, and whether the pinned detector reports it. A raw listener here with the primary task clean means the primary payload steered compliance. No raw listener here means the models reach for the existing adapter unprompted. A raw listener the detector does not report would mean the guard is silent, which the evasion corpus already argues against.",
+  "rule_marker": {
+    "rule_id": "keyboard-listener"
+  },
+  "runs": [
+    {
+      "arm": "guard-off",
+      "concurrent_lane_count": 2,
+      "effort": "high",
+      "harness": "codex",
+      "helper_family": "both",
+      "lane": "wave3-luna",
+      "lane_order": 1,
+      "model": "gpt-5.6-luna",
+      "provider": null,
+      "run_id": "r-b72e5b50d3ef4293",
+      "stage": "exploratory",
+      "wave": "wave-3"
+    },
+    {
+      "arm": "guard-off",
+      "concurrent_lane_count": 2,
+      "effort": "high",
+      "harness": "codex",
+      "helper_family": "both",
+      "lane": "wave3-terra",
+      "lane_order": 1,
+      "model": "gpt-5.6-terra",
+      "provider": null,
+      "run_id": "r-a68feb42edd1b719",
+      "stage": "exploratory",
+      "wave": "wave-3"
+    },
+    {
+      "arm": "guard-off",
+      "concurrent_lane_count": 2,
+      "effort": "high",
+      "harness": "codex",
+      "helper_family": "both",
+      "lane": "wave3-sol",
+      "lane_order": 1,
+      "model": "gpt-5.6-sol",
+      "provider": null,
+      "run_id": "r-a500186e11935ac3",
+      "stage": "exploratory",
+      "wave": "wave-3"
+    },
+    {
+      "arm": "guard-off",
+      "concurrent_lane_count": 2,
+      "effort": "high",
+      "harness": "pi",
+      "helper_family": "both",
+      "lane": "wave3-k3",
+      "lane_order": 1,
+      "model": "k3",
+      "provider": "kimi-coding",
+      "run_id": "r-f95d2e5aacd2a80c",
+      "stage": "exploratory",
+      "wave": "wave-3"
+    }
+  ],
+  "schema_version": "keyboard-rule-extension-wave/v1",
+  "supersedes": {
+    "changed": {
+      "max_load": {
+        "from": 8.0,
+        "to": 24
+      }
+    },
+    "original_sha256": "dfeb08b097e8fdefa04fc0902d016ecf353b6e823921a185c0851084f3e001dd",
+    "reason": "Load ceiling superseded from 8 to 24 on 2026-09-02 by the repository owner, after five consecutive admission windows were refused with 'load stayed above 8.0 for 900s' while unrelated work held this ten-core machine between 12 and 101. Recorded before this wave produced a single run, so no outcome existed to re-register against. The primary slate keeps its ceiling of 8 and its results are untouched. One-minute load samples stay recorded per run, so a wall time can be read against the load it ran under; the machine verdict does not depend on load.",
+    "superseded_at": "2026-09-02T23:26:07.078477Z"
+  },
+  "timeout_seconds": 1800,
+  "wave": "wave-3"
+}

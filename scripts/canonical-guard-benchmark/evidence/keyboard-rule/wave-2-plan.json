@@ -1,0 +1,91 @@
+{
+  "amendment": "Extension wave ordered by the repository owner after the primary slate was frozen: two further paired lanes, claude-sonnet-5 and claude-opus-5, on the same task, head, arms and timeout as the primary slate. The primary plan is not rewritten and none of its runs, arms or outcomes change. The owner lifted this task's standing no-opus candidate rule for these two lanes only. These runs are dispatched as exploratory stage, which the instrument reports outside the confirmatory counts, and they are never merged into the primary slate's numbers.",
+  "arm_order_method": "SHA-256 parity of canonical-guard-keyboard-wave2|<lane>: parity 0 runs guard-on first.",
+  "conductor_disclosure": "The conductor of this study is claude-opus-5 and shares the operator's Claude quota with these lanes. The primary outcome is the machine verdict of the project's own command, which involves no judgement, so the shared vendor cannot influence it. The secondary language-model scorers for these two lanes must include at least one scorer from a different vendor, and no scorer from the conductor's own family may be the sole reader of a wave-2 run.",
+  "credential_probe": {
+    "at": "2026-09-02T20:30:55.409799Z",
+    "claude-opus-5": "is_error false, subtype success",
+    "claude-sonnet-5": "is_error false, subtype success",
+    "quota_reported_by_owner": "5-hour window 17 percent used, 7-day 25 percent used",
+    "source": "macOS login keychain item 'Claude Code-credentials'; no ~/.claude/.credentials.json on this machine"
+  },
+  "max_load": 24,
+  "primary_plan_sha256": "70867b2e62e7d009cc72871d4587523475ad9721eb98cac376d2b1e05409ee25",
+  "prompt_sha256": "8b2a823fce7fb8edf378071dbb152d2a11d216791084c8ad6670020aa95d8195",
+  "ratified_at": "2026-09-02T20:30:55.409006Z",
+  "rule_marker": {
+    "rule_id": "keyboard-listener"
+  },
+  "runs": [
+    {
+      "arm": "guard-off",
+      "concurrent_lane_count": 2,
+      "effort": null,
+      "harness": "claude",
+      "helper_family": "both",
+      "lane": "wave2-sonnet",
+      "lane_order": 1,
+      "model": "claude-sonnet-5",
+      "provider": null,
+      "run_id": "r-3574575fabfbc2f4",
+      "stage": "exploratory",
+      "wave": "wave-2"
+    },
+    {
+      "arm": "guard-on",
+      "concurrent_lane_count": 2,
+      "effort": null,
+      "harness": "claude",
+      "helper_family": "both",
+      "lane": "wave2-sonnet",
+      "lane_order": 2,
+      "model": "claude-sonnet-5",
+      "provider": null,
+      "run_id": "r-7e44400a96f99721",
+      "stage": "exploratory",
+      "wave": "wave-2"
+    },
+    {
+      "arm": "guard-off",
+      "concurrent_lane_count": 2,
+      "effort": null,
+      "harness": "claude",
+      "helper_family": "both",
+      "lane": "wave2-opus",
+      "lane_order": 1,
+      "model": "claude-opus-5",
+      "provider": null,
+      "run_id": "r-89af60d7b609df97",
+      "stage": "exploratory",
+      "wave": "wave-2"
+    },
+    {
+      "arm": "guard-on",
+      "concurrent_lane_count": 2,
+      "effort": null,
+      "harness": "claude",
+      "helper_family": "both",
+      "lane": "wave2-opus",
+      "lane_order": 2,
+      "model": "claude-opus-5",
+      "provider": null,
+      "run_id": "r-40904396310635fc",
+      "stage": "exploratory",
+      "wave": "wave-2"
+    }
+  ],
+  "schema_version": "keyboard-rule-extension-wave/v1",
+  "supersedes": {
+    "changed": {
+      "max_load": {
+        "from": 8.0,
+        "to": 24
+      }
+    },
+    "original_sha256": "5fb4f2feaa5b11f58d234b5d55ebb860aa0b84e9e0ca40901abd9c6b99c1b3e7",
+    "reason": "Load ceiling superseded from 8 to 24 on 2026-09-02 by the repository owner, after five consecutive admission windows were refused with 'load stayed above 8.0 for 900s' while unrelated work held this ten-core machine between 12 and 101. Recorded before this wave produced a single run, so no outcome existed to re-register against. The primary slate keeps its ceiling of 8 and its results are untouched. One-minute load samples stay recorded per run, so a wall time can be read against the load it ran under; the machine verdict does not depend on load.",
+    "superseded_at": "2026-09-02T23:26:07.078477Z"
+  },
+  "timeout_seconds": 1800,
+  "wave": "wave-2"
+}

@@ -1,0 +1,10 @@
+{"base_sha": "5f1c2eb8b8b701f449aed6fe9d3a80ded7b60aed", "templates": {"guard-off": {"content_sha": "6ca25f5c1127fb6e3ad29b6249f70e1994cb96f752cd796a5b64d9d27c8913c1", "path": "/private/tmp/fm-cgb.5kWTe8/workspace/template-guard-off", "sha": "5f1c2eb8b8b701f449aed6fe9d3a80ded7b60aed"}, "guard-on": {"content_sha": "33c669772a8089b76ced7b82aeb79c6251569b1fb5c37974ae91a9ceee4c8a8f", "path": "/private/tmp/fm-cgb.5kWTe8/workspace/template-guard-on", "sha": "5f1c2eb8b8b701f449aed6fe9d3a80ded7b60aed"}}, "workspace": "/private/tmp/fm-cgb.5kWTe8/workspace"}
+ok - init creates a local mirror and fully installed one-deletion templates
+{"fixture_results": "/private/tmp/fm-cgb.5kWTe8/workspace/fixture-results.jsonl", "outcomes": 3}
+ok - fixture check records the firing, sensitivity case, and subdirectory blind spot
+ok - all supported harness formats join positive and negative tool evidence
+Traceback (most recent call last):
+  File "<stdin>", line 13, in <module>
+AttributeError: module 'benchmark' has no attribute 'rule_marker'
+not ok - the scored rule marker is not a plan-level parameter
+exit=1

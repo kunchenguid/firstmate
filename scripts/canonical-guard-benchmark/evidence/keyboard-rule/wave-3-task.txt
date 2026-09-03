@@ -1,0 +1,7 @@
+**Step through roof planes with the bracket keys**
+
+Reviewers checking a large design have to hunt for each roof plane with the mouse. Design review wants a keyboard step-through: `]` selects the next roof plane and `[` selects the previous one, wrapping at both ends, so a reviewer can walk the whole roof without leaving the keyboard.
+
+Add `packages/frontend/src/features/3d-viz-v2/api/logic/step-roof-plane-selection.ts` exporting `stepRoofPlaneSelection(planeIds, selectedId, direction)`, which returns the id the step lands on: the neighbour in `direction` when `selectedId` is in the list, the first id when nothing is selected, wrapping at both ends, and `null` when the list is empty. Add `packages/frontend/src/features/3d-viz-v2/api/hooks/use-roof-plane-step-3d.ts` exporting `useRoofPlaneStep3D({ planeIds, selectedId, onSelect, disabled })`, which watches for those two key presses and calls `onSelect` with the result.
+
+The shortcut has to work while the reviewer's focus is anywhere in the editor, not only on the canvas, so it listens at the page level rather than on one element. Ignore the press while a text field or a `contenteditable` element has focus. Unit tests for the pure step function go in `api/logic/__tests__/`. Wiring the hook into the editor tree is a separate follow-up ticket; keep this change to the two modules and the tests. When the modules and tests are green, commit and push to origin, then finish with a short delivery note: what you built and how you verified it.

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The keyboard boundary in one minute</title>
+<style>
+  :root{--bg:#0f1319;--card:#161c25;--ink:#e8ecf2;--muted:#9aa6b6;--line:#26303c;--off:#fb923c;--on:#2dd4bf;--red:#f87171;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  section{display:block;max-width:1180px;margin:0 auto;padding:56px 28px;box-sizing:border-box;border-bottom:1px solid var(--line)}
+  .step{color:var(--muted);font-size:14px;letter-spacing:.14em;text-transform:uppercase;margin:0 0 10px}
+  h1{font-size:44px;line-height:1.12;margin:0 0 22px;font-weight:800;letter-spacing:-.015em}
+  h1 em{font-style:normal;color:var(--off)} h1 b{color:var(--on)}
+  .note{color:var(--muted);font-size:18px;margin:18px 0 0}
+  .term{background:#0a0d12;border:1px solid var(--line);border-radius:14px;padding:22px 26px;font-family:var(--mono);font-size:14px;line-height:1.5;white-space:pre-wrap;overflow-x:auto}
+  .term .k{color:var(--red);font-weight:700} .term .g{color:var(--on)} .term .d{color:var(--muted)}
+  .split{display:grid;grid-template-columns:1.25fr 56px 1fr;gap:16px;align-items:center}
+  .term,.fix code,.mono{overflow-wrap:anywhere;word-break:break-word}
+  table{table-layout:fixed}
+  td,th{overflow-wrap:anywhere}
+  .res{display:inline-flex;align-items:center;gap:8px;justify-content:center}
+  .rest{font-size:14px;color:var(--muted)}
+  .dot{display:inline-flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;color:#0f1319}
+  .dot.no{color:var(--muted)}
+  @media (max-width:720px){
+    section{padding:36px 18px}
+    h1{font-size:30px}
+    .split{grid-template-columns:1fr}
+    .arrow{transform:rotate(90deg);font-size:34px}
+    .tally{grid-template-columns:1fr}
+    .tally .n{font-size:56px}
+    .grid{grid-template-columns:1fr}
+    table{font-size:15px}
+    .res{flex-direction:column;gap:2px}
+    td:first-child{width:44%}
+  }
+  .split>*{min-width:0} .arrow{font-size:52px;color:var(--muted);text-align:center}
+  .fix{background:var(--card);border:1px solid var(--on);border-radius:14px;padding:22px 26px}
+  .fix .h{font-size:22px;font-weight:700;margin-bottom:12px}
+  .fix code{display:block;font-family:var(--mono);font-size:14px;color:var(--on);margin:4px 0;white-space:pre-wrap}
+  table{width:100%;border-collapse:collapse;font-size:18px}
+  td{padding:9px 6px;border-top:1px solid var(--line)} td:first-child{width:52%} td+td{text-align:center}
+  th{font-weight:600;color:var(--muted);font-size:13px;letter-spacing:.08em;text-transform:uppercase;padding:0 6px 8px;text-align:center} th:first-child{text-align:left}
+  .dot{display:inline-block;width:22px;height:22px;border-radius:7px;vertical-align:middle}
+  .dot.off{background:var(--off)} .dot.on{background:var(--on)} .dot.red{background:var(--red)} .dot.no{background:var(--line)}
+  .na{color:var(--muted);font-size:14px}
+  .tally{display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:center;margin-top:26px}
+  .tally .n{font-size:84px;font-weight:900;line-height:1;text-align:center}
+  .tally .l{text-align:center;font-size:18px;color:var(--muted)}
+  .tally .a .n{color:var(--off)} .tally .b .n{color:var(--on)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin-top:8px}
+  .ev{border-radius:14px;padding:14px 16px;display:flex;gap:12px;align-items:center;background:var(--card);border:1px solid var(--line)}
+  .ev.pass{border-color:var(--on)} .ev.fail{border-color:var(--red)}
+  .evi{font-size:26px;font-weight:900;line-height:1} .ev.pass .evi{color:var(--on)} .ev.fail .evi{color:var(--red)}
+  .evl{font-size:15px;color:var(--ink);line-height:1.3;overflow-wrap:anywhere;min-width:0}
+  .evn{display:block;color:var(--muted);font-size:13px;margin-top:3px}
+  .legend{color:var(--muted);font-size:15px;margin-top:18px}
+  .legend i{margin:0 6px 0 14px}
+  .foot{color:var(--muted);font-size:15px;line-height:1.6}
+  .mono{font-family:var(--mono);font-size:13px}
+</style></head><body>
+
+<section>
+  <p class="step">1 &middot; What the change is for</p>
+  <h1>Keyboard shortcuts in the 3D editor must go through <b>one place</b>.</h1>
+  <svg viewBox="0 0 1120 300" width="100%" height="auto" role="img" aria-label="Feature code reaching the browser through the engine adapter instead of directly">
+    <defs>
+      <marker id="good" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2dd4bf"/></marker>
+      <marker id="bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#fb923c"/></marker>
+    </defs>
+    <rect x="10" y="30" width="300" height="90" rx="16" fill="#161c25" stroke="#26303c" stroke-width="2"/>
+    <text x="34" y="66" fill="#9aa6b6" font-size="13" letter-spacing="2">A FEATURE HOOK</text>
+    <text x="34" y="96" fill="#e8ecf2" font-size="17" font-family="Menlo,monospace">use-roof-plane-step-3d.ts</text>
+    <rect x="430" y="30" width="280" height="90" rx="16" fill="#161c25" stroke="#2dd4bf" stroke-width="2"/>
+    <text x="454" y="66" fill="#9aa6b6" font-size="13" letter-spacing="2">THE ENGINE ADAPTER</text>
+    <text x="454" y="96" fill="#2dd4bf" font-size="16" font-family="Menlo,monospace">one gate, one teardown</text>
+    <rect x="830" y="30" width="280" height="90" rx="16" fill="#161c25" stroke="#26303c" stroke-width="2"/>
+    <text x="854" y="66" fill="#9aa6b6" font-size="13" letter-spacing="2">THE BROWSER</text>
+    <text x="854" y="96" fill="#e8ecf2" font-size="17" font-family="Menlo,monospace">keydown / keyup</text>
+    <path d="M312,75 L424,75" stroke="#2dd4bf" stroke-width="3" fill="none" marker-end="url(#good)"/>
+    <path d="M712,75 L824,75" stroke="#2dd4bf" stroke-width="3" fill="none" marker-end="url(#good)"/>
+    <path d="M160,124 C160,230 700,250 968,132" stroke="#fb923c" stroke-width="3" stroke-dasharray="8 7" fill="none" marker-end="url(#bad)"/>
+    <text x="560" y="268" fill="#fb923c" font-size="17" text-anchor="middle">the shortcut the check forbids: straight to the browser, past the gate</text>
+  </svg>
+  <p class="note">When a shortcut skips the middle box, the editor cannot switch it off while a drag is in flight, and nothing removes it when the panel closes.</p>
+</section>
+
+<section>
+  <p class="step">2 &middot; What the check says when it catches one</p>
+  <h1>It names the file, the line, and <b>the one line that fixes it</b>.</h1>
+  <div class="split">
+    <div class="term"><span class="d">$ git push</span>
+packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-concat-key.ts:8 <span class="k">[keyboard-listener]</span> raw window.keydown listener is outside the engine boundary.
+The engine owns scene keyboard gating and listener teardown, so feature listeners must use its adapter.
+Replace with: useSceneElementEventListener(target, type, listener, opts)</div>
+    <div class="arrow">&#10148;</div>
+    <div class="fix"><div class="h">What replaces it</div>
+      <code>useSceneElementEventListener(window, &#x27;keydown&#x27;, onKeyDown)</code>
+      <p class="note" style="margin-top:18px">One import. The editor gets the shortcut, and the shortcut gets the editor's on/off switch and its cleanup for free.</p>
+    </div>
+  </div>
+  <p class="legend">Captured from the project's own command on case <span class="mono">string-built-event-name</span>.</p>
+</section>
+
+<section>
+  <p class="step">3 &middot; Does it change what the machines write</p>
+  <h1>Same task, same models, built twice: <em>once without</em> the check, <b>once with</b> it.</h1>
+  <table>
+    <tr><th>Model</th><th>Without the check</th><th>With the check</th></tr>
+    <tr><td>GPT-5.6 Luna</td><td><span class="res on"><i class="dot on" aria-hidden="true">✓</i><span class="rest">used the adapter</span></span></td><td><span class="res on"><i class="dot on" aria-hidden="true">✓</i><span class="rest">used the adapter</span></span></td></tr>
+<tr><td>DeepSeek V4 Pro <span class='na'>not measured</span></td><td><span class="res no"><i class="dot no" aria-hidden="true">–</i><span class="rest">not measured</span></span></td><td><span class="res no"><i class="dot no" aria-hidden="true">–</i><span class="rest">not measured</span></span></td></tr>
+<tr><td>Qwen 3.8 Max <span class='na'>not measured</span></td><td><span class="res no"><i class="dot no" aria-hidden="true">–</i><span class="rest">not measured</span></span></td><td><span class="res no"><i class="dot no" aria-hidden="true">–</i><span class="rest">not measured</span></span></td></tr>
+<tr><td>DeepSeek V4 Flash <span class='na'>not measured</span></td><td><span class="res no"><i class="dot no" aria-hidden="true">–</i><span class="rest">not measured</span></span></td><td><span class="res no"><i class="dot no" aria-hidden="true">–</i><span class="rest">not measured</span></span></td></tr>
+<tr><td>GPT-5.6 Terra</td><td><span class="res on"><i class="dot on" aria-hidden="true">✓</i><span class="rest">used the adapter</span></span></td><td><span class="res on"><i class="dot on" aria-hidden="true">✓</i><span class="rest">used the adapter</span></span></td></tr>
+<tr><td>K3</td><td><span class="res on"><i class="dot on" aria-hidden="true">✓</i><span class="rest">used the adapter</span></span></td><td><span class="res on"><i class="dot on" aria-hidden="true">✓</i><span class="rest">used the adapter</span></span></td></tr>
+<tr><td>GPT-5.6 Sol</td><td><span class="res on"><i class="dot on" aria-hidden="true">✓</i><span class="rest">used the adapter</span></span></td><td><span class="res on"><i class="dot on" aria-hidden="true">✓</i><span class="rest">used the adapter</span></span></td></tr>
+  </table>
+  <p class="legend">Each cell says what that model did. A model is only shown a result when both of its
+    builds were captured; a lane that could not run says so rather than showing half a comparison.</p>
+  <div class="tally">
+    <div class="a"><div class="n">0 of 4</div><div class="l">shipped a raw shortcut<br>with the check switched off</div></div>
+    <div style="font-size:40px;color:var(--muted)">&rarr;</div>
+    <div class="b"><div class="n">0 of 4</div><div class="l">shipped one<br>with the check switched on</div></div>
+  </div>
+</section>
+
+<section>
+  <p class="step">4 &middot; What it costs when it fires</p>
+  <h1>On this task it never fired, so it <b>cost nothing</b>.</h1>
+  <table>
+    <tr><th>Model</th><th>Without</th><th>With</th><th>Extra time</th></tr>
+    <tr><td colspan="4" class="na">No captured pair has a recorded firing yet.</td></tr>
+  </table>
+  <p class="note">Every model went through the adapter on its own, with the check switched off as well as on. The check had nothing to correct here - which is the cheapest outcome there is, and also the reason this run says nothing about what it saves when it does fire.</p>
+</section>
+
+<section>
+  <p class="step">5 &middot; How hard is it to get around</p>
+  <h1><b>13 caught</b>, <em>0 slipped through</em> across 13 deliberate attempts.</h1>
+  <div class="grid">
+    <div class="ev pass"><div class="evi">✓</div><div class="evl">Event name built by string concatenation</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Event name held in a module constant</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Handler assigned to window.onkeydown</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Handler assigned to document.onkeydown</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Listener registered on a ref&#x27;s current element</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Listener registered on a local alias of the element</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Registration in a hooks helper re-exported from the allowed engine path</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Listener inside a plain utility module, not a hook</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Listener registered on document.body inside useEffect</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Registration through EventTarget.prototype.addEventListener.call</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Component .tsx file registering in a ref callback</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Listener added inside the allowed zone, then renamed out of it</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Plain violation carrying a Canonical-ack trailer with an empty reason</div></div>
+  </div>
+  <p class="note">Each tile is one way of writing the same forbidden shortcut, committed on its own branch and put through the project's real command. Every attempt was caught.</p>
+</section>
+
+<section>
+  <p class="step">6 &middot; What is still open</p>
+  <h1>A second sweep, written after the first came back clean: <em>0 of 10</em> still go wrong.</h1>
+  <div class="grid">
+    <div class="ev pass"><div class="evi">✓</div><div class="evl">Registration through Reflect.apply</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Registration through a bound addEventListener</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Registration through a destructured addEventListener</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Handler installed with Object.assign</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Registration through element access rather than property access</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Handler assigned through element access</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Registration through EventTarget.prototype.addEventListener.apply</div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Non-keyboard event name held in a constant<span class="evn">correctly allowed</span></div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Non-keyboard event name passed in as a parameter<span class="evn">correctly allowed</span></div></div>
+<div class="ev pass"><div class="evi">✓</div><div class="evl">Text-input keyboard handler, the receiver the rule deliberately ignores<span class="evn">correctly allowed</span></div></div>
+  </div>
+  <p class="note">Red here would mean one of two things: either the shortcut is written a way the check cannot see, or - worse for the people using the editor - ordinary code that has nothing to do with the keyboard is being blocked. There is none. Every bypass was caught, and every piece of ordinary code was left alone.</p>
+</section>
+
+<section>
+  <p class="foot">
+    The models ran against the pull request at <span class="mono">bc14abd53e09</span>; the two sweeps above
+    were run against its final state, <span class="mono">2771b22efd80</span>.
+    Each model built the task once per arm, so every row is a single observation, not a rate.
+    The clean run of the untouched branch is the false-alarm control: it was
+    <b style="color:var(--on)">clean</b>.
+    Every figure on this page is generated from the run's own records; no cell is typed in by hand.
+  </p>
+</section>
+
+</body></html>

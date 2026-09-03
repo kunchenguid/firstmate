@@ -1,0 +1,140 @@
+{
+  "arm": "guard-on",
+  "attrition": {
+    "mechanical_failure": true,
+    "reason": "harness-exit-1; no-commits; transcript-loss",
+    "timeout": false,
+    "transcript_loss": true
+  },
+  "base_sha": "bc14abd53e09d32c46a4b233067140d1ac5c6d13",
+  "behavior_trace": {
+    "events": [],
+    "files_read_or_grepped": [],
+    "grepped_for_existing_helper": false,
+    "opened_donor_files": [],
+    "ran_check_canonical_voluntarily": 0,
+    "read_agents_md": false,
+    "read_rules_doc": false
+  },
+  "blindness_check": {
+    "branch": "b-218b7066f8cd",
+    "branches": [
+      "* b-218b7066f8cd",
+      "  remotes/origin/dev"
+    ],
+    "cwd": "/Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/runs/r-7e44400a96f99721",
+    "forbidden_visible_paths": [],
+    "history_since_base": [],
+    "origin": "/Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/homes/r-7e44400a96f99721/origin.git",
+    "passed": true,
+    "prompt_sha256": "8b2a823fce7fb8edf378071dbb152d2a11d216791084c8ad6670020aa95d8195",
+    "reflog": [
+      "bc14abd53e refs/heads/b-218b7066f8cd@{0}: branch: Created from HEAD",
+      "bc14abd53e HEAD@{0}: checkout: moving from bc14abd53e09d32c46a4b233067140d1ac5c6d13 to b-218b7066f8cd"
+    ],
+    "remote_refs": [
+      "refs/heads/dev"
+    ],
+    "unexpected_remote_refs": [],
+    "unreachable_git_object_hints": []
+  },
+  "concurrent_lane_count": 2,
+  "copy_method": "apfs-clonefile",
+  "detector_sha": "94fefd20594ccc01c766729e1a566b74c2255ca97bd502c7f52af4c421dd1ed6",
+  "effort": null,
+  "ended_at": "2026-09-03T00:31:10.191936Z",
+  "exit_code": 1,
+  "gate": {
+    "firing_count": 0,
+    "firings": [],
+    "push_commands_observed": 0,
+    "pushes": [],
+    "remediation_text_exact": []
+  },
+  "git": {
+    "amend_count": 0,
+    "branch": "b-218b7066f8cd",
+    "commit_count": 0,
+    "commits": [],
+    "final_diff_path": "final.diff",
+    "force_push_count": 0,
+    "history_diffs": [],
+    "push_count": 0,
+    "pushes": [],
+    "trailers": []
+  },
+  "harness": "claude",
+  "harness_code_dirty": false,
+  "harness_code_sha": "6b6c3300efe18f868379a18c372b3b4de049cfc2",
+  "harness_version": "2.1.259 (Claude Code)",
+  "helper_families": [
+    "both"
+  ],
+  "lane": "wave2-sonnet",
+  "load_samples": [
+    {
+      "at": "2026-09-03T00:30:56.083568Z",
+      "one_minute": 23.23
+    },
+    {
+      "at": "2026-09-03T00:31:10.191936Z",
+      "one_minute": 21.03
+    }
+  ],
+  "max_load": 24.0,
+  "model": "claude-sonnet-5",
+  "preregistration": null,
+  "prompt_sha256": "8b2a823fce7fb8edf378071dbb152d2a11d216791084c8ad6670020aa95d8195",
+  "provider": null,
+  "resolution": {
+    "evidence": [],
+    "path": "none"
+  },
+  "run_id": "r-7e44400a96f99721",
+  "schema_version": "canonical-guard-run/v1",
+  "stage": "exploratory",
+  "started_at": "2026-09-03T00:28:32.356791Z",
+  "template_sha": "bc14abd53e09d32c46a4b233067140d1ac5c6d13",
+  "timeout": false,
+  "timeout_seconds": 1800,
+  "timing": {
+    "first_firing_to_clean_push_seconds": null,
+    "time_to_first_commit_seconds": null,
+    "time_to_first_push_seconds": null,
+    "wall_seconds": 157.915
+  },
+  "transcript": {
+    "loss_reason": "no exact cwd session matched",
+    "paths": [],
+    "status": "lost",
+    "terminal_paths": []
+  },
+  "usage": {
+    "cache_write_input_tokens": null,
+    "cached_input_tokens": null,
+    "currency": null,
+    "dollar_cost": null,
+    "fresh_input_tokens": null,
+    "output_tokens": null,
+    "reasoning_output_tokens": null,
+    "source": "unavailable",
+    "total_tokens": null,
+    "unavailable_reason": "claude transcript exposes no verified usage fields"
+  },
+  "verdicts": {
+    "ack": null,
+    "early_late": null,
+    "false_fire": null,
+    "machine": null,
+    "semantic": null,
+    "source": "separate append-only verdicts.jsonl"
+  },
+  "wave": null,
+  "work": {
+    "commit_count": 0,
+    "delivery_note_path": null,
+    "push_count": 0,
+    "suite_passed": null,
+    "tests_added": []
+  }
+}

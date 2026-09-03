@@ -1,0 +1,46 @@
+{
+  "lanes": [
+    {
+      "cause": "provider quota exhausted",
+      "evidence": "run r-98b816431b0ad777 transcript: 429, 'Your token-plan 1-week quota has been exhausted. The quota will reset at 09-08 02:28:00 UTC', zero tokens produced; its guard-on arm was interrupted when the scheduler was stopped to keep the two remaining quota-dead lanes from spending a slot, so only the guard-off arm carries a capture and no outcome is taken from either",
+      "harness": "pi",
+      "lane": "lane-2",
+      "model": "deepseek-v4-pro-0813",
+      "provider": "qwen-token-plan-individual"
+    },
+    {
+      "cause": "provider quota exhausted",
+      "evidence": "same provider as lane-2; not dispatched once the refusal was proven, so no lane slot was spent on a known-dead credential",
+      "harness": "pi",
+      "lane": "lane-3",
+      "model": "qwen3.8-max",
+      "provider": "qwen-token-plan-individual"
+    },
+    {
+      "cause": "provider quota exhausted",
+      "evidence": "same provider as lane-2; not dispatched once the refusal was proven",
+      "harness": "pi",
+      "lane": "lane-4",
+      "model": "deepseek-v4-flash-0731",
+      "provider": "qwen-token-plan-individual"
+    }
+  ],
+  "planning_miss": "The cooldown was already on file before this slate was planned. The fleet's own routing record carried a provider-scope cooldown for qwen-token-plan-individual, recorded 2026-09-02T12:24:02Z and expiring 2026-09-08T02:28:00Z, quoting the same refusal. It was not consulted when the roster was assembled, and the pre-dispatch credential probe could not substitute for it: the credential is valid, so the probe reported ready while the quota was already gone. Three of the seven frozen lanes should have been excluded at planning rather than discovered at dispatch.",
+  "recorded_at": "2026-09-02T19:01:32.301106Z",
+  "schema_version": "keyboard-rule-attrition/v1",
+  "second_wave": "A second wave over these three lanes is recommended once the quota resets on 2026-09-08, or sooner if a Sonnet or Grok lane is credentialed. It would run the same frozen task and arms with no change to the registration, and would take the paired-cell count from four to seven.",
+  "wave_2": {
+    "cause": "the run sandbox denies the fixed scratch directory the Claude runtime opens",
+    "evidence": "Under the superseded ceiling both lanes were admitted immediately and both arms ran, so load is no longer the cause. All four runs died in about 150 seconds with no commits and a lost transcript. The captured session log names it exactly: \"EPERM: operation not permitted, open '/private/tmp/claude-501'\". The run profile grants this run's own child under that root and denies the root itself, and the Claude runtime opens the root on its way to the child. A failing test that reproduces the refusal against the real profile is committed at evidence/harness-tests-red-scratch-root.txt.",
+    "lanes": [
+      "wave2-sonnet",
+      "wave2-opus"
+    ],
+    "status": "not captured",
+    "why_not_fixed": "The only grant that lets a process open that directory is the same one that lets it list the directory, and an existing harness guard asserts a candidate cannot list the shared scratch root, because the listing names every concurrent run. Making wave 2 run therefore means weakening a guard that protects other runs, which is a security-posture decision above this task. The change was written, shown to break that guard, and reverted; the trade-off is recorded for the repository owner rather than taken unilaterally."
+  },
+  "wave_3": {
+    "note": "One additional verdict for claude-sonnet-5 sits in the ledger from a wave-2 run that produced no commits. A run that changed nothing cannot have registered a listener, so it scores clean vacuously; it is attrition and is excluded from every published count.",
+    "status": "captured and scored on all four lanes"
+  }
+}

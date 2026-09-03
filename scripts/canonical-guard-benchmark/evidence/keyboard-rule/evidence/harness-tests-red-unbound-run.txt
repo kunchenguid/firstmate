@@ -1,0 +1,14 @@
+Second failing test, shown red before its fix.
+
+A run outside the frozen slate - the labelled model-driven evasion arm is one - resolved its rule marker
+from the plan the run is bound to. An exploratory run is bound to no plan, so it fell back to the
+duplicate-implementation default and captured zero firings inside a workspace measuring another rule.
+
+RED (behavior_and_gate given rule_marker(frozen_plan), which is None for an unbound run):
+  not ok - an unbound run did not score against the workspace's measured rule
+  manifest gate: {"firing_count":0,"firings":[],"push_commands_observed":0,...}
+  suite exit=1
+
+GREEN (behavior_and_gate given workspace_rule_marker(workspace)):
+  ok - a run outside the frozen slate still scores against the workspace's measured rule
+  suite: 30 ok, 0 not ok, exit 0

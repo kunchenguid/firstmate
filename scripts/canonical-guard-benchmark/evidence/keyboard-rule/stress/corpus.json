@@ -1,0 +1,184 @@
+{
+  "schema_version": "keyboard-rule-evasion-corpus/v1",
+  "rule_id": "keyboard-listener",
+  "scope": "packages/frontend/src/features/3d-viz-v2",
+  "note": "Each case is one labelled attempt to register a raw scene keyboard listener outside the engine boundary. The recorded verdict is the observed exit and output of `pnpm check:canonical` on a branch carrying that case, never a prediction.",
+  "cases": [
+    {
+      "id": "string-built-event-name",
+      "label": "Event name built by string concatenation",
+      "pattern": "window.addEventListener('key' + 'down', handler)",
+      "commits": [
+        {
+          "message": "Add scene shortcut with a concatenated event name",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-concat-key.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useEvasionConcatKey(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    window.addEventListener('key' + 'down', handler);\n    return () => window.removeEventListener('key' + 'down', handler);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "variable-event-name",
+      "label": "Event name held in a module constant",
+      "pattern": "const KEY_DOWN = 'keydown'; window.addEventListener(KEY_DOWN, handler)",
+      "commits": [
+        {
+          "message": "Add scene shortcut through a named event constant",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-const-key.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nconst KEY_DOWN = 'keydown';\n\nexport function useEvasionConstKey(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    window.addEventListener(KEY_DOWN, handler);\n    return () => window.removeEventListener(KEY_DOWN, handler);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "window-onkeydown-assignment",
+      "label": "Handler assigned to window.onkeydown",
+      "pattern": "window.onkeydown = handler",
+      "commits": [
+        {
+          "message": "Add scene shortcut through the window keydown property",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-window-property.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useEvasionWindowProperty(onEscape: () => void): void {\n  useEffect(() => {\n    window.onkeydown = (): void => onEscape();\n    return () => {\n      window.onkeydown = null;\n    };\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "document-onkeydown-assignment",
+      "label": "Handler assigned to document.onkeydown",
+      "pattern": "document.onkeydown = handler",
+      "commits": [
+        {
+          "message": "Add scene shortcut through the document keydown property",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-document-property.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useEvasionDocumentProperty(onEscape: () => void): void {\n  useEffect(() => {\n    document.onkeydown = (): void => onEscape();\n    return () => {\n      document.onkeydown = null;\n    };\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ref-current-receiver",
+      "label": "Listener registered on a ref's current element",
+      "pattern": "containerRef.current.addEventListener('keydown', handler)",
+      "commits": [
+        {
+          "message": "Add scene shortcut on the container ref element",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-ref-receiver.ts": "'use client';\n\nimport { type RefObject, useEffect } from 'react';\n\nexport function useEvasionRefReceiver(containerRef: RefObject<HTMLElement | null>, onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    containerRef.current?.addEventListener('keydown', handler);\n    return () => containerRef.current?.removeEventListener('keydown', handler);\n  }, [containerRef, onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "aliased-element-receiver",
+      "label": "Listener registered on a local alias of the element",
+      "pattern": "const node = containerRef.current; node.addEventListener('keydown', handler)",
+      "commits": [
+        {
+          "message": "Add scene shortcut on an aliased container element",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-alias-receiver.ts": "'use client';\n\nimport { type RefObject, useEffect } from 'react';\n\nexport function useEvasionAliasReceiver(containerRef: RefObject<HTMLElement | null>, onEscape: () => void): void {\n  useEffect(() => {\n    const node = containerRef.current;\n    if (!node) return;\n    const handler = (): void => onEscape();\n    node.addEventListener('keydown', handler);\n    return () => node.removeEventListener('keydown', handler);\n  }, [containerRef, onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "helper-under-hooks-reexported",
+      "label": "Registration in a hooks helper re-exported from the allowed engine path",
+      "pattern": "addEventListener in api/hooks/*.ts, re-exported from api/engine/*.ts",
+      "commits": [
+        {
+          "message": "Add scene shortcut through an engine re-export",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/evasion-reexported-binding.ts": "export function bindEvasionReexportedShortcut(onEscape: () => void): () => void {\n  const handler = (): void => onEscape();\n  window.addEventListener('keydown', handler);\n  return () => window.removeEventListener('keydown', handler);\n}\n",
+            "packages/frontend/src/features/3d-viz-v2/api/engine/evasion-reexported-binding.ts": "export { bindEvasionReexportedShortcut } from '../hooks/evasion-reexported-binding';\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "non-hook-util-listener",
+      "label": "Listener inside a plain utility module, not a hook",
+      "pattern": "addEventListener in api/logic/*.ts",
+      "commits": [
+        {
+          "message": "Add scene shortcut from a logic utility",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/logic/evasion-shortcut-util.ts": "export function attachEvasionShortcut(onEscape: () => void): () => void {\n  const handler = (): void => onEscape();\n  window.addEventListener('keydown', handler);\n  return () => window.removeEventListener('keydown', handler);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "useeffect-document-body",
+      "label": "Listener registered on document.body inside useEffect",
+      "pattern": "document.body.addEventListener('keydown', handler)",
+      "commits": [
+        {
+          "message": "Add scene shortcut on the document body",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-document-body.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useEvasionDocumentBody(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    document.body.addEventListener('keydown', handler);\n    return () => document.body.removeEventListener('keydown', handler);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "eventtarget-prototype-call",
+      "label": "Registration through EventTarget.prototype.addEventListener.call",
+      "pattern": "EventTarget.prototype.addEventListener.call(window, 'keydown', handler)",
+      "commits": [
+        {
+          "message": "Add scene shortcut through the EventTarget prototype",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-prototype-call.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useEvasionPrototypeCall(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    EventTarget.prototype.addEventListener.call(window, 'keydown', handler);\n    return () => EventTarget.prototype.removeEventListener.call(window, 'keydown', handler);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "tsx-ref-callback",
+      "label": "Component .tsx file registering in a ref callback",
+      "pattern": "addEventListener inside a JSX ref callback",
+      "commits": [
+        {
+          "message": "Add scene shortcut from a component ref callback",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/components/evasion-ref-callback-panel.tsx": "'use client';\n\nimport type { JSX } from 'react';\n\nexport function EvasionRefCallbackPanel({ onEscape }: { onEscape: () => void }): JSX.Element {\n  return (\n    <div\n      ref={(node) => {\n        if (!node) return;\n        const handler = (): void => onEscape();\n        node.addEventListener('keydown', handler);\n        return () => node.removeEventListener('keydown', handler);\n      }}\n    />\n  );\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "allowed-file-moved-by-rename",
+      "label": "Listener added inside the allowed zone, then renamed out of it",
+      "pattern": "git mv of an allowed engine file carrying a raw listener into api/hooks",
+      "commits": [
+        {
+          "message": "Add an engine-owned scene shortcut inside the allowed zone",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/engine/evasion-moved-shortcut.ts": "export function bindEvasionMovedShortcut(onEscape: () => void): () => void {\n  const handler = (): void => onEscape();\n  window.addEventListener('keydown', handler);\n  return () => window.removeEventListener('keydown', handler);\n}\n"
+          }
+        },
+        {
+          "message": "Move the scene shortcut helper next to its callers",
+          "rename": {
+            "packages/frontend/src/features/3d-viz-v2/api/engine/evasion-moved-shortcut.ts": "packages/frontend/src/features/3d-viz-v2/api/hooks/evasion-moved-shortcut.ts"
+          }
+        }
+      ]
+    },
+    {
+      "id": "canonical-ack-empty-reason",
+      "label": "Plain violation carrying a Canonical-ack trailer with an empty reason",
+      "pattern": "window.addEventListener('keydown', handler) plus a Canonical-ack: keyboard-listener trailer whose reason is empty",
+      "commits": [
+        {
+          "message": "Add scene shortcut with an acknowledgement trailer\n\nCanonical-ack: keyboard-listener - ",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-evasion-empty-ack.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useEvasionEmptyAck(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    window.addEventListener('keydown', handler);\n    return () => window.removeEventListener('keydown', handler);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    }
+  ]
+}

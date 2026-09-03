@@ -1,0 +1,66 @@
+{"base_sha": "5f8486152b1709e646bc59d1f466bd3492bdf8da", "templates": {"guard-off": {"content_sha": "dc8d16322523f02fa0ddcf8ff02d16043180695cda97f9482c1133d3e7928fb6", "path": "/private/tmp/fm-cgb.llcTCn/workspace/template-guard-off", "sha": "5f8486152b1709e646bc59d1f466bd3492bdf8da"}, "guard-on": {"content_sha": "40fe853f2f203e7b503c019899b0417976e4145fecf3cdea2539138961880e02", "path": "/private/tmp/fm-cgb.llcTCn/workspace/template-guard-on", "sha": "5f8486152b1709e646bc59d1f466bd3492bdf8da"}}, "workspace": "/private/tmp/fm-cgb.llcTCn/workspace"}
+ok - init creates a local mirror and fully installed one-deletion templates
+{"fixture_results": "/private/tmp/fm-cgb.llcTCn/workspace/fixture-results.jsonl", "outcomes": 3}
+ok - fixture check records the firing, sensitivity case, and subdirectory blind spot
+ok - all supported harness formats join positive and negative tool evidence
+ok - firing, remediation, and excerpt all follow the frozen plan's rule marker
+ok - macOS profile permits ancestor traversal without exposing the operator home
+ok - candidate environment names a readable CA bundle without overriding the operator
+ok - runtime dependencies the profile blinds are supplied instead of failing mid-run
+ok - exploratory runs require safe lane ids
+{"manifest": "/private/tmp/fm-cgb.llcTCn/workspace/bundles/smoke-codex/manifest.json", "mechanical_failure": false, "run_id": "smoke-codex"}
+ok - run driver captures a headless push end to end and tears down serially
+{"manifest": "/private/tmp/fm-cgb.llcTCn/workspace/bundles/smoke-grok/manifest.json", "mechanical_failure": false, "run_id": "smoke-grok"}
+ok - grok runs natively under the blinded profile and captures its terminal buffer
+ok - committed Grok evidence replays without private workspace paths
+{"excluded": 0, "included": 15, "output": "/private/tmp/fm-cgb.llcTCn/catalogue-smoke.json"}
+{"excluded": 3, "included": 12, "output": "/private/tmp/fm-cgb.llcTCn/catalogue-nonzero-codex.json"}
+{"excluded": 4, "included": 11, "output": "/private/tmp/fm-cgb.llcTCn/catalogue-nonzero-claude.json"}
+{"excluded": 1, "included": 14, "output": "/private/tmp/fm-cgb.llcTCn/catalogue-nonzero-grok.json"}
+{"excluded": 7, "included": 8, "output": "/private/tmp/fm-cgb.llcTCn/catalogue-nonzero-pi.json"}
+ok - catalogue smoke refuses partial model output across all exact routes
+{"excluded": 1, "included": 14, "output": "/private/tmp/fm-cgb.llcTCn/catalogue-wrong-provider.json"}
+{"excluded": 4, "included": 11, "output": "/private/tmp/fm-cgb.llcTCn/catalogue-wrong-claude-model.json"}
+{"excluded": 2, "included": 13, "output": "/private/tmp/fm-cgb.llcTCn/catalogue-timeout.json"}
+ok - catalogue smoke saves exact admissions without substitution and owns its lock
+{"manifest": "/private/tmp/fm-cgb.llcTCn/workspace/bundles/smoke-cursor/manifest.json", "mechanical_failure": false, "run_id": "smoke-cursor"}
+ok - cursor terminal buffers preserve exact gate remediation evidence
+{"machine": "clean", "outcome_class": "caught-early", "recorded": "smoke-cursor", "semantic": "clean"}
+ok - post-hoc scoring repairs derivation without changing the raw evidence
+ok - post-hoc scoring enforces the pinned detector after candidate tampering
+ok - capture clears assume-unchanged before preserving GUARD-OFF tampering
+{"recorded": "smoke-codex"}
+{"recorded": "synthetic-off"}
+{"recorded": "matrix-01"}
+{"recorded": "matrix-02"}
+{"recorded": "matrix-03"}
+{"recorded": "matrix-04"}
+{"recorded": "matrix-05"}
+{"recorded": "matrix-06"}
+{"recorded": "matrix-07"}
+{"recorded": "matrix-08"}
+{"recorded": "matrix-09"}
+{"recorded": "matrix-10"}
+{"recorded": "matrix-11"}
+{"recorded": "matrix-12"}
+{"recorded": "matrix-13"}
+{"recorded": "matrix-14"}
+{"exploratory_runs": 2, "fisher_p": 0.0005827505827505828, "html": "/private/tmp/fm-cgb.llcTCn/scoreboard.html", "markdown": "/private/tmp/fm-cgb.llcTCn/scoreboard.md", "matrix_runs": 14, "risk_difference": -1.0, "verdicts": 18, "waves": {"legacy": {"fisher_p": 0.0005827505827505828, "off_duplicates": 7, "off_runs": 7, "on_duplicates": 0, "on_runs": 7, "risk_difference": -1.0}}}
+ok - separate verdicts generate all seven tables without hand-entered aggregates
+{"exploratory_runs": 0, "html": "/private/tmp/fm-cgb.llcTCn/v2-scoreboard.html", "markdown": "/private/tmp/fm-cgb.llcTCn/v2-scoreboard.md", "matrix_runs": 60, "verdicts": 60, "waves": {"high": {"fisher_p": 1.28934500757877e-08, "off_duplicates": 15, "off_runs": 15, "on_duplicates": 0, "on_runs": 15, "risk_difference": -1.0}, "medium": {"fisher_p": 1.28934500757877e-08, "off_duplicates": 15, "off_runs": 15, "on_duplicates": 0, "on_runs": 15, "risk_difference": -1.0}}}
+ok - scoreboard keeps both fifteen-pair replication waves separate
+ok - scoreboard consumes the same arbitrary paired-wave shape that freeze accepts
+ok - freeze accepts arbitrary paired waves and preserves the legacy seven-pair plan
+ok - freeze binds the measured rule and refuses an unusable marker
+ok - a run outside the frozen slate still scores against the workspace's measured rule
+ok - go-no-go prints a machine verdict for every frozen v2 launch gate
+ok - a frozen plan is replaceable only before any outcome exists, and only on the record
+ok - freeze binds a single-condition ranking slate and refuses arms, repeats, and an unfrozen rubric
+ok - rank-suite replays each captured tree and executes the frozen suite independently
+ok - rank-scoreboard ranks by quality per token and never imputes a missing measurement
+ok - freeze-wave adds a labelled wave without touching the frozen slate
+ok - a labelled wave reports separately and only joins the primary slate in the effort comparison
+ok - ranking inputs are refused before any published score is computed
+ok - supersession validates first, publishes atomically, and closes once a run produced output
+a candidate could list the shared scratch root
+not ok - the suite replay must be confined and runtime scratch must be per-run

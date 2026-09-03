@@ -1,0 +1,14 @@
+Pre-existing CI failure, reproduced on the merge base with no changes of this branch applied.
+
+Clean clone of 77dc7dad6c458d5c7d5a7ae8f45779ec3c6bbae3 (this branch's merge base), detached, nothing of this branch present:
+  $ bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
+  not ok - recorded default axes did not launch identically to unset axes
+  FM_TEST_END tests/fm-spawn-dispatch-profile.test.sh exit=1
+
+Same assertion fails on this branch, and on 47846f68 as well, so the failure predates and is untouched by
+the rule-marker change. The CI job that reports it is 'Critical spawn safety', which runs
+fm-spawn-dispatch-profile.test.sh, fm-spawn-pool-base-freshen.test.sh and fm-spawn-worktree-settle.test.sh;
+the other two pass on this branch.
+
+This branch's own owner suite, on this branch:
+  $ bash tests/fm-canonical-guard-benchmark.test.sh  ->  29 ok, 0 not ok, exit 0

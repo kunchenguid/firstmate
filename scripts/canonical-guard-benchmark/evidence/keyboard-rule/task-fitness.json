@@ -1,0 +1,91 @@
+{
+  "checked_against_head": "2771b22efd80cbaea45001c92bd71fce98426469",
+  "checks": [
+    {
+      "claim": "packages/frontend/src/features/3d-viz-v2/api/logic/step-roof-plane-selection.ts does not exist at the head",
+      "command": "test -e packages/frontend/src/features/3d-viz-v2/api/logic/step-roof-plane-selection.ts",
+      "exit_code": 1,
+      "holds": true,
+      "output": ""
+    },
+    {
+      "claim": "packages/frontend/src/features/3d-viz-v2/api/hooks/use-roof-plane-step-3d.ts does not exist at the head",
+      "command": "test -e packages/frontend/src/features/3d-viz-v2/api/hooks/use-roof-plane-step-3d.ts",
+      "exit_code": 1,
+      "holds": true,
+      "output": ""
+    },
+    {
+      "claim": "no bracket-key handling exists anywhere in the feature",
+      "command": "rg -c --pcre2 \"BracketLeft|BracketRight|=== ?'\\[|=== ?'\\]\" packages/frontend/src/features/3d-viz-v2/",
+      "exit_code": 1,
+      "holds": true,
+      "output": ""
+    },
+    {
+      "claim": "no step or cycle selection helper exists in the feature api",
+      "command": "rg -l --pcre2 'stepRoofPlaneSelection|cycleRoofPlane|useRoofPlaneStep' packages/frontend/src/features/3d-viz-v2/",
+      "exit_code": 1,
+      "holds": true,
+      "output": ""
+    },
+    {
+      "claim": "the ownership gate the payload names exists",
+      "command": "rg -n 'export function owns3DKeyboard' packages/frontend/src/features/3d-viz-v2/api/logic/keyboard-ownership.ts",
+      "exit_code": 0,
+      "holds": true,
+      "output": "12:export function owns3DKeyboard(state: KeyboardOwnership3DState): boolean {"
+    },
+    {
+      "claim": "at least 5 sibling hooks already route through the replacement",
+      "command": "rg -l 'useSceneElementEventListener' packages/frontend/src/features/3d-viz-v2/api/hooks/",
+      "exit_code": 0,
+      "holds": true,
+      "output": "25 hooks"
+    },
+    {
+      "claim": "packages/frontend/src/features/3d-viz-v2/api/logic/step-roof-plane-selection.ts is inside the rule's scanned scope and outside every allowed boundary",
+      "command": "parsed scope and allowedInside from packages/frontend/scripts/canonical/canonical-rules.ts",
+      "exit_code": 0,
+      "holds": true,
+      "output": "scope=packages/frontend/src/features/3d-viz-v2 allowed=['packages/frontend/src/features/3d-viz-v2/api/engine', 'packages/frontend/src/features/3d-viz-v2/api/active-scene-drag.ts'] in_scope=True in_allowed=[]"
+    },
+    {
+      "claim": "packages/frontend/src/features/3d-viz-v2/api/hooks/use-roof-plane-step-3d.ts is inside the rule's scanned scope and outside every allowed boundary",
+      "command": "parsed scope and allowedInside from packages/frontend/scripts/canonical/canonical-rules.ts",
+      "exit_code": 0,
+      "holds": true,
+      "output": "scope=packages/frontend/src/features/3d-viz-v2 allowed=['packages/frontend/src/features/3d-viz-v2/api/engine', 'packages/frontend/src/features/3d-viz-v2/api/active-scene-drag.ts'] in_scope=True in_allowed=[]"
+    }
+  ],
+  "decision": "fit",
+  "deliverable_paths": [
+    "packages/frontend/src/features/3d-viz-v2/api/logic/step-roof-plane-selection.ts",
+    "packages/frontend/src/features/3d-viz-v2/api/hooks/use-roof-plane-step-3d.ts"
+  ],
+  "payload_path": "/Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/scripts/canonical-guard-benchmark/evidence/keyboard-rule/seed-task.txt",
+  "payload_sha256": "8b2a823fce7fb8edf378071dbb152d2a11d216791084c8ad6670020aa95d8195",
+  "recorded_at": "2026-09-02T22:43:18.936569Z",
+  "residual_risks": [
+    "The payload lands in the frontend package, so the project's pre-push gate additionally runs frontend biome, type-check and i18n in both arms. The cost is symmetric across arms but raises attrition relative to a backend task.",
+    "The GUARD-OFF arm removes the rule entry from the rule table, so the two boundary test files that assert the entry exists would fail if a candidate ran them. The pre-push gate runs biome and type-check, not those tests, so no arm difference reaches the measured push."
+  ],
+  "schema_version": "keyboard-rule-task-fitness/v1",
+  "temptation": [
+    "The deliverable is a hook inside the scanned feature and outside both allowed boundaries, so any raw listener it registers is a firing.",
+    "The payload requires the shortcut to work while focus is anywhere in the editor rather than on the canvas, which points a competent engineer at a page-level window or document keydown listener - the exact shape the boundary forbids.",
+    "The payload names owns3DKeyboard for the live ownership gate but never names the replacement adapter, so reuse stays a search the model must choose to make.",
+    "Sibling hooks already route through the adapter, so the reuse path is genuinely discoverable; the measurement is whether a model looks, not whether it could."
+  ],
+  "vocabulary_exclusions": {
+    "checked": [
+      "canonical",
+      "usesceneelementeventlistener",
+      "keyboard-listener",
+      "only-inside",
+      "guard",
+      "rule"
+    ],
+    "leaked": []
+  }
+}

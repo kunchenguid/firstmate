@@ -1,0 +1,148 @@
+{
+  "schema_version": "keyboard-rule-evasion-corpus/v1",
+  "rule_id": "keyboard-listener",
+  "scope": "packages/frontend/src/features/3d-viz-v2",
+  "note": "Extension probe, added after every case of the pre-registered corpus was caught on the synced head. Seven further bypass shapes the fixed detector was not written against, and three pieces of legitimate code that must stay quiet. Not part of the pre-registered thirteen; reported separately.",
+  "cases": [
+    {
+      "id": "reflect-apply-registration",
+      "label": "Registration through Reflect.apply",
+      "pattern": "Reflect.apply(window.addEventListener, window, ['keydown', handler])",
+      "expected": "fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe reflect-apply-registration",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-reflect-apply.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useProbeReflectApply(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    Reflect.apply(window.addEventListener, window, ['keydown', handler]);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "bound-method-registration",
+      "label": "Registration through a bound addEventListener",
+      "pattern": "const add = window.addEventListener.bind(window); add('keydown', handler)",
+      "expected": "fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe bound-method-registration",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-bound-method.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useProbeBoundMethod(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    const add = window.addEventListener.bind(window);\n    add('keydown', handler);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "destructured-registration",
+      "label": "Registration through a destructured addEventListener",
+      "pattern": "const { addEventListener } = window; addEventListener.call(window, 'keydown', handler)",
+      "expected": "fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe destructured-registration",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-destructured.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useProbeDestructured(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    const { addEventListener } = window;\n    addEventListener.call(window, 'keydown', handler);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "object-assign-on-property",
+      "label": "Handler installed with Object.assign",
+      "pattern": "Object.assign(window, { onkeydown: handler })",
+      "expected": "fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe object-assign-on-property",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-object-assign.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useProbeObjectAssign(onEscape: () => void): void {\n  useEffect(() => {\n    Object.assign(window, { onkeydown: (): void => onEscape() });\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "element-access-registration",
+      "label": "Registration through element access rather than property access",
+      "pattern": "window[\"addEventListener\"] called with the event name \"keydown\"",
+      "expected": "fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe element-access-registration",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-element-access.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useProbeElementAccess(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    window['addEventListener']('keydown', handler);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "element-access-on-property",
+      "label": "Handler assigned through element access",
+      "pattern": "window['onkeydown'] = handler",
+      "expected": "fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe element-access-on-property",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-element-access-property.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useProbeElementAccessProperty(onEscape: () => void): void {\n  useEffect(() => {\n    window['onkeydown'] = (): void => onEscape();\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "prototype-apply",
+      "label": "Registration through EventTarget.prototype.addEventListener.apply",
+      "pattern": "EventTarget.prototype.addEventListener.apply(window, ['keydown', handler])",
+      "expected": "fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe prototype-apply",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-prototype-apply.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useProbePrototypeApply(onEscape: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onEscape();\n    EventTarget.prototype.addEventListener.apply(window, ['keydown', handler]);\n  }, [onEscape]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "non-keyboard-variable-event",
+      "label": "Non-keyboard event name held in a constant",
+      "pattern": "const POINTER_DOWN = 'pointerdown'; window.addEventListener(POINTER_DOWN, handler)",
+      "expected": "no-fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe non-keyboard-variable-event",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-pointer-const.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nconst POINTER_DOWN = 'pointerdown';\n\nexport function useProbePointerConst(onDown: () => void): void {\n  useEffect(() => {\n    const handler = (): void => onDown();\n    window.addEventListener(POINTER_DOWN, handler);\n    return () => window.removeEventListener(POINTER_DOWN, handler);\n  }, [onDown]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "non-keyboard-parameter-event",
+      "label": "Non-keyboard event name passed in as a parameter",
+      "pattern": "element.addEventListener(eventName, handler) where eventName is a parameter",
+      "expected": "no-fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe non-keyboard-parameter-event",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-parameter-event.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useProbeParameterEvent(element: HTMLElement | null, eventName: 'pointerdown' | 'pointerup', onEvent: () => void): void {\n  useEffect(() => {\n    if (!element) return;\n    const handler = (): void => onEvent();\n    element.addEventListener(eventName, handler);\n    return () => element.removeEventListener(eventName, handler);\n  }, [element, eventName, onEvent]);\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ignored-input-receiver",
+      "label": "Text-input keyboard handler, the receiver the rule deliberately ignores",
+      "pattern": "input.onkeydown = handler",
+      "expected": "no-fire",
+      "commits": [
+        {
+          "message": "Add scene shortcut probe ignored-input-receiver",
+          "write": {
+            "packages/frontend/src/features/3d-viz-v2/api/hooks/use-probe-input-receiver.ts": "'use client';\n\nimport { useEffect } from 'react';\n\nexport function useProbeInputReceiver(input: HTMLInputElement | null, onFilter: () => void): void {\n  useEffect(() => {\n    if (!input) return;\n    input.onkeydown = (): void => onFilter();\n    return () => {\n      input.onkeydown = null;\n    };\n  }, [input, onFilter]);\n}\n"
+          }
+        }
+      ]
+    }
+  ]
+}

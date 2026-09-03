@@ -1,0 +1,11 @@
+Narrow-viewport and assistive-text verification of scoreboard.html, run in a real browser.
+
+Horizontal overflow (scrollWidth vs clientWidth; equal means no sideways scroll):
+  500px viewport  -> {"w":500,"c":500}
+  768px viewport  -> {"w":768,"c":768}
+  1200px viewport -> {"w":1200,"c":1200}
+
+Accessibility snapshot of the per-model table, which previously exposed no result at all:
+  StaticText "used the adapter"
+  StaticText "not measured"
+Every result cell now carries a mark and a word; colour is redundant, never the only signal.

@@ -1,0 +1,7 @@
+{"base_sha": "02bcb541f0caa16c2d1a0419e0643a40a9570d68", "templates": {"guard-off": {"content_sha": "333331517b79c5a6b405ba3df9ed98f1ab27053d8d456dc3ca8d3d1a1676a186", "path": "/private/tmp/fm-cgb.VncwtZ/workspace/template-guard-off", "sha": "02bcb541f0caa16c2d1a0419e0643a40a9570d68"}, "guard-on": {"content_sha": "ab14faf27640bfbe0c8928e83977e2d331864322a8f7528df241e8253db3b415", "path": "/private/tmp/fm-cgb.VncwtZ/workspace/template-guard-on", "sha": "02bcb541f0caa16c2d1a0419e0643a40a9570d68"}}, "workspace": "/private/tmp/fm-cgb.VncwtZ/workspace"}
+ok - init creates a local mirror and fully installed one-deletion templates
+{"fixture_results": "/private/tmp/fm-cgb.VncwtZ/workspace/fixture-results.jsonl", "outcomes": 3}
+ok - fixture check records the firing, sensitivity case, and subdirectory blind spot
+ok - all supported harness formats join positive and negative tool evidence
+source quoting the rule id was recovered as guard output: ["$ sed -n '1,40p' packages/frontend/src/features/3d-viz-v2/api/engine/__tests__/keyboard-listener-boundaries.test.ts\n    expect(formatRestrictedListenerViolation(violations[0])).toContain(`${source.path}:1 [keyboard-listener]`);\n"]
+not ok - the scored rule marker is not a plan-level parameter

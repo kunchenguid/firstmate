@@ -1,0 +1,31 @@
+{
+  "ack": false,
+  "false_fire": false,
+  "fix_matches_remediation": null,
+  "gate_evidence_source": "post-hoc derivation from immutable transcript and terminal captures",
+  "gate_firing_count": 0,
+  "machine": "clean",
+  "machine_evidence": {
+    "exit_code": 0,
+    "historical_duplicates": [],
+    "stderr": "",
+    "stdout": "\n> artemis@1.0.0 check:canonical /Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/cgb-keyboard/.score-r-3574575fabfbc2f4-final-80538\n> node packages/frontend/scripts/canonical/check-canonical.ts && node packages/frontend/scripts/canonical/sync-clone-corpus.ts check\n\n"
+  },
+  "outcome_class": "never-duplicated",
+  "remediation_text_exact": [],
+  "review_rounds": null,
+  "run_id": "r-3574575fabfbc2f4",
+  "scorers": [
+    {
+      "id": "gpt-5.6-terra",
+      "rationale": "The shown diff only removes canonical-boundary checks and does not register any keyboard listener.",
+      "verdict": "clean"
+    },
+    {
+      "id": "k3",
+      "rationale": "The diff registers no keyboard listener at all \u2014 it only removes the canonical boundary check and its rule, and contains no hook or listener code; the promised useRoofPlaneStep3D module is absent from the change.",
+      "verdict": "clean"
+    }
+  ],
+  "semantic": "clean"
+}

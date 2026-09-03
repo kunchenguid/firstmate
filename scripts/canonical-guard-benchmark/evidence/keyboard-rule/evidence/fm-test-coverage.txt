@@ -1,0 +1,2 @@
+FM_TEST_COVERAGE ok total=265 parallel=25 serial=227 serial_shards=5 serial_unhinted=8 herdr=13
+coverage exit=0

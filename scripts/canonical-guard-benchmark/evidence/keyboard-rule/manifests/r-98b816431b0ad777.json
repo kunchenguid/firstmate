@@ -1,0 +1,146 @@
+{
+  "arm": "guard-off",
+  "attrition": {
+    "mechanical_failure": true,
+    "reason": "no-commits",
+    "timeout": false,
+    "transcript_loss": false
+  },
+  "base_sha": "bc14abd53e09d32c46a4b233067140d1ac5c6d13",
+  "behavior_trace": {
+    "events": [],
+    "files_read_or_grepped": [],
+    "grepped_for_existing_helper": false,
+    "opened_donor_files": [],
+    "ran_check_canonical_voluntarily": 0,
+    "read_agents_md": false,
+    "read_rules_doc": false
+  },
+  "blindness_check": {
+    "branch": "b-e9e689daddfd",
+    "branches": [
+      "* b-e9e689daddfd",
+      "  remotes/origin/dev"
+    ],
+    "cwd": "/Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/runs/r-98b816431b0ad777",
+    "forbidden_visible_paths": [],
+    "history_since_base": [],
+    "origin": "/Users/pedromuller/.treehouse/firstmate-977aea/21/firstmate/data/homes/r-98b816431b0ad777/origin.git",
+    "passed": true,
+    "prompt_sha256": "8b2a823fce7fb8edf378071dbb152d2a11d216791084c8ad6670020aa95d8195",
+    "reflog": [
+      "bc14abd53e refs/heads/b-e9e689daddfd@{0}: branch: Created from HEAD",
+      "bc14abd53e HEAD@{0}: checkout: moving from bc14abd53e09d32c46a4b233067140d1ac5c6d13 to b-e9e689daddfd"
+    ],
+    "remote_refs": [
+      "refs/heads/dev"
+    ],
+    "unexpected_remote_refs": []
+  },
+  "concurrent_lane_count": 2,
+  "copy_method": "apfs-clonefile",
+  "detector_sha": "94fefd20594ccc01c766729e1a566b74c2255ca97bd502c7f52af4c421dd1ed6",
+  "effort": "high",
+  "ended_at": "2026-09-02T18:46:09.593210Z",
+  "exit_code": 0,
+  "gate": {
+    "firing_count": 0,
+    "firings": [],
+    "push_commands_observed": 0,
+    "pushes": [],
+    "remediation_text_exact": []
+  },
+  "git": {
+    "amend_count": 0,
+    "branch": "b-e9e689daddfd",
+    "commit_count": 0,
+    "commits": [],
+    "final_diff_path": "final.diff",
+    "force_push_count": 0,
+    "history_diffs": [],
+    "push_count": 0,
+    "pushes": [],
+    "trailers": []
+  },
+  "harness": "pi",
+  "harness_code_dirty": false,
+  "harness_code_sha": "8ab54baa00849a175ece6806cd1433d865215203",
+  "harness_version": "0.84.4",
+  "helper_families": [
+    "both"
+  ],
+  "lane": "lane-2",
+  "load_samples": [
+    {
+      "at": "2026-09-02T18:45:52.919316Z",
+      "one_minute": 45.18
+    },
+    {
+      "at": "2026-09-02T18:46:09.593210Z",
+      "one_minute": 40.1
+    }
+  ],
+  "max_load": 8.0,
+  "model": "deepseek-v4-pro-0813",
+  "preregistration": {
+    "amendment": "Keyboard-boundary slate: seven paired lanes on one ratified task, run in the order gpt-5.6-luna, deepseek-v4-pro-0813, qwen3.8-max, deepseek-v4-flash-0731, gpt-5.6-terra, k3, gpt-5.6-sol. The first four are the fast slate; the last three run only if the machine reaches them before the deterministic evasion pass finishes, and any lane not reached is reported as not-dispatched rather than as an outcome. Width is two concurrent lanes while the one-minute load average is under 8, runs stay back-to-back within a lane, the timeout is 1800 seconds, and one-minute load samples are recorded for every run. The helper-family axis belongs to the earlier duplicate-implementation task and does not apply here; it is held constant at 'both' across every lane and no result is reported by it.",
+    "plan_sha256": "70867b2e62e7d009cc72871d4587523475ad9721eb98cac376d2b1e05409ee25",
+    "ratified_at": "2026-09-02T18:38:35Z",
+    "wave": null
+  },
+  "prompt_sha256": "8b2a823fce7fb8edf378071dbb152d2a11d216791084c8ad6670020aa95d8195",
+  "provider": "qwen-token-plan-individual",
+  "resolution": {
+    "evidence": [],
+    "path": "none"
+  },
+  "run_id": "r-98b816431b0ad777",
+  "schema_version": "canonical-guard-run/v1",
+  "stage": "matrix",
+  "started_at": "2026-09-02T18:38:49.100495Z",
+  "template_sha": "bc14abd53e09d32c46a4b233067140d1ac5c6d13",
+  "timeout": false,
+  "timeout_seconds": 1800,
+  "timing": {
+    "first_firing_to_clean_push_seconds": null,
+    "time_to_first_commit_seconds": null,
+    "time_to_first_push_seconds": null,
+    "wall_seconds": 440.839
+  },
+  "transcript": {
+    "loss_reason": null,
+    "paths": [
+      "transcripts/001-2026-09-02T18-45-53-248Z_01a06371-1fdf-7e4f-8ec0-2b62f2381f9e.jsonl"
+    ],
+    "status": "captured",
+    "terminal_paths": []
+  },
+  "usage": {
+    "cache_write_input_tokens": 0,
+    "cached_input_tokens": 0,
+    "currency": "USD",
+    "dollar_cost": 0.0,
+    "fresh_input_tokens": 0,
+    "output_tokens": 0,
+    "reasoning_output_tokens": 0,
+    "source": "harness-transcript",
+    "total_tokens": 0,
+    "unavailable_reason": null
+  },
+  "verdicts": {
+    "ack": null,
+    "early_late": null,
+    "false_fire": null,
+    "machine": null,
+    "semantic": null,
+    "source": "separate append-only verdicts.jsonl"
+  },
+  "wave": null,
+  "work": {
+    "commit_count": 0,
+    "delivery_note_path": "delivery-note.txt",
+    "push_count": 0,
+    "suite_passed": null,
+    "tests_added": []
+  }
+}

@@ -135,6 +135,8 @@ def confirmatory_shape(runs: Any) -> tuple[list[str | None], int]:
 
 
 PLAN_SHAPES = ("confirmatory", "ranking")
+DEFAULT_RULE_ID = "duplicate-implementation"
+DEFAULT_RULE_PROSE = "duplicate implementation detected"
 RANK_SUITE_VERSION = "canonical-guard-rank-suite/v1"
 RESOLUTION_PATHS = (
     "exported-then-imported-point-in-ring",
@@ -238,6 +240,120 @@ def require_safe_id(value: str) -> str:
     if not SAFE_ID.fullmatch(value):
         die("run id must contain only letters, digits, dot, underscore, or dash")
     return value
+
+
+def rule_marker(plan: dict[str, Any] | None) -> dict[str, Any]:
+    """Which guard the captured output is read for, taken from the frozen plan.
+
+    A plan that names no marker measures the duplicate-implementation rule, so
+    an existing workspace scores exactly as it did before the plan could choose.
+    A plan that names a rule gets that rule's bracketed id and acknowledgement
+    trailer, plus only the prose it declares: another rule's wording is not its.
+    A marker that is present but unusable is refused rather than defaulted,
+    because silently measuring the wrong rule reports a guard that never spoke.
+    """
+    if plan is None or "rule_marker" not in plan:
+        return {"rule_id": DEFAULT_RULE_ID, "prose_patterns": [DEFAULT_RULE_PROSE]}
+    value = plan["rule_marker"]
+    if not isinstance(value, dict) or not value:
+        die("frozen rule_marker must be a non-empty object naming the rule the slate measures")
+    rule_id = value.get("rule_id")
+    if not isinstance(rule_id, str) or not SAFE_ID.fullmatch(rule_id):
+        die("frozen rule_marker.rule_id must be a safe rule id")
+    prose = value.get("prose_patterns", [])
+    if not isinstance(prose, list) or any(not isinstance(item, str) or not item.strip() for item in prose):
+        die("frozen rule_marker.prose_patterns must be a list of non-empty patterns")
+    marker = {"rule_id": rule_id, "prose_patterns": list(prose)}
+    # The patterns are joined into one alternation before they are ever used, so
+    # validating them one at a time would accept a set that only fails at the
+    # join - an inline global flag is legal alone and illegal mid-expression.
+    for build in (marker_firing_pattern, marker_remediation_pattern):
+        try:
+            build(marker)
+        except re.error as error:
+            die(f"frozen rule_marker patterns do not combine into a usable expression: {error}")
+    return marker
+
+
+def workspace_rule_marker(workspace: pathlib.Path) -> dict[str, Any]:
+    """The rule this workspace measures, for every run in it.
+
+    A run outside the frozen slate - a labelled exploratory arm is one - is
+    still captured against the rule the workspace was built to measure, so
+    reading the marker only from a plan-bound run would score that arm by
+    another rule's wording and report a guard that never spoke.
+    """
+    path = workspace / "frozen-plan.json"
+    return rule_marker(read_json(path) if path.is_file() else None)
+
+
+def marker_firing_pattern(marker: dict[str, Any]) -> re.Pattern[str]:
+    """What counts as the guard having spoken in captured output.
+
+    Push output and terminal captures are decoded text, so the same anchoring
+    the remediation matcher uses applies here: the guard's line starts with the
+    rule id or with the `path:line` it reports, while a candidate reading the
+    rule's own source carries the id mid-line inside an expression. Without the
+    anchor a read of the rule becomes a firing in the manifest, and recovery
+    trusts the manifest, so the false positive reaches the verdict.
+    """
+    rule_id = re.escape(marker["rule_id"])
+    diagnostic = rf"^[ \t]*(?:[\w./@+-]+:\d+[ \t]+)?\[{rule_id}\]"
+    return re.compile("|".join([*marker["prose_patterns"], diagnostic, rf"^[ \t]*Canonical-ack: {rule_id}"]), re.I | re.M)
+
+
+def marker_remediation_pattern(marker: dict[str, Any]) -> re.Pattern[str]:
+    """Recognise the guard's own diagnostic, not a mention of its rule id.
+
+    A candidate reads the rule's source and tests, which quote the bracketed id
+    exactly as the guard prints it. The guard's line either starts with the id
+    or starts with the `path:line` it is reporting, while quoted source carries
+    it mid-line inside an expression that holds brackets, parentheses and
+    interpolation a path never does.
+    """
+    rule_id = re.escape(marker["rule_id"])
+    diagnostic = rf"^[ \t]*(?:[\w./@+-]+:\d+[ \t]+)?\[{rule_id}\]"
+    return re.compile("|".join([*marker["prose_patterns"], diagnostic]), re.I | re.M)
+
+
+def machine_verdict(result: subprocess.CompletedProcess[str], marker: dict[str, Any], run_id: str) -> str:
+    """Whether the replayed check reports the rule this slate measures.
+
+    The project's command runs a table of rules and its own corpus check, so a
+    nonzero exit is not by itself this rule's verdict. A failure that never
+    names the measured rule is a different failure, and calling it either verdict
+    would publish a number no measurement supports, so it is refused instead.
+    """
+    if result.returncode == 0:
+        return "clean"
+    if marker_remediation_pattern(marker).search(f"{result.stdout}\n{result.stderr}"):
+        return "duplicate"
+    die(
+        f"replayed check for {run_id} failed without naming {marker['rule_id']}; "
+        f"this is a different failure, not a verdict:\n{result.stdout}\n{result.stderr}"
+    )
+    return "clean"
+
+
+def marker_candidate_pattern(marker: dict[str, Any]) -> re.Pattern[str]:
+    """Anywhere the rule could be named, used only to decide what to decode.
+
+    A transcript row holds the guard's whole output as one JSON string, so its
+    line breaks are escape sequences and the diagnostic never starts a raw line.
+    The anchored test therefore has to run on the decoded string, and this
+    cheaper unanchored one picks which rows are worth decoding at all.
+    """
+    return re.compile("|".join([*marker["prose_patterns"], rf"\[{re.escape(marker['rule_id'])}\]"]), re.I)
+
+
+def marker_excerpt(marker: dict[str, Any], remediation: str) -> str:
+    """The captured remediation from the guard's own line to the runner's noise."""
+    start = re.search(rf"[^\n]*\[{re.escape(marker['rule_id'])}\]", remediation, re.I)
+    excerpt = remediation[start.start() :] if start else remediation
+    stops = [position for token in ("ELIFECYCLE", "exit status", "┃  editor-bugfix-tests") if (position := excerpt.find(token)) >= 0]
+    if stops:
+        excerpt = excerpt[: min(stops)]
+    return excerpt.strip()[:6000]
 
 
 def cow_copy(source: pathlib.Path, destination: pathlib.Path) -> str:
@@ -1180,30 +1296,32 @@ def tool_events(files: list[pathlib.Path]) -> list[dict[str, Any]]:
     return events
 
 
-def behavior_and_gate(files: list[pathlib.Path], session_log: pathlib.Path, terminal_files: list[pathlib.Path]) -> tuple[dict[str, Any], dict[str, Any]]:
+def behavior_and_gate(files: list[pathlib.Path], session_log: pathlib.Path, terminal_files: list[pathlib.Path], marker: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     event_files = list(files)
     if session_log.is_file():
         event_files.append(session_log)
     events = tool_events(event_files)
+    marker = marker or rule_marker(None)
+    firing_pattern = marker_firing_pattern(marker)
     evidence = [event for event in events if re.search(r"(?:^|\s)(?:cat|sed|rg|grep|read)\s|/api/logic/|canonical-boundaries\.md", event["command"], re.I)]
     push_events = [event for event in events if re.search(r"(?:^|&&|;|\n)\s*git\s+push(?:\s|$)", event["command"])]
     firings = []
     remediation: list[str] = []
     for push_ordinal, event in enumerate(push_events, 1):
         output = event["output"]
-        fired = bool(re.search(r"duplicate implementation detected|\[duplicate-implementation\]|Canonical-ack: duplicate-implementation", output, re.I))
+        fired = bool(firing_pattern.search(output))
         if not fired:
             continue
         exact = "\n".join(line for line in output.splitlines() if line.strip())
         remediation.append(exact)
-        firings.append({"ordinal": len(firings) + 1, "push_ordinal": push_ordinal, "timestamp": event["timestamp"], "rule_id": "duplicate-implementation", "remediation_text": exact, "fix_matches_remediation": None})
+        firings.append({"ordinal": len(firings) + 1, "push_ordinal": push_ordinal, "timestamp": event["timestamp"], "rule_id": marker["rule_id"], "remediation_text": exact, "fix_matches_remediation": None})
     for terminal in terminal_files:
         text = terminal.read_text(errors="replace")
-        if not re.search(r"duplicate implementation detected|\[duplicate-implementation\]|Canonical-ack: duplicate-implementation", text, re.I):
+        if not firing_pattern.search(text):
             continue
         if text not in remediation:
             remediation.append(text)
-            firings.append({"ordinal": len(firings) + 1, "push_ordinal": len(push_events) or None, "timestamp": None, "rule_id": "duplicate-implementation", "remediation_text": text, "fix_matches_remediation": None, "source": str(terminal.name)})
+            firings.append({"ordinal": len(firings) + 1, "push_ordinal": len(push_events) or None, "timestamp": None, "rule_id": marker["rule_id"], "remediation_text": text, "fix_matches_remediation": None, "source": str(terminal.name)})
     command_text = "\n".join(event["command"] for event in events)
     trace = {
         "events": [{"timestamp": event["timestamp"], "command": event["command"][:4000]} for event in evidence],
@@ -1462,7 +1580,7 @@ def command_run(args: argparse.Namespace) -> None:
         else:
             capture_delivery_note(session_log, bundle / "delivery-note.txt")
         git_info, final_diff = git_capture(worktree, template_info["sha"], bundle)
-        trace, gate = behavior_and_gate(copied_transcripts, session_log, copied_terminals)
+        trace, gate = behavior_and_gate(copied_transcripts, session_log, copied_terminals, workspace_rule_marker(workspace))
         gate["firing_count"] = max(gate["firing_count"], 0)
         git_info["push_count"] = max(git_info["push_count"], gate["push_commands_observed"])
         resolution = resolution_from_diff(final_diff)
@@ -1833,6 +1951,7 @@ def command_freeze(args: argparse.Namespace) -> None:
             die("frozen ranking plan requires rubric_sha256 binding the rubric frozen before any run")
         if not isinstance(plan.get("suite_command"), str) or not plan["suite_command"].strip():
             die("frozen ranking plan requires the suite_command its executable verdict replays")
+    rule_marker(plan)
     prompt_sha = plan.get("prompt_sha256")
     if not isinstance(prompt_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", prompt_sha):
         die("frozen plan requires prompt_sha256")
@@ -1961,8 +2080,10 @@ def command_record_verdict(args: argparse.Namespace) -> None:
     print(json.dumps({"recorded": normalized["run_id"]}))
 
 
-def captured_gate_remediations(bundle: pathlib.Path, manifest: dict[str, Any]) -> list[str]:
-    marker = re.compile(r"duplicate implementation detected|\[duplicate-implementation\]", re.I)
+def captured_gate_remediations(bundle: pathlib.Path, manifest: dict[str, Any], marker: dict[str, Any] | None = None) -> list[str]:
+    marker = marker or rule_marker(None)
+    pattern = marker_remediation_pattern(marker)
+    candidate = marker_candidate_pattern(marker)
     values = list(manifest.get("gate", {}).get("remediation_text_exact", []))
     sources = sorted((bundle / "transcripts").glob("*.jsonl")) + sorted((bundle / "terminals").glob("*.txt")) + sorted((bundle / "late-recovery" / "terminals").glob("*.txt"))
     if not sources:
@@ -1972,12 +2093,13 @@ def captured_gate_remediations(bundle: pathlib.Path, manifest: dict[str, Any]) -
             continue
         if source.suffix == ".jsonl":
             for line in source.read_text(errors="replace").splitlines():
-                if not marker.search(line):
+                if not candidate.search(line):
                     continue
                 try:
                     row = json.loads(line)
                 except json.JSONDecodeError:
-                    values.append(line)
+                    if pattern.search(line):
+                        values.append(line)
                     continue
                 stack = [row]
                 strings = []
@@ -1987,13 +2109,13 @@ def captured_gate_remediations(bundle: pathlib.Path, manifest: dict[str, Any]) -
                         stack.extend(item.values())
                     elif isinstance(item, list):
                         stack.extend(item)
-                    elif isinstance(item, str) and marker.search(item):
+                    elif isinstance(item, str) and pattern.search(item):
                         strings.append(item)
                 if strings:
                     values.append(max(strings, key=len))
         else:
             text = source.read_text(errors="replace")
-            if marker.search(text):
+            if pattern.search(text):
                 values.append(text)
     unique: dict[str, str] = {}
     for value in values:
@@ -2068,8 +2190,9 @@ def command_score_locked(args: argparse.Namespace, workspace: pathlib.Path) -> N
     for index, relative in enumerate(manifest["git"].get("history_diffs", []), 1):
         historical = score_patch(bundle / relative, f"history-{index}")
         historical_machine_duplicates.append(historical.returncode != 0)
-    machine = "duplicate" if machine_result.returncode != 0 else "clean"
-    remediations = captured_gate_remediations(bundle, manifest)
+    marker = workspace_rule_marker(workspace)
+    machine = machine_verdict(machine_result, marker, args.run_id)
+    remediations = captured_gate_remediations(bundle, manifest, marker)
     gate_firing_count = max(manifest["gate"]["firing_count"], len(remediations))
     fired = gate_firing_count > 0
     ack = bool(manifest["git"]["trailers"])
@@ -3226,7 +3349,8 @@ def command_scoreboard(args: argparse.Namespace) -> None:
         die(f"presentation scoreboard rejected the confirmatory shape: {exc}")
     if any(item["run_id"] not in judged for item in runs):
         die("presentation scoreboard requires a verdict for every matrix manifest")
-    remediations = {item["run_id"]: captured_gate_remediations(workspace / "bundles" / item["run_id"], item) for item in runs}
+    marker = workspace_rule_marker(workspace)
+    remediations = {item["run_id"]: captured_gate_remediations(workspace / "bundles" / item["run_id"], item, marker) for item in runs}
     rank = {"glm-5.2-high": 0, "composer-2.5": 1, "cursor-grok-4.5-high-fast": 2, "claude-sonnet-5": 3, "gpt-5.6-sol": 4, "gpt-5.6-terra": 5, "gpt-5.6-luna": 6}
     by_cell = {(item.get("wave"), item["model"], item["arm"]): item for item in runs}
     if len(by_cell) != len(runs):
@@ -3328,12 +3452,7 @@ def command_scoreboard(args: argparse.Namespace) -> None:
     teach_rows = []
     for item in runs:
         for ordinal, remediation in enumerate(remediations[item["run_id"]], 1):
-            start = re.search(r"[^\n]*\[duplicate-implementation\]", remediation, re.I)
-            excerpt = remediation[start.start() :] if start else remediation
-            stops = [position for token in ("ELIFECYCLE", "exit status", "┃  editor-bugfix-tests") if (position := excerpt.find(token)) >= 0]
-            if stops:
-                excerpt = excerpt[: min(stops)]
-            teach_rows.append([item["run_id"], item["model"], ordinal, excerpt.strip()[:6000], judged[item["run_id"]].get("machine") == "clean"])
+            teach_rows.append([item["run_id"], item["model"], ordinal, marker_excerpt(marker, remediation), judged[item["run_id"]].get("machine") == "clean"])
     sections.append(("Did the guard teach", ["Run", "Model", "Firing", "Exact captured remediation excerpt", "Fix matched"], teach_rows))
     attrition_rows = [[item["run_id"], item["harness"], item["attrition"]["timeout"], item["attrition"]["transcript_loss"], item["attrition"]["reason"]] for item in all_runs if item["attrition"]["mechanical_failure"] or item.get("stage") == "excluded"]
     sections.append(("Attrition and exclusions", ["Run", "Harness", "Timeout", "Transcript loss", "Reason"], attrition_rows))

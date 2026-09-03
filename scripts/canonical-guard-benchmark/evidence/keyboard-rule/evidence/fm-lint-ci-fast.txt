@@ -1,0 +1,3 @@
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: hosted low-memory mode; ShellCheck extended analysis disabled
+lint exit=0

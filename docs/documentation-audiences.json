@@ -690,6 +690,78 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evasion-arm-task.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/fm-lint-ci-fast.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/fm-test-coverage.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/harness-score-refusal.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/harness-scratch-root-tradeoff.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/harness-tests-green.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/harness-tests-red-jsonl-diagnostic.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/harness-tests-red-quoted-rule-id.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/harness-tests-red-scratch-root.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/harness-tests-red-terminal-quote.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/harness-tests-red-unbound-run.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/harness-tests-red.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/preexisting-spawn-failure.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/evidence/scoreboard-viewport-and-a11y.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/report.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/review-readiness.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/seed-task.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "scripts/canonical-guard-benchmark/evidence/keyboard-rule/wave-3-task.txt",
+      "audience": "maintainer-verification"
     }
   ]
 }
