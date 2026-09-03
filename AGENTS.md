@@ -300,6 +300,9 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
+Scaffold ship and scout briefs with `--playbook <name>` whenever the work matches a `data/playbooks/` catalog entry, so the checklist lands just-in-time in the brief's Task section (`bin/fm-brief.sh` owns the embedding mechanics).
+Every ship brief carries the five-point Evidence Gate in its Definition of done (subtract-first, walk-gate, artifact proof, no-slop, lever check).
+A fix without its proof is not done.
 
 ### Dispatch and supervision handoff
 
@@ -426,6 +429,8 @@ A forced repair must use the home-scoped owner path emitted by supervision instr
 Guard warnings do not replace the contract.
 Queued wakes must be presented before other action and acknowledged only after handling, stale liveness must be repaired through the emitted protocol, and the worktree-tangle warning must be resolved without touching unlanded work.
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
+Keep the supervisor prompt lean: never paste playbook checklists or principle text into supervision context.
+Workers receive playbooks just-in-time through the brief and the provisioned worktree skill library (`bin/fm-spawn.sh` owns the provisioning).
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
 
 ### Away-mode stub
@@ -515,6 +520,8 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
+Pass `--playbook <name>` at scaffold time for work matching the `data/playbooks/` catalog; the checklist embeds into the Task section and the ship Evidence Gate into the Definition of done.
+Every spawned worker finds firstmate's skill library at `.agents/skills` inside its worktree, so briefs reference skills by name instead of inlining their content.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 Every ship and scout brief must carry the `TESTS:` and `VERIFY:` scaffold lines: `TESTS:` names the test files that judge the task, and `VERIFY:` holds the exact commands a reviewer reruns once under `timeout 60`; a brief missing either line is incomplete and must not be dispatched.
