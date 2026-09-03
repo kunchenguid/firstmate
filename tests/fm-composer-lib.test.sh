@@ -354,6 +354,21 @@ test_matrix_opencode_leftbar_signals() {
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
 }
 
+test_matrix_copilot_halfbox_identityless_backends() {
+  local screen typed
+  screen=$'╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "copilot empty half-box on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "copilot empty half-box on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  typed=$'╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n┃ Build · release checklist\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "copilot typed half-box on zellij" pending "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "copilot typed half-box on cmux/orca" pending "$CAPS_PLAIN" "$typed"
+  typed=$'╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀
+'
+  assert_screen "copilot malformed half-box on zellij" unknown "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "copilot malformed half-box on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+  pass "matrix: identityless backends accept only complete Copilot half-boxes"
+}
+
 test_matrix_grok_titled_bottom_border() {
   # Real idle grok: a bordered box whose BOTTOM border carries the model name.
   # The audit showed the title alone flipped tmux's geometry check to
@@ -619,6 +634,7 @@ test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
+test_matrix_copilot_halfbox_identityless_backends
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump

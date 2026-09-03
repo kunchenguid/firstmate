@@ -494,6 +494,20 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 
+test_copilot_harness_switch_retires_task_specific_hook() {
+  local dir out rc
+  dir=$(new_case copilotwiring rl36)
+  add_ship_task "$dir" rl36 copilot
+  mkdir -p "$dir/wt/.github/hooks"
+  printf '{"hooks":{}}\n' > "$dir/wt/.github/hooks/fm-busy-state-rl36.json"
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl36 relaunch --harness claude --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a Copilot harness switch should succeed"$'\n'"$out"
+  [ ! -e "$dir/wt/.github/hooks/fm-busy-state-rl36.json" ] \
+    || fail "the previous Copilot task hook must be cleared on a switch"
+  pass "fm-control relaunch: a harness switch retires the prior Copilot task hook"
+}
+
 test_harness_switch_does_not_carry_the_old_profile_axes() {
   local dir out rc
   dir=$(new_case profile rl5)
@@ -1501,6 +1515,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_copilot_harness_switch_retires_task_specific_hook
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement

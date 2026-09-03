@@ -207,12 +207,18 @@ fm_control_backend_state_verified() {  # <backend>
 # pointing at a retired generation. Prints zero or more absolute paths, one per
 # line: worktree-resident hook files and firstmate-owned state tokens only,
 # never a harness's own managed config.
+fm_control_copilot_hook_path() {  # <worktree> <id>
+  local wt=${1-} id=${2-}
+  [ -n "$wt" ] && [ -n "$id" ] || return 1
+  printf '%s\n' "$wt/.github/hooks/fm-busy-state-$id.json"
+}
+
 fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   local harness=${1-} wt=${2-} state=${3-} id=${4-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
-    copilot) printf '%s\n' "$wt/.github/hooks/fm-busy-state.json" ;;
+    copilot) fm_control_copilot_hook_path "$wt" "$id" ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)

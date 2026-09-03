@@ -1101,7 +1101,7 @@ _fm_composer_classify_halfbox_content() {  # <screen> <styled> <first-row> <last
     row=$((row + 1))
   done
   if [ "$text_seen" = 1 ]; then
-    if [ "$styled" = 1 ]; then printf 'pending'; else printf 'unknown'; fi
+    printf 'pending'
   else
     printf 'empty'
   fi
@@ -1410,7 +1410,7 @@ _fm_composer_halfbox_verdict() {  # <screen> <styled> <has-identity> <identity>
     return 0
   fi
   if [ "$has_identity" != 1 ]; then
-    printf 'unknown'
+    printf 'empty'
     return 0
   fi
   if [ -z "$identity" ]; then

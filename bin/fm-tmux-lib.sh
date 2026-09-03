@@ -208,21 +208,28 @@ EOF
 
 fm_tmux_pane_is_copilot() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
-  case "$tty" in /dev/*) ;; *) return 1 ;; esac
-  while read -r pid pgid tpgid comm; do
-    [ -n "$comm" ] || continue
-    [ "$pgid" = "$tpgid" ] || continue
-    case "${comm##*/}" in copilot) return 0 ;; esac
-    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
-    args=${args#"${args%%[![:space:]]*}"}
-    argv0=${args%%[[:space:]]*}
-    case "${comm##*/}:$argv0" in
-      MainThread:copilot|MainThread:*/copilot) return 0 ;;
-    esac
-  done <<EOF
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
+  case "$tty" in
+    /dev/*)
+      while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        case "${comm##*/}" in copilot) return 0 ;; esac
+        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || args=
+        args=${args#"${args%%[![:space:]]*}"}
+        argv0=${args%%[[:space:]]*}
+        case "${comm##*/}:$argv0" in
+          MainThread:copilot|MainThread:*/copilot) return 0 ;;
+        esac
+      done <<EOF
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
+      ;;
+  esac
+  comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
+  case "${comm##*/}" in
+    copilot) return 0 ;;
+  esac
   return 1
 }
 

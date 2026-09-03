@@ -521,7 +521,7 @@ test_copilot_threads_autonomy_model_and_effort() {
   assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS" \
     "copilot launch did not clear foreign primary markers"
   assert_contains "$launch" "encode launch-brief" "copilot launch lost the typed launch instructions"
-  hooks="$WT_DIR/.github/hooks/fm-busy-state.json"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
   assert_present "$hooks" "copilot spawn did not install the worker lifecycle hook"
   rm -f "$HOME_DIR/state/$id.turn-ended"
   hook_cmd=$(jq -r '.hooks.agentStop[0].bash' "$hooks")
@@ -534,6 +534,67 @@ test_copilot_threads_autonomy_model_and_effort() {
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=copilot-hook" \
     "copilot userPromptSubmitted hook did not open semantic busy state"
   pass "copilot launch and generated worker hooks carry the complete adapter contract"
+}
+
+test_copilot_preserves_repository_owned_hook_files() {
+  local id=profile-copilot-repo-hooks-z6d out status hooks
+  CASE_DIR="$TMP_ROOT/profile-copilot-repo-hooks"
+  HOME_DIR="$CASE_DIR/home"
+  PROJ_DIR="$CASE_DIR/project"
+  WT_DIR="$CASE_DIR/wt"
+  LAUNCH_LOG="$CASE_DIR/launch.log"
+  FAKEBIN_DIR=$(make_spawn_fakebin "$CASE_DIR/fake")
+  fm_test_spawn_home "$HOME_DIR" copilot
+  fm_git_init_commit "$PROJ_DIR"
+  mkdir -p "$PROJ_DIR/.github/hooks" "$PROJ_DIR/.claude"
+  printf '%s\n' '{"version":1,"hooks":{"sessionStart":[]}}' > "$PROJ_DIR/.github/hooks/fm-busy-state.json"
+  printf '%s\n' '{"hooks":{"Stop":[]}}' > "$PROJ_DIR/.claude/settings.json"
+  git -C "$PROJ_DIR" add .github/hooks/fm-busy-state.json .claude/settings.json
+  git -C "$PROJ_DIR" -c user.email=t@t -c user.name=t commit -qm fixture
+  fm_git_add_origin "$PROJ_DIR" "$PROJ_DIR.origin.git"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-copilot-repo-hooks "$WT_DIR"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "copilot spawn beside repository-owned hook files should succeed"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  assert_present "$hooks" "copilot spawn did not install its task-specific worker hook"
+  [ "$(cat "$WT_DIR/.github/hooks/fm-busy-state.json")" = '{"version":1,"hooks":{"sessionStart":[]}}' ] \
+    || fail "copilot spawn rewrote the repository-owned hook file"
+  [ "$(cat "$WT_DIR/.claude/settings.json")" = '{"hooks":{"Stop":[]}}' ] \
+    || fail "copilot spawn rewrote the repository-owned Claude settings"
+  pass "copilot spawn preserves repository-owned Copilot and Claude config files"
+}
+
+test_copilot_exact_worker_hook_collision_refuses() {
+  local id=profile-copilot-collision-z6e out status hooks
+  CASE_DIR="$TMP_ROOT/profile-copilot-collision"
+  HOME_DIR="$CASE_DIR/home"
+  PROJ_DIR="$CASE_DIR/project"
+  WT_DIR="$CASE_DIR/wt"
+  LAUNCH_LOG="$CASE_DIR/launch.log"
+  FAKEBIN_DIR=$(make_spawn_fakebin "$CASE_DIR/fake")
+  fm_test_spawn_home "$HOME_DIR" copilot
+  fm_git_init_commit "$PROJ_DIR"
+  mkdir -p "$PROJ_DIR/.github/hooks"
+  hooks="$PROJ_DIR/.github/hooks/fm-busy-state-$id.json"
+  printf '%s\n' '{"preexisting":true}' > "$hooks"
+  git -C "$PROJ_DIR" add .github/hooks
+  git -C "$PROJ_DIR" -c user.email=t@t -c user.name=t commit -qm fixture
+  fm_git_add_origin "$PROJ_DIR" "$PROJ_DIR.origin.git"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-copilot-collision "$WT_DIR"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "copilot spawn should refuse an exact owned-hook collision"
+  assert_contains "$out" "refusing to overwrite existing Firstmate Copilot worker hook" \
+    "copilot collision refusal lost its explanation"
+  [ "$(cat "$hooks")" = '{"preexisting":true}' ] || fail "copilot collision refusal rewrote the existing hook"
+  [ ! -s "$LAUNCH_LOG" ] || fail "copilot collision refusal still launched the worker"
+  pass "copilot spawn refuses only its exact owned hook filename"
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
@@ -862,6 +923,8 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_copilot_threads_autonomy_model_and_effort
+test_copilot_preserves_repository_owned_hook_files
+test_copilot_exact_worker_hook_collision_refuses
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn

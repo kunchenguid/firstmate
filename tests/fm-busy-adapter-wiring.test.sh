@@ -294,7 +294,7 @@ test_copilot_hooks_semantic_lifecycle() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "copilot spawn should succeed: $out"
   state="$HOME_DIR/state"
-  hooks="$WT_DIR/.github/hooks/fm-busy-state.json"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
   assert_present "$hooks" "copilot spawn did not write hook settings"
   jq -e . "$hooks" >/dev/null || fail "copilot hook settings are not valid JSON"
 

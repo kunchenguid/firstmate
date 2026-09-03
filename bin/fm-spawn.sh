@@ -2772,19 +2772,25 @@ EOF
       fi
       ;;
     copilot*)
-      # Copilot's repository hooks expose a semantic turn lifecycle.
-      # The commands are absolute and incarnation-bound, so a stale hook cannot
-      # settle a replacement worker's busy record.
+      local_copilot_hook_rel=$(printf '.github/hooks/fm-busy-state-%s.json' "$ID")
+      local_copilot_hook_path=$(fm_control_copilot_hook_path "$WT" "$ID") || {
+        echo "error: could not resolve the Firstmate Copilot worker hook path for $ID" >&2
+        exit 1
+      }
+      [ ! -e "$local_copilot_hook_path" ] || {
+        echo "error: refusing to overwrite existing Firstmate Copilot worker hook $local_copilot_hook_path for $ID" >&2
+        exit 1
+      }
       mkdir -p "$WT/.github/hooks"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source copilot-hook"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submitted 2>/dev/null || true")
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event agent-stop 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-      cat > "$WT/.github/hooks/fm-busy-state.json" <<EOF
+      cat > "$local_copilot_hook_path" <<EOF
 {"version":1,"hooks":{"userPromptSubmitted":[{"type":"command","bash":"$j_submit","timeoutSec":10}],"agentStop":[{"type":"command","bash":"$j_stop","timeoutSec":10}],"sessionEnd":[{"type":"command","bash":"$j_sessionend","timeoutSec":10}]}}
 EOF
-      exclude_path '.github/hooks/fm-busy-state.json'
+      exclude_path "$local_copilot_hook_rel"
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
