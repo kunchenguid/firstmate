@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# fm-voice-guard.sh - owner of the refusal that keeps firstmate's internal voice
-# out of anything published from this machine.
+# fm-prepush-voice-guard.sh - owner of the refusal that keeps firstmate's
+# internal voice and internal pointers out of anything published from this
+# machine. Unrelated to the bin/fm-voice-* audio relay family.
 #
 # THE DEFECT THIS EXISTS FOR. AGENTS.md tells every agent to address the user as
 # "captain" in every response. An agent working INSIDE this repo reads AGENTS.md
@@ -33,6 +34,14 @@
 # hold", "captain intent", "captain-gated", and "reaches the captain" all pass
 # untouched, while "…: Captain, fixed the…" and "…scans, captain" refuse.
 #
+# The same position-not-vocabulary test admits the two session-pointer rules. A
+# link to the working session is internal material leaving the machine exactly
+# as an address is, and three such trailers are already in merged history, so it
+# is refused here rather than by a second mechanism. What is refused is the
+# POINTER shape - a trailer key with a URL or opaque id, or a session path in a
+# link - never the word: 333 legitimate merged lines use "session" in its
+# ordinary technical sense and all of them still pass.
+#
 # KNOWN RESIDUAL. The trailing rule refuses a subject that ends in a bare
 # ",<space>captain", so a comma list whose last item is the word captain
 # ("firstmate, secondmate, captain") would be refused as an address. No such
@@ -63,14 +72,14 @@
 # could not be determined (fail closed - an unknown range is not a clean range).
 #
 # Usage:
-#   fm-voice-guard.sh                     check every commit not yet on the
-#                                         default branch (the pre-push default)
-#   fm-voice-guard.sh --range <a>..<b>    check an explicit commit range
-#   fm-voice-guard.sh --commit <rev>      check one commit's message
-#   fm-voice-guard.sh --text <file>       check arbitrary text, "-" for stdin
-#                                         (a pull request description)
-#   fm-voice-guard.sh --list-patterns     print the rule table
-#   fm-voice-guard.sh --help              print this usage
+#   fm-prepush-voice-guard.sh                  check every commit not yet on the
+#                                              default branch (the pre-push default)
+#   fm-prepush-voice-guard.sh --range <a>..<b> check an explicit commit range
+#   fm-prepush-voice-guard.sh --commit <rev>   check one commit's message
+#   fm-prepush-voice-guard.sh --text <file>    check arbitrary text, "-" for stdin
+#                                              (a pull request title or description)
+#   fm-prepush-voice-guard.sh --list-patterns  print the rule table
+#   fm-prepush-voice-guard.sh --help           print this usage
 #
 # FM_VOICE_GUARD_BASE overrides the default-branch ref used to bound the default
 # range; without it the resolvable refs among origin/main and main are used, and
@@ -78,7 +87,7 @@
 set -u
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SELF="$SELF_DIR/fm-voice-guard.sh"
+SELF="$SELF_DIR/fm-prepush-voice-guard.sh"
 TAB=$(printf '\t')
 
 fm_voice_usage() {
@@ -120,6 +129,19 @@ FM_VOICE_RULES+=("captain-address-greeting${TAB}i${TAB}(^|[^[:alnum:]_])(ahoy|he
 # how the change was produced rather than what it does. Four leaked lines in
 # merged history, including "Changes remain uncommitted for the outer executor".
 FM_VOICE_RULES+=("delivery-machinery-handoff${TAB}i${TAB}(^|[^[:alnum:]_])outer[[:space:]]+(executor|pipeline|run)([^[:alnum:]_]|\$)${TAB}Published history must not narrate how the change was validated or which agent finishes it. State what the change does.")
+
+# A pointer at the working session that produced the change, as a trailer whose
+# value is a URL or an opaque id. Three such trailers are already in merged
+# history, so this is a recurring leak rather than a hypothetical one. The value
+# shape is required: it separates a pointer from prose or configuration that
+# merely begins with one of these words.
+FM_VOICE_RULES+=("internal-session-pointer${TAB}i${TAB}^[[:space:]]*(claude-session|session|conversation|transcript|chat|thread)[[:space:]]*:[[:space:]]*(https?://|[A-Za-z0-9_-]{16,})${TAB}Published history must not link the working session that produced the change. Delete the trailer.")
+
+# The same pointer as a bare link, which survives being moved out of a trailer
+# and into a sentence in a pull request description. Matched on the session path
+# segment rather than on the host, so it does not become a list of vendors, and
+# ordinary links such as a forge issue URL stay legitimate.
+FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}(claude\.ai/code/session|/session_[A-Za-z0-9]{10,})${TAB}Published history must not link the working session that produced the change. Remove the link.")
 
 fm_voice_rule_field() {  # <rule> <field-index>
   printf '%s' "$1" | cut -d"$TAB" -f"$2"
@@ -207,14 +229,14 @@ fm_voice_unpublished_commits() {  # <destination>
   done < <(fm_voice_default_refs)
 
   if [ "${#refs[@]}" -eq 0 ]; then
-    printf 'fm-voice-guard.sh: cannot determine which commits are unpublished: no default-branch ref resolved (tried %s).\n' \
+    printf 'fm-prepush-voice-guard.sh: cannot determine which commits are unpublished: no default-branch ref resolved (tried %s).\n' \
       "${FM_VOICE_GUARD_BASE:-origin/main, main}" >&2
-    printf 'fm-voice-guard.sh: fetch the default branch (git fetch origin main) or set FM_VOICE_GUARD_BASE, then re-run. An unknown range is not a clean range.\n' >&2
+    printf 'fm-prepush-voice-guard.sh: fetch the default branch (git fetch origin main) or set FM_VOICE_GUARD_BASE, then re-run. An unknown range is not a clean range.\n' >&2
     return 3
   fi
 
   if ! git rev-list HEAD --not "${refs[@]}" > "$destination" 2>/dev/null; then
-    printf 'fm-voice-guard.sh: cannot list the commits ahead of %s. An unknown range is not a clean range.\n' \
+    printf 'fm-prepush-voice-guard.sh: cannot list the commits ahead of %s. An unknown range is not a clean range.\n' \
       "${refs[*]}" >&2
     return 3
   fi
@@ -226,21 +248,21 @@ TEXT_PATH=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --range)
-      [ "$#" -ge 2 ] || { printf 'fm-voice-guard.sh: --range requires a revision range.\n' >&2; exit 2; }
+      [ "$#" -ge 2 ] || { printf 'fm-prepush-voice-guard.sh: --range requires a revision range.\n' >&2; exit 2; }
       MODE=range
       RANGE=$2
       shift 2
       ;;
     --range=*) MODE=range; RANGE=${1#*=}; shift ;;
     --commit)
-      [ "$#" -ge 2 ] || { printf 'fm-voice-guard.sh: --commit requires a revision.\n' >&2; exit 2; }
+      [ "$#" -ge 2 ] || { printf 'fm-prepush-voice-guard.sh: --commit requires a revision.\n' >&2; exit 2; }
       MODE=commit
       RANGE=$2
       shift 2
       ;;
     --commit=*) MODE=commit; RANGE=${1#*=}; shift ;;
     --text)
-      [ "$#" -ge 2 ] || { printf 'fm-voice-guard.sh: --text requires a path or "-".\n' >&2; exit 2; }
+      [ "$#" -ge 2 ] || { printf 'fm-prepush-voice-guard.sh: --text requires a path or "-".\n' >&2; exit 2; }
       MODE=text
       TEXT_PATH=$2
       shift 2
@@ -256,13 +278,13 @@ while [ "$#" -gt 0 ]; do
       ;;
     --) shift; break ;;
     *)
-      printf 'fm-voice-guard.sh: unknown argument: %s\n' "$1" >&2
+      printf 'fm-prepush-voice-guard.sh: unknown argument: %s\n' "$1" >&2
       exit 2
       ;;
   esac
 done
 
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-voice-guard.XXXXXX") || exit 2
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-prepush-voice-guard.XXXXXX") || exit 2
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 MESSAGE_FILE="$TMP_ROOT/message"
@@ -276,7 +298,7 @@ if [ "$MODE" = text ]; then
   elif [ -f "$TEXT_PATH" ]; then
     cat -- "$TEXT_PATH" > "$MESSAGE_FILE"
   else
-    printf 'fm-voice-guard.sh: no such text file: %s\n' "$TEXT_PATH" >&2
+    printf 'fm-prepush-voice-guard.sh: no such text file: %s\n' "$TEXT_PATH" >&2
     exit 2
   fi
   SUBJECT_LABEL='the supplied text'
@@ -287,20 +309,20 @@ if [ "$MODE" = text ]; then
   fi
 else
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
-    printf 'fm-voice-guard.sh: not inside a git work tree.\n' >&2
+    printf 'fm-prepush-voice-guard.sh: not inside a git work tree.\n' >&2
     exit 2
   }
 
   COMMITS_FILE="$TMP_ROOT/commits"
   if [ "$MODE" = commit ]; then
     git rev-parse --verify -q "$RANGE^{commit}" > "$COMMITS_FILE" || {
-      printf 'fm-voice-guard.sh: not a commit: %s\n' "$RANGE" >&2
+      printf 'fm-prepush-voice-guard.sh: not a commit: %s\n' "$RANGE" >&2
       exit 2
     }
     SUBJECT_LABEL='that commit'
   elif [ -n "$RANGE" ]; then
     git rev-list "$RANGE" > "$COMMITS_FILE" 2>/dev/null || {
-      printf 'fm-voice-guard.sh: not a revision range: %s\n' "$RANGE" >&2
+      printf 'fm-prepush-voice-guard.sh: not a revision range: %s\n' "$RANGE" >&2
       exit 2
     }
     SUBJECT_LABEL='the commits in that range'
@@ -327,7 +349,7 @@ if [ "$FOUND" -eq 0 ]; then
 fi
 
 {
-  printf 'fm-voice-guard.sh: REFUSING - firstmate internal voice found in %s.\n' "$SUBJECT_LABEL"
+  printf 'fm-prepush-voice-guard.sh: REFUSING - firstmate internal voice found in %s.\n' "$SUBJECT_LABEL"
   printf 'This text would become permanent public history under the repository owner'"'"'s name.\n'
   cat "$REPORT"
   printf '\n  How to clear this refusal:\n'
@@ -339,7 +361,7 @@ fi
     printf '      git rebase -i <base>      then mark the named commits "reword"\n'
     printf '    Inside a no-mistakes run, respond to the gate and let the pipeline reword; do not push around this check.\n'
   fi
-  printf '    Inspect the full rule table with: bin/fm-voice-guard.sh --list-patterns\n'
+  printf '    Inspect the full rule table with: bin/fm-prepush-voice-guard.sh --list-patterns\n'
 } >&2
 
 exit 1

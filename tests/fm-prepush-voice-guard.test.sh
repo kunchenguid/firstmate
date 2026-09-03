@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pre-push refusal that keeps firstmate's internal voice out of published text,
-# owned by bin/fm-voice-guard.sh.
+# owned by bin/fm-prepush-voice-guard.sh.
 #
 # Regression origin: AGENTS.md tells every agent to address the user as
 # "captain" in every response, and agents working inside this repo read that as
@@ -22,7 +22,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-GUARD="$ROOT/bin/fm-voice-guard.sh"
+GUARD="$ROOT/bin/fm-prepush-voice-guard.sh"
 LINT="$ROOT/bin/fm-lint.sh"
 LINT_WF="$ROOT/bin/fm-lint-workflows.sh"
 
@@ -160,6 +160,57 @@ Captain, this also removes the second copy.') || rc=$?
 }
 
 # --- the refusal has to be actionable, or it gets disabled ------------------
+
+test_refuses_a_pointer_to_the_working_session() {
+  local tmp out rc=0
+
+  # The exact trailer shape already in merged history three times.
+  rc=0
+  out=$(fm_voice_text 'fix(bin): bound the scan
+
+Claude-Session: https://claude.ai/code/session_01AJfonRT1YLcHJCJ2UYwc3J') || rc=$?
+  expect_code 1 "$rc" "a session trailer was not refused"
+  assert_contains "$out" "internal-session-pointer" "session trailer named the wrong rule"
+
+  # The same pointer moved into prose, where the trailer rule cannot see it.
+  rc=0
+  out=$(fm_voice_text 'Context for reviewers: https://claude.ai/code/session_01AJfonRT1YLcHJCJ2UYwc3J') || rc=$?
+  expect_code 1 "$rc" "a session link in prose was not refused"
+  assert_contains "$out" "internal-session-link" "session link named the wrong rule"
+
+  # An opaque id with no URL is still a pointer.
+  rc=0
+  out=$(fm_voice_text 'Conversation: 01AJfonRT1YLcHJCJ2UYwc3J') || rc=$?
+  expect_code 1 "$rc" "an opaque session id was not refused"
+
+  pass "refuses a pointer to the working session"
+}
+
+test_passes_ordinary_uses_of_the_word_session() {
+  local tmp out rc=0 message
+  tmp=$(fm_test_tmproot fm-voice-session-ok)
+  fm_voice_repo "$tmp/repo"
+
+  for message in \
+    'A session-scoped negative cache keeps the conclusion' \
+    'fix(bin): bind the session lock to the home rather than the process' \
+    'feat(pi): start a fresh supervision branch for every main session' \
+    'docs: explain how session start drains the wake queue' \
+    'refs https://github.com/kunchenguid/firstmate/pull/3600' \
+    'fix(bin): rename create_session_id to match its record'
+  do
+    fm_voice_commit "$tmp/repo" "$message"
+  done
+  # A configuration key that merely begins with one of the trailer words: the
+  # value shape is what separates a pointer from prose, so this must pass.
+  fm_voice_commit "$tmp/repo" 'docs(config): document the poll keys
+
+session: see docs/configuration.md for the timeout keys'
+
+  out=$(fm_voice_scan "$tmp/repo") || rc=$?
+  expect_code 0 "$rc" "an ordinary use of the word session was refused"$'\n'"$out"
+  pass "passes ordinary technical uses of the word session"
+}
 
 test_refusal_names_what_matched_and_how_to_fix_it() {
   local tmp out rc=0
@@ -336,8 +387,8 @@ test_lint_default_path_runs_the_voice_guard() {
   mkdir -p "$tmp/bin" "$tmp/.github/workflows"
   cp "$LINT" "$tmp/bin/fm-lint.sh"
   cp "$LINT_WF" "$tmp/bin/fm-lint-workflows.sh"
-  cp "$GUARD" "$tmp/bin/fm-voice-guard.sh"
-  chmod +x "$tmp/bin/fm-lint.sh" "$tmp/bin/fm-lint-workflows.sh" "$tmp/bin/fm-voice-guard.sh"
+  cp "$GUARD" "$tmp/bin/fm-prepush-voice-guard.sh"
+  chmod +x "$tmp/bin/fm-lint.sh" "$tmp/bin/fm-lint-workflows.sh" "$tmp/bin/fm-prepush-voice-guard.sh"
   printf 'name: ci\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: "true"\n' \
     > "$tmp/.github/workflows/ci.yml"
 
@@ -365,7 +416,7 @@ SH
   out=$(cd "$tmp" && PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     "$tmp/bin/fm-lint.sh" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm-lint.sh default path did not refuse a leaking commit message"$'\n'"$out"
-  assert_contains "$out" "fm-voice-guard.sh: REFUSING" \
+  assert_contains "$out" "fm-prepush-voice-guard.sh: REFUSING" \
     "fm-lint.sh default path did not run the voice guard"$'\n'"$out"
 
   # Explicit paths are a ShellCheck-only override and must not scan commits,
@@ -382,6 +433,8 @@ test_refuses_the_real_leaked_commit
 test_passes_the_real_legitimate_message
 test_passes_legitimate_captain_and_house_vocabulary
 test_refuses_each_address_shape
+test_refuses_a_pointer_to_the_working_session
+test_passes_ordinary_uses_of_the_word_session
 test_refusal_names_what_matched_and_how_to_fix_it
 test_scans_only_unpublished_commits
 test_fails_closed_when_the_range_cannot_be_determined

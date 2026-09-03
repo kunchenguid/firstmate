@@ -225,16 +225,20 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 
 The same identity that the authority boundary above contains also leaks in the other direction, as text rather than as capability.
 An agent working inside this repo reads `AGENTS.md`'s "address the user as captain" rule as an ordinary repo file and applies it to commit messages, which it treats as responses; the messages that leaked came from the gate's own review, test, and document agents, so no crewmate brief could have prevented them.
-`bin/fm-voice-guard.sh` is the deterministic half of the fix, paired with the scoping sentence at that instruction in `AGENTS.md`.
+`bin/fm-prepush-voice-guard.sh` is the deterministic half of the fix, paired with the scoping sentence at that instruction in `AGENTS.md`.
 
 It runs before the first push rather than before merge, because on a repository firstmate does not own a maintainer can merge at any moment.
 The enforcement point is `bin/fm-lint.sh`'s default path: `.no-mistakes.yaml` pins `commands.lint` to that script and the gate runs lint after its review, test, and document steps, so it is the last firstmate-owned code to see every commit that is about to leave, including the ones the gate's own agents wrote.
 The guard bounds itself to commits no default-branch ref already carries, and fails closed when it cannot resolve one, which is why the CI lint job checks out full history.
-A pull request title and description have no pre-push moment, so `.github/workflows/voice-guard.yml` reads them on open, edit, synchronize, and reopen as the earliest available backstop for the text a squash merge turns into public history.
+A pull request title and description have no pre-push moment, so `.github/workflows/internal-voice-guard.yml` reads them on open, edit, synchronize, and reopen as the earliest available backstop for the text a squash merge turns into public history.
+
+The refusal also covers a pointer to the working session that produced a change, as a trailer or as a bare link, because that is internal material leaving the machine in the same artifact at the same moment; three such trailers are already in merged history.
+It refuses the pointer shape rather than the word, so the 333 merged lines using "session" in its ordinary technical sense still pass.
 
 The script's header owns the rule set, the evidence behind each rule, and the rules that were rejected.
-The short version is that the admissible signal is the syntactic position of an address rather than any vocabulary: this repo's own subject matter is the fleet, so `captain hold`, `captain intent`, the `/ahoy` skill, and `shipshape` are legitimate and must keep shipping.
-`tests/fm-voice-guard.test.sh` pins both directions against the real merged history the rules were selected on.
+The short version is that the admissible signal is the syntactic position of an address or a pointer rather than any vocabulary: this repo's own subject matter is the fleet, so `captain hold`, `captain intent`, the `/ahoy` skill, and `shipshape` are legitimate and must keep shipping.
+Its name is deliberately outside the `bin/fm-voice-*` audio relay family, which is unrelated.
+`tests/fm-prepush-voice-guard.test.sh` pins both directions against the real merged history the rules were selected on.
 
 ## Two task shapes
 
