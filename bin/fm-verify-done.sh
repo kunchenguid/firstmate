@@ -23,11 +23,25 @@
 #   local-only
 #     - the claim names this task's own branch, exactly fm/<task-id>
 #     - the claimed head= resolves in the task's local copy and is the tip of
-#       that branch, or - once the branch has been retired after the work
-#       merged - is BOTH the local copy's own HEAD and contained in the local
-#       default branch. Bare containment is never enough: every commit already
-#       on the default branch is its own ancestor, so containment alone would
-#       pass any claim naming the default branch's tip.
+#       that branch, AND that branch has moved since git created it.
+#       bin/fm-brief.sh has every worker create fm/<task-id> before it does any
+#       work, so the branch exists at the spawn base from the outset: a branch
+#       still sitting exactly where it was created is positive evidence that it
+#       introduced nothing, whatever the claim says. The branch's own history is
+#       the authority for that, not its merge base with the default branch:
+#       local-only work is on the default branch by the time it may be torn
+#       down, so a merge base equal to the branch tip is the ordinary shape of
+#       LANDED work and would contradict every honest claim. A branch history
+#       that cannot be read is absence of evidence and reads unverified.
+#     - once the branch has been retired after the work merged, the claimed head
+#       must be BOTH the local copy's own HEAD and contained in the local default
+#       branch. Bare containment is never enough: every commit already on the
+#       default branch is its own ancestor, so containment alone would pass any
+#       claim naming the default branch's tip. The merge-base test has no
+#       counterpart here because the branch ref it needs is gone; what stands in
+#       its place is that git refuses to delete a branch a worktree has checked
+#       out, so a worker still sitting on an un-retired fm/<task-id> can never
+#       reach this arm.
 #   scout
 #     - the claimed report= exists as a non-empty regular file. An absolute path
 #       is used as given (what bin/fm-brief.sh renders into a scout brief); a
@@ -161,7 +175,15 @@ if [ "$KIND" = scout ]; then
     data/*) REPORT="$DATA/${REPORT#data/}" ;;
     *) REPORT="$DATA/$REPORT" ;;
   esac
-  if [ -f "$REPORT" ] && [ ! -L "$REPORT" ] && [ -s "$REPORT" ]; then
+  # A symlink is refused as evidence rather than followed, but refusing to read
+  # something is not proof that it is false: the report may be perfectly present
+  # behind the link. That is absence of evidence, so it names the link and reads
+  # unverified.
+  if [ -L "$REPORT" ]; then
+    verdict_is unverified "the claimed report is a symlink, which is not read as evidence: $FM_DONE_CLAIM_REPORT"
+    finish
+  fi
+  if [ -f "$REPORT" ] && [ -s "$REPORT" ]; then
     verdict_is verified "report present at $FM_DONE_CLAIM_REPORT"
   else
     verdict_is contradicted "claimed report is missing or empty: $FM_DONE_CLAIM_REPORT"
@@ -215,13 +237,36 @@ if [ "$MODE" = local-only ]; then
     verdict_is contradicted "claimed commit $HEAD_CLAIM does not exist in the local copy"
     finish
   fi
+  DEFAULT=$(fm_default_branch "$WT" 2>/dev/null || true)
+  DEFAULT_REF=
+  if [ -n "$DEFAULT" ] \
+    && git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" >/dev/null 2>&1; then
+    DEFAULT_REF="refs/heads/$DEFAULT"
+  fi
   TIP=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" 2>/dev/null || true)
   if [ -n "$TIP" ]; then
     if [ "$TIP" != "$HEAD_CLAIM" ]; then
       verdict_is contradicted "branch $BRANCH is at $TIP, not the claimed $HEAD_CLAIM"
       finish
     fi
-    verdict_is verified "branch $BRANCH is at the claimed $HEAD_CLAIM"
+    # Being the branch tip is not the same as being this task's work. Every
+    # worker creates fm/<id> at the spawn base before it does anything, so a
+    # worker that commits nothing leaves the branch existing and pointing at
+    # that base. The commit the claim names must be one the branch introduced,
+    # which is what the branch's own history in git says: a branch still sitting
+    # exactly where it was created has introduced nothing, whatever is claimed
+    # of it. Its history being unreadable is absence of evidence, not falsity.
+    CREATED=$(git -C "$WT" reflog show --format=%H "refs/heads/$BRANCH" 2>/dev/null | tail -1 || true)
+    case "$CREATED" in *[!0-9a-f]*|'') CREATED= ;; esac
+    if [ -z "$CREATED" ]; then
+      verdict_is unverified "branch $BRANCH is at the claimed $HEAD_CLAIM, but its own history could not be read, so what $BRANCH introduced cannot be established"
+      finish
+    fi
+    if [ "$CREATED" = "$HEAD_CLAIM" ]; then
+      verdict_is contradicted "branch $BRANCH introduced nothing: it is still at $HEAD_CLAIM, the commit it was created at"
+      finish
+    fi
+    verdict_is verified "branch $BRANCH is at the claimed $HEAD_CLAIM, which it introduced after being created at $CREATED"
     finish
   fi
   # The branch is gone. That is the normal end state once local-only work has
@@ -241,13 +286,11 @@ if [ "$MODE" = local-only ]; then
     verdict_is unverified "branch $BRANCH is gone and the local copy's own HEAD is $WT_HEAD, not the claimed $HEAD_CLAIM, so nothing establishes that this task produced it"
     finish
   fi
-  DEFAULT=$(fm_default_branch "$WT" 2>/dev/null || true)
-  if [ -z "$DEFAULT" ] \
-    || ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$DEFAULT^{commit}" >/dev/null 2>&1; then
+  if [ -z "$DEFAULT_REF" ]; then
     verdict_is unverified "branch $BRANCH is gone and the local copy has no default branch to check the claimed $HEAD_CLAIM against"
     finish
   fi
-  if git -C "$WT" merge-base --is-ancestor "$HEAD_CLAIM" "refs/heads/$DEFAULT" 2>/dev/null; then
+  if git -C "$WT" merge-base --is-ancestor "$HEAD_CLAIM" "$DEFAULT_REF" 2>/dev/null; then
     verdict_is verified "the local copy is at the claimed $HEAD_CLAIM and it is on $DEFAULT; its branch $BRANCH has been retired"
     finish
   fi

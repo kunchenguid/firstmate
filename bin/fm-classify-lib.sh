@@ -1284,6 +1284,32 @@ $snapshot
 EOF
 }
 
+# Pull an already-acknowledged span back to where a bounded section actually
+# stopped presenting. <held-endpoints> is a "<task>\t<byte-endpoint>" list from
+# a caller that showed only part of a task's unread span; that task then
+# acknowledges exactly the bytes it showed, so the lines it held back stay
+# unread and re-present on the next drain instead of being skipped past. Only
+# ever moves an endpoint backwards, so it can never acknowledge more than the
+# acknowledgement it is given.
+status_hold_presented_spans() {  # <acknowledged> <held-endpoints>
+  local acknowledged=$1 held=${2:-} task endpoint ident held_task held_endpoint
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    while IFS=$(printf '\t') read -r held_task held_endpoint; do
+      [ "$held_task" = "$task" ] || continue
+      case "$held_endpoint" in ''|*[!0-9]*) continue ;; esac
+      case "$endpoint" in ''|*[!0-9]*) continue ;; esac
+      [ "$held_endpoint" -lt "$endpoint" ] || continue
+      endpoint=$held_endpoint
+    done <<EOF
+$held
+EOF
+    printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" || return 1
+  done <<EOF
+$acknowledged
+EOF
+}
+
 status_commit_presentation_snapshot() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
   tmp="$state/.status-presentation-cursor.tmp.$$"
@@ -1490,17 +1516,24 @@ status_line_is_unread_surface() {  # <status-line>
 # still-unread `note:` or pending-reply resolution, in glob (task id) order.
 # Prints nothing when none are unread. Directory scan rejects status symlinks
 # the same way scan_open_decisions does.
+# Each row carries the 1-based index of the line within that task's unread span,
+# so a caller that presents only part of the span can name where it stopped and
+# status_unread_span_endpoint_through can turn that back into a byte offset. The
+# index counts every non-blank line in the span, not only the surfaced ones,
+# because the cursor advances over bytes rather than over surfaced lines.
 scan_unread_surface_lines() {  # <state>
-  local state=$1 f task lines line
+  local state=$1 f task lines line index
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     lines=$(status_new_lines_since_cursor "$f") || return 1
     [ -n "$lines" ] || continue
+    index=0
     while IFS= read -r line; do
       [ -n "$line" ] || continue
+      index=$((index + 1))
       status_line_is_unread_surface "$line" || continue
-      printf '%s\t%s\n' "$task" "$line"
+      printf '%s\t%s\t%s\n' "$task" "$index" "$line"
     done <<EOF
 $lines
 EOF
@@ -1509,22 +1542,62 @@ EOF
 }
 
 scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f lines line
+  local state=$1 snapshot=$2 task endpoint ident f lines line index
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
     lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
     [ -n "$lines" ] || continue
+    index=0
     while IFS= read -r line; do
       [ -n "$line" ] || continue
+      index=$((index + 1))
       status_line_is_unread_surface "$line" || continue
-      printf '%s\t%s\n' "$task" "$line"
+      printf '%s\t%s\t%s\n' "$task" "$index" "$line"
     done <<EOF
 $lines
 EOF
   done <<EOF
 $snapshot
 EOF
+}
+
+# The byte endpoint just past the <n>th non-blank line of a task's unread span,
+# for a caller that presented only that much of it. The status log is
+# append-only and the span is contiguous, so this is the SAME cursor the full
+# advance uses, stopped earlier - not a second one. An <n> of 0 is the cursor
+# itself (nothing presented, nothing acknowledged); an <n> at or past the span's
+# last line is the captured endpoint.
+status_unread_span_endpoint_through() {  # <status-file> <captured-end-offset> <n>
+  local f=$1 captured_end=$2 want=$3 offset span_file consumed=0 seen=0 line bytes
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  case "$captured_end" in ''|*[!0-9]*) return 1 ;; esac
+  case "$want" in ''|*[!0-9]*) return 1 ;; esac
+  offset=$(status_presentation_cursor_offset "$f") || return 1
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$want" -eq 0 ] || [ "$offset" -ge "$captured_end" ]; then
+    printf '%s' "$offset"
+    return 0
+  fi
+  span_file="$(_fm_open_decisions_cursor_path "$f").presented.$$"
+  _fm_status_read_span "$f" "$offset" "$((captured_end - offset))" > "$span_file" 2>/dev/null \
+    || { rm -f "$span_file"; return 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    bytes=$((${#line} + 1))
+    consumed=$((consumed + bytes))
+    case "$line" in
+      *[![:space:]]*)
+        seen=$((seen + 1))
+        if [ "$seen" -ge "$want" ]; then break; fi
+        ;;
+    esac
+  done < "$span_file"
+  rm -f "$span_file"
+  if [ "$seen" -lt "$want" ] || [ "$((offset + consumed))" -ge "$captured_end" ]; then
+    printf '%s' "$captured_end"
+    return 0
+  fi
+  printf '%s' "$((offset + consumed))"
 }
 
 # Fold material routed-work phases in the same keyed event stream.

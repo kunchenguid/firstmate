@@ -147,6 +147,7 @@ case "${1:-} ${2:-}" in
 esac
 case " $* " in
   *"state,headRefOid,url,statusCheckRollup"*)
+    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
     printf '%s\t%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" \
       "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" SUCCESS
     ;;
@@ -633,7 +634,7 @@ run_watcher_bounded() {
 # advisory: no verifier outcome, including there being nothing to verify, may
 # change what this script registers, arms, or exits with.
 test_registration_arms_claim_verification_without_blocking() {
-  local dir head url other
+  local dir head url other started elapsed
   url=https://github.com/o/r/pull/9
   head=0123456789abcdef0123456789abcdef01234567
   other=89abcdef0123456789abcdef0123456789abcdef
@@ -675,6 +676,26 @@ test_registration_arms_claim_verification_without_blocking() {
     || fail "a task with no terminal claim did not get its poll armed"
   assert_absent "$dir/home/state/task-a.done-verdict" "a task with no claim was given a verdict record"
   assert_no_grep 'claim:' "$dir/stdout" "a task with no claim printed a verdict line"
+
+  # The arming is advisory in LATENCY too: this is a human-facing entrypoint
+  # that used to return the moment the poll was armed, and the verifier consults
+  # the forge behind its own bounds. A verifier that runs long is abandoned, and
+  # the registration it cannot affect is already complete.
+  dir=$(make_case verify-slow)
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "worktree=$dir/wt" "kind=ship" "mode=direct-PR"
+  printf 'done: pr=%s head=%s - shipped\n' "$url" "$head" > "$dir/home/state/task-a.status"
+  started=$(date +%s)
+  FM_TEST_GH_HEAD=$head FM_TEST_GH_SLEEP=20 FM_PR_CHECK_VERIFY_TIMEOUT=2 \
+    run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a slow verifier changed the registration's exit status: $(cat "$dir/stderr")"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 15 ] \
+    || fail "registration waited ${elapsed}s on its advisory verification instead of bounding it"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "a slow verifier stopped the poll from being armed"
+  assert_grep "armed: state/task-a.check.sh" "$dir/stdout" \
+    "a slow verifier stopped the registration reporting what it armed"
 
   pass "PR registration arms claim verification without ever blocking it"
 }

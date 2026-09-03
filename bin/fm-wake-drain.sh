@@ -349,8 +349,9 @@ EOF
 # instead. Deliberately bounded where `note:` lines are not: a note is a
 # deliberate captain-facing answer, while unrecognised prose is a worker writing
 # into the wrong channel, and one chatty worker must not be able to bury the
-# rest of the drain. The count still says how many were held back, so nothing
-# disappears silently.
+# rest of the drain. The count still says how many were held back, and the
+# presentation cursor is held at the last line this drain actually showed, so
+# the rest re-present on the next drain rather than being skipped past.
 UNRECOGNISED_STATUS_MAX=${FM_DRAIN_UNRECOGNISED_MAX:-10}
 case "$UNRECOGNISED_STATUS_MAX" in ''|*[!0-9]*) UNRECOGNISED_STATUS_MAX=10 ;; esac
 
@@ -363,10 +364,43 @@ case "$UNRECOGNISED_STATUS_MAX" in ''|*[!0-9]*) UNRECOGNISED_STATUS_MAX=10 ;; es
 # ordinary status line, because it woke firstmate and classified as nothing: the
 # mark is what stops it being read as a state it never claimed. Prints nothing
 # when nothing is unread, which is the common case.
+# Byte endpoints for tasks whose unread span was only partly presented, in the
+# "<task>\t<endpoint>" form status_acknowledge_presented_snapshot takes.
+UNREAD_STATUS_HELD_ENDPOINTS=
+
+# Record where this drain actually stopped presenting <task>, so the lines the
+# cap held back stay unread instead of being skipped past. Nothing is recorded
+# for a task that was presented whole.
+hold_unread_remainder() {  # <task> <last-presented-span-index> <omitted-any> <snapshot>
+  local task=$1 through=$2 held_back=$3 snapshot=$4 f row_task endpoint ident captured=
+  [ -n "$task" ] || return 0
+  [ "$held_back" -gt 0 ] || return 0
+  f="$STATE/$task.status"
+  if [ -n "$snapshot" ]; then
+    while IFS=$(printf '\t') read -r row_task endpoint ident; do
+      [ "$row_task" = "$task" ] || continue
+      [ -n "$ident" ] || continue
+      captured=$endpoint
+    done <<EOF
+$snapshot
+EOF
+  else
+    captured=$(_fm_status_file_size "$f" 2>/dev/null || true)
+    captured=${captured//[[:space:]]/}
+  fi
+  case "$captured" in ''|*[!0-9]*) return 0 ;; esac
+  endpoint=$(status_unread_span_endpoint_through "$f" "$captured" "$through") || return 0
+  case "$endpoint" in ''|*[!0-9]*) return 0 ;; esac
+  UNREAD_STATUS_HELD_ENDPOINTS="${UNREAD_STATUS_HELD_ENDPOINTS}${task}$(printf '\t')${endpoint}
+"
+}
+
 print_unread_status_section() {
-  local snapshot=${1:-} unread task line shown=0 unrecognised=0 omitted=0
+  local snapshot=${1:-} unread task index line shown=0 unrecognised=0 omitted=0
+  local current='' through=0 held_back=0
   local header='UNREAD STATUS (new since last drain, not re-printed after this presentation):'
 
+  UNREAD_STATUS_HELD_ENDPOINTS=
   if [ -n "$snapshot" ]; then
     unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 1
   else
@@ -374,13 +408,21 @@ print_unread_status_section() {
   fi
   [ -n "$unread" ] || return 0
 
-  while IFS=$(printf '\t') read -r task line; do
+  while IFS=$(printf '\t') read -r task index line; do
     [ -n "$task" ] || continue
+    [ -n "$index" ] || continue
     [ -n "$line" ] || continue
+    if [ "$task" != "$current" ]; then
+      hold_unread_remainder "$current" "$through" "$held_back" "$snapshot" || return 1
+      current=$task
+      through=0
+      held_back=0
+    fi
     if status_line_is_unrecognized "$line"; then
       unrecognised=$((unrecognised + 1))
       if [ "$unrecognised" -gt "$UNRECOGNISED_STATUS_MAX" ]; then
         omitted=$((omitted + 1))
+        held_back=$((held_back + 1))
         continue
       fi
       fm_cap_line_var "$line" 220
@@ -392,10 +434,12 @@ print_unread_status_section() {
       printf '%s\n' "$header" || return 1
     fi
     printf '%s\n' "$line" || return 1
+    through=$index
     shown=$((shown + 1))
   done <<EOF
 $unread
 EOF
+  hold_unread_remainder "$current" "$through" "$held_back" "$snapshot" || return 1
 
   # The count is part of the section, never a bare line on its own: with the cap
   # set to 0 and only unrecognised lines unread, the loop above prints no header.
@@ -403,7 +447,7 @@ EOF
     if [ "$shown" -eq 0 ]; then
       printf '%s\n' "$header" || return 1
     fi
-    printf 'UNREAD STATUS: %d more unrecognised line(s) omitted; read them in the task status log.\n' \
+    printf 'UNREAD STATUS: %d more unrecognised line(s) held for the next drain; read them now in the task status log.\n' \
       "$omitted" || return 1
   fi
   [ "$shown" -gt 0 ] || return 0
@@ -545,6 +589,14 @@ print_status_sections() {
   } > "$prepared"; then
     rm -f -- "$prepared"
     return 1
+  fi
+  # The unread section is bounded, so it may have stopped part-way through a
+  # task's span. Pull that task's acknowledgement back to where it actually
+  # stopped, and leave every other task's acknowledgement exactly as computed
+  # above - before the open-decisions fold moved the cursor it reads.
+  if [ -n "$UNREAD_STATUS_HELD_ENDPOINTS" ]; then
+    acknowledged=$(status_hold_presented_spans "$acknowledged" "$UNREAD_STATUS_HELD_ENDPOINTS") \
+      || { rm -f -- "$prepared"; return 1; }
   fi
   # Prepare every section before presentation, but do not commit its receipt
   # until the prepared bytes reach stdout. If the consumer closes or fails,

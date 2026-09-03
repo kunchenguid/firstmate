@@ -38,12 +38,18 @@
 #   (r) a relative scout report= resolves against a relocated data root
 #   (s) a close with no done claim on record does not invent one
 #   (t) a home's configured verb vocabulary is not labelled UNRECOGNISED
-#   (u) the omitted-unrecognised count is never printed without its header
+#   (u) the omitted-unrecognised count is never printed without its header, and
+#       what the cap holds back re-presents on the next drain rather than
+#       being skipped past forever
 #   (v) an absent mode= with a local-only-shaped claim is judged as local-only,
 #       never reported as false for naming no PR
 #   (w) an absent mode= the claim's own shape cannot resolve is unverified,
 #       naming the unrecorded mode - absence of evidence is never contradicted
 #   (x) --help prints the whole header it documents itself with
+#   (y) a local-only branch that introduced nothing cannot satisfy a claim, in
+#       the shape this fleet actually produces: the branch EXISTS at the spawn
+#       base because the brief has the worker create it before any work
+#   (z) a scout report present behind a symlink is unverified, not contradicted
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -67,6 +73,15 @@ fm_git_identity fmtest fmtest@example.invalid
 # a later "shipped" commit are genuinely different objects. Prints the case dir;
 # the caller reads the two commits back with git rather than through a global,
 # because this runs inside a command substitution.
+#
+# This is a standalone repository, NOT the linked worktree of a project repo a
+# real spawn produces (make_local_world below is the fixture shaped like a real
+# spawn). That is sufficient here and only here: the PR arm judges the claim
+# against the forge and the validation run and never consults a default branch
+# or a merge base, so the worktree's relationship to a parent repo cannot change
+# any verdict it reaches. The same applies to the kind=scout cases, which are
+# left on a branch with commits while a real scout sits at detached HEAD in a
+# scratch worktree: the scout arm reads only the claimed report path.
 make_world() {  # <name> [kind] [mode]
   local name=$1 kind=${2:-ship} mode=${3:-no-mistakes} dir
   dir="$TMP_ROOT/$name"
@@ -119,10 +134,13 @@ verify() {  # <dir> [data-root]
   printf '%s\t%s\n' "$rc" "$out"
 }
 
-# A local-only world shaped like a real spawn: a repo whose default branch keeps
-# advancing, plus a LINKED worktree left where the task was spawned. The task's
-# own fm/task-v branch is never created, which is the state a worker that
-# committed nothing leaves behind. Prints the case dir.
+# A local-only world shaped like a real spawn, per bin/fm-brief.sh's shared
+# Setup section: a project repo whose default branch keeps advancing, a LINKED
+# worktree added at detached HEAD on that default branch, and - as the brief
+# makes every ship worker's FIRST action - `git checkout -b fm/task-v` in that
+# worktree BEFORE any work exists. So a worker that commits nothing leaves
+# fm/task-v EXISTING and pointing at the spawn base, which is the state the
+# branch-exists arm has to judge. Prints "<case dir>\t<default branch>".
 make_local_world() {  # <name>
   local name=$1 dir default
   dir="$TMP_ROOT/$name"
@@ -131,12 +149,24 @@ make_local_world() {  # <name>
   git -C "$dir/repo" commit -q --allow-empty -m base
   default=$(git -C "$dir/repo" symbolic-ref --quiet --short HEAD)
   git -C "$dir/repo" worktree add -q --detach "$dir/wt" HEAD
+  git -C "$dir/wt" checkout -q -b fm/task-v
   # The default branch moves on after the spawn, so its tip is a commit the task
   # never produced - exactly the commit a fabricated claim would reach for.
   git -C "$dir/repo" commit -q --allow-empty -m later
   fm_write_meta "$dir/state/task-v.meta" \
     "window=fm:fm-task-v" "worktree=$dir/wt" "kind=ship" "mode=local-only"
   printf '%s\t%s\n' "$dir" "$default"
+}
+
+# Retire fm/task-v the way landing does: the work is merged into the default
+# branch, the task's copy leaves the branch, and the branch itself is deleted.
+# git refuses to delete a branch a worktree still has checked out, which is why
+# a worker that never committed can never present the retired shape.
+retire_local_branch() {  # <case dir> <where to leave the worktree>
+  local dir=$1 park=$2
+  git -C "$dir/repo" merge -q --no-ff -m landed fm/task-v
+  git -C "$dir/wt" checkout -q --detach "$park"
+  git -C "$dir/repo" branch -q -D fm/task-v
 }
 
 nm_status() {  # <branch> <head>
@@ -335,6 +365,27 @@ test_scout_claim_checks_the_report_exists() {
   pass "a scout claim is established against the report it names"
 }
 
+# Refusing to read something is not proof that it is false. The symlink refusal
+# stays - a link is not followed as evidence - but a report that is plainly
+# present behind it must not be reported as missing, and teardown must not print
+# stop-and-investigate wording for it.
+test_a_symlinked_scout_report_is_unverified_not_contradicted() {
+  local dir result
+  dir=$(make_world scout-symlink scout scout)
+  mkdir -p "$dir/data/task-v" "$dir/elsewhere"
+  printf 'findings\n' > "$dir/elsewhere/report.md"
+  ln -s "$dir/elsewhere/report.md" "$dir/data/task-v/report.md"
+  printf 'done: report=data/task-v/report.md - found it\n' > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "a present-but-symlinked scout report was not unverified: $result"
+  case "$result" in
+    *"missing or empty"*) fail "the verdict called a present report missing: $result" ;;
+  esac
+  case "$result" in *symlink*) ;; *) fail "the verdict did not name the symlink it refused to read: $result" ;; esac
+  pass "a scout report behind a symlink is unverified, never contradicted"
+}
+
 # --- (i) a verdict judges one exact claim ------------------------------------
 
 test_a_verdict_does_not_cover_a_later_claim() {
@@ -466,18 +517,66 @@ test_a_fabricated_local_only_claim_is_not_verified() {
   dir=${out%%$'\t'*}
   default=${out#*$'\t'}
   tip=$(git -C "$dir/repo" rev-parse "refs/heads/$default")
-  # The worker committed nothing and fm/task-v never existed. It claims the
-  # default branch's tip, which IS contained in the default branch, so bare
-  # ancestry would pass a claim holding none of this task's work.
+  # The worker committed nothing, so fm/task-v still sits at the spawn base. It
+  # claims the default branch's tip, which IS contained in the default branch,
+  # so bare ancestry would pass a claim holding none of this task's work.
   printf 'done: branch=fm/task-v head=%s - shipped\n' "$tip" > "$dir/state/task-v.status"
   result=$(verify "$dir")
   case "${result#*$'\t'}" in
     verified:*) fail "a fabricated local-only claim naming the default branch tip was verified: $result" ;;
   esac
-  [ "${result%%$'\t'*}" = 3 ] \
-    || fail "a fabricated local-only claim did not exit unverified: $result"
-  case "$result" in *"local copy's own HEAD"*) ;; *) fail "the unverified reason did not name what could not be established: $result" ;; esac
+  [ "${result%%$'\t'*}" = 4 ] \
+    || fail "a claim naming a commit the task's branch is not at was not contradicted: $result"
+  case "$result" in *"not the claimed $tip"*) ;; *) fail "the contradiction did not name what the branch is actually at: $result" ;; esac
   pass "a fabricated local-only claim naming the default branch's tip is not verified"
+}
+
+# The shape that actually occurs in this fleet, and the one bare tip-comparison
+# passed: the branch exists because the brief had the worker create it, it still
+# points at the spawn base because the worker committed nothing, and the claim
+# names that base. Being the branch tip is not the same as being this task's
+# work, and a branch that introduced nothing is positive evidence, not absence.
+test_a_local_only_claim_naming_the_spawn_base_is_contradicted() {
+  local out dir base result
+  out=$(make_local_world local-spawn-base) || fail "the local-only fixture failed"
+  dir=${out%%$'\t'*}
+  base=$(git -C "$dir/wt" rev-parse HEAD)
+  [ "$(git -C "$dir/wt" rev-parse refs/heads/fm/task-v)" = "$base" ] \
+    || fail "the fixture did not leave fm/task-v at the spawn base"
+  printf 'done: branch=fm/task-v head=%s - shipped\n' "$base" > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  case "${result#*$'\t'}" in
+    verified:*) fail "a claim naming a commit its branch never introduced was verified: $result" ;;
+  esac
+  [ "${result%%$'\t'*}" = 4 ] \
+    || fail "a branch that introduced nothing was not contradicted: $result"
+  case "$result" in *"introduced nothing"*) ;; *) fail "the contradiction did not name what was established: $result" ;; esac
+  pass "a local-only claim naming the spawn base its branch never left is contradicted"
+}
+
+# The honest local-only case, which must stay verified: the branch carries work
+# the task actually produced, and the claim names its tip.
+test_a_local_only_claim_on_introduced_work_verifies() {
+  local out dir default tip result
+  out=$(make_local_world local-real-work) || fail "the local-only fixture failed"
+  dir=${out%%$'\t'*}
+  default=${out#*$'\t'}
+  git -C "$dir/wt" commit -q --allow-empty -m "the task's own work"
+  tip=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'done: branch=fm/task-v head=%s - shipped\n' "$tip" > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 0 ] \
+    || fail "a claim naming work the task's own branch introduced was not verified: $result"
+
+  # And it must STILL verify once that work is on the default branch with the
+  # branch left standing, which is the shape local-only work is in by the time
+  # bin/fm-teardown.sh consults this verdict. A test of the branch's merge base
+  # with the default branch would call this true claim false.
+  git -C "$dir/repo" update-ref "refs/heads/$default" "$tip"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 0 ] \
+    || fail "landed local-only work whose branch still stands was not verified: $result"
+  pass "a local-only claim naming work its branch introduced verifies, landed or not"
 }
 
 test_a_local_only_claim_naming_another_branch_is_contradicted() {
@@ -496,20 +595,43 @@ test_a_local_only_claim_naming_another_branch_is_contradicted() {
 }
 
 test_a_local_only_claim_on_a_retired_branch_still_verifies() {
-  local out dir default landed result
+  local out dir work result
   out=$(make_local_world local-retired) || fail "the local-only fixture failed"
   dir=${out%%$'\t'*}
-  default=${out#*$'\t'}
-  # The work landed on the default branch, and the task's own copy sits on the
-  # commit it produced. The fm/task-v branch itself has been retired.
-  git -C "$dir/repo" commit -q --allow-empty -m landed
-  landed=$(git -C "$dir/repo" rev-parse "refs/heads/$default")
-  git -C "$dir/wt" checkout -q --detach "$landed"
-  printf 'done: branch=fm/task-v head=%s - shipped\n' "$landed" > "$dir/state/task-v.status"
+  # The task committed real work, that work landed on the default branch, its
+  # own copy still sits on the commit it produced, and fm/task-v is retired.
+  git -C "$dir/wt" commit -q --allow-empty -m "the task's own work"
+  work=$(git -C "$dir/wt" rev-parse HEAD)
+  retire_local_branch "$dir" "$work"
+  git -C "$dir/wt" rev-parse --verify --quiet refs/heads/fm/task-v >/dev/null 2>&1 \
+    && fail "the fixture did not actually retire fm/task-v"
+  printf 'done: branch=fm/task-v head=%s - shipped\n' "$work" > "$dir/state/task-v.status"
   result=$(verify "$dir")
   [ "${result%%$'\t'*}" = 0 ] \
     || fail "genuinely landed local-only work with a retired branch was not verified: $result"
   pass "local-only work whose branch was retired after landing still verifies"
+}
+
+# The other half of the retired arm: the branch is gone, but the task's own copy
+# is not sitting on the commit claimed, so nothing establishes that this task
+# produced it. Absence of evidence, so unverified rather than contradicted.
+test_a_retired_branch_claim_with_the_copy_elsewhere_is_not_verified() {
+  local out dir default work result
+  out=$(make_local_world local-retired-elsewhere) || fail "the local-only fixture failed"
+  dir=${out%%$'\t'*}
+  default=${out#*$'\t'}
+  git -C "$dir/wt" commit -q --allow-empty -m "the task's own work"
+  work=$(git -C "$dir/wt" rev-parse HEAD)
+  retire_local_branch "$dir" "refs/heads/$default"
+  printf 'done: branch=fm/task-v head=%s - shipped\n' "$work" > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  case "${result#*$'\t'}" in
+    verified:*) fail "a retired-branch claim the local copy does not stand behind was verified: $result" ;;
+  esac
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "a retired-branch claim with the copy elsewhere was not unverified: $result"
+  case "$result" in *"local copy's own HEAD"*) ;; *) fail "the unverified reason did not name what could not be established: $result" ;; esac
+  pass "a retired-branch claim the task's own copy does not stand behind is not verified"
 }
 
 # --- (o)-(p) the durable record resists a downgrade but not a contradiction ---
@@ -785,11 +907,54 @@ test_the_omitted_unrecognised_count_carries_its_header() {
   # say what it is counting.
   FM_DRAIN_UNRECOGNISED_MAX=0 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed with the unrecognised surface capped at zero"
-  assert_grep 'UNREAD STATUS: 2 more unrecognised line(s) omitted' "$out" \
+  assert_grep 'UNREAD STATUS: 2 more unrecognised line(s) held for the next drain' "$out" \
     "the omitted unrecognised lines were not counted: $(cat "$out")"
   assert_grep 'UNREAD STATUS (new since last drain' "$out" \
     "the omitted count was printed without its section header: $(cat "$out")"
   pass "the omitted-unrecognised count is never printed as a bare orphan line"
+}
+
+# The cap bounds one drain; it must not cost the worker's words. What the cap
+# held back stays unread and comes back on the next drain, while what was
+# printed is not replayed - the brief is explicit that losing a worker's words
+# is worse than showing them.
+test_capped_unrecognised_lines_return_on_the_next_drain() {
+  local dir state status first second third
+  dir=$(make_case unrecognised-deferred)
+  state="$dir/state"
+  status="$state/task9.status"
+  printf 'note: bootstrap cursor line\n' > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
+    || fail "bootstrap drain failed while priming the cursor"
+
+  {
+    printf 'first prose line from the worker\n'
+    printf 'second prose line from the worker\n'
+    printf 'third prose line from the worker\n'
+  } >> "$status"
+
+  first="$dir/first.out"; second="$dir/second.out"; third="$dir/third.out"
+  FM_DRAIN_UNRECOGNISED_MAX=1 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first" \
+    || fail "the capped drain failed"
+  assert_grep 'first prose line' "$first" "the capped drain printed nothing: $(cat "$first")"
+  assert_no_grep 'second prose line' "$first" "the cap did not hold the second line back"
+  assert_grep 'UNREAD STATUS: 2 more unrecognised line(s) held' "$first" \
+    "the held-back lines were not counted: $(cat "$first")"
+
+  FM_DRAIN_UNRECOGNISED_MAX=1 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" \
+    || fail "the second drain failed"
+  assert_grep 'second prose line' "$second" \
+    "a line the cap held back never came back: $(cat "$second")"
+  assert_no_grep 'first prose line' "$second" \
+    "a line that was already presented was replayed: $(cat "$second")"
+
+  FM_DRAIN_UNRECOGNISED_MAX=1 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$third" \
+    || fail "the third drain failed"
+  assert_grep 'third prose line' "$third" \
+    "the last held-back line never came back: $(cat "$third")"
+  assert_no_grep 'second prose line' "$third" \
+    "an already-presented line was replayed on the third drain: $(cat "$third")"
+  pass "unrecognised lines the cap holds back re-present instead of being lost"
 }
 
 test_claim_grammar_round_trips
@@ -802,6 +967,7 @@ test_honest_claim_verifies_and_records_the_checks_state
 test_red_checks_do_not_by_themselves_contradict_a_claim
 test_checks_state_is_read_from_a_real_rollup
 test_scout_claim_checks_the_report_exists
+test_a_symlinked_scout_report_is_unverified_not_contradicted
 test_a_verdict_does_not_cover_a_later_claim
 test_no_claim_is_not_a_verdict
 test_poll_reports_a_close_as_well_as_a_merge
@@ -809,8 +975,11 @@ test_marker_distinguishes_the_two_terminal_outcomes
 test_drain_flags_a_line_matching_no_status_verb
 test_known_verbs_are_not_flagged_as_unrecognised
 test_a_fabricated_local_only_claim_is_not_verified
+test_a_local_only_claim_naming_the_spawn_base_is_contradicted
+test_a_local_only_claim_on_introduced_work_verifies
 test_a_local_only_claim_naming_another_branch_is_contradicted
 test_a_local_only_claim_on_a_retired_branch_still_verifies
+test_a_retired_branch_claim_with_the_copy_elsewhere_is_not_verified
 test_a_transient_unverified_does_not_downgrade_an_established_record
 test_a_contradiction_still_overwrites_an_established_record
 test_an_absent_mode_still_checks_the_validated_commit
@@ -821,4 +990,5 @@ test_help_prints_the_whole_header
 test_a_close_does_not_invent_a_done_claim
 test_a_configured_verb_vocabulary_is_not_unrecognised
 test_the_omitted_unrecognised_count_carries_its_header
+test_capped_unrecognised_lines_return_on_the_next_drain
 echo "all fm-done-verified tests passed"

@@ -23,6 +23,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -163,11 +165,19 @@ esac
 # verifier does, including being absent, erroring, or timing out, and its
 # outcome never reaches this script's exit status. A task that has not claimed
 # done yet prints nothing and is not an error.
+# Advisory in latency as well as in outcome: the verifier consults the forge and
+# the validation run behind its own bounds, and this is a human-facing
+# entrypoint that used to return the moment the poll was armed, so the whole
+# call sits under one deadline of this script's own. Exceeding it leaves the
+# registration exactly as it already is and prints nothing.
+VERIFY_TIMEOUT=${FM_PR_CHECK_VERIFY_TIMEOUT:-20}
+case "$VERIFY_TIMEOUT" in ''|*[!0-9]*|0) VERIFY_TIMEOUT=20 ;; esac
 if [ -x "$SCRIPT_DIR/fm-verify-done.sh" ]; then
   VERIFY_LINE=$(FM_HOME="$FM_HOME" \
     FM_STATE_OVERRIDE="$STATE" \
     FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-}" \
-    "$SCRIPT_DIR/fm-verify-done.sh" "$ID" 2>/dev/null | head -1) || VERIFY_LINE=
+    fm_run_timed "$VERIFY_TIMEOUT" "$SCRIPT_DIR/fm-verify-done.sh" "$ID" 2>/dev/null \
+    | head -1) || VERIFY_LINE=
   [ -z "$VERIFY_LINE" ] || printf 'claim: %s\n' "$VERIFY_LINE"
 fi
 printf 'armed: state/%s.check.sh\n' "$ID"
