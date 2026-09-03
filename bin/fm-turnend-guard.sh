@@ -160,7 +160,6 @@ BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
-FAILURE_EPOCH="$STATE/.claude-autoarm-failure-epoch"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
@@ -315,7 +314,7 @@ autoarm_owns_recovery() {
   epoch_path="$STATE/.claude-autoarm-epoch"
   if [ -e "$FAILURE_NOTICE" ] && fm_autoarm_failure_ledger_current "$STATE"; then
     outcome=$FM_AUTOARM_FAILURE_OUTCOME
-    epoch_path=$FAILURE_EPOCH
+    epoch_path=$FM_AUTOARM_FAILURE_PATH
   else
     outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   fi

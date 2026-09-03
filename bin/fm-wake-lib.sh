@@ -1081,8 +1081,9 @@ fm_task_set_lock_path() {  # <state-dir>
 }
 
 fm_failure_episode_reset() {
-  local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
+  local state=$1 mode=${2:-acquire} lock current pid acquired=0 path failure_dir
   lock="$state/.turnend-claude-blocks.lock"
+  failure_dir="$state/.claude-autoarm-failure-epochs"
   case "$mode" in
     acquire)
       fm_lock_try_acquire "$lock" || return 1
@@ -1106,6 +1107,11 @@ fm_failure_episode_reset() {
       return 1
     fi
   done
+  if { [ -e "$failure_dir" ] || [ -L "$failure_dir" ]; } \
+    && { [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; }; then
+    [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+    return 1
+  fi
   if ! rm -f \
     "$state/.turnend-claude-blocks" \
     "$state/.claude-autoarm-failure-epoch" \
@@ -1114,6 +1120,19 @@ fm_failure_episode_reset() {
     2>/dev/null; then
     [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
     return 1
+  fi
+  if [ -d "$failure_dir" ]; then
+    for path in "$failure_dir"/* "$failure_dir"/.[!.]* "$failure_dir"/..?*; do
+      [ -e "$path" ] || [ -L "$path" ] || continue
+      if [ ! -f "$path" ] || [ -L "$path" ] || ! rm -f "$path" 2>/dev/null; then
+        [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+        return 1
+      fi
+    done
+    if ! rmdir "$failure_dir" 2>/dev/null; then
+      [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+      return 1
+    fi
   fi
   [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   return 0
@@ -1310,13 +1329,32 @@ fm_autoarm_claim_signature() {  # <state-dir>
   fi
 }
 
-fm_autoarm_failure_ledger_read() {  # <state-dir>
-  local state=$1 failure baseline rest baseline_gen baseline_owner baseline_outcome
-  failure="$state/.claude-autoarm-failure-epoch"
+fm_autoarm_failure_record_path() {  # <state-dir> <baseline-signature>
+  local state=$1 baseline=$2 rest baseline_gen baseline_owner baseline_outcome
+  if [ "$baseline" = absent ]; then
+    printf '%s/.claude-autoarm-failure-epochs/absent\n' "$state"
+    return 0
+  fi
+  baseline_gen=${baseline%%:*}
+  rest=${baseline#*:}
+  [ "$rest" != "$baseline" ] || return 1
+  baseline_owner=${rest%%:*}
+  baseline_outcome=${rest#*:}
+  case "$baseline_gen" in ''|*[!0-9]*) return 1 ;; esac
+  case "$baseline_owner" in ''|*[!0-9]*) return 1 ;; esac
+  case "$baseline_outcome" in ''|*[!a-z-]*|*:*) return 1 ;; esac
+  printf '%s/.claude-autoarm-failure-epochs/%s.%s.%s\n' \
+    "$state" "$baseline_gen" "$baseline_owner" "$baseline_outcome"
+}
+
+fm_autoarm_failure_ledger_read() {  # <state-dir> [record-path]
+  local state=$1 failure baseline expected
+  failure=${2:-$state/.claude-autoarm-failure-epoch}
   FM_AUTOARM_FAILURE_EPOCH=
   FM_AUTOARM_FAILURE_OWNER=
   FM_AUTOARM_FAILURE_OUTCOME=
   FM_AUTOARM_FAILURE_BASELINE=
+  FM_AUTOARM_FAILURE_PATH=
   FM_AUTOARM_FAILURE_EPOCH=$(_fm_autoarm_epoch_field "$failure" epoch) || return 1
   FM_AUTOARM_FAILURE_OWNER=$(_fm_autoarm_epoch_field "$failure" owner_pid) || return 1
   FM_AUTOARM_FAILURE_OUTCOME=$(_fm_autoarm_epoch_field "$failure" outcome) || return 1
@@ -1328,31 +1366,43 @@ fm_autoarm_failure_ledger_read() {  # <state-dir>
   esac
   baseline=$(_fm_autoarm_epoch_field "$failure" baseline 2>/dev/null || true)
   if [ -z "$baseline" ]; then
+    [ "$failure" = "$state/.claude-autoarm-failure-epoch" ] || return 1
     FM_AUTOARM_FAILURE_BASELINE=legacy
-  elif [ "$baseline" = absent ]; then
-    FM_AUTOARM_FAILURE_BASELINE=$baseline
   else
-    baseline_gen=${baseline%%:*}
-    rest=${baseline#*:}
-    [ "$rest" != "$baseline" ] || return 1
-    baseline_owner=${rest%%:*}
-    baseline_outcome=${rest#*:}
-    case "$baseline_gen" in ''|*[!0-9]*) return 1 ;; esac
-    case "$baseline_owner" in ''|*[!0-9]*) return 1 ;; esac
-    case "$baseline_outcome" in ''|*[!a-z-]*|*:* ) return 1 ;; esac
+    expected=$(fm_autoarm_failure_record_path "$state" "$baseline") || return 1
+    case "$failure" in
+      "$state/.claude-autoarm-failure-epoch") ;;
+      "$expected") ;;
+      *) return 1 ;;
+    esac
     FM_AUTOARM_FAILURE_BASELINE=$baseline
   fi
   case "$FM_AUTOARM_FAILURE_OUTCOME" in
-    failed|failed-suppressed) return 0 ;;
+    failed|failed-suppressed)
+      # shellcheck disable=SC2034 # Read by callers after the current failure is selected.
+      FM_AUTOARM_FAILURE_PATH=$failure
+      return 0
+      ;;
   esac
   return 1
 }
 
 fm_autoarm_failure_ledger_current() {  # <state-dir>
-  local state=$1 current
+  local state=$1 current failure_dir failure
+  current=$(fm_autoarm_claim_signature "$state")
+  failure=$(fm_autoarm_failure_record_path "$state" "$current") || return 1
+  failure_dir=${failure%/*}
+  if [ -e "$failure_dir" ] || [ -L "$failure_dir" ]; then
+    [ -d "$failure_dir" ] && [ ! -L "$failure_dir" ] || return 1
+    if [ -e "$failure" ] || [ -L "$failure" ]; then
+      [ -f "$failure" ] && [ ! -L "$failure" ] || return 1
+      fm_autoarm_failure_ledger_read "$state" "$failure" || return 1
+      [ "$FM_AUTOARM_FAILURE_BASELINE" = "$current" ]
+      return $?
+    fi
+  fi
   fm_autoarm_failure_ledger_read "$state" || return 1
   [ "$FM_AUTOARM_FAILURE_BASELINE" = legacy ] && return 0
-  current=$(fm_autoarm_claim_signature "$state")
   [ "$current" = "$FM_AUTOARM_FAILURE_BASELINE" ]
 }
 
@@ -1378,9 +1428,10 @@ fm_autoarm_failure_notice_claim() {  # <marker-file> <claim-id>
 }
 
 fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
-  local state=$1 baseline=$2 outcome=$3 marker=${4:-} lock failure pid failure_epoch tmp current i marker_rc
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} lock failure_dir failure pid failure_epoch tmp current i marker_rc
   lock="$state/.claude-autoarm.lock"
-  failure="$state/.claude-autoarm-failure-epoch"
+  failure=$(fm_autoarm_failure_record_path "$state" "$baseline") || return 1
+  failure_dir=${failure%/*}
   case "$outcome" in
     failed|failed-suppressed) ;;
     *) return 1 ;;
@@ -1395,14 +1446,28 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
   done
   current=$(fm_autoarm_claim_signature "$state")
   [ "$current" = "$baseline" ] || return 2
+  if [ -e "$failure_dir" ] || [ -L "$failure_dir" ]; then
+    [ -d "$failure_dir" ] && [ ! -L "$failure_dir" ] || return 1
+  elif ! mkdir "$failure_dir" 2>/dev/null \
+    && { [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; }; then
+    return 1
+  fi
   failure_epoch="$(date +%s)${pid}"
-  tmp="$failure.tmp.$pid"
+  tmp="$failure_dir/.failure.tmp.$pid"
   if ! printf 'epoch=%s owner_pid=%s outcome=%s baseline=%s updated_at=%s\n' \
-      "$failure_epoch" "$pid" "$outcome" "$baseline" "$(date +%s)" > "$tmp" 2>/dev/null \
-    || ! mv -f "$tmp" "$failure" 2>/dev/null; then
+      "$failure_epoch" "$pid" "$outcome" "$baseline" "$(date +%s)" > "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
+  if ! ln "$tmp" "$failure" 2>/dev/null \
+    && { [ ! -f "$failure" ] || [ -L "$failure" ]; }; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  fm_autoarm_failure_ledger_read "$state" "$failure" || return 1
+  [ "$FM_AUTOARM_FAILURE_BASELINE" = "$baseline" ] || return 1
+  failure_epoch=$FM_AUTOARM_FAILURE_EPOCH
   [ -n "$marker" ] || return 0
   fm_autoarm_failure_notice_claim "$marker" "$failure_epoch"
   marker_rc=$?

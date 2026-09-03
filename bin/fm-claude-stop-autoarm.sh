@@ -53,8 +53,8 @@
 #     until the synchronous guard has consumed its attended fail-open.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
-# generation and outcome, while state/.claude-autoarm-failure-epoch records a
-# claim failure independently of a contended claim mutex, so the synchronous Stop guard
+# generation and outcome, while state/.claude-autoarm-failure-epochs records
+# claim failures independently of a contended claim mutex, so the synchronous Stop guard
 # (bin/fm-turnend-guard.sh --claude) can allow a stop whose recovery this hook
 # already owns, instead of forcing a duplicate continuation for the same event
 # epoch. The failure marker state/.claude-autoarm-failure-notified atomically

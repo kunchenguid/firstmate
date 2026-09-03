@@ -188,14 +188,31 @@ epoch_outcome() {
   sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
 
+failure_epoch_path() {  # <dir> [baseline]
+  local dir=$1 baseline=${2:-} path
+  if [ -n "$baseline" ]; then
+    printf '%s/state/.claude-autoarm-failure-epochs/%s\n' "$dir" "${baseline//:/.}"
+    return 0
+  fi
+  for path in "$dir/state/.claude-autoarm-failure-epochs"/* "$dir/state/.claude-autoarm-failure-epoch"; do
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    printf '%s\n' "$path"
+    return 0
+  done
+  return 1
+}
+
 failure_epoch_outcome() {
-  sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-failure-epoch" 2>/dev/null || true
+  local path
+  path=$(failure_epoch_path "$@") || return 0
+  sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$path" 2>/dev/null || true
 }
 
 failure_epoch_field() {
-  local dir=$1 field=$2
+  local dir=$1 field=$2 baseline=${3:-} path
+  path=$(failure_epoch_path "$dir" "$baseline") || return 0
   sed -n "s/^.*[[:space:]]\{0,1\}$field=\([^[:space:]]*\).*$/\1/p" \
-    "$dir/state/.claude-autoarm-failure-epoch" 2>/dev/null || true
+    "$path" 2>/dev/null || true
 }
 
 # Run the hook in the background under the fake harness, output captured to a
@@ -596,6 +613,82 @@ test_concurrent_claim_failures_publish_one_notice_atomically() {
   [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "concurrent claim failures did not publish a valid independent failure epoch"
   [ "$(epoch_outcome "$dir")" = arming ] || fail "fixture did not reproduce the stalled claimant's later main-ledger write"
   pass "auto-arm: concurrent claim failures atomically elect one notice and retain independent failure state"
+}
+
+test_stale_failure_publisher_cannot_overwrite_current_failure() {
+  local dir state ready release stale_pid i rc current_path stale_path
+  dir=$(make_primary_dir "$TMP_ROOT/stale-failure-publisher")
+  state="$dir/state"
+  ready="$state/stale-publisher-ready"
+  release="$state/stale-publisher-release"
+  : > "$state/task.meta"
+  printf 'epoch=17 owner_pid=700 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    stalled=0
+    stall_failure_publish() {
+      [ "$stalled" -eq 0 ] || return 0
+      stalled=1
+      : > "$ready"
+      while [ ! -e "$release" ]; do sleep 0.01; done
+    }
+    mv() {
+      local target= arg
+      for arg in "$@"; do target=$arg; done
+      case "$target" in
+        "$state/.claude-autoarm-failure-epoch") stall_failure_publish ;;
+      esac
+      command mv "$@"
+    }
+    ln() {
+      case "${2:-}" in
+        "$state/.claude-autoarm-failure-epochs/"*) stall_failure_publish ;;
+      esac
+      command ln "$@"
+    }
+    fm_autoarm_claim_failure_commit "$state" 17:700:rewake failed \
+      "$state/.claude-autoarm-failure-notified"
+    printf "%s\n" "$?" > "$state/stale-publisher-rc"
+  ' _ "$dir" "$ready" "$release" &
+  stale_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    kill "$stale_pid" 2>/dev/null || true
+    wait "$stale_pid" 2>/dev/null || true
+    fail "stale failure publisher did not reach its publication boundary"
+  fi
+
+  printf 'epoch=18 owner_pid=800 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_claim_failure_commit "$1/state" 18:800:rewake failed \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir" || fail "current failure publisher could not commit"
+  : > "$release"
+  wait "$stale_pid" || fail "stale failure publisher fixture exited unexpectedly"
+
+  rc=$(cat "$state/stale-publisher-rc")
+  expect_code 3 "$rc" "stale publisher must preserve the current publisher's elected notice"
+  current_path=$(failure_epoch_path "$dir" 18:800:rewake)
+  stale_path=$(failure_epoch_path "$dir" 17:700:rewake)
+  assert_present "$current_path" "stale publisher erased the current failure record"
+  assert_present "$stale_path" "stale publisher did not retain its immutable baseline record"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_ledger_current "$1/state" \
+      && [ "$FM_AUTOARM_FAILURE_BASELINE" = 18:800:rewake ]
+  ' _ "$dir" || fail "current failure became invisible after the stale publisher resumed"
+  pass "auto-arm: stale failure publishers cannot overwrite the current baseline record"
 }
 
 test_failed_cycles_notify_once_and_keep_retrying() {
@@ -1369,6 +1462,7 @@ test_claim_path_failure_records_failed_epoch_and_marker
 test_live_claim_mutex_holder_cannot_hide_failure
 test_fresh_prior_terminal_epoch_cannot_hide_current_failure
 test_concurrent_claim_failures_publish_one_notice_atomically
+test_stale_failure_publisher_cannot_overwrite_current_failure
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries

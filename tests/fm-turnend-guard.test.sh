@@ -1104,6 +1104,14 @@ seed_claude_failure() {
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
 }
 
+write_independent_claim_failure() {  # <dir> <baseline> <epoch> <owner> [outcome]
+  local dir=$1 baseline=$2 epoch=$3 owner=$4 outcome=${5:-failed} path
+  path="$dir/state/.claude-autoarm-failure-epochs/${baseline//:/.}"
+  mkdir -p "${path%/*}"
+  printf 'epoch=%s owner_pid=%s outcome=%s baseline=%s updated_at=%s\n' \
+    "$epoch" "$owner" "$outcome" "$baseline" "$(date +%s)" > "$path"
+}
+
 seed_claude_budget() {
   local dir=$1 count=$2 epoch=${3:-2}
   printf 'session=sess-claude-mode\ncount=%s\nepoch=%s\n' "$count" "$epoch" > "$dir/state/.turnend-claude-blocks"
@@ -1477,8 +1485,7 @@ test_hook_claude_mode_consumes_independent_claim_failure_epoch() {
   : > "$dir/state/.claude-autoarm-failure-notified"
   printf 'epoch=17 owner_pid=999 outcome=rewake updated_at=%s\n' \
     "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
-  printf 'epoch=123456 owner_pid=777 outcome=failed baseline=17:999:rewake updated_at=%s\n' \
-    "$(date +%s)" > "$dir/state/.claude-autoarm-failure-epoch"
+  write_independent_claim_failure "$dir" 17:999:rewake 123456 777
   seed_claude_budget "$dir" 4 stale-main-epoch
 
   out=$(run_hook_claude "$dir" true); status=$?
@@ -1496,8 +1503,7 @@ test_hook_claude_mode_ignores_failure_superseded_by_later_success() {
   : > "$dir/state/.claude-autoarm-failure-notified"
   printf 'epoch=18 owner_pid=888 outcome=rewake updated_at=%s\n' \
     "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
-  printf 'epoch=123456 owner_pid=777 outcome=failed baseline=17:999:arming updated_at=%s\n' \
-    "$(date +%s)" > "$dir/state/.claude-autoarm-failure-epoch"
+  write_independent_claim_failure "$dir" 17:999:arming 123456 777
   seed_claude_budget "$dir" 4 failure:123456:777
 
   out=$(run_hook_claude "$dir" true); status=$?
@@ -1728,8 +1734,7 @@ test_hook_claude_mode_allow_resets_budget() {
   [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude block must record the consecutive-block budget"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
-  printf 'epoch=123456 owner_pid=777 outcome=failed updated_at=1\n' \
-    > "$dir/state/.claude-autoarm-failure-epoch"
+  write_independent_claim_failure "$dir" absent 123456 777
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
@@ -1745,7 +1750,7 @@ test_hook_claude_mode_allow_resets_budget() {
   rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$status" "--claude must allow once the watcher is healthy again"
   [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude allow must reset the consecutive-block budget"
-  [ ! -f "$dir/state/.claude-autoarm-failure-epoch" ] || fail "positive watcher recovery must reset the independent failure epoch"
+  [ ! -e "$dir/state/.claude-autoarm-failure-epochs" ] || fail "positive watcher recovery must reset independent failure epochs"
   [ ! -f "$dir/state/.claude-autoarm-failure-notified" ] || fail "positive watcher recovery must reset the failure notice"
   [ ! -f "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "positive watcher recovery must reset the attended alarm"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
