@@ -79,6 +79,12 @@ bench.mkdir(parents=True, exist_ok=True)
 (bench / "isolation.json").write_text(json.dumps({
     "schema": "fm-bench-isolation.v1",
     "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
+    "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
+                       "--image", "firstmate-benchmark-runtime@sha256:test",
+                       "--provider-network", "provider-egress-only",
+                       "--provider-proxy", "http://provider-proxy:8080",
+                       "--provider-proxy-container", "provider-proxy",
+                       "--allow", "{root}", "--"],
     "leak_marker": "FM_BENCH_",
     "protected_paths": [f"{iso}/sealed"],
     "entrants": [
@@ -124,3 +130,19 @@ own=$("$CONFINE" --mechanism "$MECHANISM" --allow "$ISO/e1" -- \
   /bin/cat "$ISO/e1/answer.txt" 2>&1) || fail "the entrant must still read its own clone: $own"
 assert_contains "$own" "candidate answer from e1" "the entrant reaches its own private clone"
 pass "the same confinement still lets an entrant work in its own private clone"
+
+if [ -n "${FM_BENCH_RUNTIME_IMAGE:-}" ] && [ -n "${FM_BENCH_PROVIDER_NETWORK:-}" ] \
+  && [ -n "${FM_BENCH_PROVIDER_PROXY:-}" ] && [ -n "${FM_BENCH_PROVIDER_PROXY_CONTAINER:-}" ] \
+  && [ -n "${FM_BENCH_HARNESS_BIN:-}" ] && command -v docker >/dev/null 2>&1; then
+  launch=$(
+    "$CONFINE" --purpose entrant --mechanism container --image "$FM_BENCH_RUNTIME_IMAGE" \
+      --provider-network "$FM_BENCH_PROVIDER_NETWORK" --provider-proxy "$FM_BENCH_PROVIDER_PROXY" \
+      --provider-proxy-container "$FM_BENCH_PROVIDER_PROXY_CONTAINER" --allow "$ISO/e1" -- \
+      /bin/sh -c 'env | grep -Eq "(API_KEY|TOKEN|PASSWORD|SECRET)=" && exit 91; exec "$1" --version' \
+      _ "$FM_BENCH_HARNESS_BIN" 2>&1
+  ) || fail "the real benchmark harness must start inside provider-only confinement: $launch"
+  [ -n "$launch" ] || fail "the real benchmark harness emitted no version inside confinement"
+  pass "the real harness starts with provider-only egress and no credential environment"
+else
+  echo "skip: launch-capable runtime proof needs FM_BENCH_RUNTIME_IMAGE, provider topology, and FM_BENCH_HARNESS_BIN"
+fi

@@ -29,20 +29,24 @@
 #   provenance-check  positive coverage of every original author, reviewer,
 #                     and judge before a historical packet is replayed
 #   isolation-verify  run the sibling-access probe set inside each entrant's
-#                     trusted launch-capable confinement, prove its in-root
+#                     network-disabled confinement, verify a separate provider-
+#                     proxy runtime wrapper for launch, prove its in-root
 #                     private paths are ignored by Git, and refuse unless every
 #                     probe is denied
 #   evaluator-verify  environment lock, published score map, zero-weight
-#                     validity gates, two identical dry-runs, mutation
-#                     calibration, and one bound capture record per planned head
+#                     validity gates, confined content-addressed executions,
+#                     mutation calibration, and one capture per planned head
+#   evaluator-execute-verify
+#                     run the evaluator proof used by preflight directly
 #   manifest-build / manifest-check
 #                     derive the exact run, judge, capture, timing, failure,
 #                     allowance, and low/base/high cost arithmetic from the plan
 #   preflight         all of the above; writes preflight.receipt on a pass
 #
 # Post-run gates:
-#   promote-evaluate  reconcile void reruns, require finite composites, then
-#                     apply the sweep, margin, and baseline veto
+#   promote-evaluate  recompute content-addressed panel, tree, evaluator,
+#                     capture, timing, and failure evidence, then apply the
+#                     sweep, margin, and baseline veto
 #   archive-verify    require the exact planned sample identities, regular
 #                     self-contained files, role-specific evidence groups, and
 #                     recomputed content addresses

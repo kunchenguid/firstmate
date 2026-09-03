@@ -29,7 +29,8 @@ Run the gates in this order, because each one's evidence depends on the last.
 4. Only then spawn entrants, with `FM_BENCH_ROOT` set.
    `bin/fm-spawn.sh` refuses a `bench-` task id that no passing receipt covers.
 
-After the runs: `promote-evaluate`, then `archive-verify`, then `restore-drill`, then `cleanup-gate`.
+After the runs: `archive-verify`, then `promote-evaluate`, then `restore-drill`, then `cleanup-gate`.
+Promotion reads the content-addressed sample evidence, so the archive must verify before any standing-route calculation.
 Cleanup is refused until the drill has really restored every bundle, and the receipt stops covering the archive the moment one archived byte changes.
 
 ## A refusal is a finding

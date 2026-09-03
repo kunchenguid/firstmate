@@ -111,10 +111,10 @@ try:
     record = json.loads(Path(path).read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError) as exc:
     raise SystemExit(f"cannot read isolation.json: {exc}")
-wrapper = record.get("exec_wrapper")
+wrapper = record.get("launch_wrapper")
 entrants = record.get("entrants")
 if not isinstance(wrapper, list) or not wrapper or not all(isinstance(item, str) and item for item in wrapper):
-    raise SystemExit("isolation.json has no executable confinement wrapper")
+    raise SystemExit("isolation.json has no launch-capable confinement wrapper")
 if not isinstance(entrants, list):
     raise SystemExit("isolation.json has no provisioned entrants")
 entrant = next((item for item in entrants if isinstance(item, dict) and item.get("id") == entrant_id), None)
