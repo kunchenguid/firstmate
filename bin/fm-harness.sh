@@ -50,9 +50,9 @@ detect_own() {
   # a human started by hand. Verified live on cursor-agent 2026.08.11-e8db854:
   # CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself, and
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
+  [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
-  [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   # Gemini is checked BEFORE claude for exactly cursor's reason above: the
   # Gemini CLI does NOT clear an inherited CLAUDECODE, so a gemini worker
   # launched from a claude primary carries BOTH markers and whichever is

@@ -29,6 +29,8 @@ test_environment_marker_wins() {
   local out
   out=$(COPILOT_CLI=1 CLAUDECODE=1 "$HARNESS")
   [ "$out" = copilot ] || fail "COPILOT_CLI marker detected as '$out'"
+  out=$(COPILOT_CLI=1 CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
+  [ "$out" = copilot ] || fail "COPILOT_CLI marker lost to inherited Cursor markers: '$out'"
   pass "Copilot's verified environment marker identifies the current harness"
 }
 
@@ -37,12 +39,12 @@ test_process_shapes_are_anchored() {
   fakebin="$TMP_ROOT/process-shapes"
   make_ps "$fakebin"
 
-  out=$(env -u COPILOT_CLI -u CLAUDECODE PATH="$fakebin:$PATH" \
-    FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
   [ "$out" = copilot ] || fail "MainThread with Copilot argv zero detected as '$out'"
 
-  out=$(env -u COPILOT_CLI -u CLAUDECODE PATH="$fakebin:$PATH" \
-    FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node runner.js copilot' "$HARNESS")
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node runner.js copilot' "$HARNESS")
   [ "$out" = unknown ] || fail "an unrelated later copilot argument detected as '$out'"
   pass "Copilot process detection accepts argv zero and rejects later-argument false positives"
 }
@@ -51,7 +53,8 @@ test_session_lock_identity_matches_copilot() {
   local fakebin out
   fakebin="$TMP_ROOT/lock-shape"
   make_ps "$fakebin"
-  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+  out=$(env -u COPILOT_CLI -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
     bash -c '. "$1"; fm_harness_ancestry_pid' -- "$LOCK_LIB")
   case "$out" in
     ''|*[!0-9]*) fail "Copilot lock identity returned '$out'" ;;
