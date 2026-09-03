@@ -318,7 +318,8 @@ test_refused_restart_falls_back_without_claiming_a_reload() {
 # The far side also models the live mate: it answers the persist request that
 # crossed the same hop, on the parent channel, with that request's own token.
 setup_remote_case() {  # <case-dir> <id> <ssh-mode>
-  local dir=$1 id=$2 mode=$3 fb="$dir/fakebin"
+  local dir=$1 id=$2 mode=$3
+  local fb="$dir/fakebin"
   mkdir -p "$dir/$id-home"
   {
     echo "window=remote:$id"

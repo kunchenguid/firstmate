@@ -230,7 +230,7 @@ harvest_restarts() {
       nudged:*) nudged_count=$((nudged_count + 1)) ;;
       *) unreached_count=$((unreached_count + 1)) ;;
     esac
-    PLAN[i]=done
+    PLAN[i]="done"
     restart_active_count=$((restart_active_count - 1))
     i=$((i + 1))
   done
@@ -312,7 +312,7 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     pending_count=$((pending_count + 1))
   else
     fall_back_to_nudge "${IDS[$i]}" "${REASON[i]}"
-    PLAN[i]=done
+    PLAN[i]="done"
   fi
   i=$((i + 1))
 done
@@ -332,7 +332,7 @@ while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
     elif [ "$now" -ge "${DEADLINE[i]}" ]; then
       fall_back_to_nudge "${IDS[$i]}" \
         "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
-      PLAN[i]=done
+      PLAN[i]="done"
       pending_count=$((pending_count - 1))
     else
       remaining=$((DEADLINE[i] - now))
