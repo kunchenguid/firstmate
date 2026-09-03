@@ -148,6 +148,10 @@ else
   TASK_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
   INTENT_BODY=$(fm_brief_marked_captain_words "$TASK_BODY")
 fi
+if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
+  echo "error: $SCOUT_BRIEF has no provenance-marked Captain's intent; add the captain's actual words before promotion" >&2
+  exit 1
+fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
@@ -177,11 +181,6 @@ EOF
 6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule.
 7. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or ship-time instructions.
 EOF
-  if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
-    cat <<'EOF'
-8. This legacy brief has no provenance-marked captain intent. Before starting no-mistakes, stop and ask firstmate to record the captain's actual words.
-EOF
-  fi
   printf '\n'
   fm_dod_block "$MODE" "$ID"
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }

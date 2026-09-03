@@ -1782,8 +1782,12 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
       && ! fm_brief_heading_present "$BRIEF" "## Captain's intent"; then
-    echo "error: legacy mixed # Task briefs cannot safely define no-mistakes --intent; migrate the captain's marked words into ## Captain's intent and Firstmate instructions into ## Firstmate spec" >&2
-    exit 1
+    LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
+    LEGACY_CAPTAIN_WORDS=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
+    if [ -z "$(printf '%s' "$LEGACY_CAPTAIN_WORDS" | tr -d '[:space:]')" ]; then
+      echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
+      exit 1
+    fi
   fi
 fi
 

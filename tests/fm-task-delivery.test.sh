@@ -496,11 +496,25 @@ Delivery contract: mode=no-mistakes
 Pass the entire Task as --intent.
 EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "has no provenance-marked captain words" \
+    "legacy no-mistakes spawn rejected explicitly marked captain words"
+
+  id=delivery-legacy-unmarked-no-mistakes
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+Fix the legacy dispatch boundary.
+Do not copy this Firstmate-authored constraint into intent.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "legacy no-mistakes spawn should require subsection migration"
-  assert_contains "$out" "legacy mixed # Task briefs cannot safely define no-mistakes --intent" \
-    "legacy no-mistakes spawn could still copy a mixed Task wholesale into intent"
-  assert_absent "$home/state/$id.meta" "unsafe legacy no-mistakes spawn wrote task metadata"
+  [ "$status" -ne 0 ] || fail "unmarked legacy no-mistakes spawn should require provenance"
+  assert_contains "$out" "has no provenance-marked captain words" \
+    "unmarked legacy no-mistakes spawn did not explain the missing intent provenance"
+  assert_absent "$home/state/$id.meta" "unmarked legacy no-mistakes spawn wrote task metadata"
 
   id=delivery-unfilled-scout
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
@@ -549,6 +563,24 @@ EOF
   assert_absent "$home/data/$id/ship-instructions.md" \
     "promotion without a scout brief fabricated ship instructions"
   assert_grep 'kind=scout' "$meta" "missing-brief promotion changed the task record"
+
+  id=promote-unmarked-legacy
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+Investigate the unmarked legacy failure.
+Keep this Firstmate constraint out of captain intent.
+EOF
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion without provenance-marked captain intent should fail"
+  assert_contains "$out" "has no provenance-marked Captain's intent" \
+    "unmarked legacy promotion did not explain the missing intent provenance"
+  assert_absent "$home/data/$id/ship-instructions.md" \
+    "unmarked legacy promotion published empty captain intent"
+  assert_grep 'kind=scout' "$meta" "unmarked legacy promotion changed the task record"
 
   id=promote-filled-e2
   meta="$home/state/$id.meta"
