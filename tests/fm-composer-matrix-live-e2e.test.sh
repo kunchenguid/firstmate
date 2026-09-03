@@ -146,9 +146,32 @@ done
 . "$ROOT/bin/fm-composer-lib.sh"
 CAPS_CURSORLESS=$'styled=1\ncursor=0\nidentity=1\nrows=20'
 
+# tmux prints every visible row of the grid, trailing blank rows included,
+# while `herdr pane read --source recent` ends at the last written row. The
+# classic renderer draws its composer near the top of a fresh 50-row grid, so
+# a raw 20-row tail of the grid is blank there and reads unknown, whereas the
+# fullscreen renderer parks its composer at the bottom and the two tails
+# agree. Drop the rows that are blank after ANSI stripping and whitespace
+# trimming first, then keep the last 20 exactly as the herdr adapter bounds
+# its read, so either renderer is read the same way without forcing a tui.
+content_tail() {  # <window> [capture-pane flags...] -> the last 20 rows ending at the last written row
+  local win=$1 captured plain row n=0 last=0
+  shift
+  captured=$(tmux -L "$SOCKET" capture-pane -p "$@" -t "$SESSION:$win" 2>/dev/null) || return 1
+  plain=$(printf '%s\n' "$captured" | fm_composer_strip_ansi)
+  while IFS= read -r row; do
+    n=$((n + 1))
+    fm_composer_normalize_trim_var row
+    [ -z "$row" ] || last=$n
+  done <<EOF
+$plain
+EOF
+  printf '%s\n' "$captured" | head -n "$last" | tail -n 20
+}
+
 cursorless_verdict() {  # <window> -> verdict, resolving need-identity like an adapter without identity
   local screen verdict
-  screen=$(tmux -L "$SOCKET" capture-pane -p -e -t "$SESSION:$1" 2>/dev/null | tail -n 20)
+  screen=$(content_tail "$1" -e)
   verdict=$(fm_composer_classify_screen "$CAPS_CURSORLESS" "$screen")
   [ "$verdict" != need-identity ] \
     || verdict=$(fm_composer_classify_screen "$CAPS_CURSORLESS" "$screen" '' probe-absent)
@@ -174,7 +197,7 @@ check_claude_cursorless() {  # <label> <want-mode-label:0|1> <launch-cmd...>
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
-  plain=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null | tail -n 20)
+  plain=$(content_tail "$win")
   if [ "$want_label" = 1 ] && ! printf '%s\n' "$plain" | grep -q '─.*ultracode'; then
     note "claude $label ($version): the ultracode label was not drawn in the composer rule (mode unavailable on this machine); cursorless mode-label case NOT verified"
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
