@@ -34,6 +34,16 @@ required = yaml.safe_load(required_path.read_text())
 assert ci.get("permissions") == {"contents": "read"}
 assert fallback.get("permissions") == {"contents": "read"}
 assert required.get("permissions") == {"contents": "read", "pull-requests": "read"}
+# The "Require no-mistakes" gate is reversibly disabled (see the dated top
+# comment in no-mistakes-required.yml): the pull_request trigger is commented
+# out so the workflow cannot run on pull requests. This assertion semantically
+# proves the gate cannot run; restore the pull_request trigger block to
+# revive it. Captured here because a later `for required in ...` loop rebinds
+# the `required` name.
+required_on = required.get(True, required.get("on"))
+assert isinstance(required_on, dict)
+assert "pull_request" not in required_on
+assert "workflow_dispatch" in required_on
 expected_primary_jobs = [
     "lint",
     "critical-teardown",

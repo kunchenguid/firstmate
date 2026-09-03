@@ -1,11 +1,20 @@
+# DISABLED 2026-09-03: no-mistakes was stood down for Artemis and Firstmate.
+# The "Require no-mistakes" gate is reversibly disabled: the pull_request
+# trigger below is commented out so the workflow no longer runs on pull
+# requests, while the complete gate implementation (job body, admission
+# condition, concurrency, permissions, and refusal logic) is retained in
+# place unchanged. A workflow_dispatch trigger keeps the file valid and
+# manually runnable for revival checks. To revive: uncomment the pull_request
+# trigger block below (workflow_dispatch may stay or be removed).
 name: Require no-mistakes
 run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize, reopened]
-    branches:
-      - main
+  workflow_dispatch:
+  # pull_request:
+  #   types: [opened, edited, synchronize, reopened]
+  #   branches:
+  #     - main
 
 permissions:
   contents: read
