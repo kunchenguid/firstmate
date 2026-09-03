@@ -251,7 +251,8 @@ The nudge rides the primary turn-end guard: at a turn end the guard would otherw
 [`turnend-guard.md`](turnend-guard.md#stow-nudge) owns the mechanism, its gates, and why it can never displace a supervision block.
 
 The measure is the session's context size, read from the Claude transcript's newest assistant usage, compared with where it stood when the last pass completed or when this session was first seen.
-The nudge fires when the context has grown 60 percent of the way from that point to the auto-compact window, when the context shrank below that point because the conversation was compacted, or when 3 hours of active session have passed since that point, whichever comes first.
+The nudge fires when the context has grown 60 percent of the way from that point to the auto-compact window, when the context shrank below that point because the conversation was compacted, or when 3 hours of wall-clock time have passed since the last stow record, whichever comes first.
+The horizon is plain wall clock rather than active time, so a session that sat idle or was resumed after a long pause is nudged at its first turn end.
 The default window is 1,000,000 tokens, which is where Claude Code compacts a Fable or Sonnet 5 session that sets no `--autocompact` window; the same environment overrides Claude Code documents, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, are honored when the primary was launched with them.
 [`verification/stow-memory.md`](verification/stow-memory.md#stow-nudge-calibration) records the evidence behind those defaults.
 

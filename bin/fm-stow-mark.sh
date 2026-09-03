@@ -54,9 +54,12 @@
 # Context now is the newest non-sidechain `type=assistant` line's usage
 # (input + cache_creation + cache_read tokens), read with jq from the last
 # FM_STOW_TAIL_BYTES (default 262144) bytes of the transcript; a partial first
-# line in that tail is ignored. When no usage can be read - unreadable tail,
-# missing jq, or a transcript format this parser does not recognise - the
-# growth and compaction measures are skipped and only the horizon applies.
+# line in that tail is ignored, and so is a line whose model is `<synthetic>`
+# (Claude Code's API-error and interruption messages) or whose usage sums to
+# zero, so the reading is the newest real usage and is never 0. When no usage
+# can be read - unreadable tail, missing jq, only synthetic lines, or a
+# transcript format this parser does not recognise - the growth and compaction
+# measures are skipped and only the horizon applies.
 #
 # config/stow-nudge (optional; LOCAL, gitignored, not inherited) is either the
 # single word `off` or key=value lines with any of:
@@ -95,7 +98,7 @@ TAIL_BYTES=${FM_STOW_TAIL_BYTES:-262144}
 case "$TAIL_BYTES" in ''|*[!0-9]*|0) TAIL_BYTES=262144 ;; esac
 
 usage() {
-  sed -n '2,84{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,87{s/^# \{0,1\}//;p;}' "$0"
 }
 
 is_positive_int() {
@@ -226,7 +229,7 @@ record_read() {
   is_positive_int "$REC_STOWED" || REC_STOWED=
   is_positive_int "$REC_BOUND" || REC_BOUND=
   case "$REC_OFFSET" in ''|*[!0-9]*) REC_OFFSET= ;; esac
-  case "$REC_CONTEXT" in ''|*[!0-9]*) REC_CONTEXT= ;; esac
+  is_positive_int "$REC_CONTEXT" || REC_CONTEXT=
   return 0
 }
 
@@ -271,14 +274,15 @@ transcript_context() {
     fi | jq -R -r '
       fromjson?
       | select(type == "object" and .type == "assistant" and ((.isSidechain // false) | not))
-      | .message.usage?
+      | .message
+      | select(type == "object" and ((.model // "") != "<synthetic>"))
+      | .usage
       | select(type == "object")
       | ((.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0))
+      | select(type == "number" and . > 0)
     ' 2>/dev/null | tail -1
   )
-  case "$out" in
-    ''|*[!0-9]*) return 0 ;;
-  esac
+  is_positive_int "$out" || return 0
   printf '%s\n' "$out"
 }
 
@@ -418,7 +422,11 @@ cmd_check() {
   if [ -z "$reason" ]; then
     elapsed=$((now - REC_BOUND))
     if [ "$elapsed" -ge $((NUDGE_HOURS * 3600)) ]; then
-      reason="$(fmt_duration "$elapsed") of active session $since (threshold ${NUDGE_HOURS}h)"
+      if [ -n "$REC_STOWED" ]; then
+        reason="$(fmt_duration "$elapsed") wall clock since the last stow record (threshold ${NUDGE_HOURS}h)"
+      else
+        reason="$(fmt_duration "$elapsed") wall clock since this session was first seen, with no /stow pass recorded (threshold ${NUDGE_HOURS}h)"
+      fi
     fi
   fi
   [ -n "$reason" ] || exit 0

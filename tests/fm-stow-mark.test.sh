@@ -266,8 +266,8 @@ test_check_horizon_fallback_and_bounded_tail() {
 
   now=$(date +%s)
   set_record_field "$home" bound $((now - 4 * 3600))
-  out=$(FM_STOW_TAIL_BYTES=300 run_check "$home" "$t"); expect_code 3 "$?" "4h of active session is past the 3h horizon"
-  [ "$out" = "firstmate stow nudge: 4h 00m of active session with no /stow pass recorded (threshold 3h); run the /stow pass now" ] \
+  out=$(FM_STOW_TAIL_BYTES=300 run_check "$home" "$t"); expect_code 3 "$?" "4h of wall clock is past the 3h horizon"
+  [ "$out" = "firstmate stow nudge: 4h 00m wall clock since this session was first seen, with no /stow pass recorded (threshold 3h); run the /stow pass now" ] \
     || fail "unexpected horizon nudge text: $out"
 
   # A partial first line in the tail is skipped, and the usage after it is read.
@@ -278,6 +278,74 @@ test_check_horizon_fallback_and_bounded_tail() {
   FM_STOW_TAIL_BYTES=300 run_check "$home" "$t" >/dev/null
   [ "$(record_field "$home" context)" = 123000 ] || fail "the usage inside the tail must be read past a partial first line, got '$(record_field "$home" context)'"
   pass "fm-stow-mark check: the horizon covers a session without a growth measure, and the tail read is bounded"
+}
+
+# Claude Code writes assistant lines with no real usage: API-error and
+# interruption messages carry model "<synthetic>" and all-zero usage. Neither a
+# synthetic line nor a zero usage is a context reading, so neither can look
+# like a compaction or become a baseline of 0.
+synthetic_line() {  # [context-tokens, default 0]
+  printf '{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","usage":{"input_tokens":%s,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n' "${1:-0}"
+}
+
+zero_usage_line() {
+  printf '{"type":"assistant","message":{"role":"assistant","model":"claude-fable-5-1","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n'
+}
+
+test_check_skips_synthetic_and_zero_usage_lines() {
+  local home t out
+  home=$(make_home "$TMP_ROOT/synthetic")
+  t="$home/transcript.jsonl"
+  write_transcript "$t" 300000
+  run_check "$home" "$t" >/dev/null
+  [ "$(record_field "$home" context)" = 300000 ] || fail "binding at 300k"
+
+  synthetic_line >> "$t"
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "a synthetic zero-usage line is not a compaction"
+  [ -z "$out" ] || fail "synthetic line nudged: $out"
+  [ "$(record_field "$home" context)" = 300000 ] || fail "a synthetic line must not rebind the context, got '$(record_field "$home" context)'"
+  assert_absent "$home/state/.stow-nudged" "a synthetic line must not consume the cycle"
+
+  zero_usage_line >> "$t"
+  synthetic_line 50 >> "$t"
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "a real-model zero usage and a synthetic non-zero usage are both skipped"
+  [ -z "$out" ] || fail "zero-usage or synthetic line nudged: $out"
+  [ "$(record_field "$home" context)" = 300000 ] || fail "the baseline must survive skipped lines, got '$(record_field "$home" context)'"
+
+  # The newest real usage is still read past those lines.
+  append_turn "$t" 310000
+  synthetic_line >> "$t"
+  out=$(FM_HOME="$home" "$MARK" mark --transcript "$t"); expect_code 0 "$?" "mark past trailing synthetic lines"
+  assert_contains "$out" "(context 310000 tokens at this point)" "mark must read the newest real usage"
+  [ "$(record_field "$home" context)" = 310000 ] || fail "mark must bind the newest real usage, got '$(record_field "$home" context)'"
+
+  # A transcript with only synthetic assistant lines has no reading at all:
+  # the context stays unknown, so nothing can be mistaken for a compaction.
+  home=$(make_home "$TMP_ROOT/synthetic-only")
+  t="$home/transcript.jsonl"
+  printf '{"type":"user","message":{"role":"user","content":"hello"}}\n' > "$t"
+  synthetic_line >> "$t"
+  zero_usage_line >> "$t"
+  out=$(FM_HOME="$home" "$MARK" mark --transcript "$t"); expect_code 0 "$?" "mark on a synthetic-only transcript"
+  [ -z "$(record_field "$home" context)" ] || fail "a synthetic-only transcript must bind no context, got '$(record_field "$home" context)'"
+  [ "$(record_field "$home" transcript)" = "$t" ] || fail "the transcript itself is still bound"
+  synthetic_line >> "$t"
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "no reading means no compaction nudge"
+  [ -z "$out" ] || fail "synthetic-only transcript nudged: $out"
+  [ -z "$(record_field "$home" context)" ] || fail "check must not rebind a context it could not read, got '$(record_field "$home" context)'"
+
+  # A record that already holds context=0 is read as no baseline, never as a
+  # point every real reading would be compared against.
+  home=$(make_home "$TMP_ROOT/zero-baseline")
+  t="$home/transcript.jsonl"
+  write_transcript "$t" 70000
+  run_check "$home" "$t" >/dev/null
+  set_record_field "$home" context 0
+  append_turn "$t" 150000
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "a zero baseline measures nothing"
+  [ -z "$out" ] || fail "zero baseline nudged: $out"
+  assert_absent "$home/state/.stow-nudged" "a zero baseline must not deliver"
+  pass "fm-stow-mark check: synthetic and zero-usage assistant lines are never a reading, a baseline, or a compaction"
 }
 
 # --- GATES ------------------------------------------------------------------
@@ -370,7 +438,7 @@ test_config_off_tuning_env_and_malformed() {
   FM_HOME="$home" "$MARK" mark --transcript "$t" >/dev/null
   set_record_field "$home" bound $((now - 3700))
   out=$(run_check "$home" "$t"); expect_code 3 "$?" "1h 01m is past a 1h horizon"
-  assert_contains "$out" "1h 01m of active session since last /stow (threshold 1h)" "tuned horizon must be reported"
+  assert_contains "$out" "1h 01m wall clock since the last stow record (threshold 1h)" "tuned horizon must be reported"
 
   # Environment overrides supply the default window when the file sets none.
   rm -f "$home/config/stow-nudge"
@@ -561,6 +629,7 @@ test_check_binds_then_nudges_on_growth
 test_check_once_per_cycle_until_mark
 test_check_compaction_drop_nudges_and_rebinds
 test_check_horizon_fallback_and_bounded_tail
+test_check_skips_synthetic_and_zero_usage_lines
 test_check_no_transcript_is_silent_noop
 test_check_requires_lock_owning_primary
 test_config_off_tuning_env_and_malformed
