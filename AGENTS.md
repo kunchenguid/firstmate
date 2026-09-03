@@ -172,7 +172,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 ### Validation
 
 For a no-mistakes ship, the same worker that implemented the change invokes and drives the pipeline through every synchronous gate or outcome.
-Firstmate never answers a worker-owned gate directly; its decision response to the worker must forbid `--yes` and require the worker to process every synchronous return until completion or a genuinely new escalation.
+Firstmate never answers a worker-owned gate directly; its decision response to the worker must require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 An ask-user finding returns to firstmate, which loads `ask-user-authority`, gets any required captain decision, and sends one exact response with the decision key and finding IDs.
 The worker must preserve pipeline-owned commits, follow structured branch-custody instructions after a terminal run, and never hand-edit, abort, restart, or start a second run while an active run owns the branch except for the documented complete-intent-supersession path.
 Judge validation by `bin/fm-crew-state.sh`; running and fixing states are working, parked states need a response, passed states are ready, and failed or cancelled states are failures.
