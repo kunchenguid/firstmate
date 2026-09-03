@@ -6,9 +6,12 @@
 #   2. subsequent polls for the same hash are silent (no extra wakes);
 #   3. the cap persists across pause-class transitions (paused: then
 #      lifted) - Greptile R4 fix;
-#   4. the cap lifts on unambiguous recovery (new hash + active pipeline)
-#      - Greptile R5 fix;
-#   5. invalid override values (0, non-integer) fall back to the default.
+#   4. the cap is bound by FM_CAP_HORIZON_SECS (re-fires after the
+#      horizon elapses) - Greptile R8 fix (v9 design, hash-keyed cap
+#      and horizon-bounded are the two exit conditions; the third is
+#      operator rm);
+#   5. invalid override values (0, non-integer) fall back to the default
+#      for FM_WEDGE_MAX_ESCALATIONS and FM_CAP_HORIZON_SECS.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -94,10 +97,15 @@ seen_sig() {
 # --- FM_WEDGE_MAX_ESCALATIONS cap (local patch 2026-08-19, v6) ----------------
 # The cap is a hard floor on the LLM-supervised unattended loop that the 2026-
 # 08-18 MiniMax drain (~359M tokens) demonstrated. Past FM_WEDGE_MAX_ESCALATIONS
-# consecutive wedge escalations on the SAME stale hash, the watcher emits ONE
+# consecutive wedge escalations on the SAME (window, hash), the watcher emits ONE
 # terminal wake with PERMANENTLY-WEDGED and writes a STATE/.wedge-permanent-
-# <key>-<hash12> marker. Subsequent polls for that hash short-circuit. The cap
-# lifts on unambiguous recovery (pause_state_class=working for the window).
+# <key>-<hash12> marker (the timestamp is the cap-fire epoch). Three exit
+# conditions: FM_CAP_HORIZON_SECS elapses since that timestamp (default 24h);
+# the pane hash changes (different marker key naturally invalidates the cap);
+# the operator manually removes the marker. No auto-lift on
+# pause_state_class=working (the v6/v7 lift sites were removed in v9 because
+# pause_state_class=working can be a steady state during a wedge, not a recovery
+# signal).
 
 test_wedge_cap_fires_permanently_wedged_after_max_escalations() {
   local dir state fakebin out capture_file window key pane_hash sig pid n max
@@ -550,28 +558,19 @@ test_wedge_cap_operator_can_rm_marker() {
 
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WEDGE_MAX_ESCALATIONS=$max "$WATCH" > "$out" &
   pid=$!
-  # The counter is at FM_WEDGE_MAX_ESCALATIONS (climbed to cap earlier); with the
-  # marker gone, the very next wedge_timer_check call increments to max+1 and
-  # re-fires the cap immediately. This is expected: counter NOT reset on operator
-  # rm (v9 doesn't reset counter anywhere). Use a fresh counter via hash change
-  # instead - that's covered by the hash-change test above. For this test we
-  # just verify the marker stays gone and the cap eventually fires again.
-  # Actually the count was 3 (=max), so next increment makes n=4 < 10, normal
-  # escalation, not cap. Need to wait for more polls. Use STALE_ESCALATE_SECS=1
-  # for fast cycling. Skip this subtlety; verify only that the marker stays
-  # gone and the watcher didn't exit immediately.
-  if ! wait_poll_cycle "$state" "$pid"; then
-    wait "$pid" 2>/dev/null || true
-    ack_stopped_cycle "$state" || true
-  fi
-  reap "$pid"
+  # The counter is at FM_WEDGE_MAX_ESCALATIONS (=max=3); with the marker gone,
+  # the next wedge_timer_check call increments to max+1 and re-fires the cap
+  # once FM_STALE_ESCALATE_SECS elapses. Verify the re-fire actually reaches
+  # the drain as a fresh PERMANENTLY-WEDGED wake.
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not exit after operator rm"; }
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null || fail "operator rm did not result in a fresh PERMANENTLY-WEDGED wake: $(cat "$out")"
+  [ -e "$marker" ] || fail "cap marker was not recreated after operator rm re-fire"
   ack_stopped_cycle "$state" || true
-  [ ! -e "$marker" ] || fail "cap marker was recreated after operator rm"
   unset FM_FAKE_CREW_STATE
-  pass "the operator can manually remove the cap marker for immediate re-engagement"
+  pass "the operator can manually remove the cap marker for immediate re-engagement and a fresh PERMANENTLY-WEDGED wake fires"
 }
 
 test_wedge_cap_validates_invalid_override() {
