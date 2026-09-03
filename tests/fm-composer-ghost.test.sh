@@ -385,6 +385,7 @@ test_copilot_half_box_requires_complete_rules() {
 }
 
 test_tmux_copilot_detection_falls_back_to_current_command() (
+  # shellcheck disable=SC2329 # Mock invoked indirectly by fm_tmux_pane_is_copilot.
   tmux() {
     case "$*" in
       *pane_tty*) printf '/dev/pts/9\n' ;;
@@ -392,6 +393,7 @@ test_tmux_copilot_detection_falls_back_to_current_command() (
       *) return 1 ;;
     esac
   }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by fm_tmux_pane_is_copilot.
   ps() {
     case "$*" in
       *'-t pts/9 -o pid=,pgid=,tpgid=,comm='*) printf '123 10 11 MainThread\n' ;;
