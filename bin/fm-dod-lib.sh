@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Single owner of a ship task's mode-specific "Definition of done" block.
+# Single owner of a ship task's Ponytail development contract and mode-specific
+# "Definition of done" block.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract: a promoted
@@ -20,8 +21,42 @@
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
 # through the helpers below. Other mentions of `--intent` point here rather than
 # restating the rule.
+# The Ponytail contract is deliberately one compact generated instruction rather
+# than a copied ruleset. New ship briefs receive it from fm_dod_block; spawn adds
+# it to legacy ship briefs before launch and validates the final worker-facing
+# artifact. For no-mistakes, the current intent overlay carries the same compact
+# discipline into every pipeline agent invocation because --intent is the only
+# versioned prompt surface no-mistakes exposes at run start.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+
+fm_ponytail_instruction() {
+  cat <<'EOF'
+For code generation or development edits, use Ponytail `full` for the entire task.
+Prefer the host's installed Ponytail plugin, skill, and lifecycle hooks when they are available.
+Otherwise apply this compact fallback: reuse existing code and standard or native features, make the shortest correct change, add no speculative abstraction or dependency, and keep required validation, error handling, security, accessibility, and tests.
+Do not apply this coding discipline to unrelated prose-only or read-only work.
+EOF
+}
+
+fm_ponytail_contract_block() {
+  cat <<'EOF'
+# Development discipline
+Development contract: ponytail=full
+EOF
+  fm_ponytail_instruction
+  cat <<'EOF'
+Keep this contract active through implementation and, for no-mistakes delivery, through every review and fix invocation.
+EOF
+}
+
+fm_brief_ponytail_contract_present() {  # <file>
+  local actual expected
+  [ -f "$1" ] || return 1
+  actual=$(fm_brief_heading_body "$1" "# Development discipline")
+  expected=$(fm_ponytail_contract_block | sed '1d')
+  [ "$actual" = "$expected" ]
+}
 
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.
@@ -134,7 +169,8 @@ fm_brief_intent_overlay() {  # <captain-intent>
 
 # Current no-mistakes intent contract
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+Pass the serialized captain intent below plus any later words the captain actually supplied, followed by the exact `## Required pipeline discipline` text below, as `--intent`.
+Never include Firstmate specification or other mixed Task content.
 
 ## Captain intent authorized for --intent
 EOF
@@ -143,6 +179,13 @@ EOF
 
 Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
 The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent above refers to into its substance rather than passing the pointer.
+
+## Required pipeline discipline
+EOF
+  fm_ponytail_instruction
+  cat <<'EOF'
+
+This fixed execution directive is the only non-captain text authorized in `--intent`; it keeps Ponytail active in every no-mistakes review and fix agent without admitting task-specific Firstmate specification.
 EOF
 }
 
@@ -176,6 +219,8 @@ EOF
 
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
+  fm_ponytail_contract_block
+  printf '\n'
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -208,9 +253,10 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
+When starting no-mistakes, construct \`--intent\` exactly as the appended \`# Current no-mistakes intent contract\` directs: the authorized captain intent plus its fixed Ponytail pipeline discipline.
+Include any later words the captain actually supplied as that overlay directs.
 For a legacy brief with no such subsection, include only words explicitly labeled \`Captain:\`, \`Captain's words:\`, \`Captain's ask:\`, or \`Captain's intent:\`; never copy its mixed \`# Task\` wholesale. If it has no provenance-marked captain words, stop and ask firstmate instead of starting no-mistakes.
-Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
+Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs; the fixed Ponytail pipeline discipline is the sole non-captain exception.
 The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.

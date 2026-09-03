@@ -59,6 +59,9 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Every ship brief receives the compact Ponytail full development contract from
+# bin/fm-dod-lib.sh. Scout and secondmate briefs do not, so unrelated read-only
+# and prose-only work never inherits coding discipline merely by being delegated.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers

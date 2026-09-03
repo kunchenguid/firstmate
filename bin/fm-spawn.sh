@@ -14,8 +14,11 @@
 #   scaffolded before that line existed warns once and launches on the flag. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, or an incomplete pair of Task subsections.
-#   For a no-mistakes ship, spawn renders `launch-brief.md` with the current
-#   `--intent` contract and the extracted captain intent. A legacy mixed Task is
+#   Every ship spawn validates that the worker-facing brief carries the Ponytail
+#   full development contract, adding the compact contract to a legacy brief
+#   through `launch-brief.md` when needed. For a no-mistakes ship, that artifact
+#   also carries the current `--intent` contract, the extracted captain intent,
+#   and the Ponytail pipeline-agent handoff. A legacy mixed Task is
 #   accepted there only under bin/fm-dod-lib.sh's provenance-marking rules;
 #   unmarked legacy Tasks stop for migration rather than becoming intent. That
 #   library owns the parsing and intent rules. When the explicit mode carries
@@ -1878,18 +1881,38 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         exit 1
       fi
     fi
+  fi
+  if [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || ! fm_brief_ponytail_contract_present "$BRIEF"; }; then
     SOURCE_BRIEF=$BRIEF
     BRIEF="$DATA/$ID/launch-brief.md"
     BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+    [ ! -d "$BRIEF" ] || {
+      echo "error: Ponytail full guarantee cannot be established for $ID: launch brief path is a directory: $BRIEF" >&2
+      exit 1
+    }
     {
       cat "$SOURCE_BRIEF"
-      fm_brief_intent_overlay "$CAPTAIN_INTENT"
-    } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current intent contract for $SOURCE_BRIEF" >&2; exit 1; }
+      if ! fm_brief_ponytail_contract_present "$SOURCE_BRIEF"; then
+        printf '\n'
+        fm_ponytail_contract_block
+      fi
+      if [ "$MODE" = no-mistakes ]; then
+        fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      fi
+    } > "$BRIEF_TMP" || {
+      rm -f -- "$BRIEF_TMP"
+      echo "error: Ponytail full guarantee cannot be rendered for $ID from $SOURCE_BRIEF" >&2
+      exit 1
+    }
     if ! mv "$BRIEF_TMP" "$BRIEF"; then
       rm -f -- "$BRIEF_TMP"
-      echo "error: could not publish current intent contract for $SOURCE_BRIEF" >&2
+      echo "error: Ponytail full guarantee cannot be published for $ID at $BRIEF" >&2
       exit 1
     fi
+  fi
+  if [ "$KIND" = ship ] && ! fm_brief_ponytail_contract_present "$BRIEF"; then
+    echo "error: Ponytail full guarantee cannot be established for $ID: worker-facing brief lacks Development contract: ponytail=full" >&2
+    exit 1
   fi
 fi
 

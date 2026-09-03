@@ -206,6 +206,18 @@ test_ship_modes_generate_clean_briefs() {
     expect_code 0 "$status" "fm-brief.sh $id --mode $mode should exit 0"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
+    grep -qx "Development contract: ponytail=full" "$brief" \
+      || fail "$id: ship brief did not require Ponytail full"
+    [ "$(grep -c '^Development contract: ponytail=full$' "$brief")" = 1 ] \
+      || fail "$id: ship brief duplicated the Ponytail contract"
+    assert_grep "Prefer the host's installed Ponytail plugin, skill, and lifecycle hooks" "$brief" \
+      "$id: ship brief did not prefer the installed host integration"
+    assert_grep "Otherwise apply this compact fallback" "$brief" \
+      "$id: ship brief omitted the instruction-level fallback"
+    assert_grep "keep required validation, error handling, security, accessibility, and tests" "$brief" \
+      "$id: Ponytail contract weakened correctness safeguards"
+    assert_grep "Do not apply this coding discipline to unrelated prose-only or read-only work" "$brief" \
+      "$id: Ponytail contract leaked onto unrelated non-development work"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
@@ -341,9 +353,11 @@ test_no_mistakes_dod_wording() {
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep '`help`' "$brief" \
     "no-mistakes DOD must render literal backticks around help"
-  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
-    "no-mistakes DOD must require --intent to be the Captain's intent subsection"
-  assert_grep "plus any later words the captain actually said" "$brief" \
+  assert_grep "construct \`--intent\` exactly as the appended \`# Current no-mistakes intent contract\` directs" "$brief" \
+    "no-mistakes DOD must route --intent through the launch-time contract"
+  assert_grep "authorized captain intent plus its fixed Ponytail pipeline discipline" "$brief" \
+    "no-mistakes DOD did not hand Ponytail to pipeline agents"
+  assert_grep "Include any later words the captain actually supplied" "$brief" \
     "no-mistakes DOD must allow later captain words in --intent"
   assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
     "no-mistakes DOD must keep Firstmate spec out of --intent"
@@ -831,6 +845,8 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
+  assert_no_grep "Development contract: ponytail=full" "$brief" \
+    "scout brief must not apply development discipline to read-only work"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
@@ -843,6 +859,8 @@ test_scout_and_secondmate_scaffold() {
     "secondmate charter must not grow ship/scout Task subsections"
   assert_no_grep "{FIRSTMATE_SPEC}" "$brief" \
     "secondmate charter must not carry the Firstmate spec placeholder"
+  assert_no_grep "Development contract: ponytail=full" "$brief" \
+    "secondmate charter must not apply development discipline to supervision"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
