@@ -125,14 +125,14 @@ fm_brief_marked_captain_words() {  # <task-body>
   '
 }
 
-fm_brief_legacy_intent_overlay() {  # <captain-words>
+fm_brief_intent_overlay() {  # <captain-intent>
   cat <<'EOF'
 
 # Current no-mistakes intent contract
 This section supersedes every earlier instruction about constructing `--intent`.
-Use only the provenance-marked captain words below as `--intent`; never include the rest of the legacy mixed `# Task`.
+Use only the captain intent below as `--intent`; never include Firstmate specification or other mixed Task content.
 
-## Captain words authorized for intent
+## Captain intent authorized for --intent
 EOF
   printf '%s\n' "$1"
   cat <<'EOF'

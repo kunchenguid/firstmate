@@ -1780,22 +1780,29 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
-  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
-      && ! fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
-    LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
-    LEGACY_CAPTAIN_WORDS=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
-    if [ -z "$(printf '%s' "$LEGACY_CAPTAIN_WORDS" | tr -d '[:space:]')" ]; then
-      echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
-      exit 1
+  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+    if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
+      CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
+    else
+      LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
+      CAPTAIN_INTENT=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
+      if [ -z "$(printf '%s' "$CAPTAIN_INTENT" | tr -d '[:space:]')" ]; then
+        echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
+        exit 1
+      fi
     fi
     SOURCE_BRIEF=$BRIEF
     BRIEF="$DATA/$ID/launch-brief.md"
     BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
     {
       cat "$SOURCE_BRIEF"
-      fm_brief_legacy_intent_overlay "$LEGACY_CAPTAIN_WORDS"
+      fm_brief_intent_overlay "$CAPTAIN_INTENT"
     } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current intent contract for $SOURCE_BRIEF" >&2; exit 1; }
-    mv "$BRIEF_TMP" "$BRIEF"
+    if ! mv "$BRIEF_TMP" "$BRIEF"; then
+      rm -f -- "$BRIEF_TMP"
+      echo "error: could not publish current intent contract for $SOURCE_BRIEF" >&2
+      exit 1
+    fi
   fi
 fi
 

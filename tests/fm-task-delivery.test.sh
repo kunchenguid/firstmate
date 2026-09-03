@@ -503,11 +503,37 @@ EOF
   assert_grep "supersedes every earlier instruction about constructing \`--intent\`" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy spawn did not override its stale intent instruction"
-  authorized=$(awk '$0 == "## Captain words authorized for intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
+  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
   assert_contains "$authorized" "Fix the legacy dispatch boundary." \
     "marked legacy launch contract omitted captain words"
   assert_not_contains "$authorized" "Firstmate-authored constraint" \
     "marked legacy launch contract included mixed Task specification"
+
+  id=delivery-migrated-stale-no-mistakes
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the migrated dispatch boundary.
+
+## Firstmate spec
+Preserve the existing compatibility path.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+Pass the entire Task and every Firstmate requirement as --intent.
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  assert_present "$home/data/$id/launch-brief.md" \
+    "migrated subsection brief did not receive the current launch contract"
+  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
+  assert_contains "$authorized" "Fix the migrated dispatch boundary." \
+    "migrated launch contract omitted Captain's intent"
+  assert_not_contains "$authorized" "Preserve the existing compatibility path." \
+    "migrated launch contract included Firstmate spec in intent"
+  assert_grep "supersedes every earlier instruction about constructing \`--intent\`" \
+    "$home/data/$id/launch-brief.md" \
+    "migrated launch contract did not supersede its stale mixed-Task DoD"
 
   id=delivery-legacy-unmarked-no-mistakes
   mkdir -p "$home/data/$id"
