@@ -233,6 +233,37 @@ run_gate() {  # <bench-dir> <gate> [args...]
   "$GATE" --bench "$bench" --probe-timeout 30 "$@" 2>&1
 }
 
+bench_evidence_digest() {  # <bench-dir>
+  run_gate "$1" evidence-digest \
+    | sed -n 's/^BENCH_CHECK launch\.evidence_digest ok //p' | head -n 1
+}
+
+# Mint the receipt a passing preflight would write, taking the evidence binding
+# from the gate itself rather than recomputing the gate's digest in the test.
+write_receipt() {  # <bench-dir> [isolation-hash-override]
+  local bench=$1 isolation_override=${2:-} digest
+  digest=$(bench_evidence_digest "$bench")
+  [ -n "$digest" ] || fail "the gate reported no evidence digest for $bench"
+  python3 - "$bench" "$digest" "$isolation_override" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench, evidence, isolation_override = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+isolation = bench / "isolation.json"
+receipt = {
+    "schema": "fm-bench-preflight-receipt.v1",
+    "verdict": "pass",
+    "plan_sha256": hashlib.sha256((bench / "benchmark.json").read_bytes()).hexdigest(),
+    "evidence_sha256": evidence,
+    "stages": ["plan"],
+}
+if isolation_override:
+    receipt["isolation_sha256"] = isolation_override
+elif isolation.is_file():
+    receipt["isolation_sha256"] = hashlib.sha256(isolation.read_bytes()).hexdigest()
+(bench / "preflight.receipt").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+PY
+}
+
 run_gate_env() {  # <env-argument...> -- <bench-dir> <gate> [args...]
   local -a assignments=()
   while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
@@ -713,7 +744,17 @@ write_evaluator "$BENCH"
 printf '{"golden_head":"deadbeef","pixel":0.0074,"axe":1}\n' > "$BENCH/evaluator/determinism/run-2.json"
 out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
 expect_code 1 "$status" "two differing dry-runs are not a deterministic evaluator"
-assert_contains "$out" "no preregistered bounded delta" "an unexplained rerun difference is refused"
+assert_contains "$out" "no declared tolerance can stand in for reproducibility" \
+  "an unexplained rerun difference is refused"
+python3 - "$BENCH/evaluator/determinism/bound.json" <<'PY'
+import json, sys
+json.dump({"max_image_delta": 1000000, "observed_image_delta": 0,
+           "structural_fields_identical": True}, open(sys.argv[1], "w"), indent=2, sort_keys=True)
+PY
+out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
+expect_code 1 "$status" "a self-authored tolerance cannot clear differing dry-runs"
+assert_contains "$out" "no declared tolerance can stand in for reproducibility" \
+  "the determinism gate recomputes rather than reading a declared bound"
 pass "an evaluator whose two dry-runs disagree is refused"
 
 BENCH="$TMP_ROOT/evaluator-bleed"
@@ -877,13 +918,8 @@ bench, confine, entrant = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
                   "provider_proxy": "http://provider-proxy-k7:8080",
                   "provider_proxy_container": "provider-proxy-k7"}],
 }, indent=2, sort_keys=True) + "\n")
-digest = hashlib.sha256((bench / "benchmark.json").read_bytes()).hexdigest()
-isolation_digest = hashlib.sha256((bench / "isolation.json").read_bytes()).hexdigest()
-(bench / "preflight.receipt").write_text(json.dumps({
-    "schema": "fm-bench-preflight-receipt.v1", "verdict": "pass", "plan_sha256": digest,
-    "isolation_sha256": isolation_digest,
-}, indent=2, sort_keys=True) + "\n")
 PY
+write_receipt "$BENCH"
 out=$(FM_BENCH_ROOT="$BENCH" bash -c '
   . "$1/bin/fm-bench-launch-lib.sh"
   fm_bench_wrap_entrant_launch ordinary-crew-task "$2" "printf untouched"
@@ -901,6 +937,7 @@ p = sys.argv[1]; d = json.load(open(p))
 d["leak_marker"] = "FM_BENCH_CHANGED_"
 json.dump(d, open(p, "w"), indent=2, sort_keys=True)
 PY
+write_receipt "$BENCH" "$(printf '0%.0s' $(seq 1 64))"
 out=$(FM_BENCH_ROOT="$BENCH" bash -c '
   . "$1/bin/fm-bench-launch-lib.sh"
   fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "printf unsafe"
@@ -913,15 +950,7 @@ p = sys.argv[1]; d = json.load(open(p))
 d["launch_wrapper"][0] = "/missing/benchmark-wrapper"
 json.dump(d, open(p, "w"), indent=2, sort_keys=True)
 PY
-python3 - "$BENCH" <<'PY'
-import hashlib, json, sys
-from pathlib import Path
-bench = Path(sys.argv[1])
-receipt = bench / "preflight.receipt"
-d = json.loads(receipt.read_text())
-d["isolation_sha256"] = hashlib.sha256((bench / "isolation.json").read_bytes()).hexdigest()
-receipt.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
-PY
+write_receipt "$BENCH"
 out=$(FM_BENCH_ROOT="$BENCH" bash -c '
   . "$1/bin/fm-bench-launch-lib.sh"
   fm_bench_wrap_entrant_launch bench-b1-k7 "$2" "printf unsafe"
@@ -1014,15 +1043,7 @@ assert_contains "$out" "no passing preflight" "the refusal names the missing pre
 
 # A hand-written receipt cannot substitute for a real pass: it is bound to the
 # plan's bytes, so it survives only while the plan it cleared is unchanged.
-python3 - "$BENCH" <<'PY'
-import hashlib, json, sys
-from pathlib import Path
-bench = Path(sys.argv[1])
-digest = hashlib.sha256((bench / "benchmark.json").read_bytes()).hexdigest()
-(bench / "preflight.receipt").write_text(json.dumps({
-    "schema": "fm-bench-preflight-receipt.v1", "verdict": "pass",
-    "plan_sha256": digest, "stages": ["plan"]}, indent=2) + "\n")
-PY
+write_receipt "$BENCH"
 out=$(guard "bench-b1-k7" "$BENCH")
 assert_contains "$out" "rc=0" "a receipt bound to the current plan permits the launch"
 write_plan "$BENCH" 'plan["promotion_rule"]["required_wins"] = 4'
@@ -1040,15 +1061,7 @@ write_provenance "$BENCH" C1 cleared
 write_evaluator "$BENCH"
 run_gate "$BENCH" manifest-build >/dev/null
 run_gate "$BENCH" freeze >/dev/null
-python3 - "$BENCH" <<'PY'
-import hashlib, json, sys
-from pathlib import Path
-bench = Path(sys.argv[1])
-digest = hashlib.sha256((bench / "benchmark.json").read_bytes()).hexdigest()
-(bench / "preflight.receipt").write_text(json.dumps({
-    "schema": "fm-bench-preflight-receipt.v1", "verdict": "pass",
-    "plan_sha256": digest, "stages": ["plan"]}, indent=2) + "\n")
-PY
+write_receipt "$BENCH"
 out=$(guard "bench-b1-k7" "$BENCH")
 assert_contains "$out" "rc=0" "the clearance stands while it matches the plan"
 out=$(run_gate "$BENCH" preflight) && status=0 || status=$?
@@ -1058,6 +1071,51 @@ assert_absent "$BENCH/preflight.receipt" "a refusing preflight removes the recei
 out=$(guard "bench-b1-k7" "$BENCH")
 assert_contains "$out" "rc=1" "the launch guard refuses once the clearance is revoked"
 pass "evidence degrading outside the plan revokes the clearance rather than leaving it standing"
+
+# The receipt binds every artifact the preflight validated, not just the plan
+# and the isolation layout, so evidence edited without a rerun withdraws it.
+BENCH="$TMP_ROOT/evidence-binding"
+write_plan "$BENCH"
+write_provenance "$BENCH" A1 cleared
+write_provenance "$BENCH" C1 cleared
+write_evaluator "$BENCH"
+run_gate "$BENCH" manifest-build >/dev/null
+write_freeze_inputs "$BENCH"
+run_gate "$BENCH" freeze >/dev/null
+write_receipt "$BENCH"
+out=$(guard "bench-b1-k7" "$BENCH")
+assert_contains "$out" "rc=0" "a receipt covering the current evidence permits the launch"
+rm -f "$BENCH"/evaluator/captures/*.json
+out=$(guard "bench-b1-k7" "$BENCH")
+assert_contains "$out" "rc=1" "capture records deleted after the pass withdraw the clearance"
+assert_contains "$out" "preflight evidence no longer holds" "the refusal names the stale evidence binding"
+assert_contains "$out" "launch evidence changed after the preflight that cleared it" \
+  "the gate that owns the digest reports the mismatch"
+write_receipt "$BENCH"
+out=$(guard "bench-b1-k7" "$BENCH")
+assert_contains "$out" "rc=0" "a receipt reminted over the current evidence clears again"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1]) / "allowance.json"
+record = json.loads(path.read_text()) if path.is_file() else {}
+record["measured_available_runs"] = 1
+path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(guard "bench-b1-k7" "$BENCH")
+assert_contains "$out" "rc=1" "an allowance lowered after the pass withdraws the clearance"
+pass "the launch receipt binds every artifact the preflight validated"
+
+BENCH="$TMP_ROOT/evidence-symlink"
+write_plan "$BENCH"
+write_receipt "$BENCH"
+mv "$BENCH/benchmark.json" "$BENCH/benchmark-real.json"
+ln -s "$BENCH/benchmark-real.json" "$BENCH/benchmark.json"
+out=$(guard "bench-b1-k7" "$BENCH")
+assert_contains "$out" "rc=1" "a launch artifact replaced by a symlink is refused"
+assert_contains "$out" "launch evidence is symlinked or a special file: benchmark.json" \
+  "the refusal names the substituted artifact"
+pass "substituted launch evidence is refused by type, not only by bytes"
 
 out=$(FM_BENCH_LAUNCH_BYPASS=1 bash -c '
   . "$1/bin/fm-bench-launch-lib.sh"
@@ -1249,6 +1307,71 @@ PY
   assert_contains "$out" "determinism/run-1.json input and expected output are not structurally distinct" \
     "no choice of fixture bytes lets an echoing evaluator reproduce its expected output"
   pass "preflight evaluator evidence is generated by the frozen executable"
+
+  # A lookup table keyed on the frozen input path answers every record without
+  # measuring anything, so the gate hands the evaluator an opaque path instead.
+  BENCH="$TMP_ROOT/evaluator-path-lookup"
+  write_plan "$BENCH"
+  write_evaluator "$BENCH"
+  write_freeze_inputs "$BENCH"
+  write_isolation "$BENCH" "$RESTORE_MECHANISM"
+  python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+program = bench / "scoring" / "evaluator.sh"
+outputs = bench / "ground-truth" / "evaluator-outputs"
+cases = []
+for output in sorted(outputs.rglob("*.json")):
+    relative = output.relative_to(outputs).as_posix()
+    cases.append("  */%s) cat %s;;" % (relative, json.dumps(str(output))))
+program.write_text("#!/bin/sh\ncase \"$2\" in\n" + "\n".join(cases) + "\n  *) exit 3;;\nesac\n")
+program.chmod(0o755)
+contract_path = bench / "evaluator" / "execution.json"
+contract = json.loads(contract_path.read_text())
+contract["sha256"] = hashlib.sha256(program.read_bytes()).hexdigest()
+contract_path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
+PY
+  run_gate "$BENCH" freeze >/dev/null
+  out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
+  expect_code 1 "$status" "an evaluator that answers from its input path is refused"
+  assert_contains "$out" "evaluator confinement or execution for determinism/run-1.json exited 3" \
+    "the opaque input path matches no entry in a path-keyed answer table"
+  pass "the frozen evaluator never sees the path of the record it must derive"
+
+  # This evaluator derives every record correctly but normalises away the one
+  # value the gate edits, so it reproduces its records without reading them.
+  BENCH="$TMP_ROOT/evaluator-input-blind"
+  write_plan "$BENCH"
+  write_evaluator "$BENCH"
+  write_freeze_inputs "$BENCH"
+  write_isolation "$BENCH" "$RESTORE_MECHANISM"
+  python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+program = bench / "scoring" / "evaluator.sh"
+golden = json.loads((bench / "evaluator" / "determinism" / "run-1.json").read_text())
+program.write_text(
+    "#!/bin/sh\n"
+    "[ \"${1:-}\" = --evaluate ] && [ -f \"${2:-}\" ] || exit 2\n"
+    "sed -e 's/\"golden_head\":\"[^\"]*\"/\"golden_head\":\"%s\"/' \\\n"
+    "    -e 's/\"schema\":\"fm-bench-evaluator-input.v1\",\"fixture\":/"
+    "\"schema\":\"fm-bench-evaluator-output.v1\",\"result\":/' \"$2\"\n"
+    % golden["golden_head"]
+)
+program.chmod(0o755)
+contract_path = bench / "evaluator" / "execution.json"
+contract = json.loads(contract_path.read_text())
+contract["sha256"] = hashlib.sha256(program.read_bytes()).hexdigest()
+contract_path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
+PY
+  run_gate "$BENCH" freeze >/dev/null
+  out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
+  expect_code 1 "$status" "an evaluator blind to the perturbed value is refused"
+  assert_contains "$out" "the frozen evaluator ignored its input" \
+    "a gate-owned edit of the golden input must move the evaluator output"
+  pass "preflight proves the frozen evaluator reads the input it is handed"
 fi
 
 # The gate resolves its container runtime through the wrapper, so the wrapper

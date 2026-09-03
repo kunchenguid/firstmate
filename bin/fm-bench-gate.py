@@ -51,6 +51,21 @@ DRILL_SCHEMA = "fm-bench-restore-drill.v1"
 EVALUATOR_INPUT_SCHEMA = "fm-bench-evaluator-input.v1"
 EVALUATOR_OUTPUT_SCHEMA = "fm-bench-evaluator-output.v1"
 RESTORE_EVALUATOR_SAMPLE_LIMIT = 1
+EVIDENCE_FILES = (
+    "benchmark.json",
+    "isolation.json",
+    "freeze.json",
+    "manifest.json",
+    "allowance.json",
+)
+EVIDENCE_TREES = (
+    "packets",
+    "ground-truth",
+    "scoring",
+    "judge-prompts",
+    "provenance",
+    "evaluator",
+)
 MAX_PNG_RASTER_BYTES = 128 * 1024 * 1024
 NORMALIZED_RUN_TIME_NS = 1_600_000_000_000_000_000
 
@@ -1824,6 +1839,77 @@ def check_evaluator(
         check_evaluator_execution(root, base, report, timeout)
 
 
+EVALUATOR_DEPENDENCE_RECORD = "determinism/run-1.json"
+
+
+def fixture_scalar_pointers(fixture: Any) -> list[str]:
+    """Every scalar inside a frozen input fixture, in a deterministic order."""
+    pointers: list[str] = []
+
+    def walk(node: Any, prefix: str) -> None:
+        if isinstance(node, dict):
+            for key in sorted(node):
+                token = str(key).replace("~", "~0").replace("/", "~1")
+                walk(node[key], f"{prefix}/{token}")
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                walk(item, f"{prefix}/{index}")
+        else:
+            pointers.append(prefix)
+
+    walk(fixture, "/fixture")
+    return pointers
+
+
+def perturb_frozen_fixture(original: bytes, entropy: bytes) -> bytes:
+    """A gate-owned, form- and length-preserving edit of one fixture scalar.
+
+    The gate chooses the edit, so an archive cannot steer the probe at a value
+    its evaluator ignores, and the edit stays inside the fixture payload so the
+    input keeps its frozen schema.
+    """
+    document = json.loads(original.decode("utf-8"))
+    for pointer in fixture_scalar_pointers(document.get("fixture")):
+        try:
+            return perturb_json_bytes(original, pointer, entropy)[0]
+        except ValueError:
+            continue
+    raise ValueError("no frozen evaluator input scalar carries a form-preserving perturbation")
+
+
+def blinded_evaluator_run(
+    wrapper: list[str],
+    program: Path,
+    root: Path,
+    workspace: Path,
+    payload: bytes,
+    timeout: int,
+) -> subprocess.CompletedProcess[bytes]:
+    """Execute the frozen evaluator against payload behind an opaque path.
+
+    The evaluator never sees the frozen input's own path, so it cannot key an
+    answer table on the record it is being asked to derive: every execution
+    arrives under a fresh directory and file name that carry no case identity.
+    """
+    run_dir = Path(tempfile.mkdtemp(dir=str(workspace)))
+    target = run_dir / uuid.uuid4().hex
+    target.write_bytes(payload)
+    argv = [
+        *(str(root) if item == "{root}" else item for item in wrapper),
+        str(program),
+        "--evaluate",
+        str(target),
+    ]
+    return subprocess.run(
+        argv,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        env=confinement_env(),
+    )
+
+
 def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: int) -> None:
     try:
         contract = load_json(base / "execution.json")
@@ -1885,144 +1971,197 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
             ),
         )
         return
-    generated = 0
-    input_root = (root / "ground-truth" / "evaluator-inputs").resolve()
-    output_root = (root / "ground-truth" / "evaluator-outputs").resolve()
-    for path in evidence:
-        relative_name = path.relative_to(base).as_posix()
-        execution_record = records.get(relative_name)
-        if not isinstance(execution_record, dict) or set(execution_record) != {"input", "expected_output"}:
-            report.fail("evaluator.execution", f"{relative_name} has no distinct frozen input and expected output")
-            return
-        input_record = execution_record.get("input")
-        output_record = execution_record.get("expected_output")
-        if not isinstance(input_record, dict) or not isinstance(output_record, dict):
-            report.fail("evaluator.execution", f"{relative_name} input and expected output must be separate records")
-            return
-        input_name = input_record.get("path")
-        input_hash = input_record.get("sha256")
-        output_name = output_record.get("path")
-        output_hash = output_record.get("sha256")
-        if not all(nonempty_str(value) for value in (input_name, input_hash, output_name, output_hash)):
-            report.fail("evaluator.execution", f"{relative_name} input or expected output is not content-addressed")
-            return
-        input_path = (root / str(input_name)).resolve()
-        output_path = (root / str(output_name)).resolve()
-        if (
-            not is_within(input_path, input_root)
-            or not input_path.is_file()
-            or sha256_file(input_path) != input_hash
-            or frozen_hashes.get(str(input_name)) != input_hash
-        ):
-            report.fail("evaluator.execution", f"{relative_name} input is absent, mutable, or outside frozen evaluator inputs")
-            return
-        if (
-            not is_within(output_path, output_root)
-            or not output_path.is_file()
-            or sha256_file(output_path) != output_hash
-            or frozen_hashes.get(str(output_name)) != output_hash
-        ):
+    workspace = Path(tempfile.mkdtemp(dir=str(root), prefix=".fm-bench-blind-"))
+    dependence_input: bytes | None = None
+    dependence_stdout: bytes | None = None
+    try:
+        generated = 0
+        input_root = (root / "ground-truth" / "evaluator-inputs").resolve()
+        output_root = (root / "ground-truth" / "evaluator-outputs").resolve()
+        for path in evidence:
+            relative_name = path.relative_to(base).as_posix()
+            execution_record = records.get(relative_name)
+            if not isinstance(execution_record, dict) or set(execution_record) != {"input", "expected_output"}:
+                report.fail("evaluator.execution", f"{relative_name} has no distinct frozen input and expected output")
+                return
+            input_record = execution_record.get("input")
+            output_record = execution_record.get("expected_output")
+            if not isinstance(input_record, dict) or not isinstance(output_record, dict):
+                report.fail("evaluator.execution", f"{relative_name} input and expected output must be separate records")
+                return
+            input_name = input_record.get("path")
+            input_hash = input_record.get("sha256")
+            output_name = output_record.get("path")
+            output_hash = output_record.get("sha256")
+            if not all(nonempty_str(value) for value in (input_name, input_hash, output_name, output_hash)):
+                report.fail("evaluator.execution", f"{relative_name} input or expected output is not content-addressed")
+                return
+            input_path = (root / str(input_name)).resolve()
+            output_path = (root / str(output_name)).resolve()
+            if (
+                not is_within(input_path, input_root)
+                or not input_path.is_file()
+                or sha256_file(input_path) != input_hash
+                or frozen_hashes.get(str(input_name)) != input_hash
+            ):
+                report.fail("evaluator.execution", f"{relative_name} input is absent, mutable, or outside frozen evaluator inputs")
+                return
+            if (
+                not is_within(output_path, output_root)
+                or not output_path.is_file()
+                or sha256_file(output_path) != output_hash
+                or frozen_hashes.get(str(output_name)) != output_hash
+            ):
+                report.fail(
+                    "evaluator.execution",
+                    f"{relative_name} expected output is absent, mutable, or outside frozen evaluator outputs",
+                )
+                return
+            if input_path == output_path or input_path.read_bytes() == output_path.read_bytes():
+                report.fail("evaluator.execution", f"{relative_name} input and expected output are not structurally distinct")
+                return
+            try:
+                input_fixture = load_json(input_path, EVALUATOR_INPUT_SCHEMA)
+                expected_output = load_json(output_path, EVALUATOR_OUTPUT_SCHEMA)
+                recorded = load_json(path)
+            except GateError as exc:
+                report.fail("evaluator.execution", f"{relative_name} frozen evaluator contract is invalid: {exc}")
+                return
+            if set(input_fixture) != {"schema", "fixture"}:
+                report.fail("evaluator.execution", f"{relative_name} input does not match the frozen input schema")
+                return
+            if set(expected_output) != {"schema", "result"} or expected_output.get("result") != recorded:
+                report.fail(
+                    "evaluator.execution",
+                    f"{relative_name} expected output does not bind the evaluator evidence record",
+                )
+                return
+            try:
+                completed = blinded_evaluator_run(
+                    wrapper, program, root, workspace, input_path.read_bytes(), timeout
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                report.fail("evaluator.execution", f"content-addressed evaluator could not run: {exc}")
+                return
+            if relative_name == EVALUATOR_DEPENDENCE_RECORD:
+                dependence_input = input_path.read_bytes()
+                dependence_stdout = completed.stdout
+            if completed.returncode != 0:
+                report.fail(
+                    "evaluator.execution",
+                    f"evaluator confinement or execution for {relative_name} exited "
+                    f"{completed.returncode}{confinement_stderr(completed.stderr)}",
+                )
+                return
+            try:
+                observed_output = json.loads(completed.stdout)
+            except json.JSONDecodeError as exc:
+                report.fail("evaluator.execution", f"evaluator output for {path.name} is invalid: {exc}")
+                return
+            if observed_output != expected_output:
+                report.fail(
+                    "evaluator.execution",
+                    f"content-addressed evaluator did not derive {path.relative_to(base)} from its frozen input",
+                )
+                return
+            relative = path.relative_to(base)
+            observed = observed_output.get("result")
+            if not isinstance(observed, dict):
+                report.fail("evaluator.execution", f"{relative} did not produce a derived result object")
+                return
+            if relative.parts[0] == "mutations":
+                before = observed.get("scores_before")
+                after = observed.get("scores_after")
+                declared = observed.get("dimension_deltas")
+                if not isinstance(before, dict) or not isinstance(after, dict) or not isinstance(declared, dict):
+                    report.fail("evaluator.execution", f"{relative} has no executable before-and-after score vectors")
+                    return
+                dimensions = set(before) | set(after)
+                try:
+                    derived = {name: float(after[name]) - float(before[name]) for name in dimensions}
+                except (KeyError, TypeError, ValueError):
+                    report.fail("evaluator.execution", f"{relative} score vectors are incomplete or non-numeric")
+                    return
+                if any(
+                    not math.isfinite(value)
+                    or not isinstance(declared.get(name), (int, float))
+                    or isinstance(declared.get(name), bool)
+                    or abs(float(declared[name]) - value) > 1e-9
+                    for name, value in derived.items()
+                ):
+                    report.fail("evaluator.execution", f"{relative} declared deltas differ from executed score vectors")
+                    return
+            elif relative.parts[0] == "captures":
+                payload = dict(observed)
+                claimed_hash = payload.pop("result_hash", None)
+                derived_hash = sha256_bytes(
+                    (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+                )
+                if claimed_hash != derived_hash:
+                    report.fail("evaluator.execution", f"{relative} capture result hash was not derived from execution")
+                    return
+            generated += 1
+        report.ok(
+            "evaluator.execution",
+            f"content-addressed evaluator generated all {generated} golden, mutation, and capture records under network-disabled confinement",
+        )
+        if dependence_input is None or dependence_stdout is None:
             report.fail(
-                "evaluator.execution",
-                f"{relative_name} expected output is absent, mutable, or outside frozen evaluator outputs",
+                "evaluator.reproducibility",
+                f"{EVALUATOR_DEPENDENCE_RECORD} carries no executed golden run to prove reproducibility against",
             )
             return
-        if input_path == output_path or input_path.read_bytes() == output_path.read_bytes():
-            report.fail("evaluator.execution", f"{relative_name} input and expected output are not structurally distinct")
-            return
         try:
-            input_fixture = load_json(input_path, EVALUATOR_INPUT_SCHEMA)
-            expected_output = load_json(output_path, EVALUATOR_OUTPUT_SCHEMA)
-            recorded = load_json(path)
-        except GateError as exc:
-            report.fail("evaluator.execution", f"{relative_name} frozen evaluator contract is invalid: {exc}")
-            return
-        if set(input_fixture) != {"schema", "fixture"}:
-            report.fail("evaluator.execution", f"{relative_name} input does not match the frozen input schema")
-            return
-        if set(expected_output) != {"schema", "result"} or expected_output.get("result") != recorded:
-            report.fail(
-                "evaluator.execution",
-                f"{relative_name} expected output does not bind the evaluator evidence record",
-            )
-            return
-        argv = [
-            *(str(root) if item == "{root}" else item for item in wrapper),
-            str(program),
-            "--evaluate",
-            str(input_path),
-        ]
-        try:
-            completed = subprocess.run(
-                argv,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                env=confinement_env(),
+            repeated = blinded_evaluator_run(
+                wrapper, program, root, workspace, dependence_input, timeout
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            report.fail("evaluator.execution", f"content-addressed evaluator could not run: {exc}")
+            report.fail("evaluator.reproducibility", f"the frozen evaluator could not be re-executed: {exc}")
             return
-        if completed.returncode != 0:
+        if repeated.returncode != 0:
             report.fail(
-                "evaluator.execution",
-                f"evaluator confinement or execution for {relative_name} exited "
-                f"{completed.returncode}{confinement_stderr(completed.stderr)}",
+                "evaluator.reproducibility",
+                f"the repeated golden execution exited {repeated.returncode}"
+                f"{confinement_stderr(repeated.stderr)}",
             )
+            return
+        if repeated.stdout != dependence_stdout:
+            report.fail(
+                "evaluator.reproducibility",
+                f"the frozen evaluator produced different output for byte-identical {EVALUATOR_DEPENDENCE_RECORD} input",
+            )
+            return
+        report.ok(
+            "evaluator.reproducibility",
+            f"byte-identical {EVALUATOR_DEPENDENCE_RECORD} input reproduced byte-identical output through two opaque paths",
+        )
+        try:
+            perturbed_input = perturb_frozen_fixture(dependence_input, uuid.uuid4().bytes)
+        except (ValueError, json.JSONDecodeError, UnicodeError) as exc:
+            report.fail("evaluator.input_dependence", f"the frozen golden input cannot be perturbed: {exc}")
             return
         try:
-            observed_output = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            report.fail("evaluator.execution", f"evaluator output for {path.name} is invalid: {exc}")
+            perturbed = blinded_evaluator_run(
+                wrapper, program, root, workspace, perturbed_input, timeout
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            report.fail("evaluator.input_dependence", f"the perturbed execution could not run: {exc}")
             return
-        if observed_output != expected_output:
+        if perturbed.returncode != 0:
             report.fail(
-                "evaluator.execution",
-                f"content-addressed evaluator did not derive {path.relative_to(base)} from its frozen input",
+                "evaluator.input_dependence",
+                f"the perturbed golden execution exited {perturbed.returncode}"
+                f"{confinement_stderr(perturbed.stderr)}",
             )
             return
-        relative = path.relative_to(base)
-        observed = observed_output.get("result")
-        if not isinstance(observed, dict):
-            report.fail("evaluator.execution", f"{relative} did not produce a derived result object")
-            return
-        if relative.parts[0] == "mutations":
-            before = observed.get("scores_before")
-            after = observed.get("scores_after")
-            declared = observed.get("dimension_deltas")
-            if not isinstance(before, dict) or not isinstance(after, dict) or not isinstance(declared, dict):
-                report.fail("evaluator.execution", f"{relative} has no executable before-and-after score vectors")
-                return
-            dimensions = set(before) | set(after)
-            try:
-                derived = {name: float(after[name]) - float(before[name]) for name in dimensions}
-            except (KeyError, TypeError, ValueError):
-                report.fail("evaluator.execution", f"{relative} score vectors are incomplete or non-numeric")
-                return
-            if any(
-                not math.isfinite(value)
-                or not isinstance(declared.get(name), (int, float))
-                or isinstance(declared.get(name), bool)
-                or abs(float(declared[name]) - value) > 1e-9
-                for name, value in derived.items()
-            ):
-                report.fail("evaluator.execution", f"{relative} declared deltas differ from executed score vectors")
-                return
-        elif relative.parts[0] == "captures":
-            payload = dict(observed)
-            claimed_hash = payload.pop("result_hash", None)
-            derived_hash = sha256_bytes(
-                (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-            )
-            if claimed_hash != derived_hash:
-                report.fail("evaluator.execution", f"{relative} capture result hash was not derived from execution")
-                return
-        generated += 1
-    report.ok(
-        "evaluator.execution",
-        f"content-addressed evaluator generated all {generated} golden, mutation, and capture records under network-disabled confinement",
-    )
+        report.require(
+            perturbed.stdout != dependence_stdout,
+            "evaluator.input_dependence",
+            f"a gate-owned form-preserving edit of {EVALUATOR_DEPENDENCE_RECORD} moved the evaluator's output",
+            f"the frozen evaluator ignored its input: a gate-owned edit of {EVALUATOR_DEPENDENCE_RECORD} left the output unchanged",
+        )
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
 
 
 def check_evaluator_lock(base: Path, report: Report) -> None:
@@ -2119,29 +2258,11 @@ def check_evaluator_determinism(base: Path, report: Report) -> None:
         report.fail("evaluator.determinism", "two dry-runs on the same golden head are required")
         return
     left, right = sha256_file(first), sha256_file(second)
-    if left == right:
-        report.ok("evaluator.determinism", f"two dry-runs on the golden head are byte-identical ({left[:12]})")
-        return
-    try:
-        bound = load_json(base / "determinism" / "bound.json")
-    except GateError:
-        report.fail(
-            "evaluator.determinism",
-            "the two dry-runs differ and no preregistered bounded delta is declared",
-        )
-        return
-    declared = bound.get("max_image_delta")
-    observed = bound.get("observed_image_delta")
     report.require(
-        isinstance(declared, (int, float))
-        and isinstance(observed, (int, float))
-        and not isinstance(declared, bool)
-        and not isinstance(observed, bool)
-        and observed <= declared
-        and bound.get("structural_fields_identical") is True,
+        left == right,
         "evaluator.determinism",
-        f"structured results identical and image delta {observed} within the preregistered bound {declared}",
-        "the two dry-runs differ outside the preregistered bounded delta",
+        f"two dry-runs on the golden head are byte-identical ({left[:12]})",
+        "the two dry-runs on the golden head differ; no declared tolerance can stand in for reproducibility",
     )
 
 
@@ -2471,12 +2592,15 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
                     invalid_roots.append(entry.name)
             except OSError:
                 invalid_roots.append(entry.name)
-    ok = report.require(
-        not invalid_roots,
-        "archive.storage",
-        "every sample root is a real directory inside the archive",
-        "archive sample roots are symlinks or special files: " + ", ".join(sorted(invalid_roots)),
-    ) and ok
+        ok = report.require(
+            not invalid_roots,
+            "archive.storage",
+            "every sample root is a real directory inside the archive",
+            "archive sample roots are symlinks or special files: " + ", ".join(sorted(invalid_roots)),
+        ) and ok
+    else:
+        report.fail("archive.storage", "sample roots were not read because the archive root is unusable")
+        ok = False
     samples = archive_samples(root)
     expected_identities = planned_sample_identities(plan)
     digests: list[str] = []
@@ -3841,7 +3965,6 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
         tree = evaluator.get("tree") if isinstance(evaluator, dict) else None
         capture_hash = evaluator.get("capture_hash") if isinstance(evaluator, dict) else None
         binding = manifest.get("tree_binding") or {}
-        status = failure.get("status") if isinstance(failure, dict) else None
         if (
             not isinstance(deterministic, (int, float))
             or isinstance(deterministic, bool)
@@ -3858,7 +3981,6 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             and nonempty_str(tree)
             and tree == binding.get("original_tree")
             and nonempty_str(capture_hash)
-            and status == "scored"
         )
         if not valid:
             report.fail(
@@ -4148,6 +4270,95 @@ def baseline_veto_clear(
 # --------------------------------------------------------------------------
 
 
+def evidence_entries(root: Path) -> list[tuple[str, str, int, str]]:
+    """Every launch artifact preflight validates, as sorted content bindings.
+
+    Each entry carries the benchmark-relative path, its type, its mode, and its
+    bytes, so a file that is deleted, edited, substituted for a directory, or
+    replaced by a symlink all move the digest rather than any one of them
+    slipping past a hash of the paths alone.
+    """
+    entries: list[tuple[str, str, int, str]] = []
+
+    def record(path: Path) -> None:
+        relative = path.relative_to(root).as_posix()
+        try:
+            mode = path.lstat().st_mode
+        except OSError:
+            entries.append((relative, "absent", 0, ""))
+            return
+        if stat.S_ISLNK(mode):
+            entries.append((relative, "symlink", stat.S_IMODE(mode), ""))
+        elif stat.S_ISDIR(mode):
+            entries.append((relative, "directory", stat.S_IMODE(mode), ""))
+        elif stat.S_ISREG(mode):
+            entries.append((relative, "file", stat.S_IMODE(mode), sha256_file(path)))
+        else:
+            entries.append((relative, "special", stat.S_IMODE(mode), ""))
+
+    for name in EVIDENCE_FILES:
+        record(root / name)
+    for name in EVIDENCE_TREES:
+        tree = root / name
+        try:
+            tree_mode = tree.lstat().st_mode
+        except OSError:
+            entries.append((name, "absent", 0, ""))
+            continue
+        if not stat.S_ISDIR(tree_mode) or stat.S_ISLNK(tree_mode):
+            record(tree)
+            continue
+        for path in sorted(tree.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+            record(path)
+    return sorted(entries)
+
+
+def evidence_digest(root: Path) -> str:
+    payload = "\n".join(
+        f"{relative}\t{kind}\t{mode:o}\t{digest}" for relative, kind, mode, digest in evidence_entries(root)
+    )
+    return sha256_bytes(payload.encode("utf-8"))
+
+
+def check_launch_evidence(root: Path, report: Report) -> None:
+    """Recompute every launch artifact the receipt cleared, at the spawn boundary."""
+    receipt_path = root / "preflight.receipt"
+    try:
+        receipt = load_json(receipt_path, RECEIPT_SCHEMA)
+    except GateError as exc:
+        report.fail("launch.receipt", str(exc))
+        return
+    if receipt.get("verdict") != "pass":
+        report.fail("launch.receipt", "the preflight receipt does not record a passing verdict")
+        return
+    recorded = receipt.get("evidence_sha256")
+    if not nonempty_str(recorded):
+        report.fail(
+            "launch.receipt",
+            "the preflight receipt carries no evidence binding; rerun preflight to mint a current clearance",
+        )
+        return
+    entries = evidence_entries(root)
+    unusable = sorted(
+        relative for relative, kind, _mode, _digest in entries if kind in ("symlink", "special")
+    )
+    if unusable:
+        report.fail(
+            "launch.evidence",
+            "launch evidence is symlinked or a special file: " + ", ".join(unusable),
+        )
+        return
+    payload = "\n".join(
+        f"{relative}\t{kind}\t{mode:o}\t{digest}" for relative, kind, mode, digest in entries
+    )
+    report.require(
+        sha256_bytes(payload.encode("utf-8")) == recorded,
+        "launch.evidence",
+        f"all {len(entries)} launch artifacts still match the evidence the preflight cleared",
+        "launch evidence changed after the preflight that cleared it",
+    )
+
+
 def frozen_inputs(root: Path, plan: dict[str, Any]) -> dict[str, str]:
     """Every input that must be fixed before labels are assigned."""
     hashes: dict[str, str] = {"benchmark.json": sha256_file(root / "benchmark.json")}
@@ -4276,6 +4487,7 @@ def preflight(root: Path, plan: dict[str, Any], report: Report, timeout: int) ->
                 "verdict": "pass",
                 "plan_sha256": sha256_file(root / "benchmark.json"),
                 "isolation_sha256": sha256_file(root / "isolation.json"),
+                "evidence_sha256": evidence_digest(root),
                 "stages": list(PREFLIGHT_STAGES),
             },
         )
@@ -4341,6 +4553,8 @@ def build_parser() -> argparse.ArgumentParser:
             "restore-drill",
             "cleanup-gate",
             "promote-evaluate",
+            "evidence-digest",
+            "launch-check",
         ],
         help="the gate to run",
     )
@@ -4392,6 +4606,10 @@ def main(argv: list[str]) -> int:
             cleanup_gate(root, plan, report)
         elif args.subcommand == "promote-evaluate":
             promote_evaluate(root, plan, report)
+        elif args.subcommand == "evidence-digest":
+            report.ok("launch.evidence_digest", evidence_digest(root))
+        elif args.subcommand == "launch-check":
+            check_launch_evidence(root, report)
     except GateError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE

@@ -14,12 +14,20 @@
 #
 # A benchmark entrant may launch only when all of these hold:
 #   1. FM_BENCH_ROOT names a benchmark directory,
-#   2. that directory holds a preflight.receipt with verdict "pass", and
-#   3. the receipt's plan_sha256 still matches benchmark.json's current bytes.
+#   2. that directory holds a preflight.receipt with verdict "pass",
+#   3. the receipt's plan_sha256 still matches benchmark.json's current bytes,
+#      and
+#   4. `fm-bench-gate.sh launch-check` recomputes the receipt's evidence
+#      binding over every artifact the preflight validated and still agrees.
 #
-# Condition 3 is what makes the receipt a binding rather than a note: editing
-# the plan after a passing preflight invalidates every receipt written against
-# it, so a relaxed threshold or a swapped packet cannot ride an old pass.
+# Conditions 3 and 4 are what make the receipt a binding rather than a note.
+# Editing the plan after a passing preflight invalidates every receipt written
+# against it, so a relaxed threshold or a swapped packet cannot ride an old
+# pass; and because the evidence binding covers the freeze, manifest,
+# allowance, provenance, and evaluator material too, deleting a capture record
+# or lowering the measured allowance after a pass revokes the clearance rather
+# than leaving it standing. The gate owns that digest, so this library never
+# recomputes it independently.
 #
 # TEST-HARNESS ESCAPE HATCH (FM_BENCH_LAUNCH_BYPASS=1): firstmate's own suite
 # spawns fixture tasks whose ids may collide with the reserved prefix. The
@@ -41,7 +49,7 @@ fm_bench_sha256_file() {  # <path>
 # Refuse a benchmark entrant spawn that no passing preflight covers.
 # Returns 0 for every non-benchmark task id.
 fm_refuse_ungated_benchmark_entrant() {  # <task-id>
-  local id=${1-} root receipt plan_hash receipt_hash verdict
+  local id=${1-} root receipt plan_hash receipt_hash verdict gate evidence
   case "$id" in
     bench-*) ;;
     *) return 0 ;;
@@ -67,6 +75,16 @@ fm_refuse_ungated_benchmark_entrant() {  # <task-id>
   plan_hash=$(fm_bench_sha256_file "$root/benchmark.json") || plan_hash=
   if [ -z "$plan_hash" ] || [ -z "$receipt_hash" ] || [ "$plan_hash" != "$receipt_hash" ]; then
     echo "error: benchmark entrant $id preflight covers a different plan; launch refused" >&2
+    return 1
+  fi
+  gate="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/fm-bench-gate.sh"
+  if [ ! -x "$gate" ]; then
+    echo "error: benchmark entrant $id cannot recheck its preflight evidence; launch refused" >&2
+    return 1
+  fi
+  if ! evidence=$("$gate" --bench "$root" launch-check 2>&1); then
+    echo "error: benchmark entrant $id preflight evidence no longer holds; launch refused" >&2
+    printf '%s\n' "$evidence" >&2
     return 1
   fi
   return 0
