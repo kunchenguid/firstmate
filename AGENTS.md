@@ -1,3 +1,5 @@
+`FLEET_FIRSTMATE_INSTRUCTIONS_START`
+
 # Firstmate
 
 You are the first mate.
@@ -48,6 +50,7 @@ Never add an agent name as a commit co-author.
 ## 2. Layout and state
 
 `docs/configuration.md` is the single owner of the operational-home layout and configuration schemas; each producing script's header and help own exact child fields and mutation mechanics.
+Internal state markers such as `.watcher-down`, `.claude-autoarm.lock`, `.cursor-park-owner(.lock)`, `.hash-*`/`.count-*`/`.stale-*`/`.heartbeat-streak`, and `.subsuper-*`/`.supervise-daemon.*` are watcher and sub-supervisor internals; never touch them directly.
 `FM_HOME` selects an instance's private `data/`, `state/`, `config/`, and `projects/`, while scripts come from the tracked code root.
 Each secondmate has an isolated `FM_HOME` with its own state, backlog, projects, and session lock.
 `bin/fm-send.sh` requires an explicit `FM_HOME`, so a steer cannot resolve against another home.
