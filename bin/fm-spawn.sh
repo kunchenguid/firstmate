@@ -2496,6 +2496,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # A freshly created herdr pane's shell may still be running its startup here
+  # (pyenv init contends on a global rehash lock for up to ~57s). A treehouse get
+  # submitted into that window sits queued past the 60s worktree-detection wait
+  # below, and the unverified pane/Space is then torn down (herdr issue #3208).
+  # Block until the pane's shell actually executes a submitted command before
+  # sending treehouse get; a failure here is a hard spawn failure, so exit and let
+  # the trap's abort cleanup remove any unverified projected Space. Only herdr
+  # needs this - the other backends open their pane into an already-live shell.
+  if [ "$BACKEND" = herdr ] && ! fm_backend_herdr_wait_shell_ready "$WT_TARGET"; then
+    echo "error: herdr pane shell did not become ready before treehouse get; inspect window $T" >&2
+    exit 1
+  fi
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.

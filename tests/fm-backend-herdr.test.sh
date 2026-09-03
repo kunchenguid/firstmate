@@ -2992,6 +2992,93 @@ test_current_path_reads_cwd() {
   pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
 }
 
+# --- wait_shell_ready: the fresh-pane execution-readiness barrier ------------
+#
+# A new herdr pane's zsh can still be running its startup when fm-spawn wants to
+# submit `treehouse get` (pyenv init contends on a global rehash lock for up to
+# ~57s). fm_backend_herdr_wait_shell_ready blocks on a split-token printf marker
+# until the shell actually executes a submitted command, so the barrier's verdict
+# is real command execution, not an echoed keystroke.
+
+test_wait_shell_ready_returns_zero_when_marker_renders() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/ready-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # pane run (call 1) submits the marker silently; pane wait-output (call 2)
+  # succeeds - modeling a shell that finished startup and rendered the marker
+  # (the real `pane wait-output` blocks up to the timeout for exactly this).
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_shell_ready default:w1:p2' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "wait_shell_ready should return 0 when the marker renders (wait-output succeeds)"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''run'$'\x1f''w1:p2'$'\x1f''printf ' \
+    "wait_shell_ready did not submit the readiness printf via pane run"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''wait-output'$'\x1f''--match'$'\x1f''FMSHELLRDY' \
+    "wait_shell_ready did not wait for the rendered marker"
+  assert_contains "$(cat "$log")" $'\x1f''--source'$'\x1f''recent-unwrapped'$'\x1f''--timeout'$'\x1f''90000' \
+    "wait_shell_ready did not wait with recent-unwrapped matching and the default 90s bound"
+  pass "fm_backend_herdr_wait_shell_ready: submits the printf marker, waits for it, and returns 0 on render"
+}
+
+test_wait_shell_ready_marker_only_matches_execution() {
+  # The waited marker must be the CONTIGUOUS prefix+token, which the typed printf
+  # command never contains verbatim (prefix inside the format, token a separate
+  # operand). That is what makes an echoed command line unable to satisfy
+  # readiness - only the shell actually RUNNING the printf can.
+  local dir log resp fb logtxt runcmd token matchval
+  dir="$TMP_ROOT/ready-split"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_shell_ready default:w1:p2' "$ROOT"
+  logtxt=$(cat "$log")
+  runcmd=$(printf '%s' "$logtxt" | tr $'\x1f' '\n' | grep -m1 '^printf ')
+  token=${runcmd##* }
+  matchval=$(printf '%s' "$logtxt" | tr $'\x1f' '\n' | grep -A1 -x -- '--match' | tail -1)
+  [ -n "$token" ] || fail "could not extract the readiness token from the printf command"
+  case "$token" in ''|*[!0-9a-f]*) fail "token should be lowercase hex, got '$token'" ;; esac
+  [ "$matchval" = "FMSHELLRDY$token" ] || fail "waited marker '$matchval' is not the contiguous prefix+token 'FMSHELLRDY$token'"
+  case "$runcmd" in
+    *"FMSHELLRDY$token"*) fail "the typed printf command contains the contiguous marker, so an echoed command line could satisfy readiness: $runcmd" ;;
+  esac
+  pass "fm_backend_herdr_wait_shell_ready: the waited marker is contiguous prefix+token and never appears verbatim in the typed command"
+}
+
+test_wait_shell_ready_returns_failure_on_timeout() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/ready-timeout"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # pane run (call 1) succeeds; pane wait-output (call 2) fails - the shell
+  # stayed busy and never rendered the marker within the bound.
+  printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_shell_ready default:w1:p2' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "wait_shell_ready must fail closed when the marker never renders within the timeout: $out"
+  pass "fm_backend_herdr_wait_shell_ready: returns non-zero when the shell stays busy past the timeout"
+}
+
+test_wait_shell_ready_respects_custom_timeout() {
+  local dir log resp fb
+  dir="$TMP_ROOT/ready-custom-to"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_shell_ready default:w1:p2 12345' "$ROOT"
+  assert_contains "$(cat "$log")" $'\x1f''--timeout'$'\x1f''12345' "wait_shell_ready did not honor an explicit timeout-ms argument"
+  pass "fm_backend_herdr_wait_shell_ready: honors an explicit timeout-ms argument"
+}
+
+test_wait_shell_ready_fails_closed_on_bad_target() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/ready-badtarget"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_shell_ready no-colon-target' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "wait_shell_ready must fail closed on an unparseable target: $out"
+  case "$(cat "$log")" in *$'\x1f'pane$'\x1f'run$'\x1f'*) fail "wait_shell_ready ran a command against an unparseable target" ;; esac
+  pass "fm_backend_herdr_wait_shell_ready: fails closed on an unparseable target and submits no command"
+}
+
 # --- busy_state (semantic agent state) ---------------------------------------
 
 test_busy_state_working_maps_to_busy() {
@@ -4638,6 +4725,11 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_on_composer_capture_failure
+test_wait_shell_ready_returns_zero_when_marker_renders
+test_wait_shell_ready_marker_only_matches_execution
+test_wait_shell_ready_returns_failure_on_timeout
+test_wait_shell_ready_respects_custom_timeout
+test_wait_shell_ready_fails_closed_on_bad_target
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

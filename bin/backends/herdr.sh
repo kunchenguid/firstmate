@@ -2546,6 +2546,45 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
+# fm_backend_herdr_wait_shell_ready: block until a freshly created pane's shell
+# is actually EXECUTING submitted commands, then return 0. A new herdr pane's
+# zsh may still be running its startup when fm-spawn submits `treehouse get`:
+# three pyenv init calls contend on pyenv's global rehash lock for up to ~57s,
+# so the queued `treehouse get` only runs long after fm-spawn's 60s
+# worktree-detection window has closed and the unverified pane/Space is torn
+# down (herdr issue #3208). Sending this barrier first, and only sending
+# `treehouse get` once it returns, removes that race. This is deliberately NOT
+# folded into fm_backend_herdr_send_text_line: that primitive also carries the
+# GOTMPDIR/TRACEPARENT exports sent AFTER treehouse enters its nested shell,
+# which need no readiness barrier.
+#
+# The probe submits a printf whose rendered marker carries a per-call random
+# token. The marker prefix lives INSIDE the printf format and the token is a
+# separate operand, so the contiguous marker string is produced only when the
+# shell actually RUNS the printf - it never appears in the echoed command line.
+# Waiting on the contiguous marker therefore proves real command execution, not
+# a rendered prompt or an echoed keystroke. recent-unwrapped matching survives a
+# marker the terminal hard-wrapped across rows on a narrow pane.
+#
+# Returns non-zero on an unreadable/unparseable pane, a failed submit, or the
+# timeout (default 90000ms, above the observed ~57s pyenv lock). fm-spawn treats
+# a non-zero return as a hard spawn failure so its existing abort cleanup removes
+# the unverified Space.
+fm_backend_herdr_wait_shell_ready() {  # <target> [timeout-ms]
+  fm_backend_herdr_target_ready "$1" || return 1
+  local timeout=${2:-90000} token
+  case "$timeout" in ''|*[!0-9]*) timeout=90000 ;; esac
+  token=$(dd if=/dev/urandom bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
+  [ -n "$token" ] || return 1
+  # printf renders "FMSHELLRDY<token>"; the typed command keeps the prefix and
+  # token apart, so the contiguous marker exists only in real output.
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" \
+    "printf 'FMSHELLRDY%s\\n' $token" >/dev/null 2>&1 || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane wait-output \
+    --match "FMSHELLRDY$token" --source recent-unwrapped --timeout "$timeout" \
+    "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1
+}
+
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
