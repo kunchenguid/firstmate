@@ -312,7 +312,7 @@ tests/fm-backend-herdr.test.sh
 tests/fm-spawn-herdr-shell-ready.test.sh
 ```
 
-They prove that echoed command text cannot satisfy readiness, a delayed shell releases `treehouse get` only after the marker executes, and timeout or unreadable state fails closed without submitting `treehouse get`.
+They prove that echoed command text cannot satisfy readiness, a delayed shell releases `treehouse get` only after the marker executes, and a timeout fails closed without submitting `treehouse get`.
 
 ### Submit confirmation
 

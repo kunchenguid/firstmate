@@ -212,7 +212,7 @@ Explicit named-session routing and unrelated launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
-Before the first `treehouse get` in every fresh crewmate or scout spawn, Firstmate submits a split-token marker and waits up to 90 seconds by default for its executed output to appear in the pane's recent capture.
+Before the first `treehouse get` in every fresh crewmate or scout spawn, Firstmate submits a split-token marker and uses a 90-second default timeout while waiting for its executed output to appear in the pane's recent capture.
 This execution-readiness barrier applies to projected and flat spawns, but not relaunches that reuse an existing live pane or the exports sent after Treehouse enters its nested shell.
 An unreadable pane, failed marker submission, or readiness timeout fails the spawn before `treehouse get`; the existing abort cleanup remains responsible for removing any unverified projected space.
 Enter, Escape, and Ctrl-C are supported.
