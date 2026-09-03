@@ -1211,11 +1211,15 @@ test_a_later_failed_line_withdraws_the_claim() {
 # prose: a secondmate home publishes a child's outcome as
 # `failed [key=child-outcome-<id>-...]` into the PARENT's status. Nothing about
 # one routed phase or one child may withdraw the task's own terminal assertion.
+# A routed key has two stated positions the fleet's classifier treats alike -
+# before the colon and at the head of the note - so both are exercised here: a
+# rule that guards one spelling leaves the same hole open through the other.
 test_only_the_task_itself_may_withdraw_its_claim() {
   local dir state line
   for line in \
     'failed [key=docs-pass]: that routed phase did not land' \
     'failed [key=child-outcome-task-c-failed-abc123]: child task-c failed: no work landed' \
+    'failed: [key=docs-pass] that routed phase did not land' \
     'failed corr=0123456789abcdef: the answered request did not land'; do
     dir="$TMP_ROOT/claim-subevent-$RANDOM"
     state="$dir/state"
@@ -1242,6 +1246,7 @@ test_only_the_task_itself_may_assert_its_claim() {
   for line in \
     'done [key=docs-pass]: that routed phase landed' \
     'done [key=child-outcome-task-c-done-abc123]: child task-c done: closed out report=data/task-c/report.md' \
+    'done: [key=docs-pass] that routed phase landed' \
     'done corr=0123456789abcdef: the answered request landed'; do
     dir="$TMP_ROOT/claim-assert-subevent-$RANDOM"
     state="$dir/state"
@@ -1255,15 +1260,19 @@ test_only_the_task_itself_may_assert_its_claim() {
     esac
   done
 
-  # A sub-event may not assert a claim where the task has made none either.
-  dir="$TMP_ROOT/claim-assert-subevent-only"
-  state="$dir/state"
-  mkdir -p "$state"
-  printf 'done [key=child-outcome-task-c-done-abc123]: child task-c done: closed out report=data/task-c/report.md\n' \
-    > "$state/task-v.status"
-  fm_done_claim_status "$state" task-v
-  [ "$FM_DONE_CLAIM_STATE" = none ] \
-    || fail "a sub-event alone gave a task the claim state $FM_DONE_CLAIM_STATE"
+  # A sub-event may not assert a claim where the task has made none either, in
+  # either stated key position.
+  for line in \
+    'done [key=child-outcome-task-c-done-abc123]: child task-c done: closed out report=data/task-c/report.md' \
+    'done: [key=child-outcome-task-c-done-abc123] child task-c done: closed out report=data/task-c/report.md'; do
+    dir="$TMP_ROOT/claim-assert-subevent-only-$RANDOM"
+    state="$dir/state"
+    mkdir -p "$state"
+    printf '%s\n' "$line" > "$state/task-v.status"
+    fm_done_claim_status "$state" task-v
+    [ "$FM_DONE_CLAIM_STATE" = none ] \
+      || fail "a sub-event alone gave a task the claim state $FM_DONE_CLAIM_STATE: $line"
+  done
   pass "only the task speaking for itself asserts its claim, never a sub-event"
 }
 

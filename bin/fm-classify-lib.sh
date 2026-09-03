@@ -387,6 +387,20 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   fi
   printf '%s' "$n"
 }
+# 0 when the line STATES a routed key token, in either documented position:
+# before the line's first colon, or at the head of the note. This is the one
+# owner of that question, so nothing has to re-derive it from one spelling and
+# then disagree with the fold about a single line - _fm_decision_key below reads
+# the same pair of positions, and bin/fm-done-claim-lib.sh's authority rule asks
+# here rather than testing a prefix itself.
+#
+# Slug VALIDITY is a separate question (_fm_decision_slug_ok): a malformed token
+# is still a token the writer stated, and a reader deciding whether a line speaks
+# for the whole task wants the statement, not its well-formedness.
+status_line_states_key() {  # <status-line>
+  _fm_key_before_colon "$1" && return 0
+  _fm_key_at_note_head "$1" >/dev/null
+}
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local k
   if _fm_key_before_colon "$1"; then

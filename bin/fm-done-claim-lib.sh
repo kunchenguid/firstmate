@@ -159,7 +159,14 @@ fm_done_claim_has_identity() {
 # This is an authority rule, not a formatting rule about verbs, so do not
 # "simplify" it into one. `status_line_verb` deliberately reads THROUGH a
 # `[key=...]` and through a correlation token, which is right for classification
-# and wrong for authority, so the test is made on the undecorated prefix instead.
+# and wrong for authority, so the undecorated prefix is tested here instead.
+#
+# A routed key has TWO stated positions, before the colon and at the head of the
+# note, and the fleet's classifier treats them as equally valid. Whether a line
+# states one is therefore asked of `status_line_states_key`, which owns both,
+# rather than answered here from one spelling: an authority rule and the decision
+# fold disagreeing about a single line is the same defect shape that once had
+# five readers giving two answers.
 # It is written by code, not only by prose: bin/fm-brief.sh instructs workers to
 # close routed phases with `done [key=<work-slug>]`, and
 # report_child_ledger_locked publishes both `done [key=child-outcome-...]` and
@@ -172,7 +179,8 @@ fm_done_claim_has_identity() {
 fm_done_claim_own_voice() {  # <trimmed-line> <bare-verb>
   local head=${1%%:*}
   head=${head%"${head##*[![:space:]]}"}
-  [ "$head" = "${2:-}" ]
+  [ "$head" = "${2:-}" ] || return 1
+  ! status_line_states_key "$1"
 }
 
 # The one owner of "is this status line the task speaking its own TERMINAL
@@ -234,11 +242,13 @@ fm_done_claim_own_terminal_verb() {  # <status-line>
 # withdrawing it and people withdraw it; make it force and they learn to reach
 # for force.
 #
-# This runs per task on every current-state read and every session-start digest.
-# The speaker test is fork-free and exact rather than an approximation: a line
-# whose verb is `done` or `failed` always begins with that word after its leading
-# whitespace, and a correlation token or a `[key=...]` only ever follows the verb
-# word, so an undecorated prefix is the task's own voice and nothing else is.
+# This runs per task on every current-state read and every session-start digest,
+# so the speaker test is only paid for by lines that could carry one of the two
+# verbs: such a line always begins with that word after its leading whitespace,
+# which makes the case prefixes below exact rather than an approximation. The
+# speaker test itself is not a prefix test - a routed `[key=...]` may be stated
+# before the colon OR at the head of the note, and fm_done_claim_own_voice asks
+# the classifier that owns both positions.
 fm_done_claim_last() {  # <status-file>
   local f=${1:-} line trimmed last=
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
