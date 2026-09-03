@@ -26,6 +26,12 @@ As defense in depth, `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.
 `../../../docs/herdr-backend.md` under "Composer and injection safety" owns dark-TRUECOLOR tradeoffs and `../../../docs/verification/runtime-backends.md` owns captures.
 Styled capture stays internal to the boolean detector; `fm-peek` and model-facing captures remain plain, without escapes.
 
+## Feedback drafts
+
+The spawn also passes `--settings '{"feedbackDrafts":"off"}'` to every Claude worker and secondmate, disabling the `/bug`/`/feedback` model-drafted feedback flow (the SendFeedback tool) so a fleet-launched agent never queues or submits a bug report on the captain's behalf.
+`feedbackDrafts` is the documented settings key for this control (Claude Code changelog 2.1.247); the undocumented `CLAUDE_CODE_SEND_FEEDBACK` env var is deliberately not used.
+`--settings` is a per-launch CLI override scoped to this invocation only, same scoping principle as the prompt-suggestion env prefix above; the captain's global `~/.claude/settings.json` is untouched.
+
 ## Primary integration
 
 Primary behavior was verified 2026-07-04 on 2.1.201, preserved 2026-07-08 on 2.1.204, and Stop auto-arm revalidated 2026-07-24 on 2.1.219.
