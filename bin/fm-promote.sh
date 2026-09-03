@@ -142,8 +142,8 @@ if ! fm_brief_task_content_valid "$SCOUT_BRIEF"; then
   echo "error: $SCOUT_BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before promotion" >&2
   exit 1
 fi
-if fm_brief_heading_present "$SCOUT_BRIEF" "## Captain's intent"; then
-  INTENT_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "## Captain's intent")
+if fm_brief_task_heading_present "$SCOUT_BRIEF" "## Captain's intent"; then
+  INTENT_BODY=$(fm_brief_task_heading_body "$SCOUT_BRIEF" "## Captain's intent")
 else
   TASK_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
   INTENT_BODY=$(fm_brief_marked_captain_words "$TASK_BODY")

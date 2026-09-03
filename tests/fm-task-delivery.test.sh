@@ -430,7 +430,7 @@ EOF
 # public brief/spawn/promote path. Filling both subsections lets the spawn
 # delivery checks proceed (the fake tmux still fails later).
 test_spawn_and_promote_require_filled_task_subsections() {
-  local rec home proj fakebin out status id brief meta intent_body spec_body
+  local rec home proj fakebin out status id brief meta intent_body spec_body authorized
   rec=$(make_home subsections)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -498,6 +498,16 @@ EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
   assert_not_contains "$out" "has no provenance-marked captain words" \
     "legacy no-mistakes spawn rejected explicitly marked captain words"
+  assert_present "$home/data/$id/launch-brief.md" \
+    "marked legacy spawn did not render a current launch contract"
+  assert_grep "supersedes every earlier instruction about constructing \`--intent\`" \
+    "$home/data/$id/launch-brief.md" \
+    "marked legacy spawn did not override its stale intent instruction"
+  authorized=$(awk '$0 == "## Captain words authorized for intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
+  assert_contains "$authorized" "Fix the legacy dispatch boundary." \
+    "marked legacy launch contract omitted captain words"
+  assert_not_contains "$authorized" "Firstmate-authored constraint" \
+    "marked legacy launch contract included mixed Task specification"
 
   id=delivery-legacy-unmarked-no-mistakes
   mkdir -p "$home/data/$id"
@@ -508,6 +518,12 @@ Do not copy this Firstmate-authored constraint into intent.
 
 # Definition of done
 Delivery contract: mode=no-mistakes
+
+# Notes
+## Captain's intent
+Unrelated notes must not become task intent.
+## Firstmate spec
+Unrelated notes must not satisfy task validation.
 EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
   status=$?
@@ -572,6 +588,12 @@ EOF
 # Task
 Investigate the unmarked legacy failure.
 Keep this Firstmate constraint out of captain intent.
+
+# Notes
+## Captain's intent
+Unrelated notes are not the original ask.
+## Firstmate spec
+Unrelated notes are not the task specification.
 EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
   status=$?

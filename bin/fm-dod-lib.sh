@@ -24,8 +24,8 @@
 fm_brief_task_placeholders_present() {  # <file>
   local file=$1 intent spec
   [ -f "$file" ] || return 1
-  intent=$(fm_brief_heading_body "$file" "## Captain's intent")
-  spec=$(fm_brief_heading_body "$file" "## Firstmate spec")
+  intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
+  spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
   [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
   [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
   return 1
@@ -34,9 +34,13 @@ fm_brief_task_placeholders_present() {  # <file>
 # Parse an exact ATX heading outside fenced blocks. Body mode prints through
 # the next unfenced heading at the same or a higher level; present mode reports
 # whether the heading exists.
-fm_brief_heading_parse() {  # <file> <heading> <body|present>
-  local file=$1 heading=$2 mode=$3
-  [ -f "$file" ] || { [ "$mode" = body ]; return; }
+fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
+  local file=$1 heading=$2 mode=$3 input=$1
+  if [ "$file" = - ]; then
+    input=/dev/stdin
+  else
+    [ -f "$file" ] || { [ "$mode" = body ]; return; }
+  fi
   awk -v heading="$heading" -v mode="$mode" '
     BEGIN {
       target_level = 0
@@ -89,7 +93,7 @@ fm_brief_heading_parse() {  # <file> <heading> <body|present>
     END {
       if (mode == "present" && !found) exit 1
     }
-  ' "$file"
+  ' "$input"
 }
 
 fm_brief_heading_body() {  # <file> <heading>
@@ -98,6 +102,18 @@ fm_brief_heading_body() {  # <file> <heading>
 
 fm_brief_heading_present() {  # <file> <heading>
   fm_brief_heading_parse "$1" "$2" present >/dev/null
+}
+
+fm_brief_task_heading_body() {  # <file> <heading>
+  local task
+  task=$(fm_brief_heading_body "$1" "# Task")
+  printf '%s\n' "$task" | fm_brief_heading_parse - "$2" body
+}
+
+fm_brief_task_heading_present() {  # <file> <heading>
+  local task
+  task=$(fm_brief_heading_body "$1" "# Task")
+  printf '%s\n' "$task" | fm_brief_heading_parse - "$2" present >/dev/null
 }
 
 fm_brief_marked_captain_words() {  # <task-body>
@@ -109,17 +125,33 @@ fm_brief_marked_captain_words() {  # <task-body>
   '
 }
 
+fm_brief_legacy_intent_overlay() {  # <captain-words>
+  cat <<'EOF'
+
+# Current no-mistakes intent contract
+This section supersedes every earlier instruction about constructing `--intent`.
+Use only the provenance-marked captain words below as `--intent`; never include the rest of the legacy mixed `# Task`.
+
+## Captain words authorized for intent
+EOF
+  printf '%s\n' "$1"
+  cat <<'EOF'
+
+Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
+EOF
+}
+
 # Accept the current two-subsection contract only when both bodies have content;
 # briefs predating that contract remain valid when their # Task body has content.
 fm_brief_task_content_valid() {  # <file>
   local file=$1 intent spec task has_intent=0 has_spec=0
   [ -f "$file" ] && [ -r "$file" ] || return 1
-  fm_brief_heading_present "$file" "## Captain's intent" && has_intent=1
-  fm_brief_heading_present "$file" "## Firstmate spec" && has_spec=1
+  fm_brief_task_heading_present "$file" "## Captain's intent" && has_intent=1
+  fm_brief_task_heading_present "$file" "## Firstmate spec" && has_spec=1
   if [ "$has_intent" -eq 1 ] || [ "$has_spec" -eq 1 ]; then
     [ "$has_intent" -eq 1 ] && [ "$has_spec" -eq 1 ] || return 1
-    intent=$(fm_brief_heading_body "$file" "## Captain's intent")
-    spec=$(fm_brief_heading_body "$file" "## Firstmate spec")
+    intent=$(fm_brief_task_heading_body "$file" "## Captain's intent")
+    spec=$(fm_brief_task_heading_body "$file" "## Firstmate spec")
     [ -n "$(printf '%s' "$intent" | tr -d '[:space:]')" ] || return 1
     [ -n "$(printf '%s' "$spec" | tr -d '[:space:]')" ] || return 1
     return 0

@@ -1781,13 +1781,21 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     exit 1
   fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
-      && ! fm_brief_heading_present "$BRIEF" "## Captain's intent"; then
+      && ! fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
     LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
     LEGACY_CAPTAIN_WORDS=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
     if [ -z "$(printf '%s' "$LEGACY_CAPTAIN_WORDS" | tr -d '[:space:]')" ]; then
       echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add Captain: lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
       exit 1
     fi
+    SOURCE_BRIEF=$BRIEF
+    BRIEF="$DATA/$ID/launch-brief.md"
+    BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+    {
+      cat "$SOURCE_BRIEF"
+      fm_brief_legacy_intent_overlay "$LEGACY_CAPTAIN_WORDS"
+    } > "$BRIEF_TMP" || { rm -f -- "$BRIEF_TMP"; echo "error: could not render current intent contract for $SOURCE_BRIEF" >&2; exit 1; }
+    mv "$BRIEF_TMP" "$BRIEF"
   fi
 fi
 
