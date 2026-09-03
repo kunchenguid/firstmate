@@ -14,8 +14,8 @@
 #   <PreToolUse JSON on stdin> | bin/fm-arm-pretool-check.sh
 #   bin/fm-arm-pretool-check.sh --command '<cmd>' [--background true|false]
 #
-# Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude and Codex. Cursor delivers the same .tool_input.command shape with
+# Stdin mode extracts .toolArgs.command for Copilot, .toolInput.command for
+# Grok, or .tool_input.command for Claude and Codex. Cursor delivers the same .tool_input.command shape with
 # tool_name "Shell" (verified live, cursor-agent 2026.08.11-e8db854), so it needs
 # no new extraction - only --cursor, which selects Cursor's own deny rendering
 # and marks this invocation as the Cursor registration rather than the
@@ -52,8 +52,8 @@ usage() {
   cat <<'EOF'
 Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
 
-With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex/Cursor tool_input.command).
+With no --command, reads a PreToolUse-style JSON payload on stdin (Copilot
+toolArgs.command, Grok toolInput.command, or Claude/Codex/Cursor tool_input.command).
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
@@ -117,7 +117,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolArgs.command // .toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
   [ -n "$CMD" ] || exit 0
   # Kept for transport parity only.
   # shellcheck disable=SC2034

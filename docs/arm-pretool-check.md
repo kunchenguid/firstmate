@@ -23,10 +23,12 @@ It tokenizes the bytes and classifies lexical execution positions only.
 `bin/fm-arm-pretool-check.sh` supports these entry forms:
 
 - Stdin JSON at `.tool_input.command` for Claude and Codex.
+- Stdin JSON at `.toolArgs.command` for GitHub Copilot CLI.
 - Stdin JSON at `.toolInput.command` for Grok.
 - `--command <exact string>` for OpenCode, Pi, and pi-signed.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
+  Copilot's tracked command hooks use the same silent-stdout mode because command-hook exit 2 denies the tool call and surfaces stderr.
 
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
@@ -150,6 +152,7 @@ Prose may improve without changing adapter behavior.
 - Default deny mode also writes `{"decision":"deny","reason":"[code] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
+- GitHub Copilot CLI denies a `preToolUse` command on exit 2 and displays the hook reason.
 - OpenCode throws only when the checker exits 2.
 - Pi and pi-signed return `{block: true}` only when the checker exits 2.
 
@@ -157,6 +160,7 @@ Prose may improve without changing adapter behavior.
 
 | Harness | Exact command field | Adapter behavior on checker exit 2 |
 | --- | --- | --- |
+| GitHub Copilot CLI | `.toolArgs.command` | `.github/hooks/fm-primary.json` forwards the native payload with `--claude`; command-hook exit 2 denies the call while stdout remains empty. |
 | Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |

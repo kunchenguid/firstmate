@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse) return 0 ;;
+    claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse) return 0 ;;
   esac
   return 1
 }
@@ -82,6 +82,7 @@ fm_control_harness_family() {  # <recorded-harness>
     pi-signed) printf 'pi-signed' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
+    copilot*) printf 'copilot' ;;
     opencode*) printf 'opencode' ;;
     grok*) printf 'grok' ;;
     kimi*) printf 'kimi' ;;
@@ -113,7 +114,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # (`(esc to cancel, <n>s)`), and a single Escape was verified to cancel it.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|kimi|cursor|gemini|muse) printf 'Escape' ;;
+    claude|codex|copilot|opencode|pi|pi-signed|kimi|cursor|gemini|muse) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -124,7 +125,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|grok|kimi|cursor|gemini|muse) printf '1' ;;
+    claude|codex|copilot|pi|pi-signed|grok|kimi|cursor|gemini|muse) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -145,7 +146,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini) ;;
+    claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|cursor|gemini) ;;
     *) return 1 ;;
   esac
 }
@@ -157,7 +158,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # after an interrupt was measured as variable - sometimes seconds, sometimes
     # not within 20 - so a cancellation claim built on it would be unreliable.
     # Normal turn completion is prompt, which is what the busy fold depends on.
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini) printf 'none' ;;
+    claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|cursor|gemini) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -165,7 +166,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 # The command that exits the agent from its own composer.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse) printf '/exit' ;;
+    claude|copilot|opencode|grok|kimi|cursor|muse) printf '/exit' ;;
     codex|pi|pi-signed|gemini) printf '/quit' ;;
     *) return 1 ;;
   esac
@@ -211,6 +212,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
+    copilot) printf '%s\n' "$wt/.github/hooks/fm-busy-state.json" ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)

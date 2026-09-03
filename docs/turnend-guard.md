@@ -58,6 +58,10 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 ## Harness integrations
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
+- GitHub Copilot CLI registers native `agentStop` in `.github/hooks/fm-primary.json`.
+  `bin/fm-copilot-hook.sh` passes the payload through the shared predicate and converts exit 2 plus stderr to `{"decision":"block","reason":"..."}`.
+  Copilot also reads `.claude/settings.json`, whose entries stand down when `COPILOT_CLI=1`; non-Copilot Firstmate launches clear that inherited marker before starting the child runtime.
+  The native adapter itself requires `COPILOT_CLI=1`, so Copilot cloud-agent jobs that also load `.github/hooks/` do not run Firstmate's local primary lifecycle.
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
@@ -75,8 +79,9 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
   `tests/fm-turnend-guard.test.sh` pins that inventory so neither the guarded set nor the exception can change silently.
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
-Both payloads carry `stop_hook_active`.
-In the default Codex mode, a true value lets the second stop finish after one forced continuation.
+Copilot blocks through its native decision object.
+All three payloads carry `stop_hook_active`.
+In the default Codex and Copilot mode, a true value lets the second stop finish after one forced continuation.
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.

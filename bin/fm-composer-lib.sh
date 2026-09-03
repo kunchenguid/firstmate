@@ -61,6 +61,10 @@
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
+#   half-box   - copilot: a `╻` plus `▄` top rule, one or more `┃`-prefixed
+#                content rows with no right border, and a width-matched `╹`
+#                plus `▀` bottom rule. The complete pair is required before a
+#                blank lone `┃` can prove an empty composer.
 #   separated  - pi: content rows between two solid horizontal `─` rules, no
 #                glyph and no side border. Provable only with a live agent
 #                identity reporting an idle/done pi (herdr `agent
@@ -584,6 +588,19 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   return 1
 }
 
+# Print a Copilot half-box rule's width as ASCII spaces.
+_fm_composer_half_rule_spaces() {  # <trimmed-row> <corner> <block>
+  local row=$1 corner=$2 block=$3 inner
+  case "$row" in "$corner"*) ;; *) return 1 ;; esac
+  inner=${row#"$corner"}
+  [ -n "$inner" ] || return 1
+  [ -z "${inner//"$block"/}" ] || return 1
+  case "$inner" in "$block$block$block$block$block$block$block$block"*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "${inner//"$block"/ }"
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
@@ -592,6 +609,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   local top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0
   local content_inner content_spaces bottom_inner bottom_spaces glyph
   local current_indent='' current_family='' row=0 top=-1 valid=0 content_rows=0
+  local half_top=-1 half_indent='' half_spaces='' half_first=-1 half_last=-1 half_rows=0 rule_spaces
   # Complete-box results: the box containing the cursor (cursor mode) or the
   # bottom-most complete box (no cursor).
   FM_COMPOSER_SCAN_BOX_TOP=-1
@@ -604,6 +622,10 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_SHELL_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
+  FM_COMPOSER_SCAN_HALFBOX_TOP=-1
+  FM_COMPOSER_SCAN_HALFBOX_BOTTOM=-1
+  FM_COMPOSER_SCAN_HALFBOX_FIRST=-1
+  FM_COMPOSER_SCAN_HALFBOX_LAST=-1
   FM_COMPOSER_SCAN_PI_PAIR_FOUND=0
   FM_COMPOSER_SCAN_PI_PAIR_VALID=0
   FM_COMPOSER_SCAN_PI_OPEN=-1
@@ -630,6 +652,47 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       '┗'*'┛') kind=bottom; family=heavy ;;
       '+'*'+') kind=ascii; family=ascii ;;
     esac
+    # Copilot half-box: a complete, width-matched top and bottom rule around
+    # contiguous left-bar content rows. This is separate from generic left-bar
+    # detection because an empty Copilot content row trims to the single glyph
+    # `┃`, which is not positive proof without both surrounding rules.
+    if rule_spaces=$(_fm_composer_half_rule_spaces "$trimmed" '╻' '▄'); then
+      half_top=$row
+      half_indent=$indent
+      half_spaces=$rule_spaces
+      half_first=-1
+      half_last=-1
+      half_rows=0
+    elif [ "$half_top" -ge 0 ]; then
+      if rule_spaces=$(_fm_composer_half_rule_spaces "$trimmed" '╹' '▀'); then
+        if [ "$half_rows" -gt 0 ] && [ "$indent" = "$half_indent" ] \
+           && [ "$rule_spaces" = "$half_spaces" ]; then
+          FM_COMPOSER_SCAN_HALFBOX_TOP=$half_top
+          FM_COMPOSER_SCAN_HALFBOX_BOTTOM=$row
+          FM_COMPOSER_SCAN_HALFBOX_FIRST=$half_first
+          FM_COMPOSER_SCAN_HALFBOX_LAST=$half_last
+        fi
+        half_top=-1
+      else
+        case "$trimmed" in
+          '┃')
+            [ "$indent" = "$half_indent" ] || half_top=-1
+            ;;
+          '┃'*)
+            case "$trimmed" in
+              *'┃') half_top=-1 ;;
+              *) [ "$indent" = "$half_indent" ] || half_top=-1 ;;
+            esac
+            ;;
+          *) half_top=-1 ;;
+        esac
+        if [ "$half_top" -ge 0 ]; then
+          if [ "$half_first" -lt 0 ]; then half_first=$row; fi
+          half_last=$row
+          half_rows=$((half_rows + 1))
+        fi
+      fi
+    fi
     # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
     # closes the preceding candidate and immediately opens the next, so an
     # earlier transcript rule can never outrank the live bottom composer pair.
@@ -653,6 +716,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # Left-bar rows (opencode): a heavy left bar `┃` opening the row with no
     # closing side border. A `┃…┃` row is a bordered box row, not a left bar.
     case "$trimmed" in
+      '┃') leftbar_start=-1 ;;
       '┃'*'┃') leftbar_start=-1 ;;
       '┃'*)
         if [ "$leftbar_start" -lt 0 ]; then leftbar_start=$row; fi
@@ -1048,6 +1112,12 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
+  if [ "$FM_COMPOSER_SCAN_HALFBOX_BOTTOM" -gt "$generic" ]; then
+    generic=$FM_COMPOSER_SCAN_HALFBOX_BOTTOM
+    FM_COMPOSER_SELECTED_KIND=halfbox
+    FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_HALFBOX_FIRST
+    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_HALFBOX_LAST
+  fi
   if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
@@ -1143,6 +1213,9 @@ EOF
           leading_blank=0
         fi
         ;;
+      halfbox)
+        case "$content" in '┃'*) content=${content#┃} ;; esac
+        ;;
       box)
         if [ "$prompt_row" -lt 0 ] \
            && fm_composer_leading_prompt_glyph_var glyph "$content"; then
@@ -1211,6 +1284,12 @@ EOF
         "$((FM_COMPOSER_SCAN_BOX_TOP + 1))" "$((FM_COMPOSER_SCAN_BOX_BOTTOM - 1))"
       return 0
     fi
+    if [ "$FM_COMPOSER_SCAN_HALFBOX_TOP" -ge 0 ] \
+       && [ "$cy" -gt "$FM_COMPOSER_SCAN_HALFBOX_TOP" ] \
+       && [ "$cy" -lt "$FM_COMPOSER_SCAN_HALFBOX_BOTTOM" ]; then
+      _fm_composer_halfbox_verdict "$screen" "$styled" "$has_identity" "$identity"
+      return 0
+    fi
     if [ "$FM_COMPOSER_SCAN_LEFTBAR_START" -ge 0 ] \
        && [ "$cy" -ge "$FM_COMPOSER_SCAN_LEFTBAR_START" ] \
        && [ "$cy" -le "$FM_COMPOSER_SCAN_LEFTBAR_END" ]; then
@@ -1270,6 +1349,9 @@ EOF
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
         "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
       ;;
+    halfbox)
+      _fm_composer_halfbox_verdict "$screen" "$styled" "$has_identity" "$identity"
+      ;;
     bare)
       if [ "$FM_COMPOSER_SELECTED_LAST" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
         _fm_composer_classify_bare_wrap "$screen" "$styled" \
@@ -1288,6 +1370,34 @@ EOF
         "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
       ;;
   esac
+}
+
+_fm_composer_halfbox_verdict() {  # <screen> <styled> <has-identity> <identity>
+  local screen=$1 styled=$2 has_identity=$3 identity=$4 state agent
+  state=$(_fm_composer_classify_leftbar "$screen" "$styled" \
+    "$FM_COMPOSER_SCAN_HALFBOX_FIRST" "$FM_COMPOSER_SCAN_HALFBOX_LAST")
+  if [ "$state" != empty ]; then
+    printf '%s' "$state"
+    return 0
+  fi
+  if [ "$has_identity" != 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  if [ -z "$identity" ]; then
+    printf 'need-identity'
+    return 0
+  fi
+  if [ "$identity" = probe-absent ]; then
+    printf 'unknown'
+    return 0
+  fi
+  agent=${identity%%$'\t'*}
+  if [ "$agent" = copilot ]; then
+    printf 'empty'
+  else
+    printf 'unknown'
+  fi
 }
 
 # fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop

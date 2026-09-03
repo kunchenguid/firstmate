@@ -131,7 +131,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -150,6 +150,22 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI" \
     "non-cursor launch must clear both inherited Cursor identity markers"
   pass "non-cursor launches clear inherited Cursor identity markers"
+}
+
+test_non_copilot_launch_clears_inherited_copilot_markers() {
+  local rec id out status launch
+  id=profile-claude-copilot-markers-z1c
+  rec=$(make_spawn_case profile-claude-copilot-markers claude "$id")
+  read_case_record "$rec"
+
+  out=$(COPILOT_CLI=1 COPILOT_AGENT_SESSION_ID=s1 COPILOT_LOADER_PID=42 COPILOT_CLI_BINARY_VERSION=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn under Copilot markers should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION" \
+    "non-copilot launch must clear inherited Copilot identity markers"
+  pass "non-copilot launches clear inherited Copilot identity markers"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -488,6 +504,38 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   pass "grok omits unsupported xhigh reasoning effort"
 }
 
+test_copilot_threads_autonomy_model_and_effort() {
+  local rec id out status launch hooks hook_cmd
+  id=profile-copilot-z6c
+  rec=$(make_spawn_case profile-copilot copilot "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5.6-sol --effort max)
+  status=$?
+  expect_code 0 "$status" "copilot spawn with model and max effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" copilot gpt-5.6-sol max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "copilot --allow-all --no-ask-user --model 'gpt-5.6-sol' --effort 'max' -i" \
+    "copilot launch did not carry autonomy, model, effort, and interactive prompt flags"
+  assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS" \
+    "copilot launch did not clear foreign primary markers"
+  assert_contains "$launch" "encode launch-brief" "copilot launch lost the typed launch instructions"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state.json"
+  assert_present "$hooks" "copilot spawn did not install the worker lifecycle hook"
+  rm -f "$HOME_DIR/state/$id.turn-ended"
+  hook_cmd=$(jq -r '.hooks.agentStop[0].bash' "$hooks")
+  printf '{}' | sh -c "$hook_cmd" || fail "copilot agentStop worker hook failed"
+  assert_present "$HOME_DIR/state/$id.turn-ended" "copilot agentStop hook did not touch the notification marker"
+  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=idle source=copilot-hook" \
+    "copilot agentStop hook did not settle semantic busy state"
+  hook_cmd=$(jq -r '.hooks.userPromptSubmitted[0].bash' "$hooks")
+  printf '{}' | sh -c "$hook_cmd" || fail "copilot userPromptSubmitted worker hook failed"
+  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=copilot-hook" \
+    "copilot userPromptSubmitted hook did not open semantic busy state"
+  pass "copilot launch and generated worker hooks carry the complete adapter contract"
+}
+
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
   local rec id out status launch
   id=profile-cursor-z6c
@@ -739,7 +787,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u COPILOT_CLI -u COPILOT_AGENT_SESSION_ID -u COPILOT_LOADER_PID -u COPILOT_CLI_BINARY_VERSION env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -797,6 +845,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
+test_non_copilot_launch_clears_inherited_copilot_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
@@ -812,6 +861,7 @@ test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
+test_copilot_threads_autonomy_model_and_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn

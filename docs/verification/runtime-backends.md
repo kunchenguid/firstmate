@@ -59,6 +59,26 @@ Claude Code is the harness whose title no longer attributes it at all; every oth
 Codex reported `codex-aarch64-a` at 0.145.0 and `codex` at 0.146.0, and Kimi Code reported `kimi-code` as its foreground `comm` at 0.29.1 and `kimi` at 0.31.1, so these identities move between ordinary patch releases in both directions.
 That is the evidence for treating any single process name as a surface under vendor control rather than a stable contract.
 
+GitHub Copilot CLI was verified separately on 2026-09-02 with Copilot CLI 1.0.83-3 and tmux 3.6 under Ubuntu WSL2.
+
+```sh
+tmux new-session -d -s fm-copilot-real -n copilot -- copilot --no-auto-update
+tmux display-message -p -t fm-copilot-real:copilot '#{pane_current_command}'
+ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm=,args=
+```
+
+Observed bounded output:
+
+```text
+title=copilot
+foreground comm=MainThread args=copilot --no-auto-update
+state=alive
+```
+
+The two independent sources deliberately disagree.
+The pane title identifies Copilot directly, while the foreground process group preserves the generic `MainThread` command plus Copilot argv zero.
+Either signal is sufficient for `alive`, and the portable regression also proves that an unrelated later argument containing `copilot` does not match.
+
 The crewmate-only Muse Code 0.1.0-R708.1 adapter was verified separately on 2026-08-05 against tmux on macOS arm64.
 Its installed `muse-bin-0.1.0-R708.1` foreground identity classified `alive`, while `musescore`, `amuse`, `muse-binary`, and `muse-bind` remained ambiguous in the portable regression.
 [`muse.md`](muse.md#process-identity) owns the artifact identity and launcher evidence for that verification.
@@ -115,7 +135,7 @@ pi-signed
 
 Two checks keep the evidence boundaries separate.
 `tests/fm-harness-adapter-references.test.sh` parses the router's declared JSON contract as normalized data and proves every selected reference is readable, which is structural evidence only.
-`tests/fm-harness-adapter-instructions-live-e2e.test.sh` is an opt-in development check that sends the directly loaded router and every operation scenario across all nine harness identities to a local Ollama model, requires the generated plan as normalized JSON, and makes no external-provider call.
+`tests/fm-harness-adapter-instructions-live-e2e.test.sh` is an opt-in development check that sends the directly loaded router and every operation scenario across all ten harness identities to a local Ollama model, requires the generated plan as normalized JSON, and makes no external-provider call.
 
 ```sh
 FM_HARNESS_ADAPTER_INSTRUCTION_EVAL=1 FM_HARNESS_ADAPTER_LOCAL_MODEL=ambient-router-gemma4:e4b bin/fm-test-run.sh tests/fm-harness-adapter-instructions-live-e2e.test.sh
@@ -123,7 +143,7 @@ FM_HARNESS_ADAPTER_INSTRUCTION_EVAL=1 FM_HARNESS_ADAPTER_LOCAL_MODEL=ambient-rou
 
 That local evaluation demonstrates instruction-driven scenario selection, but it does not claim that a native harness loaded the selected files.
 The guard prints the exact installed version or unavailable status for every native harness so absent tools and unexercised provider transports remain explicit rather than becoming passes.
-Native loader behavior still requires the applicable live agent-tool check; no uniform deterministic zero-provider transport currently spans Claude, Codex, OpenCode, and Pi, and the other five tools remain unavailable where their binaries are absent.
+Native loader behavior still requires the applicable live agent-tool check; no uniform deterministic zero-provider transport currently spans Claude, Codex, OpenCode, and Pi, and the other six tools remain unavailable where their binaries are absent.
 
 Bounded output from the 2026-08-29 local run:
 
@@ -141,6 +161,9 @@ ok - local model ambient-router-gemma4:e4b selected every operation scenario and
 # installed native tools recorded without overstating loader coverage: 4
 # unavailable native tools: pi-signed grok kimi cursor muse
 ```
+
+That retained output predates Copilot's addition.
+The current router and test matrix contain ten identities, with Copilot routed through `references/harness/copilot.md`.
 
 The isolated process and endpoint checks used:
 
@@ -202,7 +225,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, GitHub Copilot CLI, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ## Claude workspace trust
 
@@ -309,6 +332,18 @@ Kimi was not installed on the verification machine; its bordered shape is pinned
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
 Known staleness: on 2026-08-23 the steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`, so the grok row above is stale for 1.0.5 and owes a refresh; steering is unaffected because the send path's composer check is advisory, but empty-requiring consumers (away-daemon injection, spawn readiness) should not trust the 1.0.0 grok result.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
+
+Copilot CLI 1.0.83-3 was added to the same live guard on 2026-09-02 under Ubuntu WSL2 with tmux 3.6.
+Its terminal cursor was at row 4 while the empty composer occupied the bottom half-box, so the initial cursor-anchored read returned `unknown`.
+The shipped fallback now requires a live Copilot foreground identity and a complete width-matched `╻▄▄...`, `┃...`, `╹▀▀...` structure before cursorless classification can return `empty`.
+
+```text
+ok - copilot (GitHub Copilot CLI 1.0.83-3.): real idle composer classifies empty
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+ok - live composer-matrix guard verified 2 live surface(s)
+```
+
+The portable matrix separately proves that a lone `┃`, an unidentified half-box, a missing rule, or mismatched top and bottom widths remains `unknown`, while typed content remains `pending`.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 

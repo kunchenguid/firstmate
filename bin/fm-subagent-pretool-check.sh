@@ -34,7 +34,7 @@
 #   <PreToolUse JSON on stdin> | bin/fm-subagent-pretool-check.sh
 #   bin/fm-subagent-pretool-check.sh --tool '<tool-name>'
 #
-# Stdin mode extracts .tool_name for Claude and Codex, or .toolName for Grok.
+# Stdin mode extracts .toolName for Copilot and Grok, or .tool_name for Claude and Codex.
 # CLI mode is for adapters that already hold the tool name (OpenCode, Pi).
 #
 # Exit/output contract (identical shape to bin/fm-cd-pretool-check.sh):
@@ -86,8 +86,8 @@ usage() {
   cat <<'EOF'
 Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude]
 
-With no --tool, reads a PreToolUse-style JSON payload on stdin (Claude/Codex
-tool_name, or Grok toolName).
+With no --tool, reads a PreToolUse-style JSON payload on stdin (Copilot/Grok
+toolName, or Claude/Codex tool_name).
 Denies a delegation-SHAPED tool name in a genuine primary home.
 Claude primaries may also add an untracked per-home permissions.deny list that
 removes known delegation tools from the model schema before this hook is needed.

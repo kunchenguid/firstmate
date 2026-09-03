@@ -10,7 +10,9 @@
 # fleet-touching command itself, can sit blind for hours.
 # This script is push-based: verified harness turn-end hooks invoke it every time
 # the primary is about to end a turn.
-# Claude and codex can block directly by preserving exit status 2 and stderr.
+# Claude and Codex block directly by preserving exit status 2 and stderr.
+# Copilot's adapter translates the same exit-2 predicate into its native
+# decision object.
 # OpenCode and pi adapters use the same predicate and force one bounded
 # follow-up because their turn-end events are passive. Grok delegates native
 # blocking when its running Stop payload advertises that capability, with one

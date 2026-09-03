@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|copilot|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -35,8 +35,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
-  # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
+  # Claude, Copilot, Gemini, Pi, Grok, and Cursor set verified markers of their own;
+  # codex, opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
@@ -52,6 +52,7 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   # Gemini is checked BEFORE claude for exactly cursor's reason above: the
   # Gemini CLI does NOT clear an inherited CLAUDECODE, so a gemini worker
   # launched from a claude primary carries BOTH markers and whichever is
@@ -116,6 +117,7 @@ detect_own() {
       # command carrying a harness name in its arguments claim an identity.
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;
+      copilot) echo copilot; return ;;
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
@@ -134,6 +136,9 @@ detect_own() {
           echo gemini
           return
         fi
+        case "${args%% *}" in
+          copilot|*/copilot) echo copilot; return ;;
+        esac
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;
@@ -141,6 +146,14 @@ detect_own() {
           *grok*) echo grok; return ;;
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
+      MainThread)
+        # Copilot's bundled Linux executable has reported this generic kernel
+        # name while preserving `copilot` in argv zero.
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        case "${args%% *}" in
+          copilot|*/copilot) echo copilot; return ;;
+        esac
+        ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
