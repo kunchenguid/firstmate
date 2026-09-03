@@ -44,6 +44,19 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+fm_pid_zombie() {
+  local pid=$1 proc_root stat_line
+  local -a stat_fields
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  [ -r "$proc_root/$pid/stat" ] || return 1
+  stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+  read -r -a stat_fields <<< "${stat_line##*)}"
+  [ "${stat_fields[0]:-}" = Z ]
+}
+
 fm_pid_identity() {
   local pid=$1 out proc_root stat_line starttime cmdline_hex identity_key
   local -a stat_fields
@@ -1095,7 +1108,7 @@ fm_autoarm_transition_try_acquire() {  # <state-dir>
 }
 
 fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace>
-  local state=$1 grace=$2 lock steal owner pid recorded current i
+  local state=$1 grace=$2 lock steal owner pid recorded current i revoked_signature revoked_identity
   lock="$state/.claude-autoarm-transition.lock"
   steal="$lock.steal"
   [ "$(fm_path_age "$lock")" -ge "$grace" ] || return 1
@@ -1109,6 +1122,14 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace>
     return 1
   fi
   case "$pid" in ''|*[!0-9]*|0) fm_lock_release "$steal"; return 1 ;; esac
+  if fm_pid_zombie "$pid"; then
+    fm_lock_remove_path "$lock" || {
+      fm_lock_release "$steal"
+      return 1
+    }
+    fm_lock_release "$steal"
+    return 0
+  fi
   current=$(fm_pid_identity "$pid" 2>/dev/null) || {
     fm_lock_release "$steal"
     return 1
@@ -1124,6 +1145,15 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace>
     }
     fm_lock_release "$steal"
     return 0
+  fi
+  revoked_signature=
+  revoked_identity=
+  if fm_autoarm_ledger_read "$state" \
+    && [ "$FM_AUTOARM_OWNER" = "$pid" ] \
+    && [ "$FM_AUTOARM_OUTCOME" = arming ] \
+    && [ "$FM_AUTOARM_IDENTITY" = "$recorded" ]; then
+    revoked_signature="$FM_AUTOARM_GEN:$FM_AUTOARM_OWNER:$FM_AUTOARM_OUTCOME"
+    revoked_identity=$FM_AUTOARM_IDENTITY
   fi
   if ! kill -TERM "$pid" 2>/dev/null; then
     fm_lock_release "$steal"
@@ -1149,13 +1179,15 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace>
     return 1
   }
   fm_lock_release "$steal"
-  FM_AUTOARM_TRANSITION_REVOKED_PID=$pid
+  FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE=$revoked_signature
+  FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=$revoked_identity
   return 0
 }
 
 fm_autoarm_transition_acquire() {  # <state-dir>
   local state=$1 grace=${FM_AUTOARM_TRANSITION_GRACE:-2}
-  FM_AUTOARM_TRANSITION_REVOKED_PID=
+  FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE=
+  FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=
   case "$grace" in ''|*[!0-9]*|0) grace=2 ;; esac
   while ! fm_autoarm_transition_try_acquire "$state"; do
     if [ "$(fm_path_age "$state/.claude-autoarm-transition.lock")" -ge "$grace" ]; then
@@ -1554,7 +1586,7 @@ fm_autoarm_failure_notice_claim() {  # <marker-file> <claim-id>
 }
 
 fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
-  local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition failure_dir failure pid failure_epoch tmp current current_owner current_outcome marker_rc
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition failure_dir failure pid failure_epoch tmp current current_outcome current_identity revoked marker_rc
   transition="$state/.claude-autoarm-transition.lock"
   case "$outcome" in
     failed|failed-suppressed) ;;
@@ -1565,14 +1597,19 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
   current=$(fm_autoarm_claim_signature "$state")
   if [ "$current" != "$baseline" ]; then
     if fm_autoarm_ledger_read "$state"; then
-      current_owner=$FM_AUTOARM_OWNER
       current_outcome=$FM_AUTOARM_OUTCOME
+      current_identity=$FM_AUTOARM_IDENTITY
       if [ "$current_outcome" != arming ]; then
         fm_lock_release "$transition"
         return 2
       fi
-      if [ "$current_owner" != "${FM_AUTOARM_TRANSITION_REVOKED_PID:-}" ] \
-        && fm_autoarm_claim_open "$state"; then
+      revoked=0
+      if [ "$current" = "${FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE:-}" ] \
+        && [ -n "$current_identity" ] \
+        && [ "$current_identity" = "${FM_AUTOARM_TRANSITION_REVOKED_IDENTITY:-}" ]; then
+        revoked=1
+      fi
+      if [ "$revoked" -ne 1 ] && fm_autoarm_claim_open "$state"; then
         fm_lock_release "$transition"
         return 2
       fi

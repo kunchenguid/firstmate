@@ -619,6 +619,42 @@ test_pid_reused_transition_holder_cannot_hide_failure() {
   pass "auto-arm: pid-reused transition locks are reclaimed without signalling"
 }
 
+test_zombie_transition_holder_cannot_hide_failure() {
+  local dir state ready holder fakeproc marker rc i
+  dir=$(make_primary_dir "$TMP_ROOT/zombie-transition-failure")
+  state="$dir/state"
+  ready="$state/zombie-transition-ready"
+  fakeproc="$dir/proc"
+  marker="$state/.claude-autoarm-failure-notified"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_transition_acquire "$1/state" || exit
+    : > "$2"
+    while :; do sleep 1; done
+  ' _ "$dir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition holder did not acquire its boundary"
+  mkdir -p "$fakeproc/$holder"
+  printf '%s (zombie fixture) Z 1\n' "$holder" > "$fakeproc/$holder/stat"
+  : > "$fakeproc/$holder/cmdline"
+
+  FM_PROC_ROOT_OVERRIDE="$fakeproc" FM_AUTOARM_TRANSITION_GRACE=1 bash -c '
+    . "$1"
+    fm_autoarm_claim_failure_commit "$2" absent failed "$3"
+  ' _ "$dir/bin/fm-wake-lib.sh" "$state" "$marker"
+  rc=$?
+  kill -0 "$holder" 2>/dev/null || fail "zombie-shaped transition holder was signalled"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 0 "$rc" "a zombie transition owner must be reclaimed for failure publication"
+  assert_present "$marker" "zombie transition failure did not write the failure marker"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "zombie transition failure did not record outcome=failed"
+  pass "auto-arm: zombie transition owners cannot wedge failure publication"
+}
+
 test_fenced_arming_transition_rebases_failure() {
   local dir state ready marker holder baseline rc i
   dir=$(make_primary_dir "$TMP_ROOT/fenced-arming-transition")
@@ -658,6 +694,38 @@ test_fenced_arming_transition_rebases_failure() {
   [ "$(failure_epoch_field "$dir" baseline "$baseline")" = "$baseline" ] \
     || fail "the failed epoch did not rebase onto the fenced arming claim"
   pass "auto-arm: fenced nonterminal claims are rebased into durable failures"
+}
+
+test_revoked_pid_reuse_defers_to_replacement_claim() {
+  local dir state marker owner old_identity rc
+  dir=$(make_primary_dir "$TMP_ROOT/revoked-pid-reuse")
+  state="$dir/state"
+  marker="$state/.claude-autoarm-failure-notified"
+  sleep 60 &
+  owner=$!
+  record_autoarm_v2_claim "$dir" 2 "$owner" arming "$owner" \
+    || fail "could not record the replacement claim"
+  old_identity="revoked-owner-identity"
+
+  FM_TEST_OWNER="$owner" FM_TEST_OLD_IDENTITY="$old_identity" bash -c '
+    . "$1"
+    fm_autoarm_transition_acquire() {
+      fm_autoarm_transition_try_acquire "$1" || return 1
+      FM_AUTOARM_TRANSITION_REVOKED_PID=$FM_TEST_OWNER
+      FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE="1:$FM_TEST_OWNER:arming"
+      FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=$FM_TEST_OLD_IDENTITY
+    }
+    fm_autoarm_claim_failure_commit "$2" absent failed "$3"
+  ' _ "$dir/bin/fm-wake-lib.sh" "$state" "$marker"
+  rc=$?
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+
+  expect_code 2 "$rc" "revoking an old claim must not authorize failure against its pid-reused replacement"
+  assert_absent "$marker" "pid-reused replacement claim was falsely marked failed"
+  assert_absent "$state/.claude-autoarm-failure-epochs" "pid-reused replacement claim received a false failure epoch"
+  [ "$(epoch_field "$dir" epoch)" = 2 ] || fail "failure publisher rewrote the replacement claim"
+  pass "auto-arm: revocation is fenced by the exact ledger claim"
 }
 
 test_fresh_prior_terminal_epoch_cannot_hide_current_failure() {
@@ -1659,7 +1727,9 @@ test_claim_path_failure_records_failed_epoch_and_marker
 test_live_claim_mutex_holder_cannot_hide_failure
 test_stalled_transition_holder_cannot_hide_failure
 test_pid_reused_transition_holder_cannot_hide_failure
+test_zombie_transition_holder_cannot_hide_failure
 test_fenced_arming_transition_rebases_failure
+test_revoked_pid_reuse_defers_to_replacement_claim
 test_fresh_prior_terminal_epoch_cannot_hide_current_failure
 test_concurrent_claim_failures_publish_one_notice_atomically
 test_stale_failure_publisher_cannot_emit_after_success
