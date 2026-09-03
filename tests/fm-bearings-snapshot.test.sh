@@ -2220,6 +2220,57 @@ SH
   pass "task teardown during metadata capture is omitted without aborting the snapshot"
 }
 
+test_current_state_uses_captured_status_observation() {
+  local home fakebin real_cp worktree json
+  home=$(make_home captured-status-race)
+  fakebin=$(make_fakebin "$home")
+  real_cp=$(command -v cp)
+  worktree="$home/projects/captured-status"
+  mkdir -p "$worktree"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] captured-status - Captured status fixture (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/captured-status.meta" \
+    "window=fixture:captured-status" "worktree=$worktree" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "spawn_gen=stable-generation"
+  printf 'working: captured state\n' > "$home/state/captured-status.status"
+  record_claude_state "$home/state" captured-status idle
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+"$REAL_CP" "$@" || exit
+for arg in "$@"; do
+  if [ "$arg" = "$RACE_STATUS" ] && mkdir "$RACE_ONCE" 2>/dev/null; then
+    printf 'needs-decision[new]: appended after capture\n' >> "$RACE_STATUS"
+    break
+  fi
+done
+SH
+  chmod +x "$fakebin/cp"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_NOW_EPOCH=1783792800 NET_LOG="$home/net.log" REAL_CP="$real_cp" \
+    RACE_ONCE="$home/status-race-once" RACE_STATUS="$home/state/captured-status.status" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot failed during captured status race"
+  printf '%s' "$json" | jq -e '
+    .tasks[] | select(.id == "captured-status")
+    | .current_state.state == "working"
+      and .current_state.source == "status-log"
+      and .paths.status_log.last_event.raw == "working: captured state"
+      and .hints.pending_decision == false
+      and .hints.open_decisions == []
+  ' >/dev/null || fail "current state escaped the captured status observation: $json"
+  [ "$(tail -n 1 "$home/state/captured-status.status")" = \
+      "needs-decision[new]: appended after capture" ] \
+    || fail "captured status race fixture did not append the live decision"
+  pass "current state and decision hints share one captured status observation"
+}
+
 test_relaunched_task_does_not_inherit_reused_endpoint_state() {
   local home fakebin worktree json
   home=$(make_home endpoint-generation-race)
@@ -2499,6 +2550,7 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
 }
 
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
+test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_overlaps_local_reads_without_projection_drift
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
