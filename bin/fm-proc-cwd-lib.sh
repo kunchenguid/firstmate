@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-proc-cwd-lib.sh - "which processes are rooted under this directory?" (one owner).
+# fm-proc-cwd-lib.sh - "which processes may this reaper signal?" (one owner).
 #
 # WHY. Two independent reapers need the same question answered before they
 # delete a directory tree, and both are dangerous if the answer is too wide:
@@ -18,13 +18,31 @@
 # there belongs to that caller by construction, and nothing outside that
 # subtree can ever match.
 #
-# This file owns only that boundary computation, deliberately not the reaping
-# policy on top of it: teardown is fail-closed (an unreadable process list
-# refuses destructive teardown and preserves the worktree for inspection),
-# while a test fixture is best-effort (it must never turn a leaked process into
-# a suite failure). Sharing the boundary keeps the dangerous half from drifting
-# between two hand-written copies; leaving the policy with each caller keeps a
-# test-only need from reshaping a production safety path.
+# A pid alone is not a safe reference to the process that was scanned, so this
+# file owns a second boundary: identity across time. A pid the scan reported may
+# exit before the signal is sent, and the kernel may hand that number to an
+# unrelated process - so both reapers must capture what the process WAS at scan
+# time and re-verify it immediately before every signal. fm_proc_safe_to_signal
+# composes the two questions ("still inside the boundary?" and "still the same
+# process?") into the single predicate a reaper must pass before it kills
+# anything, because omitting either one is the same bug.
+#
+# The identity here is deliberately BIRTH ONLY (start time), which is the right
+# semantics for a REAPER and not for an owner. It must survive `exec`: a leaked
+# process that exec'd between the scan and the signal is still the leak, and an
+# identity including the command line would silently spare it (verified against
+# real processes: an exec preserves start time while rewriting the command
+# line). Do not reach for bin/fm-wake-lib.sh's fm_pid_identity here - its
+# command-line-inclusive identity is correct for its own question, "does this
+# pid still own my lock?", where any change must read as a different process.
+#
+# What this file does NOT own is the reaping policy: teardown is fail-closed (an
+# unreadable process list refuses destructive teardown and preserves the
+# worktree for inspection), while a test fixture is best-effort (it must never
+# turn a leaked process into a suite failure). Sharing the two boundaries keeps
+# the dangerous half from drifting between hand-written copies; leaving the
+# policy with each caller keeps a test-only need from reshaping a production
+# safety path.
 #
 # Pure and side-effect free at source time, so the test fixture's EXIT trap can
 # source it as cheaply as a long-lived script does.
@@ -83,4 +101,63 @@ fm_pids_with_cwd_under() {  # <dir>
   done <<EOF
 $out
 EOF
+}
+
+# fm_proc_reap_identity <pid>
+# Prints a stable identity for the process currently holding <pid>, or returns
+# 1 if it cannot be read - which a caller must treat as "I could not find out",
+# never as "unchanged". See the header for why this is birth identity only.
+#
+# A Linux-compatible /proc is preferred where present: stat field 22 (start
+# time in clock ticks since boot) is immune to the wall-clock steps that
+# re-render the `ps lstart` fallback. FM_PROC_ROOT_OVERRIDE relocates that root
+# so a test can exercise the portable fallback on a machine that has /proc.
+fm_proc_reap_identity() {  # <pid>
+  local pid=$1 proc_root stat_line starttime value
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    # After the final comm delimiter, array index 19 is proc stat field 22.
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    printf 'starttime=%s\n' "$starttime"
+    return 0
+  fi
+  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  # Trimmed inline rather than through bin/fm-nm-run-lib.sh's fm_nm_trim: this
+  # file stays dependency-free so an EXIT trap can source it (see header).
+  value=${value#"${value%%[![:space:]]*}"}
+  value=${value%"${value##*[![:space:]]}"}
+  [ -n "$value" ] || return 1
+  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  printf 'lstart=%s\n' "$value"
+}
+
+# fm_proc_reap_identity_matches <pid> <identity>
+# True only if <pid> is readable AND still the process <identity> came from.
+fm_proc_reap_identity_matches() {  # <pid> <identity>
+  local current
+  current=$(fm_proc_reap_identity "$1") || return 1
+  [ "$current" = "$2" ]
+}
+
+# fm_proc_pid_in_list <pid-list> <pid>
+# True if newline-separated <pid-list> contains <pid> as a whole line.
+fm_proc_pid_in_list() {  # <pid-list> <pid>
+  printf '%s\n' "$1" | grep -Fxq "$2"
+}
+
+# fm_proc_safe_to_signal <pid> <identity> <current-pid-list>
+# The predicate every signal in this file's callers must pass: <pid> is still
+# inside the boundary according to a FRESH scan (<current-pid-list>), and is
+# still the same process whose <identity> was captured from that scan. Both
+# halves are required, and a caller that checks only one has the bug this
+# predicate exists to prevent.
+fm_proc_safe_to_signal() {  # <pid> <identity> <current-pid-list>
+  fm_proc_pid_in_list "$3" "$1" || return 1
+  fm_proc_reap_identity_matches "$1" "$2"
 }

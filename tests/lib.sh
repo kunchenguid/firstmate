@@ -41,11 +41,12 @@ export FM_GATE_REFUSE_BYPASS=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The one owner of "which processes are rooted (by cwd) under this directory",
-# shared with bin/fm-teardown.sh's leaked-process reap. Safe to source here
-# because it is pure: unlike bin/fm-wake-lib.sh (which fm_test_pid_identity
-# below must therefore call in a subshell with FM_STATE_OVERRIDE set), it
-# creates no directories and resolves no home at source time.
+# The one owner of "which processes may this reaper signal" - both the cwd
+# boundary and the per-signal identity recheck - shared with
+# bin/fm-teardown.sh's leaked-process reap. Safe to source here because it is
+# pure: unlike bin/fm-wake-lib.sh (which fm_test_pid_identity below must
+# therefore call in a subshell with FM_STATE_OVERRIDE set), it creates no
+# directories and resolves no home at source time.
 # shellcheck source=bin/fm-proc-cwd-lib.sh
 . "$ROOT/bin/fm-proc-cwd-lib.sh"
 
@@ -83,6 +84,13 @@ pass() {
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
 
+# The OWNERSHIP identity - bin/fm-wake-lib.sh's fm_pid_identity, as the
+# watcher and the turn-end guards compute it - for tests that assert against a
+# real claim record, and for this file's own fixture-root owner marker. Any
+# change to the process must read as a different owner there, so it includes
+# the command line. A reaper needs the opposite (an identity that survives
+# `exec`) and must use fm_proc_reap_identity instead; bin/fm-proc-cwd-lib.sh's
+# header owns that distinction.
 fm_test_pid_identity() {
   local pid=$1
   FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c \
@@ -147,20 +155,22 @@ fm_test_sweepable_root() {
 # this machine survived TERM and needed KILL - so a TERM-only sweep would still
 # leak one process per spawning case.
 #
-# Re-deriving the pid set from the cwd boundary immediately before each signal
-# keeps the sweep scoped across the grace period: a pid that left the subtree
-# is simply absent from the next scan. That alone does not close the window
-# between listing a pid and signalling it: if that pid has already exited and
-# the OS recycled the number for an unrelated process, a cwd-only recheck can
-# still find a match (the new process may itself sit under <dir>, or the
-# recheck may simply run before the kernel has reused it) and signal a process
-# this sweep never leaked. fm_test_pid_identity (shared with fm_pid_identity in
-# bin/fm-wake-lib.sh) is captured per pid alongside the scan and re-verified
-# immediately before every signal for the same reason production teardown's
-# reap_task_worktree_processes binds identity rather than trusting a pid number
-# alone; a pid whose identity has changed is left alone.
+# A pid is not a safe reference to the process that was scanned, so every
+# signal goes through fm_proc_safe_to_signal: the pid must still be inside the
+# cwd boundary according to a FRESH scan, and must still be the same process
+# whose identity was captured at scan time. Re-scanning alone would not close
+# the window between listing a pid and signalling it - once that pid has exited
+# and the OS has recycled the number, a cwd-only recheck cannot tell the
+# replacement apart from the leak - so the sweep would be able to signal a
+# process it never leaked. bin/fm-proc-cwd-lib.sh owns both halves of that
+# predicate and the reason its identity is birth-only, which is what keeps a
+# leaked process that exec'd in the meantime reapable rather than spared.
+#
+# Note the two remaining asymmetries with production teardown, both from the
+# best-effort policy: a pid whose identity cannot be read is skipped rather
+# than refused, and there is one TERM/KILL round rather than bounded retries.
 fm_test_sweep_leaked_processes() {
-  local dir=$1 pids pid identity current i
+  local dir=$1 pids pid identity i
   local -a tracked_pids tracked_identities
   fm_test_sweepable_root "$dir" || return 0
   pids=$(fm_pids_with_cwd_under "$dir" 2>/dev/null) || return 0
@@ -169,7 +179,7 @@ fm_test_sweep_leaked_processes() {
   tracked_identities=()
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
-    identity=$(fm_test_pid_identity "$pid" 2>/dev/null) || continue
+    identity=$(fm_proc_reap_identity "$pid" 2>/dev/null) || continue
     tracked_pids+=("$pid")
     tracked_identities+=("$identity")
   done <<EOF
@@ -179,11 +189,8 @@ EOF
 
   pids=$(fm_pids_with_cwd_under "$dir" 2>/dev/null) || return 0
   for i in "${!tracked_pids[@]}"; do
-    pid=${tracked_pids[$i]}
-    if printf '%s\n' "$pids" | grep -qFx "$pid" \
-      && current=$(fm_test_pid_identity "$pid" 2>/dev/null) \
-      && [ "$current" = "${tracked_identities[$i]}" ]; then
-      kill -TERM "$pid" 2>/dev/null
+    if fm_proc_safe_to_signal "${tracked_pids[$i]}" "${tracked_identities[$i]}" "$pids"; then
+      kill -TERM "${tracked_pids[$i]}" 2>/dev/null
     fi
   done
 
@@ -191,11 +198,8 @@ EOF
 
   pids=$(fm_pids_with_cwd_under "$dir" 2>/dev/null) || return 0
   for i in "${!tracked_pids[@]}"; do
-    pid=${tracked_pids[$i]}
-    if printf '%s\n' "$pids" | grep -qFx "$pid" \
-      && current=$(fm_test_pid_identity "$pid" 2>/dev/null) \
-      && [ "$current" = "${tracked_identities[$i]}" ]; then
-      kill -KILL "$pid" 2>/dev/null
+    if fm_proc_safe_to_signal "${tracked_pids[$i]}" "${tracked_identities[$i]}" "$pids"; then
+      kill -KILL "${tracked_pids[$i]}" 2>/dev/null
     fi
   done
   return 0

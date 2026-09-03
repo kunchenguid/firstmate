@@ -420,7 +420,7 @@ test_sweep_leaves_a_pid_alone_once_its_identity_no_longer_matches() {
   # A cwd-only recheck closes the "left the subtree" case but not PID reuse:
   # if the pid the sweep scanned has already exited and the OS handed the
   # number to an unrelated process by the time the sweep is about to signal,
-  # a cwd-only recheck cannot tell the difference. fm_test_pid_identity is
+  # a cwd-only recheck cannot tell the difference. fm_proc_reap_identity is
   # overridden here, in a child shell, to return a different value on every
   # call - exactly what re-deriving identity for a reused pid would look like
   # - so the pre-signal identity recheck can never match what was captured at
@@ -432,7 +432,7 @@ test_sweep_leaves_a_pid_alone_once_its_identity_no_longer_matches() {
   pid=$(start_cwd_sleeper "$root") || fail "the identity-check sleeper never started"
   track_sleeper "$pid"
 
-  # A plain shell variable would not do: each call to fm_test_pid_identity runs
+  # A plain shell variable would not do: each call to fm_proc_reap_identity runs
   # inside the command substitution that captures its output, which is a
   # subshell, so an in-memory counter would never actually advance in the
   # caller. A counter file survives across that subshell boundary instead.
@@ -440,7 +440,7 @@ test_sweep_leaves_a_pid_alone_once_its_identity_no_longer_matches() {
     # shellcheck source=tests/lib.sh
     . "$1"
     counter="$2/identity-calls"
-    fm_test_pid_identity() {
+    fm_proc_reap_identity() {
       local n
       n=$(( $(cat "$counter" 2>/dev/null || echo 0) + 1 ))
       printf "%s\n" "$n" > "$counter"
@@ -450,12 +450,107 @@ test_sweep_leaves_a_pid_alone_once_its_identity_no_longer_matches() {
   ' _ "$LIB" "$harness" "$root" \
     || fail "the sweep failed rather than no-op'ing on an identity mismatch"
 
+  # The counter proves the override was actually consulted. Without it, a sweep
+  # that stopped asking for identity would pass this case vacuously: "the
+  # sleeper survived" is also what a sweep that signalled nothing looks like.
+  [ -s "$harness/identity-calls" ] \
+    || fail "the sweep never asked for a process identity, so this case proves nothing"
+
   alive=0
   proc_is_alive "$pid" && alive=1
   reap_sleeper "$pid"
   [ "$alive" -eq 1 ] \
     || fail "the sweep signalled a pid whose identity no longer matched what it captured at scan time"
   pass "the sweep leaves a pid alone once its identity no longer matches what was captured at scan time"
+}
+
+test_signal_guard_still_admits_a_leak_that_execd_since_the_scan() {
+  local harness root pid ready landed tries=0
+  local captured own_before own_after cmd_before cmd_after scan
+  # WHY THIS CASE EXISTS. The pre-signal recheck above stops the sweep
+  # signalling a recycled pid - but identity can be built two ways, and only
+  # one is correct for a REAPER. bin/fm-wake-lib.sh's fm_pid_identity (the
+  # OWNERSHIP identity, used for lock claims) folds in the command line, so it
+  # deliberately breaks on `exec`. Building the sweep on that would make it
+  # spare any leaked process that exec'd after the scan - reinstating the very
+  # leak this file pins, and silently, because sparing a process is
+  # indistinguishable from having had nothing to reap. fm_proc_reap_identity is
+  # birth-only for exactly that reason.
+  #
+  # This asserts the shared predicate directly rather than racing a signal into
+  # the sweep's grace window: the exec is driven by a marker file and confirmed
+  # landed before anything is asserted, so the case turns on the identity rule
+  # and never on scheduling. bin/fm-teardown.sh's reap passes through the same
+  # predicate, so this covers production too.
+  harness=$(fm_test_tmproot fm-test-cleanup-signal-guard)
+  root="$harness/leak"
+  mkdir -p "$root"
+  : > "$root/.fm-test-fixture"
+  ready="$harness/ready"
+  landed="$harness/landed"
+
+  # Waits for the marker, then execs - so the pid, its start time and its cwd
+  # all survive while the command line is rewritten. Mirrors a leaked
+  # `treehouse get` subshell handing off to the shell it opens.
+  ( cd "$root" && exec perl -e '
+      my ($ready, $landed) = @ARGV;
+      open my $fh, ">", $ready or die "ready";
+      close $fh;
+      until (-e $landed) { select undef, undef, undef, 0.01; }
+      exec "sleep", "313";
+    ' "$ready" "$landed" ) >/dev/null 2>&1 </dev/null &
+  pid=$!
+  disown
+  track_sleeper "$pid"
+  while [ "$tries" -lt 200 ]; do
+    [ -e "$ready" ] && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ -e "$ready" ] || fail "the exec fixture process never started"
+
+  captured=$(fm_proc_reap_identity "$pid") \
+    || fail "could not capture a reap identity for the fixture process"
+  own_before=$(fm_test_pid_identity "$pid") \
+    || fail "could not capture an ownership identity for the fixture process"
+  cmd_before=$(ps -p "$pid" -o command= 2>/dev/null)
+
+  # `sleep 313` is a signature no other process on the machine is running, so
+  # polling the command line for it is positive proof the exec landed - not the
+  # mere absence of the old one.
+  : > "$landed"
+  tries=0
+  while [ "$tries" -lt 400 ]; do
+    cmd_after=$(ps -p "$pid" -o command= 2>/dev/null)
+    case "$cmd_after" in *"sleep 313"*) break ;; esac
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  case "$cmd_after" in
+    *"sleep 313"*) ;;
+    *) fail "the fixture process never exec'd, so this case proves nothing" ;;
+  esac
+
+  scan=$(fm_pids_with_cwd_under "$root") \
+    || fail "the cwd scan failed against the exec fixture root"
+  fm_proc_pid_in_list "$scan" "$pid" \
+    || fail "the exec'd process left the fixture root, so this case proves nothing"
+
+  # The property: birth identity is unchanged, so the leak is still reapable.
+  fm_proc_safe_to_signal "$pid" "$captured" "$scan" \
+    || fail "the signal guard refused a leaked process that only exec'd since the scan"
+
+  # And the divergence that makes the property non-trivial: the ownership
+  # identity DID change, so a sweep built on it would have spared this leak.
+  own_after=$(fm_test_pid_identity "$pid") \
+    || fail "could not re-read the ownership identity after the exec"
+  [ "$cmd_after" != "$cmd_before" ] \
+    || fail "the exec did not rewrite the command line, so the identities cannot diverge"
+  [ "$own_after" != "$own_before" ] \
+    || fail "the ownership identity did not change across the exec, so this case pins nothing"
+
+  reap_sleeper "$pid"
+  pass "the signal guard still admits a leak that only exec'd since the scan"
 }
 
 test_sweep_never_reaches_a_registered_repo_checkout_dir() {
@@ -548,6 +643,7 @@ test_sweep_cannot_reach_outside_its_own_root
 test_sweep_refuses_unmarked_and_non_tmpdir_roots
 test_sweep_kills_a_process_that_ignores_term
 test_sweep_leaves_a_pid_alone_once_its_identity_no_longer_matches
+test_signal_guard_still_admits_a_leak_that_execd_since_the_scan
 test_sweep_never_reaches_a_registered_repo_checkout_dir
 test_sweep_never_signals_the_sweeping_shell
 test_orphan_sweep_reaps_processes_left_in_a_stale_root
