@@ -1,10 +1,13 @@
 name: Voice guard
 run-name: "PR #${{ github.event.pull_request.number }} text - ${{ github.event.action }}"
 
-# The commit-message half of this refusal runs before the first push, inside
-# bin/fm-lint.sh. A pull request's title and description have no pre-push
-# moment - they do not exist until after the push - so this workflow is the
-# earliest firstmate-owned point that can read them.
+# The commit-message half of this refusal is prevention: bin/fm-lint.sh runs it
+# before the first push, so matching text never leaves the machine.
+# This pull request check is only a backstop: GitHub has already stored and
+# exposed the title and description before this workflow receives its event.
+# A failed check reports that leak but cannot undo the disclosure.
+# Prevention requires scanning where no-mistakes generates the pull request
+# text before its API call, which is outside this repository.
 #
 # It matters because of how a squash merge composes public history: the title
 # becomes the merge commit's subject and the description can become its body,

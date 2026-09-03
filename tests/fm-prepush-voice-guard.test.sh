@@ -212,6 +212,35 @@ session: see docs/configuration.md for the timeout keys'
   pass "passes ordinary technical uses of the word session"
 }
 
+test_refuses_a_private_per_task_work_document() {
+  local out rc=0
+
+  out=$(fm_voice_text 'docs: retire data/alpha/report.md after completion') || rc=$?
+  expect_code 1 "$rc" "a private per-task work-document path was not refused"
+  assert_contains "$out" "private-task-work-document" \
+    "private work-document path named the wrong rule"
+  assert_contains "$out" "data/alpha/report.md" \
+    "refusal did not name the private work-document path"
+  pass "refuses a private per-task work-document path"
+}
+
+test_passes_nonprivate_paths_and_work_document_words() {
+  local out rc message
+
+  for message in \
+    'docs: update data/backlog.md' \
+    'docs: update data/secondmates.md' \
+    'fix: clear state/alpha.status' \
+    'docs: describe projects/alpha' \
+    'docs: report the outcome'
+  do
+    rc=0
+    out=$(fm_voice_text "$message") || rc=$?
+    expect_code 0 "$rc" "a legitimate path or bare work-document word was refused"$'\n'"$message"$'\n'"$out"
+  done
+  pass "passes flat data files, other private roots, and bare report"
+}
+
 test_refusal_names_what_matched_and_how_to_fix_it() {
   local tmp out rc=0
   tmp=$(fm_test_tmproot fm-voice-message)
@@ -253,6 +282,26 @@ test_scans_only_unpublished_commits() {
   assert_not_contains "$out" 'this already shipped' \
     "refusal reached back into already-published history"
   pass "scans only the commits that have not been pushed"
+}
+
+test_prefers_origin_main_over_an_ahead_local_main() {
+  local tmp out rc=0 remote_main
+  tmp=$(fm_test_tmproot fm-voice-ahead-main)
+  fm_voice_repo "$tmp/repo"
+  remote_main=$(git -C "$tmp/repo" rev-parse HEAD)
+  git -C "$tmp/repo" update-ref refs/remotes/origin/main "$remote_main"
+
+  git -C "$tmp/repo" checkout -q main
+  fm_voice_commit "$tmp/repo" 'fix(ci): Captain, this local-main commit has not shipped'
+  git -C "$tmp/repo" checkout -q feature
+  git -C "$tmp/repo" merge -q --ff-only main
+  fm_voice_commit "$tmp/repo" 'fix(bin): keep the feature tip clean'
+
+  out=$(fm_voice_scan "$tmp/repo") || rc=$?
+  expect_code 1 "$rc" "an ahead local main hid an unpushed leaking commit"
+  assert_contains "$out" "this local-main commit has not shipped" \
+    "refusal did not identify the hidden unpushed commit"
+  pass "prefers origin/main when local main is ahead"
 }
 
 test_fails_closed_when_the_range_cannot_be_determined() {
@@ -435,8 +484,11 @@ test_passes_legitimate_captain_and_house_vocabulary
 test_refuses_each_address_shape
 test_refuses_a_pointer_to_the_working_session
 test_passes_ordinary_uses_of_the_word_session
+test_refuses_a_private_per_task_work_document
+test_passes_nonprivate_paths_and_work_document_words
 test_refusal_names_what_matched_and_how_to_fix_it
 test_scans_only_unpublished_commits
+test_prefers_origin_main_over_an_ahead_local_main
 test_fails_closed_when_the_range_cannot_be_determined
 test_fails_closed_when_the_commit_list_is_unusable
 test_base_override_bounds_the_range

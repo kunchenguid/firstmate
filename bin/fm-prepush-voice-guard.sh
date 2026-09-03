@@ -42,6 +42,12 @@
 # link - never the word: 333 legitimate merged lines use "session" in its
 # ordinary technical sense and all of them still pass.
 #
+# The private work-document rule likewise keys on a path shape, not a word. A
+# path with a subdirectory under data/, data/<id>/<file>, is the per-task brief
+# or report shape AGENTS.md defines. It catches exactly three real leaks in the
+# same merged history - data/fm-send-reliability-reframe-s1/report.md and
+# data/agentsmd-diet-s2/report.md twice - with zero false positives.
+#
 # KNOWN RESIDUAL. The trailing rule refuses a subject that ends in a bare
 # ",<space>captain", so a comma list whose last item is the word captain
 # ("firstmate, secondmate, captain") would be refused as an address. No such
@@ -63,6 +69,15 @@
 #     human's own voice is not what this guard is for.
 #   - Verification narration ("Verified with X; all passed"). Hundreds of
 #     legitimate merged commits carry it. It is process detail, not our voice.
+#   - Bare "report" or "brief". Legitimate merged messages use both words; the
+#     private per-task path shape is the leak, not either noun.
+#   - Every data/ path. The flat private files data/backlog.md, data/captain.md,
+#     data/learnings.md, data/projects.md, and data/secondmates.md appear
+#     legitimately in eight merged messages, so requiring a subdirectory keeps
+#     them outside the rule.
+#   - Every state/ path. Merged history contains 46 legitimate mentions.
+#   - projects/ and .no-mistakes/ paths. Both have legitimate merged mentions
+#     and are unrelated to the per-task work-document shape.
 #
 # NO BYPASS FLAG. A refusal is always fixable by rewording the message, so there
 # is no case that needs an override. The refusal names the rule, the exact text
@@ -82,8 +97,8 @@
 #   fm-prepush-voice-guard.sh --help           print this usage
 #
 # FM_VOICE_GUARD_BASE overrides the default-branch ref used to bound the default
-# range; without it the resolvable refs among origin/main and main are used, and
-# a commit reachable from any of them is already published and never scanned.
+# range. Without it, origin/main is authoritative when it resolves and local
+# main is only a fallback, so an ahead local main cannot hide unpushed commits.
 set -u
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,6 +158,12 @@ FM_VOICE_RULES+=("internal-session-pointer${TAB}i${TAB}^[[:space:]]*(claude-sess
 # ordinary links such as a forge issue URL stay legitimate.
 FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}(claude\.ai/code/session|/session_[A-Za-z0-9]{10,})${TAB}Published history must not link the working session that produced the change. Remove the link.")
 
+# A private per-task work document has exactly this repository-owned path shape:
+# data/<id>/<file>. Requiring both components excludes the named flat data files
+# that legitimate commit messages discuss, while spelling the component and
+# outer boundaries avoids GNU-only \b.
+FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}(^|[^[:alnum:]_])data/[[:alnum:]_.-]+/[[:alnum:]_.-]+([^[:alnum:]_/.-]|\$)${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
+
 fm_voice_rule_field() {  # <rule> <field-index>
   printf '%s' "$1" | cut -d"$TAB" -f"$2"
 }
@@ -195,49 +216,43 @@ EOF
   [ "$found" -eq 0 ]
 }
 
-# The candidate default-branch refs, probed the same way bin/fm-lint.sh's own
-# fm_lint_changed_base_ref probes them so both agree on what "the default
-# branch" means in a given checkout.
-fm_voice_default_refs() {
-  local ref
+# The default-branch ref, probed the same way bin/fm-lint.sh's own
+# fm_lint_changed_base_ref probes candidates. The remote-tracking ref is the
+# publication boundary; local main is only a fallback when it does not resolve.
+fm_voice_default_ref() {
   if [ -n "${FM_VOICE_GUARD_BASE:-}" ]; then
     printf '%s\n' "$FM_VOICE_GUARD_BASE"
     return 0
   fi
-  for ref in origin/main main; do
-    if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
-      printf '%s\n' "$ref"
-    fi
-  done
+  if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
+    printf '%s\n' origin/main
+  elif git rev-parse --verify -q main >/dev/null 2>&1; then
+    printf '%s\n' main
+  fi
 }
 
-# Commits on HEAD that no known default-branch ref already carries. Excluding
-# every resolvable ref, not just the first, keeps a stale local main from
-# dragging already-published history into the scan.
+# Commits on HEAD that the authoritative default-branch ref does not carry.
+# Preferring origin/main prevents an ahead local main from hiding commits that
+# the first feature push would publish.
 #
 # Both failure modes return 3, never 1: an unresolvable ref and an unusable
 # rev-list both mean the range is unknown, and an unknown range must not be
 # reported as either clean or leaking.
 fm_voice_unpublished_commits() {  # <destination>
   local destination=$1
-  local -a refs
-  local ref
-  refs=()
-  while IFS= read -r ref; do
-    [ -n "$ref" ] || continue
-    refs+=("$ref")
-  done < <(fm_voice_default_refs)
+  local base_ref
+  base_ref=$(fm_voice_default_ref)
 
-  if [ "${#refs[@]}" -eq 0 ]; then
+  if [ -z "$base_ref" ]; then
     printf 'fm-prepush-voice-guard.sh: cannot determine which commits are unpublished: no default-branch ref resolved (tried %s).\n' \
       "${FM_VOICE_GUARD_BASE:-origin/main, main}" >&2
     printf 'fm-prepush-voice-guard.sh: fetch the default branch (git fetch origin main) or set FM_VOICE_GUARD_BASE, then re-run. An unknown range is not a clean range.\n' >&2
     return 3
   fi
 
-  if ! git rev-list HEAD --not "${refs[@]}" > "$destination" 2>/dev/null; then
+  if ! git rev-list HEAD --not "$base_ref" > "$destination" 2>/dev/null; then
     printf 'fm-prepush-voice-guard.sh: cannot list the commits ahead of %s. An unknown range is not a clean range.\n' \
-      "${refs[*]}" >&2
+      "$base_ref" >&2
     return 3
   fi
 }
