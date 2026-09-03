@@ -1643,6 +1643,58 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   pass "fm-turnend-guard --claude: reset contention preserves all episode state until retry"
 }
 
+test_hook_claude_mode_stalled_transition_recovery_is_bounded() {
+  local dir home pid identity holder ready guard i status hung=0
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stalled-transition-recovery")
+  home=$(cd "$dir" && pwd)
+  ready="$dir/state/transition-steal-ready"
+  : > "$dir/state/task1.meta"
+  seed_claude_budget "$dir" 3
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify stalled-transition watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    FM_LOCK_REQUIRE_IDENTITY=1 \
+      fm_lock_try_acquire "$1/state/.claude-autoarm-transition.lock.steal" || exit
+    : > "$2"
+    kill -STOP "${BASHPID:-$$}"
+  ' _ "$dir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition steal holder did not acquire its boundary"
+  kill -STOP "$holder" 2>/dev/null || fail "transition steal holder did not remain live"
+
+  printf '{"stop_hook_active":false,"session_id":"sess-claude-mode"}' \
+    | CLAUDECODE=1 FM_HOME="$home" FM_AUTOARM_TRANSITION_ATTEMPTS=5 \
+      bash "$dir/bin/fm-turnend-guard.sh" --claude > "$dir/guard.out" 2>&1 &
+  guard=$!
+  i=0
+  while [ "$i" -lt 200 ] && kill -0 "$guard" 2>/dev/null; do sleep 0.01; i=$((i + 1)); done
+  if kill -0 "$guard" 2>/dev/null; then
+    hung=1
+    kill "$guard" 2>/dev/null || true
+  fi
+  wait "$guard" 2>/dev/null
+  status=$?
+  kill -0 "$holder" 2>/dev/null || fail "identity-recorded transition steal holder was signalled"
+  kill -CONT "$holder" 2>/dev/null || true
+  kill "$holder" "$pid" 2>/dev/null || true
+  wait "$holder" "$pid" 2>/dev/null || true
+
+  [ "$hung" -eq 0 ] || fail "healthy guard wedged behind a stalled transition steal holder"
+  expect_code 2 "$status" "a healthy guard must continue when transition recovery cannot serialize"
+  assert_present "$dir/state/.turnend-claude-blocks" "bounded transition recovery partially cleared the block budget"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "bounded transition recovery partially cleared the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "bounded transition recovery partially cleared the attended alarm"
+  pass "fm-turnend-guard --claude: stalled transition recovery remains bounded"
+}
+
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
   local dir pid identity auto_pid guard_pid auto_status guard_status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-concurrent-recovery")
@@ -2041,6 +2093,7 @@ test_hook_claude_mode_ignores_failure_superseded_by_later_success
 test_hook_claude_mode_ignores_legacy_failure_superseded_by_later_success
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
+test_hook_claude_mode_stalled_transition_recovery_is_bounded
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking

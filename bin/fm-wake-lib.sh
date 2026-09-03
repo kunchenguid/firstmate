@@ -1186,27 +1186,11 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace> [caller-identity
   return 0
 }
 
-fm_autoarm_transition_acquire() {  # <state-dir>
-  local state=$1 grace=${FM_AUTOARM_TRANSITION_GRACE:-2}
+fm_autoarm_transition_acquire_bounded() {  # <state-dir> <attempts>
+  local state=$1 attempts=$2 grace=${FM_AUTOARM_TRANSITION_GRACE:-2} pid identity i=0
   FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE=
   FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=
   case "$grace" in ''|*[!0-9]*|0) grace=2 ;; esac
-  while ! fm_autoarm_transition_try_acquire "$state"; do
-    if [ "$(fm_path_age "$state/.claude-autoarm-transition.lock")" -ge "$grace" ]; then
-      fm_autoarm_transition_revoke_stalled "$state" "$grace" || true
-    fi
-    sleep 0.02
-  done
-}
-
-fm_autoarm_failure_transition_acquire() {  # <state-dir>
-  local state=$1 grace=${FM_AUTOARM_TRANSITION_GRACE:-2} pid identity
-  local attempts=${FM_AUTOARM_FAILURE_TRANSITION_ATTEMPTS:-150} i=0
-  FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE=
-  FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=
-  case "$grace" in ''|*[!0-9]*|0) grace=2 ;; esac
-  case "$attempts" in ''|*[!0-9]*|0) attempts=150 ;; esac
-  [ "$attempts" -le 250 ] || attempts=250
   pid=${BASHPID:-$$}
   identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   [ -n "$identity" ] || return 1
@@ -1219,9 +1203,24 @@ fm_autoarm_failure_transition_acquire() {  # <state-dir>
       fm_autoarm_transition_revoke_stalled "$state" "$grace" "$identity" || true
     fi
     i=$((i + 1))
+    [ "$i" -lt "$attempts" ] || break
     sleep 0.02
   done
   return 1
+}
+
+fm_autoarm_transition_acquire() {  # <state-dir>
+  local state=$1 attempts=${FM_AUTOARM_TRANSITION_ATTEMPTS:-150}
+  case "$attempts" in ''|*[!0-9]*|0) attempts=150 ;; esac
+  [ "$attempts" -le 250 ] || attempts=250
+  fm_autoarm_transition_acquire_bounded "$state" "$attempts"
+}
+
+fm_autoarm_failure_transition_acquire() {  # <state-dir>
+  local state=$1 attempts=${FM_AUTOARM_FAILURE_TRANSITION_ATTEMPTS:-150}
+  case "$attempts" in ''|*[!0-9]*|0) attempts=150 ;; esac
+  [ "$attempts" -le 250 ] || attempts=250
+  fm_autoarm_transition_acquire_bounded "$state" "$attempts"
 }
 
 _fm_failure_episode_clear() {  # <state-dir>
@@ -1724,12 +1723,11 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
   pid=${BASHPID:-$$}
   i=0
   while :; do
-    if fm_autoarm_transition_acquire "$state"; then
-      if fm_lock_try_acquire "$lock"; then
-        break
-      fi
-      fm_lock_release "$transition"
+    fm_autoarm_transition_acquire "$state" || return 1
+    if fm_lock_try_acquire "$lock"; then
+      break
     fi
+    fm_lock_release "$transition"
     [ "$i" -lt 20 ] || return 1
     sleep 0.02
     i=$((i + 1))
