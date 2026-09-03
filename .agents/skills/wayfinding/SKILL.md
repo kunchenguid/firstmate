@@ -73,9 +73,10 @@ An unclassified new request defaults to preempt in practice, because it is the t
 ## Pre-staging: a blocker gates its step, not the task
 
 A blocker gates only the step it actually blocks, never the whole task.
-When intake or a frontier recompute finds work blocked only at its final step, design the task so every unblocked part runs now - the research, the compilation, the drafting, the coding - and the blocked step is left as an explicit "finalize when X lands" placeholder rather than a guessed value.
-A guessed value is worse than a placeholder because it looks finished, so nothing brings anyone back to it once X actually lands.
-Each prepared piece names its consumer and its invalidation rule, so when X lands it is already known what consumes the piece and what would make it wrong.
+Pre-stage useful research, specifications, interfaces, fixtures, page-specific implementation, and focused tests.
+Multiple prepared branches may await one dependency, but they must not independently redefine the same unstable shared contract or integration seam.
+Record the integration owner, order, trigger, recheck duty, and invalidation condition.
+When the dependency lands, integrate prepared consumers before extending that chain further.
 
 Write every placeholder as the exact token `FINALIZE-AFTER(<trigger>): <what>`, inline where the value belongs.
 One search, `grep -rn 'FINALIZE-AFTER('`, then finds every open placeholder with its trigger already beside it, so no separate index of pending work exists to drift out of date.
