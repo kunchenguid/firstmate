@@ -715,8 +715,13 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     fi
     # Left-bar rows (opencode): a heavy left bar `┃` opening the row with no
     # closing side border. A `┃…┃` row is a bordered box row, not a left bar.
+    # Blank `┃` rows are valid content rows inside opencode's composer run.
     case "$trimmed" in
-      '┃') leftbar_start=-1 ;;
+      '┃')
+        if [ "$leftbar_start" -lt 0 ]; then leftbar_start=$row; fi
+        FM_COMPOSER_SCAN_LEFTBAR_START=$leftbar_start
+        FM_COMPOSER_SCAN_LEFTBAR_END=$row
+        ;;
       '┃'*'┃') leftbar_start=-1 ;;
       '┃'*)
         if [ "$leftbar_start" -lt 0 ]; then leftbar_start=$row; fi
@@ -1043,7 +1048,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # can prove it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
+  local row raw content pending_seen=0 saw_nonblank=0 footer_re leading_blank=1 placeholder_position=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   row=$first
   while [ "$row" -le "$last" ]; do
@@ -1054,6 +1059,7 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     esac
     fm_composer_normalize_trim_var content
     if [ -z "$content" ]; then row=$((row + 1)); continue; fi
+    saw_nonblank=1
     if [ "$leading_blank" = 1 ] && [ "$row" -gt "$first" ]; then
       placeholder_position=1
     else
@@ -1072,6 +1078,29 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     row=$((row + 1))
   done
   if [ "$pending_seen" = 1 ]; then
+    if [ "$styled" = 1 ]; then printf 'pending'; else printf 'unknown'; fi
+  elif [ "$saw_nonblank" = 1 ]; then
+    printf 'empty'
+  else
+    printf 'unknown'
+  fi
+}
+
+_fm_composer_classify_halfbox_content() {  # <screen> <styled> <first-row> <last-row>
+  local screen=$1 styled=$2 first=$3 last=$4 row raw content text_seen=0
+  row=$first
+  while [ "$row" -le "$last" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    content=$(_fm_composer_row_content "$raw" "$styled")
+    case "$content" in '┃'*) content=${content#┃} ;; esac
+    fm_composer_normalize_trim_var content
+    if [ -n "$content" ]; then
+      text_seen=1
+      break
+    fi
+    row=$((row + 1))
+  done
+  if [ "$text_seen" = 1 ]; then
     if [ "$styled" = 1 ]; then printf 'pending'; else printf 'unknown'; fi
   else
     printf 'empty'
@@ -1374,7 +1403,7 @@ EOF
 
 _fm_composer_halfbox_verdict() {  # <screen> <styled> <has-identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 state agent
-  state=$(_fm_composer_classify_leftbar "$screen" "$styled" \
+  state=$(_fm_composer_classify_halfbox_content "$screen" "$styled" \
     "$FM_COMPOSER_SCAN_HALFBOX_FIRST" "$FM_COMPOSER_SCAN_HALFBOX_LAST")
   if [ "$state" != empty ]; then
     printf '%s' "$state"

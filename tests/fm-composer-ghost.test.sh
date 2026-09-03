@@ -361,6 +361,14 @@ test_copilot_half_box_requires_complete_rules() {
   out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 $'copilot\tpresent')
   [ "$out" = pending ] || fail "Copilot half-box text should be pending, got '$out'"
 
+  printf '╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n┃ Plan · release checklist\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n' > "$capture"
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 $'copilot\tpresent')
+  [ "$out" = pending ] || fail "Copilot half-box content beginning with Plan must stay pending, got '$out'"
+
+  printf '╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n┃ Build · release checklist\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n' > "$capture"
+  out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 $'copilot\tpresent')
+  [ "$out" = pending ] || fail "Copilot half-box content beginning with Build must stay pending, got '$out'"
+
   printf '╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀▀▀▀▀▀\n' > "$capture"
   out=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1' "$(cat "$capture")" 1 probe-absent)
   [ "$out" = unknown ] || fail "an unidentified Copilot half-box must stay unknown, got '$out'"
