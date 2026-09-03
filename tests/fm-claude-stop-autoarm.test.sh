@@ -279,6 +279,17 @@ run_autoarm_from_claude_daemon_bridge() {  # <dir> <foreground-lock-owner-pid>
   return "$rc"
 }
 
+pause_terminal_transition_acquire() {
+  cat >> "$1/bin/fm-wake-lib.sh" <<'SH'
+fm_autoarm_transition_acquire() {
+  local state=$1
+  : > "$state/terminal-lock-waiting"
+  while [ ! -e "$state/terminal-lock-release" ]; do sleep 0.01; done
+  fm_lock_try_acquire "$state/.claude-autoarm-transition.lock"
+}
+SH
+}
+
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
@@ -500,6 +511,122 @@ test_claude_daemon_losing_session_owner_cannot_commit() {
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "former session daemon elected a terminal notice"
   assert_not_contains "$(cat "$out")" "firstmate watcher wake" "former session daemon delivered terminal output"
   pass "auto-arm: daemon bridge revalidates session authority before terminal commit"
+}
+
+test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit() {
+  local dir out owner successor hook status i
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-terminal-lock-wait")
+  out="$dir/hook.out"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  pause_terminal_transition_acquire "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/terminal-lock-waiting" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$dir/state/terminal-lock-waiting" ]; then
+    kill "$hook" "$owner" 2>/dev/null || true
+    wait "$hook" "$owner" 2>/dev/null || true
+    fail "daemon bridge did not block inside terminal lock acquisition"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  successor=$!
+  printf '%s\n' "$successor" > "$dir/state/.lock"
+  : > "$dir/state/terminal-lock-release"
+  wait "$hook"; status=$?
+  kill "$successor" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+
+  expect_code 0 "$status" "a detached daemon must stand down when authority changes during terminal lock acquisition"
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "former session daemon committed after losing authority inside terminal lock acquisition"
+  assert_absent "$dir/state/.claude-autoarm-failure-epochs" "former session daemon published a terminal failure after lock wait"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "former session daemon elected a terminal notice after lock wait"
+  pass "auto-arm: locked terminal commits revalidate daemon session authority"
+}
+
+test_claude_daemon_losing_owner_during_record_lock_wait_cannot_mutate() {
+  local dir out owner successor hook status i
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-record-lock-wait")
+  out="$dir/hook.out"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" afk-appears
+  pause_terminal_transition_acquire "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/terminal-lock-waiting" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$dir/state/terminal-lock-waiting" ]; then
+    kill "$hook" "$owner" 2>/dev/null || true
+    wait "$hook" "$owner" 2>/dev/null || true
+    fail "daemon bridge did not block inside quiet-record lock acquisition"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  successor=$!
+  printf '%s\n' "$successor" > "$dir/state/.lock"
+  : > "$dir/state/terminal-lock-release"
+  wait "$hook"; status=$?
+  kill "$successor" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+
+  expect_code 0 "$status" "a detached daemon quiet record must stand down after authority changes"
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "former session daemon recorded quiet terminal state after losing authority"
+  assert_absent "$dir/state/.claude-autoarm-failure-epochs" "former session daemon published failure state from a quiet record"
+  pass "auto-arm: locked quiet records revalidate daemon session authority"
+}
+
+test_claude_daemon_losing_owner_during_reset_lock_wait_cannot_reset() {
+  local dir out owner successor hook watcher identity status i
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-reset-lock-wait")
+  out="$dir/hook.out"
+  : > "$dir/state/task.meta"
+  printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
+  write_arm_fixture "$dir" benign-live
+  pause_terminal_transition_acquire "$dir"
+  sleep 60 &
+  watcher=$!
+  identity=$(watcher_identity "$dir" "$watcher") || fail "could not identify live watcher for reset authority transfer"
+  record_watcher_lock "$dir" "$watcher" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/terminal-lock-waiting" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$dir/state/terminal-lock-waiting" ]; then
+    kill "$hook" "$owner" "$watcher" 2>/dev/null || true
+    wait "$hook" "$owner" "$watcher" 2>/dev/null || true
+    fail "daemon bridge did not block inside recovery-reset lock acquisition"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  successor=$!
+  printf '%s\n' "$successor" > "$dir/state/.lock"
+  : > "$dir/state/terminal-lock-release"
+  wait "$hook"; status=$?
+  kill "$successor" "$watcher" 2>/dev/null || true
+  wait "$successor" "$watcher" 2>/dev/null || true
+
+  expect_code 0 "$status" "a detached daemon reset must stand down after authority changes"
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "former session daemon recorded clean state after losing reset authority"
+  assert_present "$dir/state/.turnend-claude-blocks" "former session daemon reset the failure episode after losing authority"
+  assert_absent "$dir/state/.claude-autoarm-failure-reset" "former session daemon advanced the reset fence after losing authority"
+  pass "auto-arm: locked recovery resets revalidate daemon session authority"
 }
 
 test_claude_daemon_losing_session_owner_cannot_rearm() {
@@ -2406,6 +2533,9 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_claude_daemon_spawned_by_foreground_lock_owner_arms
 test_claude_daemon_losing_session_owner_cannot_commit
+test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit
+test_claude_daemon_losing_owner_during_record_lock_wait_cannot_mutate
+test_claude_daemon_losing_owner_during_reset_lock_wait_cannot_reset
 test_claude_daemon_losing_session_owner_cannot_rearm
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason

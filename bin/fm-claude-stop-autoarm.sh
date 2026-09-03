@@ -243,11 +243,12 @@ autoarm_commit() {  # <outcome> [marker-file]
   local commit_rc failure_rc terminal_baseline pid
   autoarm_session_still_owned || return 2
   if [ -n "${2:-}" ]; then
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2" "$FM_ROOT"
   else
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT"
   fi
   commit_rc=$?
+  autoarm_session_still_owned || return 2
   [ "$commit_rc" -ne 0 ] || return 0
   [ "$commit_rc" -ne 2 ] || return 2
   autoarm_alarm_current && return 2
@@ -276,7 +277,7 @@ autoarm_commit() {  # <outcome> [marker-file]
 # changes nothing about the action taken.
 autoarm_record() {  # <outcome>
   autoarm_session_still_owned || return 0
-  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
+  fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT" >/dev/null 2>&1 || true
 }
 
 # X mode cadence: source the generated config so an X instance polls at its
@@ -351,7 +352,7 @@ if [ "$HEALTHY" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  fm_autoarm_reset_owned "$STATE" "$MY_GEN"
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN" "$FM_ROOT"
   RESET_RC=$?
   if [ "$RESET_RC" -eq 0 ]; then
     autoarm_record clean

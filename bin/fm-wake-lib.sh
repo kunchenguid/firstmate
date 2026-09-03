@@ -2054,10 +2054,11 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
 # owned critical section (the once-per-episode failure notice). A marker failure
 # refuses the commit even though its terminal ledger entry remains; marker-first
 # ordering could permanently suppress a notice whose ledger write never won.
-# Returns 0 committed, 2 refused (superseded or required-marker failure), and 1
-# unable (bounded contention or ledger-write failure).
-fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
-  local state=$1 gen=$2 outcome=$3 marker=${4:-} transition lock epoch pid identity tmp i marker_rc reset
+# Returns 0 committed, 2 refused (superseded, session-refused, or required-marker
+# failure), and 1 unable (bounded contention or ledger-write failure).
+fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session-root]
+  local state=$1 gen=$2 outcome=$3 marker=${4:-} session_root=${5:-}
+  local transition lock epoch pid identity tmp i marker_rc reset
   transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
@@ -2079,6 +2080,13 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
     fm_lock_release "$transition"
     return 2
   fi
+  if [ -n "$session_root" ] \
+    && { ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
+      || ! fm_session_lock_owned_by_self "$state" "$session_root"; }; then
+    fm_lock_release "$lock"
+    fm_lock_release "$transition"
+    return 2
+  fi
   identity=$FM_AUTOARM_IDENTITY
   tmp="$epoch.tmp.$pid"
   if ! {
@@ -2094,6 +2102,12 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file]
     return 1
   fi
   if [ -n "$marker" ]; then
+    if [ -n "$session_root" ] \
+      && ! fm_session_lock_owned_by_self "$state" "$session_root"; then
+      fm_lock_release "$lock"
+      fm_lock_release "$transition"
+      return 2
+    fi
     reset=$(fm_autoarm_failure_reset_fence "$state") || {
       fm_lock_release "$lock"
       fm_lock_release "$transition"
@@ -2122,8 +2136,8 @@ fm_autoarm_still_owner() {  # <state-dir> <gen>
   [ "$FM_AUTOARM_GEN" = "$gen" ] && [ "$FM_AUTOARM_OWNER" = "$pid" ]
 }
 
-fm_autoarm_reset_owned() {  # <state-dir> <gen>
-  local state=$1 gen=$2 transition lock pid
+fm_autoarm_reset_owned() {  # <state-dir> <gen> [session-root]
+  local state=$1 gen=$2 session_root=${3:-} transition lock pid
   transition="$state/.claude-autoarm-transition.lock"
   lock="$state/.claude-autoarm.lock"
   pid=${BASHPID:-$$}
@@ -2134,6 +2148,13 @@ fm_autoarm_reset_owned() {  # <state-dir> <gen>
   fi
   if ! fm_autoarm_ledger_read "$state" \
     || [ "$FM_AUTOARM_GEN" != "$gen" ] || [ "$FM_AUTOARM_OWNER" != "$pid" ]; then
+    fm_lock_release "$lock"
+    fm_lock_release "$transition"
+    return 2
+  fi
+  if [ -n "$session_root" ] \
+    && { ! command -v fm_session_lock_owned_by_self >/dev/null 2>&1 \
+      || ! fm_session_lock_owned_by_self "$state" "$session_root"; }; then
     fm_lock_release "$lock"
     fm_lock_release "$transition"
     return 2
