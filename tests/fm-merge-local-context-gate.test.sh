@@ -11,6 +11,7 @@
 #   (c) code change with a complete frontmatter record lands (exit 0, merged)
 #   (d) code change in an unknown repo warns and lands (warn-only, exit 0)
 #   (e) a branch with no code changes lands without needing any record
+#   (f) a failed diff probe refuses before the landing
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -100,7 +101,7 @@ test_refuses_when_frontmatter_incomplete() {
 test_lands_when_record_current() {
   local case_dir rc
   case_dir=$(make_case record-current lia-mascot)
-  printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'body' \
+  printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: code.txt' \
     > "$case_dir/home/data/projects/lia-mascot.md"
 
   set +e
@@ -129,6 +130,125 @@ test_unknown_repo_warns_and_lands() {
   [ "$(git -C "$case_dir/something-else" rev-parse main)" = "$(git -C "$case_dir/something-else" rev-parse fm/task-x1)" ] \
     || fail "unknown-repo: main was not fast-forwarded to the branch"
   pass "fm-merge-local warns once and lands for an unknown repo"
+}
+
+test_docs_only_diff_needs_no_record() {
+  local case_dir rc repo
+  case_dir="$TMP_ROOT/docs-only"
+  mkdir -p "$case_dir/state" "$case_dir/home/data/projects"
+  repo="$case_dir/lia-mascot"
+  git init -q -b main "$repo"
+  mkdir -p "$repo/docs"
+  printf '# project\n' > "$repo/README.md"
+  printf 'base docs\n' > "$repo/docs/guide.md"
+  git -C "$repo" add README.md docs/guide.md
+  git -C "$repo" commit -qm base
+  git -C "$repo" checkout -qb fm/task-x1
+  printf 'updated docs\n' >> "$repo/docs/guide.md"
+  git -C "$repo" commit -qam docs
+  git -C "$repo" checkout -q main
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$repo" \
+    "kind=ship" \
+    "mode=local-only"
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "docs-only: documentation changes should not require a detail record"
+  [ "$(git -C "$repo" rev-parse main)" = "$(git -C "$repo" rev-parse fm/task-x1)" ] \
+    || fail "docs-only: main was not fast-forwarded to the branch"
+  pass "fm-merge-local ignores README/docs-only changes for the context gate"
+}
+
+test_refuses_malformed_record_shapes() {
+  local shape case_dir rc
+  for shape in missing-delimiters extra-key duplicate-key empty-value key-in-body extra-body; do
+    case_dir=$(make_case "malformed-$shape" lia-mascot)
+    case "$shape" in
+      missing-delimiters)
+        printf '%s\n' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: code.txt' \
+          > "$case_dir/home/data/projects/lia-mascot.md" ;;
+      extra-key)
+        printf '%s\n' '---' 'milestone: m1' 'extra: nope' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: code.txt' \
+          > "$case_dir/home/data/projects/lia-mascot.md" ;;
+      duplicate-key)
+        printf '%s\n' '---' 'milestone: m1' 'milestone: m2' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: code.txt' \
+          > "$case_dir/home/data/projects/lia-mascot.md" ;;
+      empty-value)
+        printf '%s\n' '---' 'milestone:' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: code.txt' \
+          > "$case_dir/home/data/projects/lia-mascot.md" ;;
+      key-in-body)
+        printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'blocker: stale at code.txt' \
+          > "$case_dir/home/data/projects/lia-mascot.md" ;;
+      extra-body)
+        printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: code.txt' 'extra' \
+          > "$case_dir/home/data/projects/lia-mascot.md" ;;
+    esac
+
+    set +e
+    run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "malformed-$shape: malformed detail record should be refused"
+    assert_grep 'invalid frontmatter/detail record' "$case_dir/stderr" \
+      "malformed-$shape: refusal did not identify the invalid record"
+  done
+  pass "fm-merge-local refuses non-strict detail record shapes"
+}
+
+test_refuses_when_body_is_not_source_pointer() {
+  local case_dir rc
+  case_dir=$(make_case body-not-source lia-mascot)
+  printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'body' \
+    > "$case_dir/home/data/projects/lia-mascot.md"
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "body-not-source: a body without a source pointer should be refused"
+  assert_grep 'invalid frontmatter/detail record' "$case_dir/stderr" \
+    "body-not-source: refusal did not identify the invalid record"
+  pass "fm-merge-local rejects a body without an authoritative source pointer"
+}
+
+test_refuses_when_diff_probe_fails() {
+  local case_dir rc real_git fake_bin
+  case_dir=$(make_case diff-probe-failure lia-mascot)
+  real_git=$(command -v git)
+  fake_bin="$case_dir/fake-bin"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/git" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = diff ]; then
+    for diff_arg in "\$@"; do
+      [ "\$diff_arg" = --name-only ] && exit 73
+    done
+  fi
+done
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fake_bin/git"
+
+  set +e
+  PATH="$fake_bin:$PATH" run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "diff-probe-failure: a diff inspection failure should refuse the landing"
+  assert_grep 'cannot inspect the project diff' "$case_dir/stderr" \
+    "diff-probe-failure: refusal did not report the failed diff probe"
+  [ "$(git -C "$case_dir/lia-mascot" rev-parse main)" != "$(git -C "$case_dir/lia-mascot" rev-parse fm/task-x1)" ] \
+    || fail "diff-probe-failure: refused landing still moved main"
+  pass "fm-merge-local propagates project diff probe failures"
 }
 
 test_empty_diff_needs_no_record() {
@@ -162,4 +282,8 @@ test_refuses_when_record_missing
 test_refuses_when_frontmatter_incomplete
 test_lands_when_record_current
 test_unknown_repo_warns_and_lands
+test_docs_only_diff_needs_no_record
+test_refuses_malformed_record_shapes
+test_refuses_when_body_is_not_source_pointer
+test_refuses_when_diff_probe_fails
 test_empty_diff_needs_no_record

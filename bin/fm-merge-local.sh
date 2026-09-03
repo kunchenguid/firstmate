@@ -90,19 +90,78 @@ slug_for_repo() {
   esac
 }
 
+project_code_diff() {
+  git -C "$PROJ" diff --name-only "$DEFAULT...$BRANCH" -- \
+    . \
+    ':(exclude)README*' \
+    ':(exclude)**/README*' \
+    ':(exclude)docs/**' \
+    ':(exclude)**/docs/**'
+}
+
+detail_frontmatter_has_key() {
+  local detail_file=$1 key=$2
+  awk -v key="$key" '
+    NR >= 2 && NR <= 5 && $0 ~ ("^" key ":[[:space:]]+") { found=1 }
+    END { exit(found ? 0 : 1) }
+  ' "$detail_file"
+}
+
+detail_record_is_current() {
+  local detail_file=$1
+  [ -f "$detail_file" ] || return 1
+  awk '
+    BEGIN {
+      valid = 1
+      double_quote = sprintf("%c", 34)
+      single_quote = sprintf("%c", 39)
+    }
+    function field_is_valid(line, key, value, prefix) {
+      prefix = "^" key ":[[:space:]]+"
+      if (line !~ prefix) return 0
+      value = line
+      sub(prefix, "", value)
+      return value != "" && value != double_quote double_quote && value != single_quote single_quote
+    }
+    NR == 1 { if ($0 != "---") valid=0; next }
+    NR == 2 { if (!field_is_valid($0, "milestone")) valid=0; next }
+    NR == 3 { if (!field_is_valid($0, "focus")) valid=0; next }
+    NR == 4 { if (!field_is_valid($0, "blocker")) valid=0; next }
+    NR == 5 { if (!field_is_valid($0, "next_move")) valid=0; next }
+    NR == 6 { if ($0 != "---") valid=0; next }
+    NR == 7 {
+      if ($0 ~ /^(milestone|focus|blocker|next_move):([[:space:]]|$)/ ||
+          ($0 !~ /(^|[[:space:]])(https?|file):\/\/[^[:space:]]+/ &&
+          $0 !~ /(^|[[:space:]])(~\/|\/|\.\/|\.\.\/)[^[:space:]]+/ &&
+          $0 !~ /(^|[[:space:]])[^[:space:]]+\/[^[:space:]]+/ &&
+          $0 !~ /(^|[[:space:]])[^[:space:]]+\.(md|mdx|rst|txt|json|ya?ml|toml|ini|cfg|conf|ts|tsx|js|jsx|mjs|cjs|py|sh|go|rs|java|rb|php|c|h)([[:space:]]|$)/ &&
+          $0 !~ /\]\([^[:space:]]+\)/)) valid=0
+      next
+    }
+    { valid=0 }
+    END { if (NR != 7) valid=0; exit(valid ? 0 : 1) }
+  ' "$detail_file"
+}
+
 DETAIL_DIR="${FM_DETAIL_DIR_OVERRIDE:-$FM_HOME/data/projects}"
 repo=${PROJ##*/}
 if slug=$(slug_for_repo "$repo"); then
-  touched=$(git -C "$PROJ" diff --name-only "$DEFAULT...$BRANCH" -- || true)
+  if ! touched=$(project_code_diff); then
+    echo "error: cannot inspect the project diff for $BRANCH in $PROJ; refusing to merge." >&2
+    exit 1
+  fi
   if [ -n "$touched" ]; then
     detail="$DETAIL_DIR/$slug.md"
     missing=""
     [ -f "$detail" ] || missing="missing file"
-    for key in milestone focus blocker next_move; do
-      if [ -f "$detail" ] && ! grep -q "^$key:" "$detail"; then
-        missing="${missing:+$missing, }missing frontmatter key '$key'"
-      fi
-    done
+    if [ -f "$detail" ] && ! detail_record_is_current "$detail"; then
+      missing="invalid frontmatter/detail record"
+      for key in milestone focus blocker next_move; do
+        if ! detail_frontmatter_has_key "$detail" "$key"; then
+          missing="${missing:+$missing, }missing frontmatter key '$key'"
+        fi
+      done
+    fi
     if [ -n "$missing" ]; then
       echo "REFUSED: $BRANCH touches project code under projects/$repo without a current detail record." >&2
       echo "Update $detail ($missing), then retry." >&2
