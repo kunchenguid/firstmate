@@ -288,9 +288,8 @@ Herdr's agent registry is written by whatever reports into it, and a report is n
 The classifier therefore corroborates a reported registration against the pane's own `pane process-info` inventory and treats the registration as stale when that inventory positively proves a lone bare idle shell.
 This is the same rule the tmux classifier already applies from the foreground process group, expressed through Herdr's own inventory.
 
-The corroboration is positive-only and reads one strict instantaneous sample, so it can only move a verdict from `alive` toward `dead`, never the other way.
-A live harness process, an extra foreground process, a shell with a child of its own, an unreadable inventory, and an inventory answering about a different pane all leave the registration standing.
-An idle shell transiently hosting a prompt helper therefore stays `alive` for that sample, and the next poll settles it.
+Only positive proof of an agent-free pane can move the verdict from `alive` to `dead`; an inconclusive inventory leaves the registration standing and recovery refuses until a later poll settles it.
+`bin/backends/herdr.sh` owns the exact proof and sampling mechanics.
 A pane whose registration outlived its agent is a husk on the same terms as a restored one, so create-time replacement and presentation reclaim treat both identically.
 
 The session-start sweep uses this probe.
