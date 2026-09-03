@@ -336,6 +336,18 @@ STUB
       "$mode: promoted worker was not told to stop for any wrong worktree"
     assert_grep "git checkout -b fm/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
+    if [ "$mode" = local-only ]; then
+      assert_no_grep "bin/fm-push-scan.sh" "$payload" \
+        "$mode: promoted local-only worker should not require pull-request text or a push scan"
+    else
+      # shellcheck disable=SC2016 # Delivered instruction variables must remain literal.
+      assert_grep 'bin/fm-push-scan.sh" "$PUSH_SCAN_LIST" --pr-title-file "$PR_TITLE_FILE" --pr-body-file "$PR_BODY_FILE"' "$payload" \
+        "$mode: promoted PR-delivery worker did not receive the guarded scan invocation"
+      assert_grep "use gh-axi to save its live title and body" "$payload" \
+        "$mode: promoted PR-delivery worker did not receive the published-text rescan"
+      assert_no_grep "grep -f" "$payload" \
+        "$mode: promoted PR-delivery worker was told to hand-roll the scan"
+    fi
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated

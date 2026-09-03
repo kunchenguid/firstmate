@@ -514,10 +514,11 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 
 ## 11. Crewmate briefs
 
-`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
-Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
+`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, and exact safety mechanics; `bin/fm-dod-lib.sh` owns the mode-specific delivery contract shared by ordinary ship briefs and scout promotions.
+Use the scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
+Every PR-delivery task must select exactly one push-scan direction, `company` or `sensitive`, in its task-specific instructions; never guess or merge lists, and leave `local-only` tasks without PR-text requirements.
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.

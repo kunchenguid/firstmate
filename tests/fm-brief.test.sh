@@ -212,6 +212,18 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    if [ "$mode" = local-only ]; then
+      assert_no_grep "bin/fm-push-scan.sh" "$brief" \
+        "$id: local-only brief should not require pull-request text or a push scan"
+    else
+      # shellcheck disable=SC2016 # Generated brief variables must remain literal.
+      assert_grep 'bin/fm-push-scan.sh" "$PUSH_SCAN_LIST" --pr-title-file "$PR_TITLE_FILE" --pr-body-file "$PR_BODY_FILE"' "$brief" \
+        "$id: PR-delivery brief did not emit the guarded scan invocation"
+      assert_grep "use gh-axi to save its live title and body" "$brief" \
+        "$id: PR-delivery brief did not require a live published-text rescan"
+      assert_no_grep "grep -f" "$brief" \
+        "$id: PR-delivery brief still tells workers to hand-roll grep"
+    fi
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"

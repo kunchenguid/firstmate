@@ -52,6 +52,9 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# PR-delivery ship tasks include the guarded bin/fm-push-scan.sh invocation for
+# the explicitly task-selected company or sensitive direction, both before the
+# delivery attempt and against title/body text read back from the live PR.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -374,7 +377,7 @@ exit 0
 fi
 
 # Ship task: shape Setup / Rule 1 by this task's explicit delivery mode, validated
-# above, and render the Definition of done from its single owner, bin/fm-dod-lib.sh,
+# above, and render the delivery contract from its single owner, bin/fm-dod-lib.sh,
 # which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.

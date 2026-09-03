@@ -25,6 +25,16 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Push scan term lists (config/company-push-terms.txt / config/sensitive-terms.txt)
+
+Every PR-delivery task selects exactly one local, gitignored push-scan list: `config/company-push-terms.txt` for tooling identity entering company code, or `config/sensitive-terms.txt` for private or project identity entering public code.
+The scanner never defaults one list to the other and never merges them; `local-only` delivery uses neither list because it publishes no PR.
+Each non-blank line that is not an optionally indented `#` comment is one case-insensitive extended regular expression.
+The selected path must be a readable regular file and must yield at least one usable expression, or the scan stops without a clean or hit result.
+`bin/fm-push-scan.sh` resolves the list below the effective `FM_HOME`, which must be absolute when explicitly set, and otherwise below the tracked root containing that script.
+These lists are not inherited, so configure the applicable list separately in every primary or secondmate home that owns PR-delivery work.
+The script's header and `--help` output own the exact invocation, scanned publication surfaces, result records, and failure behavior.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
