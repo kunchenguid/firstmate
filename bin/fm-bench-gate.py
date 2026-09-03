@@ -2110,7 +2110,7 @@ def json_pointer_value(document: Any, pointer: str) -> Any:
 
 def randomized_string_like(value: str, entropy: bytes) -> str:
     if not value:
-        return entropy.hex()
+        raise ValueError("JSON string cannot preserve its serialized byte length because it is empty")
     output: list[str] = []
     changed = False
     for index, character in enumerate(value):
@@ -2127,18 +2127,48 @@ def randomized_string_like(value: str, entropy: bytes) -> str:
         output.append(replacement)
         changed = changed or replacement != character
     if not changed:
-        return value + entropy.hex()
+        raise ValueError(
+            "JSON string cannot preserve its serialized byte length because it has no ASCII letter or digit"
+        )
     return "".join(output)
+
+
+def same_width_json_number(current: int | float, entropy: bytes) -> int | float:
+    token = json.dumps(current, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    digit_indexes = [index for index, character in enumerate(token) if character.isdigit()]
+    for index in reversed(digit_indexes):
+        digit = int(token[index])
+        first_shift = 1 + entropy[index % len(entropy)] % 9
+        for offset in range(9):
+            replacement = str((digit + first_shift + offset) % 10)
+            candidate_token = token[:index] + replacement + token[index + 1 :]
+            try:
+                candidate = json.loads(candidate_token)
+                serialized = json.dumps(
+                    candidate,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            except (json.JSONDecodeError, ValueError):
+                continue
+            same_type = (
+                isinstance(current, int)
+                and not isinstance(current, bool)
+                and isinstance(candidate, int)
+                and not isinstance(candidate, bool)
+            ) or (isinstance(current, float) and isinstance(candidate, float))
+            if same_type and candidate != current and serialized == candidate_token:
+                return candidate
+    raise ValueError("JSON number cannot preserve its serialized byte length")
 
 
 def json_scalar_replacement(current: Any, entropy: bytes) -> Any:
     if isinstance(current, bool):
-        return not current
-    elif isinstance(current, int):
-        return current + 1 + int.from_bytes(entropy[:4], "big")
-    elif isinstance(current, float):
-        return current + 1.0 + int.from_bytes(entropy[:4], "big") / 2**32
-    elif isinstance(current, str):
+        raise ValueError("JSON boolean cannot preserve its serialized byte length")
+    if isinstance(current, (int, float)):
+        return same_width_json_number(current, entropy)
+    if isinstance(current, str):
         return randomized_string_like(current, entropy)
     raise ValueError("JSON pointer does not select a supported scalar")
 
@@ -2146,6 +2176,8 @@ def json_scalar_replacement(current: Any, entropy: bytes) -> Any:
 def replace_unique_bytes(original: bytes, old: bytes, new: bytes, label: str) -> tuple[bytes, dict[str, Any]]:
     if not old or original.count(old) != 1:
         raise ValueError(f"{label} must identify exactly one byte span")
+    if len(old) != len(new):
+        raise ValueError(f"{label} cannot preserve its serialized byte length")
     start = original.index(old)
     changed = original[:start] + new + original[start + len(old) :]
     return changed, {"kind": "byte-span", "start": start, "old": old, "new": new, "label": label}
@@ -2247,7 +2279,7 @@ def encode_png(chunks: list[tuple[bytes, bytes]], pixels: bytes) -> bytes:
         if kind == b"IDAT":
             if inserted_idat:
                 continue
-            payload = zlib.compress(pixels)
+            payload = zlib.compress(pixels, level=0)
             inserted_idat = True
         rebuilt.extend(struct.pack(">I", len(payload)))
         rebuilt.extend(kind)
@@ -2292,6 +2324,7 @@ def build_input_differential(
     if not isinstance(declaration, dict) or not isinstance(declaration.get("kind"), str):
         raise ValueError("perturbation must be a pure-data object with a supported kind")
     kind = declaration["kind"]
+    result: tuple[bytes, bytes, dict[str, Any]]
     if kind == "json-value":
         if set(declaration) != {"kind", "pointer"}:
             raise ValueError("json-value accepts only kind and pointer")
@@ -2299,8 +2332,8 @@ def build_input_differential(
         if not isinstance(pointer, str) or not pointer.startswith("/"):
             raise ValueError("json-value needs a JSON pointer")
         changed, descriptor = perturb_json_bytes(original, pointer, entropy)
-        return original, changed, descriptor
-    if kind == "text-token":
+        result = original, changed, descriptor
+    elif kind == "text-token":
         if set(declaration) != {"kind", "token"}:
             raise ValueError("text-token accepts only kind and token")
         if suffix not in {".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".htm"}:
@@ -2311,12 +2344,16 @@ def build_input_differential(
         old = token.encode("utf-8")
         new = mutate_text_token(token, entropy).encode("utf-8")
         changed, descriptor = replace_unique_bytes(original, old, new, "declared text token")
-        return original, changed, descriptor
-    if kind == "png-pixel":
+        result = original, changed, descriptor
+    elif kind == "png-pixel":
         if suffix != ".png":
             raise ValueError("png-pixel requires a PNG input")
-        return prepare_png_differential(original, declaration)
-    raise ValueError(f"unsupported pure-data perturbation kind: {kind}")
+        result = prepare_png_differential(original, declaration)
+    else:
+        raise ValueError(f"unsupported pure-data perturbation kind: {kind}")
+    if len(result[0]) != len(result[1]):
+        raise ValueError("declared perturbation cannot preserve its prepared byte length")
+    return result
 
 
 def materialize_tree(source: Path, destination: Path, overrides: dict[str, bytes]) -> None:
@@ -2391,6 +2428,8 @@ def normalize_root_metadata(root: Path, entries: list[Path]) -> None:
 
 
 def verify_prepared_input(genuine: bytes, perturbed: bytes, descriptor: dict[str, Any]) -> None:
+    if len(genuine) != len(perturbed):
+        raise ValueError("prepared copies expose different byte lengths")
     kind = descriptor["kind"]
     if kind == "byte-span":
         start = descriptor["start"]
@@ -2490,8 +2529,8 @@ def verify_prepared_roots(
         )
         if genuine_signature != perturbed_signature:
             raise ValueError(f"prepared run roots expose different metadata at {relative}")
-        if relative != allowed_relative and genuine_stat.st_size != perturbed_stat.st_size:
-            raise ValueError(f"prepared run roots expose different sizes outside the declared perturbation at {relative}")
+        if genuine_stat.st_size != perturbed_stat.st_size:
+            raise ValueError(f"prepared run roots expose different sizes at {relative}")
     if content_error is not None:
         raise content_error
 
@@ -2550,13 +2589,16 @@ def rerun_archived_evaluator(
                     Path(candidate_name) / relative,
                     prepared[relative][2],
                 )
-            executions: list[tuple[str, Path, Path]] = [("genuine", genuine_scratch, genuine_tree)]
+            genuine_key = ("role", "genuine")
+            executions: list[tuple[tuple[str, str], Path, Path]] = [
+                (genuine_key, genuine_scratch, genuine_tree)
+            ]
             for index, relative in enumerate(perturbable_paths, start=1):
                 perturbed_scratch, perturbed_tree = run_roots[index]
-                executions.append((relative, perturbed_scratch, perturbed_tree))
+                executions.append((("input", relative), perturbed_scratch, perturbed_tree))
             executions.sort(key=lambda _item: os.urandom(16))
-            results: dict[str, subprocess.CompletedProcess[bytes]] = {}
-            for role, scratch, run_tree in executions:
+            results: dict[tuple[str, str], subprocess.CompletedProcess[bytes]] = {}
+            for execution_key, scratch, run_tree in executions:
                 completed = subprocess.run(
                     confined_evaluator_command(
                         wrapper,
@@ -2569,9 +2611,11 @@ def rerun_archived_evaluator(
                     check=False,
                     timeout=60,
                 )
-                results[role] = completed
-            genuine = results["genuine"]
-            perturbed_runs = [(relative, results[relative]) for relative in perturbable_paths]
+                results[execution_key] = completed
+            genuine = results[genuine_key]
+            perturbed_runs = [
+                (relative, results[("input", relative)]) for relative in perturbable_paths
+            ]
     except subprocess.TimeoutExpired:
         return False, "archived evaluator exceeded the 60-second restore-drill limit", {}
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, zlib.error) as exc:

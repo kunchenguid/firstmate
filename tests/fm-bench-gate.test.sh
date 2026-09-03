@@ -1258,8 +1258,11 @@ shutil.rmtree(root, ignore_errors=True)
 for track_name, candidate, packet in work:
     slug = f"{track_name}-{packet}-{candidate}".lower().replace(" ", "-").replace(".", "-")
     (src / ".ignored-by-evaluator").write_text("not scored\n")
+    (src / "genuine").write_text(json.dumps({"value": slug}, indent=2, sort_keys=True) + "\n")
+    (src / "work-bool.json").write_text('{"value":true}\n')
     (src / "work-empty.json").write_text('{"value":""}\n')
     (src / "work.json").write_text(json.dumps({"value": slug}, indent=2, sort_keys=True) + "\n")
+    (src / "work-number.json").write_text('{"n":3}\n')
     (src / "work.ts").write_text(f'export default "{slug}";\n')
     (src / "work.css").write_text(f'.sample::after {{ content: "{slug}"; }}\n')
     (src / "work.html").write_text(f'<main data-sample="{slug}">candidate</main>\n')
@@ -1598,7 +1601,7 @@ record["evaluator_rerun"]["input_perturbations"] = {
 png_chunks = []
 for kind, payload in (
     (b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)),
-    (b"IDAT", zlib.compress(b"\x00\x20\x40\x60")),
+    (b"IDAT", zlib.compress(b"\x00\x20\x40\x60", level=0)),
     (b"IEND", b""),
 ):
     png_chunks.append(
@@ -1678,6 +1681,93 @@ assert_contains "$out" "ignored declared scored input work.json" \
 assert_absent "$BENCH/archive/restore-drill.json" "a metadata-only evaluator writes no cleanup receipt"
 pass "differential evaluator trees expose identical normalized metadata"
 
+BENCH="$TMP_ROOT/archive-size-only-evaluator"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-size-only-evaluator"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text("""#!/bin/sh
+if [ "$(stat -c %s "$1/work-number.json")" = 8 ]; then
+  printf 'genuine\n'
+else
+  printf 'perturbed\n'
+fi
+""")
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["scored_inputs"] = ["work-number.json"]
+record["evaluator_rerun"]["input_perturbations"] = {
+    "work-number.json": {"kind": "json-value", "pointer": "/n"}
+}
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"genuine\n").hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "input byte length cannot identify the differential role"
+assert_contains "$out" "ignored declared scored input work-number.json" \
+  "equal-size prepared inputs make a size-only evaluator input-invariant"
+assert_absent "$BENCH/archive/restore-drill.json" "a size-only evaluator writes no cleanup receipt"
+pass "every declared input has equal prepared size in both runs"
+
+BENCH="$TMP_ROOT/archive-length-changing-perturbation"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-length-changing-perturbation"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text('#!/bin/sh\ncat "$1/work-bool.json"\n')
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["scored_inputs"] = ["work-bool.json"]
+record["evaluator_rerun"]["input_perturbations"] = {
+    "work-bool.json": {"kind": "json-value", "pointer": "/value"}
+}
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b'{"value":true}\n').hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a length-changing declared perturbation is refused"
+assert_contains "$out" "cannot preserve its serialized byte length" \
+  "the gate names a JSON scalar that cannot satisfy the equal-size invariant"
+assert_absent "$BENCH/archive/restore-drill.json" "a length-changing perturbation writes no cleanup receipt"
+pass "length-changing declarations cannot bypass the prepared-tree size invariant"
+
+BENCH="$TMP_ROOT/archive-role-name-input"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-role-name-input"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text('#!/bin/sh\ncat "$1/genuine"\n')
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["scored_inputs"] = ["genuine"]
+record["evaluator_rerun"]["input_perturbations"] = {
+    "genuine": {"kind": "json-value", "pointer": "/value"}
+}
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(
+    json.dumps({"value": sample.name}, indent=2, sort_keys=True).encode() + b"\n"
+).hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) || fail "a scored input may share a name with an execution role: $out"
+assert_contains "$out" "genuine proven by its declared form-preserving perturbation" \
+  "candidate paths cannot collide with differential execution roles"
+pass "differential execution results use a collision-free key space"
+
 BENCH="$TMP_ROOT/archive-png-encoding-evaluator"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-png-encoding-evaluator"
@@ -1720,22 +1810,24 @@ import hashlib, json, sys
 from pathlib import Path
 sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
 scoring = sample / "scoring.py"
-scoring.write_text('#!/bin/sh\ncat "$1/work-empty-link.json"\n')
+scoring.write_text('#!/bin/sh\ncat "$1/work-link.json"\n')
 scoring.chmod(0o755)
 manifest = sample / "manifest.json"
 record = json.loads(manifest.read_text())
 record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
-record["evaluator_rerun"]["scored_inputs"] = ["work-empty-link.json"]
+record["evaluator_rerun"]["scored_inputs"] = ["work-link.json"]
 record["evaluator_rerun"]["input_perturbations"] = {
-    "work-empty-link.json": {"kind": "json-value", "pointer": "/value"}
+    "work-link.json": {"kind": "json-value", "pointer": "/value"}
 }
-record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b'{"value":""}\n').hexdigest()
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(
+    json.dumps({"value": record["sample"]}, indent=2, sort_keys=True).encode() + b"\n"
+).hexdigest()
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a perturbation that changes a path outside its declaration is refused"
-assert_contains "$out" "different sizes outside the declared perturbation" \
-  "the complete prepared-root metadata invariant catches a symlink-amplified write"
+assert_contains "$out" "differ outside the declared perturbation" \
+  "the complete prepared-root byte invariant catches a symlink-amplified write"
 assert_absent "$BENCH/archive/restore-drill.json" "an over-broad perturbation writes no cleanup receipt"
 pass "the prepared-tree byte and metadata invariant can fail closed"
 

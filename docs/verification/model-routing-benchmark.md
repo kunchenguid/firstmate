@@ -39,9 +39,10 @@ The restore portion of `tests/fm-bench-gate.test.sh` restores every sample in tu
 It confines differential execution to the first sample in stable lexical order, which bounds execution cost and records the exercised sample in the cleanup receipt without bounding declaration validation.
 It executes only a content-addressed evaluator from the capture-and-scoring evidence group and compares its genuine restored-tree output hash to the archive.
 The gate-owned pure-data mutators cover JSON values, TypeScript, JavaScript, CSS and HTML text tokens, and pixels in non-interlaced 8-bit PNG inputs.
-JSON and source genuine copies retain their archived bytes, while both PNG copies use the same deterministic gate encoding and the recorded PNG result hash covers that prepared genuine copy.
+JSON and source genuine copies retain their archived bytes, while both PNG copies use the same deterministic equal-length gate encoding and the recorded PNG result hash covers that prepared genuine copy.
 PNG decompression is capped at a 128 MiB raster before allocation, and a stream or declared dimension outside that bound is a named refusal.
-Each complete run root is created in stable path order, receives matching ownership, permissions, access times, and modification times, and is compared path by path for directory order, settable metadata, and bytes before either copy executes.
+Each complete run root is created in stable path order, receives matching ownership, permissions, access times, and modification times, and is compared path by path for directory order, settable metadata, byte length, and bytes before either copy executes.
+Every gate-owned mutation preserves byte length with no scored-path exemption, so a declaration that cannot change at equal width is refused before execution.
 The resulting perturbed copy may differ only through the declared value, token, or filtered pixel byte and must produce a different successful evaluator output.
 At least one scored input per evaluator must prove dependence, while another input may remain explicitly unproven per input in both output and receipt.
 The portable declaration fixtures refuse an invalid declared perturbation, and the execution fixtures prove that a valid structured mutation reaches a strict parser while a parser rejection is reported as inconclusive rather than as evidence of an input-invariant evaluator.
