@@ -84,6 +84,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
+COPILOT_MODE=0
 CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
@@ -95,8 +96,9 @@ case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
+    --copilot) COPILOT_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    *) echo "usage: $(basename "$0") [--claude|--copilot|--cursor]" >&2; exit 2 ;;
   esac
 done
 
@@ -122,7 +124,8 @@ command -v jq >/dev/null 2>&1 || exit 0
 # which calls this guard back with --cursor. Without that flag a Cursor-delivered
 # payload is the Claude-compatibility duplicate and must not create a second
 # continuation path (docs/turnend-guard.md "Harness integrations").
-if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+if [ "$CURSOR_MODE" -eq 0 ] && [ "$COPILOT_MODE" -eq 0 ] \
+   && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
   exit 0
 fi
 

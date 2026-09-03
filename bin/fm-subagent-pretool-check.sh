@@ -81,10 +81,11 @@ PLAN_ONLY_TOOLS='taskcreate taskupdate'
 TOOL=""
 TOOL_SET=0
 CLAUDE_MODE=0
+COPILOT_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude]
+Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude|--copilot]
 
 With no --tool, reads a PreToolUse-style JSON payload on stdin (Copilot/Grok
 toolName, or Claude/Codex tool_name).
@@ -121,6 +122,10 @@ while [ "$#" -gt 0 ]; do
       CLAUDE_MODE=1
       shift
       ;;
+    --copilot)
+      COPILOT_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -139,7 +144,8 @@ if [ "$TOOL_SET" -eq 0 ]; then
   command -v jq >/dev/null 2>&1 || exit 0
   # shellcheck source=bin/fm-hook-host-lib.sh
   . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
-  if [ "$CLAUDE_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  if [ "$CLAUDE_MODE" -eq 0 ] && [ "$COPILOT_MODE" -eq 0 ] \
+     && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
   TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
@@ -208,5 +214,7 @@ json_escape() {
 
 ESCAPED=$(json_escape "$REASON")
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$COPILOT_MODE" -eq 0 ]; then
+  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+fi
 exit 2

@@ -20,18 +20,18 @@ case "$MODE" in
     command -v jq >/dev/null 2>&1 || exit 0
     OUT=$(mktemp "${TMPDIR:-/tmp}/fm-copilot-session-start.XXXXXX") || exit 0
     trap 'rm -f "$OUT"' EXIT HUP INT TERM
-    printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-sessionstart-run.sh" > "$OUT" 2>/dev/null || true
+    printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-sessionstart-run.sh" --copilot > "$OUT" 2>/dev/null || true
     [ -s "$OUT" ] || exit 0
     jq -Rs '{additionalContext:.}' < "$OUT"
     ;;
   pretool-arm)
-    exec "$SCRIPT_DIR/fm-arm-pretool-check.sh" --claude
+    exec "$SCRIPT_DIR/fm-arm-pretool-check.sh" --copilot
     ;;
   pretool-cd)
-    exec "$SCRIPT_DIR/fm-cd-pretool-check.sh" --claude
+    exec "$SCRIPT_DIR/fm-cd-pretool-check.sh" --copilot
     ;;
   pretool-subagent)
-    exec "$SCRIPT_DIR/fm-subagent-pretool-check.sh" --claude
+    exec "$SCRIPT_DIR/fm-subagent-pretool-check.sh" --copilot
     ;;
   agent-stop)
     PAYLOAD=$(cat 2>/dev/null || true)
@@ -39,7 +39,7 @@ case "$MODE" in
     command -v jq >/dev/null 2>&1 || exit 0
     REASON_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-copilot-agent-stop.XXXXXX") || exit 0
     trap 'rm -f "$REASON_FILE"' EXIT HUP INT TERM
-    if printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" >/dev/null 2>"$REASON_FILE"; then
+    if printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" --copilot >/dev/null 2>"$REASON_FILE"; then
       exit 0
     else
       STATUS=$?
