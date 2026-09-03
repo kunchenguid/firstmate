@@ -234,6 +234,20 @@ test_persist_precedes_restart() {
   pass "T2 the mate persists before anything is stopped"
 }
 
+# --- T2b: an answer delivered at a zero-second bound still releases the gate -
+test_arrived_answer_precedes_deadline_check() {
+  local dir out rc
+  dir=$(new_case arrived-at-bound)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+
+  out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "an answer delivered with the request must beat the deadline check"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1" "the arrived persist answer was ignored at the deadline"
+  pass "T2b an arrived persist answer is resolved before timeout"
+}
+
 # --- T3: a runtime that cannot prove a restart never gets one ----------------
 test_unprovable_runtime_falls_back() {
   local dir out rc
@@ -358,7 +372,12 @@ case "${rargs[1]:-}" in
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
     esac
-    printf 'relaunched %s\n' "${rargs[2]}"
+    model=${rargs[4]:--}
+    effort=${rargs[5]:--}
+    [ "$model" != - ] || model=default
+    [ "$effort" != - ] || effort=default
+    printf 'relaunched %s harness=%s from=claude model=%s effort=%s backend=herdr\n' \
+      "${rargs[2]}" "${rargs[3]}" "$model" "$effort"
     ;;
 esac
 exit 0
@@ -389,6 +408,12 @@ test_remote_mate_restarts_over_the_transport_hop() {
   [ -n "$relaunch_line" ] || fail "no relaunch crossed the transport hop"$'\n'"$(cat "$dir/ssh.log")"
   [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
     || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
+  [ "$(grep '^harness=' "$dir/home/state/sm2.meta" | tail -1)" = "harness=codex" ] \
+    || fail "the parent record kept the remote mate's old harness"
+  [ "$(grep '^model=' "$dir/home/state/sm2.meta" | tail -1)" = "model=big-model" ] \
+    || fail "the parent record kept the remote mate's old model"
+  [ "$(grep '^effort=' "$dir/home/state/sm2.meta" | tail -1)" = "effort=high" ] \
+    || fail "the parent record kept the remote mate's old effort"
   # The persist request crossed the SAME hop before the restart did.
   [ "$(grep -n '^fm-remote-secondmate-control.sh send' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
      -lt "$(grep -n '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1 | cut -d: -f1)" ] \
@@ -567,6 +592,7 @@ test_unpublished_worker_result_is_accounted_for() {
 
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
+test_arrived_answer_precedes_deadline_check
 test_unprovable_runtime_falls_back
 test_unknown_mate_is_accounted_for
 test_refused_restart_falls_back_without_claiming_a_reload
