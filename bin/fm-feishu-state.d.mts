@@ -211,6 +211,8 @@ export function reconcileFeishuIngress(home: string, markers: Array<{
   bindingGeneration: number;
 }, resetUnobservedOffers?: boolean): number;
 export function findInboundByDeliveryRef(home: string, deliveryRef: string): InboundEvent | undefined;
+export function recordInboundContentDigest(home: string, deliveryRef: string, contentDigest: string): boolean;
+export function findInboundDeliveryEvidence(home: string, deliveryRef: string): { event: InboundEvent; contentDigest: string | undefined } | undefined;
 export function claimLiveSession(home: string, binding: BindingRecord, session: {
   sessionId: string;
   sessionFile: string;

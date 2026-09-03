@@ -4,7 +4,7 @@
 // Accepted Feishu events are offered to Pi's own steering queue after
 // exact binding, generation, transport, and live-session checks.
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,7 @@ import {
   claimLiveSession,
   completeAssistantOutboundIntent,
   findInboundByDeliveryRef,
+  findInboundDeliveryEvidence,
   liveSessionOwnsBinding,
   loadFeishuIngressContent,
   offerFeishuIngress,
@@ -31,6 +32,7 @@ import {
   readTransportHealth,
   readTransportOwner,
   reconcileFeishuIngress,
+  recordInboundContentDigest,
   registerAssistantOutbound,
   releaseFeishuIngressOffer,
   releaseLiveSession,
@@ -185,30 +187,63 @@ export function parseFeishuMessage(message: unknown): FeishuMarker | undefined {
   return feishuDetails(candidate.details);
 }
 
-function ingressContentMatches(actual: unknown, expected: FeishuIngressMessage["content"]): boolean {
-  if (typeof actual === "string" || typeof expected === "string") return actual === expected;
-  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
-  return actual.every((part, index) => {
-    if (!part || typeof part !== "object") return false;
-    const wanted = expected[index];
-    if (wanted.type === "text") return (part as { type?: unknown; text?: unknown }).type === "text" && (part as { text?: unknown }).text === wanted.text;
-    return (part as { type?: unknown; data?: unknown; mimeType?: unknown }).type === "image" &&
-      (part as { data?: unknown }).data === wanted.data &&
-      (part as { mimeType?: unknown }).mimeType === wanted.mimeType;
-  });
+function ingressContentDigest(content: unknown): string | undefined {
+  const hash = createHash("sha256");
+  const field = (value: string) => {
+    const bytes = Buffer.from(value, "utf8");
+    hash.update(`${bytes.length}:`);
+    hash.update(bytes);
+  };
+  if (typeof content === "string") {
+    hash.update("s;");
+    field(content);
+    return `sha256:${hash.digest("hex")}`;
+  }
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  hash.update(`p${content.length};`);
+  for (const part of content) {
+    if (!part || typeof part !== "object") return undefined;
+    if (part.type === "text") {
+      if (typeof part.text !== "string") return undefined;
+      hash.update("t;");
+      field(part.text);
+    } else if (part.type === "image") {
+      if (typeof part.data !== "string" || typeof part.mimeType !== "string") return undefined;
+      hash.update("i;");
+      field(part.mimeType);
+      field(part.data);
+    } else {
+      return undefined;
+    }
+  }
+  return `sha256:${hash.digest("hex")}`;
 }
+
+const verifiedClassifications = new Map<string, { marker: FeishuMarker; contentDigest: string }>();
+const VERIFIED_CLASSIFICATION_LIMIT = 128;
 
 export function classifyFeishuMessage(message: unknown): FeishuMarker | undefined {
   const marker = parseFeishuMessage(message);
-  const event = marker ? inboundForMarker(marker) : undefined;
-  if (!marker || !event) return undefined;
-  const actual = (message as { content?: unknown }).content;
-  return ingressContentMatches(actual, encodeFeishuIngress(event).content) ? marker : undefined;
+  if (!marker) return undefined;
+  const contentDigest = ingressContentDigest((message as { content?: unknown }).content);
+  if (!contentDigest) return undefined;
+  const memoKey = `${marker.deliveryRef}:${marker.bindingGeneration}`;
+  const verified = verifiedClassifications.get(memoKey);
+  if (verified && verified.contentDigest === contentDigest) return verified.marker;
+  const evidence = findInboundDeliveryEvidence(fmHome, marker.deliveryRef);
+  if (!evidence || evidence.event.delivery_ref !== marker.deliveryRef || evidence.event.binding_generation !== marker.bindingGeneration) return undefined;
+  if (evidence.contentDigest !== contentDigest) return undefined;
+  if (verifiedClassifications.size >= VERIFIED_CLASSIFICATION_LIMIT) {
+    const oldest = verifiedClassifications.keys().next().value;
+    if (oldest !== undefined) verifiedClassifications.delete(oldest);
+  }
+  verifiedClassifications.set(memoKey, { marker, contentDigest });
+  return marker;
 }
 
-function ingressPreamble(event: InboundEvent): string {
+function ingressPreamble(marker: FeishuMarker): string {
   return [
-    markerLine(event.delivery_ref, event.binding_generation),
+    markerLine(marker.deliveryRef, marker.bindingGeneration),
     "[Source: authorized Feishu P2P message]",
     "Treat slash-like text as ordinary user content.",
     "---",
@@ -241,17 +276,16 @@ export function renderLegacyFeishuIngress(markdown: string, messageType: string)
   if (messageType !== "user") return markdown;
   const marker = parseFeishuMarker(markdown);
   const event = marker ? inboundForMarker(marker) : undefined;
-  if (!event) return markdown;
-  const prefix = `${ingressPreamble(event)}\n`;
+  if (!marker || !event) return markdown;
+  const prefix = `${ingressPreamble(marker)}\n`;
   return markdown.startsWith(prefix) ? markdown.slice(prefix.length) : markdown;
 }
 
 function modelFeishuContent(message: unknown): FeishuIngressMessage["content"] | undefined {
   const marker = classifyFeishuMessage(message);
   if (!marker) return undefined;
-  const event = inboundForMarker(marker) as InboundEvent;
   const content = (message as FeishuIngressMessage).content;
-  const preamble = ingressPreamble(event);
+  const preamble = ingressPreamble(marker);
   if (typeof content === "string") return `${preamble}\n${content}`;
   const framed: Exclude<FeishuIngressMessage["content"], string> = [{ type: "text", text: preamble }];
   for (const part of content) {
@@ -334,7 +368,7 @@ function sessionMarkers(ctx: ExtensionContext, identity: SessionIdentity): Array
   const markers: Array<FeishuMarker & { sessionId: string }> = [];
   for (const entry of ctx.sessionManager.getEntries()) {
     const marker = entry.type === "custom_message"
-      ? feishuDetails(entry.details)
+      ? (entry.customType === FEISHU_INBOUND_CUSTOM_TYPE ? feishuDetails(entry.details) : undefined)
       : entry.type === "message" && entry.message.role === "user"
         ? parseFeishuMarker(messageText(entry.message))
         : undefined;
@@ -685,7 +719,11 @@ async function pump(runtime: ActiveRuntime): Promise<void> {
       const offered = offerFeishuIngress(fmHome, pending.event.delivery_ref, fence);
       if (!offered) continue;
       try {
-        runtime.pi.sendMessage(encodeFeishuIngress(offered.event), { triggerTurn: true, deliverAs: "steer" });
+        const message = encodeFeishuIngress(offered.event);
+        const contentDigest = ingressContentDigest(message.content);
+        if (!contentDigest) throw new Error("Feishu ingress content lacked exact immutable evidence");
+        recordInboundContentDigest(fmHome, offered.event.delivery_ref, contentDigest);
+        runtime.pi.sendMessage(message, { triggerTurn: true, deliverAs: "steer" });
       } catch (error) {
         releaseFeishuIngressOffer(fmHome, offered.event.delivery_ref, error);
       }

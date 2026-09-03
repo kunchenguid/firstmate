@@ -409,6 +409,7 @@ Pi owns native TUI order, steering order, and pending-message sequencing.
 
 Private custom-message `details` carries only its schema, the derived delivery reference, and generation; Pi excludes it from model content.
 The renderer verifies metadata and exact content against the durable accepted event, then displays only the captain's body, while a context hook performs the same verification before adding the source fence to model text.
+Verification is bound to an immutable exact-content digest recorded in the private inbound ledger at delivery, so it survives routine media cleanup without rereading media bytes or reacquiring state locks on provider/UI paths.
 The metadata lets session restart reconcile a prior native-queue handoff and does not govern outbound eligibility.
 Native TUI and operational user messages remain unmarked, unclassified, and unmodified, and body text cannot assert trusted provenance.
 Feishu and TUI use the same normal Pi tool path with no channel-specific tool fence or confirmation command.

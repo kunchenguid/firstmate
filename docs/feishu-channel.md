@@ -155,7 +155,7 @@ They do not enter Feishu state.
 
 An accepted Feishu event remains pending until the exact bound live Pi session and current transport identity are available.
 Transient contention from a live Feishu state-lock owner leaves accepted events pending, and the existing bridge pump retries with bounded backoff after contention clears without restarting Pi or the transport or adding another scheduler.
-The bridge rereads cached bytes through their private generated path, verifies the durable length and SHA-256 binding, records one owner-fenced submission attempt, and calls Pi's `sendMessage` with a metadata-bearing custom message, `triggerTurn: true`, and native `steer` delivery.
+The bridge rereads cached bytes through their private generated path, verifies the durable length and SHA-256 binding, records one owner-fenced submission attempt and the immutable exact-content digest of the delivered body, and calls Pi's `sendMessage` with a metadata-bearing custom message, `triggerTurn: true`, and native `steer` delivery.
 Text-only input retains a string body.
 Image-only and ordered text-plus-image input use Pi's official `TextContent | ImageContent` array with `{ type: "image", data, mimeType }`; the ordered parts remain one logical Pi input and image-only input contains the actual image without invented prose.
 While Pi is busy, each accepted Feishu message is delivered after the current Assistant turn finishes its tool calls and before the next model call.
@@ -172,6 +172,7 @@ A wrong session, stale generation, lost lock, or closed live owner leaves durabl
 
 The registered custom renderer verifies that metadata and the exact content against the durable accepted event, then renders only the captain's text and images with no title, source badge, slash instruction, delivery reference, or bridge framing.
 Immediately before provider conversion, the context hook performs the same verification and adds the source fence and slash-handling instruction to model text without changing persisted or rendered content.
+Verification matches the exact content against the immutable digest recorded in the private inbound ledger when the message is offered to Pi, so routine terminal media cleanup never changes trust, rendering, or fencing, and repeated provider/UI verification reuses that evidence without rereading media bytes or reacquiring Feishu state locks.
 The metadata does not control outbound eligibility.
 Native TUI and operational user messages remain unmodified, cannot acquire Feishu trust from body text, and need no synthetic provenance.
 

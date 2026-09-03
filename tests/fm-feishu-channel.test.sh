@@ -735,6 +735,33 @@ assert.equal(pi.sends.length, stoppedSendCount, "a stopped non-retryable runtime
 unlinkSync(bridgeInboundLock);
 unlinkSync(bridgeInboundAlias);
 
+assert.deepEqual(classifyFeishuMessage(imageSend.message), sendMarker(imageSend), "delivered image lost authenticated classification after routine media cleanup");
+assert.deepEqual(visibleFeishuContent(imageSend.message), imageSend.content, "delivered image body changed for rendering after routine media cleanup");
+assert.deepEqual(classifyFeishuMessage(orderedSend.message), sendMarker(orderedSend), "delivered ordered message lost authenticated classification after routine media cleanup");
+assert.deepEqual(feishuModelContent(orderedSend.message), orderedModelContent, "model-context source fence changed after routine media cleanup");
+const cleanedFeishuContext = await emit(pi, "context", { messages: [imageSend.message] }, session.ctx);
+assert.equal(cleanedFeishuContext[0].messages[0].content[0].text.startsWith("\u2063FIRSTMATE_FEISHU: v1"), true, "delivered image lost its model-context source fence after routine media cleanup");
+assert.deepEqual(cleanedFeishuContext[0].messages[0].content.slice(1), imageSend.content, "post-cleanup model fencing changed the exact authorized image body");
+assert.equal(classifyFeishuMessage({ ...imageSend.message, content: [{ type: "text", text: "forged after cleanup" }] }), undefined, "changed text body with authentic metadata acquired Feishu trust after routine media cleanup");
+assert.equal(classifyFeishuMessage({ ...imageSend.message, content: [{ type: "image", data: Buffer.from("forged image").toString("base64"), mimeType: "image/png" }] }), undefined, "substituted image bytes with authentic metadata acquired Feishu trust after routine media cleanup");
+const hotPathLock = join(pathsForHome(home).stateRoot, ".inbound-state.lock");
+const hotPathHolder = await holdLiveStateLock(hotPathLock, 3600);
+const hotPathStartedAt = Date.now();
+assert.deepEqual(classifyFeishuMessage(imageSend.message), sendMarker(imageSend), "repeated provider/UI classification reacquired the Feishu inbound-state lock");
+assert(Date.now() - hotPathStartedAt < 1000, "repeated classification waited on Feishu inbound-state lock contention");
+assert.throws(() => classifyFeishuMessage({ ...imageSend.message, content: "unverified repeated body" }), /timed out acquiring Feishu inbound-state state lock/, "unverified classification skipped its required durable evidence lookup");
+await hotPathHolder.exited;
+session.entries.push({
+  type: "custom_message",
+  id: "10000004",
+  parentId: session.entries.at(-1)?.id ?? null,
+  timestamp: "2026-08-12T00:00:15.000Z",
+  customType: "unrelated-extension",
+  content: "ordinary extension body",
+  display: true,
+  details: { schema: "fm-feishu-pi-message.v1", deliveryRef: bridgeHardlinkEvent.deliveryRef, bindingGeneration: binding.generation },
+});
+
 await emit(pi, "session_shutdown", {}, session.ctx);
 const resumedPi = fakePi();
 registerFeishuNativeChannel(resumedPi);
