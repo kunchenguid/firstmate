@@ -8,6 +8,7 @@ set -u
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
+SUMMARY_REFRESH="$ROOT/bin/fm-home-summary-refresh.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -149,6 +150,300 @@ test_empty_fleet_json() {
   view=$(FM_HOME="$home" "$VIEW")
   assert_contains "$view" "No live task metadata found." "empty fleet view should say no live metadata"
   pass "empty fleet snapshot and view use explicit absence markers"
+}
+
+test_large_backlog_snapshot_view_and_summary_publication() {
+  local home backlog_size out index=0
+  home=$(make_home large-backlog)
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    while [ "$index" -lt 2400 ]; do
+      printf -- '- [x] archived-%04d - Accumulated completed work %04d (repo: firstmate) (kind: ship) (done 2026-08-31)\n' \
+        "$index" "$index"
+      index=$((index + 1))
+    done
+  } > "$home/data/backlog.md"
+  backlog_size=$(wc -c < "$home/data/backlog.md" | tr -d '[:space:]')
+  [ "$backlog_size" -ge 204800 ] \
+    || fail "large-backlog fixture was only $backlog_size bytes"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$SNAPSHOT" --json) \
+    || fail "snapshot failed on a $backlog_size-byte backlog"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.backlog.records | length) == 2400
+      and .main_inventory.valid == true
+      and (.tasks | length) == 0
+  ' >/dev/null || fail "large-backlog snapshot shape was wrong"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$VIEW" > "$home/fleet-view.txt" \
+    || fail "fleet view failed on a $backlog_size-byte backlog"
+  assert_contains "$(cat "$home/fleet-view.txt")" "| archived-2399 |" \
+    "fleet view omitted the tail of the large backlog"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$SUMMARY_REFRESH" \
+    || fail "home-summary publication failed on a $backlog_size-byte backlog"
+  jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .valid == true
+      and .counts.landed == 2400
+      and (.landed | length) == 10
+  ' "$home/state/home-summary.json" >/dev/null \
+    || fail "large-backlog home summary was not published with the expected shape"
+  pass "snapshot, fleet view, and home-summary publication survive a large backlog"
+}
+
+seed_secondmate_home() {  # <home-dir> <id> <done-rows>
+  local mate=$1 id=$2 rows=$3 index=0
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$mate/projects" "$mate/bin"
+  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
+  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+  {
+    printf '## In flight\n\n## Queued\n\n## Done\n'
+    while [ "$index" -lt "$rows" ]; do
+      printf -- '- [x] archived-%04d - Accumulated completed work %04d (repo: firstmate) (kind: ship) (done 2026-08-31)\n' \
+        "$index" "$index"
+      index=$((index + 1))
+    done
+  } > "$mate/data/backlog.md"
+}
+
+# bin/fm-bearings-snapshot.sh --all-landed lifts the per-home landed cap, so a
+# registered home with ordinary accumulated work publishes a summary far past
+# Linux's 131072-byte single-argument ceiling while staying inside the byte
+# limit the parent explicitly accepts.
+test_registered_secondmate_summary_survives_argv_ceiling() {
+  local home mate fakebin summary_bytes out
+  home=$(make_home oversized-mate-parent)
+  mate="$TMP_ROOT/oversized-mate-home"
+  seed_secondmate_home "$mate" sample-mate 700
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  printf -- '- sample-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
+    "$mate" > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/sample-mate.meta" "$mate"
+  printf 'working: watching delegated scope\n' > "$home/state/sample-mate.status"
+  fakebin=$(make_fakebin "$home")
+
+  # The parent samples a registered home by reading the ledger that home
+  # published, so the fixture publishes it the same way a real secondmate does.
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 \
+    "$SUMMARY_REFRESH" \
+    || fail "uncapped secondmate home summary publication failed"
+  summary_bytes=$(LC_ALL=C wc -c < "$mate/state/home-summary.json" | tr -d '[:space:]')
+  [ "$summary_bytes" -gt 131072 ] \
+    || fail "secondmate summary fixture was only $summary_bytes bytes"
+  [ "$summary_bytes" -le 262144 ] \
+    || fail "secondmate summary fixture of $summary_bytes bytes exceeds the accepted byte limit"
+
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 \
+    "$SNAPSHOT" --json) \
+    || fail "snapshot failed aggregating a $summary_bytes-byte secondmate summary"
+  printf '%s' "$out" | jq -e '
+    (.secondmate_current.records | length) == 1
+      and .secondmate_current.records[0].provenance.selected == "structured-home"
+      and .secondmate_current.records[0].counts.landed == 700
+      and (.secondmate_landed.records | length) == 700
+      and (.secondmate_landed.truncated | length) == 0
+  ' >/dev/null || fail "oversized secondmate summary was not aggregated: $out"
+  pass "an oversized registered secondmate summary still aggregates into the fleet snapshot"
+}
+
+# The parent samples a registered home by reading the ledger that home
+# published, and that file is foreign input the parent never produced: a home
+# can leave rc-file noise ahead of the document, an empty file, a repeated
+# document, or a document of the wrong shape behind. Each one has to degrade
+# only that home.
+test_unusable_secondmate_summary_degrades_that_home_only() {
+  local home mate fakebin ledger out mode clean doubled
+  home=$(make_home degraded-mate-parent)
+  mate="$TMP_ROOT/degraded-mate-home"
+  seed_secondmate_home "$mate" degraded-mate 3
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  printf -- '- degraded-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
+    "$mate" > "$home/data/secondmates.md"
+  fm_write_secondmate_meta "$home/state/degraded-mate.meta" "$mate"
+  printf 'working: watching delegated scope\n' > "$home/state/degraded-mate.status"
+  fakebin=$(make_fakebin "$home")
+  ledger="$mate/state/home-summary.json"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$mate" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$SUMMARY_REFRESH" \
+    || fail "the secondmate fixture could not publish its ledger"
+  clean=$(cat "$ledger")
+
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$SNAPSHOT" --json) \
+    || fail "snapshot failed sampling a clean secondmate summary"
+  printf '%s' "$out" | jq -e '
+    (.secondmate_current.records | length) == 1
+      and .secondmate_current.records[0].provenance.selected == "structured-home"
+      and .secondmate_current.records[0].current.state != "unknown"
+      and .secondmate_current.records[0].counts.landed == 3
+  ' >/dev/null || fail "the secondmate fixture did not sample cleanly: $out"
+
+  # A repeated document is the corruption whose every document is individually
+  # shape-valid, so only counting the whole stream rejects it.
+  doubled=$(printf '%s\n%s\n' "$clean" "$clean")
+  printf '%s' "$doubled" | jq -e -s '
+    length == 2 and all(.[]; .schema == "fm-secondmate-home-summary.v1"
+      and (.counts | type) == "object" and (.landed | type) == "array")
+  ' >/dev/null || fail "the duplicated ledger was not two shape-valid summaries: $doubled"
+
+  for mode in banner empty duplicate document; do
+    case "$mode" in
+      banner)
+        { printf 'bash: /etc/bashrc: line 1: warning\n'; printf '%s\n' "$clean"; } > "$ledger"
+        ;;
+      empty) : > "$ledger" ;;
+      duplicate) printf '%s' "$doubled" > "$ledger" ;;
+      document) printf '%s\n' '["not an object"]' > "$ledger" ;;
+    esac
+    out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+      "$SNAPSHOT" --json) \
+      || fail "snapshot aborted the whole fleet on a $mode secondmate summary"
+    printf '%s' "$out" | jq -e '
+      .schema == "fm-fleet-snapshot.v1"
+        and (.backlog | type) == "object"
+        and (.secondmate_current.records | length) == 1
+        and .secondmate_current.records[0].id == "degraded-mate"
+        and .secondmate_current.records[0].current.state == "unknown"
+        and (.secondmate_current.records[0].current.reason | type) == "string"
+        and .secondmate_current.records[0].provenance.selected != "structured-home"
+        and .secondmate_current.records[0].invalidity == null
+        and .secondmate_current.records[0].reconcile_inventory == null
+        and .secondmate_current.records[0].counts.landed == 0
+        and (.secondmate_landed.records | length) == 0
+    ' >/dev/null || fail "a $mode secondmate summary did not degrade to an unknown record: $out"
+  done
+
+  printf '%s\n' "$clean" > "$ledger"
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    FM_SNAPSHOT_SECONDMATE_MAX_BYTES=64 \
+    "$SNAPSHOT" --json) \
+    || fail "snapshot aborted the whole fleet on an oversized secondmate summary"
+  printf '%s' "$out" | jq -e '
+    (.secondmate_current.records | length) == 1
+      and .secondmate_current.records[0].current.state == "unknown"
+      and .secondmate_current.records[0].current.reason == "structured home ledger exceeded byte limit"
+      and .secondmate_current.records[0].reconcile_inventory == null
+      and (.secondmate_landed.unreadable | length) == 1
+  ' >/dev/null || fail "an oversized secondmate summary did not degrade to an unknown record: $out"
+  pass "an unusable secondmate summary degrades that home instead of the whole fleet snapshot"
+}
+
+# Scout reports accumulate monotonically and carry no FM_SNAPSHOT_* bound, so
+# their projection has to reach the final assembly without argv.
+test_many_scout_reports_survive_argv_ceiling() {
+  local home fakebin index out projection_bytes
+  home=$(make_home many-scout-reports)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  index=0
+  while [ "$index" -lt 800 ]; do
+    mkdir -p "$home/data/archived-review-with-a-deliberately-long-identifier-$(printf '%04d' "$index")"
+    printf '# Report\n' \
+      > "$home/data/archived-review-with-a-deliberately-long-identifier-$(printf '%04d' "$index")/report.md"
+    index=$((index + 1))
+  done
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$SNAPSHOT" --json) \
+    || fail "snapshot failed on 800 accumulated scout reports"
+  printf '%s' "$out" | jq -e '
+    (.scout_reports | length) == 800
+      and (.scout_reports | all(.kind == "scout"))
+  ' >/dev/null || fail "accumulated scout reports were not projected: ${out:0:400}"
+  projection_bytes=$(printf '%s' "$out" | jq '{records:.scout_reports}' | LC_ALL=C wc -c | tr -d '[:space:]')
+  [ "$projection_bytes" -gt 131072 ] \
+    || fail "scout report fixture projected only $projection_bytes bytes"
+  pass "an unbounded scout report projection survives the single-argument ceiling"
+}
+
+# A producer that loses its stdout while still exiting 0 must not publish a
+# null-bearing snapshot; it must fail loudly and leave no temporary storage.
+test_lost_producer_output_fails_loudly_and_cleans_up() {
+  local home fakebin shimbin tmpdir status out err real_jq
+  real_jq=$(command -v jq)
+  home=$(make_home lost-producer)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  shimbin="$home/shimbin"
+  mkdir -p "$shimbin"
+  cat > "$shimbin/jq" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_TEST_JQ_MATCH:-}" ]; then
+  for arg in "$@"; do
+    case $arg in
+      *"$FM_TEST_JQ_MATCH"*)
+        printf '%s' "${FM_TEST_JQ_OUTPUT:-}"
+        exit 0
+        ;;
+    esac
+  done
+fi
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+  chmod +x "$shimbin/jq"
+  tmpdir="$home/tmp"
+  mkdir -p "$tmpdir"
+
+  status=0
+  out=$(PATH="$shimbin:$fakebin:$PATH" TMPDIR="$tmpdir" \
+    FM_TEST_REAL_JQ="$real_jq" FM_TEST_JQ_MATCH='def section_state:' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$SNAPSHOT" --json 2> "$home/lost-empty.err") || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "snapshot published a snapshot from an empty backlog document: $out"
+  printf '%s' "$out" | jq -e '.backlog == null' >/dev/null 2>&1 \
+    && fail "snapshot published a null backlog instead of failing"
+  [ -s "$home/lost-empty.err" ] || fail "empty backlog document failed silently"
+
+  status=0
+  out=$(PATH="$shimbin:$fakebin:$PATH" TMPDIR="$tmpdir" \
+    FM_TEST_REAL_JQ="$real_jq" FM_TEST_JQ_MATCH='def section_state:' \
+    FM_TEST_JQ_OUTPUT='{"path":"a","present":true,"records":[]}
+{"path":"b","present":true,"records":[]}' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$SNAPSHOT" --json 2> "$home/lost-multi.err") || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "snapshot accepted a multi-document backlog projection: $out"
+
+  status=0
+  out=$(PATH="$shimbin:$fakebin:$PATH" TMPDIR="$tmpdir" \
+    FM_TEST_REAL_JQ="$real_jq" FM_TEST_JQ_MATCH='def section_state:' \
+    FM_TEST_JQ_OUTPUT='null' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$SNAPSHOT" --json 2> "$home/lost-null.err") || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "snapshot accepted a null backlog projection: $out"
+
+  err=$(cat "$home/lost-null.err")
+  assert_contains "$err" "backlog" "the failed read did not name the backlog projection"
+
+  PATH="$shimbin:$fakebin:$PATH" TMPDIR="$tmpdir" \
+    FM_TEST_REAL_JQ="$real_jq" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-09-01T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1788264000 \
+    "$SNAPSHOT" --json > /dev/null \
+    || fail "snapshot failed with an unshimmed producer"
+  [ -z "$(find "$tmpdir" -mindepth 1 -print -quit)" ] \
+    || fail "snapshot leaked temporary JSON storage into TMPDIR"
+  pass "a lost, multi-document, or null intermediate projection fails loudly and cleans up"
 }
 
 test_fixture_snapshot_json() {
@@ -897,6 +1192,11 @@ EOF
 }
 
 test_empty_fleet_json
+test_large_backlog_snapshot_view_and_summary_publication
+test_registered_secondmate_summary_survives_argv_ceiling
+test_unusable_secondmate_summary_degrades_that_home_only
+test_many_scout_reports_survive_argv_ceiling
+test_lost_producer_output_fails_loudly_and_cleans_up
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
 test_main_inventory_orphan_and_unstructured_disclosure

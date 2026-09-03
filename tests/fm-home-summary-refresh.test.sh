@@ -337,11 +337,14 @@ FAILBIN="$TMP_ROOT/failbin"
 mkdir -p "$FAILBIN"
 cat > "$FAILBIN/jq" <<'SH'
 #!/usr/bin/env bash
+printf 'jq-fixture: diagnostic survives producer failure\n' >&2
 exit 7
 SH
 chmod +x "$FAILBIN/jq"
+FAIL_TMPDIR="$HOME_DIR/tmp"
+mkdir -p "$FAIL_TMPDIR"
 cp "$HOME_DIR/state/home-summary.json" "$TMP_ROOT/before-best-effort.json"
-PATH="$FAILBIN:$FAKEBIN:$PATH" \
+PATH="$FAILBIN:$FAKEBIN:$PATH" TMPDIR="$FAIL_TMPDIR" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$WRITER" --best-effort \
   || fail "best-effort refresh propagated its producer failure"
@@ -349,7 +352,12 @@ cmp -s "$TMP_ROOT/before-best-effort.json" "$HOME_DIR/state/home-summary.json" \
   || fail "failed best-effort refresh changed the prior ledger"
 grep -F 'summary producer failed' "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "best-effort refresh did not log its failure"
-pass "best-effort publication logs and continues"
+grep -F 'jq-fixture: diagnostic survives producer failure' \
+  "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
+  || fail "best-effort refresh discarded the producer diagnostic"
+[ -z "$(find "$FAIL_TMPDIR" -mindepth 1 -print -quit)" ] \
+  || fail "failed producer leaked temporary JSON storage into TMPDIR"
+pass "best-effort publication logs the producer diagnostic, cleans up, and continues"
 
 LOCK_MARKER="$TMP_ROOT/lock-held"
 rm -f "$HOME_DIR/state/.home-summary-refresh.log"
