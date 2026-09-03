@@ -690,9 +690,14 @@ test_no_mistakes_origin_remote_allows() {
   # Push the task branch to origin and fetch so the worktree sees it.
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+  # A progress observation record (bin/fm-progress-lib.sh) left by supervision:
+  # a finished task's phase durations are recorded to this home's history at
+  # teardown and the record retired with the rest of the volatile state.
+  printf 'v=1\nobserved=100\nphase=ci\nstep=ci\nsince=90\nfix_rounds=1\nsecs_implementing=1200\nsecs_validating=600\nsecs_fixing=300\nsecs_ci=120\nsecs_waiting=0\nsecs_ready=0\nsecs_other=0\nlabel=\nlabel_attempt=0\n' \
+    > "$case_dir/state/.progress-task-x1"
 
   set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_PROGRESS_NOW=200 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
@@ -700,7 +705,13 @@ test_no_mistakes_origin_remote_allows() {
   ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+  grep -q 'progress: recorded task-x1 (ship, no-mistakes)' "$case_dir/stderr" \
+    || fail "nm-origin: teardown did not record the task's phase history: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/.progress-task-x1" ] || fail "nm-origin: the progress observation record must be retired"
+  jq -e '.id == "task-x1" and .kind == "ship" and .mode == "no-mistakes" and .secs.implementing == 1200 and .secs.ci == 220 and .fix_rounds == 1' \
+    "$case_dir/data/phase-history.jsonl" >/dev/null \
+    || fail "nm-origin: phase history line wrong: $(cat "$case_dir/data/phase-history.jsonl" 2>&1)"
+  pass "no-mistakes worktree with HEAD on origin is torn down and its phase durations are recorded"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {

@@ -128,6 +128,11 @@ Durable task records are erased only once the exact pane is confirmed gone throu
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
 If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
 
+A live task's projected workspace label also carries a display-only progress suffix, ` · <phase> · <estimate>` such as ` · validating · ~25 min`, inserted before the ` · p:<token>` tail so the token stays the label's last segment and every token correlation above keeps matching.
+The watcher refreshes it through the version 2 journal only, at most once per poll and only when the phase or the rounded estimate changes; a flat task, a quarantined or absent journal, and every other backend are skipped silently, a failed or unverified rename only warns and retries on the cadence, and a label changed by hand is left alone.
+Every place that compares a live label with the journaled base strips that segment first, so a decoration is never read as a rename, is never journaled, and never authorizes any mutation.
+[`configuration.md`](configuration.md#progress-phase-and-remaining-time-guess-dataphase-historyjsonl) owns the phase model, the estimate, and the history record behind the suffix.
+
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.

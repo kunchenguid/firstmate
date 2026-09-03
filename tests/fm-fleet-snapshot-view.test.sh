@@ -170,6 +170,23 @@ test_fixture_snapshot_json() {
       and .hints.pending_decision == false
       and .paths.status_log.kind == "event_history"
   ' >/dev/null || fail "ship task state, PR, body, and stale event hints wrong"
+  # The display-only progress projection (bin/fm-progress-lib.sh): a working
+  # worker with a recorded PR is in ci with a guess; the scout, whose current
+  # state this fixture cannot read (no busy record for its harness), a
+  # secondmate, and an unreadable task all carry the honest unknown shape
+  # rather than a stale estimate.
+  printf '%s' "$out" | jq -e '
+    (.tasks[] | select(.id == "ship-task") | .progress
+      | .phase == "ci" and (.estimate.text | test("guess")) and .label_suffix == (" · ci · " + .estimate.short))
+    and (.tasks[] | select(.id == "scout-task") | .progress
+      | .phase == "unknown" and .estimate.text == "unknown" and .label_suffix == " · unknown")
+    and (.tasks[] | select(.id == "secondmate-task") | .progress
+      | .phase == "unknown" and .estimate.text == "unknown")
+    and (.tasks[] | select(.id == "cmux-task") | .progress
+      | .phase == "unknown" and .estimate.text == "unknown" and .label_suffix == " · unknown")
+  ' >/dev/null || fail "progress phase and guess projection wrong: $(printf '%s' "$out" | jq -c '[.tasks[] | {id, progress}]')"
+  [ -f "$home/state/.progress-ship-task" ] || fail "reading progress must publish the ship task's observation record"
+  [ ! -e "$home/state/.progress-secondmate-task" ] || fail "a secondmate must get no observation record"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "scout-task")
     | .paths.report.present == true

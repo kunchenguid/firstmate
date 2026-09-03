@@ -219,7 +219,7 @@ family_for_basename() {
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
-    fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
+    fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|fm-progress.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
@@ -250,7 +250,7 @@ family_for_basename() {
     fm-backend-herdr-focus-flash-e2e.test.sh|\
     fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
-    fm-control-herdr-smoke.test.sh)
+    fm-control-herdr-smoke.test.sh|fm-progress-label-herdr-e2e.test.sh)
       printf '%s\n' real-herdr-gated
       ;;
     fm-backlog-handoff.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\
@@ -610,6 +610,7 @@ tests/fm-pi-primary-live-e2e.test.sh 20
 tests/fm-pi-watch-extension.test.sh 42970
 tests/fm-pr-check-security.test.sh 160475
 tests/fm-procevent-quota.test.sh 1949
+tests/fm-progress.test.sh 6930
 tests/fm-procevent-when.test.sh 17392
 tests/fm-procevent.test.sh 69715
 tests/fm-project-origin.test.sh 137
@@ -1270,6 +1271,17 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      ;;
+    bin/fm-progress-lib.sh|bin/fm-progress.sh)
+      # The display-only progress phase and guess: its own unit suite
+      # (pure-contract-unit), the snapshot and bearings projections, the
+      # watcher tick, teardown's history hook (pr-forge), and the real-Herdr
+      # label rename guard.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pr-forge
+      printf '%s\n' real-herdr-gated
       ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both

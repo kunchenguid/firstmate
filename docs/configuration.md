@@ -224,6 +224,18 @@ Fleet-local operational facts and gotchas live locally in `data/learnings.md`; i
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 There is no shared learnings file by captain decision.
 
+## Progress phase and remaining-time guess (data/phase-history.jsonl)
+
+Every live task carries a display-only progress phase and a remaining-time guess, shown as a suffix on the worker's Herdr workspace label and as the `phase` and `eta_guess` columns of `/bearings`.
+The phase is derived only from sources that already exist: the current state `bin/fm-crew-state.sh` reads, including the run step and fix round it names, the keyed decision fold owned by `bin/fm-classify-lib.sh`, the captain-hold predicate of `bin/fm-captain-hold.sh`, and the task's recorded PR.
+The phases are implementing, validating with its step, fixing, ci, waiting on captain, ready, and the pass-through states blocked, paused, failed, and unknown; the header of `bin/fm-progress-lib.sh` is the single owner of the exact mapping.
+The guess is the remainder of the current phase plus every phase still ahead in the task's delivery sequence, taken from the median of matching finished tasks once at least three exist for the same kind and delivery mode, and otherwise from these default bands: implementing 10 to 60 minutes, validating 15 to 40 minutes, each fix round 5 to 15 minutes with one round expected, ci 5 to 15 minutes, and no estimate while waiting on the captain.
+It always renders as a range or a `~` point value with the word guess beside it in prose, says running long once a phase has outlived its band, and says unknown rather than repeating a stale number when the current state cannot be read.
+`data/phase-history.jsonl` is the gitignored per-home history: one JSON line per finished task, appended by teardown through `bin/fm-progress.sh record` with the task's per-phase seconds and fix-round count, never rewritten, and dropped without recording on a forced teardown.
+`state/.progress-<id>` is the per-task observation record that the watcher tick and the fleet snapshot advance and teardown retires; deleting it only restarts that task's accumulators from its spawn instant.
+The watcher re-reads a task's phase no more often than `FM_PROGRESS_REFRESH_SECS` and renames its projected Herdr workspace only when the phase or the rounded estimate changes, at most once per poll and through the presentation journal alone; [Presentation spaces](herdr-backend.md#presentation-spaces) owns the label grammar and its safety limits.
+Nothing in this path changes a task's lifecycle, waits on the network, or writes a record another script owns; `bin/fm-progress.sh show <id>` prints one task's phase and guess, and `bin/fm-progress.sh history` prints the medians in use.
+
 ## Startup memory budget (config/startup-memory-budget)
 
 `config/startup-memory-budget` is the primary-authoritative per-home allowance for the startup prompt-memory surface: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` together.
@@ -841,6 +853,10 @@ FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed directly
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_PROGRESS_REFRESH_SECS=60   # seconds between per-task progress phase re-reads in the watcher tick; 0 disables the tick (see "Progress phase and remaining-time guess")
+FM_PROGRESS_MIN_SAMPLES=3     # finished tasks a phase needs before its history median replaces the default band
+FM_PROGRESS_HISTORY_MAX=200   # newest data/phase-history.jsonl records considered when computing medians
+FM_CAPTAIN_HOLD_BIN=bin/fm-captain-hold.sh   # test override for the captain-hold predicate the progress phase consults
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env

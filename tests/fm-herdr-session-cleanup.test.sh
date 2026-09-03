@@ -253,6 +253,15 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeat cleanup closed again"
 pass "successful cleanup is idempotent on repeat"
 
+# A display-only progress segment (bin/backends/herdr.sh
+# fm_backend_herdr_projection_progress_apply) never counts as a rename: the
+# decorated title strips back to the journaled grammar and cleanup proceeds.
+reset_fixture; printf '%s\n' "└ task · validating · ~25 min · p:$TOKEN" > "$FIXTURE_DIR/title"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "a progress-decorated title kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "a progress-decorated title did not close exactly once"
+pass "a progress-decorated title still matches the exact projected grammar"
+
 reset_fixture; printf '%s\n' '└ malformed p:AbCdEfGhIjKlMnOpQrStUv' > "$FIXTURE_DIR/title"; assert_preserved "malformed title"
 reset_fixture; printf '%s\n' '└ missing-token' > "$FIXTURE_DIR/title"; assert_preserved "missing token"
 reset_fixture; printf 'version=1\ntask_id=%s\nprojection_id=short\n' "$ID" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "malformed journal"

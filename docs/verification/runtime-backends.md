@@ -631,6 +631,27 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh bin/fm-test-run.sh --lane real-herdr-gated
 ```
 
 Both runs reported `family=real-herdr-gated count=11 failed=0`.
+
+### Progress label suffix
+
+The display-only progress suffix on a projected workspace label (`docs/herdr-backend.md` "Presentation spaces") depends on three vendor behaviors: `workspace rename` accepting the decorated label, `workspace get` reading it back exactly, and the rename leaving the focused workspace and tab alone.
+The guard was run on 2026-09-03 against Herdr 0.8.2 protocol 19 in an isolated lab session:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-progress-label-herdr-e2e.test.sh
+```
+
+```text
+ok - real herdr 0.8.2: a bound projection's workspace is renamed to base plus suffix with the token last
+ok - real herdr 0.8.2: the rename leaves the focused workspace and tab unchanged
+ok - real herdr 0.8.2: an unchanged suffix is a no-op and a changed suffix replaces the segment
+ok - real herdr 0.8.2: a label changed by hand is left alone with one warning
+ok - real herdr 0.8.2: a task without a version 2 journal is skipped silently
+ok - real Herdr lab validation completed on Herdr 0.8.2 with the default-session tripwire intact
+```
+
+The suffix grammar, the base recovery every label comparison uses, the refresh-on-change rule, and the failure handling are pinned portably with a fake Herdr in `tests/fm-progress.test.sh`, `tests/fm-backend-herdr.test.sh`, and `tests/fm-herdr-session-cleanup.test.sh`.
 The projection suite's unconfigured-home case is release-aware rather than pinned to one outcome, so it proves the projected default on 0.8.0 and the flat fallback with its naming warning on 0.7.4:
 
 ```text

@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+# Behavior tests for the display-only progress phase and remaining-time guess
+# (bin/fm-progress-lib.sh through bin/fm-progress.sh), the watcher's label
+# refresh rule, and the Herdr label grammar in bin/backends/herdr.sh.
+#
+# The crew's current state is served by a canned fm-crew-state.sh
+# (FM_CREW_STATE_BIN, exactly the line the real helper prints), the captain
+# hold by a canned fm-captain-hold.sh (FM_CAPTAIN_HOLD_BIN), and Herdr by a
+# stateful fake `herdr` that answers `workspace get` from a label file and
+# logs every `workspace rename`. Time is fixed through FM_PROGRESS_NOW.
+#   (a) phase derivation: every phase in the model from its exact sources,
+#       including the lifecycle rule that a provably working crew outranks a
+#       backlog hold or an old keyed decision, and unknown for an unreadable
+#       state
+#   (b) observation record: seeding from the spawn instant, per-phase
+#       accumulators across transitions, fix-round counting, and the run's own
+#       round winning
+#   (c) fallback bands: the documented defaults summed over the phases ahead
+#       per delivery sequence, always as a range, and "running long" past a band
+#   (d) history and median: fewer than three samples keep the bands; three
+#       samples switch a phase to its "~N min" median; teardown's record hook
+#       appends one JSONL line and drops the record, --discard drops only
+#   (e) label refresh rule: rename only when the suffix changes, at most once
+#       per tick, through the version 2 presentation journal only; silent on
+#       tmux and on a Herdr task without a bound projection; a failed rename
+#       warns and retries on the cadence, a hand-changed label is left alone
+#   (f) tick throttle: one phase re-read per cadence window per task
+#   (g) label grammar: the base is recovered from a decorated label and the
+#       token stays the last segment
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+PROGRESS="$ROOT/bin/fm-progress.sh"
+TMP_ROOT=$(fm_test_tmproot fm-progress)
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+
+NOW=1788400000
+TOKEN=AbCdEfGhIjKlMnOpQrStUv
+
+make_case() {  # <name> -> echoes case dir
+  local d="$TMP_ROOT/$1" fb
+  mkdir -p "$d/state" "$d/data" "$d/fakebin"
+  fb="$d/fakebin"
+  # The captain-hold predicate is consulted only for a home that keeps a
+  # backlog; the canned fm-captain-hold.sh below answers FM_FAKE_HELD.
+  printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$d/data/backlog.md"
+  cat > "$fb/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_CREW_STATE_LOG"
+printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
+exit 0
+SH
+  cat > "$fb/fm-captain-hold.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = open ] || exit 2
+[ "${FM_FAKE_HELD:-0}" = 1 ]
+SH
+  # A stateful herdr: `workspace get` answers from $FM_FAKE_HERDR_LABEL_FILE,
+  # `workspace rename` logs and rewrites it unless FM_FAKE_HERDR_RENAME_FAIL=1.
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "workspace get")
+    printf '{"result":{"workspace":{"workspace_id":"%s","label":%s,"tab_count":1,"pane_count":1}}}\n' \
+      "$3" "$(jq -Rn --rawfile l "${FM_FAKE_HERDR_LABEL_FILE:?}" '$l | rtrimstr("\n")')"
+    ;;
+  "workspace rename")
+    [ "${FM_FAKE_HERDR_RENAME_FAIL:-0}" = 1 ] && exit 1
+    printf '%s\n' "$4" > "${FM_FAKE_HERDR_LABEL_FILE:?}"
+    ;;
+  "status --json")
+    printf '{"client":{"version":"0.8.2","protocol":19},"server":{"running":true}}\n'
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/fm-crew-state.sh" "$fb/fm-captain-hold.sh" "$fb/herdr"
+  printf '%s\n' "$d"
+}
+
+write_task() {  # <case> <id> <kind> <mode> [extra key=val ...]
+  local d=$1 id=$2 kind=$3 mode=$4
+  shift 4
+  fm_write_meta "$d/state/$id.meta" \
+    "window=fm:fm-$id" "endpoint_task_id=$id" "worktree=$d/wt-$id" \
+    "kind=$kind" "mode=$mode" "spawn_gen=s$((NOW - 1200)).11.22" "$@"
+}
+
+# progress <case> <now> <crew-state-line> <held 0|1> <args...>
+progress() {
+  local d=$1 now=$2 line=$3 held=$4
+  shift 4
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" \
+    FM_CREW_STATE_BIN="$d/fakebin/fm-crew-state.sh" FM_CAPTAIN_HOLD_BIN="$d/fakebin/fm-captain-hold.sh" \
+    FM_PROGRESS_NOW="$now" FM_FAKE_CREW_STATE="$line" FM_FAKE_HELD="$held" \
+    FM_FAKE_HERDR_LOG="$d/herdr.log" FM_FAKE_HERDR_LABEL_FILE="$d/label" \
+    "$PROGRESS" "$@"
+}
+
+phase_of() {  # <show-output>
+  local out=$1
+  out=${out#phase: }
+  printf '%s' "${out%% · *}"
+}
+
+# ---------------------------------------------------------------------------
+# (a) phase derivation
+
+test_phase_matrix() {
+  local d out
+  d=$(make_case phases)
+  write_task "$d" t1 ship no-mistakes
+  printf 'working: started\n' > "$d/state/t1.status"
+
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · harness busy (record)' 0 show t1)
+  [ "$(phase_of "$out")" = implementing ] || fail "busy pane before any run must be implementing: $out"
+  out=$(progress "$d" "$NOW" 'state: working · source: run-step · validating (running) · step: review' 0 show t1)
+  [ "$(phase_of "$out")" = validating ] || fail "a running step must be validating: $out"
+  assert_contains "$out" "step: review" "the run step rides beside the phase"
+  out=$(progress "$d" "$NOW" 'state: working · source: run-step · validating (fixing) · step: review · fix round: 2' 0 show t1)
+  [ "$(phase_of "$out")" = fixing ] || fail "a fix step must be fixing: $out"
+  out=$(progress "$d" "$NOW" 'state: working · source: run-step · ci running · step: ci' 0 show t1)
+  [ "$(phase_of "$out")" = ci ] || fail "the ci step must be ci: $out"
+  out=$(progress "$d" "$NOW" 'state: working · source: run-step · validating (running) · step: push' 0 show t1)
+  [ "$(phase_of "$out")" = ci ] || fail "the push step must read as ci: $out"
+  out=$(progress "$d" "$NOW" 'state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)' 0 show t1)
+  [ "$(phase_of "$out")" = 'waiting on captain' ] || fail "an ask-user gate waits on the captain: $out"
+  out=$(progress "$d" "$NOW" 'state: parked · source: run-step · parked at review: 1 finding(s)' 0 show t1)
+  [ "$(phase_of "$out")" = validating ] || fail "a worker-answered gate stays validating: $out"
+  assert_contains "$out" "step: review" "the gate names the validating step"
+  out=$(progress "$d" "$NOW" 'state: done · source: run-step · checks green: PR ready for review' 0 show t1)
+  [ "$(phase_of "$out")" = ready ] || fail "a reported done is ready: $out"
+  assert_contains "$out" "ready, awaiting merge" "ready carries no time guess"
+  out=$(progress "$d" "$NOW" 'state: blocked · source: status-log · need creds' 0 show t1)
+  [ "$(phase_of "$out")" = blocked ] || fail "blocked stays blocked: $out"
+  out=$(progress "$d" "$NOW" 'state: paused · source: status-log · waiting on upstream' 0 show t1)
+  [ "$(phase_of "$out")" = paused ] || fail "paused stays paused: $out"
+  out=$(progress "$d" "$NOW" 'state: failed · source: run-step · run failed' 0 show t1)
+  [ "$(phase_of "$out")" = failed ] || fail "failed stays failed: $out"
+  out=$(progress "$d" "$NOW" 'garbage that is not a state line' 0 show t1)
+  [ "$(phase_of "$out")" = unknown ] || fail "an unreadable state is unknown: $out"
+  assert_contains "$out" "guess: unknown" "unknown never carries a stale estimate"
+  pass "phase derivation covers implementing, validating, fixing, ci, waiting, ready, blocked, paused, failed, and unknown"
+}
+
+test_phase_pr_recorded_without_run_is_ci() {
+  local d out
+  d=$(make_case pr-ci)
+  write_task "$d" t2 ship direct-PR "pr=https://github.com/o/r/pull/5"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · harness busy' 0 show t2)
+  [ "$(phase_of "$out")" = ci ] || fail "a recorded PR with a still-working worker is ci: $out"
+  pass "a recorded PR moves a working direct-PR worker to ci"
+}
+
+test_phase_open_decision_and_hold() {
+  local d out
+  d=$(make_case decisions)
+  write_task "$d" t3 ship no-mistakes
+  printf 'needs-decision [key=api]: pick the API shape\nworking: idling\n' > "$d/state/t3.status"
+  out=$(progress "$d" "$NOW" 'state: working · source: status-log · idling' 0 show t3)
+  [ "$(phase_of "$out")" = 'waiting on captain' ] || fail "an open keyed decision behind a later working line still waits: $out"
+  printf 'resolved [key=api]: shape chosen\n' >> "$d/state/t3.status"
+  out=$(progress "$d" "$NOW" 'state: working · source: status-log · idling' 0 show t3)
+  [ "$(phase_of "$out")" = implementing ] || fail "a resolved decision no longer waits: $out"
+  printf 'needs-decision [key=b]: another\n' >> "$d/state/t3.status"
+  out=$(progress "$d" "$NOW" 'state: working · source: run-step · validating (running) · step: test' 0 show t3)
+  [ "$(phase_of "$out")" = validating ] || fail "a provably working run outranks an old keyed decision: $out"
+  out=$(progress "$d" "$NOW" 'state: parked · source: status-log · another' 0 show t3)
+  [ "$(phase_of "$out")" = 'waiting on captain' ] || fail "an idle needs-decision waits on the captain: $out"
+  # The captain hold predicate: held and idle waits; held but provably working
+  # keeps the working phase.
+  write_task "$d" t4 ship no-mistakes
+  printf 'working: started\n' > "$d/state/t4.status"
+  out=$(progress "$d" "$NOW" 'state: unknown · source: pane · harness state unavailable' 1 show t4)
+  [ "$(phase_of "$out")" = 'waiting on captain' ] || fail "a captain-held idle task waits on the captain: $out"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · harness busy' 1 show t4)
+  [ "$(phase_of "$out")" = implementing ] || fail "a captain hold never masks a provably working crew: $out"
+  pass "keyed decisions and captain holds resolve to waiting on captain only while the crew is not provably working"
+}
+
+test_secondmate_and_remote_are_skipped() {
+  local d out
+  d=$(make_case skip)
+  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "kind=secondmate" "home=$d/home" "spawn_gen=s1.1.1"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show mate)
+  assert_contains "$out" "no local task record" "a secondmate has no phase"
+  [ ! -e "$d/state/.progress-mate" ] || fail "a secondmate must not get an observation record"
+  write_task "$d" rem ship no-mistakes "remote_host=box"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show rem)
+  assert_contains "$out" "no local task record" "a remote task has no local phase"
+  pass "secondmates and remote tasks are skipped without a record"
+}
+
+# ---------------------------------------------------------------------------
+# (b) observation record
+
+test_record_accumulates_phases() {
+  local d rec
+  d=$(make_case record)
+  write_task "$d" r1 ship no-mistakes
+  progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show r1 >/dev/null
+  rec="$d/state/.progress-r1"
+  [ -f "$rec" ] || fail "the first read must publish the observation record"
+  grep -q "^secs_implementing=1200$" "$rec" || fail "time since the spawn instant counts as implementing: $(cat "$rec")"
+  grep -q "^since=$((NOW - 1200))$" "$rec" || fail "the first phase starts at the spawn instant: $(cat "$rec")"
+  progress "$d" $((NOW + 600)) 'state: working · source: run-step · validating (running) · step: review' 0 show r1 >/dev/null
+  grep -q "^secs_implementing=1800$" "$rec" || fail "the interval up to the transition is charged to implementing: $(cat "$rec")"
+  grep -q "^since=$((NOW + 600))$" "$rec" || fail "a transition resets since: $(cat "$rec")"
+  progress "$d" $((NOW + 900)) 'state: working · source: run-step · validating (fixing) · step: review' 0 show r1 >/dev/null
+  grep -q "^secs_validating=300$" "$rec" || fail "validating time accumulates: $(cat "$rec")"
+  grep -q "^fix_rounds=1$" "$rec" || fail "entering fixing counts one round: $(cat "$rec")"
+  progress "$d" $((NOW + 1000)) 'state: working · source: run-step · validating (fixing) · step: review · fix round: 3' 0 show r1 >/dev/null
+  grep -q "^fix_rounds=3$" "$rec" || fail "the run's own round count wins when reported: $(cat "$rec")"
+  progress "$d" $((NOW + 1300)) 'state: working · source: run-step · ci running · step: ci' 0 show r1 >/dev/null
+  grep -q "^secs_fixing=400$" "$rec" || fail "fixing time accumulates: $(cat "$rec")"
+  progress "$d" $((NOW + 1400)) 'state: working · source: run-step · ci running · step: ci' 0 show r1 >/dev/null
+  grep -q "^secs_ci=100$" "$rec" || fail "ci time accumulates: $(cat "$rec")"
+  grep -q "^phase=ci$" "$rec" || fail "the record carries the current phase: $(cat "$rec")"
+  pass "the observation record seeds from the spawn instant and charges each interval to the phase seen at its start"
+}
+
+test_record_without_spawn_epoch_uses_mtime() {
+  local d rec mtime
+  d=$(make_case mtime)
+  fm_write_meta "$d/state/m1.meta" "window=fm:fm-m1" "worktree=$d/wt" "kind=ship" "mode=no-mistakes" "spawn_gen=teardown-test-m1"
+  mtime=$(stat -c %Y "$d/state/m1.meta" 2>/dev/null || stat -f %m "$d/state/m1.meta")
+  progress "$d" $((mtime + 60)) 'state: working · source: pane · busy' 0 show m1 >/dev/null
+  rec="$d/state/.progress-m1"
+  grep -q "^secs_implementing=60$" "$rec" || fail "a non-epoch spawn_gen falls back to the record mtime: $(cat "$rec")"
+  pass "a spawn instant that cannot be parsed falls back to the record's mtime"
+}
+
+# ---------------------------------------------------------------------------
+# (c) fallback bands
+
+test_default_bands_by_sequence() {
+  local d out
+  d=$(make_case bands)
+  write_task "$d" nm ship no-mistakes "spawn_gen=s$NOW.1.1"
+  write_task "$d" dp ship direct-PR "spawn_gen=s$NOW.1.1"
+  write_task "$d" lo ship local-only "spawn_gen=s$NOW.1.1"
+  write_task "$d" sc scout scout "spawn_gen=s$NOW.1.1"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show nm)
+  assert_contains "$out" "guess: 35 to 130 min guess (default bands" "no-mistakes at spawn sums implementing, validating plus one fix round, and ci"
+  assert_contains "$out" "label: · implementing · 35 to 130 min" "the label carries the phase and the range"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show dp)
+  assert_contains "$out" "guess: 15 to 75 min guess" "direct-PR sums implementing and ci only"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show lo)
+  assert_contains "$out" "guess: 10 to 60 min guess" "local-only is implementing only"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show sc)
+  assert_contains "$out" "guess: 10 to 60 min guess" "a scout is implementing only"
+  out=$(progress "$d" "$NOW" 'state: working · source: run-step · validating (running) · step: test' 0 show nm)
+  assert_contains "$out" "guess: 25 to 70 min guess" "validating sums the remaining block and ci"
+  out=$(progress "$d" "$NOW" 'state: working · source: run-step · ci running · step: ci' 0 show nm)
+  assert_contains "$out" "guess: 5 to 15 min guess" "ci is the last band"
+  out=$(progress "$d" "$NOW" 'state: parked · source: run-step · parked at review (ask-user: authority decision)' 0 show nm)
+  assert_contains "$out" "guess: no estimate while waiting on the captain" "waiting on the captain has no estimate"
+  assert_contains "$out" "label: · waiting on captain" "the waiting label carries no number"
+  pass "default bands sum over the phases still ahead for each delivery sequence"
+}
+
+test_running_long_past_the_band() {
+  local d out
+  d=$(make_case overrun)
+  write_task "$d" ov ship no-mistakes "spawn_gen=s$((NOW - 4000)).1.1"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show ov)
+  assert_contains "$out" "guess: running long: past the 10 to 60 min guess for implementing, then 25 to 70 min more" "an overrun names the band it passed and what is still ahead"
+  assert_contains "$out" "label: · implementing · running long" "the label says running long instead of a stale number"
+  pass "a phase past its band reads as running long rather than a bare zero"
+}
+
+# ---------------------------------------------------------------------------
+# (d) history and medians
+
+test_history_medians_replace_bands_at_three_samples() {
+  local d out i
+  d=$(make_case history)
+  write_task "$d" h1 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  for i in 1 2; do
+    printf '{"v":1,"id":"old%s","kind":"ship","mode":"no-mistakes","finished":1,"secs":{"implementing":1800,"validating":600,"fixing":300,"ci":300,"waiting":0},"fix_rounds":1}\n' "$i" \
+      >> "$d/data/phase-history.jsonl"
+  done
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show h1)
+  assert_contains "$out" "35 to 130 min guess (default bands, fewer than 3 finished tasks)" "two samples keep the default bands"
+  printf '{"v":1,"id":"old3","kind":"ship","mode":"no-mistakes","finished":1,"secs":{"implementing":2400,"validating":900,"fixing":600,"ci":600,"waiting":0},"fix_rounds":2}\n' \
+    >> "$d/data/phase-history.jsonl"
+  printf '{"v":1,"id":"other","kind":"scout","mode":"scout","finished":1,"secs":{"implementing":36000,"validating":0,"fixing":0,"ci":0,"waiting":0},"fix_rounds":0}\n' \
+    >> "$d/data/phase-history.jsonl"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show h1)
+  # medians: implementing 30 min, validating 10 min, fix round 5 min x 1 round, ci 5 min -> 50 -> "~50 min"
+  assert_contains "$out" "guess: ~50 min guess (from" "three matching samples switch every phase to its median"
+  assert_contains "$out" "label: · implementing · ~50 min" "the label carries the point guess with a ~"
+  out=$(progress "$d" "$NOW" x 0 history)
+  assert_contains "$out" "implementing  median 30 min over 3 task(s)" "history reports the median and sample count"
+  assert_contains "$out" "fix_rounds    median 1 round(s) over 3 task(s)" "history reports the fix-round median"
+  pass "history medians replace the default bands once three matching finished tasks exist, per kind and mode"
+}
+
+test_record_hook_appends_history_and_drops_record() {
+  local d out line
+  d=$(make_case record-hook)
+  write_task "$d" done1 ship no-mistakes
+  progress "$d" "$NOW" 'state: working · source: run-step · validating (running) · step: review' 0 show done1 >/dev/null
+  out=$(progress "$d" $((NOW + 300)) x 0 record done1)
+  assert_contains "$out" "progress: recorded done1 (ship, no-mistakes)" "record names the task, kind, and mode"
+  [ ! -e "$d/state/.progress-done1" ] || fail "record must remove the observation record"
+  line=$(cat "$d/data/phase-history.jsonl")
+  printf '%s' "$line" | jq -e '.v == 1 and .id == "done1" and .kind == "ship" and .mode == "no-mistakes"
+    and .secs.implementing == 1200 and .secs.validating == 300 and .fix_rounds == 0 and .finished == 1788400300' >/dev/null \
+    || fail "history line is wrong: $line"
+  write_task "$d" done2 ship no-mistakes
+  progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show done2 >/dev/null
+  out=$(progress "$d" $((NOW + 300)) x 0 record done2 --discard)
+  assert_contains "$out" "removed without recording history" "--discard drops the record silently"
+  [ "$(wc -l < "$d/data/phase-history.jsonl" | tr -d ' ')" = 1 ] || fail "--discard must not append history"
+  out=$(progress "$d" $((NOW + 300)) x 0 record nothing)
+  assert_contains "$out" "no observation record" "a task never observed records nothing"
+  pass "the teardown hook appends one history line and drops the record, and --discard drops only"
+}
+
+# ---------------------------------------------------------------------------
+# (e) label refresh rule (Herdr through the version 2 presentation journal)
+
+write_v2_journal() {  # <case> <id> <base-label>
+  local d=$1 id=$2 base=$3
+  {
+    printf 'version=2\n'
+    printf 'task_id=%s\n' "$id"
+    printf 'projection_id=%s\n' "$TOKEN"
+    printf 'home=%s\n' "$d"
+    printf 'session=fmtest\nworkspace_id=w2\ntab_id=w2:t2\npane_id=w2:p2\n'
+    printf 'parent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=%s\ntask_label=fm-%s\n' "$base" "$id"
+  } > "$d/state/$id.herdr-presentation"
+}
+
+rename_count() {  # <case>
+  grep -c '^workspace rename ' "$1/herdr.log" 2>/dev/null || true
+}
+
+test_label_refresh_on_change_only() {
+  local d base
+  d=$(make_case label)
+  base="└ lab1 · p:$TOKEN"
+  write_task "$d" lab1 ship no-mistakes "backend=herdr" "herdr_session=fmtest" "herdr_workspace_id=w2" "herdr_tab_id=w2:t2" "herdr_pane_id=w2:p2" "spawn_gen=s$NOW.1.1"
+  write_v2_journal "$d" lab1 "$base"
+  printf '%s\n' "$base" > "$d/label"
+  : > "$d/herdr.log"
+  progress "$d" "$NOW" 'state: working · source: pane · busy' 0 tick
+  [ "$(rename_count "$d")" = 1 ] || fail "the first tick must rename once: $(cat "$d/herdr.log")"
+  [ "$(cat "$d/label")" = "└ lab1 · implementing · 35 to 130 min · p:$TOKEN" ] \
+    || fail "the decorated label keeps the token last: $(cat "$d/label")"
+  grep -q "^label= · implementing · 35 to 130 min$" "$d/state/.progress-lab1" || fail "the applied suffix is recorded"
+  progress "$d" $((NOW + 60)) 'state: working · source: pane · busy' 0 tick
+  [ "$(rename_count "$d")" = 1 ] || fail "an unchanged suffix must not rename again: $(cat "$d/herdr.log")"
+  progress "$d" $((NOW + 240)) 'state: working · source: run-step · validating (running) · step: review' 0 tick
+  [ "$(rename_count "$d")" = 2 ] || fail "a phase change renames once: $(cat "$d/herdr.log")"
+  [ "$(cat "$d/label")" = "└ lab1 · validating · 25 to 70 min · p:$TOKEN" ] || fail "label after the phase change: $(cat "$d/label")"
+  # The estimate ticking down inside a five-minute bucket is not a change.
+  progress "$d" $((NOW + 300)) 'state: working · source: run-step · validating (running) · step: review' 0 tick
+  [ "$(rename_count "$d")" = 2 ] || fail "a sub-bucket estimate change must not rename: $(cat "$d/herdr.log")"
+  # Crossing a bucket boundary is a change, and still only one rename.
+  progress "$d" $((NOW + 480)) 'state: working · source: run-step · validating (running) · step: review' 0 tick
+  [ "$(rename_count "$d")" = 3 ] || fail "a bucket change renames exactly once: $(cat "$d/herdr.log")"
+  [ "$(cat "$d/label")" = "└ lab1 · validating · 20 to 65 min · p:$TOKEN" ] || fail "label after the bucket change: $(cat "$d/label")"
+  pass "the label is renamed only when the phase or the rounded estimate changes, at most once per tick"
+}
+
+test_label_refresh_skips_without_projection_or_on_tmux() {
+  local d
+  d=$(make_case label-skip)
+  write_task "$d" flat ship no-mistakes "backend=herdr" "spawn_gen=s$NOW.1.1"
+  write_task "$d" tm ship no-mistakes "spawn_gen=s$NOW.1.1"
+  printf '└ x · p:%s\n' "$TOKEN" > "$d/label"
+  : > "$d/herdr.log"
+  progress "$d" "$NOW" 'state: working · source: pane · busy' 0 tick 2> "$d/err"
+  [ ! -s "$d/herdr.log" ] || fail "a Herdr task without a version 2 journal must not touch Herdr: $(cat "$d/herdr.log")"
+  [ ! -s "$d/err" ] || fail "skipping must be silent: $(cat "$d/err")"
+  [ -f "$d/state/.progress-flat" ] && [ -f "$d/state/.progress-tm" ] || fail "phases are still observed for skipped labels"
+  pass "no Herdr call is made for a flat Herdr task or a tmux task, silently"
+}
+
+test_label_refresh_failure_warns_and_retries_on_cadence() {
+  local d base
+  d=$(make_case label-fail)
+  base="└ lab2 · p:$TOKEN"
+  write_task "$d" lab2 ship no-mistakes "backend=herdr" "spawn_gen=s$NOW.1.1"
+  write_v2_journal "$d" lab2 "$base"
+  printf '%s\n' "$base" > "$d/label"
+  : > "$d/herdr.log"
+  FM_FAKE_HERDR_RENAME_FAIL=1 progress "$d" "$NOW" 'state: working · source: pane · busy' 0 tick 2> "$d/err"
+  grep -q "warning: herdr progress label rename failed for lab2" "$d/err" || fail "a failed rename must warn: $(cat "$d/err")"
+  [ "$(cat "$d/label")" = "$base" ] || fail "a failed rename leaves the label alone"
+  grep -q "^label_attempt=$NOW$" "$d/state/.progress-lab2" || fail "the failed attempt is recorded"
+  grep -q '^worktree=' "$d/state/lab2.meta" || fail "task records stay untouched"
+  # Within the cadence the failure is not retried; after it, it is.
+  : > "$d/herdr.log"
+  FM_FAKE_HERDR_RENAME_FAIL=1 progress "$d" $((NOW + 30)) 'state: working · source: pane · busy' 0 tick 2>/dev/null
+  [ ! -s "$d/herdr.log" ] || fail "a failed rename must not retry inside the cadence: $(cat "$d/herdr.log")"
+  progress "$d" $((NOW + 90)) 'state: working · source: pane · busy' 0 tick 2>/dev/null
+  [ "$(rename_count "$d")" = 1 ] || fail "the rename retries after the cadence: $(cat "$d/herdr.log")"
+  [ "$(cat "$d/label")" = "└ lab2 · implementing · 35 to 130 min · p:$TOKEN" ] || fail "the retry applies the label: $(cat "$d/label")"
+  # A label changed by hand is never overwritten.
+  printf 'my own name\n' > "$d/label"
+  : > "$d/herdr.log"
+  progress "$d" $((NOW + 400)) 'state: working · source: run-step · validating (running) · step: review' 0 tick 2> "$d/err"
+  [ "$(rename_count "$d")" = 0 ] || fail "a hand-changed label must not be renamed: $(cat "$d/herdr.log")"
+  grep -q "leaving the hand-changed label alone" "$d/err" || fail "a hand-changed label warns once: $(cat "$d/err")"
+  [ "$(cat "$d/label")" = "my own name" ] || fail "the hand-changed label survives"
+  pass "a failed rename only warns and retries on the cadence, and a hand-changed label is left alone"
+}
+
+# ---------------------------------------------------------------------------
+# (f) tick throttle
+
+test_tick_reads_phase_once_per_cadence() {
+  local d
+  d=$(make_case throttle)
+  write_task "$d" th1 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  write_task "$d" th2 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  : > "$d/crew.log"
+  FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" "$NOW" 'state: working · source: pane · busy' 0 tick
+  FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 10)) 'state: working · source: pane · busy' 0 tick
+  FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 59)) 'state: working · source: pane · busy' 0 tick
+  [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 2 ] || fail "each task is read once inside the cadence: $(cat "$d/crew.log")"
+  FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 60)) 'state: working · source: pane · busy' 0 tick
+  [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 4 ] || fail "the cadence boundary re-reads every task: $(cat "$d/crew.log")"
+  : > "$d/crew.log"
+  FM_PROGRESS_REFRESH_SECS=0 FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 600)) 'state: working · source: pane · busy' 0 tick
+  [ ! -s "$d/crew.log" ] || fail "FM_PROGRESS_REFRESH_SECS=0 disables the tick"
+  pass "the tick re-reads each task's phase once per cadence window and can be disabled"
+}
+
+# ---------------------------------------------------------------------------
+# (g) label grammar in the Herdr adapter
+
+test_label_grammar() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    base=$(fm_backend_herdr_projection_workspace_label fm-task-1 "$1")
+    dec=$(fm_backend_herdr_projection_progress_label "$base" " · validating · ~25 min")
+    printf "%s\n%s\n%s\n%s\n" "$base" "$dec" \
+      "$(fm_backend_herdr_projection_label_base "$dec")" \
+      "$(fm_backend_herdr_projection_progress_label "$base" " · bad p:x")"
+  ' "$ROOT" "$TOKEN")
+  [ "$(printf '%s\n' "$out" | sed -n 1p)" = "└ task-1 · p:$TOKEN" ] || fail "base label: $out"
+  [ "$(printf '%s\n' "$out" | sed -n 2p)" = "└ task-1 · validating · ~25 min · p:$TOKEN" ] || fail "decorated label keeps the token last: $out"
+  [ "$(printf '%s\n' "$out" | sed -n 3p)" = "└ task-1 · p:$TOKEN" ] || fail "the base is recovered from a decorated label: $out"
+  [ "$(printf '%s\n' "$out" | sed -n 4p)" = "└ task-1 · p:$TOKEN" ] || fail "a suffix carrying a token marker is refused: $out"
+  printf '%s\n' "$(printf '%s\n' "$out" | sed -n 2p)" | grep -Eq '^└ .+ · p:[A-Za-z0-9_-]{22}$' \
+    || fail "a decorated label must still match the projected child grammar"
+  pass "the progress segment sits before the token and strips back to the journaled base"
+}
+
+test_phase_matrix
+test_phase_pr_recorded_without_run_is_ci
+test_phase_open_decision_and_hold
+test_secondmate_and_remote_are_skipped
+test_record_accumulates_phases
+test_record_without_spawn_epoch_uses_mtime
+test_default_bands_by_sequence
+test_running_long_past_the_band
+test_history_medians_replace_bands_at_three_samples
+test_record_hook_appends_history_and_drops_record
+test_label_refresh_on_change_only
+test_label_refresh_skips_without_projection_or_on_tmux
+test_label_refresh_failure_warns_and_retries_on_cadence
+test_tick_reads_phase_once_per_cadence
+test_label_grammar
+
+echo "all fm-progress tests passed"

@@ -355,7 +355,46 @@ test_active_run_is_authoritative() {
   assert_contains "$out" "state: working" "active run -> working"
   assert_contains "$out" "source: run-step" "active run -> run-step source"
   assert_contains "$out" "validating (running)" "active run reports the step"
+  assert_contains "$out" "validating (running) · step: review" "the running steps row names the current step"
   pass "active run-step is authoritative"
+}
+
+run_fixing_with_active_steps() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fixing
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: 2 awaiting
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,11
+    review,fixing,2,1370338
+    test,pending,0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    review,fixing,27m48s,"49s ago: claude producing output","3173529",fix 2
+EOF
+}
+
+# The active_steps table names the current step and the run's own fix round,
+# rendered after the unchanged state detail so every existing consumer of the
+# line keeps parsing it (bin/fm-progress-lib.sh reads the step and round).
+test_active_step_detail_names_step_and_fix_round() {
+  reset_fakes
+  local d; d=$(new_case active-step)
+  make_repo_on_branch "$d/wt" fm/feat-step
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-step.meta" "window=fm:fm-feat-step" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_fixing_with_active_steps fm/feat-step)"
+  local out; out=$(run_crew_state "$d" feat-step)
+  assert_contains "$out" "state: working" "fixing run -> working"
+  assert_contains "$out" "validating (fixing) · step: review · fix round: 2" "active_steps names the step and the fix round"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-step)"
+  out=$(run_crew_state "$d" feat-step)
+  assert_contains "$out" "validating (fixing)" "fixing without a steps table keeps the plain detail"
+  case "$out" in *"step:"*) fail "no step may be invented without a steps table: $out" ;; esac
+  pass "the current step and fix round ride beside the run-step detail only when the run reports them"
 }
 
 # (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED
@@ -1725,6 +1764,7 @@ EOF
 }
 
 test_active_run_is_authoritative
+test_active_step_detail_names_step_and_fix_round
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded

@@ -1033,7 +1033,15 @@ test_default_is_bounded_and_local_only() {
     .schema == "fm-bearings.v1"
       and (.in_flight | any(.id == "ship-task" and .repo == "firstmate"))
   ' >/dev/null || fail "json schema or main Underway repository wrong: $json"
-  pass "default output is bounded, local-only, and marks omitted surfaces"
+  # Every Underway row carries the display-only phase and a guess that says
+  # so (bin/fm-progress-lib.sh): a working worker with a recorded PR is in ci.
+  printf '%s' "$json" | jq -e '
+    (.in_flight | all(has("phase") and has("eta_guess")))
+      and (.in_flight | any(.id == "ship-task" and .phase == "ci" and (.eta_guess | test("guess"))))
+  ' >/dev/null || fail "Underway rows must carry phase and eta_guess: $(printf '%s' "$json" | jq -c '.in_flight')"
+  assert_contains "$toon" "in_flight[" "in_flight renders in TOON"
+  assert_contains "$toon" "phase,eta_guess}" "the TOON in_flight header carries the phase and guess columns"
+  pass "default output is bounded, local-only, marks omitted surfaces, and carries the phase and guess per Underway row"
 }
 
 test_toon_json_parity() {

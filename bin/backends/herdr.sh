@@ -649,6 +649,93 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
 }
 
+# --- progress label suffix (display only) ------------------------------------
+# bin/fm-progress-lib.sh composes a " · <phase> · <estimate>" suffix for a live
+# task; this adapter owns where it sits in a projected workspace label and how
+# it is stripped again. The suffix is inserted BEFORE the " · p:<token>" tail,
+# so the token stays the label's last segment and every existing token
+# correlation (endswith " · p:<token>", the └ ... · p:<token> child grammar)
+# keeps matching a decorated label unchanged:
+#   └ task · p:<token>                          base (journal workspace_label)
+#   └ task · validating · ~25 min · p:<token>   decorated
+# A decorated label is presentation only: it is never journaled, never used to
+# find an endpoint, and never authorizes any mutation. Everything that compares
+# a live label with the journaled base compares through
+# fm_backend_herdr_projection_label_base so a decoration never reads as a rename.
+
+# fm_backend_herdr_projection_label_base <label>: the label without any
+# progress segment. A label without the token tail is returned as is.
+fm_backend_herdr_projection_label_base() {  # <label>
+  local label=$1 head token
+  case "$label" in
+    *' · p:'*) ;;
+    *) printf '%s' "$label"; return 0 ;;
+  esac
+  token=${label##* · p:}
+  head=${label%% · *}
+  printf '%s · p:%s' "$head" "$token"
+}
+
+# fm_backend_herdr_projection_progress_label <base-label> <suffix>: the
+# decorated label, or the base unchanged when the suffix is empty or unsafe
+# (a suffix must not carry a newline or a second token marker).
+fm_backend_herdr_projection_progress_label() {  # <base-label> <suffix>
+  local base=$1 suffix=$2 head token
+  [ -n "$suffix" ] || { printf '%s' "$base"; return 0; }
+  case "$suffix" in
+    *p:*|*$'\n'*|*$'\r'*) printf '%s' "$base"; return 0 ;;
+  esac
+  case "$base" in
+    *' · p:'*) ;;
+    *) printf '%s' "$base"; return 0 ;;
+  esac
+  token=${base##* · p:}
+  head=${base% · p:*}
+  printf '%s%s · p:%s' "$head" "$suffix" "$token"
+}
+
+# fm_backend_herdr_projection_progress_apply <state-dir> <task-id> <suffix>:
+# rename the task's projected workspace to its journaled base label plus the
+# suffix. Return 0 when the live label already carries it or the rename was
+# verified, 2 when the task has no version 2 projection binding to decorate
+# (flat tasks, quarantined or absent journals: silent), and 1 with one warning
+# when the live label could not be read, was changed by hand, or the rename
+# failed or did not verify. Takes no session lock: a rename changes neither
+# layout nor focus, and the presentation journal is only read here.
+fm_backend_herdr_projection_progress_apply() {  # <state-dir> <task-id> <suffix>
+  local state=$1 id=$2 suffix=$3 journal session workspace base desired live
+  journal=$(fm_backend_herdr_projection_journal_path "$state" "$id")
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 2
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 2
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || return 2
+  session=$FM_BACKEND_HERDR_JOURNAL_SESSION
+  workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+  base=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL
+  desired=$(fm_backend_herdr_projection_progress_label "$base" "$suffix")
+  live=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null \
+    | jq -r '.result.workspace.label // empty' 2>/dev/null) || live=
+  if [ -z "$live" ]; then
+    echo "warning: herdr progress label for $id could not read workspace $workspace; leaving the label alone" >&2
+    return 1
+  fi
+  if [ "$(fm_backend_herdr_projection_label_base "$live")" != "$base" ]; then
+    echo "warning: herdr progress label for $id skipped: workspace $workspace no longer carries its projected label; leaving the hand-changed label alone" >&2
+    return 1
+  fi
+  [ "$live" != "$desired" ] || return 0
+  if ! fm_backend_herdr_cli "$session" workspace rename "$workspace" "$desired" >/dev/null 2>&1; then
+    echo "warning: herdr progress label rename failed for $id on workspace $workspace; the label stays as it was" >&2
+    return 1
+  fi
+  live=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null \
+    | jq -r '.result.workspace.label // empty' 2>/dev/null) || live=
+  if [ "$live" != "$desired" ]; then
+    echo "warning: herdr progress label rename for $id did not verify on workspace $workspace" >&2
+    return 1
+  fi
+  return 0
+}
+
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
 # path per live named Herdr session/socket, shared across every Firstmate home
 # that uses that session.
@@ -2229,10 +2316,14 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
         (.label | type) == "string"
         and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
         and (.label | startswith($owner + "/"));
+      # A progress decoration (fm_backend_herdr_projection_progress_apply) sits
+      # between the first and last " · " segments; compare through the base.
+      def label_base:
+        if type == "string" and test(" · p:") then (split(" · ") | .[0] + " · " + .[-1]) else . end;
       (.result.workspaces // null) as $spaces
       | select(($spaces | type) == "array")
       | select(([$spaces[]? | select(.workspace_id == $workspace)] | length) == 1)
-      | select(([$spaces[]? | select(.workspace_id == $workspace and .label == $workspace_label)] | length) == 1)
+      | select(([$spaces[]? | select(.workspace_id == $workspace and (.label | label_base) == $workspace_label)] | length) == 1)
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)))] | length) == 1)
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)) and .workspace_id == $workspace)] | length) == 1)
       | select(([$spaces[]? | select(.workspace_id == $parent_workspace and .label == $parent_label)] | length) == 1)

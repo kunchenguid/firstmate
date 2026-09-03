@@ -10,7 +10,10 @@
 # shared named-session Herdr presentation lock, in that order.
 #
 # A visible title is discovery only. Cleanup requires the exact current
-# "└ <concise-task> · p:<22-char-token>" grammar, one token occurrence across
+# "└ <concise-task> · p:<22-char-token>" grammar (a display-only progress
+# segment inserted before the token by bin/backends/herdr.sh's
+# fm_backend_herdr_projection_progress_apply is stripped first and never
+# counts as a rename), one token occurrence across
 # the named-session snapshot, exactly one matching home-local journal, one tab,
 # one pane, absent task metadata, no registered agent, and a process proof that
 # the pane contains only one idle recognized shell with no child process. A
@@ -123,6 +126,8 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
     --arg workspace "$workspace" --arg title "$title" --arg token "$token" \
     --arg bound_workspace "$bound_workspace" --arg bound_tab "$bound_tab" \
     --arg bound_pane "$bound_pane" '
+    def label_base:
+      if type == "string" and test(" · p:") then (split(" · ") | .[0] + " · " + .[-1]) else . end;
     .result.snapshot as $s
     | [$s.workspaces[]? | select(.workspace_id == $workspace)] as $workspaces
     | [$s.tabs[]? | select(.workspace_id == $workspace)] as $tabs
@@ -130,7 +135,7 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
     | ([ $s.workspaces[]?.label? // "" |
          ((split("p:" + $token) | length) - 1) ] | add // 0) as $token_count
     | select($workspaces | length == 1)
-    | select($workspaces[0].label == $title)
+    | select(($workspaces[0].label | label_base) == $title)
     | select($workspaces[0].tab_count == 1 and $workspaces[0].pane_count == 1)
     | select($tabs | length == 1)
     | select($panes | length == 1)
@@ -167,14 +172,18 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
 
   workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$workspaces" | jq -e --arg workspace "$workspace" --arg title "$title" --arg token "$token" '
-    ([.result.workspaces[]? | select(.workspace_id == $workspace and .label == $title)] | length) == 1
+    def label_base:
+      if type == "string" and test(" · p:") then (split(" · ") | .[0] + " · " + .[-1]) else . end;
+    ([.result.workspaces[]? | select(.workspace_id == $workspace and (.label | label_base) == $title)] | length) == 1
     and ([.result.workspaces[]?.label? // "" |
           ((split("p:" + $token) | length) - 1)] | add // 0) == 1
   ' >/dev/null 2>&1 || return 1
   workspace_info=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
   printf '%s' "$workspace_info" | jq -e --arg workspace "$workspace" --arg title "$title" '
+    def label_base:
+      if type == "string" and test(" · p:") then (split(" · ") | .[0] + " · " + .[-1]) else . end;
     .result.workspace.workspace_id == $workspace
-    and .result.workspace.label == $title
+    and (.result.workspace.label | label_base) == $title
     and .result.workspace.tab_count == 1
     and .result.workspace.pane_count == 1
   ' >/dev/null 2>&1 || return 1
@@ -203,6 +212,9 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
   local tab pane state close_status=0
+  # A live progress decoration is display only; every exact-title comparison
+  # below is made against the journaled base grammar.
+  title=$(fm_backend_herdr_projection_label_base "$title")
   token=$(fm_herdr_cleanup_title_token "$title") || return 0
   if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
     return 0

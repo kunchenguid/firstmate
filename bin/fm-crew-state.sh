@@ -44,6 +44,9 @@
 #      before it having ended at exactly this worktree's head - so an active fix
 #      round never reads as an older failed run (rule owned by
 #      fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh).
+#      A working run also names its current step (" · step: <name>", plus
+#      " · fix round: <n>" when the run reports one) after the detail, read
+#      from axi status's active_steps or steps table (nm_active_step_detail).
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -309,6 +312,38 @@ log_reports_ci_ready() {
   esac
 }
 
+# The step the run is working on right now, rendered as " · step: <name>" and,
+# when the run reports a fix round, " · fix round: <n>". Read from the
+# `active_steps[...]` table when present (its first column is the step, its last
+# column the round, e.g. `fix 2`), else from the first `steps[...]` row whose
+# status is running or fixing. Empty when neither answers. Purely additive
+# detail for consumers that want the phase beside the state
+# (bin/fm-progress-lib.sh); every existing state and detail word is unchanged.
+nm_active_step_detail() {
+  local row step round=''
+  row=$(printf '%s\n' "$RUN_OUT" | sed -n '/^[[:space:]]*active_steps\[[0-9]*\]{/{n;p;q;}' | head -1)
+  row=$(trim "$row")
+  if [ -n "$row" ]; then
+    step=$(strip_quotes "${row%%,*}")
+    round=$(strip_quotes "${row##*,}")
+    case "$round" in
+      fix\ [0-9]*) round=${round#fix } ;;
+      *) round='' ;;
+    esac
+    case "$round" in *[!0-9]*) round='' ;; esac
+  else
+    row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*[A-Za-z_-]+,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
+    row=$(trim "$row")
+    [ -n "$row" ] || return 0
+    step=$(strip_quotes "${row%%,*}")
+  fi
+  case "$step" in
+    ''|*[!A-Za-z0-9_-]*) return 0 ;;
+  esac
+  printf '%s' "${SEP}step: $step"
+  [ -z "$round" ] || printf '%s' "${SEP}fix round: $round"
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -518,6 +553,9 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=not-ready
             ;;
         esac
+      fi
+      if [ "$RUN_STATE" = working ]; then
+        RUN_DETAIL="$RUN_DETAIL$(nm_active_step_detail)"
       fi
     fi
   fi

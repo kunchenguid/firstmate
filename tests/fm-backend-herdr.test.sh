@@ -1295,6 +1295,38 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
   pass "herdr presentation journal: version 2 binds exact home/endpoint/parent identities and advances atomically"
 }
 
+# The live-binding predicate compares a workspace label through its base, so
+# the display-only progress segment inserted by
+# fm_backend_herdr_projection_progress_apply never reads as a rename, while a
+# label changed by hand still refuses.
+test_projection_live_binding_accepts_progress_decoration_only() {
+  local dir log resp fb token base rc
+  token=AbCdEfGhIjKlMnOpQrStUv
+  base="└ task-p9 · p:$token"
+  dir="$TMP_ROOT/projection-live-binding"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"
+  binding_check() {  # <live-label> -> rc
+    rm -f "$resp"/*.out "$resp/.count"; : > "$log"
+    printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":%s}]}}\n' \
+      "$(jq -n --arg l "$1" '$l')" > "$resp/1.out"
+    printf '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-task-p9","workspace_id":"w2"}]}}\n' > "$resp/2.out"
+    printf '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}\n' > "$resp/3.out"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_projection_live_binding_matches fmtest "$1" w2 w2:t2 w2:p2 w1 firstmate "$2" fm-task-p9
+      ' "$ROOT" "$token" "$base"
+  }
+  fb=$(make_herdr_fakebin "$dir")
+  binding_check "$base" || fail "the undecorated base label must bind"
+  binding_check "└ task-p9 · validating · ~25 min · p:$token" \
+    || fail "a progress-decorated label must still bind to its journaled base"
+  binding_check "└ other · p:$token" && fail "a hand-renamed label must not bind"
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a hand-renamed label must refuse with status 1, got $rc"
+  pass "herdr live binding: a progress decoration binds through the base label while a hand rename refuses"
+}
+
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   local dir state log resp fb out token journal
   dir="$TMP_ROOT/projection-create"; state="$dir/state"; mkdir -p "$dir/responses" "$state"
@@ -4533,6 +4565,7 @@ test_release_floor_verdict_survives_losing_either_signal
 test_presentation_preference_reports_three_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
+test_projection_live_binding_accepts_progress_decoration_only
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab

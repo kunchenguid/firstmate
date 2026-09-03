@@ -31,9 +31,13 @@
 # disclosed in omitted[], revealed by --all-decisions / --all-queued.
 # Underway (in_flight) projects every main live worker plus every active child
 # from every readable secondmate ledger, independently of that home's
-# bearings_state. A home classified captain_decision because it has an open
-# captain hold still contributes each working child as its own Underway row;
-# the home row on secondmates[] keeps the decision and gate classification.
+# bearings_state. Each row carries the display-only progress phase (with its
+# run step or gate) and the remaining-time guess text from the canonical
+# snapshot's tasks[].progress, owned by bin/fm-progress-lib.sh; the text always
+# says guess or names why there is none, and "unknown" is the honest fallback.
+# A home classified captain_decision because it has an open captain hold still
+# contributes each working child as its own Underway row; the home row on
+# secondmates[] keeps the decision and gate classification.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
@@ -120,7 +124,7 @@ Default collection performs bounded concurrent remote-ledger reads for registere
 remote homes under one shared snapshot budget and may refresh the parent-side cache.
 --include-prs additionally performs live GitHub discovery and checks.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,doing},
+Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,doing,phase,eta_guess},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
@@ -324,6 +328,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  # The phase column: the display-only progress phase with its run step or
+  # gate in parentheses; "unknown" when the snapshot carries no progress.
+  def phase_text($p):
+    (($p // {}).phase // "unknown") as $ph
+    | (($p // {}).step // "") as $st
+    | if $st != "" then $ph + " (" + $st + ")" else $ph end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -399,7 +409,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         state: .current_state.state,
         repo:(.backlog.repo // .project // null),
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90)),
+        phase: phase_text(.progress),
+        eta_guess: ((.progress.estimate.text // "unknown") | trunc(120))
       } ]
      + [ $secondmate_views[] as $m
          | $m.active_children[]?
@@ -407,7 +419,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             kind:(.kind // "secondmate"),
             state:(.state // "working"),
             repo:(.repo // null),
-            doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
+            doing:((.doing // .state) | trunc(90)),
+            phase: phase_text(.progress),
+            eta_guess: ((.progress.estimate.text // "unknown") | trunc(120))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | select(($all_decisions == 1) or (.deferred_marker != true))

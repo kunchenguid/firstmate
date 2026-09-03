@@ -48,6 +48,13 @@
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
+#     progress is the display-only phase and remaining-time guess owned by
+#     bin/fm-progress-lib.sh: {phase,step,since,elapsed_seconds,
+#     estimate:{short,text,low_minutes,high_minutes,basis,samples,overrun},
+#     label_suffix}. Reading it advances the task's observation record
+#     (state/.progress-<id>); phase "unknown" with estimate text "unknown" is
+#     the honest answer when the current state could not be read, and remote
+#     secondmate rows carry that same unknown shape without any read.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
@@ -184,6 +191,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-progress-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-progress-lib.sh"  # fm_progress_read: display-only phase and guess
 
 usage() {
   cat <<'EOF'
@@ -293,6 +303,48 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
   esac
   jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
+}
+
+# The display-only progress phase and guess for one local task, from the
+# crew-state line this snapshot already read (never a second read) and the
+# captain-hold role of this home's backlog row. bin/fm-progress-lib.sh owns the
+# derivation and advances the task's observation record as a side effect;
+# remote secondmate rows and secondmates carry the unknown shape unread.
+progress_unknown_json() {
+  jq -n '{phase:"unknown",step:null,since:null,elapsed_seconds:null,
+          estimate:{short:null,text:"unknown",low_minutes:null,high_minutes:null,basis:null,samples:0,overrun:false},
+          label_suffix:" · unknown"}'
+}
+
+progress_json_for_task() {  # <id> <kind> <remote-host> <current-state-json>
+  local id=$1 kind=$2 remote_host=$3 current_json=$4 raw held=0 low high
+  if [ -n "$remote_host" ] || [ "$kind" = secondmate ]; then
+    progress_unknown_json
+    return 0
+  fi
+  raw=$(printf '%s' "$current_json" | jq -r '.raw // ""')
+  [ -n "$raw" ] || raw='state: unknown · source: none · current state not read'
+  if printf '%s' "$BACKLOG_JSON" | jq -e --arg id "$id" \
+      '.records[]? | select(.id == $id and .state == "in_flight" and .hold_kind == "captain")' >/dev/null 2>&1; then
+    held=1
+  fi
+  if ! fm_progress_read "$STATE" "$DATA" "$id" "$raw" "$held"; then
+    progress_unknown_json
+    return 0
+  fi
+  low=${FM_PROGRESS_LOW:-null}; high=${FM_PROGRESS_HIGH:-null}
+  jq -n \
+    --arg phase "$FM_PROGRESS_PHASE" --arg step "$FM_PROGRESS_STEP" \
+    --argjson since "$FM_PROGRESS_SINCE" --argjson elapsed "$FM_PROGRESS_ELAPSED" \
+    --arg short "$FM_PROGRESS_SHORT" --arg text "$FM_PROGRESS_TEXT" \
+    --argjson low "$low" --argjson high "$high" --arg basis "$FM_PROGRESS_BASIS" \
+    --argjson samples "$FM_PROGRESS_SAMPLES" --argjson overrun "$(bool_json "$FM_PROGRESS_OVERRUN")" \
+    --arg label "$FM_PROGRESS_LABEL_SUFFIX" '
+    {phase:$phase,step:($step | if . == "" then null else . end),since:$since,elapsed_seconds:$elapsed,
+     estimate:{short:($short | if . == "" then null else . end),text:$text,
+               low_minutes:$low,high_minutes:$high,
+               basis:($basis | if . == "" then null else . end),samples:$samples,overrun:$overrun},
+     label_suffix:$label}'
 }
 
 status_event_json() {  # <observed-status-log> [<contract-path>]
@@ -643,7 +695,7 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json progress_json
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -688,6 +740,7 @@ task_json_lines() {
       snapshot_task_cleanup
       return 1
     }
+    progress_json=$(progress_json_for_task "$id" "$kind" "$remote_host" "$current_json")
     event_json=$(status_event_json "$status_log" "$STATE/$id.status")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     read -r current_state current_source < <(
@@ -771,6 +824,7 @@ task_json_lines() {
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
+      --argjson progress "$progress_json" \
       --argjson meta_path "$meta_json" \
       --argjson status_log "$status_json" \
       --argjson report "$report_json" \
@@ -800,6 +854,7 @@ task_json_lines() {
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+        progress:$progress,
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive

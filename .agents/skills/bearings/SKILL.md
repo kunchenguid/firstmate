@@ -16,7 +16,7 @@ Generate a complete current snapshot from the fleet's current state, so the capt
 Plain `/bearings` returns only the concise four-section chat digest.
 Only `/bearings file` writes the dated markdown report artifact and then returns the concise four-section chat digest linked to that report.
 Only `/bearings lavish` builds the interactive fleet board beside that digest, through `bin/fm-bearings-board.sh` (its header owns every board mechanic and the fm-bearings-board.v1 payload contract).
-A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, durable per-target reconcile-notify requests when the captured state needs them, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
+A digest/build invocation is operationally read-only apart from observational remote-ledger cache refreshes, the display-only progress observation records the snapshot advances (`bin/fm-progress-lib.sh`), durable per-target reconcile-notify requests when the captured state needs them, plus the explicit per-mode artifacts: the dated report in file mode, and in lavish mode the board file plus the answer binding and source registration that `bin/fm-bearings-board.sh build` records through their own owners.
 During that invocation it never tears down a task, merges a PR, dispatches new work, steers a worker, answers a decision, cleans up work, or mutates backlog or task state.
 Board answers are acted on later under the normal authority rules; this skill's board-wake section explicitly owns the guarded routing at that time.
 
@@ -76,7 +76,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
    - **Captain's Call** - every open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
-   - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
+   - **Underway** - each live direct report making progress, with its current state, its progress phase, its remaining-time guess written with the word guess, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
    - **Charted Next** - queued or gated work, including any main-inventory integrity warning, with each item's blocker, date, or integrity reason.
    After writing the file, return the concise four-section chat digest and include the report path or link without adding a fifth section.
    For a richer review surface, offer `/bearings lavish` when the report has enough structure to deserve one, but only after the required digest is ready.
@@ -129,6 +129,7 @@ Every `/bearings` chat response renders EXACTLY these four sections, in THIS ord
 2. **Recently Landed** - the bounded current recent-completions baseline: merged PRs, completed scouts, and finished local-only merges across the main fleet and every registered secondmate home.
    Empty-state: "No recent completions are in the current baseline."
 3. **Underway** - live work progressing on its own, one line of current state per direct report.
+   Each line also names the row's `phase` and its `eta_guess` from the snapshot, written with the word guess, for example "validating (review), guess ~25 min" or "implementing, guess 35 to 130 min"; a phase or guess the snapshot reports as unknown is written as unknown, and a bare number is never shown.
    Empty-state: "Nothing is underway."
 4. **Charted Next** - queued or gated work waiting on the fleet or a date, plus action-free fleet-integrity warnings, never on the captain.
    Empty-state: "Nothing is queued."
@@ -159,7 +160,7 @@ Rules that keep the contract unambiguous:
 
 ## Supervision discipline
 
-During a digest/build invocation, this skill changes no fleet state beyond observational remote-ledger cache refreshes, durable local per-target reconcile-notify requests, explicit report or board artifacts, binding, and source registration.
+During a digest/build invocation, this skill changes no fleet state beyond observational remote-ledger cache refreshes, display-only progress observation records, durable local per-target reconcile-notify requests, explicit report or board artifacts, binding, and source registration.
 Do not tear down a task, merge a PR, dispatch queued work, steer a worker, answer a queued decision, clean up work, or mutate any other `state/` or `data/` file during that invocation.
 If the state gathered for the digest suggests an action, name it in its section and leave it to the normal lifecycle and configured authority.
 On a later board wake, this read-only invocation rule yields to "Handling a board wake" and its guarded authority for captain-selected dispatches and merges.

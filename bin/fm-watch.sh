@@ -94,6 +94,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -133,6 +134,12 @@ mkdir -p "$STATE"
 # gate and the wake emission (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# Display-only progress phase and remaining-time guess: the per-poll tick below
+# (fm_progress_tick) re-reads each task's phase on a bounded cadence and refreshes
+# its Herdr workspace label suffix only when the phase or rounded estimate
+# changed. bin/fm-progress-lib.sh owns the model, records, and label grammar.
+# shellcheck source=bin/fm-progress-lib.sh
+. "$SCRIPT_DIR/fm-progress-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -2044,6 +2051,12 @@ EOF
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi
+
+  # Progress indicator tick, after every wake decision of this cycle so it can
+  # never delay one: bounded per-task phase re-reads on the
+  # FM_PROGRESS_REFRESH_SECS cadence and a label refresh only on change. Display
+  # only; a failure here warns and never changes what this cycle decided.
+  fm_progress_tick "$STATE" "$DATA" || true
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
