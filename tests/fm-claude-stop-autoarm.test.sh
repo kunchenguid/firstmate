@@ -554,7 +554,7 @@ test_reclaims_stale_session_lock_before_arming() {
 }
 
 test_stale_recovery_session_lease_timeout_publishes_failure() {
-  local dir holder out status started elapsed failure reset
+  local dir holder out status started elapsed failure reset claimant
   dir=$(make_primary_dir "$TMP_ROOT/stale-recovery-session-lease")
   : > "$dir/state/task.meta"
   printf '9999999\n' > "$dir/state/.lock"
@@ -572,6 +572,7 @@ test_stale_recovery_session_lease_timeout_publishes_failure() {
   failure=$(failure_epoch_path "$dir") \
     || fail "stalled stale recovery left no durable failure record"
   reset=$(failure_epoch_field "$dir" reset)
+  claimant=$(failure_epoch_field "$dir" claimant_pid)
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
 
@@ -580,9 +581,14 @@ test_stale_recovery_session_lease_timeout_publishes_failure() {
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed after stale recovery timed out"
   [ "$(failure_epoch_field "$dir" session_owner_pid)" = 9999999 ] \
     || fail "stale-recovery failure was not bound to the unchanged dead owner"
+  case "$claimant" in
+    ''|*[!0-9]*) fail "stalled stale recovery did not persist its authenticated claimant" ;;
+  esac
+  [ "$claimant" != 9999999 ] \
+    || fail "stalled stale recovery scoped its notice to the dead predecessor"
   assert_present "$failure" "stalled stale recovery did not persist its failed epoch"
-  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.9999999" \
-    "stalled stale recovery did not persist its owner-bound notice"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$claimant" \
+    "stalled stale recovery did not persist its claimant-bound notice"
   assert_contains "$out" "stale session lock recovery failed" \
     "stalled stale recovery did not deliver its failure reason"
   pass "auto-arm: stalled stale recovery publishes bounded owner-scoped failure state"
@@ -984,9 +990,11 @@ test_recovery_revalidates_bridged_owner_after_session_lease_wait() {
     "recovery armed after its authenticated foreground owner died"
   [ "$(failure_epoch_field "$dir" session_owner_pid)" = 9999999 ] \
     || fail "lease-wait owner-death failure was not fenced to the stale predecessor"
+  [ "$(failure_epoch_field "$dir" claimant_pid)" = "$owner" ] \
+    || fail "lease-wait owner-death failure did not persist its authenticated claimant"
   assert_present "$failure" "lease-wait owner death did not persist its failed epoch"
-  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.9999999" \
-    "lease-wait owner death did not persist its stale-owner notice"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+    "lease-wait owner death did not persist its claimant-scoped notice"
   assert_contains "$(cat "$out")" "stale session lock recovery failed" \
     "lease-wait owner death did not deliver its recovery failure"
   pass "auto-arm: stale recovery revalidates bridged ownership after lease waits"

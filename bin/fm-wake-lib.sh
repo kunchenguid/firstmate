@@ -2045,6 +2045,12 @@ fm_autoarm_failure_episode_current() {  # <state-dir> <marker-file>
   if [ -n "$ledger_owner" ]; then
     [ "$(cat "$state/.lock" 2>/dev/null || true)" = "$ledger_owner" ] || return 1
   fi
+  FM_AUTOARM_FAILURE_EPOCH=$FM_AUTOARM_GEN
+  FM_AUTOARM_FAILURE_OWNER=$FM_AUTOARM_OWNER
+  FM_AUTOARM_FAILURE_OUTCOME=$outcome
+  FM_AUTOARM_FAILURE_SESSION_OWNER=$ledger_owner
+  FM_AUTOARM_FAILURE_CLAIMANT=
+  FM_AUTOARM_FAILURE_PATH="$state/.claude-autoarm-epoch"
   FM_AUTOARM_FAILURE_EPISODE_RESET=$reset
   FM_AUTOARM_FAILURE_EPISODE_SESSION_OWNER=$episode_owner
   FM_AUTOARM_FAILURE_EPISODE_LOCK_OWNER=$ledger_owner
