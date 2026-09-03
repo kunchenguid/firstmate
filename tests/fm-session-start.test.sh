@@ -1465,10 +1465,14 @@ SH
 
 # The locked startup scan may need the same expensive current-state read that a
 # busy validation makes slow. It belongs to the detached startup worker, so the
-# digest must finish before this 8s answer exists; the answer then has to create
-# the ordinary durable inactive-outcome wake rather than disappear off-path.
+# digest must finish while that read is still outstanding; the answer then has to
+# create the ordinary durable inactive-outcome wake rather than disappear
+# off-path. The slow read is held open by this case rather than by a fixed sleep,
+# so "the digest did not wait for it" is decided by what had happened when the
+# digest returned and not by how fast the host was.
 test_inactive_reconcile_never_blocks_the_digest() {
-  local rec root home fakebin world worktree crew_state calls out started elapsed waited=0
+  local rec root home fakebin world worktree crew_state calls out waited=0
+  local release_gate read_finished
   rec=$(new_world inactive-reconcile-deferred)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1482,6 +1486,8 @@ EOF
   make_fake_ps_claude "$fakebin"
   fm_git_init_commit "$worktree"
 
+  release_gate="$world/slow-state-read.release"
+  read_finished="$world/slow-state-read.finished"
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -1495,7 +1501,15 @@ if [ "${1:-} ${2:-}" = 'axi status' ]; then
   else
     printf '%s\n' 'blocking' >> "${FM_FAKE_NM_CALLS:?}"
   fi
-  sleep 8
+  # Stay outstanding until the case releases this read. A caller that waits for
+  # it therefore waits indefinitely rather than for a fixed interval a loaded
+  # host could out-run. The tick bound only stops a broken case hanging forever.
+  ticks=0
+  while [ ! -e "${FM_FAKE_NM_RELEASE:?}" ] && [ "$ticks" -lt 300 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  : > "${FM_FAKE_NM_READ_FINISHED:?}"
   printf '%s\n' 'slow validation state answered'
 fi
 exit 0
@@ -1516,18 +1530,18 @@ SH
   touch -t 202001010000 "$home/state/slow-child.meta" \
     "$home/state/slow-child.status" "$home/state/slow-child.turn-ended"
 
-  started=$(date +%s)
   out=$(FM_BACKEND=tmux FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
-    FM_FAKE_NM_CALLS="$calls" FM_INACTIVE_RECONCILE_SECS=60 \
-    FM_INACTIVE_RECONCILE_BUDGET_SECS=10 FM_INACTIVE_CREW_STATE_BIN="$crew_state" \
+    FM_FAKE_NM_CALLS="$calls" FM_FAKE_NM_RELEASE="$release_gate" \
+    FM_FAKE_NM_READ_FINISHED="$read_finished" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=30 FM_INACTIVE_CREW_STATE_BIN="$crew_state" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  elapsed=$(( $(date +%s) - started ))
 
   assert_contains "$out" "SESSION START" "the digest did not complete"
-  [ "$elapsed" -lt 8 ] \
-    || fail "the digest waited ${elapsed}s for inactive reconciliation's 8s state read"
+  assert_absent "$read_finished" \
+    "the digest waited for inactive reconciliation's still-unreleased state read"
   [ "$(grep -c '^blocking$' "$calls" 2>/dev/null || true)" -eq 0 ] \
     || fail "the digest called the slow state reader on its blocking path"
+  : > "$release_gate"
 
   while ! grep -Fq $'\tcheck\tinactive-outcome:' "$home/state/.wake-queue" 2>/dev/null \
     && [ "$waited" -lt 150 ]; do

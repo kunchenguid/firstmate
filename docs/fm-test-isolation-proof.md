@@ -145,42 +145,85 @@ The family's clock is two long scripts that do not contend: `fm-pr-check-securit
 `bin/fm-test-isolation-proof.sh`'s own `--list-exclusions` keeps `fm-pr-check-security` and `fm-teardown` out of the mixed PORTABLE pool, where they would share a machine with unrelated lock and forge stress.
 Admitting them inside their own family is a different question and this proof answers it: the family's six scripts are safe with each other at four workers.
 
-### secondmate: refused
+### secondmate: admitted
 
 - Date: 2026-09-03
 - Command: `bin/fm-test-isolation-proof.sh --pool secondmate --jobs 4`
-- Result: three runs, 20 candidates, one clean and two failing on the same script.
+- Result: two consecutive runs, 21 candidates, 0 failures.
 
 | Run | Summary |
 |---|---|
-| 1 | `FM_ISOLATION_SUMMARY total=20 failed=0 concurrency=4 duration_ms=473233` |
-| 2 | `FM_ISOLATION_SUMMARY total=20 failed=1 concurrency=4 duration_ms=482261` |
-| 3 | `FM_ISOLATION_SUMMARY total=20 failed=1 concurrency=4 duration_ms=631533` |
+| 1 | `FM_ISOLATION_SUMMARY total=21 failed=0 concurrency=4 duration_ms=536586` |
+| 2 | `FM_ISOLATION_SUMMARY total=21 failed=0 concurrency=4 duration_ms=571247` |
 
-Both failures are `tests/fm-backlog-handoff.test.sh`, and both are its crash-recovery case: the script SIGKILLs a real `bin/fm-backlog-handoff.sh` mid-operation to assert that an interrupted move is recoverable, and under four workers the kill lands after the move instead of before it, so recovery reports `Task "pre-move-crash" not found in this backlog`.
-That reproduces on the same script in two runs of three, so it is a property of the script under concurrency rather than one bad sample, and the family stays serial.
-The other 19 scripts passed in every run, so the blocker is one crash-injection race and not shared secondmate state.
-Re-run this proof after that injection is made deterministic; the rest of the family is otherwise ready.
-The measured prize is large: the production runner ran `--family secondmate --jobs 1` in 1432.1s with 0 failures against about 478s of four-worker proof wall, so admission would return roughly 3x on the repo's second-largest family.
+An earlier proof on 2026-09-03 refused this family on `tests/fm-backlog-handoff.test.sh`, failing two runs of three with `Task "pre-move-crash" not found in this backlog`.
+The cause was in the case's crash injection, not in shared secondmate state.
+Its fake `tasks-axi` killed the handoff and then slept a fixed second before delegating to the real binary, expecting to be torn down during that pause.
+Nothing tore it down: the fake outlives the process it kills, so on a host slow enough for the case's next assertions to take longer than a second, the orphan woke up and completed the very move the case requires left undone, which then made the recovery step fail.
+Direct observation of the source and destination backlogs during the injected crash showed exactly that, the item moving one second after the crash while the case was still asserting.
 
-### session-bootstrap: refused
+The injection is now decided by observation rather than by a clock.
+`fm_fake_crash_injector` in `tests/lib.sh` drops an `fm-crash-inject <pid>` shim that signals the target and returns only once that process is observably gone, and the pre-move fake never delegates the move at all.
+All four crash injections in that file use it, so none of them is a wall-clock bet any more.
+Under a synthetic five-minute load average above 30, the case failed on the old injection and passed six of six on the new one, and the whole script passed end to end twice at that load.
+
+### session-bootstrap: admitted
 
 - Date: 2026-09-03
 - Command: `bin/fm-test-isolation-proof.sh --pool session-bootstrap --jobs 4`
-- Result: `FM_ISOLATION_SUMMARY total=11 failed=1 concurrency=4 duration_ms=357559`
+- Result: two consecutive runs, 11 candidates, 0 failures.
 
-The single failure is `tests/fm-session-start.test.sh` reporting `the digest waited 9s for inactive reconciliation's 8s state read`.
-That case asserts the digest does not block on a slow state read, so it measures elapsed time rather than shared state, and it is the same CPU-oversubscription class this document already records for `watcher-wake-lock`.
-The host carried a five-minute load average above 12 from unrelated work while the proof ran, well past the quiet four-worker condition the admitted families were proven under, so this result does not separate a real contention bug from an overloaded measurement.
-It is recorded as a refusal because admission requires a passing proof, and this harness never retries a failure into green.
-Re-run it on an otherwise idle host before deciding.
+| Run | Summary |
+|---|---|
+| 1 | `FM_ISOLATION_SUMMARY total=11 failed=0 concurrency=4 duration_ms=337928` |
+| 2 | `FM_ISOLATION_SUMMARY total=11 failed=0 concurrency=4 duration_ms=335204` |
 
-### unclassified: not attempted
+The earlier refusal was `tests/fm-session-start.test.sh` reporting `the digest waited 9s for inactive reconciliation's 8s state read`.
+That case proves the startup digest does not block on a slow current-state read, and it decided that by timing the whole digest against a fixed eight-second sleep, which a loaded host can exceed without the property being violated.
+The case now holds the slow read open instead: its fake answers only once the case releases it, and the case asserts, the moment the digest returns, that the read has not finished.
+A digest that waited would therefore wait indefinitely rather than for an interval a slow host can out-run, so the assertion is stronger than the elapsed-time bound it replaces and no longer reads the host's speed.
+Its scan budget was also raised to the maximum, because the previous value left two seconds of margin over the fixed sleep and was measuring the host rather than the deadline that `tests/fm-inactive-reconcile.test.sh` owns.
+Both proof runs above were taken while the machine carried a five-minute load average between 8 and 14, not on an idle host.
 
-`unclassified` owns about 12 minutes of the serial suite and was the third family targeted, but it cannot be proven as it stands.
-It currently holds `tests/fm-backend-herdr-focus-flash-e2e.test.sh`, a real-Herdr lab regression whose family should be `real-herdr-gated`, and `tests/fm-claude-stop-autoarm-live-e2e.test.sh`, an opt-in live-harness script whose family should be `live-harness-optin`.
-The first would put a live Herdr lab into a concurrent group that the repository deliberately keeps serial, and the second gate-skips on its first line, which this harness treats as a candidate that cannot prove concurrency.
-Correcting those two entries in `bin/fm-test-run.sh`'s family map is the prerequisite; moving the Herdr script also moves it out of the portable serial lane and into the required Herdr lane, which is a coverage change that belongs with someone able to exercise real Herdr.
+### standalone: admitted
+
+- Date: 2026-09-03
+- Command: `bin/fm-test-isolation-proof.sh --pool standalone --jobs 4`
+- Result: two consecutive runs, 28 candidates, 0 failures.
+
+| Run | Summary |
+|---|---|
+| 1 | `FM_ISOLATION_SUMMARY total=28 failed=0 concurrency=4 duration_ms=301792` |
+| 2 | `FM_ISOLATION_SUMMARY total=28 failed=0 concurrency=4 duration_ms=250230` |
+
+This family is the residual set that used to sit in `unclassified`, and it exists because the catch-all itself must never be admitted.
+`unclassified` is the family map's `*)` arm, so admitting it would silently grant concurrency to every test added afterwards, which is exactly the population with no proof.
+`standalone` enumerates its 28 members instead, and `unclassified` stays the always-serial home for anything nobody has classified yet.
+`tests/fm-test-run.test.sh` covers that split behaviorally: two `standalone` members run concurrently while an unmapped basename is refused under `--jobs` and still runs serially.
+
+Two scripts left the residual set rather than joining it.
+`tests/fm-backend-herdr-focus-flash-e2e.test.sh` is a real-Herdr lab regression and is now `real-herdr-gated`, which also moves it out of the portable serial lane and into the required Herdr lane; it had been gate-skipping on Linux CI, so that real-Herdr regression was not running anywhere.
+It was verified locally against herdr 0.8.2 through the guarded named non-default lab, reporting `steal_live=0 floor_verdict=0 default-session-tripwire=armed`, with the fleet's default session unchanged before and after.
+`tests/fm-claude-stop-autoarm-live-e2e.test.sh` gate-skips on its opt-in variable and is now `live-harness-optin`, since a candidate that gate-skips cannot prove concurrency.
+
+One member needs a current Pi to pass at all.
+`tests/fm-pi-branch-extension.test.sh` compares firstmate's supervision-branch extension against the stock renderers of the installed `@earendil-works/pi-coding-agent`, and the proof host's global install was stale at 0.81.1 while the published release was 0.84.4.
+On the stale package the case fails serially as well as concurrently, so it is a prerequisite rather than a concurrency result; both runs above pinned the current package with `FM_PI_PACKAGE_DIR`, and on a host whose global install is current the plain command reproduces them.
+
+## Production runner effect of the 2026-09-03 admissions
+
+Each family measured with `bin/fm-test-run.sh --family <name> --jobs <n>` on the same host, back to back, every run reporting 0 failures.
+These pairs are the whole-suite effect as well: the runner gives each admitted family its own concurrent phase and leaves everything else where it was, so admitting these three changes only their three phases.
+
+| family | scripts | `--jobs 1` | `--jobs 4` | speedup | recovered |
+|---|---:|---:|---:|---:|---:|
+| `secondmate` | 21 | 1233.1s | 453.4s | 2.72x | 779.7s |
+| `session-bootstrap` | 11 | 756.4s | 286.4s | 2.64x | 470.0s |
+| `standalone` | 28 | 724.6s | 261.1s | 2.78x | 463.5s |
+| total | 60 | 2714.1s | 1000.9s | 2.71x | 1713.2s (28.6 min) |
+
+No test was removed, weakened, or skipped to get there.
+The three families hold the same assertions they held before; what changed is one crash injection that no longer races, one elapsed-time assertion that no longer reads the host's speed, and a family map that no longer files a real-Herdr regression and an opt-in live script where they cannot run.
 
 ## Scope
 
@@ -203,4 +246,5 @@ bin/fm-test-isolation-proof.sh --pool watcher-wake-lock --jobs 4
 ```
 
 Run a family proof on an otherwise idle host.
-Two of the families recorded above failed on elapsed-time assertions rather than on shared state, and this harness deliberately never retries a failure into green, so a proof taken on a busy machine can only refuse a family it might have admitted.
+Families recorded above have failed on elapsed-time assertions rather than on shared state, and this harness deliberately never retries a failure into green, so a proof taken on a busy machine can only refuse a family it might have admitted.
+When such a failure turns out to be the assertion timing itself rather than contention, fix the assertion so it decides on an observed condition instead of a wall clock, and re-run: `session-bootstrap` was admitted that way, from proofs taken on a host that was not idle.
