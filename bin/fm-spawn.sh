@@ -1451,8 +1451,21 @@ launch_template() {
   esac
 }
 
+env_split_string_uses_claude_local() {
+  local word
+  while [ "$#" -gt 0 ]; do
+    word=$1
+    word=${word#\'}
+    word=${word#\"}
+    word=${word%\'}
+    word=${word%\"}
+    case "$word" in [A-Za-z_]*=*) shift ;; *) break ;; esac
+  done
+  case "${word:-}" in claude-local|*/claude-local) return 0 ;; *) return 1 ;; esac
+}
+
 raw_launch_uses_claude_local() {  # <raw-launch>
-  local launch=$1
+  local launch=$1 word
   # shellcheck disable=SC2086
   set -- $launch
   while [ "$#" -gt 0 ]; do
@@ -1473,11 +1486,20 @@ raw_launch_uses_claude_local() {  # <raw-launch>
             ;;
           -S|--split-string)
             shift
-            while [ "$#" -gt 0 ]; do
-              case "$1" in *claude-local*) return 0 ;; esac
-              shift
-            done
-            return 1
+            env_split_string_uses_claude_local "$@"
+            return $?
+            ;;
+          -S?*)
+            word=${1#-S}
+            shift
+            env_split_string_uses_claude_local "$word" "$@"
+            return $?
+            ;;
+          --split-string=*)
+            word=${1#--split-string=}
+            shift
+            env_split_string_uses_claude_local "$word" "$@"
+            return $?
             ;;
           -u|--unset|-C|--chdir) shift; [ "$#" -gt 0 ] || return 1; shift ;;
           -u?*|--unset=*|-C?*|--chdir=*|-i|--ignore-environment|-0|--null) shift ;;

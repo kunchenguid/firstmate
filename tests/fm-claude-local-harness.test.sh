@@ -315,6 +315,15 @@ test_raw_claude_local_commands_are_refused() {
   fm_test_spawn_brief "$home" "cl-raw-env-split-x1" "tiny brief"
   assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
     "cl-raw-env-split-x1" "env -S 'claude-local --model local-coder'"
+  fm_test_spawn_brief "$home" "cl-raw-env-split-attached-x1" "tiny brief"
+  assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
+    "cl-raw-env-split-attached-x1" "env -S'claude-local --model local-coder'"
+  fm_test_spawn_brief "$home" "cl-raw-env-long-split-x1" "tiny brief"
+  assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
+    "cl-raw-env-long-split-x1" "env --split-string 'claude-local --model local-coder'"
+  fm_test_spawn_brief "$home" "cl-raw-env-long-split-equals-x1" "tiny brief"
+  assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
+    "cl-raw-env-long-split-equals-x1" "env --split-string='claude-local --model local-coder'"
   assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
     "cl-raw-command-x1" "command claude-local --model local-coder"
 
@@ -323,7 +332,7 @@ test_raw_claude_local_commands_are_refused() {
   fm_test_spawn_brief "$home" "cl-raw-ordinary-x1" "tiny brief"
   fm_git_worktree "$project" "$worktree" "fm/cl-raw-ordinary-x1"
   FM_FAKE_PANE_PATH="$worktree" run_spawn "$home" "$fakebin" "$endpoint" "cl-raw-ordinary-x1" "$project" \
-    "env -i SAFE=1 unverified-runner --flag" --scout || {
+    "env -S 'echo claude-local'" --scout || {
       out=$(cat "$RUN_OUT")
       fail "an ordinary raw env launch was changed by the claude-local guard: $out"
     }
