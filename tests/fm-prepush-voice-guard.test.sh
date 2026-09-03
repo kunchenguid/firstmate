@@ -108,7 +108,9 @@ test_passes_legitimate_captain_and_house_vocabulary() {
     'feat(ahoy): guide captains through open decisions' \
     'Require shipshape routine acknowledgement' \
     'fix: keep active children underway beside a captain hold' \
-    'perf: the outer process-group kill moves to budget+1s'
+    'perf: the outer process-group kill moves to budget+1s' \
+    'docs: captain.md now records the fleet owner' \
+    '* captain.md gains a section'
   do
     fm_voice_commit "$tmp/repo" "$message"
   done
@@ -154,6 +156,9 @@ Captain, this also removes the second copy.') || rc=$?
 
   rc=0; out=$(fm_voice_text 'fix(ci): Captain. Fixed the scan') || rc=$?
   expect_code 1 "$rc" "a period address after a commit prefix was not refused"
+
+  rc=0; out=$(fm_voice_text 'fix(bin): bound the scan. Captain. Done.') || rc=$?
+  expect_code 1 "$rc" "a period address after a sentence boundary was not refused"
 
   rc=0; out=$(fm_voice_text 'Captain - fixed the scan') || rc=$?
   expect_code 1 "$rc" "a line-start spaced-dash address was not refused"
@@ -254,7 +259,15 @@ test_refuses_a_private_per_task_work_document() {
     "private work-document path named the wrong rule"
   assert_contains "$out" "data/alpha/report.md" \
     "refusal did not name the private work-document path"
-  pass "refuses a private per-task work-document path"
+
+  # A deeper path is exactly as private. A rule that stopped at two components
+  # would refuse the shallow leak above and pass this one.
+  rc=0
+  out=$(fm_voice_text 'docs: retire data/alpha/evidence/report.md after completion') || rc=$?
+  expect_code 1 "$rc" "a deeper private work-document path was not refused"
+  assert_contains "$out" "data/alpha/evidence/report.md" \
+    "refusal did not name the deeper private work-document path"
+  pass "refuses a private per-task work-document path at any depth"
 }
 
 test_refuses_a_private_review_artifact() {
@@ -266,7 +279,13 @@ test_refuses_a_private_review_artifact() {
     "review-artifact path named the wrong rule"
   assert_contains "$out" ".lavish/sample-board.html" \
     "refusal did not name the review-artifact path that matched"
-  pass "refuses a local review-artifact path"
+
+  rc=0
+  out=$(fm_voice_text 'docs: refresh .lavish/board/sample-board.html before the review') || rc=$?
+  expect_code 1 "$rc" "a deeper review-artifact path was not refused"
+  assert_contains "$out" ".lavish/board/sample-board.html" \
+    "refusal did not name the deeper review-artifact path"
+  pass "refuses a local review-artifact path at any depth"
 }
 
 test_passes_nonprivate_paths_and_work_document_words() {
@@ -274,13 +293,17 @@ test_passes_nonprivate_paths_and_work_document_words() {
 
   for message in \
     'docs: update data/backlog.md' \
+    'docs: update data/projects.md' \
+    'docs: update data/learnings.md' \
     'docs: update data/secondmates.md' \
+    'docs: touch tests/data/fixtures/x.txt' \
     'fix: clear state/alpha.status' \
     'fix: clear state/01ABCDEF.status' \
     'docs: describe projects/alpha' \
     'docs: document config/crew-harness' \
     'docs: explain the no-mistakes gate worktree (.no-mistakes/repos/)' \
     'feat(lavish): open a Lavish review surface for the plan' \
+    'fix(bin): keep typed Lavish comments' \
     'docs: report the outcome'
   do
     rc=0
