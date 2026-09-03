@@ -2538,12 +2538,22 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
+# Per-task temp root: ${TMPDIR:-/tmp}/fm-<id>/ with Go's build temp nested at
+# gotmp/. Go won't create GOTMPDIR, so mkdir before it is used; fm-teardown removes
+# the whole root through the tasktmp= line recorded below. Nested (not a bare
+# fm-<id>/gotmp) so other per-task temp can live alongside later, and teardown
+# cleans one deterministic path. The root honours the caller's TMPDIR like every
+# other mktemp site in bin/, so a test suite's private TMPDIR collects it instead
+# of the system temp tree; GOTMPDIR (not TMPDIR) stays the knob exported into the
+# pane, because TMPDIR is too broad (every program's temp, not just Go's). A
+# relaunch keeps the recorded root so the task never strands one under an older
+# TMPDIR.
+TASK_TMP=
+[ "$RELAUNCH" -eq 0 ] || TASK_TMP=$(fm_meta_get "$RELAUNCH_META" tasktmp)
+if [ -z "$TASK_TMP" ]; then
+  TASK_TMP=${TMPDIR:-/tmp}
+  TASK_TMP="${TASK_TMP%/}/fm-$ID"
+fi
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches

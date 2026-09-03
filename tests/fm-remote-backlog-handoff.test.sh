@@ -48,7 +48,7 @@ fm_remote_handoff_teardown() {
   done
   rm -rf -- "$TMP_ROOT" 2>/dev/null || true
 }
-trap fm_remote_handoff_teardown EXIT
+trap 'fm_remote_handoff_teardown; fm_test_cleanup' EXIT
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-job-lib.sh" \
   "$ROOT/bin/fm-remote-job-worker.sh" "$ROOT/bin/fm-remote-file.sh" \

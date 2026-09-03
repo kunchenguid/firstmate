@@ -22,6 +22,7 @@ cleanup() {
     FM_REMOTE_JOB_STATE="$TMP_ROOT/remote-jobs"
     fm_remote_job_stop_worker_tree "$pid" 2>/dev/null || true
   fi
+  fm_test_cleanup
   rm -rf -- "$TMP_ROOT"
 }
 trap cleanup EXIT

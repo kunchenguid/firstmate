@@ -63,6 +63,7 @@ cleanup() {
     kill "$worker_pid" 2>/dev/null || true
   fi
   rm -rf -- "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap cleanup EXIT
 

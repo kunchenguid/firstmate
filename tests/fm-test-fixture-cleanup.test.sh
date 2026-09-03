@@ -164,9 +164,37 @@ test_orphan_sweep_reaps_read_only_package_tree() {
   pass "the orphan sweep reaps read-only package fixtures"
 }
 
+test_suite_private_tmpdir_is_exported_and_gone_after_exit() {
+  local harness ambient child_out suite_tmpdir exported
+  harness=$(fm_test_tmproot fm-test-cleanup-tmpdir-harness)
+  ambient="$harness/ambient"
+  mkdir -p "$ambient"
+  child_out=$(TMPDIR="$ambient" bash -c '
+    # shellcheck source=tests/lib.sh
+    . "'"$LIB"'"
+    printf "%s\n" "$TMPDIR"
+    sh -c '"'"'printf "%s\n" "$TMPDIR"'"'"'
+    scratch=$(mktemp -d)
+    if [ -d "$scratch" ]; then printf "mid:present\n"; else printf "mid:missing\n"; fi
+  ')
+  suite_tmpdir=$(printf '%s\n' "$child_out" | sed -n '1p')
+  exported=$(printf '%s\n' "$child_out" | sed -n '2p')
+  case "$suite_tmpdir" in
+    "$ambient"/*) ;;
+    *) fail "sourcing lib.sh did not move TMPDIR under the ambient one (got '$suite_tmpdir')" ;;
+  esac
+  [ "$exported" = "$suite_tmpdir" ] || fail "the suite's private TMPDIR was not exported to child processes"
+  assert_contains "$child_out" "mid:present" \
+    "plain mktemp did not land in the suite's private TMPDIR while the suite was alive"
+  assert_absent "$suite_tmpdir" \
+    "the suite's private TMPDIR survived its owning process's normal exit"
+  pass "sourcing lib.sh exports a private TMPDIR that leaves with the suite"
+}
+
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_cleanup_registry_resists_precreation
 test_fixture_registration_failure_rolls_back_root
 test_orphan_sweep_respects_fixture_ownership
 test_orphan_sweep_reaps_read_only_package_tree
+test_suite_private_tmpdir_is_exported_and_gone_after_exit

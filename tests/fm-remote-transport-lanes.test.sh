@@ -44,6 +44,7 @@ cleanup_lane_fixture() {
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
   rm -rf -- "$TMP_ROOT"
+  fm_test_cleanup
 }
 trap cleanup_lane_fixture EXIT
 

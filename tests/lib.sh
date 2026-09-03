@@ -156,6 +156,22 @@ if [ "${FM_TEST_SKIP_ORPHAN_REAP:-0}" != 1 ]; then
   fm_test_reap_orphans
 fi
 
+# Every suite runs under a private TMPDIR of its own: a registered fixture root
+# under the ambient one, exported so the suite and every bin script it drives
+# (fm-spawn's per-task temp root among them) put their scratch where the same
+# EXIT/INT/TERM cleanup removes it, instead of piling up in the system temp
+# tree. A suite that arms its own EXIT trap must call fm_test_cleanup from it
+# (see the fixture-root note above), or this root outlives the suite. The
+# orphan sweep above already ran against the ambient TMPDIR, so a hard-killed
+# suite's private root is reaped on a later source like any other marked
+# fixture. Herdr lab state stays in the ambient location: bin/fm-herdr-lab.sh
+# refuses to stop or tear down a lab whose fleet-state tripwire is missing, so
+# that record must outlive a suite that dies with a lab still running.
+FM_HERDR_LAB_STATE_DIR=${FM_HERDR_LAB_STATE_DIR:-${TMPDIR:-/tmp}/fm-herdr-lab-${UID}}
+export FM_HERDR_LAB_STATE_DIR
+TMPDIR=$(fm_test_tmproot fm-suite) || return 1
+export TMPDIR
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to

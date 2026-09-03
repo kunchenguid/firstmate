@@ -32,7 +32,6 @@ set -u
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-cursor-harness)
-trap 'rm -rf "$TMP_ROOT"' EXIT
 
 # A fake cursor install tree with BOTH installed names, shaped exactly like the
 # real one: ~/.local/share/cursor-agent/versions/<version>/cursor-agent with

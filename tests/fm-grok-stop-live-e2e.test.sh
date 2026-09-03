@@ -74,6 +74,8 @@ preserve_on_failure() {
   local rc=$?
   if [ "$rc" -ne 0 ] && [ -n "$ACTIVE_LAB" ]; then
     echo "blocked: preserving failed isolated Grok cell at $ACTIVE_LAB" >&2
+  else
+    fm_test_cleanup
   fi
   exit "$rc"
 }
@@ -215,5 +217,6 @@ EOF
 
 run_cell native "$NATIVE_BIN"
 run_cell legacy "$LEGACY_BIN"
+fm_test_cleanup
 trap - EXIT
 echo "ok - Grok adaptive Stop real-process matrix passed with exact target cleanup and control-window survival"
