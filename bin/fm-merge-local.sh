@@ -10,6 +10,18 @@
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
 # Usage: fm-merge-local.sh <task-id>
+#
+# Context-contract gate (landing-only): when the branch carries project-code
+# changes for a KNOWN slug (explicit repo->slug map below), the slug's detail
+# record must exist in the home's data/projects/ dir with its 4-key YAML
+# frontmatter (milestone/focus/blocker/next_move); otherwise the landing is
+# REFUSED. The record lives in FM_HOME, outside the project repo, so it can
+# never appear in the branch diff itself: the worker refreshes that record
+# before landing and this gate verifies its presence here. Repos outside the
+# map warn and proceed. Teardown/cleanup paths are never gated by this script:
+# it only lands, it never cleans up.
+# Detail-dir override for tests: FM_DETAIL_DIR_OVERRIDE (default
+# "$FM_HOME/data/projects").
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,6 +78,39 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
   exit 1
+fi
+
+# Context-contract gate: repo basename -> known slug. Unknown repos warn only.
+slug_for_repo() {
+  case "$1" in
+    lia) printf 'lia-core' ;;
+    lia-mascot) printf 'lia-mascot' ;;
+    kg-hpmor) printf 'kg-hpmor' ;;
+    *) return 1 ;;
+  esac
+}
+
+DETAIL_DIR="${FM_DETAIL_DIR_OVERRIDE:-$FM_HOME/data/projects}"
+repo=${PROJ##*/}
+if slug=$(slug_for_repo "$repo"); then
+  touched=$(git -C "$PROJ" diff --name-only "$DEFAULT...$BRANCH" -- || true)
+  if [ -n "$touched" ]; then
+    detail="$DETAIL_DIR/$slug.md"
+    missing=""
+    [ -f "$detail" ] || missing="missing file"
+    for key in milestone focus blocker next_move; do
+      if [ -f "$detail" ] && ! grep -q "^$key:" "$detail"; then
+        missing="${missing:+$missing, }missing frontmatter key '$key'"
+      fi
+    done
+    if [ -n "$missing" ]; then
+      echo "REFUSED: $BRANCH touches project code under projects/$repo without a current detail record." >&2
+      echo "Update $detail ($missing), then retry." >&2
+      exit 1
+    fi
+  fi
+else
+  echo "warning: projects/$repo has no known slug; skipping the context-contract check." >&2
 fi
 
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
