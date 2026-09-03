@@ -227,6 +227,37 @@ test_ledger_delivery_downgrades_an_unestablished_claim() {
   pass "ledger delivery publishes an unestablished done claim as a blocker and an established one as done"
 }
 
+# A report about an UNSETTLED state must never be retired as though it were
+# settled. A claim published upward as unverified is corrected when the verifier
+# later establishes it, because the verdict is part of the event's identity and
+# not only of its wording - while a verdict that has not moved is still the same
+# event and stays deduplicated.
+test_a_later_established_claim_corrects_the_parents_record() {
+  local claim hash
+  claim='done: pr=https://example.test/owner/repo/pull/1 head=00112233445566778899aabbccddeeff00112233 - shipped'
+  make_world ledger-corrects; bind_secondmate local
+  write_child "$MATE" child "$claim"
+
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  grep -q '^blocked \[key=child-outcome-child-done-' "$MAIN/state/mate.status" \
+    || fail "an unestablished claim did not reach the parent as a blocker: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(grep -c 'child-outcome-child-done-' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "an unchanged verdict was reported twice"
+
+  hash=$(fm_done_claim_hash "$claim") || fail "could not compute the claim identity"
+  printf 'fm-done-verdict-v1\nverified\n%s\n%s\nPR at the claimed head\n' \
+    "$hash" "$(date +%s)" > "$MATE/state/child.done-verdict"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  grep -q '^done \[key=child-outcome-child-done-' "$MAIN/state/mate.status" \
+    || fail "an established claim never corrected the parent's blocked record: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(grep -c '^done \[key=child-outcome-child-done-' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the corrected line was republished on a later poll"
+  pass "a claim established after it was reported unverified corrects the parent's record once"
+}
+
 # A busy child cannot keep later ledger outcomes from being visited, and is
 # retried on the next poll after its lifecycle lock becomes available.
 test_busy_child_does_not_starve_later_ledger_outcomes() {
@@ -826,6 +857,7 @@ test_reconciliation_never_calls_forge() {
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
 test_ledger_delivery_downgrades_an_unestablished_claim
+test_a_later_established_claim_corrects_the_parents_record
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery

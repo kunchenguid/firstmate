@@ -1387,6 +1387,57 @@ test_a_close_contradicts_only_a_claim_about_the_pr_that_closed() {
   pass "a close contradicts only a claim about the PR that actually closed"
 }
 
+# The verdict and the words are two statements of one fact, so they must not be
+# able to disagree. A close under a claim about a different PR, or under a claim
+# that names no PR at all, writes no contradiction and must not tell the captain
+# the task claims done about the PR that closed either.
+test_a_close_narrates_only_what_it_contradicts() {
+  local dir other queue
+  other=https://github.com/o/r/pull/8
+
+  dir=$(make_claim_world close-narration-other "done: pr=$PR_A head=$HEAD_A - shipped" \
+    verified "the PR is open at the claimed head") \
+    || fail "the established-claim fixture failed"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$other" poll closed-unmerged \
+    || fail "the close outcome could not be published"
+  queue=$(cat "$dir/state/.wake-queue" 2>/dev/null || true)
+  case "$queue" in
+    *"claims done but"*|*"contradicting the done record"*)
+      fail "a close of another PR was narrated as contradicting the task's claim: $queue" ;;
+  esac
+  case "$queue" in
+    *"PR closed without merging"*) ;;
+    *) fail "a close of another PR was not narrated at all: $queue" ;;
+  esac
+
+  dir=$(make_claim_world close-narration-no-pr 'done: report=data/task-v/report.md - scouted') \
+    || fail "the no-PR-claim fixture failed"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
+    || fail "the close outcome could not be published under a claim naming no PR"
+  assert_absent "$dir/state/task-v.done-verdict" \
+    "a close contradicted a claim that names no PR at all"
+  queue=$(cat "$dir/state/.wake-queue" 2>/dev/null || true)
+  case "$queue" in
+    *"contradicting the done record"*)
+      fail "a claim naming no PR was narrated as contradicted: $queue" ;;
+  esac
+
+  dir=$(make_claim_world close-narration-same "done: pr=$PR_A head=$HEAD_A - shipped" \
+    verified "the PR is open at the claimed head") \
+    || fail "the established-claim fixture failed"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
+    || fail "the close outcome could not be published"
+  fm_done_claim_status "$dir/state" task-v
+  [ "$FM_DONE_CLAIM_STATE" = contradicted ] \
+    || fail "a close of the claimed PR left the claim reported as $FM_DONE_CLAIM_STATE"
+  queue=$(cat "$dir/state/.wake-queue" 2>/dev/null || true)
+  case "$queue" in
+    *"contradicting the done record"*) ;;
+    *) fail "a close of the claimed PR was not narrated as a contradiction: $queue" ;;
+  esac
+  pass "a close narrates a contradiction only where it records one"
+}
+
 # Neither arm may invent a verdict for a task that has asserted nothing. The
 # poll is armed at PR registration, long before any claim.
 test_a_terminal_outcome_invents_no_verdict_without_a_claim() {
@@ -1728,6 +1779,7 @@ test_only_the_task_itself_may_assert_its_claim
 test_a_merge_marks_an_established_claim_stale
 test_a_close_contradicts_an_established_claim_in_the_record
 test_a_close_contradicts_only_a_claim_about_the_pr_that_closed
+test_a_close_narrates_only_what_it_contradicts
 test_a_terminal_outcome_invents_no_verdict_without_a_claim
 test_a_failed_verdict_write_still_publishes_the_outcome
 test_verdict_write_precedence_keeps_the_stronger_statement

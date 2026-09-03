@@ -410,7 +410,33 @@ report_child_ledger_locked() { # <id> <meta>
   state=$(status_line_verb "$last")
   pr=$(pr_for_task "$meta" "$status" "$last")
   incarnation=$(meta_incarnation "$meta")
-  fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
+  # The same rule report_to_parent applies, at the other delivery path into the
+  # parent channel: a `done` the child only ASSERTED is not a completion the
+  # parent may record as one. It is published as a blocker naming what the claim
+  # actually is, so the parent's durable record cannot say done while the child's
+  # own home says done-unverified. A `failed` line, and a `done` whose verdict IS
+  # verified, are unchanged.
+  #
+  # The verdict is therefore part of this event's IDENTITY, not only of its
+  # wording, and that is what the fingerprint below carries. A report about an
+  # unestablished claim is a report about an UNSETTLED state, and retiring it as
+  # though it were settled is how a pessimistic record rots: a child reported
+  # upward as `claim=unverified` while its PR was still unregistered would stay
+  # blocked on the parent's record forever once bin/fm-pr-check.sh established
+  # the claim, because the ledger line it was computed from never changed. With
+  # the verdict in the identity, a later establishment is a genuinely NEW event
+  # that publishes a corrected line, while a report whose verdict has not moved
+  # is still the same event and stays deduplicated exactly as before.
+  verb=$state
+  claim=
+  if [ "$state" = "done" ]; then
+    fm_done_claim_status "$STATE" "$id"
+    case "$FM_DONE_CLAIM_STATE" in
+      verified|none) ;;
+      *) verb=blocked; claim=$FM_DONE_CLAIM_STATE ;;
+    esac
+  fi
+  fingerprint=$(sha256_text "$incarnation|$id|$state|$claim|ledger|$last")
   previous=$(grep -v '^[[:space:]]*$' "$status" 2>/dev/null \
     | tail -2 | awk 'NR == 1 { first = $0 } NR == 2 { print first }' || true)
   predecessor_head=$(sha256_text "$previous")
@@ -429,22 +455,6 @@ report_child_ledger_locked() { # <id> <meta>
   mode=$(clean_field "$(meta_field "$meta" mode)")
   yolo=$(clean_field "$(meta_field "$meta" yolo)")
   data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-  # The same rule report_to_parent applies, at the other delivery path into the
-  # parent channel: a `done` the child only ASSERTED is not a completion the
-  # parent may record as one. It is published as a blocker naming what the claim
-  # actually is, so the parent's durable record cannot say done while the child's
-  # own home says done-unverified. A `failed` line, and a `done` whose verdict IS
-  # verified, are unchanged. The record and its key still carry the ledger's own
-  # state, so dedup is untouched; only the leading verb and one extra field move.
-  verb=$state
-  claim=
-  if [ "$state" = "done" ]; then
-    fm_done_claim_status "$STATE" "$id"
-    case "$FM_DONE_CLAIM_STATE" in
-      verified|none) ;;
-      *) verb=blocked; claim=$FM_DONE_CLAIM_STATE ;;
-    esac
-  fi
   line="$verb [key=$outcome_key]: child $id $state: $note"
   [ -z "$pr" ] || line="$line pr=$pr"
   [ -z "$mode" ] || line="$line mode=$mode"

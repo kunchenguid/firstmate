@@ -5,12 +5,14 @@
 # `done:` record is still true:
 #   merged           the PR landed.
 #   closed-unmerged  the PR was closed WITHOUT merging. When the task holds a
-#                    terminal `done:` record, that record has silently stopped
-#                    being true, and reporting the contradiction is the failure
-#                    this carries. The poll is armed at PR registration, well
-#                    before any terminal claim, so this outcome is also reached
-#                    with no claim on record; the publication then reports the
-#                    close plainly rather than inventing a claim to contradict.
+#                    terminal `done:` record ABOUT THAT PR, that record has
+#                    silently stopped being true, and reporting the contradiction
+#                    is the failure this carries. The poll is armed at PR
+#                    registration, well before any terminal claim, and a reused
+#                    task may stand on a claim about an earlier PR, so this
+#                    outcome is also reached with no claim to contradict; the
+#                    publication then reports the close plainly rather than
+#                    inventing a claim to contradict.
 #
 # Publishing is only half of it: this is also where the task's DURABLE verdict
 # record is corrected, because this is the one site that observes the outcome
@@ -74,7 +76,7 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 # than treat it as success: the merge landed and the record did not.
 fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outcome>]
   local home=$1 state=$2 id=$3 url=$4 origin=$5 outcome=${6:-merged}
-  local self_rc=0 destination='' line lock status=0 wake_note claimed=0
+  local self_rc=0 destination='' line lock status=0 wake_note claimed=0 claims_this_pr=0
   local provider host path number claim_state='' claim_probe='' claim_hash=''
   local claim_rest='' claim_pr='' claim_verdict='' claim_reason=''
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
@@ -142,18 +144,29 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   # a task that has asserted nothing would make this publication itself the
   # unfounded claim the whole verdict path exists to stop.
   #
-  # The close arm carries one further condition the merge arm does not need, and
-  # the asymmetry is deliberate rather than an oversight. `contradicted` is
-  # positive evidence of falsity and is unoverwritable short of a fresh
+  # "This task's standing claim is about the PR that just closed" is ONE fact, so
+  # it is decided once here and every consumer below reads this variable. The
+  # verdict and the narration are two statements of that same fact - a durable
+  # `contradicted` record and the words the captain and the parent channel are
+  # told - and they came apart once already, inside the very commit that added
+  # `claim_pr` to hold them together: the record learned the narrower test while
+  # the wording was left on "a claim exists". Neither may be changed without the
+  # other, which is why neither re-derives the test.
+  #
+  # Why the close arm needs the test and the merge arm does not. `contradicted`
+  # is positive evidence of falsity and is unoverwritable short of a fresh
   # `verified`, so it may only be recorded against a claim about the very PR
   # whose close was observed. A task reused for a second PR still standing on an
   # established claim about the first would otherwise have that claim marked
-  # false by an observation about a different object. `stale` needs no such test:
-  # it only asks the next gate to re-verify against the world that now exists,
-  # which is harmless whichever claim is standing.
+  # false, and be announced as claiming done about a PR it never named. `stale`
+  # needs no such test: it only asks the next gate to re-verify against the world
+  # that now exists, which is harmless whichever claim is standing.
+  if [ "$claimed" -eq 1 ] && [ "$claim_pr" = "$provider $host $path $number" ]; then
+    claims_this_pr=1
+  fi
   if [ "$claimed" -eq 1 ] && [ -n "$claim_hash" ]; then
     if [ "$outcome" != merged ]; then
-      if [ "$claim_pr" = "$provider $host $path $number" ]; then
+      if [ "$claims_this_pr" -eq 1 ]; then
         claim_verdict=contradicted
         claim_reason="$FM_PR_URL was closed without merging, so this task is not done"
       fi
@@ -164,7 +177,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   fi
   if [ "$outcome" = merged ]; then
     wake_note="check: merge landed: $id $FM_PR_URL"
-  elif [ "$claimed" -eq 1 ]; then
+  elif [ "$claims_this_pr" -eq 1 ]; then
     wake_note="check: PR closed without merging, contradicting the done record: $id $FM_PR_URL"
   else
     wake_note="check: PR closed without merging: $id $FM_PR_URL"
@@ -172,7 +185,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   if destination=$(fm_parent_channel_destination "$home" "$state"); then
     if [ "$outcome" = merged ]; then
       line="done [key=merged-$id]: merged $id $FM_PR_URL"
-    elif [ "$claimed" -eq 1 ]; then
+    elif [ "$claims_this_pr" -eq 1 ]; then
       line="blocked [key=closed-unmerged-$id]: $id claims done but $FM_PR_URL was closed without merging"
     else
       line="blocked [key=closed-unmerged-$id]: $id had its PR $FM_PR_URL closed without merging"
