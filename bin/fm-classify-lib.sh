@@ -1570,6 +1570,14 @@ EOF
 # last line is the captured endpoint.
 status_unread_span_endpoint_through() {  # <status-file> <captured-end-offset> <n>
   local f=$1 captured_end=$2 want=$3 offset span_file consumed=0 seen=0 line bytes
+  # The cursor is a BYTE offset, and ${#line} below counts CHARACTERS under any
+  # UTF-8 locale. A worker's prose is arbitrary text, so one multibyte character
+  # anywhere in a partly presented span would land the committed cursor mid-line
+  # and make the next drain read the tail of an already-presented line as a whole
+  # new status line - a fabricated line, in the one surface whose whole purpose
+  # is showing a worker's words faithfully. Counting in C makes the arithmetic
+  # bytes; bash restores the caller's locale when this function returns.
+  local LC_ALL=C
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   case "$captured_end" in ''|*[!0-9]*) return 1 ;; esac
   case "$want" in ''|*[!0-9]*) return 1 ;; esac

@@ -76,6 +76,17 @@
 # left to each arm's care: a `contradicted` verdict must carry the observation it
 # contradicts with, and one that carries none is recorded as `unverified`.
 #
+# There is a fourth verdict this script never reaches for and must still expect
+# to find in the record it is re-judging: `stale`. Terminal evidence about a
+# claim has THREE shapes, not two - absence of evidence (`unverified`), positive
+# evidence of falsity (`contradicted`), and the world having CHANGED under a
+# verdict that was true when it was made (`stale`). Only the site that observes
+# a PR reach a terminal state can see the third, so bin/fm-merge-outcome-lib.sh
+# writes it when a merge lands under an established claim. What that record asks
+# for is exactly this script: `stale` is not established, so every gate re-runs
+# the verifier against the world that now exists. See bin/fm-done-claim-lib.sh
+# for the three shapes and the write precedence that keeps them apart.
+#
 # The verdict record binds to the exact claim line it judged, so appending a new
 # `done:` line invalidates it rather than inheriting its verdict.
 set -u

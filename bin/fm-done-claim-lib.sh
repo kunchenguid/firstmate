@@ -26,12 +26,37 @@
 #
 # Verdict record: state/<id>.done-verdict, five lines,
 #   fm-done-verdict-v1
-#   <verified|unverified|contradicted>
+#   <verified|unverified|contradicted|stale>
 #   <sha256 of the exact claim line the verdict judged>
 #   <epoch seconds when it was established>
 #   <single-line reason>
 # The claim hash binds a verdict to one exact claim, so appending a new `done:`
 # line invalidates the old verdict instead of inheriting it.
+#
+# THE THREE SHAPES OF TERMINAL EVIDENCE. Evidence about a standing claim comes in
+# three shapes, not two, and conflating the third with the first is what let a
+# `done` record survive the close of its own PR:
+#
+#   1. Absence of evidence - we could not check. The forge was unreachable, a
+#      tool was off PATH, a reflog had been pruned, a validation run had aged
+#      out. The world has not changed; we simply failed to look. This must NEVER
+#      downgrade a standing verdict. It is `unverified`.
+#   2. Positive evidence of falsity - we looked and the claim is false. The PR
+#      was closed without merging. This is `contradicted`, and it overwrites
+#      anything.
+#   3. The world changed - the PR merged, possibly at a head nobody verified.
+#      The standing verdict is neither wrong nor still valid: it is a true
+#      statement about a world that no longer exists. This is `stale`, a
+#      distinct third state. The rule protecting a record from an outage was
+#      written for shape 1; it was never meant to preserve a verdict about a
+#      superseded world.
+#
+# `stale` is not established. Every consumer treats it the way it treats
+# `unverified` - bin/fm-crew-state.sh reports `done-unverified`, and
+# bin/fm-teardown.sh's record-first gate re-runs the verifier rather than
+# passing on it, which is the point: the expensive check is deferred to the gate
+# that actually needs the answer. The write precedence that keeps the three
+# apart is stated once, on fm_done_verdict_write below.
 #
 # Read-only apart from fm_done_verdict_write. Sourced by bin/fm-verify-done.sh,
 # bin/fm-crew-state.sh, bin/fm-teardown.sh, bin/fm-dod-lib.sh, bin/fm-brief.sh
@@ -207,36 +232,53 @@ fm_done_verdict_resolve() {  # <verdict> <reason> [<observed>]
   FM_DONE_VERDICT_RESOLVED_REASON="nothing was observed that contradicts the claim, so it is not established either way: $reason"
 }
 
-# 0 when a durable record already establishes THIS exact claim as verified. Run
-# in a subshell so reading it does not clobber a caller's FM_DONE_VERDICT* view.
-_fm_done_verdict_already_verified() {  # <state> <task-id> <claim-hash>
+# The verdict a durable record currently holds for THIS exact claim, or empty
+# when no record stands for it. Run in a subshell so reading it does not clobber
+# a caller's FM_DONE_VERDICT* view.
+_fm_done_verdict_standing() {  # <state> <task-id> <claim-hash>
   (
-    fm_done_verdict_read "$1" "$2" || exit 1
-    [ "$FM_DONE_VERDICT" = verified ] || exit 1
-    [ "$FM_DONE_VERDICT_CLAIM_HASH" = "$3" ] || exit 1
+    fm_done_verdict_read "$1" "$2" || exit 0
+    [ "$FM_DONE_VERDICT_CLAIM_HASH" = "$3" ] || exit 0
+    printf '%s' "$FM_DONE_VERDICT"
   )
 }
 
-# Write the durable verdict record, with one refusal: an `unverified` verdict
-# never overwrites a record that already establishes the SAME claim as
-# `verified`. Unverified is only the absence of evidence - a forge that could
-# not be reached, a tool missing from PATH - so letting it overwrite would let a
-# transient outage un-establish work that was genuinely established. A
-# `contradicted` verdict still overwrites, because that is positive evidence of
-# falsity. The refusal protects only the DURABLE record: the run that observed
-# the transient unverified result still prints and exits with it (see finish()
-# in bin/fm-verify-done.sh), so nothing hides the outage from its caller.
-# Returns 0 for that refusal, because the record already holds a stronger
-# verdict for this claim and there is nothing left to record.
+# Write the durable verdict record, subject to the write precedence stated at
+# the top of this file: an incoming verdict never replaces a standing one that
+# says something stronger about the SAME claim.
+#
+#   contradicted  always written. Positive evidence of falsity outranks
+#                 everything, including a `verified` established earlier.
+#   verified      always written. It is the verifier's fresh look at the world.
+#   stale         written unless the standing record is already `contradicted`,
+#                 which is the stronger statement. Stale says the world moved
+#                 past what was established, not that the claim was false.
+#   unverified    written only when nothing stands for this claim, or what
+#                 stands is itself `unverified`. Absence of evidence is not
+#                 evidence: a forge that could not be reached or a tool missing
+#                 from PATH must never un-establish, un-contradict, or un-stale
+#                 a record, because the world did not change - we failed to look.
+#
+# The precedence protects only the DURABLE record: the run that observed the
+# refused verdict still prints and exits with it (see finish() in
+# bin/fm-verify-done.sh), so nothing hides an outage from its caller. A refusal
+# returns 0, because the record already holds the stronger verdict for this
+# claim and there is nothing left to record.
 fm_done_verdict_write() {  # <state> <task-id> <verdict> <claim-hash> <reason>
-  local state=$1 id=$2 verdict=$3 hash=$4 reason=$5 path tmp
-  case "$verdict" in verified|unverified|contradicted) ;; *) return 2 ;; esac
+  local state=$1 id=$2 verdict=$3 hash=$4 reason=$5 path tmp standing
+  case "$verdict" in verified|unverified|contradicted|stale) ;; *) return 2 ;; esac
   case "$hash" in *[!0-9a-f]*|'') return 2 ;; esac
   [ "${#hash}" -eq 64 ] || return 2
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  if [ "$verdict" = unverified ] && _fm_done_verdict_already_verified "$state" "$id" "$hash"; then
-    return 0
-  fi
+  standing=$(_fm_done_verdict_standing "$state" "$id" "$hash")
+  case "$verdict" in
+    unverified)
+      case "$standing" in ''|unverified) ;; *) return 0 ;; esac
+      ;;
+    stale)
+      [ "$standing" != contradicted ] || return 0
+      ;;
+  esac
   path=$(fm_done_verdict_path "$state" "$id")
   [ ! -L "$path" ] || return 1
   umask 077
@@ -274,7 +316,7 @@ fm_done_verdict_read() {  # <state> <task-id>
   fi
   exec 7<&-
   [ "$version" = "$FM_DONE_VERDICT_VERSION" ] || return 1
-  case "$verdict" in verified|unverified|contradicted) ;; *) return 1 ;; esac
+  case "$verdict" in verified|unverified|contradicted|stale) ;; *) return 1 ;; esac
   case "$hash" in *[!0-9a-f]*|'') return 1 ;; esac
   [ "${#hash}" -eq 64 ] || return 1
   case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
@@ -296,6 +338,9 @@ fm_done_verdict_read() {  # <state> <task-id>
 #                 legacy claim), no verdict yet, a verdict for a superseded
 #                 claim, or a verifier that could not reach its sources.
 #   contradicted  the claim was established and is false.
+#   stale         the claim was established, and its PR then reached a terminal
+#                 state the establishment did not cover. Not established: the
+#                 verdict is a true statement about a superseded world.
 #
 # Pure read; returns 0 whatever the outcome, so a caller branches on the state
 # rather than on an exit code.

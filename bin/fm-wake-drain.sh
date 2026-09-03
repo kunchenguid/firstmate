@@ -345,11 +345,15 @@ EOF
   fi
 }
 
-# How many unrecognised lines one drain prints before it starts counting them
-# instead. Deliberately bounded where `note:` lines are not: a note is a
-# deliberate captain-facing answer, while unrecognised prose is a worker writing
-# into the wrong channel, and one chatty worker must not be able to bury the
-# rest of the drain. The count still says how many were held back, and the
+# How many unrecognised lines one TASK's unread span prints before the drain
+# starts counting them instead. The budget is per task, reset at each task
+# transition: a single per-drain budget would let one chatty worker consume it
+# and defer every alphabetically later task's prose behind itself, drain after
+# drain, which is the starvation this cap exists to prevent rather than cause.
+# Deliberately bounded where `note:` lines are not: a note is a deliberate
+# captain-facing answer, while unrecognised prose is a worker writing into the
+# wrong channel, and one chatty worker must not be able to bury the rest of the
+# drain. The count still says how many were held back, and the
 # presentation cursor is held at the last line this drain actually showed, so
 # the rest re-present on the next drain rather than being skipped past.
 UNRECOGNISED_STATUS_MAX=${FM_DRAIN_UNRECOGNISED_MAX:-10}
@@ -417,6 +421,7 @@ print_unread_status_section() {
       current=$task
       through=0
       held_back=0
+      unrecognised=0
     fi
     if status_line_is_unrecognized "$line"; then
       unrecognised=$((unrecognised + 1))

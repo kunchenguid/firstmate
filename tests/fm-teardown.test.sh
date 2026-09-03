@@ -49,6 +49,8 @@
 #   (z5) contradicted claim + --force                   -> ALLOW  (escape hatch)
 #   (z6) established claim, verifier's sources then gone -> ALLOW  (the record stands)
 #   (z7) same blinded world with NO record standing     -> REFUSE (unverified)
+#   (z8) a `stale` record, verifier blinded             -> REFUSE (not established)
+#   (z9) verified record, then the PR closed unmerged   -> REFUSE (contradicted)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -2890,6 +2892,71 @@ test_an_established_claim_survives_losing_the_verifier_sources() {
 
 # The other half of the same rule: deferring to the record is not deferring to
 # nothing. With no record standing, the identical blinded world still refuses.
+# A record-first gate is only safe while the record itself stays honest. These
+# two pin the other half: a verdict that has stopped describing the world must
+# not carry a task through cleanup on the strength of what it used to say.
+seed_verdict_record() {  # <case-dir> <verdict> <reason>
+  local case_dir=$1 verdict=$2 reason=$3 claim hash
+  # shellcheck source=bin/fm-done-claim-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-done-claim-lib.sh"
+  claim=$(fm_done_claim_last "$case_dir/state/task-x1.status")
+  [ -n "$claim" ] || fail "the fixture wrote no terminal claim to bind a verdict to"
+  hash=$(fm_done_claim_hash "$claim") || fail "the claim could not be hashed"
+  fm_done_verdict_write "$case_dir/state" task-x1 "$verdict" "$hash" "$reason" \
+    || fail "the $verdict record could not be seeded"
+}
+
+# `stale` is not established. The record-first gate must fall through to the
+# verifier for it, which is the whole point: the expensive check is deferred to
+# the gate that actually needs the answer, and here that check cannot be made.
+test_a_stale_record_does_not_carry_a_task_through_cleanup() {
+  local case_dir rc=0 head
+  case_dir=$(make_claim_case claim-stale "placeholder")
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$head" \
+    > "$case_dir/state/task-x1.status"
+  seed_verdict_record "$case_dir" stale 'the PR merged after this claim was established'
+  blind_the_local_only_verifier "$case_dir"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "a stale record carried a task through cleanup without re-verification"
+  assert_grep "could not be established" "$case_dir/stderr" \
+    "the refusal did not say the claim could not be established"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "the stale refusal erased the durable task record"
+  pass "a stale record sends the gate back to the verifier instead of passing"
+}
+
+# The three-week rot, end to end at the gate: a claim established while its PR
+# was open, then closed unmerged. The close must have corrected the record, so
+# cleanup refuses rather than passing on what the record used to say.
+test_a_closed_pr_stops_its_own_done_record_carrying_cleanup() {
+  local case_dir rc=0 head
+  case_dir=$(make_claim_case claim-closed "placeholder")
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$head" \
+    > "$case_dir/state/task-x1.status"
+  seed_verdict_record "$case_dir" verified 'the PR is open at the claimed head'
+  # shellcheck source=bin/fm-merge-outcome-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-merge-outcome-lib.sh"
+  FM_HOME="$case_dir" fm_merge_outcome_report "$case_dir" "$case_dir/state" task-x1 \
+    https://github.com/o/r/pull/7 poll closed-unmerged \
+    || fail "the close outcome could not be published"
+  blind_the_local_only_verifier "$case_dir"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "a claim whose PR was closed unmerged was torn down as done"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "the refusal erased the durable task record"
+  pass "a PR closed without merging stops its own done record carrying cleanup"
+}
+
 test_an_unestablished_claim_still_refuses_without_a_record() {
   local case_dir rc=0 head
   case_dir=$(make_claim_case claim-unestablished "placeholder")
@@ -2932,6 +2999,8 @@ test_established_claim_allows_teardown
 test_force_overrides_a_contradicted_claim
 test_an_established_claim_survives_losing_the_verifier_sources
 test_an_unestablished_claim_still_refuses_without_a_record
+test_a_stale_record_does_not_carry_a_task_through_cleanup
+test_a_closed_pr_stops_its_own_done_record_carrying_cleanup
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

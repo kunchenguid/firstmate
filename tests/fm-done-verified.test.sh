@@ -50,6 +50,12 @@
 #       the shape this fleet actually produces: the branch EXISTS at the spawn
 #       base because the brief has the worker create it before any work
 #   (z) a scout report present behind a symlink is unverified, not contradicted
+#   (ad) a merge marks an established claim stale; a close contradicts it; and
+#        neither invents a verdict for a task that claimed nothing
+#   (ae) verdict write precedence: absence never downgrades, falsity outranks
+#        everything, and a changed world does not soften a contradiction
+#   (af) a held-back span containing multibyte prose presents whole lines only
+#   (ag) the unrecognised cap is per task, so one chatty worker starves nobody
 #   (aa) a branch whose creation reflog entry has expired is unverified, not
 #        contradicted: the oldest SURVIVING entry is not the creation point
 #   (ab) a contradiction must carry the observation it contradicts with; one
@@ -995,6 +1001,222 @@ test_capped_lines_return_even_when_a_recognised_line_follows_them() {
   pass "held-back prose survives a recognised line printed later in the same span"
 }
 
+# --- the three shapes of terminal evidence -----------------------------------
+# A verdict is a statement about a world. Absence of evidence must never
+# downgrade one; positive evidence of falsity outranks everything; and a world
+# that has CHANGED under a verdict leaves it neither wrong nor still valid,
+# which is the third shape the record now names. The site that observes a PR
+# reach a terminal state is the only one that can see the third, so these drive
+# it through fm_merge_outcome_report rather than through the verifier.
+
+HEAD_A=00112233445566778899aabbccddeeff00112233
+PR_A=https://github.com/o/r/pull/7
+
+# A world holding one terminal claim, optionally with a verdict already
+# standing for it. Echoes the state dir; the caller reads the record back
+# through the library rather than through a global, because this runs inside a
+# command substitution.
+make_claim_world() {  # <name> <claim-line> [<standing-verdict> <reason>]
+  local name=$1 claim=$2 verdict=${3:-} reason=${4:-} dir state hash
+  dir="$TMP_ROOT/$name"
+  state="$dir/state"
+  mkdir -p "$state"
+  printf '%s\n' "$claim" > "$state/task-v.status"
+  if [ -n "$verdict" ]; then
+    hash=$(fm_done_claim_hash "$claim") || return 1
+    fm_done_verdict_write "$state" task-v "$verdict" "$hash" "$reason" || return 1
+  fi
+  printf '%s\n' "$dir"
+}
+
+# A merge is not a contradiction and not an outage: it is the world moving past
+# what was established. The verdict was true when it was made and no longer
+# describes anything, so it must stop counting as established rather than
+# survive untouched or be recorded as false.
+test_a_merge_marks_an_established_claim_stale() {
+  local claim dir
+  claim="done: pr=$PR_A head=$HEAD_A - shipped"
+  dir=$(make_claim_world merge-stale "$claim" verified "the PR is open at the claimed head") \
+    || fail "the established-claim fixture failed"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll merged \
+    || fail "the merge outcome could not be published"
+  fm_done_claim_status "$dir/state" task-v
+  [ "$FM_DONE_CLAIM_STATE" = stale ] \
+    || fail "a merge left an established claim reported as $FM_DONE_CLAIM_STATE"
+  case "$FM_DONE_CLAIM_REASON" in
+    *"re-run bin/fm-verify-done.sh"*) ;;
+    *) fail "the stale record did not say what to do about it: $FM_DONE_CLAIM_REASON" ;;
+  esac
+  pass "a merge marks an established claim stale rather than leaving it established"
+}
+
+# The three-week rot, at the record rather than at the publication: a claim
+# established while the PR was open must not survive that PR being closed.
+test_a_close_contradicts_an_established_claim_in_the_record() {
+  local claim dir
+  claim="done: pr=$PR_A head=$HEAD_A - shipped"
+  dir=$(make_claim_world close-contradicts "$claim" verified "the PR is open at the claimed head") \
+    || fail "the established-claim fixture failed"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll closed-unmerged \
+    || fail "the close outcome could not be published"
+  fm_done_claim_status "$dir/state" task-v
+  [ "$FM_DONE_CLAIM_STATE" = contradicted ] \
+    || fail "a close left an established claim reported as $FM_DONE_CLAIM_STATE"
+  case "$FM_DONE_CLAIM_REASON" in
+    *"closed without merging"*) ;;
+    *) fail "the contradiction did not name the close: $FM_DONE_CLAIM_REASON" ;;
+  esac
+  pass "a close records a contradiction over a claim established while the PR was open"
+}
+
+# Neither arm may invent a verdict for a task that has asserted nothing. The
+# poll is armed at PR registration, long before any claim.
+test_a_terminal_outcome_invents_no_verdict_without_a_claim() {
+  local dir outcome
+  for outcome in merged closed-unmerged; do
+    dir=$(make_claim_world "no-claim-$outcome" 'working: still going') \
+      || fail "the no-claim fixture failed"
+    fm_merge_outcome_report "$dir" "$dir/state" task-v "$PR_A" poll "$outcome" \
+      || fail "the $outcome outcome could not be published without a claim"
+    assert_absent "$dir/state/task-v.done-verdict" \
+      "a $outcome outcome invented a verdict for a task that never claimed done"
+    fm_done_claim_status "$dir/state" task-v
+    [ "$FM_DONE_CLAIM_STATE" = none ] \
+      || fail "a $outcome outcome gave a claimless task the state $FM_DONE_CLAIM_STATE"
+  done
+  pass "a terminal PR outcome invents no verdict for a task that never claimed done"
+}
+
+# The precedence itself, driven through the record's owner. Each incoming
+# verdict is tried against a standing one and the record is read back.
+test_verdict_write_precedence_keeps_the_stronger_statement() {
+  local dir state claim hash
+  claim="done: pr=$PR_A head=$HEAD_A - shipped"
+  dir="$TMP_ROOT/verdict-precedence"
+  state="$dir/state"
+  mkdir -p "$state"
+  printf '%s\n' "$claim" > "$state/task-v.status"
+  hash=$(fm_done_claim_hash "$claim") || fail "the claim could not be hashed"
+
+  # Absence of evidence overwrites nothing: not an establishment, not a
+  # contradiction, not a superseded world.
+  fm_done_verdict_write "$state" task-v verified "$hash" established || fail "verified did not record"
+  fm_done_verdict_write "$state" task-v unverified "$hash" 'the forge could not be reached' \
+    || fail "the refused unverified write reported failure"
+  fm_done_verdict_read "$state" task-v || fail "the record became unreadable"
+  [ "$FM_DONE_VERDICT" = verified ] \
+    || fail "an outage un-established a verified record: $FM_DONE_VERDICT"
+
+  fm_done_verdict_write "$state" task-v stale "$hash" 'the PR merged' || fail "stale did not record"
+  fm_done_verdict_read "$state" task-v || fail "the record became unreadable"
+  [ "$FM_DONE_VERDICT" = stale ] || fail "stale did not overwrite verified: $FM_DONE_VERDICT"
+
+  fm_done_verdict_write "$state" task-v unverified "$hash" 'the forge could not be reached' \
+    || fail "the refused unverified write reported failure"
+  fm_done_verdict_read "$state" task-v || fail "the record became unreadable"
+  [ "$FM_DONE_VERDICT" = stale ] || fail "an outage overwrote a stale record: $FM_DONE_VERDICT"
+
+  fm_done_verdict_write "$state" task-v contradicted "$hash" 'the PR was closed unmerged' \
+    || fail "contradicted did not record"
+  fm_done_verdict_read "$state" task-v || fail "the record became unreadable"
+  [ "$FM_DONE_VERDICT" = contradicted ] \
+    || fail "contradicted did not overwrite stale: $FM_DONE_VERDICT"
+
+  # Falsity is the strongest statement: neither absence nor a changed world
+  # may soften it. Only the verifier's own fresh look may.
+  fm_done_verdict_write "$state" task-v stale "$hash" 'the PR merged' \
+    || fail "the refused stale write reported failure"
+  fm_done_verdict_read "$state" task-v || fail "the record became unreadable"
+  [ "$FM_DONE_VERDICT" = contradicted ] \
+    || fail "stale overwrote a contradiction: $FM_DONE_VERDICT"
+
+  fm_done_verdict_write "$state" task-v unverified "$hash" 'the forge could not be reached' \
+    || fail "the refused unverified write reported failure"
+  fm_done_verdict_read "$state" task-v || fail "the record became unreadable"
+  [ "$FM_DONE_VERDICT" = contradicted ] \
+    || fail "an outage overwrote a contradiction: $FM_DONE_VERDICT"
+
+  fm_done_verdict_write "$state" task-v verified "$hash" 're-established' \
+    || fail "a fresh establishment did not record"
+  fm_done_verdict_read "$state" task-v || fail "the record became unreadable"
+  [ "$FM_DONE_VERDICT" = verified ] \
+    || fail "the verifier's fresh look could not overwrite a contradiction: $FM_DONE_VERDICT"
+  pass "verdict write precedence keeps the stronger statement about the same claim"
+}
+
+# The presentation cursor is a BYTE offset. A worker's prose is arbitrary text,
+# so a held-back span containing one multibyte character must not leave the
+# cursor mid-line and turn the tail of an already-presented line into a whole
+# new status line on the next drain.
+test_a_held_back_span_with_multibyte_prose_presents_no_fragment() {
+  local dir state status first second line
+  dir=$(make_case unrecognised-multibyte)
+  state="$dir/state"
+  status="$state/task9.status"
+  printf 'note: bootstrap cursor line\n' > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
+    || fail "bootstrap drain failed while priming the cursor"
+
+  {
+    printf 'prose \xe2\x9c\x93 line one from the worker\n'
+    printf 'prose \xe2\x9c\x93 line two from the worker\n'
+    printf 'prose \xe2\x9c\x93 line three from the worker\n'
+  } >> "$status"
+
+  first="$dir/first.out"; second="$dir/second.out"
+  FM_DRAIN_UNRECOGNISED_MAX=1 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first" \
+    || fail "the capped drain failed on a multibyte span"
+  assert_grep 'line one from the worker' "$first" \
+    "the capped drain printed nothing: $(cat "$first")"
+
+  FM_DRAIN_UNRECOGNISED_MAX=9 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" \
+    || fail "the second drain failed"
+  assert_grep 'line two from the worker' "$second" \
+    "a held-back multibyte line never came back: $(cat "$second")"
+  assert_grep 'line three from the worker' "$second" \
+    "the rest of the held-back multibyte prose never came back: $(cat "$second")"
+  # Every unrecognised line presented must be a whole line the worker wrote, not
+  # a tail sliced out of one that was already shown.
+  while IFS= read -r line; do
+    case "$line" in
+      *'UNRECOGNISED (matches no status verb): '*) ;;
+      *) continue ;;
+    esac
+    case "${line#*'UNRECOGNISED (matches no status verb): '}" in
+      'prose '*' from the worker') ;;
+      *) fail "the drain presented a fragment of an already-presented line: $line" ;;
+    esac
+  done < "$second"
+  pass "a held-back span with multibyte prose presents whole lines, never a fragment"
+}
+
+# The cap bounds one TASK, not the whole drain. A per-drain budget would let one
+# chatty worker defer every alphabetically later task behind it, drain after
+# drain, which is the starvation the cap exists to prevent.
+test_the_unrecognised_cap_is_per_task_not_per_drain() {
+  local dir state out i
+  dir=$(make_case unrecognised-per-task)
+  state="$dir/state"
+  printf 'note: bootstrap cursor line\n' > "$state/task-a.status"
+  printf 'note: bootstrap cursor line\n' > "$state/task-z.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
+    || fail "bootstrap drain failed while priming the cursors"
+
+  for i in 1 2 3; do
+    printf 'chatty prose %s from task-a\n' "$i" >> "$state/task-a.status"
+  done
+  printf 'the one line task-z had to say\n' >> "$state/task-z.status"
+
+  out="$dir/drain.out"
+  FM_DRAIN_UNRECOGNISED_MAX=2 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "the capped drain failed across two tasks"
+  assert_grep 'chatty prose 1 from task-a' "$out" \
+    "the chatty task printed nothing: $(cat "$out")"
+  assert_grep 'the one line task-z had to say' "$out" \
+    "a quiet task was starved behind a chatty one's exhausted budget: $(cat "$out")"
+  pass "the unrecognised cap is per task, so one chatty worker cannot starve the rest"
+}
+
 test_the_omitted_unrecognised_count_carries_its_header() {
   local dir state status out
   dir=$(make_case unrecognised-cap-zero)
@@ -1095,6 +1317,12 @@ test_a_close_does_not_invent_a_done_claim
 test_a_configured_verb_vocabulary_is_not_unrecognised
 test_a_pruned_reflog_is_unverified_not_contradicted
 test_a_contradiction_needs_the_observation_it_contradicts_with
+test_a_merge_marks_an_established_claim_stale
+test_a_close_contradicts_an_established_claim_in_the_record
+test_a_terminal_outcome_invents_no_verdict_without_a_claim
+test_verdict_write_precedence_keeps_the_stronger_statement
+test_a_held_back_span_with_multibyte_prose_presents_no_fragment
+test_the_unrecognised_cap_is_per_task_not_per_drain
 test_the_omitted_unrecognised_count_carries_its_header
 test_capped_unrecognised_lines_return_on_the_next_drain
 test_capped_lines_return_even_when_a_recognised_line_follows_them

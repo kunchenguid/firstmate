@@ -12,6 +12,14 @@
 #                    with no claim on record; the publication then reports the
 #                    close plainly rather than inventing a claim to contradict.
 #
+# Publishing is only half of it: this is also where the task's DURABLE verdict
+# record is corrected, because this is the one site that observes the outcome
+# and every later gate reads that record rather than re-observing. A close
+# records `contradicted` for the standing claim; a merge marks an established
+# claim `stale`, because the world moved past what was established. See
+# bin/fm-done-claim-lib.sh for the three shapes of terminal evidence and the
+# write precedence that keeps them apart.
+#
 # Both a merge performed by this home and either outcome detected by its existing
 # poll use this operation, so neither depends on an agent remembering it.
 # This operation publishes the poll's local actionable row; the watcher
@@ -67,7 +75,8 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outcome>]
   local home=$1 state=$2 id=$3 url=$4 origin=$5 outcome=${6:-merged}
   local self_rc=0 destination='' line lock status=0 wake_note claimed=0
-  local provider host path number claim_state=''
+  local provider host path number claim_state='' claim_probe='' claim_hash=''
+  local claim_verdict='' claim_reason=''
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -91,12 +100,44 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   # record to contradict. Asserting one would make this publication itself the
   # unfounded claim the whole verdict path exists to stop. Read in a subshell so
   # the claim globals a caller may be holding are left alone.
-  if [ "$outcome" != merged ]; then
-    claim_state=$(fm_done_claim_status "$state" "$id" >/dev/null 2>&1 \
-      && printf '%s' "$FM_DONE_CLAIM_STATE")
-    # An unreadable claim state is treated as no claim: the weaker wording is
-    # true either way, while the stronger one would not be.
-    case "$claim_state" in ''|none) ;; *) claimed=1 ;; esac
+  claim_probe=$(fm_done_claim_status "$state" "$id" >/dev/null 2>&1 \
+    && printf '%s\t%s' "$FM_DONE_CLAIM_STATE" \
+      "$(fm_done_claim_hash "$FM_DONE_CLAIM_LINE" 2>/dev/null || true)")
+  claim_state=${claim_probe%%$'\t'*}
+  claim_hash=${claim_probe#*$'\t'}
+  [ "$claim_hash" != "$claim_probe" ] || claim_hash=
+  # An unreadable claim state is treated as no claim: the weaker wording is
+  # true either way, while the stronger one would not be.
+  case "$claim_state" in ''|none) ;; *) claimed=1 ;; esac
+
+  # This is the only site in the fleet that OBSERVES a PR reach a terminal
+  # state, and the durable verdict record is what every later gate reads. Those
+  # two came apart once already: a claim established while the PR was open kept
+  # its `verified` record after the PR was closed unmerged, so cleanup passed on
+  # a record the forge had already falsified. Recording here, inside the funnel,
+  # is what stops observing and recording from separating again.
+  #
+  # Which verdict follows from which outcome is the three-shape distinction
+  # bin/fm-done-claim-lib.sh states: a close without merge is positive evidence
+  # of falsity and records `contradicted`; a merge is the world CHANGING under a
+  # verdict that was true when it was made, which records `stale` so the next
+  # gate re-verifies against the world that now exists. The verifier is
+  # deliberately not re-run here: that would couple every merge to forge and
+  # validation-run reads, and would only relocate the outage question one layer
+  # up.
+  #
+  # Both arms act only when a terminal claim is actually on record. The poll is
+  # armed at PR registration, long before any claim, so inventing a verdict for
+  # a task that has asserted nothing would make this publication itself the
+  # unfounded claim the whole verdict path exists to stop.
+  if [ "$claimed" -eq 1 ] && [ -n "$claim_hash" ]; then
+    if [ "$outcome" != merged ]; then
+      claim_verdict=contradicted
+      claim_reason="$FM_PR_URL was closed without merging, so this task is not done"
+    elif [ "$claim_state" = verified ]; then
+      claim_verdict=stale
+      claim_reason="$FM_PR_URL merged after this claim was established, so what was established no longer describes the world; re-run bin/fm-verify-done.sh $id"
+    fi
   fi
   if [ "$outcome" = merged ]; then
     wake_note="check: merge landed: $id $FM_PR_URL"
@@ -132,7 +173,11 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
     return 0
   fi
 
-  if [ -n "$destination" ]; then
+  if [ -n "$claim_verdict" ]; then
+    fm_done_verdict_write "$state" "$id" "$claim_verdict" "$claim_hash" "$claim_reason" \
+      || status=1
+  fi
+  if [ "$status" -eq 0 ] && [ -n "$destination" ]; then
     fm_parent_channel_append_once "$destination" "$line" || status=1
   fi
   if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
