@@ -5,6 +5,7 @@
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|-> <effort|->
 #   fm-remote-secondmate-control.sh state <id>
+#   fm-remote-secondmate-control.sh incarnation <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
 #   fm-remote-secondmate-control.sh key <id> <key>
@@ -125,6 +126,16 @@ state_value() { # <id>; prints recovery-grade state
     return 0
   fi
   fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
+}
+
+print_incarnation() { # <id>
+  local id=$1 meta state spawn_gen
+  meta=$(meta_path "$id")
+  state=$(state_value "$id")
+  spawn_gen=
+  [ ! -f "$meta" ] || spawn_gen=$(fm_meta_get "$meta" spawn_gen)
+  printf 'state=%s\n' "$state"
+  printf 'spawn_gen=%s\n' "$spawn_gen"
 }
 
 print_route() { # <id>
@@ -417,6 +428,7 @@ case "${1:-}" in
   launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
   relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
+  incarnation) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; print_incarnation "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;

@@ -48,9 +48,10 @@ case "${1:-}" in
   send-keys)
     shift
     literal=0
+    target=
     while [ $# -gt 0 ]; do
       case "$1" in
-        -t) shift 2 ;;
+        -t) target=$2; shift 2 ;;
         -l) literal=1; shift ;;
         *) break ;;
       esac
@@ -59,7 +60,12 @@ case "${1:-}" in
     if [ "$literal" = 1 ]; then
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
-        /exit|/quit) printf 'zsh' > "$D/command" ;;
+        /exit|/quit)
+          if [ -e "$D/remote-relaunch-start" ] && [ ! -e "$D/remote-relaunch-end" ]; then
+            : > "$D/local-relaunch-during-remote"
+          fi
+          printf 'zsh' > "$D/command"
+          ;;
         *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
         'Firstmate instruction waiting: list '*)
           printf 'doorbell\n' >> "$D/rings"
@@ -101,6 +107,10 @@ SH
   chmod +x "$fb/tmux"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
+case "${1:-}" in
+  ''|*[!0-9]*) ;;
+  *) /bin/sleep 0.01 ;;
+esac
 exit 0
 SH
   chmod +x "$fb/sleep"
@@ -142,6 +152,7 @@ add_local_mate() {
     echo "yolo=off"
     echo "model=default"
     echo "effort=default"
+    echo "spawn_gen=spawn-$id-old"
     echo "home=$smhome"
     [ -z "$backend" ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
@@ -172,7 +183,7 @@ test_persist_gates_and_asks_only_for_open_records() {
   dir=$(new_case gate)
   add_local_mate "$dir" sm1
   # No answer armed: the mate never confirms its open work is written down.
-  FM_TEST_PERSIST_WAIT=0 out=$(run_restart "$dir" fm-sm1); rc=$?
+  out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" fm-sm1); rc=$?
 
   expect_code 3 "$rc" "an unconfirmed persist is a fallback, not a success"$'\n'"$out"
   assert_contains "$out" "nudged: sm1:" "an unconfirmed persist must fall back to the re-read message"
@@ -327,6 +338,10 @@ case "${FM_FAKE_SSH_MODE:-ok}" in
   unreachable) exit 255 ;;
 esac
 case "${rargs[1]:-}" in
+  incarnation)
+    printf 'state=alive\nspawn_gen=%s\n' "$(cat "$FM_FAKE_DIR/remote.gen")"
+    ;;
+  state) printf 'alive\n' ;;
   send)
     # Model the live remote mate: act on the instruction and report back on the
     # parent channel, carrying the correlation token the request embedded.
@@ -336,12 +351,26 @@ case "${rargs[1]:-}" in
         >> "$FM_FAKE_ANSWER_STATUS"
     fi
     ;;
-  relaunch) printf 'relaunched %s\n' "${rargs[2]}" ;;
+  relaunch)
+    case "${FM_FAKE_SSH_MODE:-ok}" in
+      slow-relaunch)
+        : > "$FM_FAKE_DIR/remote-relaunch-start"
+        /bin/sleep 2
+        : > "$FM_FAKE_DIR/remote-relaunch-end"
+        ;;
+      replaced-ambiguous)
+        printf 'spawn-remote-new\n' > "$FM_FAKE_DIR/remote.gen"
+        exit 255
+        ;;
+    esac
+    printf 'relaunched %s\n' "${rargs[2]}"
+    ;;
 esac
 exit 0
 SH
   chmod +x "$fb/fake-ssh"
   : > "$dir/ssh.log"
+  printf 'spawn-remote-old\n' > "$dir/fake/remote.gen"
   export FM_FAKE_SSH_LOG="$dir/ssh.log"
   export FM_FAKE_SSH_MODE="$mode"
   export FM_TEST_SSH_BIN="$fb/fake-ssh"
@@ -433,7 +462,7 @@ printf 'done [corr=$corr]: unrelated request answered\n' >> "$state/sm1.status"
 SH
   chmod +x "$dir/fake/on-doorbell"
 
-  FM_TEST_PERSIST_WAIT=0 out=$(run_restart "$dir" sm1); rc=$?
+  out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
 
   expect_code 3 "$rc" "an unrelated concurrent answer must not release the persist gate"$'\n'"$out"
   assert_not_contains "$out" "restarted: sm1" "the unrelated answer authorized a restart"
@@ -443,18 +472,18 @@ SH
 
 # --- T10: one unanswered mate does not hold a confirmed mate behind it -------
 test_persist_waits_are_polled_together() {
-  local dir out rc restarted_line nudged_line
+  local dir out rc exit_line nudge_line
   dir=$(new_case concurrent-waits)
   add_local_mate "$dir" sm1
   add_local_mate "$dir" sm2
   arm_answer "$dir" sm2
 
-  FM_TEST_PERSIST_WAIT=3 out=$(run_restart "$dir" sm1 sm2); rc=$?
+  out=$(FM_TEST_PERSIST_WAIT=3 run_restart "$dir" sm1 sm2); rc=$?
 
   expect_code 3 "$rc" "the unanswered mate should fall back after the confirmed mate restarts"$'\n'"$out"
-  restarted_line=$(printf '%s\n' "$out" | grep -n '^restarted: sm2' | cut -d: -f1)
-  nudged_line=$(printf '%s\n' "$out" | grep -n '^nudged: sm1' | cut -d: -f1)
-  [ -n "$restarted_line" ] && [ -n "$nudged_line" ] && [ "$restarted_line" -lt "$nudged_line" ] \
+  exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  nudge_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | tail -1 | cut -d: -f1)
+  [ -n "$exit_line" ] && [ -n "$nudge_line" ] && [ "$exit_line" -lt "$nudge_line" ] \
     || fail "the first mate's timeout held the confirmed second mate behind it: $out"
   pass "T10 pending persist answers are polled as one fleet"
 }
@@ -478,6 +507,46 @@ test_post_stop_failure_is_reported_unreached() {
   pass "T11 post-stop restart failure is never misreported as a nudge"
 }
 
+# --- T12: relaunch work does not stop polling other persist answers ----------
+test_relaunches_do_not_block_persist_polling() {
+  local dir out rc
+  dir=$(new_case relaunch-polling)
+  setup_remote_case "$dir" sm1 slow-relaunch
+  add_local_mate "$dir" sm2
+  printf -- '- sm2 - local domain (home: %s; scope: things; projects: p; added 2026-09-03)\n' \
+    "$dir/sm2-home" >> "$dir/home/data/secondmates.md"
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
+  arm_answer "$dir" sm2
+
+  out=$(FM_TEST_PERSIST_WAIT=5 run_restart "$dir" sm1 sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "both confirmed mates should restart independently"$'\n'"$out"
+  assert_present "$dir/fake/local-relaunch-during-remote" \
+    "the slow first relaunch blocked lifecycle progress for the second mate"
+  assert_contains "$out" "summary: 2 of 2 restarted, 0 nudged, 0 unreached" \
+    "parallel relaunches were not both accounted for"
+  pass "T12 relaunch waits do not block fleet persistence polling"
+}
+
+# --- T13: a changed live incarnation proves an ambiguous relaunch completed --
+test_changed_incarnation_confirms_ambiguous_remote_relaunch() {
+  local dir out rc
+  dir=$(new_case remote-incarnation)
+  setup_remote_case "$dir" sm1 replaced-ambiguous
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "a live replacement incarnation should prove the restart"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 on remote-mac (claude)" \
+    "the changed remote incarnation was not classified as the replacement"
+  assert_not_contains "$out" "nudged: sm1" \
+    "the replacement incarnation was mistaken for the old agent"
+  pass "T13 incarnation identity resolves an ambiguous relaunch result"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_unprovable_runtime_falls_back
@@ -489,5 +558,7 @@ test_unreachable_host_is_reported_unknown
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
 test_post_stop_failure_is_reported_unreached
+test_relaunches_do_not_block_persist_polling
+test_changed_incarnation_confirms_ambiguous_remote_relaunch
 
 echo "# all fm-secondmate-restart tests passed"

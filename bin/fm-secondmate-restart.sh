@@ -120,6 +120,8 @@ HOST=()
 HARNESS=()
 MODEL=()
 EFFORT=()
+RESTART_PID=()
+RESTART_RESULT=()
 
 restarted_count=0
 nudged_count=0
@@ -152,31 +154,43 @@ report_unreached() {  # <id> <reason>
   printf 'unreached: %s: %s\n' "$1" "$2"
 }
 
-local_agent_state() {  # <id>
-  local id=$1
-  if ! fm_backend_validate_task_endpoint "$STATE/$id.meta" "$id" 2>/dev/null; then
-    printf 'unverified\n'
-    return
+snapshot_field() {  # <snapshot> <field>
+  printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -1
+}
+
+local_incarnation_snapshot() {  # <id>
+  local id=$1 state spawn_gen
+  state=unverified
+  if fm_backend_validate_task_endpoint "$STATE/$id.meta" "$id" 2>/dev/null; then
+    state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
+      "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null || printf 'unreadable')
   fi
-  fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
-    "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null || printf 'unreadable\n'
+  spawn_gen=$(fm_meta_get "$STATE/$id.meta" spawn_gen)
+  printf 'state=%s\nspawn_gen=%s\n' "$state" "$spawn_gen"
+}
+
+remote_incarnation_snapshot() {  # <id>
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$1" \
+    fm-remote-secondmate-control.sh incarnation "$1" < /dev/null 2>/dev/null
 }
 
 restart_mate() {  # <array-index>
-  local i=$1 id restart_out restart_rc restart_reason ran_on lifecycle_state state_rc
+  local i=$1 id restart_out restart_rc restart_reason ran_on
+  local before after before_gen after_gen lifecycle_state
   id=${IDS[$i]}
   if [ "${PLACEMENT[i]}" = remote ]; then
+    before=$(remote_incarnation_snapshot "$id" || true)
     restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
       fm-remote-secondmate-control.sh relaunch \
       "$id" "${HARNESS[i]}" "${MODEL[i]:--}" "${EFFORT[i]:--}" < /dev/null 2>&1)
     restart_rc=$?
   else
+    before=$(local_incarnation_snapshot "$id")
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
     restart_rc=$?
   fi
   if [ "$restart_rc" -eq 0 ]; then
-    restarted_count=$((restarted_count + 1))
     ran_on=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* harness=\([^ ]*\).*/\1/p' | tail -1)
     [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
     if [ "${PLACEMENT[i]}" = remote ]; then
@@ -184,33 +198,70 @@ restart_mate() {  # <array-index>
     else
       printf 'restarted: %s (%s)\n' "$id" "$ran_on"
     fi
-    PLAN[i]=done
     return
   fi
 
   restart_reason=$(first_reported_line "$restart_out")
   [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
-  lifecycle_state=unreadable
   if [ "${PLACEMENT[i]}" = remote ]; then
-    state_rc=0
-    lifecycle_state=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
-      fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null) || state_rc=$?
-    [ "$state_rc" -eq 0 ] && [ -n "$lifecycle_state" ] || lifecycle_state=unreadable
+    after=$(remote_incarnation_snapshot "$id" || true)
   else
-    lifecycle_state=$(local_agent_state "$id")
+    after=$(local_incarnation_snapshot "$id")
   fi
-  case "$lifecycle_state" in
-    alive)
-      fall_back_to_nudge "$id" "the restart did not complete: $restart_reason"
-      ;;
-    dead|missing)
-      report_unreached "$id" "the restart did not complete and no agent is running (state: $lifecycle_state): $restart_reason"
-      ;;
-    *)
-      report_unreached "$id" "the restart did not complete and the agent state is unknown ($lifecycle_state): $restart_reason"
-      ;;
-  esac
-  PLAN[i]=done
+  lifecycle_state=$(snapshot_field "$after" state)
+  before_gen=$(snapshot_field "$before" spawn_gen)
+  after_gen=$(snapshot_field "$after" spawn_gen)
+  if [ "$lifecycle_state" = alive ] && [ -n "$before_gen" ] \
+    && [ -n "$after_gen" ] && [ "$before_gen" != "$after_gen" ]; then
+    if [ "${PLACEMENT[i]}" = remote ]; then
+      printf 'restarted: %s on %s (%s)\n' "$id" "${HOST[i]}" "${HARNESS[i]}"
+    else
+      ran_on=$(fm_meta_get "$STATE/$id.meta" harness)
+      [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
+      printf 'restarted: %s (%s)\n' "$id" "$ran_on"
+    fi
+  elif [ "$lifecycle_state" = alive ] && [ -n "$before_gen" ] \
+    && [ "$before_gen" = "$after_gen" ]; then
+    fall_back_to_nudge "$id" "the restart did not complete: $restart_reason"
+  elif [ "$lifecycle_state" = dead ] || [ "$lifecycle_state" = missing ]; then
+    report_unreached "$id" "the restart did not complete and no agent is running (state: $lifecycle_state): $restart_reason"
+  else
+    [ -n "$lifecycle_state" ] || lifecycle_state=unreadable
+    report_unreached "$id" "the restart did not complete and the agent state is unknown ($lifecycle_state): $restart_reason"
+  fi
+}
+
+launch_restart() {  # <array-index>
+  local i=$1 result tmp
+  result="$RESULT_DIR/$i.result"
+  tmp="$result.tmp"
+  ( trap - EXIT; restart_mate "$i" > "$tmp"; mv -f "$tmp" "$result" ) &
+  RESTART_PID[i]=$!
+  RESTART_RESULT[i]=$result
+  PLAN[i]=restarting
+  restart_active_count=$((restart_active_count + 1))
+}
+
+harvest_restarts() {
+  local i out
+  i=0
+  while [ "$i" -lt "${#IDS[@]}" ]; do
+    if [ "${PLAN[i]}" != restarting ] || [ ! -f "${RESTART_RESULT[i]}" ]; then
+      i=$((i + 1))
+      continue
+    fi
+    wait "${RESTART_PID[i]}" 2>/dev/null || true
+    out=$(cat "${RESTART_RESULT[i]}")
+    printf '%s\n' "$out"
+    case "$out" in
+      restarted:*) restarted_count=$((restarted_count + 1)) ;;
+      nudged:*) nudged_count=$((nudged_count + 1)) ;;
+      *) unreached_count=$((unreached_count + 1)) ;;
+    esac
+    PLAN[i]=done
+    restart_active_count=$((restart_active_count - 1))
+    i=$((i + 1))
+  done
 }
 
 # --- phase A: persist ------------------------------------------------------
@@ -277,7 +328,13 @@ done
 
 # --- phase B: restart ------------------------------------------------------
 
+RESULT_DIR=$(mktemp -d "$STATE/.secondmate-restart.XXXXXX") || {
+  echo "error: could not create restart result directory under $STATE" >&2
+  exit 1
+}
+trap 'rm -rf -- "$RESULT_DIR"' EXIT
 pending_count=0
+restart_active_count=0
 i=0
 while [ "$i" -lt "${#IDS[@]}" ]; do
   if [ "${PLAN[i]}" = persisted-pending ]; then
@@ -289,7 +346,7 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
   i=$((i + 1))
 done
 
-while [ "$pending_count" -gt 0 ]; do
+while [ "$((pending_count + restart_active_count))" -gt 0 ]; do
   now=$(date +%s)
   next_wait=$PERSIST_POLL
   i=0
@@ -298,22 +355,22 @@ while [ "$pending_count" -gt 0 ]; do
       i=$((i + 1))
       continue
     fi
-    if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
-      PLAN[i]=persisted
-      pending_count=$((pending_count - 1))
-      restart_mate "$i"
-    elif [ "$now" -ge "${DEADLINE[i]}" ]; then
+    if [ "$now" -ge "${DEADLINE[i]}" ]; then
       fall_back_to_nudge "${IDS[$i]}" \
         "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
       PLAN[i]=done
       pending_count=$((pending_count - 1))
+    elif fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
+      pending_count=$((pending_count - 1))
+      launch_restart "$i"
     else
       remaining=$((DEADLINE[i] - now))
       [ "$remaining" -ge "$next_wait" ] || next_wait=$remaining
     fi
     i=$((i + 1))
   done
-  [ "$pending_count" -eq 0 ] || sleep "$next_wait"
+  harvest_restarts
+  [ "$((pending_count + restart_active_count))" -eq 0 ] || sleep "$next_wait"
 done
 
 # --- summary ---------------------------------------------------------------
