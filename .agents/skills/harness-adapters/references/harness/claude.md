@@ -54,7 +54,7 @@ Guard exit 2 plus stderr forces continuation.
 Stop payload `stop_hook_active=true` follows any hook-driven continuation, including async reawakening, so Claude mode ignores it and uses cooperative claim and epoch plus bounded re-block; default Codex mode keeps it as a one-block loop guard.
 
 Project `.claude/settings.json` loads only when the exact project root is the session root; Claude does not search parents, so Firstmate starts at repository root.
-Hooks still run through cwd-sensitive `/bin/sh`, so tracked commands anchor through `"$CLAUDE_PROJECT_DIR"/bin/...`.
+Tracked entries still tolerate cwd-sensitive `/bin/sh`: real Claude resolves helpers from `CLAUDE_PROJECT_DIR`, and Copilot-compatible fallback root discovery plus host stand-down are owned by [`../../../../../docs/configuration.md#harness-support`](../../../../../docs/configuration.md#harness-support).
 `../../../docs/turnend-guard.md` owns details.
 
 The Stop-owned watcher hook runs every Stop, foregrounds `../../../bin/fm-watch-arm.sh` only when eligible, and uses exit-2 async reawakening as notification.
