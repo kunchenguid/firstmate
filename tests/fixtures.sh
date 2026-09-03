@@ -105,8 +105,29 @@ fm_test_fake_tmux_spawn() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Extract the value following a flag (e.g. -t, -n) from the argument list.
+fake_arg_after() {
+  local flag=$1 prev= a
+  shift
+  for a in "$@"; do
+    [ "$prev" = "$flag" ] && { printf '%s\n' "$a"; return 0; }
+    prev=$a
+  done
+  return 1
+}
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    # A batch spawns several distinct tasks into one home; a real worktree pool
+    # hands each its own slot. When FM_FAKE_WT_MAP is set, map the queried
+    # window (its name is fm-<id>) to its own worktree so each pair settles into
+    # a distinct path; otherwise fall back to the single shared pane path.
+    if [ -n "${FM_FAKE_WT_MAP:-}" ]; then
+      target=$(fake_arg_after -t "$@" || true)
+      if [ -n "$target" ] && [ -d "$FM_FAKE_WT_MAP/$target" ]; then
+        printf '%s\n' "$FM_FAKE_WT_MAP/$target"; exit 0
+      fi
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -116,7 +137,12 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  new-window)
+    # Under FM_FAKE_WT_MAP, echo the window name as its window id so the
+    # pane-path query above can resolve a per-window worktree.
+    [ -n "${FM_FAKE_WT_MAP:-}" ] && fake_arg_after -n "$@"
+    exit 0 ;;
+  has-session|new-session|kill-window|set-window-option) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

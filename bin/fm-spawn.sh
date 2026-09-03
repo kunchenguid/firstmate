@@ -1825,6 +1825,69 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# Report the id of any OTHER task whose durable metadata still claims worktree
+# <resolved-worktree>. Compares physical paths so a symlinked or relative prefix
+# never hides a real collision, and prints the first conflicting task id (or
+# nothing). The current task ($ID) is skipped: a recovery re-spawn legitimately
+# reclaims the slot its own state/<id>.meta already records.
+worktree_meta_claimant() {  # <resolved-worktree>
+  local wt=$1 wt_real meta task_id claim line
+  wt_real=$(real_path_or_raw "$wt")
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    task_id=${meta##*/}
+    task_id=${task_id%.meta}
+    [ "$task_id" = "$ID" ] && continue
+    claim=
+    while IFS= read -r line; do
+      case $line in
+        worktree=*) claim=${line#worktree=}; break ;;
+      esac
+    done < "$meta"
+    [ -n "$claim" ] || continue
+    if [ "$(real_path_or_raw "$claim")" = "$wt_real" ]; then
+      printf '%s\n' "$task_id"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Print this task's recorded worktree when a same-identity reclaim can resume it
+# in place, or nothing when a fresh acquisition is required. A worktree qualifies
+# only if state/<id>.meta already records it, it still resolves to a real git
+# worktree root distinct from the primary checkout, and no OTHER task's metadata
+# claims it. Resuming the recorded worktree lets a restart continue on its own
+# work instead of acquiring a fresh pool slot: a fresh `treehouse get` chooses a
+# slot by live-owner availability, which after a crash or reboot can be another
+# still-owned task's slot (refused by the ownership guard), and it abandons this
+# task's own worktree and any unlanded work on it.
+reusable_own_worktree() {
+  local recorded recorded_real top top_real line
+  [ -f "$STATE/$ID.meta" ] || return 0
+  recorded=
+  while IFS= read -r line; do
+    case $line in
+      worktree=*) recorded=${line#worktree=}; break ;;
+    esac
+  done < "$STATE/$ID.meta"
+  [ -n "$recorded" ] || return 0
+  recorded_real=$(real_path_or_raw "$recorded")
+  top=$(git -C "$recorded" rev-parse --show-toplevel 2>/dev/null) || return 0
+  top_real=$(real_path_or_raw "$top")
+  [ "$recorded_real" = "$top_real" ] || return 0
+  [ "$recorded_real" != "$PROJ_ABS_REAL" ] || return 0
+  [ -z "$(worktree_meta_claimant "$recorded")" ] || return 0
+  printf '%s\n' "$recorded"
+}
+
+# Single-quote a string for safe reuse as one word in a POSIX shell command line.
+shell_squote() {
+  local s=$1
+  s=${s//\'/\'\\\'\'}
+  printf "'%s'" "$s"
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1834,7 +1897,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real owner
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -1847,6 +1910,19 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
   if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  # Refuse a slot that another task's durable metadata still claims. The worktree
+  # pool (treehouse, or any provider) keys reuse off live-agent presence, not
+  # recorded task ownership: a crash- or reboot-orphaned but still-owned slot
+  # reads as "empty" and gets handed to a new spawn, which resets its branch and
+  # destroys that task's unlanded work (observed 2026-07-21). state/<id>.meta
+  # ownership outlives the agent process, so this guard fires regardless of
+  # whether an agent is currently live in the slot - it turns a silent
+  # destructive reuse into a loud refusal the captain can reconcile.
+  owner=$(worktree_meta_claimant "$WT" || true)
+  if [ -n "$owner" ]; then
+    echo "error: $source handed out worktree '$WT', but task $owner still claims it in $STATE/$owner.meta; refusing to launch on a slot with a recorded owner (its unlanded work would be destroyed). Reconcile or tear down task $owner first. Inspect target $inspect_target" >&2
     exit 1
   fi
 }
@@ -2421,9 +2497,28 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # A same-identity reclaim resumes its own recorded worktree instead of
+  # acquiring a fresh pool slot (reusable_own_worktree explains why). It resumes
+  # the slot with `treehouse enter <name>`, which opens a subshell in the existing
+  # worktree WITHOUT resetting it, preserving any unlanded work. A subshell (not a
+  # bare `cd` of the pane's own shell) matters: teardown returns the worktree by
+  # terminating processes whose cwd is inside it, so the reused slot must hold a
+  # nested subshell - exactly as a fresh `treehouse get` does - and never the
+  # pane's own shell, or that termination would collapse the pane. The pool
+  # worktree layout is <pool>/<name>/<repo>, so the slot name is the recorded
+  # worktree's parent directory name. The settle loop below confirms the move
+  # exactly as it does for a fresh `treehouse get`.
+  WT_SOURCE='treehouse get'
+  WT_ENTER_CMD='treehouse get'
+  reuse_wt=$(reusable_own_worktree)
+  if [ -n "$reuse_wt" ]; then
+    reuse_name=$(basename "$(dirname "$reuse_wt")")
+    WT_SOURCE='worktree reuse'
+    WT_ENTER_CMD="treehouse enter $(shell_squote "$reuse_name")"
+  fi
+  spawn_send_text_line "$WT_TARGET" "$WT_ENTER_CMD"
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the subshell/cd: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -2463,11 +2558,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    echo "error: $WT_SOURCE did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "$WT_SOURCE" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
