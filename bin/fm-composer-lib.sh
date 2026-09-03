@@ -1116,6 +1116,15 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
   [ -z "${blocks//▀/}" ]
 }
 
+_fm_composer_leftbar_conflicts_halfbox() {  # <plain-screen> <first-row>
+  local plain=$1 first=$2 raw trimmed
+  [ "$first" -gt 0 ] || return 1
+  raw=$(_fm_composer_screen_row "$((first - 1))" "$plain")
+  trimmed=$raw
+  fm_composer_normalize_trim_var trimmed
+  _fm_composer_half_rule_spaces "$trimmed" '╻' '▄' >/dev/null
+}
+
 _fm_composer_select_cursorless() {
   local plain=$1 generic=-1 next boundary raw trimmed
   FM_COMPOSER_SELECTED_KIND=
@@ -1186,6 +1195,10 @@ _fm_composer_select_cursorless() {
     if [ "$FM_COMPOSER_SELECTED_KIND" = box ]; then
       boundary=$FM_COMPOSER_SCAN_BOX_BOTTOM
     else
+      if _fm_composer_leftbar_conflicts_halfbox "$plain" "$FM_COMPOSER_SELECTED_FIRST"; then
+        FM_COMPOSER_SELECTED_KIND=
+        return 1
+      fi
       next=$((boundary + 1))
       raw=$(_fm_composer_screen_row "$next" "$plain")
       trimmed=$raw

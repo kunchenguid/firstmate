@@ -523,16 +523,18 @@ test_copilot_threads_autonomy_model_and_effort() {
   assert_contains "$launch" "encode launch-brief" "copilot launch lost the typed launch instructions"
   hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
   assert_present "$hooks" "copilot spawn did not install the worker lifecycle hook"
+  hook_cmd=$(jq -r '.hooks.userPromptSubmitted[0].bash' "$hooks")
+  printf '%s' '{"sessionId":"parent"}' | sh -c "$hook_cmd" || fail "copilot userPromptSubmitted worker hook failed"
+  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=copilot-hook" \
+    "copilot userPromptSubmitted hook did not open semantic busy state"
+  assert_grep 'session=parent' "$HOME_DIR/state/$id.copilot-session" \
+    "copilot hook did not latch the parent session"
   rm -f "$HOME_DIR/state/$id.turn-ended"
   hook_cmd=$(jq -r '.hooks.agentStop[0].bash' "$hooks")
-  printf '{}' | sh -c "$hook_cmd" || fail "copilot agentStop worker hook failed"
+  printf '%s' '{"sessionId":"parent"}' | sh -c "$hook_cmd" || fail "copilot agentStop worker hook failed"
   assert_present "$HOME_DIR/state/$id.turn-ended" "copilot agentStop hook did not touch the notification marker"
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=idle source=copilot-hook" \
     "copilot agentStop hook did not settle semantic busy state"
-  hook_cmd=$(jq -r '.hooks.userPromptSubmitted[0].bash' "$hooks")
-  printf '{}' | sh -c "$hook_cmd" || fail "copilot userPromptSubmitted worker hook failed"
-  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=copilot-hook" \
-    "copilot userPromptSubmitted hook did not open semantic busy state"
   pass "copilot launch and generated worker hooks carry the complete adapter contract"
 }
 
@@ -595,6 +597,27 @@ test_copilot_exact_worker_hook_collision_refuses() {
   [ "$(cat "$hooks")" = '{"preexisting":true}' ] || fail "copilot collision refusal rewrote the existing hook"
   [ ! -s "$LAUNCH_LOG" ] || fail "copilot collision refusal still launched the worker"
   pass "copilot spawn refuses only its exact owned hook filename"
+}
+
+test_copilot_worker_hooks_ignore_foreign_sessions() {
+  local rec id out status hooks hook_cmd
+  id=profile-copilot-child-z6f
+  rec=$(make_spawn_case profile-copilot-child copilot "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "copilot spawn with child-session regression fixture should succeed"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  hook_cmd=$(jq -r '.hooks.userPromptSubmitted[0].bash' "$hooks")
+  printf '%s' '{"sessionId":"parent"}' | sh -c "$hook_cmd" || fail "parent userPromptSubmitted hook failed"
+  rm -f "$HOME_DIR/state/$id.turn-ended"
+  hook_cmd=$(jq -r '.hooks.agentStop[0].bash' "$hooks")
+  printf '%s' '{"sessionId":"child"}' | sh -c "$hook_cmd" || fail "child agentStop hook failed"
+  assert_absent "$HOME_DIR/state/$id.turn-ended" "child agentStop should not touch the notification marker"
+  assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=copilot-hook" \
+    "child agentStop should not settle the parent's busy state"
+  pass "copilot worker hooks ignore foreign child sessions"
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
@@ -925,6 +948,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_copilot_threads_autonomy_model_and_effort
 test_copilot_preserves_repository_owned_hook_files
 test_copilot_exact_worker_hook_collision_refuses
+test_copilot_worker_hooks_ignore_foreign_sessions
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn

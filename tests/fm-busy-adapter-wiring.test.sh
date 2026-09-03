@@ -280,15 +280,15 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
-run_copilot_hook() {  # <hooks.json> <hook-event>
-  local cmd
+run_copilot_hook() {  # <hooks.json> <hook-event> [payload]
+  local cmd payload=${3:-'{}'}
   cmd=$(jq -r ".hooks[\"$2\"][0].bash" "$1")
   [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
-  printf '{}' | sh -c "$cmd"
+  printf '%s' "$payload" | sh -c "$cmd"
 }
 
 test_copilot_hooks_semantic_lifecycle() {
-  local rec id=busy-copilot-1 out state hooks
+  local rec id=busy-copilot-1 out state hooks binding
   rec=$(make_spawn_case copilot-lifecycle copilot "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
@@ -301,20 +301,50 @@ test_copilot_hooks_semantic_lifecycle() {
   out=$(classify copilot "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
 
+  binding="$state/$id.copilot-session"
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"parent"}' || fail "userPromptSubmitted hook command failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "userPromptSubmitted must classify 'busy copilot-hook', got '$out'"
+  assert_grep 'session=parent' "$binding" "userPromptSubmitted did not latch the parent session"
+
   rm -f "$state/$id.turn-ended"
-  run_copilot_hook "$hooks" agentStop || fail "agentStop hook command failed"
+  run_copilot_hook "$hooks" agentStop '{"sessionId":"parent"}' || fail "agentStop hook command failed"
   [ -f "$state/$id.turn-ended" ] || fail "agentStop no longer touches the notification marker"
   out=$(classify copilot "$id" "$state")
   [ "$out" = "idle copilot-hook" ] || fail "agentStop must classify 'idle copilot-hook', got '$out'"
 
-  run_copilot_hook "$hooks" userPromptSubmitted || fail "userPromptSubmitted hook command failed"
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"parent"}' || fail "second userPromptSubmitted hook command failed"
   out=$(classify copilot "$id" "$state")
-  [ "$out" = "busy copilot-hook" ] || fail "userPromptSubmitted must classify 'busy copilot-hook', got '$out'"
+  [ "$out" = "busy copilot-hook" ] || fail "a repeated parent session must re-open busy state, got '$out'"
 
-  run_copilot_hook "$hooks" sessionEnd || fail "sessionEnd hook command failed"
+  run_copilot_hook "$hooks" sessionEnd '{"sessionId":"parent"}' || fail "sessionEnd hook command failed"
   out=$(classify copilot "$id" "$state")
   [ "$out" = "idle copilot-hook" ] || fail "sessionEnd must classify idle, got '$out'"
-  pass "copilot hooks open on userPromptSubmitted and close on agentStop and sessionEnd"
+  pass "copilot hooks latch one parent session and classify matching lifecycle events"
+}
+
+test_copilot_hooks_ignore_foreign_sessions() {
+  local rec id=busy-copilot-foreign-1 out state hooks binding
+  rec=$(make_spawn_case copilot-foreign-session copilot "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "copilot spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+  binding="$state/$id.copilot-session"
+
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"parent"}' || fail "parent latch hook failed"
+  rm -f "$state/$id.turn-ended"
+  run_copilot_hook "$hooks" agentStop '{"sessionId":"child"}' || fail "foreign agentStop hook failed"
+  assert_absent "$state/$id.turn-ended" "a foreign child session touched the notification marker"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "a foreign child stop must leave the parent busy, got '$out'"
+
+  run_copilot_hook "$hooks" sessionEnd '{"sessionId":"child"}' || fail "foreign sessionEnd hook failed"
+  out=$(classify copilot "$id" "$state")
+  [ "$out" = "busy copilot-hook" ] || fail "a foreign child sessionEnd must leave the parent busy, got '$out'"
+  assert_grep 'session=parent' "$binding" "a foreign child session replaced the latched parent session"
+  pass "copilot hooks ignore foreign subagent sessions once the parent is latched"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -463,6 +493,7 @@ test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
 test_gemini_is_refused_as_a_secondmate
 test_copilot_hooks_semantic_lifecycle
+test_copilot_hooks_ignore_foreign_sessions
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

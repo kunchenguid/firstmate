@@ -2782,11 +2782,10 @@ EOF
         exit 1
       }
       mkdir -p "$WT/.github/hooks"
-      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
-      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source copilot-hook"
-      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submitted 2>/dev/null || true")
-      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event agent-stop 2>/dev/null || true")
-      j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+      copilot_hook_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-copilot-worker-hook.sh") $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN")"
+      j_submit=$(json_escape "$copilot_hook_cmd_prefix user-prompt-submitted $(shell_quote "$TURNEND") 2>/dev/null || true")
+      j_stop=$(json_escape "$copilot_hook_cmd_prefix agent-stop $(shell_quote "$TURNEND") 2>/dev/null || true")
+      j_sessionend=$(json_escape "$copilot_hook_cmd_prefix session-end $(shell_quote "$TURNEND") 2>/dev/null || true")
       cat > "$local_copilot_hook_path" <<EOF
 {"version":1,"hooks":{"userPromptSubmitted":[{"type":"command","bash":"$j_submit","timeoutSec":10}],"agentStop":[{"type":"command","bash":"$j_stop","timeoutSec":10}],"sessionEnd":[{"type":"command","bash":"$j_sessionend","timeoutSec":10}]}}
 EOF

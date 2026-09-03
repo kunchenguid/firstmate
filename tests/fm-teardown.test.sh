@@ -586,10 +586,12 @@ test_teardown_removes_only_the_task_specific_copilot_hook() {
   add_fork_with_pushed_branch "$case_dir"
   owned_hook="$case_dir/wt/.github/hooks/fm-busy-state-task-x1.json"
   printf '%s\n' '{"owned":true}' > "$owned_hook"
+  printf 'gen=teardown-test-task-x1\nsession=parent\n' > "$case_dir/state/task-x1.copilot-session"
 
   run_teardown "$case_dir" --force >/dev/null 2>&1; rc=$?
   expect_code 0 "$rc" "teardown should remove the task-specific Copilot hook"
   assert_absent "$owned_hook" "teardown left the task-specific Copilot hook behind"
+  assert_absent "$case_dir/state/task-x1.copilot-session" "teardown left the Copilot session binding behind"
   [ "$(cat "$case_dir/wt/.github/hooks/fm-busy-state.json")" = '{"repo":true}' ] \
     || fail "teardown rewrote the repository-owned Copilot hook file"
   [ "$(cat "$case_dir/wt/.claude/settings.json")" = '{"claude":true}' ] \

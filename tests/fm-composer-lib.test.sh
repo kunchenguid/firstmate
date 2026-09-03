@@ -364,8 +364,14 @@ test_matrix_copilot_halfbox_identityless_backends() {
   assert_screen "copilot typed half-box on cmux/orca" pending "$CAPS_PLAIN" "$typed"
   typed=$'╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃\n╹▀▀▀▀▀▀▀
 '
-  assert_screen "copilot malformed half-box on zellij" unknown "$CAPS_STYLED_NOID" "$typed"
-  assert_screen "copilot malformed half-box on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+  assert_screen "copilot malformed empty half-box on zellij" unknown "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "copilot malformed empty half-box on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+  typed=$'╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃ fix login\n╹▀▀▀▀▀▀▀'
+  assert_screen "copilot width-mismatched typed half-box on zellij" unknown "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "copilot width-mismatched typed half-box on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+  typed=$'╻▄▄▄▄▄▄▄▄▄▄▄▄\n┃ fix login'
+  assert_screen "copilot incomplete typed half-box on zellij" unknown "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "copilot incomplete typed half-box on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
   pass "matrix: identityless backends accept only complete Copilot half-boxes"
 }
 

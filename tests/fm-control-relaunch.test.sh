@@ -500,12 +500,15 @@ test_copilot_harness_switch_retires_task_specific_hook() {
   add_ship_task "$dir" rl36 copilot
   mkdir -p "$dir/wt/.github/hooks"
   printf '{"hooks":{}}\n' > "$dir/wt/.github/hooks/fm-busy-state-rl36.json"
+  printf 'gen=busy-gen\nsession=parent\n' > "$dir/home/state/rl36.copilot-session"
   printf 'claude' > "$dir/fake/becomes"
   out=$(run_control "$dir" rl36 relaunch --harness claude --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a Copilot harness switch should succeed"$'\n'"$out"
   [ ! -e "$dir/wt/.github/hooks/fm-busy-state-rl36.json" ] \
     || fail "the previous Copilot task hook must be cleared on a switch"
-  pass "fm-control relaunch: a harness switch retires the prior Copilot task hook"
+  [ ! -e "$dir/home/state/rl36.copilot-session" ] \
+    || fail "the previous Copilot session binding must be cleared on a switch"
+  pass "fm-control relaunch: a harness switch retires the prior Copilot hook and session binding"
 }
 
 test_harness_switch_does_not_carry_the_old_profile_axes() {

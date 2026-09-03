@@ -213,12 +213,21 @@ fm_control_copilot_hook_path() {  # <worktree> <id>
   printf '%s\n' "$wt/.github/hooks/fm-busy-state-$id.json"
 }
 
+fm_control_copilot_session_path() {  # <state-dir> <id>
+  local state=${1-} id=${2-}
+  [ -n "$state" ] && [ -n "$id" ] || return 1
+  printf '%s\n' "$state/$id.copilot-session"
+}
+
 fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   local harness=${1-} wt=${2-} state=${3-} id=${4-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
-    copilot) fm_control_copilot_hook_path "$wt" "$id" ;;
+    copilot)
+      fm_control_copilot_hook_path "$wt" "$id"
+      fm_control_copilot_session_path "$state" "$id"
+      ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)
