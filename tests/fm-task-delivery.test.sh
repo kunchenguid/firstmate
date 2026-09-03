@@ -451,10 +451,14 @@ EOF
   id=delivery-filled-ship
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "filled-ship brief should scaffold"
-  fill_brief_subsections "$home/data/$id/brief.md" "Ship the listed change." "Touch only the named helper."
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    'Fix replacement of `{TASK}` in Herdr briefs.' \
+    'Keep literal `{FIRSTMATE_SPEC}` examples intact.'
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
-    "a filled ship brief was refused for leftover Task placeholders"
+    "a filled ship brief mentioning placeholder tokens was refused as unfilled"
+  assert_not_contains "$out" "must contain nonempty" \
+    "a filled ship brief mentioning placeholder tokens failed content validation"
 
   id=delivery-unfilled-scout
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \

@@ -19,14 +19,15 @@
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 
-# Return 0 when a ship/scout brief or promotion instructions still carry an
-# unfilled Task-subsection placeholder. A missing file is treated as not
-# carrying placeholders (legacy fixtures and pre-subsection briefs).
+# Return 0 when a Task subsection still consists only of its scaffold
+# placeholder. A missing file and legacy briefs carry no such placeholders.
 fm_brief_task_placeholders_present() {  # <file>
-  local file=$1
+  local file=$1 intent spec
   [ -f "$file" ] || return 1
-  grep -q -F '{TASK}' "$file" && return 0
-  grep -q -F '{FIRSTMATE_SPEC}' "$file" && return 0
+  intent=$(fm_brief_heading_body "$file" "## Captain's intent")
+  spec=$(fm_brief_heading_body "$file" "## Firstmate spec")
+  [ "$(printf '%s' "$intent" | tr -d '[:space:]')" = '{TASK}' ] && return 0
+  [ "$(printf '%s' "$spec" | tr -d '[:space:]')" = '{FIRSTMATE_SPEC}' ] && return 0
   return 1
 }
 
