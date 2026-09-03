@@ -35,9 +35,9 @@
 #      cancelled mapping below owns why that is its own terminal word).
 #      EXCEPT: while the active step is ci, `axi status` alone cannot tell
 #      "still waiting on checks" from "checks green, waiting on merge" (see
-#      nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      nm_ci_checks_state) - a ci-step log-tail check overrides working ->
+#      done once checks read green, so a green PR is never silently read as
+#      still-validating.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
