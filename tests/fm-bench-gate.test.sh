@@ -253,6 +253,12 @@ refuses "an optional-stopping extension key" \
 refuses "a baseline treated as a competing peer" \
   'plan["promotion_rule"]["baseline_role"] = "competitor"' \
   "regression_veto"
+refuses "a baseline mean floor looser than zero" \
+  'plan["promotion_rule"]["baseline_veto"]["max_negative_mean_quality_delta"] = -0.5' \
+  "must keep max_negative_mean_quality_delta at 0"
+refuses "a baseline loss limit above one" \
+  'plan["promotion_rule"]["baseline_veto"]["max_losses_of_three"] = 2' \
+  "max_losses_of_three between 0 and 1"
 refuses "an unstratified baseline subset" \
   'plan["tracks"]["A"]["baseline_packets"] = ["A1", "A2", "A3"]' \
   "preregistered stratified subset"
@@ -1252,7 +1258,8 @@ shutil.rmtree(root, ignore_errors=True)
 for track_name, candidate, packet in work:
     slug = f"{track_name}-{packet}-{candidate}".lower().replace(" ", "-").replace(".", "-")
     (src / ".ignored-by-evaluator").write_text("not scored\n")
-    (src / "work.json").write_text(json.dumps({"value": slug}, separators=(",", ":")) + "\n")
+    (src / "work.json").write_text(json.dumps({"value": slug}, indent=2, sort_keys=True) + "\n")
+    (src / "work.ts").write_text(f'export default "{slug}";\n')
     git("add", "-A")
     git("commit", "-q", "-m", slug)
     sha, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
@@ -1326,7 +1333,9 @@ out=$(run_gate "$BENCH" restore-drill) || fail "the restore drill must pass: $ou
 assert_contains "$out" "restored into a fresh repository, and rebound to its archived tree" \
   "each bundle is really restored and rebound"
 assert_present "$BENCH/archive/restore-drill.json" "the drill writes its receipt"
-assert_contains "$out" "changed under scored-input perturbation" \
+assert_contains "$out" "identically prepared copies differ only at declared JSON pointers" \
+  "both evaluator inputs use the same preparation pipeline before the declared scalar changes"
+assert_contains "$out" "evaluator_dependence ok proven" \
   "the evaluator responds to its declared scored subset rather than the first restored file"
 python3 - "$BENCH" <<'PY' || fail "the receipt must record its bounded deterministic evaluator sample"
 import json, sys
@@ -1336,6 +1345,8 @@ receipt = json.loads((bench / "archive" / "restore-drill.json").read_text())
 expected = sorted(path.name for path in (bench / "archive").iterdir() if path.is_dir())[:1]
 if receipt.get("evaluator_samples") != expected:
     raise SystemExit(f"expected evaluator sample {expected}, got {receipt.get('evaluator_samples')}")
+if receipt.get("evaluator_dependence") != {expected[0]: "proven"}:
+    raise SystemExit(f"expected proven dependence for {expected[0]}, got {receipt.get('evaluator_dependence')}")
 PY
 out=$(run_gate "$BENCH" cleanup-gate) || fail "cleanup must pass after a drill: $out"
 assert_contains "$out" "no candidate ships directly" "the disposition is re-asserted at cleanup"
@@ -1521,6 +1532,39 @@ assert_contains "$out" "ignored its declared scored inputs" "the rerun contract 
 assert_absent "$BENCH/archive/restore-drill.json" "a no-op evaluator writes no cleanup receipt"
 pass "the restore drill refuses an executable evaluator that ignores restored content"
 
+BENCH="$TMP_ROOT/archive-source-input"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-source-input"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text("#!/bin/sh\ncat \"$1/work.ts\"\n")
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["scored_inputs"] = ["work.ts"]
+record["evaluator_rerun"].pop("input_perturbations")
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(
+    f'export default "{record["sample"]}";\n'.encode()
+).hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) || fail "a source-scoring archive must remain restorable: $out"
+assert_contains "$out" "evaluator_dependence ok unproven" \
+  "an input without a sound perturbation narrows the dependence claim"
+python3 - "$BENCH" <<'PY' || fail "the receipt must preserve the unproven dependence state"
+import json, sys
+from pathlib import Path
+receipt = json.loads((Path(sys.argv[1]) / "archive" / "restore-drill.json").read_text())
+if list(receipt.get("evaluator_dependence", {}).values()) != ["unproven"]:
+    raise SystemExit(f"expected one unproven dependence result, got {receipt.get('evaluator_dependence')}")
+PY
+out=$(run_gate "$BENCH" cleanup-gate) || fail "unproven dependence must preserve the other cleanup proofs: $out"
+pass "source inputs rerun under confinement with dependence explicitly unproven"
+
 BENCH="$TMP_ROOT/archive-stateful-evaluator"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-stateful-evaluator"
@@ -1621,24 +1665,6 @@ assert_contains "$out" "scored_inputs must name at least one" "an empty scored-i
 assert_absent "$BENCH/archive/restore-drill.json" "an input-free evaluator writes no cleanup receipt"
 pass "every archived evaluator declares a non-empty scored-input set"
 
-BENCH="$TMP_ROOT/archive-no-perturbation-contract"
-write_plan "$BENCH"
-write_archive "$BENCH" "$TMP_ROOT/srcrepo-no-perturbation-contract"
-python3 - "$BENCH" <<'PY'
-import json, sys
-from pathlib import Path
-p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
-d = json.loads(p.read_text())
-d["evaluator_rerun"].pop("input_perturbations")
-p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
-PY
-out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
-expect_code 1 "$status" "an evaluator must declare how each scored input stays valid under perturbation"
-assert_contains "$out" "input_perturbations must define every scored input exactly once" \
-  "the form-preserving perturbation contract is mandatory"
-assert_absent "$BENCH/archive/restore-drill.json" "an undeclared perturbation writes no cleanup receipt"
-pass "every archived evaluator declares its scored-input perturbation contract"
-
 BENCH="$TMP_ROOT/archive-duplicate-scored-input"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-duplicate-scored-input"
@@ -1652,7 +1678,7 @@ p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
 expect_code 1 "$status" "a scored input cannot reuse one perturbation declaration twice"
-assert_contains "$out" "input_perturbations must define every scored input exactly once" \
+assert_contains "$out" "scored_inputs must not contain duplicates" \
   "the perturbation contract is one-to-one"
 assert_absent "$BENCH/archive/restore-drill.json" "a duplicate scored input writes no cleanup receipt"
 pass "scored-input perturbation declarations are one-to-one"
@@ -1750,7 +1776,7 @@ record["evaluator_rerun"]["result_hash"] = hashlib.sha256((record["sample"] + "\
 manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
 out=$(run_gate "$BENCH" restore-drill) || fail "an evaluator that writes scratch output must not dirty its archive: $out"
-assert_contains "$out" "changed under scored-input perturbation" "the scratch-writing evaluator ran against both restored candidates"
+assert_contains "$out" "evaluator_dependence ok proven" "the scratch-writing evaluator ran against both restored candidates"
 first_sample=$(find "$BENCH/archive" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1)
 assert_absent "$first_sample/scratch-only.txt" "evaluator scratch output never reaches the certified archive"
 out=$(run_gate "$BENCH" cleanup-gate) || fail "a scratch-only evaluator must leave cleanup authorised: $out"
@@ -1980,13 +2006,28 @@ for name in sorted(plan["tracks"]):
             write(name, ids[0], entrant["name"], "entrant", 9.0, suffix="-rerun")
     if "baseline" in track:
         for index, packet in enumerate(track["baseline_packets"]):
-            if mode == "tolerance":
-                base = 10.2 if index == 0 else 8.0
+            if mode == "zero_floor":
+                base = 10.0 if index == 0 else 8.5
+            elif mode == "negative_mean":
+                base = 10.0 if index == 0 else 8.75
             elif mode == "lossbound":
                 base = 9.5 if index == 0 else 7.5
             else:
                 base = 9.5 if mode == "veto" else 7.5
+            if mode == "baseline_unreplaced_void" and index == 0:
+                write(name, packet, track["baseline"]["name"], "baseline", 0.0, status="void")
+                continue
             write(name, packet, track["baseline"]["name"], "baseline", base)
+        if mode == "baseline_void":
+            write(
+                name,
+                track["baseline_packets"][0],
+                track["baseline"]["name"],
+                "baseline",
+                0.0,
+                status="void",
+                suffix="-void",
+            )
 PY
 }
 
@@ -2004,17 +2045,27 @@ BENCH="$TMP_ROOT/promote-replaced-void"
 write_plan "$BENCH"
 write_results "$BENCH" void
 out=$(run_gate "$BENCH" promote-evaluate) || fail "a void with a scored replacement must remain promotable: $out"
-assert_contains "$out" "all 1 voided samples have scored replacements on the same entrant and packet" \
+assert_contains "$out" "all 1 voided samples have scored replacements with the same role, candidate, and packet" \
   "the scored rerun reconciles its void"
 assert_contains "$out" "standing route eligible" "a replaced void does not make the field permanently incomplete"
 pass "a void is retained as evidence and credited when its rerun scores"
 
-BENCH="$TMP_ROOT/promote-declared-tolerance"
-write_plan "$BENCH" 'plan["promotion_rule"]["baseline_veto"]["max_negative_mean_quality_delta"] = -0.5'
-write_results "$BENCH" tolerance
-out=$(run_gate "$BENCH" promote-evaluate) || fail "the declared baseline tolerance must be honoured: $out"
-assert_contains "$out" "mean delta 0.267 >= -0.500" "the veto reads its declared mean-delta floor"
-pass "promotion honours the frozen baseline quality tolerance"
+BENCH="$TMP_ROOT/promote-replaced-baseline-void"
+write_plan "$BENCH"
+write_results "$BENCH" baseline_void
+out=$(run_gate "$BENCH" promote-evaluate) || fail "a baseline void with a scored replacement must remain promotable: $out"
+assert_contains "$out" "same role, candidate, and packet" \
+  "the baseline rerun reconciles its retained void"
+assert_contains "$out" "standing route eligible" "a replaced baseline void does not make the field incomplete"
+pass "baseline void evidence is credited when the same baseline sample reruns"
+
+BENCH="$TMP_ROOT/promote-zero-floor"
+write_plan "$BENCH"
+write_results "$BENCH" zero_floor
+out=$(run_gate "$BENCH" promote-evaluate) || fail "a zero mean delta at the fixed floor must pass: $out"
+assert_contains "$out" "mean delta 0.000 >= 0.000" "the zero baseline mean floor is inclusive"
+assert_contains "$out" "1 <= 1 losses" "one loss remains within the original outer limit"
+pass "the baseline veto accepts its zero-mean and one-loss boundaries"
 
 BENCH="$TMP_ROOT/promote-declared-loss-bound"
 write_plan "$BENCH" 'plan["promotion_rule"]["baseline_veto"]["max_losses_of_three"] = 0'
@@ -2039,6 +2090,8 @@ refuses_promotion "five of six wins" split "no standing route"
 refuses_promotion "a blocker-class failure" blocker "carries a blocker-class failure"
 refuses_promotion "a margin under the predeclared bar" thin "below the predeclared bar"
 refuses_promotion "a baseline regression" veto "regression veto fired"
+refuses_promotion "a negative baseline mean" negative_mean "below the declared floor 0.000"
 refuses_promotion "a void with no scored replacement" unreplaced_void "without scored replacements"
+refuses_promotion "a baseline void with no scored replacement" baseline_unreplaced_void "baseline:"
 refuses_promotion "an extra sample beyond the approved six" ninth "no adaptive extension"
-pass "five of six, blockers, thin margins, regressions, unreplaced voids, and seventh samples refuse"
+pass "five of six, blockers, thin margins, regressions, all-role unreplaced voids, and seventh samples refuse"
