@@ -72,4 +72,9 @@ printf 'not json\n' >"$TMP/invalid.json"
 expect_red "cannot read Codex prompt input" \
   python3 "$ROOT/bin/fm-instruction-context-check.py" --input-json "$TMP/invalid.json" --budget 20
 
+reordered="FLEET_FIRSTMATE_INSTRUCTIONS_START FM-HARD-1 FM-HARD-2 FM-SESSION-START FM-HARD-3 FM-HARD-4 FM-HARD-5 FM-LOCK-REFUSAL FM-CAPTAIN-PRECEDENCE FLEET_FIRSTMATE_INSTRUCTIONS_END"
+write_fixture "$TMP/reordered.json" "$reordered"
+expect_red "out of order" \
+  python3 "$ROOT/bin/fm-instruction-context-check.py" --input-json "$TMP/reordered.json" --budget 20
+
 echo "ok - instruction context check exercises live command and red paths"

@@ -76,9 +76,18 @@ def main() -> None:
         parser.error("--budget must be positive")
 
     text = instruction_block(load_prompt(args.input_json))
-    missing = [marker for marker in (*PROTECTED_IDS, END_SENTINEL) if marker not in text]
+    ordered_markers = (BLOCK_SENTINEL, *PROTECTED_IDS, END_SENTINEL)
+    missing = [marker for marker in ordered_markers if marker not in text]
     if missing:
         fail(f"model-visible instructions are incomplete; missing {', '.join(missing)}")
+
+    last_index = -1
+    last_marker = None
+    for marker in ordered_markers:
+        index = text.index(marker)
+        if index <= last_index:
+            fail(f"model-visible instructions are out of order; {marker} did not follow {last_marker}")
+        last_index, last_marker = index, marker
 
     words = len(text.split())
     estimated_tokens = (words * 4 + 2) // 3
