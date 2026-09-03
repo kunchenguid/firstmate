@@ -398,12 +398,20 @@ test_ask_user_escalation_format() {
   assert_no_grep "escalate to firstmate (rule 6) and stop." "$brief" \
     "no-mistakes DOD ask-user paragraph still uses the old bare rule-6 pointer"
 
+  other_id="brief-no-ask-user-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --scout >/dev/null 2>&1
+  other_brief="$home/data/$other_id/brief.md"
+  assert_no_grep "destructive actions, ask-user findings" "$other_brief" \
+    "scout brief received a no-mistakes-only decision case"
+
   for mode in direct-PR local-only; do
     other_id="brief-no-ask-user-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --mode "$mode" >/dev/null 2>&1
     other_brief="$home/data/$other_id/brief.md"
     assert_no_grep "nm-<run>-findings.txt" "$other_brief" \
       "$mode brief received a no-mistakes-only escalation format"
+    assert_no_grep "destructive actions, ask-user findings" "$other_brief" \
+      "$mode brief received a no-mistakes-only decision case"
   done
 
   pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
