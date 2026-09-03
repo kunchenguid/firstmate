@@ -55,9 +55,17 @@
 #   label_attempt=<epoch>   when the last failed label refresh was attempted
 #                           (0 when none is pending), so a failing rename
 #                           retries on the cadence rather than every poll
+#   label_warned=<reason>   the failure reason last warned about (empty when
+#                           the last refresh succeeded), so one reason warns
+#                           once and warns again only after it changes or a
+#                           later success
 # The first observation seeds observed= from the task's spawn instant (the
 # epoch inside spawn_gen=s<epoch>.<pid>.<random>, else the record's mtime), so
 # time before the first observation counts as implementing.
+# An observation whose derived phase is unknown (an unreadable current state)
+# charges its interval to secs_other and leaves phase=, step=, since=, and the
+# fix-round count untouched: the caller displays unknown with no estimate, but
+# a transient blip never resets the last known phase's clock or counts a round.
 #
 # HISTORY RECORD, data/phase-history.jsonl, one JSON object per finished task,
 # appended by `fm-progress.sh record` at teardown and never rewritten:
@@ -66,7 +74,8 @@
 #    "fix_rounds":N}
 # Medians are computed per (kind, mode) over the newest FM_PROGRESS_HISTORY_MAX
 # records; a phase needs FM_PROGRESS_MIN_SAMPLES finished tasks with time in it
-# before its median replaces the default band.
+# before its median replaces the default band. The sample count reported beside
+# a guess is the number of matching records, never a sum over phases.
 #
 # DEFAULT BANDS (minutes), used for any phase with fewer samples than that:
 #   implementing 10 to 60, validating 15 to 40, each fix round 5 to 15 (one
@@ -78,8 +87,12 @@
 #   direct-PR                 implementing, ci
 #   no-mistakes (default)     implementing, validating+fixing, ci
 # validating and fixing are one interleaved block whose elapsed time is their
-# sum. A current phase that has already outlived its band contributes nothing
-# and is reported as running long. Medians give a "~N min" point guess; default
+# sum. A current phase that has already outlived its threshold contributes
+# nothing and is reported as running long: the threshold is the default band's
+# upper bound, or, once history supplies the median, the 75th percentile of the
+# matching samples (the largest sample when fewer than four exist), so a task
+# on a normal pace is not called late the moment it passes the median. Medians
+# give a "~N min" point guess; default
 # bands give an "N to M min" range; a mix gives a range. Each bound is rounded
 # to the nearest five minutes so a label moves at most once per five elapsed
 # minutes rather than every poll.
@@ -324,6 +337,7 @@ _fm_progress_rec_reset() {
   FM_PROGRESS_REC_SECS_OTHER=0
   FM_PROGRESS_REC_LABEL=
   FM_PROGRESS_REC_LABEL_ATTEMPT=
+  FM_PROGRESS_REC_LABEL_WARNED=
 }
 
 _fm_progress_num() {  # <value> -> value or 0
@@ -356,6 +370,7 @@ fm_progress_record_load() {
       secs_other) FM_PROGRESS_REC_SECS_OTHER=$(_fm_progress_num "$value") ;;
       label) FM_PROGRESS_REC_LABEL=$value ;;
       label_attempt) FM_PROGRESS_REC_LABEL_ATTEMPT=$(_fm_progress_num "$value") ;;
+      label_warned) FM_PROGRESS_REC_LABEL_WARNED=$value ;;
     esac
   done < "$rec"
   [ -n "$FM_PROGRESS_REC_OBSERVED" ] && [ -n "$FM_PROGRESS_REC_PHASE" ] || {
@@ -387,6 +402,7 @@ fm_progress_record_write() {
     printf 'secs_other=%s\n' "$FM_PROGRESS_REC_SECS_OTHER"
     printf 'label=%s\n' "$FM_PROGRESS_REC_LABEL"
     printf 'label_attempt=%s\n' "$FM_PROGRESS_REC_LABEL_ATTEMPT"
+    printf 'label_warned=%s\n' "$FM_PROGRESS_REC_LABEL_WARNED"
   } > "$tmp"; then
     rm -f "$tmp"
     return 1
@@ -423,6 +439,14 @@ fm_progress_observe() {
   prev=$FM_PROGRESS_REC_PHASE
   delta=$((now - FM_PROGRESS_REC_OBSERVED))
   [ "$delta" -ge 0 ] || delta=0
+  if [ "$phase" = unknown ]; then
+    # An unreadable state is displayed as unknown but is not a transition: the
+    # last known phase keeps its clock, step, and round count.
+    _fm_progress_rec_add other "$delta"
+    FM_PROGRESS_REC_OBSERVED=$now
+    fm_progress_record_write "$state" "$id"
+    return
+  fi
   _fm_progress_rec_add "$(fm_progress_phase_key "$prev")" "$delta"
   if [ "$phase" != "$prev" ]; then
     FM_PROGRESS_REC_SINCE=$now
@@ -460,10 +484,12 @@ fm_progress_history_append() {
 }
 
 # fm_progress_history_medians <data-dir> <kind> <mode>
-# Prints "<name>\t<median>\t<count>" for implementing, validating, ci (seconds),
-# fix_round (seconds per round), and fix_rounds (rounds per task), over the
-# newest FM_PROGRESS_HISTORY_MAX matching records. Prints nothing without jq or
-# without a history file.
+# Prints "<name>\t<median>\t<count>\t<p75>" for implementing, validating, ci
+# (seconds), block (validating plus fixing seconds per task), fix_round (seconds
+# per round), and fix_rounds (rounds per task), plus one "tasks\t<n>\t<n>\t<n>"
+# row counting the matching records, over the newest FM_PROGRESS_HISTORY_MAX
+# matching records. p75 is the nearest-rank 75th percentile, the largest sample
+# when fewer than four exist. Prints nothing without jq or without a history file.
 fm_progress_history_medians() {
   local data=$1 kind=$2 mode=$3 file
   file=$(fm_progress_history_path "$data")
@@ -475,13 +501,19 @@ fm_progress_history_medians() {
         sort | if length == 0 then null
                elif length % 2 == 1 then .[(length / 2) | floor]
                else ((.[length / 2 - 1] + .[length / 2]) / 2) end;
+      def p75:
+        sort | if length == 0 then null
+               elif length < 4 then .[-1]
+               else .[((length * 3 + 3) / 4 | floor) - 1] end;
       def row($name; $values):
         ($values | map(select(type == "number" and . >= 0))) as $v
-        | [$name, (($v | median) // 0 | round), ($v | length)] | @tsv;
+        | [$name, (($v | median) // 0 | round), ($v | length), (($v | p75) // 0 | round)] | @tsv;
       [ split("\n")[] | select(length > 0) | (fromjson? // empty)
         | select(.v == 1 and .kind == $kind and .mode == $mode) ] as $rows
-      | row("implementing"; [$rows[] | .secs.implementing | select(. > 0)]),
+      | (["tasks", ($rows | length), ($rows | length), ($rows | length)] | @tsv),
+        row("implementing"; [$rows[] | .secs.implementing | select(. > 0)]),
         row("validating"; [$rows[] | .secs.validating | select(. > 0)]),
+        row("block"; [$rows[] | select(.secs.validating > 0) | (.secs.validating + .secs.fixing)]),
         row("ci"; [$rows[] | .secs.ci | select(. > 0)]),
         row("fix_round"; [$rows[] | select((.fix_rounds // 0) > 0) | (.secs.fixing / .fix_rounds)]),
         row("fix_rounds"; [$rows[] | select(.secs.validating > 0) | (.fix_rounds // 0)])
@@ -490,56 +522,66 @@ fm_progress_history_medians() {
 
 # --- estimate ---------------------------------------------------------------
 
-_fm_progress_median_lookup() {  # <medians-tsv> <name> -> "<median>\t<count>"
+_fm_progress_median_lookup() {  # <medians-tsv> <name> -> "<median>\t<count>\t<p75>"
   local line
   while IFS= read -r line; do
     case "$line" in "$2"$'\t'*) line=${line#*$'\t'}; printf '%s' "$line"; return 0 ;; esac
   done <<EOF
 $1
 EOF
-  printf '0\t0'
+  printf '0\t0\t0'
 }
 
-# Expected minutes for one unit as "<low>\t<high>\t<history|default>\t<samples>".
+_fm_progress_secs_to_min() {  # <secs>
+  printf '%s' "$(( ($1 + 30) / 60 ))"
+}
+
+# Expected minutes for one unit as
+# "<low>\t<high>\t<history|default|mixed>\t<threshold>": the threshold is the
+# minute count past which the unit reads as running long (the default band's
+# upper bound, or the history 75th percentile once the unit's median applies).
 _fm_progress_unit_expected() {  # <medians-tsv> <unit>
-  local m=$1 unit=$2 rec median count rounds rounds_count per per_count vlow vhigh vbasis samples
+  local m=$1 unit=$2 rec median count p75 rounds rounds_count per per_count vlow vhigh vbasis threshold
   case "$unit" in
-    impl)
-      rec=$(_fm_progress_median_lookup "$m" implementing)
-      median=${rec%%$'\t'*}; count=${rec#*$'\t'}
-      if [ "$count" -ge "$FM_PROGRESS_MIN_SAMPLES" ]; then
-        median=$(( (median + 30) / 60 ))
-        printf '%s\t%s\thistory\t%s' "$median" "$median" "$count"
+    impl|ci)
+      if [ "$unit" = impl ]; then
+        rec=$(_fm_progress_median_lookup "$m" implementing)
       else
-        printf '%s\t%s\tdefault\t%s' "$FM_PROGRESS_DEFAULT_IMPLEMENTING_LOW" "$FM_PROGRESS_DEFAULT_IMPLEMENTING_HIGH" "$count"
+        rec=$(_fm_progress_median_lookup "$m" ci)
       fi
-      ;;
-    ci)
-      rec=$(_fm_progress_median_lookup "$m" ci)
-      median=${rec%%$'\t'*}; count=${rec#*$'\t'}
+      median=${rec%%$'\t'*}; rec=${rec#*$'\t'}
+      count=${rec%%$'\t'*}; p75=${rec#*$'\t'}
       if [ "$count" -ge "$FM_PROGRESS_MIN_SAMPLES" ]; then
-        median=$(( (median + 30) / 60 ))
-        printf '%s\t%s\thistory\t%s' "$median" "$median" "$count"
+        median=$(_fm_progress_secs_to_min "$median")
+        printf '%s\t%s\thistory\t%s' "$median" "$median" "$(_fm_progress_secs_to_min "$p75")"
+      elif [ "$unit" = impl ]; then
+        printf '%s\t%s\tdefault\t%s' "$FM_PROGRESS_DEFAULT_IMPLEMENTING_LOW" "$FM_PROGRESS_DEFAULT_IMPLEMENTING_HIGH" "$FM_PROGRESS_DEFAULT_IMPLEMENTING_HIGH"
       else
-        printf '%s\t%s\tdefault\t%s' "$FM_PROGRESS_DEFAULT_CI_LOW" "$FM_PROGRESS_DEFAULT_CI_HIGH" "$count"
+        printf '%s\t%s\tdefault\t%s' "$FM_PROGRESS_DEFAULT_CI_LOW" "$FM_PROGRESS_DEFAULT_CI_HIGH" "$FM_PROGRESS_DEFAULT_CI_HIGH"
       fi
       ;;
     block)
       rec=$(_fm_progress_median_lookup "$m" validating)
-      median=${rec%%$'\t'*}; count=${rec#*$'\t'}
-      samples=$count
+      median=${rec%%$'\t'*}; rec=${rec#*$'\t'}
+      count=${rec%%$'\t'*}
       if [ "$count" -ge "$FM_PROGRESS_MIN_SAMPLES" ]; then
-        vlow=$(( (median + 30) / 60 )); vhigh=$vlow; vbasis=history
+        vlow=$(_fm_progress_secs_to_min "$median"); vhigh=$vlow; vbasis=history
+        rec=$(_fm_progress_median_lookup "$m" block)
+        rec=${rec#*$'\t'}
+        threshold=$(_fm_progress_secs_to_min "${rec#*$'\t'}")
       else
         vlow=$FM_PROGRESS_DEFAULT_VALIDATING_LOW; vhigh=$FM_PROGRESS_DEFAULT_VALIDATING_HIGH; vbasis=default
+        threshold=''
       fi
       rec=$(_fm_progress_median_lookup "$m" fix_rounds)
-      rounds=${rec%%$'\t'*}; rounds_count=${rec#*$'\t'}
+      rounds=${rec%%$'\t'*}; rec=${rec#*$'\t'}
+      rounds_count=${rec%%$'\t'*}
       [ "$rounds_count" -ge "$FM_PROGRESS_MIN_SAMPLES" ] || rounds=$FM_PROGRESS_DEFAULT_FIX_ROUNDS
       rec=$(_fm_progress_median_lookup "$m" fix_round)
-      per=${rec%%$'\t'*}; per_count=${rec#*$'\t'}
+      per=${rec%%$'\t'*}; rec=${rec#*$'\t'}
+      per_count=${rec%%$'\t'*}
       if [ "$per_count" -ge "$FM_PROGRESS_MIN_SAMPLES" ]; then
-        per=$(( (per + 30) / 60 ))
+        per=$(_fm_progress_secs_to_min "$per")
         vlow=$((vlow + rounds * per)); vhigh=$((vhigh + rounds * per))
         [ "$vbasis" = history ] || vbasis=mixed
       else
@@ -547,7 +589,10 @@ _fm_progress_unit_expected() {  # <medians-tsv> <unit>
         vhigh=$((vhigh + rounds * FM_PROGRESS_DEFAULT_FIX_ROUND_HIGH))
         [ "$vbasis" = default ] || vbasis=mixed
       fi
-      printf '%s\t%s\t%s\t%s' "$vlow" "$vhigh" "$vbasis" "$samples"
+      # A history threshold below the expected block would call every task late;
+      # keep whichever is larger.
+      if [ -z "$threshold" ] || [ "$threshold" -lt "$vhigh" ]; then threshold=$vhigh; fi
+      printf '%s\t%s\t%s\t%s' "$vlow" "$vhigh" "$vbasis" "$threshold"
       ;;
   esac
 }
@@ -588,13 +633,16 @@ _fm_progress_basis_merge() {  # <a> <b>
 # in minutes, or "none" when the phase carries no estimate.
 fm_progress_estimate() {
   local data=$1 kind=$2 mode=$3 phase=$4 elapsed=$5 block=$6
-  local unit seq medians found=0 u exp low high basis samples elapsed_min
+  local unit seq medians found=0 u exp low high basis threshold elapsed_min rec
   local cur_low=0 cur_high=0 rest_low=0 rest_high=0 all_basis='' overrun=0 exp_low=0 exp_high=0 total_samples=0
   unit=$(fm_progress_unit_of_phase "$phase")
   [ -n "$unit" ] || { printf 'none'; return 0; }
   seq=$(fm_progress_sequence "$kind" "$mode")
   case " $seq " in *" $unit "*) ;; *) printf 'none'; return 0 ;; esac
   medians=$(fm_progress_history_medians "$data" "$kind" "$mode")
+  # The sample count is the number of matching finished tasks, never a sum.
+  rec=$(_fm_progress_median_lookup "$medians" tasks)
+  total_samples=${rec%%$'\t'*}
   for u in $seq; do
     if [ "$found" = 0 ]; then
       [ "$u" = "$unit" ] || continue
@@ -602,23 +650,21 @@ fm_progress_estimate() {
       exp=$(_fm_progress_unit_expected "$medians" "$u")
       low=${exp%%$'\t'*}; exp=${exp#*$'\t'}
       high=${exp%%$'\t'*}; exp=${exp#*$'\t'}
-      basis=${exp%%$'\t'*}; samples=${exp#*$'\t'}
+      basis=${exp%%$'\t'*}; threshold=${exp#*$'\t'}
       exp_low=$low; exp_high=$high
       if [ "$u" = block ]; then elapsed_min=$(( block / 60 )); else elapsed_min=$(( elapsed / 60 )); fi
       cur_low=$((low - elapsed_min)); [ "$cur_low" -ge 0 ] || cur_low=0
       cur_high=$((high - elapsed_min)); [ "$cur_high" -ge 0 ] || cur_high=0
-      [ "$elapsed_min" -le "$high" ] || overrun=1
+      [ "$elapsed_min" -le "$threshold" ] || overrun=1
       all_basis=$(_fm_progress_basis_merge "$all_basis" "$basis")
-      total_samples=$((total_samples + samples))
       continue
     fi
     exp=$(_fm_progress_unit_expected "$medians" "$u")
     low=${exp%%$'\t'*}; exp=${exp#*$'\t'}
     high=${exp%%$'\t'*}; exp=${exp#*$'\t'}
-    basis=${exp%%$'\t'*}; samples=${exp#*$'\t'}
+    basis=${exp%%$'\t'*}
     rest_low=$((rest_low + low)); rest_high=$((rest_high + high))
     all_basis=$(_fm_progress_basis_merge "$all_basis" "$basis")
-    total_samples=$((total_samples + samples))
   done
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
     "$cur_low" "$cur_high" "$rest_low" "$rest_high" "$all_basis" "$overrun" "$total_samples" "$exp_low" "$exp_high"
@@ -680,7 +726,11 @@ fm_progress_estimate_text() {
     *) basis_text="default bands, fewer than $FM_PROGRESS_MIN_SAMPLES finished tasks" ;;
   esac
   if [ "$overrun" = 1 ]; then
-    printf 'running long: past the %s guess for %s' "$(fm_progress_minutes_text "$exp_low" "$exp_high")" "$phase"
+    if [ "$exp_low" -eq "$exp_high" ]; then
+      printf 'running long: past the 75th percentile of finished tasks for %s (guess was %s)' "$phase" "$(fm_progress_minutes_text "$exp_low" "$exp_high")"
+    else
+      printf 'running long: past the %s guess for %s' "$(fm_progress_minutes_text "$exp_low" "$exp_high")" "$phase"
+    fi
     if [ "$((rest_low + rest_high))" -gt 0 ]; then
       printf ', then %s more' "$(fm_progress_minutes_text "$rest_low" "$rest_high")"
     fi
@@ -791,10 +841,14 @@ fm_progress_read() {
 # fm_progress_label_refresh <state-dir> <id> <suffix> [now]
 # Applies the suffix to the worker's projected Herdr workspace when it differs
 # from the last applied one. Silent on every non-Herdr backend and on a Herdr
-# task without a bound projection; a failed rename warns once and retries on
-# the cadence. Never touches task or endpoint records.
+# task without a bound projection. A failure warns once per distinct reason
+# (the adapter reports the reason in FM_BACKEND_HERDR_PROGRESS_REASON), stays
+# silent while that reason persists, warns again after the reason changes or a
+# later success, and retries on the cadence; a hand-changed label is only
+# re-read on that cadence, never renamed, until its journaled base returns.
+# Never touches task or endpoint records.
 fm_progress_label_refresh() {
-  local state=$1 id=$2 suffix=$3 now=${4:-} meta backend rc
+  local state=$1 id=$2 suffix=$3 now=${4:-} meta backend rc reason
   meta="$state/$id.meta"
   [ -f "$meta" ] || return 0
   backend=$(_fm_progress_meta_get "$meta" backend)
@@ -818,9 +872,15 @@ fm_progress_label_refresh() {
     0)
       FM_PROGRESS_REC_LABEL=$suffix
       FM_PROGRESS_REC_LABEL_ATTEMPT=0
+      FM_PROGRESS_REC_LABEL_WARNED=
       ;;
     2) return 0 ;;
     *)
+      reason=${FM_BACKEND_HERDR_PROGRESS_REASON:-failed}
+      if [ "$FM_PROGRESS_REC_LABEL_WARNED" != "$reason" ]; then
+        echo "warning: herdr progress label for $id: ${FM_BACKEND_HERDR_PROGRESS_MESSAGE:-$reason} (this repeats only if the reason changes)" >&2
+        FM_PROGRESS_REC_LABEL_WARNED=$reason
+      fi
       FM_PROGRESS_REC_LABEL_ATTEMPT=$now
       ;;
   esac
@@ -829,10 +889,11 @@ fm_progress_label_refresh() {
 }
 
 # fm_progress_tick <state-dir> <data-dir> [now]
-# The watcher's per-poll entry: for every local task with a record, re-read the
-# phase no more often than FM_PROGRESS_REFRESH_SECS, then refresh the label
-# when the phase or rounded estimate changed. Bounded, no network, never fails
-# the caller.
+# One pass over every local task, launched by the watcher as a detached child
+# each poll (bin/fm-watch.sh progress_tick_detached) so no current-state read
+# ever sits on the poll loop's path: re-read the phase no more often than
+# FM_PROGRESS_REFRESH_SECS, then refresh the label when the phase or rounded
+# estimate changed. Bounded, no network, never fails the caller.
 fm_progress_tick() {
   local state=$1 data=$2 now=${3:-} meta id
   [ "$FM_PROGRESS_REFRESH_SECS" -gt 0 ] || return 0

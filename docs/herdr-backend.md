@@ -129,7 +129,7 @@ Missing or malformed endpoint identity and missing confirmation machinery are am
 If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
 
 A live task's projected workspace label also carries a display-only progress suffix, ` · <phase> · <estimate>` such as ` · validating · ~25 min`, inserted before the ` · p:<token>` tail so the token stays the label's last segment and every token correlation above keeps matching.
-The watcher refreshes it through the version 2 journal only, at most once per poll and only when the phase or the rounded estimate changes; a flat task, a quarantined or absent journal, and every other backend are skipped silently, a failed or unverified rename only warns and retries on the cadence, and a label changed by hand is left alone.
+The watcher's detached progress tick refreshes it through the version 2 journal only, at most once per pass and only when the phase or the rounded estimate changes; a flat task, a quarantined or absent journal, and every other backend are skipped silently, a failed or unverified rename or an unreadable server warns once per distinct reason and retries silently on the cadence, and a label changed by hand is left alone with one warning and is not renamed again until its journaled base label returns.
 Every place that compares a live label with the journaled base strips that segment first, so a decoration is never read as a rename, is never journaled, and never authorizes any mutation.
 [`configuration.md`](configuration.md#progress-phase-and-remaining-time-guess-dataphase-historyjsonl) owns the phase model, the estimate, and the history record behind the suffix.
 

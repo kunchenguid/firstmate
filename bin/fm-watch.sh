@@ -134,13 +134,6 @@ mkdir -p "$STATE"
 # gate and the wake emission (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
-# Display-only progress phase and remaining-time guess: the per-poll tick below
-# (fm_progress_tick) re-reads each task's phase on a bounded cadence and refreshes
-# its Herdr workspace label suffix only when the phase or rounded estimate
-# changed. bin/fm-progress-lib.sh owns the model, records, and label grammar.
-# shellcheck source=bin/fm-progress-lib.sh
-. "$SCRIPT_DIR/fm-progress-lib.sh"
-
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
@@ -1453,6 +1446,32 @@ home_summary_refresh_detached() {
   HOME_SUMMARY_PID=$!
 }
 
+# Display-only progress phase and remaining-time guess (bin/fm-progress-lib.sh
+# owns the model, records, and label grammar). The per-task current-state read
+# it needs is the same bounded no-mistakes query crew_absorb_class reserves for
+# no-verb and first-sighting stale paths, so it never runs on this loop: each
+# poll launches `fm-progress.sh tick` as a detached child under the same
+# single-flight shape as home_summary_refresh_detached (skip while the previous
+# child is alive), and the child's own FM_PROGRESS_REFRESH_SECS cadence keeps an
+# idle launch to one bash start. Its warnings reach this watcher's stderr; its
+# failure never changes what a cycle decided, and it writes no task or endpoint
+# record.
+PROGRESS_TICK_PID=
+progress_tick_detached() {
+  [ "${FM_PROGRESS_REFRESH_SECS:-60}" != 0 ] || return 0
+  if [ -n "$PROGRESS_TICK_PID" ]; then
+    if kill -0 "$PROGRESS_TICK_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$PROGRESS_TICK_PID" 2>/dev/null || true
+    PROGRESS_TICK_PID=
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CREW_STATE_BIN="$FM_CREW_STATE_BIN" \
+    "$SCRIPT_DIR/fm-progress.sh" tick </dev/null >/dev/null &
+  PROGRESS_TICK_PID=$!
+}
+
 RECONCILE_REQUEST_PID=
 reconcile_requests_pending() {
   local request
@@ -2052,11 +2071,9 @@ EOF
     fi
   fi
 
-  # Progress indicator tick, after every wake decision of this cycle so it can
-  # never delay one: bounded per-task phase re-reads on the
-  # FM_PROGRESS_REFRESH_SECS cadence and a label refresh only on change. Display
-  # only; a failure here warns and never changes what this cycle decided.
-  fm_progress_tick "$STATE" "$DATA" || true
+  # Progress indicator tick, detached after every wake decision of this cycle
+  # so it can never delay one (progress_tick_detached above).
+  progress_tick_detached
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.

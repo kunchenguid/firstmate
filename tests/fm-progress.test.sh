@@ -24,9 +24,16 @@
 #       per tick, through the version 2 presentation journal only; silent on
 #       tmux and on a Herdr task without a bound projection; a failed rename
 #       warns and retries on the cadence, a hand-changed label is left alone
-#   (f) tick throttle: one phase re-read per cadence window per task
+#   (f) tick throttle: one phase re-read per cadence window per task, and the
+#       real watcher launches the tick as a detached single-flight child that
+#       never holds its poll loop
 #   (g) label grammar: the base is recovered from a decorated label and the
 #       token stays the last segment
+#   (h) an unreadable (unknown) observation never resets the last known
+#       phase's clock or counts a fix round
+#   (i) history: the reported sample count is the number of matching finished
+#       tasks, and running long starts past their 75th percentile, not the
+#       median
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -50,9 +57,11 @@ make_case() {  # <name> -> echoes case dir
 #!/usr/bin/env bash
 set -u
 [ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_CREW_STATE_LOG"
+[ -z "${FM_FAKE_CREW_STATE_SLEEP:-}" ] || sleep "$FM_FAKE_CREW_STATE_SLEEP"
 printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
 exit 0
 SH
+  fm_fake_exit0 "$fb" tmux
   cat > "$fb/fm-captain-hold.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -67,6 +76,7 @@ set -u
 printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
 case "${1:-} ${2:-}" in
   "workspace get")
+    [ "${FM_FAKE_HERDR_GET_FAIL:-0}" = 1 ] && exit 1
     printf '{"result":{"workspace":{"workspace_id":"%s","label":%s,"tab_count":1,"pane_count":1}}}\n' \
       "$3" "$(jq -Rn --rawfile l "${FM_FAKE_HERDR_LABEL_FILE:?}" '$l | rtrimstr("\n")')"
     ;;
@@ -225,6 +235,29 @@ test_record_accumulates_phases() {
   pass "the observation record seeds from the spawn instant and charges each interval to the phase seen at its start"
 }
 
+test_unknown_observation_keeps_the_phase_clock() {
+  local d rec out
+  d=$(make_case unknown-blip)
+  write_task "$d" ub ship no-mistakes "spawn_gen=s$((NOW - 3000)).1.1"
+  progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show ub >/dev/null
+  rec="$d/state/.progress-ub"
+  out=$(progress "$d" $((NOW + 10)) 'state: unknown · source: none · current state not read' 0 show ub)
+  [ "$(phase_of "$out")" = unknown ] || fail "an unreadable state displays unknown: $out"
+  assert_contains "$out" "guess: unknown" "an unreadable state carries no estimate"
+  grep -q "^phase=implementing$" "$rec" || fail "an unknown observation must not switch the record's phase: $(cat "$rec")"
+  grep -q "^since=$((NOW - 3000))$" "$rec" || fail "an unknown observation must not reset since: $(cat "$rec")"
+  grep -q "^secs_other=10$" "$rec" || fail "the unknown interval is charged to other: $(cat "$rec")"
+  out=$(progress "$d" $((NOW + 70)) 'state: working · source: pane · busy' 0 show ub)
+  [ "$(phase_of "$out")" = implementing ] || fail "the real phase returns: $out"
+  assert_contains "$out" "elapsed: 51 min" "the clock continues from the original since across the blip"
+  # A blip inside fixing must not count a second round.
+  progress "$d" $((NOW + 100)) 'state: working · source: run-step · validating (fixing) · step: review' 0 show ub >/dev/null
+  progress "$d" $((NOW + 130)) 'state: unknown · source: pane · harness state unavailable' 0 show ub >/dev/null
+  progress "$d" $((NOW + 160)) 'state: working · source: run-step · validating (fixing) · step: review' 0 show ub >/dev/null
+  grep -q "^fix_rounds=1$" "$rec" || fail "fixing -> unknown -> fixing must stay one round: $(cat "$rec")"
+  pass "an unreadable observation is displayed as unknown but never resets the phase clock or inflates fix rounds"
+}
+
 test_record_without_spawn_epoch_uses_mtime() {
   local d rec mtime
   d=$(make_case mtime)
@@ -294,12 +327,32 @@ test_history_medians_replace_bands_at_three_samples() {
     >> "$d/data/phase-history.jsonl"
   out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show h1)
   # medians: implementing 30 min, validating 10 min, fix round 5 min x 1 round, ci 5 min -> 50 -> "~50 min"
-  assert_contains "$out" "guess: ~50 min guess (from" "three matching samples switch every phase to its median"
+  assert_contains "$out" "guess: ~50 min guess (from 3 finished tasks)" "three matching samples switch every phase to its median and the count is the number of tasks, not a sum"
   assert_contains "$out" "label: · implementing · ~50 min" "the label carries the point guess with a ~"
   out=$(progress "$d" "$NOW" x 0 history)
-  assert_contains "$out" "implementing  median 30 min over 3 task(s)" "history reports the median and sample count"
-  assert_contains "$out" "fix_rounds    median 1 round(s) over 3 task(s)" "history reports the fix-round median"
+  assert_contains "$out" "tasks         3 matching finished task(s)" "history reports the matching task count"
+  assert_contains "$out" "implementing  median 30 min, 75th percentile 40 min, over 3 task(s)" "history reports the median, the 75th percentile, and the sample count"
+  assert_contains "$out" "fix_rounds    median 1 round(s), 75th percentile 2, over 3 task(s)" "history reports the fix-round median"
   pass "history medians replace the default bands once three matching finished tasks exist, per kind and mode"
+}
+
+test_running_long_starts_past_the_75th_percentile() {
+  local d out secs
+  d=$(make_case p75)
+  for secs in 1200 1800 1800 2400 3000; do
+    printf '{"v":1,"id":"h%s","kind":"ship","mode":"no-mistakes","finished":1,"secs":{"implementing":%s,"validating":600,"fixing":300,"ci":300,"waiting":0},"fix_rounds":1}\n' "$secs" "$secs" \
+      >> "$d/data/phase-history.jsonl"
+  done
+  # implementing: median 30 min, 75th percentile 40 min (nearest rank over five samples)
+  write_task "$d" past-median ship no-mistakes "spawn_gen=s$((NOW - 2100)).1.1"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show past-median)
+  case "$out" in *"running long"*) fail "a task past the median but under the 75th percentile is not running long: $out" ;; esac
+  assert_contains "$out" "guess: ~20 min guess (from 5 finished tasks)" "past the median the current phase contributes nothing and the rest still carries the point guess"
+  write_task "$d" past-p75 ship no-mistakes "spawn_gen=s$((NOW - 2700)).1.1"
+  out=$(progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show past-p75)
+  assert_contains "$out" "guess: running long: past the 75th percentile of finished tasks for implementing (guess was ~30 min), then ~20 min more" "past the 75th percentile the task reads as running long"
+  assert_contains "$out" "label: · implementing · running long" "the label says running long past the percentile"
+  pass "with history, running long starts past the 75th percentile of matching samples rather than the median"
 }
 
 test_record_hook_appends_history_and_drops_record() {
@@ -385,7 +438,7 @@ test_label_refresh_skips_without_projection_or_on_tmux() {
   pass "no Herdr call is made for a flat Herdr task or a tmux task, silently"
 }
 
-test_label_refresh_failure_warns_and_retries_on_cadence() {
+test_label_refresh_failure_warns_once_per_reason() {
   local d base
   d=$(make_case label-fail)
   base="└ lab2 · p:$TOKEN"
@@ -393,26 +446,52 @@ test_label_refresh_failure_warns_and_retries_on_cadence() {
   write_v2_journal "$d" lab2 "$base"
   printf '%s\n' "$base" > "$d/label"
   : > "$d/herdr.log"
+  # The same failure across two cadence windows warns exactly once.
   FM_FAKE_HERDR_RENAME_FAIL=1 progress "$d" "$NOW" 'state: working · source: pane · busy' 0 tick 2> "$d/err"
-  grep -q "warning: herdr progress label rename failed for lab2" "$d/err" || fail "a failed rename must warn: $(cat "$d/err")"
+  grep -q "warning: herdr progress label for lab2: rename failed on workspace w2" "$d/err" || fail "a failed rename must warn: $(cat "$d/err")"
+  [ "$(grep -c warning "$d/err")" = 1 ] || fail "one failure warns once: $(cat "$d/err")"
   [ "$(cat "$d/label")" = "$base" ] || fail "a failed rename leaves the label alone"
   grep -q "^label_attempt=$NOW$" "$d/state/.progress-lab2" || fail "the failed attempt is recorded"
+  grep -q "^label_warned=rename-failed$" "$d/state/.progress-lab2" || fail "the warned reason is recorded: $(cat "$d/state/.progress-lab2")"
   grep -q '^worktree=' "$d/state/lab2.meta" || fail "task records stay untouched"
-  # Within the cadence the failure is not retried; after it, it is.
   : > "$d/herdr.log"
-  FM_FAKE_HERDR_RENAME_FAIL=1 progress "$d" $((NOW + 30)) 'state: working · source: pane · busy' 0 tick 2>/dev/null
+  FM_FAKE_HERDR_RENAME_FAIL=1 progress "$d" $((NOW + 30)) 'state: working · source: pane · busy' 0 tick 2> "$d/err"
   [ ! -s "$d/herdr.log" ] || fail "a failed rename must not retry inside the cadence: $(cat "$d/herdr.log")"
-  progress "$d" $((NOW + 90)) 'state: working · source: pane · busy' 0 tick 2>/dev/null
+  [ ! -s "$d/err" ] || fail "no warning inside the cadence: $(cat "$d/err")"
+  FM_FAKE_HERDR_RENAME_FAIL=1 progress "$d" $((NOW + 90)) 'state: working · source: pane · busy' 0 tick 2> "$d/err"
   [ "$(rename_count "$d")" = 1 ] || fail "the rename retries after the cadence: $(cat "$d/herdr.log")"
-  [ "$(cat "$d/label")" = "└ lab2 · implementing · 35 to 130 min · p:$TOKEN" ] || fail "the retry applies the label: $(cat "$d/label")"
-  # A label changed by hand is never overwritten.
+  [ ! -s "$d/err" ] || fail "the same persisting reason must not warn again: $(cat "$d/err")"
+  # A changed reason warns again, once.
+  FM_FAKE_HERDR_GET_FAIL=1 progress "$d" $((NOW + 180)) 'state: working · source: pane · busy' 0 tick 2> "$d/err"
+  grep -q "warning: herdr progress label for lab2: could not read workspace w2" "$d/err" || fail "a changed reason warns again: $(cat "$d/err")"
+  FM_FAKE_HERDR_GET_FAIL=1 progress "$d" $((NOW + 270)) 'state: working · source: pane · busy' 0 tick 2> "$d/err"
+  [ ! -s "$d/err" ] || fail "an unreadable server keeps retrying silently: $(cat "$d/err")"
+  # A success clears the warned reason, so a later new failure warns again.
+  progress "$d" $((NOW + 360)) 'state: working · source: pane · busy' 0 tick 2> "$d/err"
+  [ "$(cat "$d/label")" = "└ lab2 · implementing · 30 to 125 min · p:$TOKEN" ] || fail "the retry applies the label once the server answers: $(cat "$d/label")"
+  [ ! -s "$d/err" ] || fail "a success is silent: $(cat "$d/err")"
+  grep -q "^label_warned=$" "$d/state/.progress-lab2" || fail "a success clears the warned reason: $(cat "$d/state/.progress-lab2")"
+  FM_FAKE_HERDR_RENAME_FAIL=1 progress "$d" $((NOW + 450)) 'state: working · source: run-step · validating (running) · step: review' 0 tick 2> "$d/err"
+  grep -q "rename failed on workspace w2" "$d/err" || fail "a failure after a success warns again: $(cat "$d/err")"
+  # A label changed by hand: one warning, no rename attempts, decoration
+  # resumes once the base label is back.
+  progress "$d" $((NOW + 540)) 'state: working · source: run-step · validating (running) · step: review' 0 tick 2>/dev/null
   printf 'my own name\n' > "$d/label"
   : > "$d/herdr.log"
-  progress "$d" $((NOW + 400)) 'state: working · source: run-step · validating (running) · step: review' 0 tick 2> "$d/err"
+  progress "$d" $((NOW + 640)) 'state: working · source: run-step · ci running · step: ci' 0 tick 2> "$d/err"
   [ "$(rename_count "$d")" = 0 ] || fail "a hand-changed label must not be renamed: $(cat "$d/herdr.log")"
-  grep -q "leaving the hand-changed label alone" "$d/err" || fail "a hand-changed label warns once: $(cat "$d/err")"
+  grep -q "leaving the hand-changed label alone until it returns" "$d/err" || fail "a hand-changed label warns once: $(cat "$d/err")"
+  [ "$(grep -c warning "$d/err")" = 1 ] || fail "exactly one hand-changed warning: $(cat "$d/err")"
+  : > "$d/herdr.log"
+  progress "$d" $((NOW + 740)) 'state: working · source: run-step · ci running · step: ci' 0 tick 2> "$d/err"
+  [ "$(rename_count "$d")" = 0 ] || fail "no later rename attempt while the label stays hand-changed: $(cat "$d/herdr.log")"
+  grep -q '^workspace get ' "$d/herdr.log" || fail "the live label is still re-read on the cadence to notice a restoration"
+  [ ! -s "$d/err" ] || fail "a persisting hand-changed label does not warn again: $(cat "$d/err")"
   [ "$(cat "$d/label")" = "my own name" ] || fail "the hand-changed label survives"
-  pass "a failed rename only warns and retries on the cadence, and a hand-changed label is left alone"
+  printf '%s\n' "$base" > "$d/label"
+  progress "$d" $((NOW + 840)) 'state: working · source: run-step · ci running · step: ci' 0 tick 2> "$d/err"
+  [ "$(cat "$d/label")" = "└ lab2 · ci · 5 to 10 min · p:$TOKEN" ] || fail "decoration resumes once the base label returns: $(cat "$d/label")"
+  pass "a failed rename warns once per distinct reason, retries on the cadence, and a hand-changed label is left alone until its base returns"
 }
 
 # ---------------------------------------------------------------------------
@@ -434,6 +513,38 @@ test_tick_reads_phase_once_per_cadence() {
   FM_PROGRESS_REFRESH_SECS=0 FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 600)) 'state: working · source: pane · busy' 0 tick
   [ ! -s "$d/crew.log" ] || fail "FM_PROGRESS_REFRESH_SECS=0 disables the tick"
   pass "the tick re-reads each task's phase once per cadence window and can be disabled"
+}
+
+# The real watcher launches the tick as a detached single-flight child: the
+# poll loop keeps beating while a slow current-state read is in flight, the
+# record still appears, and a second cycle never doubles a running tick.
+test_watcher_launches_tick_detached_with_single_flight() {
+  local d pid beat1 beat2 i
+  d=$(make_case watcher-tick)
+  write_task "$d" wt1 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  : > "$d/crew.log"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" \
+    FM_CREW_STATE_BIN="$d/fakebin/fm-crew-state.sh" FM_CAPTAIN_HOLD_BIN="$d/fakebin/fm-captain-hold.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · busy' FM_FAKE_CREW_STATE_LOG="$d/crew.log" \
+    FM_FAKE_CREW_STATE_SLEEP=3 FM_PROGRESS_REFRESH_SECS=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$d/watch.out" 2> "$d/watch.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ] && [ ! -s "$d/crew.log" ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$d/crew.log" ] || { kill "$pid" 2>/dev/null; fail "the watcher never launched the tick: $(cat "$d/watch.err")"; }
+  beat1=$(stat -c %Y "$d/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$d/state/.last-watcher-beat")
+  sleep 2
+  kill -0 "$pid" 2>/dev/null || fail "the watcher must stay alive while the tick child sleeps: $(cat "$d/watch.err")"
+  beat2=$(stat -c %Y "$d/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$d/state/.last-watcher-beat")
+  [ "$beat2" -gt "$beat1" ] || { kill "$pid" 2>/dev/null; fail "the poll loop must keep beating while a slow read is in flight"; }
+  [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 1 ] || { kill "$pid" 2>/dev/null; fail "a running tick is never doubled by later cycles: $(cat "$d/crew.log")"; }
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -f "$d/state/.progress-wt1" ]; do sleep 0.1; i=$((i + 1)); done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  [ -f "$d/state/.progress-wt1" ] || fail "the detached tick must still publish the observation record: $(cat "$d/watch.err")"
+  grep -q "^phase=implementing$" "$d/state/.progress-wt1" || fail "the detached tick records the phase: $(cat "$d/state/.progress-wt1")"
+  pass "the watcher launches the progress tick detached with a single-flight guard and keeps polling while it runs"
 }
 
 # ---------------------------------------------------------------------------
@@ -470,8 +581,11 @@ test_history_medians_replace_bands_at_three_samples
 test_record_hook_appends_history_and_drops_record
 test_label_refresh_on_change_only
 test_label_refresh_skips_without_projection_or_on_tmux
-test_label_refresh_failure_warns_and_retries_on_cadence
+test_label_refresh_failure_warns_once_per_reason
 test_tick_reads_phase_once_per_cadence
+test_watcher_launches_tick_detached_with_single_flight
 test_label_grammar
+test_unknown_observation_keeps_the_phase_clock
+test_running_long_starts_past_the_75th_percentile
 
 echo "all fm-progress tests passed"

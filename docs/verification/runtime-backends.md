@@ -646,7 +646,7 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 ok - real herdr 0.8.2: a bound projection's workspace is renamed to base plus suffix with the token last
 ok - real herdr 0.8.2: the rename leaves the focused workspace and tab unchanged
 ok - real herdr 0.8.2: an unchanged suffix is a no-op and a changed suffix replaces the segment
-ok - real herdr 0.8.2: a label changed by hand is left alone with one warning
+ok - real herdr 0.8.2: a label changed by hand is left alone and reported as hand-changed
 ok - real herdr 0.8.2: a task without a version 2 journal is skipped silently
 ok - real Herdr lab validation completed on Herdr 0.8.2 with the default-session tripwire intact
 ```

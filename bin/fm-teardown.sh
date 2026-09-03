@@ -935,13 +935,6 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
-# The progress observation record path (bin/fm-progress-lib.sh owns the file);
-# spelled here so a record left by a skipped `fm-progress.sh record` is still
-# retired with the rest of the volatile state.
-fm_progress_record_path_for_teardown() {  # <state-dir> <id>
-  printf '%s/.progress-%s' "$1" "$2"
-}
-
 require_orca_worktree_id() {
   local meta=$1 id
   id=$(meta_value "$meta" orca_worktree_id)
@@ -2921,20 +2914,19 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-# Display-only progress bookkeeping (bin/fm-progress-lib.sh): a finished task's
-# per-phase durations feed this home's data/phase-history.jsonl so later
-# estimates improve; a forced (discarded) teardown drops the observation record
-# without recording it. Best effort: it never blocks cleanup.
-if [ "$KIND" != secondmate ] && [ "$CLEANUP_RECOVERY" != orca ]; then
-  if [ "$FORCE" = "--force" ]; then
-    FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      "$SCRIPT_DIR/fm-progress.sh" record "$ID" --discard >&2 || true
-  else
-    FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      "$SCRIPT_DIR/fm-progress.sh" record "$ID" >&2 || true
-  fi
+# Display-only progress bookkeeping (bin/fm-progress-lib.sh owns the record
+# and its path): a finished task's per-phase durations feed this home's
+# data/phase-history.jsonl so later estimates improve, while a forced
+# (discarded) teardown, a secondmate retirement, and an Orca cleanup recovery
+# drop the observation record without recording it. Best effort: it never
+# blocks cleanup.
+if [ "$FORCE" = "--force" ] || [ "$KIND" = secondmate ] || [ "$CLEANUP_RECOVERY" = orca ]; then
+  FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-progress.sh" record "$ID" --discard >&2 || true
+else
+  FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-progress.sh" record "$ID" >&2 || true
 fi
-rm -f "$(fm_progress_record_path_for_teardown "$STATE" "$ID")"
 rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \

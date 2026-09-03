@@ -11,11 +11,13 @@
 #   fm-progress.sh show <id> [--json]   derive the task's phase now, advance its
 #                                       observation record, print phase, step,
 #                                       elapsed, guess, and label suffix
-#   fm-progress.sh tick                 the watcher's per-poll pass over every
-#                                       local task: bounded re-read on the
-#                                       FM_PROGRESS_REFRESH_SECS cadence and a
-#                                       Herdr label refresh only when the phase
-#                                       or rounded estimate changed
+#   fm-progress.sh tick                 one pass over every local task, which
+#                                       the watcher launches as a detached
+#                                       single-flight child each poll: bounded
+#                                       re-read on the FM_PROGRESS_REFRESH_SECS
+#                                       cadence and a Herdr label refresh only
+#                                       when the phase or rounded estimate
+#                                       changed
 #   fm-progress.sh record <id> [--discard]
 #                                       teardown's completion hook: append the
 #                                       task's per-phase durations to the
@@ -150,12 +152,13 @@ command_history() {
     printf 'history: no records for %s %s under %s (default bands apply)\n' "$kind" "$mode" "$(fm_progress_history_path "$DATA")"
     return 0
   fi
-  printf 'history: %s %s medians from %s (a phase needs %s samples before its median is used)\n' \
+  printf 'history: %s %s medians from %s (a phase needs %s samples before its median is used; running long starts past the 75th percentile)\n' \
     "$kind" "$mode" "$(fm_progress_history_path "$DATA")" "$FM_PROGRESS_MIN_SAMPLES"
-  printf '%s\n' "$out" | while IFS=$'\t' read -r name median count; do
+  printf '%s\n' "$out" | while IFS=$'\t' read -r name median count p75; do
     case "$name" in
-      fix_rounds) printf '  %-13s median %s round(s) over %s task(s)\n' "$name" "$median" "$count" ;;
-      *) printf '  %-13s median %s min over %s task(s)\n' "$name" "$(minutes "$median")" "$count" ;;
+      tasks) printf '  %-13s %s matching finished task(s)\n' "$name" "$count" ;;
+      fix_rounds) printf '  %-13s median %s round(s), 75th percentile %s, over %s task(s)\n' "$name" "$median" "$p75" "$count" ;;
+      *) printf '  %-13s median %s min, 75th percentile %s min, over %s task(s)\n' "$name" "$(minutes "$median")" "$(minutes "$p75")" "$count" ;;
     esac
   done
 }

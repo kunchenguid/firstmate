@@ -12,8 +12,9 @@
 # A visible title is discovery only. Cleanup requires the exact current
 # "└ <concise-task> · p:<22-char-token>" grammar (a display-only progress
 # segment inserted before the token by bin/backends/herdr.sh's
-# fm_backend_herdr_projection_progress_apply is stripped first and never
-# counts as a rename), one token occurrence across
+# fm_backend_herdr_projection_progress_apply is stripped first through that
+# adapter's one label-base rule and never counts as a rename), one token
+# occurrence across
 # the named-session snapshot, exactly one matching home-local journal, one tab,
 # one pane, absent task metadata, no registered agent, and a process proof that
 # the pane contains only one idle recognized shell with no child process. A
@@ -125,9 +126,7 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
   record=$(printf '%s' "$snapshot" | jq -er \
     --arg workspace "$workspace" --arg title "$title" --arg token "$token" \
     --arg bound_workspace "$bound_workspace" --arg bound_tab "$bound_tab" \
-    --arg bound_pane "$bound_pane" '
-    def label_base:
-      if type == "string" and test(" · p:") then (split(" · ") | .[0] + " · " + .[-1]) else . end;
+    --arg bound_pane "$bound_pane" "$FM_BACKEND_HERDR_LABEL_BASE_JQ"'
     .result.snapshot as $s
     | [$s.workspaces[]? | select(.workspace_id == $workspace)] as $workspaces
     | [$s.tabs[]? | select(.workspace_id == $workspace)] as $tabs
@@ -171,17 +170,13 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
     && [ "$FM_HERDR_CLEANUP_BOUND_PANE" = "$bound_pane" ] || return 1
 
   workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
-  printf '%s' "$workspaces" | jq -e --arg workspace "$workspace" --arg title "$title" --arg token "$token" '
-    def label_base:
-      if type == "string" and test(" · p:") then (split(" · ") | .[0] + " · " + .[-1]) else . end;
+  printf '%s' "$workspaces" | jq -e --arg workspace "$workspace" --arg title "$title" --arg token "$token" "$FM_BACKEND_HERDR_LABEL_BASE_JQ"'
     ([.result.workspaces[]? | select(.workspace_id == $workspace and (.label | label_base) == $title)] | length) == 1
     and ([.result.workspaces[]?.label? // "" |
           ((split("p:" + $token) | length) - 1)] | add // 0) == 1
   ' >/dev/null 2>&1 || return 1
   workspace_info=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
-  printf '%s' "$workspace_info" | jq -e --arg workspace "$workspace" --arg title "$title" '
-    def label_base:
-      if type == "string" and test(" · p:") then (split(" · ") | .[0] + " · " + .[-1]) else . end;
+  printf '%s' "$workspace_info" | jq -e --arg workspace "$workspace" --arg title "$title" "$FM_BACKEND_HERDR_LABEL_BASE_JQ"'
     .result.workspace.workspace_id == $workspace
     and (.result.workspace.label | label_base) == $title
     and .result.workspace.tab_count == 1

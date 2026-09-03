@@ -663,6 +663,12 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 # a live label with the journaled base compares through
 # fm_backend_herdr_projection_label_base so a decoration never reads as a rename.
 
+# The same strip rule for jq filters that compare live labels: one owner
+# (this variable, kept beside fm_backend_herdr_projection_label_base) that the
+# live-binding predicate below and bin/fm-herdr-session-cleanup.sh interpolate
+# with "$FM_BACKEND_HERDR_LABEL_BASE_JQ" ahead of their programs.
+FM_BACKEND_HERDR_LABEL_BASE_JQ='def label_base: if type == "string" and test(" · p:") then (split(" · ") | .[0] + " · " + .[-1]) else . end;'
+
 # fm_backend_herdr_projection_label_base <label>: the label without any
 # progress segment. A label without the token tail is returned as is.
 fm_backend_herdr_projection_label_base() {  # <label>
@@ -698,12 +704,21 @@ fm_backend_herdr_projection_progress_label() {  # <base-label> <suffix>
 # rename the task's projected workspace to its journaled base label plus the
 # suffix. Return 0 when the live label already carries it or the rename was
 # verified, 2 when the task has no version 2 projection binding to decorate
-# (flat tasks, quarantined or absent journals: silent), and 1 with one warning
-# when the live label could not be read, was changed by hand, or the rename
-# failed or did not verify. Takes no session lock: a rename changes neither
-# layout nor focus, and the presentation journal is only read here.
+# (flat tasks, quarantined or absent journals: silent), and 1 when it could
+# not be applied, with FM_BACKEND_HERDR_PROGRESS_REASON naming why as one of
+# unreadable (the live label could not be read, typically no running server),
+# hand-changed (the live label no longer strips to the journaled base, so it
+# is left alone and no rename is attempted until the base returns),
+# rename-failed, or unverified, and FM_BACKEND_HERDR_PROGRESS_MESSAGE carrying
+# the one-line explanation. It prints nothing itself: the caller
+# (bin/fm-progress-lib.sh) owns warning once per distinct reason. Takes no
+# session lock: a rename changes neither layout nor focus, and the
+# presentation journal is only read here.
+# shellcheck disable=SC2034  # FM_BACKEND_HERDR_PROGRESS_REASON and _MESSAGE are this function's outputs, read by bin/fm-progress-lib.sh.
 fm_backend_herdr_projection_progress_apply() {  # <state-dir> <task-id> <suffix>
   local state=$1 id=$2 suffix=$3 journal session workspace base desired live
+  FM_BACKEND_HERDR_PROGRESS_REASON=
+  FM_BACKEND_HERDR_PROGRESS_MESSAGE=
   journal=$(fm_backend_herdr_projection_journal_path "$state" "$id")
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 2
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 2
@@ -715,22 +730,26 @@ fm_backend_herdr_projection_progress_apply() {  # <state-dir> <task-id> <suffix>
   live=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null \
     | jq -r '.result.workspace.label // empty' 2>/dev/null) || live=
   if [ -z "$live" ]; then
-    echo "warning: herdr progress label for $id could not read workspace $workspace; leaving the label alone" >&2
+    FM_BACKEND_HERDR_PROGRESS_REASON=unreadable
+    FM_BACKEND_HERDR_PROGRESS_MESSAGE="could not read workspace $workspace; leaving the label alone"
     return 1
   fi
   if [ "$(fm_backend_herdr_projection_label_base "$live")" != "$base" ]; then
-    echo "warning: herdr progress label for $id skipped: workspace $workspace no longer carries its projected label; leaving the hand-changed label alone" >&2
+    FM_BACKEND_HERDR_PROGRESS_REASON=hand-changed
+    FM_BACKEND_HERDR_PROGRESS_MESSAGE="workspace $workspace no longer carries its projected label; leaving the hand-changed label alone until it returns"
     return 1
   fi
   [ "$live" != "$desired" ] || return 0
   if ! fm_backend_herdr_cli "$session" workspace rename "$workspace" "$desired" >/dev/null 2>&1; then
-    echo "warning: herdr progress label rename failed for $id on workspace $workspace; the label stays as it was" >&2
+    FM_BACKEND_HERDR_PROGRESS_REASON=rename-failed
+    FM_BACKEND_HERDR_PROGRESS_MESSAGE="rename failed on workspace $workspace; the label stays as it was"
     return 1
   fi
   live=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null \
     | jq -r '.result.workspace.label // empty' 2>/dev/null) || live=
   if [ "$live" != "$desired" ]; then
-    echo "warning: herdr progress label rename for $id did not verify on workspace $workspace" >&2
+    FM_BACKEND_HERDR_PROGRESS_REASON=unverified
+    FM_BACKEND_HERDR_PROGRESS_MESSAGE="rename did not verify on workspace $workspace"
     return 1
   fi
   return 0
@@ -2303,12 +2322,15 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
   local session=$1 token=$2 workspace=$3 tab=$4 pane=$5 parent_workspace=$6
   local parent_label=$7 workspace_label=$8 task_label=$9 list tabs panes
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  # A progress decoration (fm_backend_herdr_projection_progress_apply) sits
+  # between the first and last " · " segments; compare through the base rule
+  # owned above as FM_BACKEND_HERDR_LABEL_BASE_JQ.
   printf '%s' "$list" | jq -e \
     --arg token "$token" \
     --arg workspace "$workspace" \
     --arg parent_workspace "$parent_workspace" \
     --arg parent_label "$parent_label" \
-    --arg workspace_label "$workspace_label" '
+    --arg workspace_label "$workspace_label" "$FM_BACKEND_HERDR_LABEL_BASE_JQ"'
       def is_new_child:
         (.label | type) == "string"
         and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
@@ -2316,10 +2338,6 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
         (.label | type) == "string"
         and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
         and (.label | startswith($owner + "/"));
-      # A progress decoration (fm_backend_herdr_projection_progress_apply) sits
-      # between the first and last " · " segments; compare through the base.
-      def label_base:
-        if type == "string" and test(" · p:") then (split(" · ") | .[0] + " · " + .[-1]) else . end;
       (.result.workspaces // null) as $spaces
       | select(($spaces | type) == "array")
       | select(([$spaces[]? | select(.workspace_id == $workspace)] | length) == 1)

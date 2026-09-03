@@ -12,7 +12,8 @@
 #     plus the suffix, with the token still the label's last segment
 #   - the rename does not move the captain's focused workspace or tab
 #   - an unchanged suffix is a no-op and a changed suffix replaces the segment
-#   - a label changed by hand is left alone with a warning and status 1
+#   - a label changed by hand is left alone, reported as hand-changed with
+#     status 1 (the library owns warning once per reason)
 #   - a task without a version 2 journal is skipped silently with status 2
 # Skips cleanly when herdr, jq, or a running default session is unavailable.
 set -u
@@ -108,9 +109,10 @@ else
   rc=$?
 fi
 [ "$rc" -eq 1 ] || fail "a hand-changed label must refuse with status 1, got $rc"
-grep -q "leaving the hand-changed label alone" "$SCRATCH/warn" || fail "a hand-changed label must warn: $(cat "$SCRATCH/warn")"
+[ "$FM_BACKEND_HERDR_PROGRESS_REASON" = hand-changed ] || fail "a hand-changed label must report its reason, got '$FM_BACKEND_HERDR_PROGRESS_REASON'"
+[ ! -s "$SCRATCH/warn" ] || fail "the adapter reports the reason and leaves the warning to its caller: $(cat "$SCRATCH/warn")"
 [ "$(live_label "$WS")" = "my own name" ] || fail "a hand-changed label must survive"
-pass "real herdr $RELEASE: a label changed by hand is left alone with one warning"
+pass "real herdr $RELEASE: a label changed by hand is left alone and reported as hand-changed"
 
 rm -f "$JOURNAL"
 if fm_backend_herdr_projection_progress_apply "$STATE" "$ID" " · ready" 2> "$SCRATCH/warn2"; then
