@@ -599,6 +599,50 @@ test_copilot_exact_worker_hook_collision_refuses() {
   pass "copilot spawn refuses only its exact owned hook filename"
 }
 
+test_copilot_worker_hook_rejects_symlink_paths() {
+  local case_name id out status hooks target
+  for case_name in github-symlink hooks-symlink hook-symlink; do
+    id="profile-copilot-$case_name-z6g"
+    CASE_DIR="$TMP_ROOT/$case_name"
+    HOME_DIR="$CASE_DIR/home"
+    PROJ_DIR="$CASE_DIR/project"
+    WT_DIR="$CASE_DIR/wt"
+    LAUNCH_LOG="$CASE_DIR/launch.log"
+    FAKEBIN_DIR=$(make_spawn_fakebin "$CASE_DIR/fake")
+    fm_test_spawn_home "$HOME_DIR" copilot
+    fm_git_init_commit "$PROJ_DIR"
+    target="$CASE_DIR/foreign-target"
+    case "$case_name" in
+      github-symlink)
+        mkdir -p "$CASE_DIR"
+        ln -s "$target" "$PROJ_DIR/.github"
+        ;;
+      hooks-symlink)
+        mkdir -p "$PROJ_DIR/.github"
+        ln -s "$target" "$PROJ_DIR/.github/hooks"
+        ;;
+      hook-symlink)
+        mkdir -p "$PROJ_DIR/.github/hooks"
+        ln -s "$target" "$PROJ_DIR/.github/hooks/fm-busy-state-$id.json"
+        ;;
+    esac
+    git -C "$PROJ_DIR" add .github
+    git -C "$PROJ_DIR" -c user.email=t@t -c user.name=t commit -qm fixture
+    fm_git_add_origin "$PROJ_DIR" "$PROJ_DIR.origin.git"
+    git -C "$PROJ_DIR" worktree add --quiet -b "wt-$case_name" "$WT_DIR"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    hooks="$WT_DIR/.github/hooks/fm-busy-state-$id.json"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    [ "$status" -ne 0 ] || fail "copilot spawn should refuse $case_name"
+    assert_contains "$out" "Copilot worker hook" "symlink refusal for $case_name lost its hook-path explanation"
+    [ ! -s "$LAUNCH_LOG" ] || fail "copilot symlink refusal for $case_name still launched the worker"
+    [ -L "$hooks" ] || [ "$case_name" != hook-symlink ] || fail "hook symlink refusal rewrote the broken symlink"
+  done
+  pass "copilot spawn rejects symlinked hook paths before writing"
+}
+
 test_copilot_worker_hooks_ignore_foreign_sessions() {
   local rec id out status hooks hook_cmd
   id=profile-copilot-child-z6f
@@ -948,6 +992,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort
 test_copilot_threads_autonomy_model_and_effort
 test_copilot_preserves_repository_owned_hook_files
 test_copilot_exact_worker_hook_collision_refuses
+test_copilot_worker_hook_rejects_symlink_paths
 test_copilot_worker_hooks_ignore_foreign_sessions
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog

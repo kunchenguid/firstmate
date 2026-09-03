@@ -1677,6 +1677,23 @@ json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+copilot_hook_path_safe() {  # <worktree> <hook-path>
+  local wt=$1 hook=$2 github_dir hooks_dir path
+  github_dir=$wt/.github
+  hooks_dir=$github_dir/hooks
+  for path in "$github_dir" "$hooks_dir"; do
+    [ ! -L "$path" ] || { echo "error: refusing Copilot worker hook because $path is a symlink" >&2; return 1; }
+    if [ -e "$path" ] && [ ! -d "$path" ]; then
+      echo "error: refusing Copilot worker hook because $path exists and is not a directory" >&2
+      return 1
+    fi
+  done
+  if [ -L "$hook" ] || [ -e "$hook" ]; then
+    echo "error: refusing to overwrite existing Firstmate Copilot worker hook $hook for $ID" >&2
+    return 1
+  fi
+}
+
 resolved_existing_dir() {
   local path=$1
   [ -d "$path" ] || { echo "error: firstmate home does not exist or is not a directory: $path" >&2; return 1; }
@@ -2777,10 +2794,7 @@ EOF
         echo "error: could not resolve the Firstmate Copilot worker hook path for $ID" >&2
         exit 1
       }
-      [ ! -e "$local_copilot_hook_path" ] || {
-        echo "error: refusing to overwrite existing Firstmate Copilot worker hook $local_copilot_hook_path for $ID" >&2
-        exit 1
-      }
+      copilot_hook_path_safe "$WT" "$local_copilot_hook_path" || exit 1
       mkdir -p "$WT/.github/hooks"
       copilot_hook_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-copilot-worker-hook.sh") $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN")"
       j_submit=$(json_escape "$copilot_hook_cmd_prefix user-prompt-submitted $(shell_quote "$TURNEND") 2>/dev/null || true")
