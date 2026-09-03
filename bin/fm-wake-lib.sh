@@ -1697,8 +1697,8 @@ fm_autoarm_session_lease_acquire() {  # <state-dir>
 # Atomically publish this process as the owner of generation N+1, under one
 # short micro-mutex hold. Returns 0 with FM_AUTOARM_MY_GEN set on success, 2
 # when a competing claimant won the race (the ledger holds an open claim), and
-# 1 when the micro-mutex is contended, the mandatory identity cannot be
-# computed, or the write failed.
+# 1 when a bounded coordination lease or lock is unavailable, the mandatory
+# identity cannot be computed, or the write failed.
 fm_autoarm_claim_next() {  # <state-dir> [grace] [session-root] [session-owner-pid] [session-authority]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} session_root=${3:-} session_owner=${4:-}
   local session_authority=${5:-owned}

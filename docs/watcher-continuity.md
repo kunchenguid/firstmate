@@ -20,7 +20,7 @@ Each new generation claim is published under the session-acquisition lease, reco
 After those gates, inability to recover the session lock, claim a generation, or commit an owned result leaves current session-owner-bound durable failure state rather than absence; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns the lease bounds, failure records, notice election, and recovery-reset contract.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
 A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
-Only an exhausted failure with no verified watcher commits one last-resort notice for the continuous failure episode; a refused notice commit stays silent for a later retry, and after a successful notice later Stop cycles exit 2 without repeating it until the turn-end guard consumes the attended fail-open.
+An exhausted arm failure or eligible claim/publication failure with no verified watcher commits one last-resort notice for the continuous failure episode; a refused notice commit stays silent for a later retry, and after a successful notice later Stop cycles exit 2 without repeating it until the turn-end guard consumes the attended fail-open.
 The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, session-owner-scoped attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
@@ -113,7 +113,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale, zombie, and live session owners, Claude daemon `--spawned-by` ownership bridging, unchanged AFK and need boundaries, independent failed-claim epochs, reset-fenced atomic notice election, bounded legacy pre-publication, prior-terminal isolation, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
-`FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
+`FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, requires every real Stop delivery to authenticate the foreground owner through ancestry or the daemon bridge, completes two tokenless cycles, and checks the competing-live-owner negative control.
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic owned and repeated-claim failure progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset; [`turnend-guard.md`](turnend-guard.md#regression-coverage) lists that suite's full generation and legacy claim coverage.
 
 ## Active limits and verification
@@ -123,4 +123,4 @@ No zero-latency guarantee is claimed because lock verification, watcher startup,
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
 
-[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.
+[`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence and exact opt-in commands, with the current credentialed Claude result owned by its [turn-end guard evidence](verification/supervision.md#turn-end-guard).

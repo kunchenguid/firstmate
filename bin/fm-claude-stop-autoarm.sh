@@ -48,10 +48,11 @@
 #     watcher still has a fresh beacon.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
-#     hook. Only an exhausted failure with no verified watcher emits one
-#     last-resort notice per failure episode; later consecutive failures still
-#     exit 2 to guarantee the next Stop-owned retry without repeating notice,
-#     until the synchronous guard has consumed its attended fail-open.
+#     hook. An exhausted arm failure or an eligible claim/publication failure
+#     with no verified watcher emits one last-resort notice per failure episode;
+#     later consecutive failures still exit 2 to guarantee the next Stop-owned
+#     retry without repeating notice, until the synchronous guard has consumed
+#     its attended fail-open.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, while state/.claude-autoarm-failure-epochs records
@@ -66,9 +67,10 @@
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
-# Unresolvable session ownership and malformed session-lock state remain inert,
-# while an eligible generation-claim failure records a failed epoch and marker
-# without depending on the contended claim mutex.
+# A competing live owner and missing or malformed session-lock state remain
+# inert, while an eligible stale-owner recovery or generation-claim failure
+# records a failed epoch and marker without depending on the contended claim
+# mutex.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -252,12 +254,11 @@ fi
 # a live open claim, and a stuck, dead, identity-mismatched, or finished claim
 # is superseded by taking the next generation (fm_autoarm_claim_open and
 # fm_autoarm_claim_next in bin/fm-wake-lib.sh own the contract). No mutex is
-# held past this point. A micro-mutex contention with a bare hold is another
-# participant's short ledger section and the next Stop firing simply retries,
-# while a role-carrying hold is a legacy lock-holding claim from a
-# pre-generation build (or the guard's own terminal-check), which the legacy
-# shim defers to while genuinely deciding and reclaims once when proven
-# abandoned.
+# held past this point. Bounded contention with a bare hold uses the independent
+# failure-publication path, while a role-carrying hold is a legacy lock-holding
+# claim from a pre-generation build (or the guard's own terminal-check), which
+# the legacy shim defers to while genuinely deciding and reclaims once when
+# proven abandoned.
 autoarm_session_current_or_fail 'authenticated session owner died before generation claim' || exit 0
 fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
 autoarm_session_current_or_fail 'authenticated session owner died before generation publication' || exit 0
