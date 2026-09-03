@@ -268,11 +268,37 @@ fm_pr_sha256() {
   fi
 }
 
+# Overlayfs reports a different st_dev for a directory than for files created
+# in it. Trust a sibling file-layer device only when the ordinary parent itself
+# remains bound to the caller-supplied expected store device.
+fm_pr_same_store_device() {
+  local path=$1 expected=$2 actual parent tmp parent_dir_dev sibling_dev
+  actual=$(fm_pr_file_device "$path") || return 1
+  [ -n "$expected" ] && [ -n "$actual" ] || return 1
+  [ "$actual" = "$expected" ] && return 0
+  parent=$(dirname -- "$path")
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  parent_dir_dev=$(fm_pr_file_device "$parent") || return 1
+  [ "$parent_dir_dev" = "$expected" ] || return 1
+  tmp=$(mktemp "$parent/.fm-pr-store-dev.XXXXXX") || return 1
+  if [ ! -d "$parent" ] || [ -L "$parent" ] \
+    || [ "$(fm_pr_file_device "$parent")" != "$expected" ]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  sibling_dev=$(fm_pr_file_device "$tmp") || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  rm -f -- "$tmp"
+  [ -n "$sibling_dev" ] && [ "$actual" = "$sibling_dev" ]
+}
+
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
-  [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
+  fm_pr_same_store_device "$path" "$device" || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }
 
@@ -287,7 +313,7 @@ fm_pr_regular_destination_or_absent() {
 fm_pr_regular_destination_on_device_or_absent() {
   local path=$1 device=$2
   fm_pr_regular_destination_or_absent "$path" || return 1
-  [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
+  [ ! -e "$path" ] || fm_pr_same_store_device "$path" "$device"
 }
 
 fm_pr_metadata_identity_parse() {
@@ -357,8 +383,8 @@ fm_pr_meta_rewrite() {  # <meta> <state> <tmp-prefix> <drop-keys> <identity-chec
   local meta=$1 state=$2 tmp_prefix=$3 drop_keys=$4 identity_check=$5
   shift 5
   local device line
-  device=$(fm_pr_file_device "$meta") || return 1
-  [ "$device" = "$(fm_pr_file_device "$state")" ] || return 1
+  device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_same_store_device "$meta" "$device" || return 1
   FM_PR_META_TMP=$(mktemp "$state/$tmp_prefix.XXXXXX") || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case ":$drop_keys:" in

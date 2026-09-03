@@ -59,7 +59,7 @@ fm_custom_check_snapshot_prepare() {
     || { fm_custom_check_snapshot_cleanup; return 1; }
   [ "$(fm_pr_file_mode "$FM_CUSTOM_CHECK_SNAPSHOT")" = 600 ] \
     || { fm_custom_check_snapshot_cleanup; return 1; }
-  [ "$(fm_pr_file_device "$FM_CUSTOM_CHECK_SNAPSHOT")" = "$state_device" ] \
+  fm_pr_same_store_device "$FM_CUSTOM_CHECK_SNAPSHOT" "$state_device" \
     || { fm_custom_check_snapshot_cleanup; return 1; }
   [ "$(fm_pr_file_link_count "$FM_CUSTOM_CHECK_SNAPSHOT")" = 1 ] \
     || { fm_custom_check_snapshot_cleanup; return 1; }

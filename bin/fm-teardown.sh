@@ -1139,7 +1139,7 @@ validate_pr_poll_cleanup() {
     "$state_dir/$id.check-trust"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
-      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || ! fm_pr_same_store_device "$artifact" "$state_device" \
       || [ "$(fm_pr_file_link_count "$artifact")" != 1 ]; then
       echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
       return 1

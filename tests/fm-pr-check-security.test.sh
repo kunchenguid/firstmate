@@ -10,6 +10,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-x-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-slack-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-check-lib.sh"
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
@@ -129,6 +131,28 @@ SH
   printf '%s\n' "$dir"
 }
 
+install_overlay_device_stat() {
+  local dir=$1
+  cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+path=${!#}
+case " $* " in
+  *" %d "*)
+    if [ -d "$path" ]; then
+      printf '39\n'
+      exit 0
+    fi
+    if [ -f "$path" ]; then
+      printf '40\n'
+      exit 0
+    fi
+    ;;
+esac
+exec "${FM_TEST_REAL_STAT:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/stat"
+}
+
 write_task_meta() {
   local dir=$1 id=${2:-task-a}
   fm_write_meta "$dir/home/state/$id.meta" \
@@ -187,6 +211,17 @@ write_ambiguous_poll() {
 write_v1_x_shim() {
   local file=$1 home=$2 root=$3
   fmx_poll_shim_v1_content "$home" "$root" > "$file"
+}
+
+write_slack_shim() {
+  local file=$1 home=$2 root=$3
+  fms_poll_shim_content "$home" "$root" > "$file"
+}
+
+write_stale_slack_shim() {
+  local file=$1 home=$2 root=$3
+  write_slack_shim "$file" "$home" "$root"
+  printf '# stale slack identity\n' >> "$file"
 }
 
 write_manual_poll_pair() {
@@ -1001,6 +1036,207 @@ test_migration_initializes_fresh_state() {
   [ "$(file_mode "$state")" = 700 ] || fail "fresh-state migration did not create state with mode 0700"
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
   pass "migration creates and validates private state before watcher exclusion"
+}
+
+test_migration_completes_when_directory_and_file_devices_differ() {
+  local dir state rc
+  dir=$(make_case "migration-split-devices")
+  state="$dir/home/state"
+  cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+path=${!#}
+case " $* " in
+  *" %d "*)
+    if [ -d "$path" ]; then
+      printf '39\n'
+      exit 0
+    fi
+    if [ -f "$path" ]; then
+      printf '40\n'
+      exit 0
+    fi
+    ;;
+esac
+exec "${FM_TEST_REAL_STAT:?}" "$@"
+SH
+  chmod +x "$dir/fakebin/stat"
+  set +e
+  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" \
+    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "split-device migration failed: $(cat "$dir/migrate.err")"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
+  pass "migration completes when directory and file device numbers differ"
+}
+
+test_private_file_refuses_wrong_expected_store_device() {
+  local dir state file actual parent_dev wrong
+  dir=$(make_case "wrong-expected-store-device")
+  state="$dir/home/state"
+  file="$state/probe"
+  umask 077
+  : > "$file"
+  chmod 0600 "$file"
+  actual=$(fm_pr_file_device "$file")
+  parent_dev=$(fm_pr_file_device "$state")
+  [ -n "$actual" ] && [ -n "$parent_dev" ] || fail "could not read probe devices"
+  wrong=$((actual + 100000))
+  if [ "$wrong" = "$parent_dev" ]; then
+    wrong=$((parent_dev + 100000))
+  fi
+  if fm_pr_private_file_valid "$file" 600 "$wrong"; then
+    fail "private file accepted a wrong expected store device"
+  fi
+  fm_pr_private_file_valid "$file" 600 "$parent_dev" \
+    || fail "private file rejected the parent store device"
+  pass "private file refuses a wrong expected store device and still accepts the parent store"
+}
+
+test_migration_quarantines_legacy_poll_when_directory_and_file_devices_differ() {
+  local dir state rc
+  dir=$(make_case "migration-legacy-split-devices")
+  state="$dir/home/state"
+  install_overlay_device_stat "$dir"
+  write_ambiguous_poll "$dir"
+  set +e
+  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" \
+    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "legacy-poll overlay migration failed: $(cat "$dir/migrate.err")"
+  [ ! -e "$state/task-a.check.sh" ] || fail "legacy-poll overlay migration left a runnable check"
+  find "$state/.pr-check-quarantine" -name 'task-a.check.*' -type f | grep . >/dev/null \
+    || fail "legacy-poll overlay migration did not quarantine the check"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
+  pass "migration quarantines a legacy poll when directory and file device numbers differ"
+}
+
+test_meta_rewrite_accepts_overlay_file_devices() {
+  local dir state rc
+  dir=$(make_case "meta-rewrite-split-devices")
+  state="$dir/home/state"
+  install_overlay_device_stat "$dir"
+  printf '%s\n' 'window=fm-task-a' 'pr=https://github.com/o/r/pull/1' > "$state/task-a.meta"
+  chmod 0600 "$state/task-a.meta"
+  set +e
+  FM_TEST_REAL_STAT="$REAL_STAT" PATH="$dir/fakebin:$BASE_PATH" bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    identity_ok() { [ -n "$FM_PR_META_URL" ]; }
+    fm_pr_meta_rewrite "$2/task-a.meta" "$2" .fm-pr-meta \
+      pr identity_ok "pr=https://github.com/o/r/pull/1"
+  ' _ "$ROOT" "$state" > "$dir/rewrite.out" 2> "$dir/rewrite.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "overlay meta rewrite failed: $(cat "$dir/rewrite.err")"
+  grep -qxF 'pr=https://github.com/o/r/pull/1' "$state/task-a.meta" \
+    || fail "overlay meta rewrite lost the PR identity"
+  pass "metadata rewrite accepts overlay file-layer devices"
+}
+
+test_teardown_removes_poll_artifacts_when_directory_and_file_devices_differ() {
+  local dir fakebin rc
+  dir=$(make_case teardown-split-devices)
+  fakebin="$dir/fakebin"
+  install_overlay_device_stat "$dir"
+  fm_git_init_commit "$dir/project"
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/missing-worktree" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only'
+  printf 'check\n' > "$dir/home/state/task-a.check.sh"
+  printf 'data\n' > "$dir/home/state/task-a.pr-poll"
+  printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
+  mkdir -p "$dir/home/state/.pr-check-quarantine"
+  chmod 0700 "$dir/home/state/.pr-check-quarantine"
+  printf 'legacy\n' > "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
+  chmod 0600 "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  touch "$dir/home/state/.last-watcher-beat"
+  install_stale_treehouse_occupancy "$dir" task-a "$dir/missing-worktree"
+  set +e
+  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    PATH="$fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "overlay teardown failed: $(cat "$dir/teardown.err")"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "overlay teardown left the runnable check"
+  [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "overlay teardown left the sidecar"
+  pass "teardown removes poll artifacts when directory and file device numbers differ"
+}
+
+test_historical_x_shim_survives_overlay_devices() {
+  local dir state shim executed rc
+  dir=$(make_case "historical-x-overlay-devices")
+  state="$dir/home/state"
+  shim="$state/x-watch.check.sh"
+  executed="$dir/x-poll-executed"
+  install_overlay_device_stat "$dir"
+  cat > "$dir/root/bin/fm-x-poll.sh" <<SH
+#!/usr/bin/env bash
+touch '$executed'
+SH
+  chmod 0700 "$dir/root/bin/fm-x-poll.sh"
+  write_v1_x_shim "$shim" "$dir/home" "$dir/root"
+  chmod 0755 "$shim"
+  set +e
+  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "overlay historical X shim migration failed: $(cat "$dir/migrate.err")"
+  fmx_poll_shim_valid "$shim" "$dir/home" "$dir/root" \
+    || fail "overlay historical X shim was not replaced with the current identity"
+  [ "$(file_mode "$shim")" = 700 ] || fail "overlay current X shim mode was not 0700"
+  [ ! -e "$executed" ] || fail "overlay historical X shim was executed during migration"
+  ! find "$state/.pr-check-quarantine" -name 'x-watch.check.*' -type f 2>/dev/null | grep . >/dev/null \
+    || fail "overlay historical X shim was quarantined"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
+  pass "historical X shim refreshes when directory and file device numbers differ"
+}
+
+test_historical_slack_shim_survives_overlay_devices() {
+  local dir state shim executed rc
+  dir=$(make_case "historical-slack-overlay-devices")
+  state="$dir/home/state"
+  shim="$state/slack-watch.check.sh"
+  executed="$dir/slack-poll-executed"
+  install_overlay_device_stat "$dir"
+  cat > "$dir/root/bin/fm-slack-poll.sh" <<SH
+#!/usr/bin/env bash
+touch '$executed'
+SH
+  chmod 0700 "$dir/root/bin/fm-slack-poll.sh"
+  write_stale_slack_shim "$shim" "$dir/home" "$dir/root"
+  chmod 0700 "$shim"
+  set +e
+  FM_TEST_REAL_STAT="$REAL_STAT" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "overlay historical Slack shim migration failed: $(cat "$dir/migrate.err")"
+  fms_poll_shim_valid "$shim" "$dir/home" "$dir/root" \
+    || fail "overlay historical Slack shim was not replaced with the current identity"
+  [ "$(file_mode "$shim")" = 700 ] || fail "overlay current Slack shim mode was not 0700"
+  [ ! -e "$executed" ] || fail "overlay historical Slack shim was executed during migration"
+  ! find "$state/.pr-check-quarantine" -name 'slack-watch.check.*' -type f 2>/dev/null | grep . >/dev/null \
+    || fail "overlay historical Slack shim was quarantined"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
+  pass "historical Slack shim refreshes when directory and file device numbers differ"
 }
 
 test_private_artifact_paths_refuse_symlinks_and_directories() {
@@ -3764,6 +4000,13 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries
 test_migration_initializes_fresh_state
+test_migration_completes_when_directory_and_file_devices_differ
+test_private_file_refuses_wrong_expected_store_device
+test_migration_quarantines_legacy_poll_when_directory_and_file_devices_differ
+test_meta_rewrite_accepts_overlay_file_devices
+test_teardown_removes_poll_artifacts_when_directory_and_file_devices_differ
+test_historical_x_shim_survives_overlay_devices
+test_historical_slack_shim_survives_overlay_devices
 test_migration_excludes_older_watcher_before_scan
 test_private_artifact_paths_refuse_symlinks_and_directories
 test_marker_and_diagnostic_rename_fail_closed

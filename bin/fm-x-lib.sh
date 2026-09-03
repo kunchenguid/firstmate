@@ -49,6 +49,11 @@
 #   fmx_meta_link_clear <meta> - remove the X-request link entirely
 # Callers must have FM_HOME set before calling fmx_load_config.
 
+# File-identity checks share the PR store-device owner so overlay file-layer
+# devices stay bound to the expected parent directory device.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
+
 # Read the value of KEY from a .env-style file: last assignment wins; tolerates a
 # leading "export ", surrounding whitespace, and one layer of matching single or
 # double quotes. Prints nothing (and succeeds) when the file or key is absent, so
@@ -131,17 +136,15 @@ fmx_poll_shim_v1_content() {
 }
 
 fmx_single_link_file_valid() {
-  local file=$1 expected_device=${2-} links device
+  local file=$1 expected_device=${2-} links
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   if [ "$(uname)" = Darwin ]; then
     links=$(stat -f %l "$file" 2>/dev/null) || return 1
-    device=$(stat -f %d "$file" 2>/dev/null) || return 1
   else
     links=$(stat -c %h "$file" 2>/dev/null) || return 1
-    device=$(stat -c %d "$file" 2>/dev/null) || return 1
   fi
   [ "$links" = 1 ] || return 1
-  [ -z "$expected_device" ] || [ "$device" = "$expected_device" ]
+  [ -z "$expected_device" ] || fm_pr_same_store_device "$file" "$expected_device"
 }
 
 fmx_single_link_file_mode_valid() {

@@ -376,7 +376,7 @@ refresh_v1_x_shim() {
   fmx_poll_shim_v1_valid "$shim" "$FM_HOME" "$FM_ROOT" "$STATE_DEVICE" || return 1
   mv -f -- "$MIGRATION_X_SHIM_TMP" "$shim" || return 1
   MIGRATION_X_SHIM_TMP=
-  [ "$(fm_pr_file_device "$shim")" = "$STATE_DEVICE" ] || return 1
+  fm_pr_same_store_device "$shim" "$STATE_DEVICE" || return 1
   [ "$(fm_pr_file_mode "$shim")" = 700 ] || return 1
   fmx_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT"
 }
@@ -395,7 +395,7 @@ refresh_slack_shim() {
   fms_poll_shim_valid "$MIGRATION_SLACK_SHIM_TMP" "$FM_HOME" "$FM_ROOT" || return 1
   mv -f -- "$MIGRATION_SLACK_SHIM_TMP" "$shim" || return 1
   MIGRATION_SLACK_SHIM_TMP=
-  [ "$(fm_pr_file_device "$shim")" = "$STATE_DEVICE" ] || return 1
+  fm_pr_same_store_device "$shim" "$STATE_DEVICE" || return 1
   [ "$(fm_pr_file_mode "$shim")" = 700 ] || return 1
   fms_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT"
 }
@@ -527,11 +527,11 @@ quarantine_tree_repair_and_validate() {
   for artifact in "$QUARANTINE"/* "$QUARANTINE"/.[!.]* "$QUARANTINE"/..?*; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     [ -f "$artifact" ] && [ ! -L "$artifact" ] || return 1
-    [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] || return 1
+    fm_pr_same_store_device "$artifact" "$STATE_DEVICE" || return 1
     [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || return 1
     chmod 0600 "$artifact" || return 1
     [ "$(fm_pr_file_mode "$artifact")" = 600 ] || return 1
-    [ "$(fm_pr_file_device "$artifact")" = "$STATE_DEVICE" ] || return 1
+    fm_pr_same_store_device "$artifact" "$STATE_DEVICE" || return 1
     [ "$(fm_pr_file_link_count "$artifact")" = 1 ] || return 1
   done
   quarantine_dir_valid
@@ -558,18 +558,17 @@ metadata_pr_is_canonical() {
 }
 
 quarantine_artifact() {
-  local source=$1 prefix=$2 kind=$3 destination source_device
+  local source=$1 prefix=$2 kind=$3 destination
   [ -e "$source" ] || [ -L "$source" ] || return 0
   [ -f "$source" ] && [ ! -L "$source" ] || return 1
   quarantine_dir_valid || return 1
-  source_device=$(fm_pr_file_device "$source") || return 1
-  [ "$source_device" = "$STATE_DEVICE" ] || return 1
+  fm_pr_same_store_device "$source" "$STATE_DEVICE" || return 1
   [ "$(fm_pr_file_link_count "$source")" = 1 ] || return 1
   [ -z "$MIGRATION_QUARANTINE_TMP" ] || rm -f -- "$MIGRATION_QUARANTINE_TMP"
   MIGRATION_QUARANTINE_TMP=
   MIGRATION_QUARANTINE_TMP=$(mktemp "$QUARANTINE/$prefix.$kind.XXXXXX") || return 1
   [ -f "$MIGRATION_QUARANTINE_TMP" ] && [ ! -L "$MIGRATION_QUARANTINE_TMP" ] || return 1
-  [ "$(fm_pr_file_device "$MIGRATION_QUARANTINE_TMP")" = "$STATE_DEVICE" ] || return 1
+  fm_pr_same_store_device "$MIGRATION_QUARANTINE_TMP" "$STATE_DEVICE" || return 1
   destination=$MIGRATION_QUARANTINE_TMP
   rm -f -- "$destination" || return 1
   MIGRATION_QUARANTINE_TMP=
@@ -580,7 +579,7 @@ quarantine_artifact() {
   chmod 0600 "$destination" || return 1
   [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
   [ "$(fm_pr_file_mode "$destination")" = 600 ] || return 1
-  [ "$(fm_pr_file_device "$destination")" = "$STATE_DEVICE" ] || return 1
+  fm_pr_same_store_device "$destination" "$STATE_DEVICE" || return 1
   [ "$(fm_pr_file_link_count "$destination")" = 1 ] || return 1
   [ ! -e "$source" ] && [ ! -L "$source" ]
 }
@@ -624,7 +623,7 @@ record_diagnostic() {
   MIGRATION_LOG_TMP=
   MIGRATION_LOG_TMP=$(mktemp "$STATE/.fm-pr-check-log.XXXXXX") || return 1
   [ -f "$MIGRATION_LOG_TMP" ] && [ ! -L "$MIGRATION_LOG_TMP" ] || return 1
-  [ "$(fm_pr_file_device "$MIGRATION_LOG_TMP")" = "$STATE_DEVICE" ] || return 1
+  fm_pr_same_store_device "$MIGRATION_LOG_TMP" "$STATE_DEVICE" || return 1
   if [ -f "$LOG" ]; then
     cp "$LOG" "$MIGRATION_LOG_TMP" || return 1
   fi
