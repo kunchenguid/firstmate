@@ -105,6 +105,8 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
+#   While that lock is held, a pooled worktree is refused when another task's
+#   metadata still claims it; only teardown or recovery releases that claim.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -1926,6 +1928,28 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+refuse_claimed_spawn_worktree() {  # <worktree>
+  local worktree=$1 worktree_real meta claimed claimed_real claimant
+  worktree_real=$(real_path_or_raw "$worktree")
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || [ -L "$meta" ] || continue
+    [ "$meta" != "$STATE/$ID.meta" ] || continue
+    if ! fm_backlog_record_present "$meta" "task record" "$STATE"; then
+      echo "error: cannot safely inspect pooled-worktree claims: $FM_BACKLOG_TRANSITION_ERROR" >&2
+      return 1
+    fi
+    claimed=$(sed -n 's/^worktree=//p' "$meta" | head -n 1)
+    [ -n "$claimed" ] || continue
+    claimed_real=$(real_path_or_raw "$claimed")
+    [ "$claimed_real" != "$worktree_real" ] || {
+      claimant=${meta##*/}
+      claimant=${claimant%.meta}
+      echo "error: pooled worktree '$worktree' is still claimed by task $claimant in '$meta'; refusing to reuse it until teardown or recovery releases that task record" >&2
+      return 1
+    }
+  done
+}
+
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
 # an earlier refresh moved the superproject and left the submodule checkout on
 # the pin the previous base recorded. The refusal still stands and this gate
@@ -2543,6 +2567,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  refuse_claimed_spawn_worktree "$WT" || exit 1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
