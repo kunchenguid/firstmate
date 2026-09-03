@@ -1891,33 +1891,45 @@ if [ "$JOBS" -gt 1 ] && [ "$AUTO_CONCURRENCY" -eq 0 ]; then
   done
 fi
 
-# Split the run into the proven-concurrent scripts and an unproven remainder.
-# The remainder runs serially AFTER the concurrent group, never beside it, so an
-# unproven script still never shares a machine with another test. An explicit
-# --jobs refused above, so its remainder is always empty.
+# Split the run into proven concurrent phases and an unproven remainder.
+# Individually proven scripts share one phase. Scripts admitted only by a family
+# proof get a separate phase per family, because that proof establishes safety
+# only among members of that family. The serial remainder runs after every
+# concurrent phase, never beside another test.
 CONCURRENT_SCRIPTS=()
 SERIAL_TAIL_SCRIPTS=()
+CONCURRENT_PHASE_BREAK=__fm_test_concurrent_phase_break__
 if [ "$JOBS" -gt 1 ]; then
   SCHEDULE_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-test-sched.XXXXXX")
   : >"$SCHEDULE_TMP"
-  # Two passes: the tail array must be built in this shell, so the weighted
-  # listing is written to a file rather than piped into sort from a loop whose
-  # appends would be lost in a subshell.
   for s in "${SCRIPTS[@]}"; do
     if script_allows_concurrency "$s"; then
-      # Longest first: workers are handed scripts in order, so starting the
-      # longest last strands it running alone at the tail. Measured over the
-      # watcher family, alphabetical order finished in 395s where the balanced
-      # four-worker sum was 205s.
-      printf '%s\t%s\n' "$(portable_serial_weight_for "$s")" "$s" >>"$SCHEDULE_TMP"
+      if is_proven_isolated_script "$s"; then
+        phase=0
+      else
+        family=$(family_for_basename "$(basename "$s")")
+        phase=1
+        while IFS= read -r admitted_family; do
+          [ "$family" = "$admitted_family" ] && break
+          phase=$((phase + 1))
+        done < <(list_concurrent_safe_families)
+      fi
+      # Longest first within each isolation phase: workers are handed scripts
+      # in order, so starting the longest last strands it at the tail.
+      printf '%s\t%s\t%s\n' "$phase" "$(portable_serial_weight_for "$s")" "$s" >>"$SCHEDULE_TMP"
     else
       SERIAL_TAIL_SCRIPTS+=("$s")
     fi
   done
-  while IFS=$'\t' read -r _weight s; do
+  previous_phase=
+  while IFS=$'\t' read -r phase _weight s; do
     [ -n "$s" ] || continue
+    if [ -n "$previous_phase" ] && [ "$phase" != "$previous_phase" ]; then
+      CONCURRENT_SCRIPTS+=("$CONCURRENT_PHASE_BREAK")
+    fi
     CONCURRENT_SCRIPTS+=("$s")
-  done < <(LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 "$SCHEDULE_TMP")
+    previous_phase=$phase
+  done < <(LC_ALL=C sort -t"$(printf '\t')" -k1,1n -k2,2nr -k3,3 "$SCHEDULE_TMP")
   rm -f "$SCHEDULE_TMP"
 fi
 
@@ -2149,6 +2161,12 @@ else
   }
 
   for script in "${CONCURRENT_SCRIPTS[@]+"${CONCURRENT_SCRIPTS[@]}"}"; do
+    if [ "$script" = "$CONCURRENT_PHASE_BREAK" ]; then
+      while [ "$active_workers" -gt 0 ]; do
+        wait_one_completed_job_worker
+      done
+      continue
+    fi
     while [ "$active_workers" -ge "$JOBS" ]; do
       wait_one_completed_job_worker
     done
