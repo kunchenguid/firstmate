@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+# bin/fm-secondmate-restart.sh: persist-then-restart, and the honest fallback.
+#
+# What these pin, all through the real commands (real fm-send, real durable
+# steering inbox, real parent-owned reply expectation, real fm-control
+# transaction) against a lifecycle-modelling session-provider stub:
+#
+#   1. The persist request is a GATE. Nothing is stopped until that mate's own
+#      correlated answer lands on the parent channel, and a mate that never
+#      answers keeps its agent and gets the re-read message instead.
+#   2. The order is persist THEN restart, observable in what reaches the pane.
+#   3. The persist request is the task-subset of /stow: it asks for open records
+#      and task status, and explicitly not for the memory, learnings, or
+#      captain-preference sweeps.
+#   4. Every unsafe case falls back to the nudge and SAYS so - a runtime that
+#      cannot prove a restart, a mate with no durable record, a refused restart,
+#      and an unreachable host - and none of them is reported as a clean reload.
+#   5. A remote mate restarts by running the SAME local control-plane relaunch on
+#      its host, over the fm-on transport, with the profile resolved from the
+#      PARENT's own pin rather than the remote home's copy of it.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+RESTART="$ROOT/bin/fm-secondmate-restart.sh"
+
+fm_git_identity fmtest fmtest@example.com
+TMP_ROOT=$(fm_test_tmproot fm-secondmate-restart)
+mkdir -p "$TMP_ROOT"
+TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
+trap 'rm -rf -- "$TMP_ROOT"' EXIT
+
+# A session-provider stub that models the two things this pass depends on: the
+# harness exit command stops the agent, a launch brief starts the replacement,
+# and - when armed - the live mate ANSWERS a doorbell by doing what the persist
+# request asks and reporting it on the parent channel with the correlation token
+# the request carried. That answer is a real status append read by the real
+# pending-reply machinery, not a stubbed verdict.
+make_stub() {  # <case-dir>
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    payload=${1:-}
+    if [ "$literal" = 1 ]; then
+      printf '%s\n' "$payload" >> "$D/literal"
+      case "$payload" in
+        /exit|/quit) printf 'zsh' > "$D/command" ;;
+        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
+        'Firstmate instruction waiting: list '*)
+          printf 'doorbell\n' >> "$D/rings"
+          if [ -f "$D/answer-inbox" ]; then
+            # Model the mate: read the newest instruction it was handed and
+            # report back on the parent channel, carrying the correlation token
+            # the request itself embedded.
+            inbox=$(cat "$D/answer-inbox")
+            corr=$(cat "$inbox"/*.msg 2>/dev/null \
+              | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+            if [ -n "$corr" ]; then
+              printf 'done [%s]: open records written down\n' "$corr" \
+                >> "$(cat "$D/answer-status")"
+            fi
+          fi
+          ;;
+      esac
+    else
+      printf '%s\n' "$payload" >> "$D/keys"
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane) printf '> \n'; exit 0 ;;
+  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fb/sleep"
+}
+
+# new_case <name> -> a parent home with a stub session provider.
+new_case() {
+  local dir="$TMP_ROOT/$1-$RANDOM"
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/fake"
+  : > "$dir/fake/literal"
+  : > "$dir/fake/keys"
+  : > "$dir/fake/rings"
+  printf 'claude' > "$dir/fake/command"
+  printf 'claude' > "$dir/fake/becomes"
+  make_stub "$dir"
+  printf '%s\n' "$dir"
+}
+
+# add_local_mate <case-dir> <id> [harness] [backend-line]
+# A live LOCAL second mate: a real git worktree for its home, plus the durable
+# record this home keeps for it.
+add_local_mate() {
+  local dir=$1 id=$2 harness=${3:-claude} backend=${4:-}
+  local home="$dir/home" smhome="$dir/$id-home"
+  fm_git_worktree "$dir/$id-repo" "$smhome" "sm-$id"
+  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin" "$home/data/$id"
+  printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$smhome/AGENTS.md"
+  printf '# charter\n' > "$home/data/$id/brief.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$smhome"
+    echo "project=$smhome"
+    echo "harness=$harness"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$smhome"
+    [ -z "$backend" ] || echo "backend=$backend"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$smhome" > "$dir/fake/cwd"
+}
+
+# arm_answer <case-dir> <id>: make the modelled mate answer the persist request.
+arm_answer() {
+  local dir=$1 id=$2
+  printf '%s' "$dir/home/state/$id.inbox" > "$dir/fake/answer-inbox"
+  printf '%s' "$dir/home/state/$id.status" > "$dir/fake/answer-status"
+}
+
+run_restart() {  # <case-dir> <args...>
+  local dir=$1; shift
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
+    FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-30}" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
+    "$RESTART" "$@" 2>&1
+}
+
+# --- T1: the persist request is the task subset of /stow, and it gates --------
+test_persist_gates_and_asks_only_for_open_records() {
+  local dir out rc request
+  dir=$(new_case gate)
+  add_local_mate "$dir" sm1
+  # No answer armed: the mate never confirms its open work is written down.
+  FM_TEST_PERSIST_WAIT=0 out=$(run_restart "$dir" fm-sm1); rc=$?
+
+  expect_code 3 "$rc" "an unconfirmed persist is a fallback, not a success"$'\n'"$out"
+  assert_contains "$out" "nudged: sm1:" "an unconfirmed persist must fall back to the re-read message"
+  assert_contains "$out" "its open work is written down" "the fallback must name the missing confirmation"
+  assert_not_contains "$out" "restarted: sm1" "a mate that never confirmed must not be restarted"
+  assert_contains "$out" "summary: 0 of 1 restarted" "the summary must not claim a reload"
+  # The agent is untouched: nothing exited, nothing relaunched.
+  assert_no_grep '^/exit$' "$dir/fake/literal" "the agent was stopped without a confirmed persist"
+  assert_absent "$dir/home/state/sm1.control-relaunch" \
+    "a restart transaction was opened without a confirmed persist"
+
+  # The request the mate actually received is the open-record half of /stow only.
+  request=$(cat "$dir/home/state/sm1.inbox"/*.msg)
+  assert_contains "$request" "Open-record persistence" "the request must reuse stow's open-record contract"
+  assert_contains "$request" "file a task for each open record" "the request must ask for the unfiled open records"
+  assert_contains "$request" "correct any task whose status" "the request must ask for stale task status"
+  assert_contains "$request" "captain call you had formed but never registered" \
+    "the request must flush an unregistered captain call"
+  assert_contains "$request" "Do NOT run the memory, learnings, or captain-preference sweeps" \
+    "the request must exclude the memory curation half of stow"
+  pass "T1 persist is a gate, and asks for open records and task status only"
+}
+
+# --- T2: persist THEN restart, in that order --------------------------------
+test_persist_precedes_restart() {
+  local dir out rc doorbell_line exit_line
+  dir=$(new_case order)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "a confirmed persist should restart the mate"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 (claude)" "the mate should be restarted on its pinned runtime"
+  assert_contains "$out" "summary: 1 of 1 restarted, 0 left" "the summary should report the reload"
+  # The pane transcript orders the two phases: the instruction doorbell first,
+  # the harness exit command only after it.
+  doorbell_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  [ -n "$doorbell_line" ] || fail "the persist request never reached the mate"
+  [ -n "$exit_line" ] || fail "the mate was never stopped, so it was not restarted"
+  [ "$doorbell_line" -lt "$exit_line" ] \
+    || fail "the agent was stopped before it was asked to persist (persist line $doorbell_line, exit line $exit_line)"
+  # The reply expectation is settled rather than left open behind the restart.
+  grep -h '^phase=' "$dir/home/state/pending-replies"/* | grep -q '^phase=resolved$' \
+    || fail "the persist answer did not settle its durable expectation"
+  pass "T2 the mate persists before anything is stopped"
+}
+
+# --- T3: a runtime that cannot prove a restart never gets one ----------------
+test_unprovable_runtime_falls_back() {
+  local dir out rc
+  dir=$(new_case unprovable)
+  # zellij has no recovery-grade agent-state classifier, so "the old agent
+  # stopped and the replacement came up" can never be established there.
+  add_local_mate "$dir" sm1 claude zellij
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 3 "$rc" "an unprovable runtime must not report a reload"$'\n'"$out"
+  assert_contains "$out" "nudged: sm1:" "an unprovable runtime must fall back to the re-read message"
+  assert_contains "$out" "cannot prove an agent stopped" "the fallback must name the runtime limit"
+  assert_not_contains "$out" "restarted: sm1" "an unprovable runtime must not be reported as restarted"
+  # It is never even asked to spend a turn persisting, because it could not be
+  # restarted afterwards either way; the only thing it was handed is the nudge.
+  assert_no_grep 'Open-record persistence' "$dir/home/state/sm1.inbox/001.msg" \
+    "a mate that cannot be restarted should not be asked to persist first"
+  assert_grep 're-read your AGENTS.md' "$dir/home/state/sm1.inbox/001.msg" \
+    "the fallback should hand the mate the ordinary re-read message"
+  pass "T3 a runtime that cannot prove a restart falls back to the re-read message"
+}
+
+# --- T4: a mate with no durable record in this home --------------------------
+test_unknown_mate_is_accounted_for() {
+  local dir out rc
+  dir=$(new_case unknown)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+
+  out=$(run_restart "$dir" sm1 ghost); rc=$?
+
+  expect_code 3 "$rc" "an unknown mate must not pass silently"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1" "the known mate should still be restarted"
+  assert_contains "$out" "ghost:" "the unknown mate must be accounted for by name"
+  assert_contains "$out" "no durable record" "the unknown mate's reason must be concrete"
+  assert_contains "$out" "summary: 1 of 2 restarted, 1 left" "the summary must count both mates"
+  pass "T4 every named mate is accounted for, including one this home does not know"
+}
+
+# --- T5: a refused restart leaves the mate running and says so ---------------
+test_refused_restart_falls_back_without_claiming_a_reload() {
+  local dir out rc before
+  dir=$(new_case refused)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  # muse is a crewmate-only adapter, so the control plane refuses a secondmate
+  # relaunch onto it BEFORE stopping anything.
+  printf 'muse\n' > "$dir/home/config/secondmate-harness"
+  before=$(cat "$dir/fake/command")
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 3 "$rc" "a refused restart must not be reported as a reload"$'\n'"$out"
+  assert_contains "$out" "the restart did not complete" "the fallback must name the failed restart"
+  assert_not_contains "$out" "restarted: sm1" "a refused restart must not be reported as restarted"
+  [ "$(cat "$dir/fake/command")" = "$before" ] \
+    || fail "a refusal before the stop should leave the running agent exactly as it was"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "a pre-stop refusal must not have stopped the agent"
+  pass "T5 a refused restart leaves the mate running and is reported as a message, not a reload"
+}
+
+# --- T6: a remote mate restarts over the fm-on hop, on the parent's pin -------
+# The seam decodes what fm-on.sh actually put on the wire, so this pins the
+# host-local command and the profile the PARENT resolved, not a local shortcut.
+# The far side also models the live mate: it answers the persist request that
+# crossed the same hop, on the parent channel, with that request's own token.
+setup_remote_case() {  # <case-dir> <id> <ssh-mode>
+  local dir=$1 id=$2 mode=$3 fb="$dir/fakebin"
+  mkdir -p "$dir/$id-home"
+  {
+    echo "window=remote:$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/$id-home"
+    echo "project=$dir/$id-home"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/$id-home"
+    echo "remote_host=remote-mac"
+    echo "remote_backend=herdr"
+    echo "remote_target=fm-remote:2ndmate-$id"
+  } > "$dir/home/state/$id.meta"
+  printf -- '- %s - remote domain (host: remote-mac; root: /srv/fm; home: /srv/%s; scope: things; projects: p; added 2026-09-03)\n' \
+    "$id" "$id" > "$dir/home/data/secondmates.md"
+  cat > "$fb/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+shift 2  # host, fm-remote-entrypoint.sh
+argv_b64=$4
+decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
+rargs=()
+while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+printf '%s\n' "${rargs[*]}" >> "$FM_FAKE_SSH_LOG"
+case "${FM_FAKE_SSH_MODE:-ok}" in
+  unreachable) exit 255 ;;
+esac
+case "${rargs[1]:-}" in
+  send)
+    # Model the live remote mate: act on the instruction and report back on the
+    # parent channel, carrying the correlation token the request embedded.
+    if [ -n "${FM_FAKE_ANSWER_STATUS:-}" ]; then
+      corr=$(printf '%s' "${rargs[3]:-}" | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+      [ -z "$corr" ] || printf 'done [%s]: open records written down\n' "$corr" \
+        >> "$FM_FAKE_ANSWER_STATUS"
+    fi
+    ;;
+  relaunch) printf 'relaunched %s\n' "${rargs[2]}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/fake-ssh"
+  : > "$dir/ssh.log"
+  export FM_FAKE_SSH_LOG="$dir/ssh.log"
+  export FM_FAKE_SSH_MODE="$mode"
+  export FM_TEST_SSH_BIN="$fb/fake-ssh"
+}
+
+test_remote_mate_restarts_over_the_transport_hop() {
+  local dir out rc relaunch_line
+  dir=$(new_case remote)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  # The parent's own pin is what the replacement must run on; the remote home's
+  # copy of config/secondmate-harness is a different home's file.
+  printf 'codex big-model high\n' > "$dir/home/config/secondmate-harness"
+
+  out=$(run_restart "$dir" fm-sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "a remote mate should restart over its transport hop"$'\n'"$out"
+  assert_contains "$out" "restarted: sm2 on remote-mac (codex)" \
+    "a remote restart should be reported with its host and the parent's pinned runtime"
+  relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
+  [ -n "$relaunch_line" ] || fail "no relaunch crossed the transport hop"$'\n'"$(cat "$dir/ssh.log")"
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+    || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
+  # The persist request crossed the SAME hop before the restart did.
+  [ "$(grep -n '^fm-remote-secondmate-control.sh send' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
+     -lt "$(grep -n '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1 | cut -d: -f1)" ] \
+    || fail "the remote mate was restarted before it was asked to persist"$'\n'"$(cat "$dir/ssh.log")"
+  pass "T6 a remote mate restarts through the host-local control plane over the fm-on hop"
+}
+
+# --- T7: an unreachable host is unknown, never a claimed reload --------------
+test_unreachable_host_is_reported_unknown() {
+  local dir out rc
+  dir=$(new_case unreachable)
+  setup_remote_case "$dir" sm3 unreachable
+
+  out=$(run_restart "$dir" sm3); rc=$?
+
+  expect_code 3 "$rc" "an unreachable host must not be reported as a reload"$'\n'"$out"
+  assert_not_contains "$out" "restarted: sm3" "an unreachable host must not be claimed as restarted"
+  assert_contains "$out" "sm3:" "the unreachable mate must still be named"
+  assert_contains "$out" "could not be delivered" "an unreachable host must be reported as undelivered, not as reloaded"
+  pass "T7 an unreachable host is reported honestly instead of claimed as reloaded"
+}
+
+# --- T8: a local restart lands on this home's durable pin, and says which -----
+test_local_restart_uses_the_home_pin_and_reports_what_ran() {
+  local dir out rc
+  dir=$(new_case pin)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  printf 'codex\n' > "$dir/home/config/secondmate-harness"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "a pinned local restart should succeed"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 (codex)" \
+    "the restart should land on this home's pin and report the runtime that actually came up"
+  [ "$(grep '^harness=' "$dir/home/state/sm1.meta" | tail -1)" = "harness=codex" ] \
+    || fail "the durable record did not follow the replacement onto the pinned runtime"
+  pass "T8 a local restart re-resolves this home's pin and reports the runtime that came up"
+}
+
+test_persist_gates_and_asks_only_for_open_records
+test_persist_precedes_restart
+test_unprovable_runtime_falls_back
+test_unknown_mate_is_accounted_for
+test_refused_restart_falls_back_without_claiming_a_reload
+test_local_restart_uses_the_home_pin_and_reports_what_ran
+test_remote_mate_restarts_over_the_transport_hop
+test_unreachable_host_is_reported_unknown
+
+echo "# all fm-secondmate-restart tests passed"

@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# Restart second mates onto a freshly advanced instruction surface, persisting
+# their open records first.
+#
+# Usage: fm-secondmate-restart.sh <secondmate-id>... [--help]
+#
+# This is the executable half of /updatefirstmate's reload step. A running agent
+# holds AGENTS.md and every skill it has loaded frozen from launch, and no
+# verified harness offers a reload, so a re-read steer cannot replace either -
+# it appends a second copy of the mate's own job description with no defined
+# precedence. Replacing the agent is the only mechanism that guarantees the new
+# bytes are the ones read, and it re-resolves the launch-time wiring (harness,
+# model, effort, turn-end hooks) at the same time.
+#
+# The cost of that guarantee is the conversation, which is why this command runs
+# in two phases and why the first one is a GATE, not a courtesy:
+#
+#   A. PERSIST. Every mate is asked, in one marked request, to durably record the
+#      open work it holds only in conversation - a task for each unfiled open
+#      record, including a captain call it formed but never registered, and a
+#      status correction for each task whose recorded state is now stale. That is
+#      the /stow skill's "Open-record persistence" contract and nothing else from
+#      it: no memory, learnings, or captain-preference sweep, which would make
+#      every instruction update cost far more than the reload it is paying for.
+#      All requests go out before any restart, so a slow mate delays only its own
+#      restart instead of serializing the fleet behind it.
+#   B. RESTART. Only after that mate's own correlated answer lands on the parent
+#      channel. The gate is that answer, never a wall clock, so a mate that is
+#      mid-turn queues the request behind that turn and is never cut off
+#      mid-thought; the bound below exists to end the wait, not to authorize a
+#      restart without the answer.
+#
+# Anything that leaves the reload unprovable falls back to the ordinary re-read
+# nudge and is REPORTED as a nudge - never as a clean reload. That covers a mate
+# whose persist answer did not arrive, whose runtime cannot prove a restart, whose
+# relaunch was refused, whose replacement did not come up, and whose host could
+# not be reached.
+#
+# Placement changes the transport and nothing else. A local mate is restarted
+# with bin/fm-control.sh <id> relaunch; a remote mate is restarted by running THAT
+# SAME command on its host over bin/fm-on.sh, through the host-local
+# fm-remote-secondmate-control.sh relaunch verb. The restart decision, the
+# profile, the request text, the bound, the failure vocabulary, and this report
+# are all computed here in the primary and are identical for both.
+#
+# Nothing here forces, stashes, or discards anything. bin/fm-control.sh owns the
+# restart transaction, its checkpoint, its journal, and its rollback; a refusal
+# before the agent is stopped leaves the mate running exactly as it was.
+#
+# Restart candidacy itself belongs to bin/fm-update.sh, which knows which homes
+# advanced and what changed; this command re-checks capability on its own argv
+# rather than trusting a caller's list.
+#
+# Environment knobs:
+#   FM_SECONDMATE_PERSIST_WAIT  seconds to wait for one mate's persist answer (900)
+#   FM_SECONDMATE_PERSIST_POLL  seconds between checks of that answer (5)
+#
+# Exit status: 0 every named mate restarted; 3 at least one fell back to the
+# nudge and every mate was still accounted for; 1 the input itself is unusable;
+# 2 invalid use.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+usage() {
+  sed -n '2,60{s/^# \{0,1\}//;p;}' "$0"
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  '') usage >&2; exit 2 ;;
+esac
+
+if [ -z "${FM_HOME:-}" ]; then
+  echo "error: FM_HOME is not set; fm-secondmate-restart refuses to resolve second mates without an explicit firstmate home" >&2
+  exit 1
+fi
+[ -d "$FM_HOME" ] || { echo "error: FM_HOME '$FM_HOME' is not a directory" >&2; exit 1; }
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+[ -d "$STATE" ] || { echo "error: state dir '$STATE' is missing; fm-secondmate-restart cannot resolve second mates for FM_HOME '$FM_HOME'" >&2; exit 1; }
+
+# shellcheck source=bin/fm-secondmate-restart-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-restart-lib.sh"
+# shellcheck source=bin/fm-secondmate-nudge-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+
+PERSIST_WAIT=${FM_SECONDMATE_PERSIST_WAIT:-900}
+PERSIST_POLL=${FM_SECONDMATE_PERSIST_POLL:-5}
+case "$PERSIST_WAIT" in ''|*[!0-9]*) echo "error: FM_SECONDMATE_PERSIST_WAIT must be a non-negative integer: $PERSIST_WAIT" >&2; exit 2 ;; esac
+case "$PERSIST_POLL" in ''|*[!0-9]*|0) echo "error: FM_SECONDMATE_PERSIST_POLL must be a positive integer: $PERSIST_POLL" >&2; exit 2 ;; esac
+
+IDS=()
+for arg in "$@"; do
+  case "$arg" in
+    -*) echo "error: unexpected argument '$arg'" >&2; usage >&2; exit 2 ;;
+  esac
+  # /updatefirstmate's action line names each mate by its fm-<id> selector; the
+  # bare id is equally acceptable so a hand-run stays natural.
+  id=${arg#fm-}
+  case "$id" in ''|*[!A-Za-z0-9._-]*) echo "error: invalid second mate id: $arg" >&2; exit 2 ;; esac
+  case " ${IDS[*]:-} " in
+    *" $id "*) continue ;;
+  esac
+  IDS+=("$id")
+done
+[ "${#IDS[@]}" -gt 0 ] || { usage >&2; exit 2; }
+
+# Per-mate pass state, kept as parallel indexed arrays so this stays bash-3.2
+# safe. PLAN is the phase the mate reached: persist-sent, or fallback with the
+# reason already decided.
+PLAN=()
+REASON=()
+CORR=()
+PLACEMENT=()
+HOST=()
+HARNESS=()
+MODEL=()
+EFFORT=()
+
+restarted_count=0
+nudged_count=0
+
+# The first line of a command's output that carries anything, flattened to one
+# readable line with its "error: " prefix dropped. A refusal's own words are the
+# most useful thing this report can carry, and its first line is often blank.
+first_reported_line() {  # <text>
+  printf '%s\n' "$1" | sed -n '/./{s/^error: //;s/[[:space:]]\{1,\}/ /g;p;q;}'
+}
+
+# The correlation ids of this task's still-open reply expectations, one per line.
+open_corrs_for() {  # <task-id>
+  local task=$1 dir rec
+  dir=$(fm_pending_reply_dir "$STATE") || return 0
+  [ -d "$dir" ] || return 0
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task" ] || continue
+    [ "$(fm_pending_reply_get "$rec" phase)" != resolved ] || continue
+    printf '%s\n' "${rec##*/}"
+  done
+}
+
+# Send the ordinary re-read steer to a mate this pass will not restart, and say
+# plainly which it was. A nudge is a partial reload and is never reported as more.
+fall_back_to_nudge() {  # <id> <reason>
+  local id=$1 reason=$2 out
+  nudged_count=$((nudged_count + 1))
+  if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+    printf 'nudged: %s: %s\n' "$id" "$reason"
+  else
+    printf 'unreached: %s: %s; the re-read message could not be delivered either: %s\n' \
+      "$id" "$reason" "$(first_reported_line "$out")"
+  fi
+}
+
+# --- phase A: persist ------------------------------------------------------
+# Every request goes out before any restart, so the fleet persists concurrently
+# and one busy mate delays only itself.
+
+i=0
+while [ "$i" -lt "${#IDS[@]}" ]; do
+  id=${IDS[$i]}
+  PLAN[i]="fallback"
+  REASON[i]=""
+  CORR[i]=""
+  PLACEMENT[i]=""
+  HOST[i]=""
+  HARNESS[i]=""
+  MODEL[i]=""
+  EFFORT[i]=""
+  if ! fm_secondmate_restart_capable "$STATE/$id.meta"; then
+    REASON[i]=$FM_SECONDMATE_RESTART_REASON
+    i=$((i + 1))
+    continue
+  fi
+  PLACEMENT[i]=$FM_SECONDMATE_RESTART_PLACEMENT
+  HOST[i]=$FM_SECONDMATE_RESTART_HOST
+  HARNESS[i]=$FM_SECONDMATE_RESTART_HARNESS
+  if [ "${PLACEMENT[i]}" = remote ]; then
+    # A local relaunch re-resolves this home's durable secondmate pin on its own,
+    # which is the one owner of that resolution. A remote one cannot: it runs in
+    # a home whose config/secondmate-harness is deliberately NOT inherited, so
+    # the file on that host belongs to a different home and re-resolving there
+    # would silently move the mate onto another runtime. Resolve the pin here and
+    # pass it explicitly, so both placements land on the same decision.
+    HARNESS[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null || true)
+    [ -n "${HARNESS[i]}" ] || HARNESS[i]=$FM_SECONDMATE_RESTART_HARNESS
+    MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
+    EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
+    case "${EFFORT[i]}" in
+      ''|low|medium|high|xhigh|max) ;;
+      *) EFFORT[i]="" ;;
+    esac
+  fi
+
+  before=$(open_corrs_for "$id")
+  if ! send_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECONDMATE_PERSIST_REQUEST" 2>&1); then
+    REASON[i]="the request to write down its open work could not be delivered: $(first_reported_line "$send_out")"
+    i=$((i + 1))
+    continue
+  fi
+  corr=""
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "$(printf '%s\n' "$before")" in
+      *"$candidate"*) continue ;;
+    esac
+    corr=$candidate
+  done <<EOF
+$(open_corrs_for "$id")
+EOF
+  if [ -z "$corr" ]; then
+    # Delivery succeeded but nothing is tracking the answer, so no arrival can
+    # ever be proven for it. That is exactly the case this gate exists for.
+    REASON[i]="its answer about the open work cannot be tracked, so a clean reload could not be proven"
+    i=$((i + 1))
+    continue
+  fi
+  CORR[i]=$corr
+  PLAN[i]="persisted-pending"
+  i=$((i + 1))
+done
+
+# --- phase B: restart ------------------------------------------------------
+
+i=0
+while [ "$i" -lt "${#IDS[@]}" ]; do
+  id=${IDS[$i]}
+  if [ "${PLAN[i]}" != persisted-pending ]; then
+    fall_back_to_nudge "$id" "${REASON[i]}"
+    i=$((i + 1))
+    continue
+  fi
+  waited=0
+  persisted=0
+  while :; do
+    if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
+      persisted=1
+      break
+    fi
+    [ "$waited" -lt "$PERSIST_WAIT" ] || break
+    sleep "$PERSIST_POLL"
+    waited=$((waited + PERSIST_POLL))
+  done
+  if [ "$persisted" -ne 1 ]; then
+    fall_back_to_nudge "$id" \
+      "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
+    i=$((i + 1))
+    continue
+  fi
+
+  if [ "${PLACEMENT[i]}" = remote ]; then
+    restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
+      fm-remote-secondmate-control.sh relaunch \
+      "$id" "${HARNESS[i]}" "${MODEL[i]:--}" "${EFFORT[i]:--}" < /dev/null 2>&1)
+    restart_rc=$?
+  else
+    restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
+    restart_rc=$?
+  fi
+  if [ "$restart_rc" -eq 0 ]; then
+    restarted_count=$((restarted_count + 1))
+    # Report the runtime the replacement ACTUALLY came up on, as the control
+    # plane names it, rather than the one this pass intended.
+    ran_on=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* harness=\([^ ]*\).*/\1/p' | tail -1)
+    [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
+    if [ "${PLACEMENT[i]}" = remote ]; then
+      printf 'restarted: %s on %s (%s)\n' "$id" "${HOST[i]}" "$ran_on"
+    else
+      printf 'restarted: %s (%s)\n' "$id" "$ran_on"
+    fi
+    i=$((i + 1))
+    continue
+  fi
+  restart_reason=$(first_reported_line "$restart_out")
+  [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
+  if [ "$restart_rc" -eq 255 ] && [ "${PLACEMENT[i]}" = remote ]; then
+    # ssh could not complete: whether the restart ran on that host is unknown, so
+    # claiming either outcome would be a guess. Preserve the route and say so.
+    restart_reason="its host could not be reached, so whether the restart happened there is unknown"
+  fi
+  fall_back_to_nudge "$id" "the restart did not complete: $restart_reason"
+  i=$((i + 1))
+done
+
+# --- summary ---------------------------------------------------------------
+
+printf 'summary: %d of %d restarted, %d left on the older instructions with a re-read message\n' \
+  "$restarted_count" "${#IDS[@]}" "$nudged_count"
+[ "$nudged_count" -eq 0 ] || exit 3
+exit 0

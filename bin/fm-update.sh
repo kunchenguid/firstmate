@@ -25,7 +25,19 @@
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
-#   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
+#   - restart-secondmates: fm-<id>...|none (advanced live secondmates whose
+#     AGENTS.md or .agents/skills/ changed AND whose recorded runtime can prove a
+#     restart, so their agents must be replaced to actually reload)
+#   - nudge-secondmates: fm-<id>...|none   (the residual: advanced live
+#     secondmates that changed instructions but cannot be restarted provably, so
+#     the older re-read steer is all that is honest for them)
+#
+# The two sets are disjoint and both require a CHANGED INSTRUCTION SURFACE, which
+# is stricter than this command's older "any advance" nudge and matches what the
+# session-start sweep has always used. Restart is stricter again: a bin/-only
+# advance reloads itself on the next call and never costs a conversation
+# (bin/fm-ff-lib.sh's ff_instr_needs_reload), and bin/fm-secondmate-restart-lib.sh
+# owns the capability half.
 #
 # Usage: fm-update.sh [--help]
 set -eu
@@ -37,6 +49,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-secondmate-restart-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-restart-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -57,16 +71,31 @@ if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
 fi
 
 # --- secondmates -----------------------------------------------------------
-# An updated live secondmate is nudged whenever it advanced (nudge_requires_instr
-# is "no" here): /updatefirstmate's nudge is a gentle re-read steer, kept on the
-# same condition it has always used.
+# An advanced live secondmate is reached only when its INSTRUCTION SURFACE moved
+# (nudge_requires_instr is "yes" on every sweep below), the same threshold the
+# session-start sweep uses: an advance that touched only README.md, docs/, or the
+# installer-facing skills/ changes nothing the agent is running on.
+#
+# Of those, the ones whose AGENTS.md or .agents/skills/ changed need a restart
+# rather than a steer, because a running agent holds both frozen from launch and
+# no harness offers a reload. The rest keep the re-read nudge.
 
 FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
+FF_RESTART_WINDOWS=""
+
+# Classify one advanced local secondmate. bin/fm-ff-lib.sh calls this for each
+# home that advanced with a changed instruction surface and a live endpoint.
+fm_ff_after_instruction_update() {  # <id> <home> <window> <instr>
+  local id=$1 instr=$4
+  ff_instr_needs_reload "$instr" || return 0
+  fm_secondmate_restart_capable "$STATE/$id.meta" || return 0
+  FF_RESTART_WINDOWS="$FF_RESTART_WINDOWS fm-$id"
+}
 
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the
 # authoritative home= path.
-sweep_live_secondmate_metas "$STATE" origin no
+sweep_live_secondmate_metas "$STATE" origin yes
 
 # Registry backstop: a secondmate registered in data/secondmates.md but without
 # a live meta (e.g. between restarts) is still its persistent on-disk home.
@@ -87,9 +116,32 @@ if [ -f "$SECONDMATES_MD" ]; then
         remote_result=$(printf '%s\n' "$remote_out" | tail -1)
         case "$remote_result" in
           synced:*)
-            echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST (${remote_result#synced: })"
-            if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
-              FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+            remote_detail=${remote_result#synced: }
+            # The host reports its advance as "<commit> instr=<paths>". A host
+            # whose Firstmate copy predates that suffix reports the commit alone,
+            # which is UNKNOWN rather than "nothing changed", so it stays out of
+            # both action sets instead of being restarted or steered on a guess.
+            case "$remote_detail" in
+              *' instr='*)
+                remote_instr=${remote_detail##* instr=}
+                remote_commit=${remote_detail%% instr=*}
+                remote_instr_known=1
+                ;;
+              *) remote_instr=""; remote_commit=$remote_detail; remote_instr_known=0 ;;
+            esac
+            if [ -n "$remote_instr" ]; then
+              echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST ($remote_commit, instructions changed: $remote_instr)"
+            else
+              echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST ($remote_commit)"
+            fi
+            if [ "$remote_instr_known" -eq 1 ] && [ -n "$remote_instr" ] \
+              && [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
+              if ff_instr_needs_reload "$remote_instr" \
+                && fm_secondmate_restart_capable "$STATE/$id.meta"; then
+                FF_RESTART_WINDOWS="$FF_RESTART_WINDOWS fm-$id"
+              else
+                FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+              fi
             fi
             ;;
           current:*) echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })" ;;
@@ -99,12 +151,25 @@ if [ -f "$SECONDMATES_MD" ]; then
         echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
       fi
     else
-      process_secondmate "$id" "$home" "" origin no
+      process_secondmate "$id" "$home" "" origin yes
     fi
   done < "$SECONDMATES_MD"
 fi
 
 # --- caller action summary -------------------------------------------------
 
+# The local sweep accumulates every advanced instruction-surface change into
+# FF_NUDGE_WINDOWS and the classifier above promotes the restartable ones, so the
+# nudge line is the residual. Keeping the sets disjoint is what stops a mate from
+# being restarted and then steered about the instructions it just relaunched on.
+nudge_residual=""
+for selector in $FF_NUDGE_WINDOWS; do
+  case " $FF_RESTART_WINDOWS " in
+    *" $selector "*) continue ;;
+  esac
+  nudge_residual="$nudge_residual $selector"
+done
+
 echo "reread-firstmate: $reread_firstmate"
-echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"
+echo "restart-secondmates:${FF_RESTART_WINDOWS:- none}"
+echo "nudge-secondmates:${nudge_residual:- none}"

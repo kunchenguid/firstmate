@@ -13,7 +13,11 @@
 #     or the shared default branch.
 #   - The caller-action summary is correct: reread-firstmate flips to yes only
 #     when the instruction surface (AGENTS.md / bin / .agents/skills) changed, and
-#     nudge-secondmates lists exactly the live secondmates that advanced.
+#     the two secondmate action sets are disjoint and correctly gated -
+#     restart-secondmates carries a live mate whose AGENTS.md or .agents/skills/
+#     changed AND whose recorded runtime can prove a restart, nudge-secondmates
+#     carries the residual, and an advance that changed no instruction surface,
+#     or only bin/, produces no restart at all.
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
 #     re-processed as one of its own secondmates.
@@ -60,19 +64,26 @@ new_world() {
 
 # Add a secondmate home as a DETACHED worktree of the firstmate repo (matching
 # how treehouse leases a secondmate home), plus its state meta. Args: world id.
+# The recorded runtime matters to the action split, so it is part of the fixture:
+# harness defaults to a control-verified adapter on the default (tmux) backend,
+# which is what makes a restart provable. Pass a backend to model one that cannot
+# prove an agent stopped.
 add_sm() {
-  local w=$1 id=$2
+  local w=$1 id=$2 harness=${3:-claude} backend=${4:-}
   git -C "$w/main" worktree add -q --detach "$w/$id" main
   {
     printf 'window=main:fm-%s\n' "$id"
     printf 'kind=secondmate\n'
+    printf 'harness=%s\n' "$harness"
+    [ -z "$backend" ] || printf 'backend=%s\n' "$backend"
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
 }
 
-# Advance origin by one commit. mode=instr changes the instruction surface
-# (AGENTS.md, bin, .agents/skills) plus README; mode=readme changes only README.
+# Advance origin by one commit. mode=instr changes the whole instruction surface
+# (AGENTS.md, bin, .agents/skills) plus README; mode=bin changes only bin/, which
+# a running agent re-executes rather than holding; mode=readme changes only README.
 bump_origin() {
   local w=$1 mode=$2
   git -C "$w/seed" pull -q origin main >/dev/null 2>&1 || true
@@ -81,6 +92,9 @@ bump_origin() {
     printf 'v2\n' > "$w/seed/AGENTS.md"
     printf 'echo b\n' > "$w/seed/bin/tool.sh"
     printf 's2\n' > "$w/seed/.agents/skills/note.md"
+  fi
+  if [ "$mode" = bin ]; then
+    printf 'echo b-%s\n' "$RANDOM" > "$w/seed/bin/tool.sh"
   fi
   git -C "$w/seed" add -A
   git -C "$w/seed" commit -qm "bump-$mode"
@@ -107,7 +121,8 @@ test_updates_main_and_secondmate() {
   assert_contains "$out" "firstmate: updated " "firstmate fast-forwarded"
   assert_contains "$out" "secondmate sm1: updated " "secondmate fast-forwarded"
   assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
-  assert_contains "$out" "nudge-secondmates: fm-sm1" "updated secondmate is nudged"
+  assert_contains "$out" "restart-secondmates: fm-sm1" "a changed AGENTS.md must move the secondmate into the restart set"
+  assert_contains "$out" "nudge-secondmates: none" "a restarted secondmate must not also be nudged"
 
   # Fast-forward landed: HEAD == origin/main on both targets.
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
@@ -124,7 +139,7 @@ test_updates_main_and_secondmate() {
     || fail "firstmate tip is not a single-parent fast-forward"
   [ "$(git -C "$w/sm1" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" -eq 2 ] \
     || fail "secondmate tip is not a single-parent fast-forward"
-  pass "T1 main + secondmate fast-forward (single-parent), reread + nudge signalled"
+  pass "T1 main + secondmate fast-forward (single-parent), reread + restart signalled"
 }
 
 # --- T3: README-only change does not trigger a reread ----------------------
@@ -138,9 +153,43 @@ test_reread_gate_is_instruction_only() {
 
   assert_contains "$out" "firstmate: updated " "firstmate still advanced"
   assert_contains "$out" "reread-firstmate: no" "non-instruction change skips reread"
-  # The secondmate still advanced, so it is still nudged (update-based nudge).
-  assert_contains "$out" "nudge-secondmates: fm-sm1" "advanced secondmate still nudged"
-  pass "T3 reread gates on instruction surface, nudge on advancement"
+  # Nothing the secondmate reads or runs moved, so neither action set names it.
+  assert_contains "$out" "restart-secondmates: none" "a README-only advance must not restart anything"
+  assert_contains "$out" "nudge-secondmates: none" "a README-only advance must not steer anything"
+  pass "T3 an advance that touched no instruction surface produces no secondmate action"
+}
+
+# --- T3b: a bin/-only advance is nudged but never restarted ----------------
+# Every helper under bin/ is executed fresh on each call, so that advance reaches
+# the mate without a new conversation; spending one would be pure cost.
+test_bin_only_advance_never_restarts() {
+  local w out
+  w=$(new_world t3b)
+  add_sm "$w" sm1
+  bump_origin "$w" bin
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "reread-firstmate: yes" "a bin/ change is still an instruction-surface advance"
+  assert_contains "$out" "restart-secondmates: none" "a bin/-only advance must not cost a conversation"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "a bin/-only advance still steers the secondmate"
+  pass "T3b a bin/-only advance steers the secondmate instead of restarting it"
+}
+
+# --- T3c: a runtime that cannot prove a restart gets the steer instead ------
+test_unprovable_runtime_is_nudged_not_restarted() {
+  local w out
+  w=$(new_world t3c)
+  # zellij has no recovery-grade agent-state classifier, so no restart there can
+  # ever prove the old agent stopped and the replacement came up.
+  add_sm "$w" sm1 claude zellij
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "restart-secondmates: none" "an unprovable runtime must stay out of the restart set"
+  assert_contains "$out" "nudge-secondmates: fm-sm1" "an unprovable runtime keeps the re-read steer"
+  pass "T3c a secondmate whose runtime cannot prove a restart is steered instead"
 }
 
 # --- T4: dirty secondmate is skipped, its edit preserved -------------------
@@ -230,7 +279,11 @@ test_registry_backstop_dedup_and_self_exclusion() {
   # output, where 'secondmate reg1: updated' legitimately appears).
   local nudge_line
   nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
-  assert_contains "$nudge_line" "fm-sm1" "live-meta secondmate is nudged"
+  local restart_line
+  restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
+  assert_contains "$restart_line" "fm-sm1" "live-meta secondmate is restarted"
+  assert_not_contains "$restart_line" "reg1" "registry-only secondmate without live metadata gets no action"
+  assert_not_contains "$nudge_line" "sm1" "a restarted secondmate must not also be nudged"
   assert_not_contains "$nudge_line" "reg1" "registry-only secondmate without live metadata is not nudged"
   pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }
@@ -293,6 +346,8 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
+test_bin_only_advance_never_restarts
+test_unprovable_runtime_is_nudged_not_restarted
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current
