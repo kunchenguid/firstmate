@@ -170,6 +170,43 @@ fm_done_reason_clean() {  # <reason>
   printf '%s' "${1:-}" | LC_ALL=C tr '\n\t\r' '   ' | cut -c1-400
 }
 
+# Decide the verdict a caller may actually record, given what it observed. This
+# is the one rule the whole done-claim contract rests on, held in the vocabulary's
+# owner rather than in each judging site's head:
+#
+#   `contradicted` means POSITIVE EVIDENCE of falsity. Absence of evidence is
+#   `unverified` - never contradicted, and never a pass.
+#
+# So a contradiction has to CARRY the observation it contradicts with: the branch
+# tip actually read, the head the forge actually reported, the commit the
+# validation run actually recorded. A caller asking for `contradicted` with
+# nothing observed is recording falsity it did not establish, so this downgrades
+# it to `unverified` whatever it asked for. Results land in
+# FM_DONE_VERDICT_RESOLVED and FM_DONE_VERDICT_RESOLVED_REASON.
+#
+# The limit of the guard, named so no reader assumes it is total: it stops a site
+# that observed NOTHING from recording falsity. It cannot stop a site that
+# observed something real and drew the WRONG INFERENCE from it. The merge-base
+# test bin/fm-verify-done.sh once used for local-only work was of that second
+# kind - a merge base equal to the branch tip is a true observation that was
+# simply the wrong invariant for landed work, and it would pass this guard
+# untouched. Only reading an arm's reasoning catches that class.
+FM_DONE_VERDICT_RESOLVED=
+FM_DONE_VERDICT_RESOLVED_REASON=
+fm_done_verdict_resolve() {  # <verdict> <reason> [<observed>]
+  local verdict=${1:-} reason=${2:-} observed=${3:-}
+  # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
+  FM_DONE_VERDICT_RESOLVED=$verdict
+  # shellcheck disable=SC2034
+  FM_DONE_VERDICT_RESOLVED_REASON=$reason
+  [ "$verdict" = contradicted ] || return 0
+  [ -z "$observed" ] || return 0
+  # shellcheck disable=SC2034
+  FM_DONE_VERDICT_RESOLVED=unverified
+  # shellcheck disable=SC2034
+  FM_DONE_VERDICT_RESOLVED_REASON="nothing was observed that contradicts the claim, so it is not established either way: $reason"
+}
+
 # 0 when a durable record already establishes THIS exact claim as verified. Run
 # in a subshell so reading it does not clobber a caller's FM_DONE_VERDICT* view.
 _fm_done_verdict_already_verified() {  # <state> <task-id> <claim-hash>

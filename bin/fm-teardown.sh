@@ -2644,12 +2644,27 @@ fi
 # ESTABLISHED before it may be cleaned up: bin/fm-verify-done.sh reads the forge,
 # git, and the validation run, and this gate refuses anything it could not
 # establish (`unverified`) as well as anything it established as false
-# (`contradicted`). The cheap local read comes first so a task that never claimed
-# done has nothing to verify, passes, and never pays for a subprocess; the
+# (`contradicted`). The cheap local reads come first: a task that never claimed
+# done has nothing to verify, and a claim a durable verdict record already
+# establishes needs nothing re-established, so neither pays for a subprocess. The
 # landed-work gates above are unchanged and still apply.
 TEARDOWN_CLAIM=
 if [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   TEARDOWN_CLAIM=$(fm_done_claim_last "$STATE/$ID.status")
+fi
+if [ -n "$TEARDOWN_CLAIM" ] && fm_done_claim_status "$STATE" "$ID" \
+  && [ "$FM_DONE_CLAIM_STATE" = verified ]; then
+  # A durable record already establishes THIS EXACT claim (fm_done_claim_status
+  # matches on the claim's hash, so a newer `done:` line does not inherit it).
+  # Re-running the verifier could only weaken that: `unverified` is the absence
+  # of evidence, and the sources it reads go away for ordinary reasons long
+  # after a claim was established - the forge unreachable, `gh` or `no-mistakes`
+  # off PATH, the validation run aged out of `axi status`. Deferring to the
+  # record here is what makes fm_done_verdict_write's anti-downgrade rule mean
+  # something at the only gate that blocks, and it leaves `--force` (explicit
+  # discard authority) for work that was never established, not for work that
+  # was. Every refusal below still stands whenever no such record does.
+  TEARDOWN_CLAIM=
 fi
 if [ -n "$TEARDOWN_CLAIM" ]; then
   TEARDOWN_CLAIM_RC=0

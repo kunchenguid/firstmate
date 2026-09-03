@@ -47,6 +47,8 @@
 #   (z3) claim naming a commit that is not the branch   -> REFUSE (contradicted)
 #   (z4) claim naming the branch tip                    -> ALLOW  (verified)
 #   (z5) contradicted claim + --force                   -> ALLOW  (escape hatch)
+#   (z6) established claim, verifier's sources then gone -> ALLOW  (the record stands)
+#   (z7) same blinded world with NO record standing     -> REFUSE (unverified)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -2832,6 +2834,82 @@ test_established_claim_allows_teardown() {
   pass "a claim naming the branch tip is established and allows cleanup"
 }
 
+# The record is what establishes a claim, not the verifier's exit code on the
+# day cleanup happens. A claim established at PR registration must still clear
+# the gate days later when the sources the verifier reads have gone away for
+# ordinary reasons - the forge unreachable, `gh` or `no-mistakes` off PATH, the
+# branch's reflog expired - because `unverified` is the absence of evidence and
+# must not un-establish work that was genuinely established. Otherwise `--force`,
+# which AGENTS.md ties to explicit discard authority, becomes the only way to
+# clean up honest work.
+run_verify_done() {  # <case-dir>
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$1" \
+  FM_STATE_OVERRIDE="$1/state" \
+  FM_DATA_OVERRIDE="$1/data" \
+    "$ROOT/bin/fm-verify-done.sh" task-x1
+}
+
+# Take away the one thing the local-only arm needs to establish that fm/task-x1
+# introduced its claimed commit: the branch's own history. This is what an
+# expired reflog leaves behind, and it is absence of evidence, not falsity.
+blind_the_local_only_verifier() {  # <case-dir>
+  local reflog
+  reflog="$(git -C "$1/wt" rev-parse --git-common-dir)/logs/refs/heads/fm/task-x1"
+  [ -f "$reflog" ] || fail "the fixture had no branch reflog to remove"
+  rm -f "$reflog"
+}
+
+test_an_established_claim_survives_losing_the_verifier_sources() {
+  local case_dir rc=0 head
+  case_dir=$(make_claim_case claim-established "placeholder")
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$head" \
+    > "$case_dir/state/task-x1.status"
+  run_verify_done "$case_dir" > "$case_dir/verify.out" 2>&1 \
+    || fail "the honest claim was not established in the first place: $(cat "$case_dir/verify.out")"
+  [ -f "$case_dir/state/task-x1.done-verdict" ] \
+    || fail "verifying the claim wrote no durable record"
+
+  blind_the_local_only_verifier "$case_dir"
+  set +e
+  run_verify_done "$case_dir" > "$case_dir/verify2.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] \
+    || fail "the fixture did not actually blind the verifier (rc=$rc): $(cat "$case_dir/verify2.out")"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" \
+    "a claim a durable record already established was refused once its sources went away: $(cat "$case_dir/stderr")"
+  pass "an established claim still clears the gate after the verifier's sources go away"
+}
+
+# The other half of the same rule: deferring to the record is not deferring to
+# nothing. With no record standing, the identical blinded world still refuses.
+test_an_unestablished_claim_still_refuses_without_a_record() {
+  local case_dir rc=0 head
+  case_dir=$(make_claim_case claim-unestablished "placeholder")
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$head" \
+    > "$case_dir/state/task-x1.status"
+  blind_the_local_only_verifier "$case_dir"
+  [ ! -e "$case_dir/state/task-x1.done-verdict" ] \
+    || fail "the fixture left a verdict record behind"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "a claim nothing had ever established was torn down as done"
+  assert_grep "could not be established" "$case_dir/stderr" \
+    "the refusal did not say the claim could not be established"
+  pass "a claim with no record standing still refuses when it cannot be established"
+}
+
 test_force_overrides_a_contradicted_claim() {
   local case_dir rc=0 other
   case_dir=$(make_claim_case claim-force "placeholder")
@@ -2852,6 +2930,8 @@ test_legacy_claim_without_commit_identity_refuses
 test_claim_naming_the_wrong_commit_refuses
 test_established_claim_allows_teardown
 test_force_overrides_a_contradicted_claim
+test_an_established_claim_survives_losing_the_verifier_sources
+test_an_unestablished_claim_still_refuses_without_a_record
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

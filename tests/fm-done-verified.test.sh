@@ -50,6 +50,12 @@
 #       the shape this fleet actually produces: the branch EXISTS at the spawn
 #       base because the brief has the worker create it before any work
 #   (z) a scout report present behind a symlink is unverified, not contradicted
+#   (aa) a branch whose creation reflog entry has expired is unverified, not
+#        contradicted: the oldest SURVIVING entry is not the creation point
+#   (ab) a contradiction must carry the observation it contradicts with; one
+#        that can name nothing observed is recorded unverified instead
+#   (ac) prose the cap held back survives a recognised line printed after it in
+#        the same span - the shape that silently lost a worker's words
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -891,6 +897,104 @@ test_a_configured_verb_vocabulary_is_not_unrecognised() {
   pass "a home's configured verb vocabulary and the legacy bare lines stay recognised"
 }
 
+# The reflog is the branch's own history, but only while its creation entry
+# survives: `git gc` prunes entries past gc.reflogExpire, and on a long-lived
+# branch that can leave the oldest SURVIVING entry sitting on the tip. Reading
+# that as "created here, introduced nothing" would report a true claim as false.
+# A history that no longer reaches the creation is absence of evidence.
+test_a_pruned_reflog_is_unverified_not_contradicted() {
+  local out dir tip result
+  out=$(make_local_world local-pruned-reflog) || fail "the local-only fixture failed"
+  dir=${out%%$'\t'*}
+  git -C "$dir/wt" commit -q --allow-empty -m "work the task itself produced"
+  tip=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" reflog show refs/heads/fm/task-v --format='%gs' \
+    | tail -1 | grep -q '^branch: Created from ' \
+    || fail "the fixture did not leave a branch-creation entry to expire"
+  # Exactly what gc.reflogExpire leaves behind on a long-lived branch: the
+  # creation entry gone, the branch's own tip now the oldest entry git can see.
+  git -C "$dir/wt" reflog delete 'refs/heads/fm/task-v@{1}' \
+    || fail "the fixture could not expire the branch-creation entry"
+  [ "$(git -C "$dir/wt" reflog show --format=%H refs/heads/fm/task-v | tail -1)" = "$tip" ] \
+    || fail "expiring the creation entry did not leave the tip as the oldest entry"
+  printf 'done: branch=fm/task-v head=%s - shipped\n' "$tip" > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" != 4 ] \
+    || fail "a true claim was contradicted because the branch's creation entry had expired: $result"
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "a branch history that no longer reaches its creation was not unverified: $result"
+  case "$result" in
+    *"oldest surviving reflog entry"*) ;;
+    *) fail "the unverified reason did not name the unreadable history: $result" ;;
+  esac
+  pass "a branch whose creation entry has been pruned reads unverified, never contradicted"
+}
+
+# The rule the whole contract rests on, exercised through its owner rather than
+# left to each judging site to remember: `contradicted` is positive evidence of
+# falsity, so it must carry the observation it contradicts with. A site that can
+# name nothing it observed records `unverified` however it asked to be recorded.
+test_a_contradiction_needs_the_observation_it_contradicts_with() {
+  fm_done_verdict_resolve contradicted 'the branch introduced nothing' ''
+  [ "$FM_DONE_VERDICT_RESOLVED" = unverified ] \
+    || fail "a contradiction with nothing observed was recorded as $FM_DONE_VERDICT_RESOLVED"
+  case "$FM_DONE_VERDICT_RESOLVED_REASON" in
+    *"nothing was observed"*"the branch introduced nothing"*) ;;
+    *) fail "the downgraded reason lost either the rule or the caller's words: $FM_DONE_VERDICT_RESOLVED_REASON" ;;
+  esac
+
+  fm_done_verdict_resolve contradicted 'the branch introduced nothing' 'fm/task-v is still at abc123'
+  [ "$FM_DONE_VERDICT_RESOLVED" = contradicted ] \
+    || fail "an ordinary contradiction carrying its observation was downgraded"
+  [ "$FM_DONE_VERDICT_RESOLVED_REASON" = 'the branch introduced nothing' ] \
+    || fail "an established contradiction had its reason rewritten: $FM_DONE_VERDICT_RESOLVED_REASON"
+
+  # The other two verdicts are untouched by the rule; only falsity needs evidence.
+  fm_done_verdict_resolve unverified 'the forge could not be reached' ''
+  [ "$FM_DONE_VERDICT_RESOLVED" = unverified ] || fail "an unverified verdict was rewritten"
+  fm_done_verdict_resolve verified 'the PR is at the claimed head' ''
+  [ "$FM_DONE_VERDICT_RESOLVED" = verified ] || fail "a verified verdict was rewritten"
+  pass "a contradiction must name what it observed, and one that cannot reads unverified"
+}
+
+# The mixed span, which is the shape that actually loses words: prose past the
+# cap, then a line the drain DOES recognise. The acknowledgement is one
+# contiguous byte offset, so a `note:` printed after an omission would carry the
+# cursor past the held-back prose and retire it as presented - while this same
+# drain has just told the operator it was held for the next one.
+test_capped_lines_return_even_when_a_recognised_line_follows_them() {
+  local dir state status first second i
+  dir=$(make_case unrecognised-mixed-span)
+  state="$dir/state"
+  status="$state/task9.status"
+  printf 'note: bootstrap cursor line\n' > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>/dev/null \
+    || fail "bootstrap drain failed while priming the cursor"
+
+  for i in 1 2 3; do
+    printf 'prose line %s from the worker\n' "$i" >> "$status"
+  done
+  printf 'note: here is the answer you asked for\n' >> "$status"
+
+  first="$dir/first.out"; second="$dir/second.out"
+  FM_DRAIN_UNRECOGNISED_MAX=1 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$first" \
+    || fail "the capped drain failed on a mixed span"
+  assert_grep 'prose line 1 from the worker' "$first" \
+    "the capped drain printed no prose at all: $(cat "$first")"
+  assert_grep 'UNREAD STATUS: 2 more unrecognised line(s) held' "$first" \
+    "the held-back prose was not counted: $(cat "$first")"
+
+  FM_DRAIN_UNRECOGNISED_MAX=9 FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" \
+    || fail "the second drain failed"
+  assert_grep 'prose line 2 from the worker' "$second" \
+    "prose the cap held back was retired by a recognised line printed after it: $(cat "$second")"
+  assert_grep 'prose line 3 from the worker' "$second" \
+    "the rest of the held-back prose never came back: $(cat "$second")"
+  assert_no_grep 'prose line 1 from the worker' "$second" \
+    "a line that was already presented was replayed: $(cat "$second")"
+  pass "held-back prose survives a recognised line printed later in the same span"
+}
+
 test_the_omitted_unrecognised_count_carries_its_header() {
   local dir state status out
   dir=$(make_case unrecognised-cap-zero)
@@ -989,6 +1093,9 @@ test_an_unresolvable_absent_mode_is_unverified_never_contradicted
 test_help_prints_the_whole_header
 test_a_close_does_not_invent_a_done_claim
 test_a_configured_verb_vocabulary_is_not_unrecognised
+test_a_pruned_reflog_is_unverified_not_contradicted
+test_a_contradiction_needs_the_observation_it_contradicts_with
 test_the_omitted_unrecognised_count_carries_its_header
 test_capped_unrecognised_lines_return_on_the_next_drain
+test_capped_lines_return_even_when_a_recognised_line_follows_them
 echo "all fm-done-verified tests passed"

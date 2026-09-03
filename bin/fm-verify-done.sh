@@ -32,7 +32,10 @@
 #       local-only work is on the default branch by the time it may be torn
 #       down, so a merge base equal to the branch tip is the ordinary shape of
 #       LANDED work and would contradict every honest claim. A branch history
-#       that cannot be read is absence of evidence and reads unverified.
+#       that cannot be read is absence of evidence and reads unverified, and so
+#       is one whose oldest surviving reflog entry is no longer the creation
+#       (`git gc` prunes entries past gc.reflogExpire): the entry must say it is
+#       the creation before anything is concluded from it.
 #     - once the branch has been retired after the work merged, the claimed head
 #       must be BOTH the local copy's own HEAD and contained in the local default
 #       branch. Bare containment is never enough: every commit already on the
@@ -67,6 +70,11 @@
 #                 commit identity). Never a pass: not knowing is not proof.
 #   contradicted  exit 4 - a required fact WAS established and the claim is false.
 # exit 2 - the task has no terminal claim to verify, or the request is invalid.
+#
+# The line between the last two is enforced by fm_done_verdict_resolve (in
+# bin/fm-done-claim-lib.sh), which every arm here records through, rather than
+# left to each arm's care: a `contradicted` verdict must carry the observation it
+# contradicts with, and one that carries none is recorded as `unverified`.
 #
 # The verdict record binds to the exact claim line it judged, so appending a new
 # `done:` line invalidates it rather than inheriting its verdict.
@@ -119,9 +127,16 @@ meta_field() {  # <key>
 
 VERDICT=
 REASON=
-verdict_is() {  # <verdict> <reason>
-  VERDICT=$1
-  REASON=$2
+# Every arm below records its verdict through here, and here defers to
+# fm_done_verdict_resolve in bin/fm-done-claim-lib.sh - the owner of the verdict
+# vocabulary - so the rule that `contradicted` must carry the observation it
+# contradicts with is one implementation shared by every judging site, testable
+# on its own, rather than a habit each arm has to remember. Read that helper for
+# the rule and for the limit of what it can enforce.
+verdict_is() {  # <verdict> <reason> [<observed>]
+  fm_done_verdict_resolve "$1" "$2" "${3:-}"
+  VERDICT=$FM_DONE_VERDICT_RESOLVED
+  REASON=$FM_DONE_VERDICT_RESOLVED_REASON
 }
 
 # Record the outcome and exit. The record is written before the exit code is
@@ -167,7 +182,7 @@ fi
 if [ "$KIND" = scout ]; then
   REPORT=$FM_DONE_CLAIM_REPORT
   if [ -z "$REPORT" ]; then
-    verdict_is contradicted 'scout claim names no report'
+    verdict_is contradicted 'scout claim names no report' "$FM_DONE_CLAIM_LINE"
     finish
   fi
   case "$REPORT" in
@@ -185,8 +200,15 @@ if [ "$KIND" = scout ]; then
   fi
   if [ -f "$REPORT" ] && [ -s "$REPORT" ]; then
     verdict_is verified "report present at $FM_DONE_CLAIM_REPORT"
+  elif [ ! -e "$REPORT" ]; then
+    verdict_is contradicted "claimed report is missing: $FM_DONE_CLAIM_REPORT" \
+      "nothing exists at $REPORT"
+  elif [ ! -f "$REPORT" ]; then
+    verdict_is contradicted "claimed report is not a file: $FM_DONE_CLAIM_REPORT" \
+      "$REPORT is not a regular file"
   else
-    verdict_is contradicted "claimed report is missing or empty: $FM_DONE_CLAIM_REPORT"
+    verdict_is contradicted "claimed report is empty: $FM_DONE_CLAIM_REPORT" \
+      "$REPORT is a regular file of zero bytes"
   fi
   finish
 fi
@@ -219,22 +241,31 @@ fi
 if [ "$MODE" = local-only ]; then
   BRANCH=$FM_DONE_CLAIM_BRANCH
   if [ -z "$BRANCH" ]; then
-    verdict_is contradicted 'local-only claim names no branch'
+    verdict_is contradicted 'local-only claim names no branch' "$FM_DONE_CLAIM_LINE"
     finish
   fi
   # A local-only task's branch is not a free field: bin/fm-brief.sh renders the
   # claim template with this task's own fm/<id>. A claim naming anything else is
   # not this task's work, however true it may be of some other branch.
   if [ "$BRANCH" != "fm/$ID" ]; then
-    verdict_is contradicted "claim names branch $BRANCH, not this task's fm/$ID"
+    verdict_is contradicted "claim names branch $BRANCH, not this task's fm/$ID" "$BRANCH"
     finish
   fi
   if [ -z "$WT" ] || [ ! -d "$WT" ]; then
     verdict_is unverified 'the local copy is gone, so the claimed commit cannot be established'
     finish
   fi
+  # Asked before anything is concluded from a git answer: a directory that is
+  # not a readable repository answers "no such commit" to every question, and
+  # reading that as falsity would contradict every honest claim made from a
+  # copy whose .git has gone missing.
+  if ! git -C "$WT" rev-parse --git-dir >/dev/null 2>&1; then
+    verdict_is unverified "the local copy at $WT is not a readable git repository, so the claimed commit cannot be established"
+    finish
+  fi
   if ! git -C "$WT" rev-parse --verify --quiet "$HEAD_CLAIM^{commit}" >/dev/null 2>&1; then
-    verdict_is contradicted "claimed commit $HEAD_CLAIM does not exist in the local copy"
+    verdict_is contradicted "claimed commit $HEAD_CLAIM does not exist in the local copy" \
+      "the readable object database at $WT holds no commit $HEAD_CLAIM"
     finish
   fi
   DEFAULT=$(fm_default_branch "$WT" 2>/dev/null || true)
@@ -246,7 +277,7 @@ if [ "$MODE" = local-only ]; then
   TIP=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" 2>/dev/null || true)
   if [ -n "$TIP" ]; then
     if [ "$TIP" != "$HEAD_CLAIM" ]; then
-      verdict_is contradicted "branch $BRANCH is at $TIP, not the claimed $HEAD_CLAIM"
+      verdict_is contradicted "branch $BRANCH is at $TIP, not the claimed $HEAD_CLAIM" "$TIP"
       finish
     fi
     # Being the branch tip is not the same as being this task's work. Every
@@ -256,14 +287,37 @@ if [ "$MODE" = local-only ]; then
     # which is what the branch's own history in git says: a branch still sitting
     # exactly where it was created has introduced nothing, whatever is claimed
     # of it. Its history being unreadable is absence of evidence, not falsity.
-    CREATED=$(git -C "$WT" reflog show --format=%H "refs/heads/$BRANCH" 2>/dev/null | tail -1 || true)
+    #
+    # The OLDEST SURVIVING reflog entry is only the creation point while the
+    # creation entry survives. `git gc` prunes entries past gc.reflogExpire (90
+    # days by default), and on a long-lived branch that leaves the oldest
+    # surviving entry somewhere in the middle of the branch's life - possibly
+    # the tip itself, which would read a true claim as falsity. So the entry is
+    # required to SAY it is the creation ("branch: Created from ..."), which is
+    # what git writes for `git checkout -b fm/<id>` (bin/fm-brief.sh's first
+    # instruction to every worker). Anything else is a history that no longer
+    # reaches back to the creation, which is absence of evidence.
+    CREATED_ENTRY=$(git -C "$WT" reflog show --format='%H %gs' "refs/heads/$BRANCH" 2>/dev/null | tail -1 || true)
+    CREATED=${CREATED_ENTRY%% *}
+    case "$CREATED_ENTRY" in
+      *' '*) CREATED_MSG=${CREATED_ENTRY#* } ;;
+      *) CREATED_MSG= ;;
+    esac
     case "$CREATED" in *[!0-9a-f]*|'') CREATED= ;; esac
     if [ -z "$CREATED" ]; then
       verdict_is unverified "branch $BRANCH is at the claimed $HEAD_CLAIM, but its own history could not be read, so what $BRANCH introduced cannot be established"
       finish
     fi
+    case "$CREATED_MSG" in
+      'branch: Created from '*) ;;
+      *)
+        verdict_is unverified "branch $BRANCH is at the claimed $HEAD_CLAIM, but the oldest surviving reflog entry for it is not its creation, so what $BRANCH introduced cannot be established"
+        finish
+        ;;
+    esac
     if [ "$CREATED" = "$HEAD_CLAIM" ]; then
-      verdict_is contradicted "branch $BRANCH introduced nothing: it is still at $HEAD_CLAIM, the commit it was created at"
+      verdict_is contradicted "branch $BRANCH introduced nothing: it is still at $HEAD_CLAIM, the commit it was created at" \
+        "$BRANCH was created at $CREATED and its tip is still $TIP"
       finish
     fi
     verdict_is verified "branch $BRANCH is at the claimed $HEAD_CLAIM, which it introduced after being created at $CREATED"
@@ -294,18 +348,20 @@ if [ "$MODE" = local-only ]; then
     verdict_is verified "the local copy is at the claimed $HEAD_CLAIM and it is on $DEFAULT; its branch $BRANCH has been retired"
     finish
   fi
-  verdict_is contradicted "branch $BRANCH is gone and the claimed $HEAD_CLAIM is not on $DEFAULT"
+  DEFAULT_TIP=$(git -C "$WT" rev-parse --verify --quiet "$DEFAULT_REF" 2>/dev/null || true)
+  verdict_is contradicted "branch $BRANCH is gone and the claimed $HEAD_CLAIM is not on $DEFAULT" \
+    "${DEFAULT_TIP:+$DEFAULT is at $DEFAULT_TIP and does not contain $HEAD_CLAIM}"
   finish
 fi
 
 # --- PR modes ----------------------------------------------------------------
 PR_CLAIM=$FM_DONE_CLAIM_PR
 if [ -z "$PR_CLAIM" ]; then
-  verdict_is contradicted 'claim names no PR'
+  verdict_is contradicted 'claim names no PR' "$FM_DONE_CLAIM_LINE"
   finish
 fi
 if ! fm_pr_url_parse "$PR_CLAIM"; then
-  verdict_is contradicted "claim names an unparseable PR reference: $PR_CLAIM"
+  verdict_is contradicted "claim names an unparseable PR reference: $PR_CLAIM" "$PR_CLAIM"
   finish
 fi
 PROVIDER=$FM_PR_PROVIDER
@@ -356,7 +412,8 @@ CHECKS=${REST#*$'\t'}
 
 case "$PR_STATE" in
   CLOSED|closed)
-    verdict_is contradicted "$PR_URL is closed without merging, so this task is not done"
+    verdict_is contradicted "$PR_URL is closed without merging, so this task is not done" \
+      "the forge reports state $PR_STATE for $PR_URL"
     finish
     ;;
   OPEN|open|MERGED|merged) ;;
@@ -371,7 +428,7 @@ if [ -z "$PR_HEAD" ]; then
   finish
 fi
 if [ "$PR_HEAD" != "$HEAD_CLAIM" ]; then
-  verdict_is contradicted "$PR_URL is at $PR_HEAD, not the claimed $HEAD_CLAIM"
+  verdict_is contradicted "$PR_URL is at $PR_HEAD, not the claimed $HEAD_CLAIM" "$PR_HEAD"
   finish
 fi
 
@@ -411,7 +468,7 @@ fi
 # The run may abbreviate; compare on the shorter of the two, which is exact for
 # any abbreviation git itself would produce.
 if [ "${HEAD_CLAIM#"$RUN_HEAD"}" = "$HEAD_CLAIM" ]; then
-  verdict_is contradicted "validation ran against $RUN_HEAD, but the claim ships $HEAD_CLAIM"
+  verdict_is contradicted "validation ran against $RUN_HEAD, but the claim ships $HEAD_CLAIM" "$RUN_HEAD"
   finish
 fi
 RUN_OUTCOME=$(fm_nm_strip_quotes "$(fm_nm_field "$RUN_OUT" outcome)")

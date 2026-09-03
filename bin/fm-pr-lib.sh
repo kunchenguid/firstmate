@@ -990,6 +990,15 @@ fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path
 # The terminal outcomes bin/fm-pr-poll.sh may report. `merged` retires the poll;
 # `closed-unmerged` contradicts a done record and deliberately leaves the poll
 # armed, because a closed PR can still be reopened and merged.
+#
+# The standing cost of that, named rather than glossed: a PR closed and never
+# reopened leaves its poll armed indefinitely, asking the forge once per watcher
+# interval forever. The notification marker keeps it from waking anyone twice, so
+# it is silent cost rather than noise, but it has no end state - bin/fm-teardown's
+# claim gate refuses that task as contradicted, which leaves `--force` as the
+# only instrument that stops the poll, and AGENTS.md ties `--force` to explicit
+# discard authority. That is the wrong instrument for retiring a poll. This is
+# known and tracked separately, not fine.
 fm_pr_poll_outcome_valid() {  # <outcome>
   case "${1:-}" in merged|closed-unmerged) return 0 ;; esac
   return 1

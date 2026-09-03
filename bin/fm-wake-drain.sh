@@ -434,7 +434,15 @@ print_unread_status_section() {
       printf '%s\n' "$header" || return 1
     fi
     printf '%s\n' "$line" || return 1
-    through=$index
+    # The acknowledgement is ONE contiguous byte offset, so `through` can only
+    # ever mean "everything up to here was presented". Once this task has held a
+    # line back, no later index may be recorded: an endpoint past the omission
+    # would acknowledge the held-back lines as presented and they would never
+    # appear in any drain again, while this drain has just told the operator they
+    # were held. Freezing it means the lines printed after the first omission
+    # re-present on the next drain, which is the safe direction: showing a line
+    # twice costs the operator a second read, losing it costs a worker's words.
+    [ "$held_back" -gt 0 ] || through=$index
     shown=$((shown + 1))
   done <<EOF
 $unread
