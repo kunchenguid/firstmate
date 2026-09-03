@@ -28,10 +28,12 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import uuid
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -1997,6 +1999,14 @@ def confined_evaluator_command(wrapper: list[str], run_root: Path, evaluator: Pa
     return [*(str(run_root) if item == "{root}" else item for item in wrapper), str(evaluator), str(restored)]
 
 
+def normalized_relative_path(value: str) -> str:
+    path = Path(value)
+    normalized = Path(os.path.normpath(value))
+    if path.is_absolute() or normalized == Path(".") or ".." in normalized.parts:
+        raise ValueError(f"path is not a contained relative path: {value}")
+    return normalized.as_posix()
+
+
 def validate_archived_evaluator_declaration(
     sample: Path,
     record: dict[str, Any],
@@ -2019,11 +2029,23 @@ def validate_archived_evaluator_declaration(
         or not all(isinstance(item, str) and item for item in scored_inputs)
     ):
         return None, "archived evaluator scored_inputs must name at least one restored candidate file"
-    if len(set(scored_inputs)) != len(scored_inputs):
-        return None, "archived evaluator scored_inputs must not contain duplicates"
     if not isinstance(perturbations, dict):
         return None, "archived evaluator input_perturbations must be an object when declared"
-    unexpected_perturbations = sorted(set(perturbations) - set(scored_inputs))
+    try:
+        normalized_inputs = [normalized_relative_path(item) for item in scored_inputs]
+        normalized_perturbations: dict[str, Any] = {}
+        for raw_path, perturbation in perturbations.items():
+            if not isinstance(raw_path, str) or not raw_path:
+                raise ValueError("perturbation paths must be non-empty strings")
+            normalized = normalized_relative_path(raw_path)
+            if normalized in normalized_perturbations:
+                raise ValueError(f"duplicate normalized perturbation path: {normalized}")
+            normalized_perturbations[normalized] = perturbation
+    except ValueError as exc:
+        return None, f"archived evaluator scored-input declaration is invalid: {exc}"
+    if len(set(normalized_inputs)) != len(normalized_inputs):
+        return None, "archived evaluator scored_inputs must not contain duplicates after path normalization"
+    unexpected_perturbations = sorted(set(normalized_perturbations) - set(normalized_inputs))
     if unexpected_perturbations:
         return None, (
             "archived evaluator input_perturbations name undeclared scored inputs: "
@@ -2041,36 +2063,32 @@ def validate_archived_evaluator_declaration(
     if not os.access(evaluator, os.X_OK):
         return None, "archived evaluator file is not executable"
     restored_root = restored_tree.resolve()
-    perturbable_paths: list[Path] = []
-    for relative in scored_inputs:
+    perturbable_paths: list[str] = []
+    input_statuses: dict[str, str] = {}
+    for relative in normalized_inputs:
         candidate = (restored_tree / relative).resolve()
         if not is_within(candidate, restored_root):
             return None, f"archived evaluator scored input escapes the restored candidate: {relative}"
         if not candidate.is_file():
             return None, f"archived evaluator scored input is not a restored candidate file: {relative}"
-        if relative not in perturbations:
+        if relative not in normalized_perturbations:
+            input_statuses[relative] = "unproven"
             continue
-        perturbation = perturbations[relative]
-        if (
-            not isinstance(perturbation, dict)
-            or perturbation.get("kind") != "json-value"
-            or not isinstance(perturbation.get("pointer"), str)
-            or not perturbation.get("pointer").startswith("/")
-        ):
-            return None, f"archived evaluator scored input needs a json-value perturbation pointer: {relative}"
+        perturbation = normalized_perturbations[relative]
         try:
-            document = json.loads(candidate.read_text(encoding="utf-8"))
-            current = json_pointer_value(document, perturbation["pointer"])
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            build_perturbed_input(candidate.read_bytes(), candidate.suffix.lower(), perturbation, bytes(32))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, zlib.error) as exc:
             return None, f"archived evaluator scored input perturbation is invalid for {relative}: {exc}"
-        if not isinstance(current, (str, int, float, bool)) or current is None:
-            return None, f"archived evaluator perturbation pointer must select a scalar value: {relative}"
-        perturbable_paths.append(Path(relative))
+        perturbable_paths.append(relative)
+        input_statuses[relative] = "declared"
+    if not perturbable_paths:
+        return None, "archived evaluator must declare at least one supported form-preserving scored-input perturbation"
     return {
         "argv": argv[0],
         "expected": expected,
         "perturbable_paths": perturbable_paths,
-        "perturbations": perturbations,
+        "perturbations": normalized_perturbations,
+        "input_statuses": input_statuses,
     }, "archived evaluator declaration validated"
 
 
@@ -2110,59 +2128,163 @@ def randomized_string_like(value: str, entropy: bytes) -> str:
     return "".join(output)
 
 
-def canonical_json_bytes(document: Any) -> bytes:
-    return (json.dumps(document, separators=(",", ":"), sort_keys=True) + "\n").encode()
-
-
-def set_json_pointer_value(document: Any, pointer: str, replacement: Any) -> Any:
-    parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer.removeprefix("/").split("/")]
-    parent = document
-    for part in parts[:-1]:
-        parent = parent[int(part)] if isinstance(parent, list) else parent[part]
-    leaf = parts[-1]
-    current = parent[int(leaf)] if isinstance(parent, list) else parent[leaf]
-    if isinstance(parent, list):
-        parent[int(leaf)] = replacement
-    else:
-        parent[leaf] = replacement
-    return current
-
-
-def perturb_json_input(path: Path, pointer: str, entropy: bytes) -> None:
-    document = json.loads(path.read_text(encoding="utf-8"))
-    current = json_pointer_value(document, pointer)
+def json_scalar_replacement(current: Any, entropy: bytes) -> Any:
     if isinstance(current, bool):
-        replacement: Any = not current
+        return not current
     elif isinstance(current, int):
-        replacement = current + 1 + int.from_bytes(entropy[:4], "big")
+        return current + 1 + int.from_bytes(entropy[:4], "big")
     elif isinstance(current, float):
-        replacement = current + 1.0 + int.from_bytes(entropy[:4], "big") / 2**32
+        return current + 1.0 + int.from_bytes(entropy[:4], "big") / 2**32
     elif isinstance(current, str):
-        replacement = randomized_string_like(current, entropy)
-    else:
-        raise ValueError(f"JSON pointer {pointer!r} does not select a supported scalar")
-    set_json_pointer_value(document, pointer, replacement)
-    path.write_bytes(canonical_json_bytes(document))
+        return randomized_string_like(current, entropy)
+    raise ValueError("JSON pointer does not select a supported scalar")
 
 
-def prepare_json_differential(genuine: Path, perturbed: Path, pointer: str, entropy: bytes) -> None:
-    genuine_document = json.loads(genuine.read_text(encoding="utf-8"))
-    perturbed_document = json.loads(perturbed.read_text(encoding="utf-8"))
-    if genuine_document != perturbed_document:
-        raise ValueError("the two restored scored-input copies differ before perturbation")
-    canonical = canonical_json_bytes(genuine_document)
-    genuine.write_bytes(canonical)
-    perturbed.write_bytes(canonical_json_bytes(perturbed_document))
-    perturb_json_input(perturbed, pointer, entropy)
-    final_genuine = json.loads(genuine.read_text(encoding="utf-8"))
-    final_perturbed = json.loads(perturbed.read_text(encoding="utf-8"))
-    original = json_pointer_value(final_genuine, pointer)
-    changed = json_pointer_value(final_perturbed, pointer)
-    if original == changed:
+def replace_unique_bytes(original: bytes, old: bytes, new: bytes, label: str) -> bytes:
+    if not old or original.count(old) != 1:
+        raise ValueError(f"{label} must identify exactly one byte span")
+    start = original.index(old)
+    changed = original[:start] + new + original[start + len(old) :]
+    if changed[:start] != original[:start] or changed[start + len(new) :] != original[start + len(old) :]:
+        raise ValueError(f"prepared copies differ outside {label}")
+    return changed
+
+
+def mutate_text_token(token: str, entropy: bytes) -> str:
+    for index, character in enumerate(token):
+        if character.isascii() and character.isalnum():
+            replacement = randomized_string_like(character, entropy)
+            return token[:index] + replacement + token[index + 1 :]
+    raise ValueError("text-token must contain an ASCII letter or digit")
+
+
+def perturb_json_bytes(original: bytes, pointer: str, entropy: bytes) -> bytes:
+    document = json.loads(original.decode("utf-8"))
+    current = json_pointer_value(document, pointer)
+    replacement = json_scalar_replacement(current, entropy)
+    old_token = json.dumps(current, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    new_token = json.dumps(replacement, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    changed = replace_unique_bytes(original, old_token, new_token, f"JSON pointer {pointer!r}")
+    changed_document = json.loads(changed.decode("utf-8"))
+    if json_pointer_value(changed_document, pointer) == current:
         raise ValueError(f"JSON pointer {pointer!r} did not change")
-    set_json_pointer_value(final_perturbed, pointer, original)
-    if canonical_json_bytes(final_perturbed) != genuine.read_bytes():
-        raise ValueError(f"prepared scored-input copies differ outside JSON pointer {pointer!r}")
+    return changed
+
+
+def parse_png(data: bytes) -> tuple[list[tuple[bytes, bytes]], int, int, int, int]:
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("png-pixel input has no PNG signature")
+    chunks: list[tuple[bytes, bytes]] = []
+    offset = 8
+    width = height = color_type = interlace = -1
+    bit_depth = -1
+    while offset < len(data):
+        if offset + 12 > len(data):
+            raise ValueError("PNG chunk is truncated")
+        length = struct.unpack(">I", data[offset : offset + 4])[0]
+        kind = data[offset + 4 : offset + 8]
+        end = offset + 12 + length
+        if end > len(data):
+            raise ValueError("PNG chunk payload is truncated")
+        payload = data[offset + 8 : offset + 8 + length]
+        expected_crc = struct.unpack(">I", data[offset + 8 + length : end])[0]
+        if zlib.crc32(kind + payload) & 0xFFFFFFFF != expected_crc:
+            raise ValueError("PNG chunk checksum is invalid")
+        chunks.append((kind, payload))
+        if kind == b"IHDR":
+            if len(payload) != 13:
+                raise ValueError("PNG IHDR chunk has the wrong size")
+            width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(
+                ">IIBBBBB", payload
+            )
+            if compression != 0 or filtering != 0:
+                raise ValueError("PNG compression or filtering method is unsupported")
+        offset = end
+        if kind == b"IEND":
+            break
+    if offset != len(data) or not chunks or chunks[-1][0] != b"IEND":
+        raise ValueError("PNG has trailing data or no IEND chunk")
+    if interlace != 0:
+        color_type = -1
+    return chunks, width, height, bit_depth, color_type
+
+
+def perturb_png_bytes(original: bytes, declaration: dict[str, Any]) -> bytes:
+    if set(declaration) != {"kind", "x", "y", "channel"}:
+        raise ValueError("png-pixel accepts only kind, x, y, and channel")
+    chunks, width, height, bit_depth, color_type = parse_png(original)
+    channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(color_type)
+    x, y, channel = declaration.get("x"), declaration.get("y"), declaration.get("channel")
+    if bit_depth != 8 or channels is None:
+        raise ValueError("png-pixel requires a non-interlaced 8-bit grayscale, RGB, grayscale-alpha, or RGBA PNG")
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in (x, y, channel)):
+        raise ValueError("png-pixel coordinates must be integers")
+    if not (0 <= x < width and 0 <= y < height and 0 <= channel < channels):
+        raise ValueError("png-pixel coordinates are outside the image")
+    compressed = b"".join(payload for kind, payload in chunks if kind == b"IDAT")
+    pixels = bytearray(zlib.decompress(compressed))
+    stride = width * channels
+    if len(pixels) != height * (stride + 1):
+        raise ValueError("png-pixel scanline layout is unsupported")
+    pixel_offset = y * (stride + 1) + 1 + x * channels + channel
+    before = bytes(pixels)
+    pixels[pixel_offset] ^= 1
+    if before[:pixel_offset] != pixels[:pixel_offset] or before[pixel_offset + 1 :] != pixels[pixel_offset + 1 :]:
+        raise ValueError("PNG perturbation changed more than the declared filtered pixel byte")
+    rebuilt = bytearray(b"\x89PNG\r\n\x1a\n")
+    inserted_idat = False
+    for kind, payload in chunks:
+        if kind == b"IDAT":
+            if inserted_idat:
+                continue
+            payload = zlib.compress(bytes(pixels))
+            inserted_idat = True
+        rebuilt.extend(struct.pack(">I", len(payload)))
+        rebuilt.extend(kind)
+        rebuilt.extend(payload)
+        rebuilt.extend(struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+    return bytes(rebuilt)
+
+
+def build_perturbed_input(original: bytes, suffix: str, declaration: Any, entropy: bytes) -> bytes:
+    if not isinstance(declaration, dict) or not isinstance(declaration.get("kind"), str):
+        raise ValueError("perturbation must be a pure-data object with a supported kind")
+    kind = declaration["kind"]
+    if kind == "json-value":
+        if set(declaration) != {"kind", "pointer"}:
+            raise ValueError("json-value accepts only kind and pointer")
+        pointer = declaration.get("pointer")
+        if not isinstance(pointer, str) or not pointer.startswith("/"):
+            raise ValueError("json-value needs a JSON pointer")
+        return perturb_json_bytes(original, pointer, entropy)
+    if kind == "text-token":
+        if set(declaration) != {"kind", "token"}:
+            raise ValueError("text-token accepts only kind and token")
+        if suffix not in {".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".htm"}:
+            raise ValueError("text-token supports TypeScript, JavaScript, CSS, and HTML inputs")
+        token = declaration.get("token")
+        if not isinstance(token, str) or not token:
+            raise ValueError("text-token needs a non-empty token")
+        old = token.encode("utf-8")
+        new = mutate_text_token(token, entropy).encode("utf-8")
+        return replace_unique_bytes(original, old, new, "declared text token")
+    if kind == "png-pixel":
+        if suffix != ".png":
+            raise ValueError("png-pixel requires a PNG input")
+        return perturb_png_bytes(original, declaration)
+    raise ValueError(f"unsupported pure-data perturbation kind: {kind}")
+
+
+def prepare_input_differential(genuine: Path, perturbed: Path, declaration: Any, entropy: bytes) -> None:
+    original = genuine.read_bytes()
+    if perturbed.read_bytes() != original:
+        raise ValueError("the two restored scored-input copies differ before perturbation")
+    changed = build_perturbed_input(original, genuine.suffix.lower(), declaration, entropy)
+    if changed == original:
+        raise ValueError("declared perturbation did not change the scored input")
+    perturbed.write_bytes(changed)
+    if genuine.read_bytes() != original:
+        raise ValueError("genuine scored-input bytes changed during differential preparation")
 
 
 def rerun_archived_evaluator(
@@ -2171,23 +2293,23 @@ def rerun_archived_evaluator(
     restored_tree: Path,
     wrapper: list[str],
     declaration: dict[str, Any],
-) -> tuple[bool, str, str]:
+) -> tuple[bool, str, dict[str, str]]:
     files = record["files"]
     evaluator_name = declaration["argv"]
     expected = declaration["expected"]
     perturbable_paths = declaration["perturbable_paths"]
     perturbations = declaration["perturbations"]
+    input_statuses = dict(declaration["input_statuses"])
     try:
-        with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as first_workspace, tempfile.TemporaryDirectory(
-            prefix="fm-bench-evaluator-"
-        ) as second_workspace:
+        with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as workspace:
             run_roots: list[tuple[Path, Path]] = []
-            for workspace in (first_workspace, second_workspace):
-                scratch = Path(workspace)
+            for _ in range(1 + len(perturbable_paths)):
+                scratch = Path(workspace) / uuid.uuid4().hex
+                scratch.mkdir()
                 for relative in files:
                     source = (sample / relative).resolve()
                     if not is_within(source, sample.resolve()) or not source.is_file():
-                        return False, f"archived evaluator input is unavailable: {relative}", "failed"
+                        return False, f"archived evaluator input is unavailable: {relative}", {}
                     destination = scratch / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, destination)
@@ -2195,18 +2317,21 @@ def rerun_archived_evaluator(
                 shutil.copytree(restored_tree, run_tree, symlinks=True)
                 run_roots.append((scratch, run_tree))
             genuine_scratch, genuine_tree = run_roots[0]
-            perturbed_scratch, perturbed_tree = run_roots[1]
-            for relative in perturbable_paths:
+            for index, relative in enumerate(perturbable_paths, start=1):
+                perturbed_scratch, perturbed_tree = run_roots[index]
                 genuine_input = (genuine_tree / relative).resolve()
                 perturbed_input = (perturbed_tree / relative).resolve()
                 if not is_within(genuine_input, genuine_tree.resolve()) or not is_within(
                     perturbed_input, perturbed_tree.resolve()
                 ):
-                    return False, f"archived evaluator scored input cannot be prepared inside scratch: {relative}", "failed"
-                prepare_json_differential(
+                    return False, f"archived evaluator scored input cannot be prepared inside scratch: {relative}", {}
+                perturbation = perturbations.get(relative)
+                if perturbation is None:
+                    return False, f"archived evaluator lost the normalized perturbation for scored input: {relative}", {}
+                prepare_input_differential(
                     genuine_input,
                     perturbed_input,
-                    perturbations[str(relative)]["pointer"],
+                    perturbation,
                     os.urandom(32),
                 )
             genuine = subprocess.run(
@@ -2216,41 +2341,47 @@ def rerun_archived_evaluator(
                 check=False,
                 timeout=60,
             )
-            perturbed = subprocess.run(
-                confined_evaluator_command(
-                    wrapper,
-                    perturbed_scratch,
-                    perturbed_scratch / evaluator_name,
-                    perturbed_tree,
-                ),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-                timeout=60,
-            )
+            perturbed_runs: list[tuple[str, subprocess.CompletedProcess[bytes]]] = []
+            for index, relative in enumerate(perturbable_paths, start=1):
+                perturbed_scratch, perturbed_tree = run_roots[index]
+                completed = subprocess.run(
+                    confined_evaluator_command(
+                        wrapper,
+                        perturbed_scratch,
+                        perturbed_scratch / evaluator_name,
+                        perturbed_tree,
+                    ),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=60,
+                )
+                perturbed_runs.append((relative, completed))
     except subprocess.TimeoutExpired:
-        return False, "archived evaluator exceeded the 60-second restore-drill limit", "failed"
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-        return False, f"archived evaluator could not execute: {exc}", "failed"
+        return False, "archived evaluator exceeded the 60-second restore-drill limit", {}
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, zlib.error) as exc:
+        return False, f"archived evaluator could not execute: {exc}", {}
     if genuine.returncode != 0:
         detail = genuine.stderr.decode("utf-8", "replace").strip()
         suffix = f": {detail}" if detail else ""
-        return False, f"archived evaluator confinement or execution exited {genuine.returncode}{suffix}", "failed"
-    if perturbable_paths and perturbed.returncode != 0:
-        detail = perturbed.stderr.decode("utf-8", "replace").strip()
-        suffix = f": {detail}" if detail else ""
-        return False, (
-            "perturbed evaluator run was inconclusive because the declared form-preserving input "
-            f"exited {perturbed.returncode}{suffix}"
-        ), "failed"
+        return False, f"archived evaluator confinement or execution exited {genuine.returncode}{suffix}", {}
     actual = sha256_bytes(genuine.stdout)
     if actual != expected:
-        return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}", "failed"
-    if not perturbable_paths:
-        return True, actual, "unproven"
-    if perturbed.stdout == genuine.stdout:
-        return False, "archived evaluator ignored its declared scored inputs; their perturbation did not change output", "failed"
-    return True, actual, "proven"
+        return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}", {}
+    for relative, perturbed in perturbed_runs:
+        if perturbed.returncode != 0:
+            detail = perturbed.stderr.decode("utf-8", "replace").strip()
+            suffix = f": {detail}" if detail else ""
+            return False, (
+                f"perturbed evaluator run for {relative} was inconclusive because the declared "
+                f"form-preserving input exited {perturbed.returncode}{suffix}"
+            ), {}
+        if perturbed.stdout == genuine.stdout:
+            return False, (
+                f"archived evaluator ignored declared scored input {relative}; its perturbation did not change output"
+            ), {}
+        input_statuses[relative] = "proven"
+    return True, actual, input_statuses
 
 
 def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
@@ -2270,7 +2401,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
     selected_samples = samples[:RESTORE_EVALUATOR_SAMPLE_LIMIT]
     selected_names = {sample.name for sample in selected_samples}
     selected_validated: dict[str, tuple[Path, dict[str, Any], dict[str, Any], Path]] = {}
-    dependence: dict[str, str] = {}
+    dependence: dict[str, dict[str, Any]] = {}
     validated_count = 0
     reran = 0
     with tempfile.TemporaryDirectory(prefix="fm-bench-selected-") as selected_workdir:
@@ -2393,7 +2524,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                 )
                 for sample in selected_samples:
                     archived_sample, record, declaration, restored_tree = selected_validated[sample.name]
-                    reran_ok, rerun_detail, dependence_status = rerun_archived_evaluator(
+                    reran_ok, rerun_detail, input_statuses = rerun_archived_evaluator(
                         archived_sample,
                         record,
                         restored_tree,
@@ -2409,16 +2540,19 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                         f"restore.{sample.name}.evaluator_rerun",
                         "confined archived evaluator rerun reproduced the recorded genuine result",
                     )
-                    dependence[sample.name] = dependence_status
-                    if dependence_status == "proven":
+                    dependence[sample.name] = {"overall": "proven", "inputs": input_statuses}
+                    report.ok(
+                        f"restore.{sample.name}.evaluator_dependence",
+                        "proven; the genuine copy retained its archived bytes and each declared pure-data perturbation changed output",
+                    )
+                    for input_index, (relative, status) in enumerate(sorted(input_statuses.items())):
+                        if status == "proven":
+                            detail = f"{relative} proven by its declared form-preserving perturbation"
+                        else:
+                            detail = f"{relative} unproven; another scored input supplies the required dependence proof"
                         report.ok(
-                            f"restore.{sample.name}.evaluator_dependence",
-                            "proven; identically prepared copies differ only at declared JSON pointers and output changed",
-                        )
-                    else:
-                        report.ok(
-                            f"restore.{sample.name}.evaluator_dependence",
-                            "unproven; no sound form-preserving perturbation was declared for the restored scored inputs",
+                            f"restore.{sample.name}.evaluator_dependence.input_{input_index}",
+                            detail,
                         )
 
     ok = report.require(
@@ -2684,6 +2818,12 @@ def baseline_veto_clear(
     ):
         report.fail(f"{prefix}.baseline_veto", "the frozen baseline veto bounds are not numeric")
         return False
+    if mean_floor != 0 or not 0 <= loss_ceiling <= 1:
+        report.fail(
+            f"{prefix}.baseline_veto",
+            "the frozen baseline veto bounds exceed the zero mean floor or one-loss outer limit",
+        )
+        return False
     deltas: list[float] = []
     losses = 0
     for packet in strata:
@@ -2869,7 +3009,7 @@ def build_parser() -> argparse.ArgumentParser:
             "scoring/, judge-prompts/, provenance/<packet>.json, isolation.json, allowance.json, "
             "evaluator/{lock.json,score-map.json,determinism/,mutations/,captures/}, manifest.json, "
             "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with evaluator_rerun.scored_inputs "
-            "and optional sound evaluator_rerun.input_perturbations, and the generated "
+            "and at least one pure-data evaluator_rerun.input_perturbations entry, and the generated "
             "preflight.receipt and archive/restore-drill.json."
         ),
     )
