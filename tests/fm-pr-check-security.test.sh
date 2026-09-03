@@ -488,7 +488,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
 }
 
 test_valid_recording_and_merge_derivation() {
-  local dir expected sidecar count rc
+  local dir expected sidecar count rc tracking_cursor
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
   expected=0123456789abcdef0123456789abcdef01234567
@@ -500,6 +500,12 @@ test_valid_recording_and_merge_derivation() {
   grep -qxF 'pr=https://github.com/my-org/repo_name.with-dots/pull/37' "$dir/home/state/task-a.meta" \
     || fail "canonical pr metadata was not exact"
   grep -qxF "pr_head=$expected" "$dir/home/state/task-a.meta" || fail "PR head metadata was not exact"
+  tracking_cursor=$(printf '%s\n' "$dir/home/state/pr-follow"/prf-gh-*.cursor)
+  [ -f "$tracking_cursor" ] || fail "PR lifecycle tracking cursor was not armed"
+  grep -qxF "head=$expected" "$tracking_cursor" \
+    || fail "PR lifecycle tracking did not seed the verified head"
+  grep -qxF 'state=open' "$tracking_cursor" \
+    || fail "PR lifecycle tracking did not seed the verified open state"
   cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "published check was not byte-for-byte static"
   [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "published check mode was not 0600"
   [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "published sidecar mode was not 0600"

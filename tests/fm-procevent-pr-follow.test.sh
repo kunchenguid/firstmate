@@ -58,6 +58,12 @@ new_section() {
   H="$TMP_ROOT/h-$1"
   new_home "$H"
   PREV_HOME=$H
+  # Give the section its own poll log too: a previous section's child that
+  # outlived its home's sweep keeps the log it started with, so it can never
+  # be counted as a poll burst of the home under measurement.
+  GH_TEST_POLL_LOG="$TMP_ROOT/gh-poll-$SECTION_N.log"
+  export GH_TEST_POLL_LOG
+  : > "$GH_TEST_POLL_LOG"
   sid=$(prf "$H" source-id "$GH_URL")
   glsid=$(prf "$H" source-id "$GL_URL")
   scheduler_id=$(prf "$H" scheduler-id)
@@ -303,6 +309,32 @@ restart_runner() {  # <home>
   return 1
 }
 
+# result_matching <home> <source-id> <fixed-string>: the first captured result
+# for this source whose body carries the string, so an assertion about one
+# announcement cannot depend on which capture happens to be newest.
+result_matching() {
+  local g scheduler target
+  scheduler=$(prf "$1" scheduler-id)
+  for g in "$1/state/procevent-inbox/$2".*.result "$1/state/procevent-inbox/$scheduler".*.result; do
+    [ -e "$g" ] || continue
+    target=$(sed -n 's/^target: //p' "$g")
+    [ -z "$target" ] || [ "$target" = "$2" ] || continue
+    grep -F -- "$3" "$g" >/dev/null || continue
+    printf '%s\n' "$g"
+    return 0
+  done
+  return 1
+}
+
+wait_for_result_matching() {  # <home> <source-id> <fixed-string> [tries]
+  local n=${4:-150}
+  for _ in $(seq 1 "$n"); do
+    result_matching "$1" "$2" "$3" >/dev/null 2>&1 && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 wait_for_result_count() {  # <home> <source-id> <count> [tries]
   local want=$3 n=${4:-150}
   for _ in $(seq 1 "$n"); do
@@ -368,7 +400,7 @@ wait_for_baseline() {  # <home> <sid> [tries]
 }
 
 arm_gh() {  # <home> <task-id> [extra flags...]
-  prf "$1" arm "${2:-task-a}" "$GH_URL" ${3+"${@:3}"}
+  prf "$1" arm "${2:-task-a}" "$GH_URL" ${3+"${@:3}"} --seed-head "$GH_SHA1"
 }
 
 # --- identity, arm, and idempotent re-arm ------------------------------------
@@ -421,6 +453,10 @@ wait_for_result "$H" "$sid" || fail "post-registration activity was swallowed by
 RESULT=$(first_result "$H" "$sid")
 assert_grep 'event: comment id=9 author=carol' "$RESULT" \
   "the arm-time boundary preserves activity arriving during a paged baseline"
+assert_no_grep 'event: head ' "$RESULT" \
+  "a comment during baseline is not mislabeled as a head replacement"
+assert_no_grep 'event: pr-state ' "$RESULT" \
+  "a comment during baseline is not mislabeled as a lifecycle transition"
 ack "$H" "$sid" 1 "$RESULT"
 pass "the baseline distinguishes history from post-registration activity"
 
@@ -876,10 +912,18 @@ gh_fix_default
 arm_gh "$H" >/dev/null
 pe "$H" reconcile >/dev/null
 wait_for_baseline "$H" "$sid" || fail "the baseline never completed"
+printf 'capture=%s\nsequence=99\ngeneration=1\nstatus=events\n' "$scheduler_id" \
+  > "$H/state/pr-follow/$sid.inflight"
+chmod 600 "$H/state/pr-follow/$sid.inflight"
+FM_HOME="$H" perl -e 'alarm 1; exec @ARGV' \
+  "$ROOT/bin/fm-procevent-pr-follow.sh" run "$sid" >/dev/null 2>&1 || true
+assert_absent "$H/state/pr-follow/$sid.inflight" \
+  "a marker whose predicted capture never landed is recovered"
 number=$(printf '%s\n' "$GH_URL" | sed 's|.*/||')
 printf '%s\n' \
   'schema: fm-pr-follow-event-v1' \
-  "source: $sid" \
+  "source: $scheduler_id" \
+  "target: $sid" \
   'provider: github' \
   "url: $GH_URL" \
   "number: $number" \
@@ -900,15 +944,19 @@ printf '%s\n' \
   'approvals=' \
   'backfill=off' \
   'generation=1' > "$TMP_ROOT/baddoc"
-# File it as a captured inbox result, exactly as the runner would capture it.
 mkdir -p "$H/state/procevent-inbox"
-cp "$TMP_ROOT/baddoc" "$H/state/procevent-inbox/$sid.1.result"
-printf 'pr-follow\n' > "$H/state/procevent-inbox/$sid.1.adapter"
-chmod 600 "$H/state/procevent-inbox/$sid.1.result" "$H/state/procevent-inbox/$sid.1.adapter"
+cp "$TMP_ROOT/baddoc" "$H/state/procevent-inbox/$scheduler_id.1.result"
+printf 'pr-follow\n' > "$H/state/procevent-inbox/$scheduler_id.1.adapter"
+printf 'capture=%s\nsequence=1\ngeneration=1\nstatus=events\n' "$scheduler_id" \
+  > "$H/state/pr-follow/$sid.inflight"
+chmod 600 "$H/state/procevent-inbox/$scheduler_id.1.result" \
+  "$H/state/procevent-inbox/$scheduler_id.1.adapter" "$H/state/pr-follow/$sid.inflight"
 # Attempt one of the bound: a distinct refusal naming the adapter class.
-out=$(prf "$H" handle "$sid" 1 "$H/state/procevent-inbox/$sid.1.result" 2>&1) && fail "an unapplicable document must be refused"
+out=$(prf "$H" handle "$scheduler_id" 1 "$H/state/procevent-inbox/$scheduler_id.1.result" 2>&1) && fail "an unapplicable document must be refused"
 assert_contains "$out" "attempt 1 of 2" "the first refusal names its attempt against the bound"
 assert_grep 'count=1' "$H/state/pr-follow/$sid.quarantine" "the refusal is durably counted"
+assert_present "$H/state/pr-follow/$sid.inflight" \
+  "a retryable validation refusal keeps its capture provenance"
 # Below the bound the source keeps polling: a counted attempt is not a pause,
 # so this poll is the ordinary quiet one and surfaces no monitoring loss.
 out=$(FM_HOME="$H" perl -e 'alarm 2; exec @ARGV' \
@@ -918,10 +966,15 @@ assert_no_grep 'monitoring loss' "$TMP_ROOT/below-bound" \
   "a refusal below the bound never pauses monitoring"
 [ -z "$out" ] || fail "polling below the bound emitted a document: $out"
 # Attempt two reaches the bound: acknowledge, pause, surface once.
-out=$(prf "$H" handle "$sid" 1 "$H/state/procevent-inbox/$sid.1.result" 2>&1) || fail "the bounded refusal must settle"
+out=$(prf "$H" handle "$scheduler_id" 1 "$H/state/procevent-inbox/$scheduler_id.1.result" 2>&1) || fail "the bounded refusal must settle"
 assert_contains "$out" "monitoring-loss: $sid paused" "the bound surfaces an actionable monitoring-loss line"
 assert_grep 'count=2' "$H/state/pr-follow/$sid.quarantine" "the quarantine record counts both refusals"
+assert_absent "$H/state/pr-follow/$sid.inflight" \
+  "the terminal validation refusal releases its in-flight capture"
 # The paused source emits exactly one monitoring-loss document, then nothing.
+printf 'capture=%s\nsequence=1\ngeneration=1\nstatus=events\n' "$scheduler_id" \
+  > "$H/state/pr-follow/$sid.inflight"
+chmod 600 "$H/state/pr-follow/$sid.inflight"
 out=$(FM_HOME="$H" perl -e 'alarm 2; exec @ARGV' \
   "$ROOT/bin/fm-procevent-pr-follow.sh" run "$sid" 2>/dev/null || true)
 printf '%s' "$out" > "$TMP_ROOT/ml-doc"
@@ -947,10 +1000,15 @@ sleep 1
 out=$(arm_gh "$H")
 assert_contains "$out" "already armed: $sid" "re-arming reports the tracked identity"
 [ ! -e "$H/state/pr-follow/$sid.quarantine" ] || fail "re-arm must clear the quarantine record"
-restart_runner "$H"
+assert_absent "$H/state/pr-follow/$sid.inflight" \
+  "re-arm releases a terminal quarantine's stale marker"
+# Publish the new comment before the runner restarts, so the first resumed
+# poll cannot race the fixture and observe the pre-resume state instead.
 printf '[{"id":5,"user":{"login":"bob"}},{"id":21,"user":{"login":"erin"}}]\n' > "$GH_FIX/comments.json"
-wait_for_result_count "$H" "$sid" 3 || fail "tracking did not resume after re-arm"
-RESULT=$(latest_result "$H" "$sid")
+restart_runner "$H"
+wait_for_result_matching "$H" "$sid" 'event: comment id=21 author=erin' \
+  || fail "tracking did not resume after re-arm"
+RESULT=$(result_matching "$H" "$sid" 'event: comment id=21 author=erin')
 seqn=${RESULT##*/"$scheduler_id".}
 seqn=${seqn%.result}
 assert_grep 'event: comment id=21 author=erin' "$RESULT" "resumed tracking announces new events"
@@ -1079,7 +1137,9 @@ pass "the guarded migration sweep arms every recorded PR exactly once"
 new_section sweep-resume
 gh_fix_default
 for n in 1 2 3; do
-  printf 'task=resume-%s\npr=https://github.com/octo/app/pull/%s\n' "$n" "$((700 + n))" \
+  resume_url="https://github.com/octo/app/pull/$((700 + n))"
+  prf "$H" arm "resume-$n" "$resume_url" --seed-head "$GH_SHA1" >/dev/null
+  printf 'task=resume-%s\npr=%s\n' "$n" "$resume_url" \
     > "$H/state/resume-$n.meta"
 done
 for _ in 1 2 3; do
@@ -1090,9 +1150,10 @@ for n in 1 2 3; do
   assert_present "$H/state/pr-follow/$rsid.cursor" "resumable sweep reached PR $n"
 done
 assert_absent "$H/state/pr-follow/backfill.scan" "completed sweep clears its progress cursor"
-assert_present "$H/state/pr-follow/legacy.scan" "legacy conversion retains its independent capped position"
-FM_PR_FOLLOW_BACKFILL_SCAN_CAP=10 prf "$H" backfill >/dev/null
 assert_absent "$H/state/pr-follow/legacy.scan" "bounded legacy conversion clears after resumable passes"
+assert_present "$H/state/pr-follow/legacy.done" "completed legacy conversion stays latched"
+FM_PR_FOLLOW_BACKFILL_SCAN_CAP=1 prf "$H" backfill >/dev/null
+assert_absent "$H/state/pr-follow/legacy.scan" "later sweeps do not restart legacy conversion"
 pass "the capped migration sweep resumes beyond its first batch"
 
 # --- GitLab lifecycle events through the real JSON parser ---------------------
@@ -1483,12 +1544,27 @@ done
 # boundary the window may straddle) instead of one per tracked PR.
 rot_start=$(date +%s)
 pe "$H" reconcile >/dev/null
-sleep 0.2
-resident=$(pgrep -f "fm-procevent-pr-follow.sh run pr-follow-scheduler" 2>/dev/null | wc -l | tr -d ' ')
-[ "$resident" -le 1 ] || fail "rotation started $resident resident schedulers"
-if pgrep -f 'fm-procevent-pr-follow.sh run prf-(gh|gl)-' >/dev/null 2>&1; then
-  fail "rotation left a resident process per tracked PR"
-fi
+# One scheduler for this home is the steady state, so sample that home's own
+# scheduler id until it holds instead of once: a child exiting while its
+# replacement starts is a momentary overlap, while a process per retained PR
+# never settles.
+resident=0
+per_pr=0
+settled=0
+for _ in $(seq 1 40); do
+  resident=$(pgrep -f "fm-procevent-pr-follow.sh run $scheduler_id" 2>/dev/null | wc -l | tr -d ' ')
+  per_pr=0
+  pgrep -f 'fm-procevent-pr-follow.sh run prf-(gh|gl)-' >/dev/null 2>&1 && per_pr=1
+  if [ "$resident" -le 1 ] && [ "$per_pr" -eq 0 ]; then
+    settled=$((settled + 1))
+    [ "$settled" -ge 3 ] && break
+  else
+    settled=0
+  fi
+  sleep 0.1
+done
+[ "$settled" -ge 3 ] \
+  || fail "rotation kept $resident resident schedulers and $per_pr per-PR processes"
 for s in "${sids[@]}"; do
   wait_for_baseline "$H" "$s" 200 || fail "rotation starved $s of its baseline poll"
 done
@@ -1512,16 +1588,30 @@ for s in "${sids[@]}"; do
 done
 FM_PR_FOLLOW_ROTATION_SLOT=5
 export FM_PR_FOLLOW_ROTATION_SLOT
-pkill -f "fm-procevent-pr-follow.sh run $scheduler_id" 2>/dev/null || true
-pkill -f "fm-procevent.sh _start $scheduler_id" 2>/dev/null || true
-: > "$GH_TEST_POLL_LOG"
-restart_runner "$H"
-sleep 0.3
-pkill -f "fm-procevent-pr-follow.sh run $scheduler_id" 2>/dev/null || true
-pkill -f "fm-procevent.sh _start $scheduler_id" 2>/dev/null || true
-restart_runner "$H"
-sleep 0.5
-restarted_bursts=$(grep -c . "$GH_TEST_POLL_LOG" || true)
+# The bound under test is the durable served-slot record, not the wall clock,
+# so both restarts have to land inside one slot: start each attempt on a slot
+# boundary and discard an attempt that still straddled the next one.
+restarted_bursts=0
+measured=0
+for _ in $(seq 1 5); do
+  pkill -f "fm-procevent-pr-follow.sh run $scheduler_id" 2>/dev/null || true
+  pkill -f "fm-procevent.sh _start $scheduler_id" 2>/dev/null || true
+  sleep "$(( 5 - $(date +%s) % 5 ))"
+  : > "$GH_TEST_POLL_LOG"
+  slot_before=$(( $(date +%s) / 5 ))
+  restart_runner "$H"
+  sleep 0.3
+  pkill -f "fm-procevent-pr-follow.sh run $scheduler_id" 2>/dev/null || true
+  pkill -f "fm-procevent.sh _start $scheduler_id" 2>/dev/null || true
+  restart_runner "$H"
+  sleep 0.5
+  restarted_bursts=$(grep -c . "$GH_TEST_POLL_LOG" || true)
+  if [ "$slot_before" = "$(( $(date +%s) / 5 ))" ]; then
+    measured=1
+    break
+  fi
+done
+[ "$measured" -eq 1 ] || fail "two restarts never fitted inside one rotation slot"
 [ "$restarted_bursts" -le 1 ] \
   || fail "restarting within one served slot repeated $restarted_bursts poll bursts"
 FM_PR_FOLLOW_ROTATION_SLOT=1

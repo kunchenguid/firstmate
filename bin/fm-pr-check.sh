@@ -160,7 +160,12 @@ esac
 # retained lifetime. Refusing here leaves the standing follow-through
 # instruction unenforced, so the failure is fatal and rerunning this script is
 # idempotent.
-if ! "$SCRIPT_DIR/fm-procevent-pr-follow.sh" arm "$ID" "$URL" >/dev/null; then
+if [ -n "$PR_HEAD" ]; then
+  PR_FOLLOW_ARM=(arm "$ID" "$URL" --seed-head "$PR_HEAD")
+else
+  PR_FOLLOW_ARM=(arm "$ID" "$URL")
+fi
+if ! "$SCRIPT_DIR/fm-procevent-pr-follow.sh" "${PR_FOLLOW_ARM[@]}" >/dev/null; then
   echo "error: PR lifecycle follow-through could not be armed; rerun fm-pr-check.sh" >&2
   exit 1
 fi

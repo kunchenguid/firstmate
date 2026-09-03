@@ -5,7 +5,7 @@
 # as one durable wake that survives task cleanup, merge, and restart.
 #
 # Usage:
-#   fm-procevent-pr-follow.sh arm <task-id> <pr-url> [--backfill]
+#   fm-procevent-pr-follow.sh arm <task-id> <pr-url> [--backfill] [--seed-head <sha>]
 #   fm-procevent-pr-follow.sh backfill
 #   fm-procevent-pr-follow.sh run <source-id>
 #   fm-procevent-pr-follow.sh handle <source-id> <sequence> <result-file>
@@ -26,8 +26,10 @@
 #            cursors persist independently under state/pr-follow/.
 #            --backfill additionally makes the next poll surface currently
 #            unanswered inline review threads (see the backfill contract below)
-#            instead of only baselining silently. Re-running arm for an already
-#            tracked identity succeeds without changing anything.
+#            instead of only baselining silently. --seed-head records a head
+#            already verified by the registering caller, so activity during
+#            the baseline is not mistaken for a head replacement. Re-running
+#            arm for an already tracked identity succeeds without changing anything.
 # backfill   Guarded migration sweep: arm every PR currently recorded in this
 #            home (state/*.meta with a validated pr= identity) that has no
 #            lifecycle registration yet, each with --backfill. Bounded, local
@@ -132,7 +134,7 @@
 #   slot, then advances to the next sorted identity regardless of elapsed or
 #   skipped slots. A restart in the same slot cannot repeat the claim. The
 #   largest default burst is 31 GETs while a backfill scan is active, or 372
-#   requests per hour for the whole home; ordinary GitHub polling is at most 21.
+#   requests per hour for the whole home; ordinary GitHub polling is at most 25.
 #   With T=max(slot,31 x fetch-timeout), an open PR starts within N x T and a
 #   merged or closed PR within N x T x FM_PR_FOLLOW_SETTLED_EVERY. Roster churn
 #   resumes at the first identity after the durable last-served identity.
@@ -597,7 +599,6 @@ SN_GH_RC_PAGE=0 SN_GH_RC_LAST=0 SN_GH_RC_COMPLETE=0
 SN_GH_REVIEW_PAGE=0 SN_GH_REVIEW_LAST=0 SN_GH_REVIEW_COMPLETE=0
 SN_GH_CHECK_PAGE=0 SN_GH_CHECK_LAST=0 SN_GH_CHECK_COMPLETE=0
 SN_GL_DISCUSSION_COMPLETE=0 SN_GL_PIPELINE_PAGE=0 SN_GL_PIPELINE_LAST=0 SN_GL_PIPELINE_COMPLETE=0
-SN_BACKFILL_PAGES=0 SN_GH_RC_PAGES=0 SN_GL_DISCUSSION_PAGES=0
 SN_FETCH_ERROR=
 GH_OUT=
 GH_TOTAL_PAGES=1
@@ -622,7 +623,6 @@ sn_reset() {
   SN_GH_REVIEW_PAGE=0 SN_GH_REVIEW_LAST=0 SN_GH_REVIEW_COMPLETE=0
   SN_GH_CHECK_PAGE=0 SN_GH_CHECK_LAST=0 SN_GH_CHECK_COMPLETE=0
   SN_GL_DISCUSSION_COMPLETE=0 SN_GL_PIPELINE_PAGE=0 SN_GL_PIPELINE_LAST=0 SN_GL_PIPELINE_COMPLETE=0
-  SN_BACKFILL_PAGES=0 SN_GH_RC_PAGES=0 SN_GL_DISCUSSION_PAGES=0
   SN_FETCH_ERROR=
 }
 
@@ -679,7 +679,6 @@ gh_rotating_pages() {
   printf -v "$pagevar" '%s' "$page"
   printf -v "$lastvar" '%s' "$progress_last"
   printf -v "$completevar" '%s' "$complete"
-  SN_BACKFILL_PAGES=$count
 }
 
 fetch_fail() {  # <fixed step label> <exit code>: records a fixed diagnostic
@@ -761,7 +760,6 @@ poll_github() {
     "repos/$owner/$repo/pulls/$number/comments" \
     "$CUR_GH_RC_PAGE" "$CUR_GH_RC_LAST" SN_RC_ROWS \
     SN_GH_RC_PAGE SN_GH_RC_LAST SN_GH_RC_COMPLETE || return 1
-  SN_GH_RC_PAGES=$SN_BACKFILL_PAGES
 
   # The normalization tests below are generated from the same shared lists the
   # validators read (vocabulary contract), so only a token the cursor accepts
@@ -941,7 +939,6 @@ poll_gitlab() {
   thread_rows=$(printf '%s\n' "$discussion_all" | awk -F '\t' '$1 == "T" {print $2 "\t" $3}')
   SN_NOTE_ROWS=$note_rows
   SN_THREAD_ROWS=$thread_rows
-  SN_GL_DISCUSSION_PAGES=$(( SN_GL_DISCUSSION_LAST < MAX_PAGES ? SN_GL_DISCUSSION_LAST : MAX_PAGES ))
 
   # shellcheck disable=SC2016 # Perl owns every $ expression in this program.
   glab_rotating_pages "projects/$enc/merge_requests/$number/pipelines" \
@@ -1318,7 +1315,7 @@ thread_states_migrate_cursor() {
 
 approval_states_migrate_cursor() {
   local rest entry
-  [ "$CUR_PROVIDER" = gitlab ] && [ "$CUR_BASELINE" = done ] \
+  [ "$CUR_PROVIDER" = gitlab ] && [ "$CUR_BASELINE" = "done" ] \
     && [ "$CUR_APPROVAL_READY" -eq 0 ] || return 0
   rest=$CUR_APPROVALS
   while [ -n "$rest" ]; do
@@ -1515,56 +1512,6 @@ compute_delta_github() {
   return 0
 }
 
-compute_backfill_github() {
-  # Reconstruct inline threads from the full review-comment rows, oldest
-  # first, and surface each thread whose chronologically last comment author
-  # is not the PR author.
-  local -a root_ids=() last_author=() last_path=() last_line=() thread_count=()
-  local rc_id rc_replyto rc_author rc_path rc_line _rc_created root found i root_n=0
-  while IFS=$'\t' read -r rc_id rc_replyto rc_author rc_path rc_line _rc_created; do
-    [ -n "$rc_id" ] || continue
-    nonnegative_int "$rc_id" || continue
-    nonnegative_int "$rc_replyto" || rc_replyto=0
-    rc_author=$(printf '%s' "$rc_author" | prf_sanitize 60)
-    prf_login_valid "$rc_author" || rc_author=invalid
-    rc_path=$(printf '%s' "$rc_path" | prf_sanitize 120)
-    nonnegative_int "$rc_line" || rc_line=0
-    if [ "$rc_replyto" -gt 0 ]; then
-      root=$rc_replyto
-    else
-      root=$rc_id
-    fi
-    found=0
-    for ((i = 0; i < root_n; i++)); do
-      if [ "${root_ids[$i]}" = "$root" ]; then
-        found=1
-        last_author[i]=$rc_author
-        last_path[i]=$rc_path
-        last_line[i]=$rc_line
-        thread_count[i]=$(( thread_count[i] + 1 ))
-        break
-      fi
-    done
-    if [ "$found" -eq 0 ]; then
-      root_ids+=("$root")
-      last_author+=("$rc_author")
-      last_path+=("$rc_path")
-      last_line+=("$rc_line")
-      thread_count+=(1)
-      root_n=$((root_n + 1))
-    fi
-  done <<< "$(printf '%s\n' "$SN_RC_ROWS" | sort -n -k1,1)"
-  EV_LINES=
-  for ((i = 0; i < root_n; i++)); do
-    if [ "${last_author[$i]}" != "$SN_AUTHOR" ] \
-       && ! item_state_get backfill "${root_ids[$i]}" >/dev/null 2>&1; then
-      ev_add "0	event: backfill-thread id=${root_ids[$i]} last-author=${last_author[$i]} comments=${thread_count[$i]} path=${last_path[$i]} line=${last_line[$i]}"
-    fi
-  done
-  ev_sort_and_cap
-  return 0
-}
-
 compute_delta_gitlab() {
   delta_common_start
   if ! delta_head_and_state; then
@@ -1664,60 +1611,6 @@ compute_delta_gitlab() {
   NEW_THREADS=$(max_thread_map_entries "$NEW_THREADS" "$MAP_LIMIT")
   NEW_GL_DISCUSSION_PAGE=$SN_GL_DISCUSSION_PAGE
   NEW_GL_DISCUSSION_LAST=$SN_GL_DISCUSSION_LAST
-  return 0
-}
-
-compute_backfill_gitlab() {
-  # GitLab threads whose last note author is not the MR author and which the
-  # forge does not mark resolved. Rows arrive newest first per thread.
-  local -a root_ids=() last_author=() last_path=() last_line=() thread_count=() thread_resolved=()
-  local n_id n_author n_kind n_path n_line n_thread n_first _n_created
-  local thread_id thread_state found i root_n=0
-  while IFS=$'\t' read -r n_id n_author n_kind n_path n_line n_thread n_first _n_created; do
-    [ -n "$n_id" ] || continue
-    nonnegative_int "$n_id" || continue
-    n_author=$(printf '%s' "$n_author" | prf_sanitize 60)
-    prf_login_valid "$n_author" || n_author=invalid
-    n_path=$(printf '%s' "$n_path" | prf_sanitize 120)
-    nonnegative_int "$n_line" || n_line=0
-    n_thread=${n_thread:-unknown}
-    case "$n_thread" in *[!A-Za-z0-9_-]*) n_thread=unknown ;; esac
-    found=0
-    for ((i = 0; i < root_n; i++)); do
-      if [ "${root_ids[$i]}" = "$n_thread" ]; then
-        found=1
-        last_author[i]=$n_author
-        last_path[i]=$n_path
-        last_line[i]=$n_line
-        thread_count[i]=$(( thread_count[i] + 1 ))
-        break
-      fi
-    done
-    if [ "$found" -eq 0 ]; then
-      root_ids+=("$n_thread")
-      last_author+=("$n_author")
-      last_path+=("$n_path")
-      last_line+=("$n_line")
-      thread_count+=(1)
-      thread_resolved+=(unresolved)
-      root_n=$((root_n + 1))
-    fi
-  done <<< "$(printf '%s\n' "$SN_NOTE_ROWS" | sort -n -k1,1)"
-  while IFS=$'\t' read -r thread_id thread_state; do
-    [ -n "$thread_id" ] || continue
-    for ((i = 0; i < root_n; i++)); do
-      [ "${root_ids[$i]}" = "$thread_id" ] && thread_resolved[i]=$thread_state
-    done
-  done <<< "$SN_THREAD_ROWS"
-  EV_LINES=
-  for ((i = 0; i < root_n; i++)); do
-    if [ "${last_author[$i]}" != "$SN_AUTHOR" ] \
-       && [ "${thread_resolved[$i]}" != resolved ] \
-       && ! item_state_get backfill "${root_ids[$i]}" >/dev/null 2>&1; then
-      ev_add "0	event: backfill-thread id=${root_ids[$i]} last-author=${last_author[$i]} comments=${thread_count[$i]} path=${last_path[$i]} line=${last_line[$i]}"
-    fi
-  done
-  ev_sort_and_cap
   return 0
 }
 
@@ -2039,9 +1932,22 @@ inflight_mark() {
 }
 
 inflight_matches() {
-  local sid=$1 capture=$2 seq=$3 status=$4 file line key value
+  local sid=$1 capture=$2 seq=$3 status=$4
+  inflight_capture_matches "$sid" "$capture" "$seq" \
+    && [ "$INFLIGHT_STATUS" = "$status" ]
+}
+
+inflight_capture_matches() {
+  local sid=$1 capture=$2 seq=$3
+  inflight_load "$sid" || return 1
+  [ "$INFLIGHT_CAPTURE" = "$capture" ] && [ "$INFLIGHT_SEQUENCE" = "$seq" ]
+}
+
+inflight_load() {
+  local sid=$1 file line key value
   local seen_capture=0 seen_sequence=0 seen_generation=0 seen_status=0
   file=$(inflight_file "$sid")
+  INFLIGHT_CAPTURE='' INFLIGHT_SEQUENCE='' INFLIGHT_STATUS=''
   [ -f "$file" ] && [ ! -L "$file" ] \
     && [ "$(fm_pr_file_mode "$file")" = 600 ] \
     && [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
@@ -2049,15 +1955,57 @@ inflight_matches() {
     key=${line%%=*}; value=${line#*=}
     [ "$key" != "$line" ] || return 1
     case "$key" in
-      capture) [ "$seen_capture" -eq 0 ] && [ "$value" = "$capture" ] || return 1; seen_capture=1 ;;
-      sequence) [ "$seen_sequence" -eq 0 ] && [ "$value" = "$seq" ] || return 1; seen_sequence=1 ;;
-      generation) [ "$seen_generation" -eq 0 ] && nonnegative_int "$value" || return 1; seen_generation=1 ;;
-      status) [ "$seen_status" -eq 0 ] && [ "$value" = "$status" ] || return 1; seen_status=1 ;;
+      capture)
+        [ "$seen_capture" -eq 0 ] \
+          && { [ "$value" = "$SCHEDULER_ID" ] || prf_source_id_valid "$value"; } || return 1
+        INFLIGHT_CAPTURE=$value; seen_capture=1
+        ;;
+      sequence)
+        [ "$seen_sequence" -eq 0 ] && nonnegative_int "$value" || return 1
+        INFLIGHT_SEQUENCE=$value; seen_sequence=1
+        ;;
+      generation)
+        [ "$seen_generation" -eq 0 ] && nonnegative_int "$value" || return 1
+        seen_generation=1
+        ;;
+      status)
+        [ "$seen_status" -eq 0 ] \
+          && case "$value" in events|backfill|error) true ;; *) false ;; esac || return 1
+        INFLIGHT_STATUS=$value; seen_status=1
+        ;;
       *) return 1 ;;
     esac
   done < "$file"
   [ "$seen_capture" -eq 1 ] && [ "$seen_sequence" -eq 1 ] \
     && [ "$seen_generation" -eq 1 ] && [ "$seen_status" -eq 1 ]
+}
+
+inflight_pending() {
+  local sid=$1 result
+  if ! inflight_load "$sid"; then
+    [ ! -e "$(inflight_file "$sid")" ] && [ ! -L "$(inflight_file "$sid")" ] && return 1
+    return 2
+  fi
+  result="$(fm_procevent_inbox_dir "$STATE")/$INFLIGHT_CAPTURE.$INFLIGHT_SEQUENCE.result"
+  if [ -e "$result" ] || [ -L "$result" ]; then
+    [ -f "$result" ] && [ ! -L "$result" ] || return 2
+    return 0
+  fi
+  fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || return 2
+  if inflight_load "$sid"; then
+    result="$(fm_procevent_inbox_dir "$STATE")/$INFLIGHT_CAPTURE.$INFLIGHT_SEQUENCE.result"
+    if [ ! -e "$result" ] && [ ! -L "$result" ]; then
+      rm -f -- "$(inflight_file "$sid")" \
+        || { fm_lock_release "$(lifecycle_lock_path "$sid")"; return 2; }
+      fm_lock_release "$(lifecycle_lock_path "$sid")"
+      return 1
+    fi
+  elif [ ! -e "$(inflight_file "$sid")" ] && [ ! -L "$(inflight_file "$sid")" ]; then
+    fm_lock_release "$(lifecycle_lock_path "$sid")"
+    return 1
+  fi
+  fm_lock_release "$(lifecycle_lock_path "$sid")"
+  return 2
 }
 QUARANTINE_SCHEMA=fm-pr-follow-quarantine-v1
 QUAR_COUNT=0
@@ -2168,23 +2116,24 @@ rotation_claim() {
       key=${line%%=*}; value=${line#*=}
       case "$key" in
         served_slot)
-          [ "$seen_served" -eq 0 ] && nonnegative_int "$value" \
-            || { fm_lock_release "$(roster_lock_path)"; return 1; }
+          [ "$seen_served" -eq 0 ] || { fm_lock_release "$(roster_lock_path)"; return 1; }
+          nonnegative_int "$value" || { fm_lock_release "$(roster_lock_path)"; return 1; }
           served=$value; seen_served=1
           ;;
         last_sid)
-          [ "$seen_last" -eq 0 ] && { [ -z "$value" ] || prf_source_id_valid "$value"; } \
+          [ "$seen_last" -eq 0 ] || { fm_lock_release "$(roster_lock_path)"; return 1; }
+          [ -z "$value" ] || prf_source_id_valid "$value" \
             || { fm_lock_release "$(roster_lock_path)"; return 1; }
           last=$value; seen_last=1
           ;;
         round)
-          [ "$seen_round" -eq 0 ] && nonnegative_int "$value" \
-            || { fm_lock_release "$(roster_lock_path)"; return 1; }
+          [ "$seen_round" -eq 0 ] || { fm_lock_release "$(roster_lock_path)"; return 1; }
+          nonnegative_int "$value" || { fm_lock_release "$(roster_lock_path)"; return 1; }
           round=$value; seen_round=1
           ;;
         slot_seconds)
-          [ "$seen_slot" -eq 0 ] && positive_int "$value" \
-            || { fm_lock_release "$(roster_lock_path)"; return 1; }
+          [ "$seen_slot" -eq 0 ] || { fm_lock_release "$(roster_lock_path)"; return 1; }
+          positive_int "$value" || { fm_lock_release "$(roster_lock_path)"; return 1; }
           stored_slot=$value; seen_slot=1
           ;;
         *) fm_lock_release "$(roster_lock_path)"; return 1 ;;
@@ -2329,18 +2278,30 @@ prf_after_arm() {
 
 baseline_write() {
   local id author created reply path line review_state check_sc check_name thread_id thread_state
-  local recent_core=0 pending_events user n_kind n_thread n_first
+  local recent_core=0 pending_events user n_kind n_thread n_first prior_head
   EV_LINES=
-  if prf_after_arm "$SN_UPDATED_AT"; then
+  prior_head=$CUR_HEAD
+  if [ -n "$prior_head" ] && [ "$SN_HEAD" != "$prior_head" ]; then
     recent_core=1
-    ev_add "$EV_KEY_EXEMPT"$'\t'"event: pr-state from=unknown state=$SN_STATE"
+    ev_add "$EV_KEY_EXEMPT"$'\t'"event: head from=${prior_head%"${prior_head#????????????}"} to=${SN_HEAD%"${SN_HEAD#????????????}"}"
+  elif [ -z "$prior_head" ] && prf_after_arm "$SN_UPDATED_AT"; then
+    recent_core=1
     ev_add "$EV_KEY_EXEMPT"$'\t'"event: head from=unknown to=${SN_HEAD%"${SN_HEAD#????????????}"}"
   else
     CUR_HEAD=$SN_HEAD
+  fi
+  if [ "$CUR_STATE" != unknown ] && [ "$SN_STATE" != "$CUR_STATE" ]; then
+    recent_core=1
+    ev_add "$EV_KEY_EXEMPT"$'\t'"event: pr-state from=$CUR_STATE state=$SN_STATE"
+  elif [ "$CUR_STATE" = unknown ] && prf_after_arm "$SN_UPDATED_AT"; then
+    recent_core=1
+    ev_add "$EV_KEY_EXEMPT"$'\t'"event: pr-state from=unknown state=$SN_STATE"
+  else
     CUR_STATE=$SN_STATE
   fi
   while IFS=$'\t' read -r id author created; do
-    [ -n "$id" ] && nonnegative_int "$id" || continue
+    [ -n "$id" ] || continue
+    nonnegative_int "$id" || continue
     author=$(printf '%s' "$author" | prf_sanitize 60)
     prf_login_valid "$author" || author=invalid
     if prf_after_arm "$created"; then
@@ -2352,7 +2313,8 @@ baseline_write() {
   done <<< "$SN_ROWS"
   if [ "$CUR_PROVIDER" = github ]; then
     while IFS=$'\t' read -r id reply author path line created; do
-      [ -n "$id" ] && nonnegative_int "$id" || continue
+      [ -n "$id" ] || continue
+      nonnegative_int "$id" || continue
       nonnegative_int "$reply" || reply=0
       author=$(printf '%s' "$author" | prf_sanitize 60); prf_login_valid "$author" || author=invalid
       path=$(printf '%s' "$path" | prf_sanitize 120); nonnegative_int "$line" || line=0
@@ -2365,7 +2327,8 @@ baseline_write() {
     done <<< "$SN_RC_ROWS"
   fi
   while IFS=$'\t' read -r id review_state author created; do
-    [ -n "$id" ] && nonnegative_int "$id" || continue
+    [ -n "$id" ] || continue
+    nonnegative_int "$id" || continue
     prf_review_state_word_valid "$review_state" || review_state=unknown
     author=$(printf '%s' "$author" | prf_sanitize 60); prf_login_valid "$author" || author=invalid
     if prf_after_arm "$created"; then
@@ -2378,7 +2341,8 @@ baseline_write() {
   done <<< "$SN_REVIEW_ROWS"
   CUR_REVIEWS=$(max_map_entries "$CUR_REVIEWS" "$MAP_LIMIT")
   while IFS=$'\t' read -r id check_sc check_name created; do
-    [ -n "$id" ] && nonnegative_int "$id" || continue
+    [ -n "$id" ] || continue
+    nonnegative_int "$id" || continue
     if prf_after_arm "$created"; then
       ev_add "$id"$'\t'"event: check id=$id name=$(printf '%s' "$check_name" | prf_sanitize 80) change=none->$(check_key "$check_sc") status=$check_sc"
     else
@@ -2397,10 +2361,9 @@ baseline_write() {
       thread_state_store "$thread_id" "$thread_state" || return 1
     done <<< "$SN_THREAD_ROWS"
     CUR_THREADS=$(max_thread_map_entries "$CUR_THREADS" "$MAP_LIMIT")
-    CUR_GL_DISCUSSION_PAGE=$SN_GL_DISCUSSION_PAGE
-    CUR_GL_DISCUSSION_LAST=$SN_GL_DISCUSSION_LAST
     while IFS=$'\t' read -r id author n_kind path line n_thread n_first created; do
-      [ -n "$id" ] && nonnegative_int "$id" || continue
+      [ -n "$id" ] || continue
+      nonnegative_int "$id" || continue
       author=$(printf '%s' "$author" | prf_sanitize 60); prf_login_valid "$author" || author=invalid
       path=$(printf '%s' "$path" | prf_sanitize 120); nonnegative_int "$line" || line=0
       if prf_after_arm "$created"; then
@@ -2530,7 +2493,8 @@ backfill_accumulate() {
   backfill_state_dir_ready || return 1
   if [ "$CUR_PROVIDER" = github ]; then
     while IFS=$'\t' read -r id reply author path line _created; do
-      [ -n "$id" ] && nonnegative_int "$id" || continue
+      [ -n "$id" ] || continue
+      nonnegative_int "$id" || continue
       nonnegative_int "$reply" || reply=0
       if [ "$reply" -gt 0 ]; then root=$reply; else root=$id; fi
       author=$(printf '%s' "$author" | prf_sanitize 60); prf_login_valid "$author" || author=invalid
@@ -2546,7 +2510,8 @@ backfill_accumulate() {
     done <<< "$rows"
   else
     while IFS=$'\t' read -r id author _n_kind path line n_thread _n_first _created; do
-      [ -n "$id" ] && nonnegative_int "$id" || continue
+      [ -n "$id" ] || continue
+      nonnegative_int "$id" || continue
       root=$n_thread
       case "$root" in ''|*[!A-Za-z0-9_-]*) continue ;; esac
       author=$(printf '%s' "$author" | prf_sanitize 60); prf_login_valid "$author" || author=invalid
@@ -2610,7 +2575,7 @@ compute_backfill_aggregate() {
 }
 
 cmd_run() {
-  local requested=${1-} gen_seen gen_now events gate
+  local requested=${1-} gen_seen gen_now events gate marker_state
   if [ "$requested" != "$SCHEDULER_ID" ]; then
     prf_source_id_valid "$requested" || die "invalid source id: $requested"
   fi
@@ -2646,29 +2611,33 @@ cmd_run() {
       [ "$requested" = "$SCHEDULER_ID" ] && { rotation_sleep_to_next_slot; continue; }
       die "cursor seed is missing: $SID (arm first)"
     fi
-    if [ -e "$(inflight_file "$SID")" ] || [ -L "$(inflight_file "$SID")" ]; then
-      [ -f "$(inflight_file "$SID")" ] && [ ! -L "$(inflight_file "$SID")" ] \
-        || die "in-flight result marker is unsafe: $SID"
-      rotation_sleep_to_next_slot
-      continue
-    fi
-    item_state_dir_ready "$SID" || die "item state directory is unavailable: $SID"
-    thread_state_dir_ready "$SID" || die "thread state directory is unavailable: $SID"
-    thread_states_migrate_cursor || die "thread state migration failed: $SID"
-    if [ "$CUR_PROVIDER" = gitlab ] && [ "$CUR_BASELINE" = done ] \
-       && [ "$CUR_APPROVAL_READY" -eq 0 ]; then
-      fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
-      cursor_load "$SID" \
-        && approval_states_migrate_cursor \
-        || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "approval state migration failed: $SID"; }
-      fm_lock_release "$(lifecycle_lock_path "$SID")"
-    fi
     gate=0
     prf_quarantine_gate || gate=$?
     [ "$gate" -ne 2 ] || exit 0
     if [ "$gate" -ne 0 ]; then
       rotation_sleep_to_next_slot
       continue
+    fi
+    if [ -e "$(inflight_file "$SID")" ] || [ -L "$(inflight_file "$SID")" ]; then
+      inflight_pending "$SID"
+      marker_state=$?
+      case "$marker_state" in
+        0) rotation_sleep_to_next_slot; continue ;;
+        1) ;;
+        *) die "in-flight result marker is unsafe: $SID" ;;
+      esac
+    fi
+    item_state_dir_ready "$SID" || die "item state directory is unavailable: $SID"
+    thread_state_dir_ready "$SID" || die "thread state directory is unavailable: $SID"
+    thread_states_migrate_cursor || die "thread state migration failed: $SID"
+    if [ "$CUR_PROVIDER" = gitlab ] && [ "$CUR_BASELINE" = "done" ] \
+       && [ "$CUR_APPROVAL_READY" -eq 0 ]; then
+      fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
+      if ! { cursor_load "$SID" && approval_states_migrate_cursor; }; then
+        fm_lock_release "$(lifecycle_lock_path "$SID")"
+        die "approval state migration failed: $SID"
+      fi
+      fm_lock_release "$(lifecycle_lock_path "$SID")"
     fi
     if [ "$requested" = "$SCHEDULER_ID" ]; then
       case "$CUR_STATE" in
@@ -3179,10 +3148,15 @@ prf_apply_refusal() {
     fm_lock_release "$(lifecycle_lock_path "$sid")"
     die "cannot record the apply-failure count: $sid"
   fi
-  fm_lock_release "$(lifecycle_lock_path "$sid")"
   if [ "$count" -lt "$APPLY_FAIL_BOUND" ]; then
+    fm_lock_release "$(lifecycle_lock_path "$sid")"
     die "adapter-produced document failed its own validation contract (attempt $count of $APPLY_FAIL_BOUND): $sid $seq"
   fi
+  if inflight_capture_matches "$sid" "$capture_sid" "$seq"; then
+    rm -f -- "$(inflight_file "$sid")" \
+      || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot clear the in-flight result marker: $sid"; }
+  fi
+  fm_lock_release "$(lifecycle_lock_path "$sid")"
   # At the bound the re-announcement loop stops: acknowledge the capture,
   # leave the quarantine latch pausing the source, and surface the loss once.
   "$SCRIPT_DIR/fm-procevent.sh" handled "$capture_sid" "$seq" >/dev/null 2>&1 \
@@ -3214,14 +3188,29 @@ ensure_scheduler() {
 }
 
 retire_legacy_registration() {
+  [ -f "$REG_DIR/$1.source" ] && [ ! -L "$REG_DIR/$1.source" ] || return 0
   "$SCRIPT_DIR/fm-procevent.sh" retire "$1" --if-matches pr-follow -- \
     "$SCRIPT_DIR/fm-procevent-pr-follow.sh" run "$1" >/dev/null 2>&1 || true
 }
 
-cmd_arm() {  # <task-id> <pr-url> [--backfill]
-  local id=$1 url=$2 flag=${3-} sid backfill=off
-  [ "$flag" = '' ] || [ "$flag" = --backfill ] || usage
-  [ "$flag" = --backfill ] && backfill=on
+cmd_arm() {  # <task-id> <pr-url> [--backfill] [--seed-head <sha>]
+  local id=$1 url=$2 sid backfill=off seed_head='' cursor_changed=0
+  local quarantine_present=0 quarantine_terminal=0
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --backfill) [ "$backfill" = off ] || usage; backfill=on; shift ;;
+      --seed-head)
+        [ -z "$seed_head" ] || usage
+        [ "$#" -ge 2 ] || usage
+        fm_pr_head_valid "$2" || usage
+        seed_head=$2
+        shift 2
+        ;;
+      *) usage ;;
+    esac
+  done
+  positive_int "$APPLY_FAIL_BOUND" || die "FM_PR_FOLLOW_APPLY_BOUND must be a positive integer"
   fm_pr_task_id_valid "$id" || die "invalid task id: $id"
   fm_pr_url_parse "$url" || die "invalid PR url: $url"
   sid=$(prf_source_id "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER") \
@@ -3240,13 +3229,39 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
       # Re-arming is the documented resume after a quarantine: clear the
       # latch so the run child polls again once the adapter is repaired.
       fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || die "cannot lock the cursor"
-      if cursor_load "$sid" \
-         && { ! [ -e "$(quarantine_file "$sid")" ] || rm -f -- "$(quarantine_file "$sid")"; }; then
-        fm_lock_release "$(lifecycle_lock_path "$sid")"
-      else
-        fm_lock_release "$(lifecycle_lock_path "$sid")"
-        die "cannot clear the quarantine record: $sid"
+      cursor_load "$sid" \
+        || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot reload the cursor: $sid"; }
+      if [ -e "$(quarantine_file "$sid")" ] || [ -L "$(quarantine_file "$sid")" ]; then
+        quarantine_read "$sid" \
+          || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "quarantine record is unsafe: $sid"; }
+        quarantine_present=1
+        if [ "$QUAR_COUNT" -ge "$APPLY_FAIL_BOUND" ]; then
+          quarantine_terminal=1
+        fi
       fi
+      if [ -n "$seed_head" ] && [ "$CUR_BASELINE" = pending ] && [ -z "$CUR_HEAD" ]; then
+        CUR_HEAD=$seed_head
+        CUR_STATE=open
+        cursor_changed=1
+      fi
+      if [ "$cursor_changed" -eq 1 ] && ! cursor_store; then
+        fm_lock_release "$(lifecycle_lock_path "$sid")"
+        die "cannot update the cursor seed: $sid"
+      fi
+      if [ "$quarantine_terminal" -eq 1 ] \
+         && { [ -e "$(inflight_file "$sid")" ] || [ -L "$(inflight_file "$sid")" ]; }; then
+        [ -f "$(inflight_file "$sid")" ] && [ ! -L "$(inflight_file "$sid")" ] \
+          && [ "$(fm_pr_file_mode "$(inflight_file "$sid")")" = 600 ] \
+          && [ "$(fm_pr_file_link_count "$(inflight_file "$sid")")" = 1 ] \
+          || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "in-flight result marker is unsafe: $sid"; }
+        rm -f -- "$(inflight_file "$sid")" \
+          || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot clear the in-flight result marker: $sid"; }
+      fi
+      if [ "$quarantine_present" -eq 1 ]; then
+        rm -f -- "$(quarantine_file "$sid")" \
+          || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot clear the quarantine record: $sid"; }
+      fi
+      fm_lock_release "$(lifecycle_lock_path "$sid")"
       if [ "$backfill" = on ] && [ "$CUR_BACKFILL" = off ]; then
         SID=$sid
         fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || die "cannot lock the cursor"
@@ -3278,8 +3293,8 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
   CUR_HOST=$FM_PR_HOST
   CUR_PATH=$FM_PR_PATH
   CUR_NUMBER=$FM_PR_NUMBER
-  CUR_HEAD=
-  CUR_STATE=unknown
+  CUR_HEAD=$seed_head
+  if [ -n "$seed_head" ]; then CUR_STATE=open; else CUR_STATE=unknown; fi
   CUR_MAX_ISSUE_COMMENT=0
   CUR_MAX_REVIEW=0
   CUR_MAX_REVIEW_COMMENT=0
@@ -3318,6 +3333,20 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
 FOLLOW_BACKFILL_SCAN_CAP=${FM_PR_FOLLOW_BACKFILL_SCAN_CAP:-500}
 backfill_scan_file() { printf '%s/backfill.scan\n' "$FOLLOW_DIR"; }
 legacy_scan_file() { printf '%s/legacy.scan\n' "$FOLLOW_DIR"; }
+legacy_done_file() { printf '%s/legacy.done\n' "$FOLLOW_DIR"; }
+
+legacy_done_valid() {
+  local file line count=0
+  file=$(legacy_done_file)
+  [ -f "$file" ] && [ ! -L "$file" ] \
+    && [ "$(fm_pr_file_mode "$file")" = 600 ] \
+    && [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    count=$((count + 1))
+    [ "$count" -eq 1 ] && [ "$line" = complete ] || return 1
+  done < "$file"
+  [ "$count" -eq 1 ]
+}
 
 backfill_scan_store() {
   local value=$1 file tmp
@@ -3331,39 +3360,55 @@ backfill_scan_store() {
 
 cmd_backfill() {
   local meta name id sid out cursor after='' last='' scanned=0 armed=0 already=0 skipped=0 capped=0
-  local legacy_after='' legacy_last='' legacy_scanned=0 legacy_capped=0
+  local legacy_after='' legacy_last='' legacy_scanned=0 legacy_capped=0 legacy_done=0
   local LC_ALL=C
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
   positive_int "$FOLLOW_BACKFILL_SCAN_CAP" || die "FM_PR_FOLLOW_BACKFILL_SCAN_CAP must be a positive integer"
   follow_dir_ready || die "follow directory is unavailable"
-  if [ -e "$(legacy_scan_file)" ] || [ -L "$(legacy_scan_file)" ]; then
-    [ -f "$(legacy_scan_file)" ] && [ ! -L "$(legacy_scan_file)" ] \
-      || die "legacy scan cursor is unsafe"
-    legacy_after=$(sed -n '1p' "$(legacy_scan_file)")
-    prf_source_id_valid "$legacy_after" || die "legacy scan cursor is malformed"
-  fi
+  # A retained roster must keep its one scheduler registration even after task
+  # cleanup removed every metadata record, so repair it once per sweep.
   for cursor in "$FOLLOW_DIR"/prf-gh-????????????.cursor "$FOLLOW_DIR"/prf-gl-????????????.cursor; do
     [ -f "$cursor" ] && [ ! -L "$cursor" ] || continue
-    sid=${cursor##*/}
-    sid=${sid%.cursor}
-    if [ -n "$legacy_after" ] && [[ "$sid" < "$legacy_after" || "$sid" = "$legacy_after" ]]; then
-      continue
-    fi
-    legacy_scanned=$((legacy_scanned + 1))
-    if [ "$legacy_scanned" -gt "$FOLLOW_BACKFILL_SCAN_CAP" ]; then
-      legacy_capped=1
-      break
-    fi
-    legacy_last=$sid
     fm_lock_acquire_wait "$(roster_lock_path)" || die "cannot lock the PR roster"
-    ensure_scheduler || die "cannot register the PR follow scheduler"
+    if ! ensure_scheduler; then
+      fm_lock_release "$(roster_lock_path)"
+      die "cannot register the PR follow scheduler"
+    fi
     fm_lock_release "$(roster_lock_path)"
-    retire_legacy_registration "$sid"
+    break
   done
-  if [ "$legacy_capped" -eq 1 ]; then
-    backfill_scan_store "$legacy_last" "$(legacy_scan_file)" || die "cannot store legacy scan progress"
-  else
-    rm -f -- "$(legacy_scan_file)" || die "cannot clear legacy scan progress"
+  if [ -e "$(legacy_done_file)" ] || [ -L "$(legacy_done_file)" ]; then
+    legacy_done_valid || die "legacy scan completion is unsafe"
+    legacy_done=1
+  fi
+  if [ "$legacy_done" -eq 0 ]; then
+    if [ -e "$(legacy_scan_file)" ] || [ -L "$(legacy_scan_file)" ]; then
+      [ -f "$(legacy_scan_file)" ] && [ ! -L "$(legacy_scan_file)" ] \
+        || die "legacy scan cursor is unsafe"
+      legacy_after=$(sed -n '1p' "$(legacy_scan_file)")
+      prf_source_id_valid "$legacy_after" || die "legacy scan cursor is malformed"
+    fi
+    for cursor in "$FOLLOW_DIR"/prf-gh-????????????.cursor "$FOLLOW_DIR"/prf-gl-????????????.cursor; do
+      [ -f "$cursor" ] && [ ! -L "$cursor" ] || continue
+      sid=${cursor##*/}
+      sid=${sid%.cursor}
+      if [ -n "$legacy_after" ] && [[ "$sid" < "$legacy_after" || "$sid" = "$legacy_after" ]]; then
+        continue
+      fi
+      legacy_scanned=$((legacy_scanned + 1))
+      if [ "$legacy_scanned" -gt "$FOLLOW_BACKFILL_SCAN_CAP" ]; then
+        legacy_capped=1
+        break
+      fi
+      legacy_last=$sid
+      retire_legacy_registration "$sid"
+    done
+    if [ "$legacy_capped" -eq 1 ]; then
+      backfill_scan_store "$legacy_last" "$(legacy_scan_file)" || die "cannot store legacy scan progress"
+    else
+      rm -f -- "$(legacy_scan_file)" || die "cannot clear legacy scan progress"
+      backfill_scan_store complete "$(legacy_done_file)" || die "cannot store legacy scan completion"
+    fi
   fi
   if [ -e "$(backfill_scan_file)" ] || [ -L "$(backfill_scan_file)" ]; then
     [ -f "$(backfill_scan_file)" ] && [ ! -L "$(backfill_scan_file)" ] \
@@ -3494,7 +3539,7 @@ cmd_retire() {  # <source-id> [--force]
 # --- dispatch ----------------------------------------------------------------
 
 case "${1-}" in
-  arm)       shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_arm "$@" ;;
+  arm)       shift; [ "$#" -ge 2 ] && [ "$#" -le 5 ] || usage; cmd_arm "$@" ;;
   backfill)  shift; [ "$#" -eq 0 ] || usage; cmd_backfill ;;
   run)       shift; [ "$#" -eq 1 ] || usage; cmd_run "$@" ;;
   handle|autohandle) shift; [ "$#" -eq 3 ] || usage; cmd_apply "$@" ;;
