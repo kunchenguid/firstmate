@@ -12,6 +12,11 @@
 #   (d) code change in an unknown repo warns and lands (warn-only, exit 0)
 #   (e) a branch with no code changes lands without needing any record
 #   (f) a failed diff probe refuses before the landing
+#   (g) non-code-only changes (LICENSE, lockfile, image, metadata) land
+#       without needing any record
+#   (h) comment-valued or non-plain-scalar frontmatter values are REFUSED
+#   (i) the body pointer must be a URL or an existing path; a slash-bearing
+#       token that resolves nowhere is REFUSED, while a URL body lands
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -60,6 +65,107 @@ run_merge_local() {
   FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/state" \
     "$MERGE_LOCAL" task-x1
+}
+
+test_lands_when_body_is_url() {
+  local case_dir rc
+  case_dir=$(make_case body-url lia-mascot)
+  printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: https://example.com/evidence.md' \
+    > "$case_dir/home/data/projects/lia-mascot.md"
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "body-url: a body with a URL source pointer should be accepted"
+  pass "fm-merge-local accepts a URL body pointer"
+}
+
+test_refuses_when_body_token_resolves_nowhere() {
+  local case_dir rc
+  case_dir=$(make_case body-fake-slash-token lia-mascot)
+  printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: fm/task-x1/notes' \
+    > "$case_dir/home/data/projects/lia-mascot.md"
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "body-fake-slash-token: a slash token that resolves nowhere should be refused"
+  assert_grep 'invalid frontmatter/detail record' "$case_dir/stderr" \
+    "body-fake-slash-token: refusal did not identify the invalid record"
+  pass "fm-merge-local refuses a slash token that resolves to no existing file"
+}
+
+test_lands_when_body_path_exists_in_repo() {
+  local case_dir rc repo
+  case_dir="$TMP_ROOT/body-existing-path"
+  mkdir -p "$case_dir/state" "$case_dir/home/data/projects"
+  repo="$case_dir/lia-mascot"
+  git init -q -b main "$repo"
+  mkdir -p "$repo/evidence"
+  printf 'base\n' > "$repo/code.txt"
+  printf 'notes\n' > "$repo/evidence/notes.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm base
+  git -C "$repo" checkout -qb fm/task-x1
+  printf 'change\n' >> "$repo/code.txt"
+  git -C "$repo" commit -qam change
+  git -C "$repo" checkout -q main
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$repo" \
+    "kind=ship" \
+    "mode=local-only"
+  printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: evidence/notes.md' \
+    > "$case_dir/home/data/projects/lia-mascot.md"
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "body-existing-path: a body pointing at an existing repo file should be accepted"
+  pass "fm-merge-local accepts a body pointer that resolves to an existing file"
+}
+
+test_non_code_only_diff_needs_no_record() {
+  local case_dir rc repo
+  case_dir="$TMP_ROOT/non-code-only"
+  mkdir -p "$case_dir/state" "$case_dir/home/data/projects"
+  repo="$case_dir/lia-mascot"
+  git init -q -b main "$repo"
+  printf 'base\n' > "$repo/code.txt"
+  printf 'MIT\n' > "$repo/LICENSE"
+  printf 'lock\n' > "$repo/package-lock.json"
+  printf 'logs/\n' > "$repo/.gitignore"
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm base
+  git -C "$repo" checkout -qb fm/task-x1
+  printf 'year\n' > "$repo/LICENSE"
+  printf 'lock2\n' > "$repo/package-lock.json"
+  printf 'dist/\n' > "$repo/.gitignore"
+  git -C "$repo" commit -qam metadata
+  git -C "$repo" checkout -q main
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$repo" \
+    "kind=ship" \
+    "mode=local-only"
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "non-code-only: LICENSE/lockfile/metadata-only changes should not require a detail record"
+  [ "$(git -C "$repo" rev-parse main)" = "$(git -C "$repo" rev-parse fm/task-x1)" ] \
+    || fail "non-code-only: main was not fast-forwarded to the branch"
+  pass "fm-merge-local lands non-code-only changes without demanding a record"
 }
 
 test_refuses_when_record_missing() {
@@ -185,6 +291,12 @@ test_refuses_malformed_record_shapes() {
       key-in-body)
         printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'blocker: stale at code.txt' \
           > "$case_dir/home/data/projects/lia-mascot.md" ;;
+      comment-value)
+        printf '%s\n' '---' 'milestone: # unknown' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: code.txt' \
+          > "$case_dir/home/data/projects/lia-mascot.md" ;;
+      flow-value)
+        printf '%s\n' '---' 'milestone: m1' 'focus: [' 'blocker: none' 'next_move: ship' '---' 'Source: code.txt' \
+          > "$case_dir/home/data/projects/lia-mascot.md" ;;
       extra-body)
         printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' 'Source: code.txt' 'extra' \
           > "$case_dir/home/data/projects/lia-mascot.md" ;;
@@ -285,5 +397,9 @@ test_unknown_repo_warns_and_lands
 test_docs_only_diff_needs_no_record
 test_refuses_malformed_record_shapes
 test_refuses_when_body_is_not_source_pointer
+test_lands_when_body_is_url
+test_refuses_when_body_token_resolves_nowhere
+test_lands_when_body_path_exists_in_repo
+test_non_code_only_diff_needs_no_record
 test_refuses_when_diff_probe_fails
 test_empty_diff_needs_no_record

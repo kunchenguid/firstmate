@@ -13,9 +13,14 @@
 #
 # Context-contract gate (landing-only): when the branch carries project-code
 # changes for a KNOWN slug (explicit repo->slug map below), the slug's detail
-# record must exist in the home's data/projects/ dir with its 4-key YAML
-# frontmatter (milestone/focus/blocker/next_move); otherwise the landing is
-# REFUSED. The record lives in FM_HOME, outside the project repo, so it can
+# record must exist in the home's data/projects/ dir as exactly 7 lines: YAML
+# frontmatter with the 4 keys (milestone/focus/blocker/next_move) as plain
+# scalars, then one body line carrying an authoritative source pointer - a
+# URL (http/https/file) or a path token that resolves to an existing file
+# (relative candidates are checked under the record dir, FM_HOME, and the
+# project repo); otherwise the landing is REFUSED. Non-code assets (README,
+# docs, LICENSE, metadata dotfiles, lockfiles, images) do not count as
+# project-code touches. The record lives in FM_HOME, outside the project repo, so it can
 # never appear in the branch diff itself: the worker refreshes that record
 # before landing and this gate verifies its presence here. Repos outside the
 # map warn and proceed. Teardown/cleanup paths are never gated by this script:
@@ -96,7 +101,30 @@ project_code_diff() {
     ':(exclude)README*' \
     ':(exclude)**/README*' \
     ':(exclude)docs/**' \
-    ':(exclude)**/docs/**'
+    ':(exclude)**/docs/**' \
+    ':(exclude)LICENSE*' \
+    ':(exclude)CONTRIBUTING*' \
+    ':(exclude)CODE_OF_CONDUCT*' \
+    ':(exclude)SECURITY*' \
+    ':(exclude)CODEOWNERS' \
+    ':(exclude).gitignore' \
+    ':(exclude).gitattributes' \
+    ':(exclude).editorconfig' \
+    ':(exclude).gitkeep' \
+    ':(exclude)*.lock' \
+    ':(exclude)*.lockb' \
+    ':(exclude)package-lock.json' \
+    ':(exclude)pnpm-lock.yaml' \
+    ':(exclude)go.sum' \
+    ':(exclude)*.png' \
+    ':(exclude)*.jpg' \
+    ':(exclude)*.jpeg' \
+    ':(exclude)*.gif' \
+    ':(exclude)*.svg' \
+    ':(exclude)*.ico' \
+    ':(exclude)*.webp' \
+    ':(exclude)*.avif' \
+    ':(exclude)*.bmp'
 }
 
 detail_frontmatter_has_key() {
@@ -113,15 +141,25 @@ detail_record_is_current() {
   awk '
     BEGIN {
       valid = 1
+      body_ok = 0
       double_quote = sprintf("%c", 34)
       single_quote = sprintf("%c", 39)
+      non_plain_leaders = "[{>|&*!%@`,]"
     }
-    function field_is_valid(line, key, value, prefix) {
+    function field_is_valid(line, key, value, prefix, c) {
       prefix = "^" key ":[[:space:]]+"
       if (line !~ prefix) return 0
       value = line
       sub(prefix, "", value)
-      return value != "" && value != double_quote double_quote && value != single_quote single_quote
+      if (value == "") return 0
+      if (value == double_quote double_quote || value == single_quote single_quote) return 0
+      c = substr(value, 1, 1)
+      if (c == double_quote || c == single_quote) {
+        return length(value) >= 2 && substr(value, length(value), 1) == c
+      }
+      if (c == "#") return 0
+      if (index(non_plain_leaders, c)) return 0
+      return 1
     }
     NR == 1 { if ($0 != "---") valid=0; next }
     NR == 2 { if (!field_is_valid($0, "milestone")) valid=0; next }
@@ -130,17 +168,53 @@ detail_record_is_current() {
     NR == 5 { if (!field_is_valid($0, "next_move")) valid=0; next }
     NR == 6 { if ($0 != "---") valid=0; next }
     NR == 7 {
-      if ($0 ~ /^(milestone|focus|blocker|next_move):([[:space:]]|$)/ ||
-          ($0 !~ /(^|[[:space:]])(https?|file):\/\/[^[:space:]]+/ &&
-          $0 !~ /(^|[[:space:]])(~\/|\/|\.\/|\.\.\/)[^[:space:]]+/ &&
-          $0 !~ /(^|[[:space:]])[^[:space:]]+\/[^[:space:]]+/ &&
-          $0 !~ /(^|[[:space:]])[^[:space:]]+\.(md|mdx|rst|txt|json|ya?ml|toml|ini|cfg|conf|ts|tsx|js|jsx|mjs|cjs|py|sh|go|rs|java|rb|php|c|h)([[:space:]]|$)/ &&
-          $0 !~ /\]\([^[:space:]]+\)/)) valid=0
+      if ($0 != "" && $0 !~ /^(milestone|focus|blocker|next_move):([[:space:]]|$)/) body_ok=1
+      else valid=0
       next
     }
     { valid=0 }
-    END { if (NR != 7) valid=0; exit(valid ? 0 : 1) }
-  ' "$detail_file"
+    END { if (NR != 7 || !body_ok) valid=0; exit(valid ? 0 : 1) }
+  ' "$detail_file" || return 1
+  detail_body_has_source "$detail_file"
+}
+
+# The body line must carry an authoritative source pointer: a URL (http,
+# https, or file), or a path token that resolves to an existing file -
+# relative candidates are checked under the detail dir, FM_HOME, and the
+# project repo, so a slash-bearing token alone is not accepted.
+detail_body_has_source() {
+  local detail_file=$1 body candidates token found=1 had_glob_off=0
+  body=$(awk 'NR==7{print; exit}' "$detail_file")
+  if printf '%s\n' "$body" | grep -Eq '(^|[[:space:]])(https?|file)://[^[:space:]]+'; then
+    return 0
+  fi
+  candidates=$(printf '%s\n' "$body" | awk -v sq="'" -v dq='"' '
+    BEGIN {
+      junk_lead = "<([{" dq "`" sq
+      junk_trail = ".,;:!?)]>" dq "`" sq
+    }
+    {
+      n = split($0, tok, /[[:space:]]+/)
+      for (i = 1; i <= n; i++) {
+        t = tok[i]
+        if (match(t, /\]\([^)]+\)/)) t = substr(t, RSTART + 2, RLENGTH - 3)
+        while (length(t) > 0 && index(junk_lead, substr(t, 1, 1))) t = substr(t, 2)
+        while (length(t) > 0 && index(junk_trail, substr(t, length(t), 1))) t = substr(t, 1, length(t) - 1)
+        if (length(t) > 0) print t
+      }
+    }
+  ')
+  case $- in *f*) ;; *) had_glob_off=1; set -f ;; esac
+  while IFS= read -r token; do
+    [ -n "$token" ] || continue
+    case $token in "~"/*) token="$HOME${token#~}" ;; esac
+    if [ -e "$token" ] || [ -e "$DETAIL_DIR/$token" ] || [ -e "$FM_HOME/$token" ] || [ -e "$PROJ/$token" ]; then
+      found=0
+      break
+    fi
+  done <<< "$candidates"
+  if [ "$had_glob_off" -eq 1 ]; then set +f; fi
+  return "$found"
 }
 
 DETAIL_DIR="${FM_DETAIL_DIR_OVERRIDE:-$FM_HOME/data/projects}"
