@@ -348,6 +348,71 @@ test_check_skips_synthetic_and_zero_usage_lines() {
   pass "fm-stow-mark check: synthetic and zero-usage assistant lines are never a reading, a baseline, or a compaction"
 }
 
+# A first turn that ends in an API error leaves only a synthetic assistant line,
+# so the binding has no context. The first real reading after that becomes the
+# cycle's baseline instead of being discarded turn after turn.
+test_check_adopts_first_real_reading_as_baseline() {
+  local home t out now bound
+  home=$(make_home "$TMP_ROOT/late-binding")
+  t="$home/transcript.jsonl"
+  printf '{"type":"user","message":{"role":"user","content":"hello"}}\n' > "$t"
+  synthetic_line >> "$t"
+  run_check "$home" "$t" >/dev/null
+  [ -z "$(record_field "$home" context)" ] || fail "a synthetic-only first turn binds no context"
+  bound=$(record_field "$home" bound)
+  [ -n "$bound" ] || fail "the binding time must be recorded"
+
+  append_turn "$t" 300000
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "the first real reading is adopted, not nudged"
+  [ -z "$out" ] || fail "adopting Stop produced output: $out"
+  [ "$(record_field "$home" context)" = 300000 ] || fail "the reading must become the baseline, got '$(record_field "$home" context)'"
+  [ "$(record_field "$home" offset)" = "$(wc -c < "$t" | tr -d ' ')" ] || fail "adoption must rebind the offset"
+  [ "$(record_field "$home" bound)" = "$bound" ] || fail "adoption must leave the binding time alone"
+  assert_absent "$home/state/.stow-nudged" "adoption must not consume the cycle"
+
+  # Growth is measured from the adopted baseline: room is 700k, so 420k is due.
+  append_turn "$t" 700000
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "400k of growth is below the 420k threshold"
+  append_turn "$t" 730000
+  out=$(run_check "$home" "$t"); expect_code 3 "$?" "430k of growth is due"
+  [ "$out" = "firstmate stow nudge: 430k context tokens with no /stow pass recorded (threshold 420k); run the /stow pass now" ] \
+    || fail "unexpected nudge from the adopted baseline: $out"
+
+  # A pass marked on a synthetic-only transcript adopts the same way, keeping
+  # the stow time, and a compaction is then seen against the adopted baseline.
+  home=$(make_home "$TMP_ROOT/late-binding-mark")
+  t="$home/transcript.jsonl"
+  printf '{"type":"user","message":{"role":"user","content":"hello"}}\n' > "$t"
+  synthetic_line >> "$t"
+  FM_HOME="$home" "$MARK" mark --transcript "$t" --session sess-1 >/dev/null
+  [ -z "$(record_field "$home" context)" ] || fail "mark on a synthetic-only transcript binds no context"
+  bound=$(record_field "$home" bound)
+  append_turn "$t" 500000
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "the reading after the pass is adopted"
+  [ "$(record_field "$home" context)" = 500000 ] || fail "adopted after mark, got '$(record_field "$home" context)'"
+  [ "$(record_field "$home" bound)" = "$bound" ] || fail "mark's binding time must survive adoption"
+  [ "$(record_field "$home" stowed)" = "$bound" ] || fail "the stow time must survive adoption"
+  append_turn "$t" 120000
+  out=$(run_check "$home" "$t"); expect_code 3 "$?" "a compaction against the adopted baseline nudges"
+  [ "$out" = "firstmate stow nudge: the context was compacted since last /stow; run the /stow pass now" ] \
+    || fail "unexpected compaction nudge: $out"
+
+  # An already-due horizon waits for the Stop after the adopting one.
+  home=$(make_home "$TMP_ROOT/late-binding-horizon")
+  t="$home/transcript.jsonl"
+  printf '{"type":"user","message":{"role":"user","content":"hello"}}\n' > "$t"
+  synthetic_line >> "$t"
+  run_check "$home" "$t" >/dev/null
+  now=$(date +%s)
+  set_record_field "$home" bound $((now - 4 * 3600))
+  append_turn "$t" 90000
+  out=$(run_check "$home" "$t"); expect_code 0 "$?" "the adopting Stop delivers nothing"
+  [ -z "$out" ] || fail "adopting Stop nudged: $out"
+  out=$(run_check "$home" "$t"); expect_code 3 "$?" "the next Stop delivers the horizon"
+  assert_contains "$out" "4h 00m wall clock since this session's first turn end" "the horizon must be the reason"
+  pass "fm-stow-mark check: the first real reading after a context-less binding becomes the cycle baseline"
+}
+
 # --- GATES ------------------------------------------------------------------
 
 test_check_no_transcript_is_silent_noop() {
@@ -740,6 +805,7 @@ test_check_once_per_cycle_until_mark
 test_check_compaction_drop_nudges_and_rebinds
 test_check_horizon_fallback_and_bounded_tail
 test_check_skips_synthetic_and_zero_usage_lines
+test_check_adopts_first_real_reading_as_baseline
 test_check_no_transcript_is_silent_noop
 test_check_requires_lock_owning_primary
 test_config_off_tuning_env_and_malformed

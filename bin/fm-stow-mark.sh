@@ -39,9 +39,11 @@
 # session that holds state/.lock (bin/fm-session-lock-lib.sh), so a crewmate,
 # scout, or lock-refused session never writes a record or receives a nudge.
 # It then binds an absent record, or one bound to another transcript, to the
-# current transcript with no nudge on that Stop, measures, and exits 3 with the
-# nudge text on stdout when the cycle key is not already in .stow-nudged and
-# one of these holds:
+# current transcript with no nudge on that Stop; likewise, when the record
+# holds no context yet and one can now be read, it adopts that reading as the
+# cycle's baseline (offset rebound, bound unchanged) with no nudge on that
+# Stop. Otherwise it measures, and exits 3 with the nudge text on stdout when
+# the cycle key is not already in .stow-nudged and one of these holds:
 #   - growth: context now minus context at binding is at least percent% of
 #     (window minus context at binding), and greater than zero; when the
 #     window is not above the context at binding the growth measure is skipped
@@ -105,7 +107,7 @@ case "$TAIL_BYTES" in ''|*[!0-9]*|0) TAIL_BYTES=262144 ;; esac
 WINDOW_FLOOR=100000
 
 usage() {
-  sed -n '2,93{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,95{s/^# \{0,1\}//;p;}' "$0"
 }
 
 is_positive_int() {
@@ -306,6 +308,15 @@ bind_transcript() {  # <transcript> <session> <now>
   REC_CONTEXT=$(transcript_context "$1")
 }
 
+# Moves the cycle's baseline to context $2 at transcript $1's current size,
+# leaving the binding time alone.
+rebind_context() {  # <transcript> <context>
+  REC_CONTEXT=$2
+  REC_OFFSET=$(transcript_size "$1")
+  case "$REC_OFFSET" in ''|*[!0-9]*) REC_OFFSET= ;; esac
+  record_write || true
+}
+
 # --- formatting --------------------------------------------------------------
 fmt_tokens() {
   if [ "$1" -ge 1000 ]; then
@@ -413,13 +424,14 @@ cmd_check() {
   fi
   reason=
   context_now=$(transcript_context "$transcript")
-  if [ -n "$context_now" ] && [ -n "$REC_CONTEXT" ]; then
+  if [ -n "$context_now" ] && [ -z "$REC_CONTEXT" ]; then
+    rebind_context "$transcript" "$context_now"
+    exit 0
+  fi
+  if [ -n "$context_now" ]; then
     if [ "$context_now" -lt "$REC_CONTEXT" ]; then
       reason="the context was compacted $since"
-      REC_CONTEXT=$context_now
-      REC_OFFSET=$(transcript_size "$transcript")
-      case "$REC_OFFSET" in ''|*[!0-9]*) REC_OFFSET= ;; esac
-      record_write || true
+      rebind_context "$transcript" "$context_now"
     else
       growth=$((context_now - REC_CONTEXT))
       room=$((NUDGE_WINDOW - REC_CONTEXT))
