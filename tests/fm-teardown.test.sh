@@ -53,6 +53,18 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# The content check compares only the paths the not-on-a-remote commits changed,
+# so being behind the default branch is not by itself a refusal - and is never by
+# itself a reason to allow (bin/fm-teardown.sh's content_in_default owns the rule):
+#   (z)  behind + every touched path matches the default branch -> ALLOW  (scoped)
+#   (aa) behind + one touched path differs                      -> REFUSE + names it
+#   (ab) touched path the default branch does not have          -> REFUSE + names it
+#   (ac) deletion the default branch also made                  -> ALLOW  (both gone)
+#   (ad) deletion the default branch has not made               -> REFUSE + names it
+#   (ae) path introduced by a merge commit's own resolution     -> REFUSE (not missed)
+#   (af) default branch unrefreshable, so the check cannot run  -> REFUSE + says why
+#   (ag) merged PR missing one not-on-a-remote commit           -> REFUSE + names it
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1123,6 +1135,261 @@ SH
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
+# Land the worktree's CURRENT version of each <path> on origin's default branch as
+# one squash commit, then add <drift> unrelated commits on top, so the task branch
+# ends up far behind origin/main while the paths it changed are already there. A
+# path the worktree no longer has is deleted on origin, which is what a landed
+# deletion looks like. Args: case_dir drift_count [path...]
+land_paths_and_drift_on_origin_main() {
+  local case_dir=$1 drift=$2 tmp path i
+  shift 2
+  tmp="$case_dir/_landdrift"
+  rm -rf "$tmp"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  for path in "$@"; do
+    if [ -e "$case_dir/wt/$path" ]; then
+      mkdir -p "$tmp/$(dirname "$path")"
+      cp "$case_dir/wt/$path" "$tmp/$path"
+      git -C "$tmp" add -- "$path"
+    else
+      git -C "$tmp" rm -q --ignore-unmatch -- "$path"
+    fi
+  done
+  git -C "$tmp" diff --cached --quiet \
+    || git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash: land the task's paths"
+  i=1
+  while [ "$i" -le "$drift" ]; do
+    printf 'unrelated %s\n' "$i" > "$tmp/drift-$i.txt"
+    git -C "$tmp" add -- "drift-$i.txt"
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "unrelated change $i"
+    i=$((i + 1))
+  done
+  git -C "$tmp" push -q origin HEAD:main
+  rm -rf "$tmp"
+}
+
+# Remove <file> on the worktree's task branch. Args: case_dir file [message]
+wt_remove_file() {
+  local case_dir=$1 file=$2 msg=${3:-remove $2}
+  git -C "$case_dir/wt" rm -q -- "$file"
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+}
+
+# (z) branch far behind the default branch, every path its own commits touched
+# already matching there -> ALLOW. This is the shape the scoped comparison
+# exists for: the branch is stale, but nothing it changed is missing.
+test_behind_default_with_matching_touched_paths_allows() {
+  local case_dir rc
+  case_dir=$(make_case behind-but-landed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  mkdir -p "$case_dir/wt/nested"
+  wt_commit_file "$case_dir" nested/helper.txt helper "add helper"
+  # The task's two paths land on origin/main, then 30 unrelated commits pile up
+  # on top of them, so the branch is far behind everywhere it did not touch.
+  land_paths_and_drift_on_origin_main "$case_dir" 30 feature.txt nested/helper.txt
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "behind-but-landed: teardown should succeed when every touched path matches the default branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "behind-but-landed: teardown printed a REFUSED line"
+  pass "branch far behind the default branch is torn down when every path it changed already matches there"
+}
+
+# (aa) same stale branch, but one touched path does NOT match -> REFUSE, and the
+# refusal names that path. This is the direction that matters: being behind is
+# not evidence of landing.
+test_behind_default_with_one_differing_touched_path_refuses() {
+  local case_dir rc
+  case_dir=$(make_case behind-one-differs)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  mkdir -p "$case_dir/wt/nested"
+  wt_commit_file "$case_dir" nested/helper.txt helper "add helper"
+  land_paths_and_drift_on_origin_main "$case_dir" 30 feature.txt nested/helper.txt
+  # The default branch then moves on past the task's own version of one path, so
+  # the worktree still holds content that is nowhere else.
+  land_on_origin_main "$case_dir" nested/helper.txt "helper, revised after the task branched"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "behind-one-differs: teardown should refuse when a touched path does not match the default branch"
+  grep -q REFUSED "$case_dir/stderr" || fail "behind-one-differs: no REFUSED line in stderr"
+  assert_grep 'nested/helper.txt' "$case_dir/stderr" \
+    "behind-one-differs: the refusal did not name the unmatched path"
+  grep -qF 'feature.txt' "$case_dir/stderr" \
+    && fail "behind-one-differs: the refusal named a path that does match the default branch"
+  pass "a touched path the default branch does not match still refuses, and the refusal names it"
+}
+
+# (ab) a commit touching a path the default branch does not have at all -> REFUSE.
+test_touched_path_absent_from_default_refuses() {
+  local case_dir rc
+  case_dir=$(make_case touched-path-absent)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # Only the drift lands; the task's own path never reaches origin/main.
+  land_paths_and_drift_on_origin_main "$case_dir" 30
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "touched-path-absent: teardown should refuse when the default branch lacks a touched path"
+  grep -q REFUSED "$case_dir/stderr" || fail "touched-path-absent: no REFUSED line in stderr"
+  assert_grep 'feature.txt' "$case_dir/stderr" \
+    "touched-path-absent: the refusal did not name the missing path"
+  pass "a path the default branch does not have at all still refuses"
+}
+
+# (ac) a landed deletion: the commit removes a file the default branch no longer
+# has either, so both sides agree it is gone -> ALLOW.
+test_landed_deletion_allows() {
+  local case_dir rc
+  case_dir=$(make_case landed-deletion)
+  write_meta "$case_dir" no-mistakes ship
+  # Seed the file on origin/main first, so removing it on the branch is a real
+  # deletion rather than the removal of something that never existed.
+  land_on_origin_main "$case_dir" doomed.txt "doomed"
+  git -C "$case_dir/wt" fetch -q origin main
+  git -C "$case_dir/wt" reset -q --hard FETCH_HEAD
+  wt_remove_file "$case_dir" doomed.txt "remove doomed"
+  land_paths_and_drift_on_origin_main "$case_dir" 20 doomed.txt
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landed-deletion: teardown should succeed when the default branch also no longer has the file"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "landed-deletion: teardown printed a REFUSED line"
+  pass "a deletion the default branch also made is torn down"
+}
+
+# (ad) the same deletion, but the default branch still has the file -> REFUSE.
+test_unlanded_deletion_refuses() {
+  local case_dir rc
+  case_dir=$(make_case unlanded-deletion)
+  write_meta "$case_dir" no-mistakes ship
+  land_on_origin_main "$case_dir" doomed.txt "doomed"
+  git -C "$case_dir/wt" fetch -q origin main
+  git -C "$case_dir/wt" reset -q --hard FETCH_HEAD
+  wt_remove_file "$case_dir" doomed.txt "remove doomed"
+  # Drift only: the removal itself never lands, so origin/main still has the file.
+  land_paths_and_drift_on_origin_main "$case_dir" 20
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unlanded-deletion: teardown should refuse while the default branch still has the file"
+  grep -q REFUSED "$case_dir/stderr" || fail "unlanded-deletion: no REFUSED line in stderr"
+  assert_grep 'doomed.txt' "$case_dir/stderr" \
+    "unlanded-deletion: the refusal did not name the still-present path"
+  pass "a deletion the default branch has not made still refuses"
+}
+
+# (ae) a merge commit among the not-on-a-remote commits whose own conflict
+# resolution introduced a path -> REFUSE. An ordinary log walk reports no paths
+# for a merge, so this guards the scoped comparison against being blinded by one.
+test_merge_commit_own_content_is_not_missed() {
+  local case_dir rc base
+  case_dir=$(make_case merge-commit-paths)
+  write_meta "$case_dir" no-mistakes ship
+  base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" checkout -q -b side "$base"
+  wt_commit_file "$case_dir" sidecar.txt side "add sidecar"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" merge -q --no-commit --no-ff side >/dev/null 2>&1 || true
+  # Content that exists ONLY in the merge commit itself.
+  printf '%s\n' "only-in-the-merge" > "$case_dir/wt/merge-only.txt"
+  git -C "$case_dir/wt" add -A
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "merge side"
+  # Everything the two ordinary commits produced lands; the merge's own file does not.
+  land_paths_and_drift_on_origin_main "$case_dir" 20 feature.txt sidecar.txt
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merge-commit-paths: teardown should refuse over content introduced by the merge commit itself"
+  grep -q REFUSED "$case_dir/stderr" || fail "merge-commit-paths: no REFUSED line in stderr"
+  assert_grep 'merge-only.txt' "$case_dir/stderr" \
+    "merge-commit-paths: the refusal did not name the merge commit's own path"
+  pass "content a merge commit introduced on its own is still accounted for"
+}
+
+# (af) the comparison cannot be trusted to be current -> REFUSE, and the refusal
+# says the check could not run rather than implying the work is missing.
+test_unreachable_default_branch_refuses_and_says_so() {
+  local case_dir rc
+  case_dir=$(make_case default-unreachable)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_paths_and_drift_on_origin_main "$case_dir" 5 feature.txt
+  # The work IS on origin/main, but origin can no longer be reached, so the
+  # comparison would be judging a stale copy.
+  git -C "$case_dir/project" remote set-url origin "$case_dir/vanished.git"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "default-unreachable: teardown should refuse when the default branch cannot be refreshed"
+  grep -q REFUSED "$case_dir/stderr" || fail "default-unreachable: no REFUSED line in stderr"
+  assert_grep 'could not check the default branch' "$case_dir/stderr" \
+    "default-unreachable: the refusal did not say the check could not run"
+  pass "an unrefreshable default branch refuses and reports that the check could not run"
+}
+
+# (ag) a merged PR that does not contain every not-on-a-remote commit -> REFUSE,
+# naming the commits it does not contain. This is the evidence whose absence sent
+# an operator reconstructing two histories by hand before reaching for --force.
+test_refusal_names_commits_a_merged_pr_does_not_contain() {
+  local case_dir rc pr_head
+  case_dir=$(make_case pr-unmatched-evidence)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  wt_commit_file "$case_dir" extra.txt extra "add extra, never reviewed"
+  append_pr_meta_url "$case_dir"
+  # The merged PR head replays only the FIRST commit's patch, under a different
+  # message so it is a genuine rebase-style replay rather than a commit git would
+  # hash identically: the second commit is the local draft that never shipped.
+  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature, replayed onto the PR branch")
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  # Both commits must really be off every remote, or this case would not be
+  # exercising the PR comparison at all.
+  [ "$(git -C "$case_dir/wt" log --oneline HEAD --not --remotes | wc -l | tr -d ' ')" = 2 ] \
+    || fail "pr-unmatched-evidence: test setup bug, expected exactly two commits off every remote"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pr-unmatched-evidence: teardown should refuse when the merged PR lacks one of the commits"
+  grep -q REFUSED "$case_dir/stderr" || fail "pr-unmatched-evidence: no REFUSED line in stderr"
+  assert_grep 'merged PR https://github.com/example/repo/pull/7' "$case_dir/stderr" \
+    "pr-unmatched-evidence: the refusal did not name the merged PR"
+  assert_grep 'does not contain 1 of these commits' "$case_dir/stderr" \
+    "pr-unmatched-evidence: the refusal did not report exactly the one commit the PR lacks"
+  assert_grep 'add extra, never reviewed' "$case_dir/stderr" \
+    "pr-unmatched-evidence: the refusal did not name the commit the PR does not contain"
+  pass "a refusal names the commits a merged PR head does not contain"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -1139,7 +1406,7 @@ test_content_fallback_refreshes_stale_origin_ref() {
 
   expect_code 0 "$rc" "content-stale-ref: teardown should use the freshly fetched default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-stale-ref: teardown printed a REFUSED line"
-  pass "content fallback refreshes origin default before comparing trees"
+  pass "content fallback refreshes origin default before comparing the paths the work touched"
 }
 
 test_dirty_worktree_refuses() {
@@ -3701,6 +3968,14 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_behind_default_with_matching_touched_paths_allows
+test_behind_default_with_one_differing_touched_path_refuses
+test_touched_path_absent_from_default_refuses
+test_landed_deletion_allows
+test_unlanded_deletion_refuses
+test_merge_commit_own_content_is_not_missed
+test_unreachable_default_branch_refuses_and_says_so
+test_refusal_names_commits_a_merged_pr_does_not_contain
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
