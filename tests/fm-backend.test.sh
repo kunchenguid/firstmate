@@ -514,6 +514,32 @@ test_backend_source_shell_portable() {
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
+# A missing adapter file must make fm_backend_source RETURN a failure the
+# caller can refuse on. Under `set -e` - which bin/fm-teardown.sh and every
+# other consumer runs with - stock macOS bash 3.2 treats `.` on a missing file
+# as a fatal special-builtin error and TERMINATES the shell, so the `|| return
+# 1` beside it never runs: the caller's refusal never prints, the rest of its
+# preflight never executes, and an EXIT trap that ends successfully turns the
+# whole thing into a reported success. Exercised with `set -e` over a real copy
+# of bin/ with one adapter removed, because neither condition alone reproduces
+# it.
+test_backend_source_missing_adapter_returns_instead_of_exiting() {
+  local root out status
+  root=$(mktemp -d "$TMP_ROOT/backend-source-missing.XXXXXX")
+  cp -R "$ROOT/bin" "$root/bin"
+  rm -f "$root/bin/backends/herdr.sh"
+  status=0
+  out=$(bash -c "set -eu; source '$root/bin/fm-backend.sh'
+if fm_backend_source herdr; then echo SOURCED; else echo REFUSED; fi
+echo REACHED" 2>&1) || status=$?
+  assert_contains "$out" "REFUSED" "fm_backend_source did not report the missing adapter as a failure"
+  assert_contains "$out" "REACHED" "a missing adapter terminated the caller instead of returning"
+  assert_not_contains "$out" "SOURCED" "fm_backend_source claimed to load a missing adapter"
+  expect_code 0 "$status" "the caller kept running after a missing adapter"
+  rm -rf "$root"
+  pass "a missing backend adapter returns a refusable failure instead of killing the caller"
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1137,6 +1163,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_source_missing_adapter_returns_instead_of_exiting
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

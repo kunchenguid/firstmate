@@ -2171,6 +2171,28 @@ gate: review
 EOF
 }
 
+# The same parked gate, but with the pipeline holding the branch and a lane
+# head that is NOT a git object in this worktree - the routine shape for a run
+# whose pipeline rebased or added fix commits that were never pushed back.
+parked_pipeline_owned_axi_status_toon() {  # <branch> [run-id]
+  cat <<EOF
+run:
+  id: "${2:-01RUN}"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 7h39m
+  head: "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+  pr: ""
+  findings: none
+gate: review
+branch_sync:
+  state: pipeline_owned
+  local:
+    branch: $1
+    state: dirty
+EOF
+}
+
 running_axi_status_toon() {  # <branch> <head> [run-id]
   cat <<EOF
 run:
@@ -2215,6 +2237,51 @@ test_parked_own_run_is_aborted_before_teardown() {
   assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
     "parked-run-abort: teardown did not report aborting the parked run before removing the worker"
   pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
+}
+
+# A parked run whose pipeline OWNS the branch reports a lane head that is not a
+# git object here, so strict head identity alone leaves exactly the orphaned
+# parked run this step exists to conclude: teardown would remove the worker and
+# the run would sit at its gate holding a fleet slot with nobody left to answer
+# it. The bounded pipeline-custody exemption attributes it, and the gate the
+# daemon wrote is its custody evidence.
+test_parked_pipeline_owned_run_is_aborted_before_teardown() {
+  local case_dir rc
+  case_dir=$(make_case parked-run-pipeline-owned)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_pipeline_owned_axi_status_toon fm/task-x1)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-pipeline-owned: teardown should still succeed"
+  assert_present "$case_dir/nm-abort.log" \
+    "parked-run-pipeline-owned: the pipeline-owned parked run was orphaned instead of aborted"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-pipeline-owned: the abort did not target the verified run id"
+  pass "a parked run at a pipeline-owned lane head is concluded, not orphaned"
+}
+
+# The exemption is not a licence to abort any same-branch run: without the
+# pipeline's own custody label an unresolvable head is unknown attribution, and
+# teardown must leave that run completely alone.
+test_parked_run_at_unattributable_head_is_left_alone() {
+  local case_dir rc
+  case_dir=$(make_case parked-run-unattributable)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-unattributable: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-unattributable: teardown aborted a run it could not attribute to this task"
+  pass "a parked run at an unattributable head is left completely alone"
 }
 
 test_mismatched_run_after_abort_refuses_unconfirmed() {
@@ -2782,6 +2849,8 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
+test_parked_pipeline_owned_run_is_aborted_before_teardown
+test_parked_run_at_unattributable_head_is_left_alone
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed

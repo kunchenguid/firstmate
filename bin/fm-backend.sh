@@ -592,9 +592,21 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 # Each adapter is an independently linted canonical root. The /dev/null source
 # boundaries keep runtime dispatch from importing all five adapter ASTs into
 # every dispatcher consumer while preserving the runtime source operations.
+#
+# Every adapter file is proved readable BEFORE it is sourced. `.` on a missing
+# file is a special-builtin failure that TERMINATES a non-interactive shell on
+# stock macOS bash 3.2 - `|| return 1` never runs, the caller's refusal never
+# prints, and the EXIT trap's own success becomes the process exit status, so a
+# missing adapter reported teardown success instead of refusing.
+fm_backend_readable_adapter() {  # <name>
+  local file="$FM_BACKEND_LIB_DIR/backends/$1.sh"
+  [ -f "$file" ] && [ -r "$file" ]
+}
+
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  fm_backend_readable_adapter "$name" || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then

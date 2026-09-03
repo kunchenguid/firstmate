@@ -74,10 +74,19 @@ META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
-# How many of the most recent `no-mistakes runs` rows the cross-branch fallback
-# (nm_runs_status_for_branch, below) scans. Generous enough to still find a
-# branch's own run on a busy multi-crew fleet without listing the entire
-# history every call.
+# How many of the most recent `no-mistakes runs` rows nm_runs_list below asks
+# for. Its one reader is the cross-branch coarse fallback
+# (nm_runs_status_for_branch), so this value bounds how far back that scan can
+# see. Generous enough to still find a branch's own run on a busy multi-crew
+# fleet without listing the entire history every call.
+#
+# The failure mode to look for when a live crew reads stale: a branch whose row
+# has been pushed past this limit by a busy fleet gets no coarse attribution at
+# all, and the crew falls back to its pane and status log even though its run
+# is genuinely running. That bound is deliberately kept off the
+# pipeline-custody exemption, whose age evidence comes from the captured run's
+# own id rather than from any listed row - a run-identity question a truncated
+# list cannot answer.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
@@ -346,6 +355,17 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
+
+# The `no-mistakes runs` rows, fetched once for the one reader that needs them
+# (the coarse cross-branch scan below). The pipeline-custody age bound does NOT
+# read this list: a run's age comes from its own id in the `axi status` output
+# being attributed (fm_nm_run_started_epoch in bin/fm-nm-run-lib.sh owns that
+# and the reason a listed row cannot supply it), so the head-match path and the
+# custody path both cost zero runs calls.
+nm_runs_list() {
+  nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT"
+}
+
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -378,7 +398,7 @@ nm_ci_checks_state() {
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
-  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+  out=$(nm_runs_list)
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -394,9 +414,28 @@ nm_runs_status_for_branch() {  # <branch>
       # Same code-identity rule as axi status: skip a same-branch row whose
       # short-sha does not match this worktree (rewritten or advanced tip).
       if ! nm_coarse_head_matches_worktree "$sha"; then
-        # An UNRESOLVABLE head is unknown attribution, not a proven
-        # mismatch. Stop instead of surfacing an older, superseded row;
-        # the caller's pane/log fallback can answer without misattribution.
+        # An UNRESOLVABLE head is unknown attribution, not a proven mismatch,
+        # so the scan STOPS here rather than surfacing an older, superseded
+        # row. It deliberately does not bind the row either, however fresh or
+        # however active it looks. The runs list carries no `pipeline_owned`
+        # custody label, and an unresolvable short sha is equally the signature
+        # of a run started from another clone or a retried task reusing the
+        # same `fm/<id>` branch name - exactly the misattribution
+        # fm_nm_head_matches_worktree exists to prevent. Binding on evidence
+        # the full axi-status path would reject could absorb a wedged crew's
+        # every no-verb signal and turn-end wake for the whole custody window,
+        # which is the precise harm the rest of this attribution exists to
+        # remove, so the safe stop wins over the attribution.
+        #
+        # This is a DECISION, not an omission. Binding a fresh active row here
+        # was implemented, reviewed and then deliberately removed for the
+        # reason above, so a review finding asking for it has been considered
+        # and declined rather than overlooked. These rows also publish no run
+        # id, so the run-age evidence the full path requires cannot even be
+        # read here. The stop is also not a regression: it is the same
+        # behaviour this scan had before the pipeline-custody work, and the
+        # crew it declines to attribute still surfaces through its pane and
+        # status log.
         fm_nm_head_resolvable "$WT" "$sha" || return 0
         continue
       fi
@@ -440,25 +479,38 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    # Head equality, or the pipeline-owned-active exemption: while the
-    # pipeline owns this branch, the daemon's own branch attribution is
-    # authoritative and the lane head need not be a git object here
-    # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
+    # Head equality, or the bounded pipeline-custody exemption: while the
+    # pipeline owns this branch the daemon's own branch attribution is
+    # authoritative and the lane head need not be a git object here, but the
+    # exemption binds only on positive current custody evidence - a gate, or a
+    # run age inside the custody window. That bound covers this else-branch
+    # only, and the head-matched branch above is deliberately unbounded;
+    # fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh owns both the
+    # exemption and the reasoning for that scope.
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
-      && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
+      && nm_run_head_matches_worktree; then
       HAVE_RUN=1
     else
-      # The active-or-most-recent run is for another branch, or its same-branch
-      # attribution failed (the CLI is alive and answered) - try the coarse
-      # fallback.
-      # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
-      # primary call means the CLI itself did not respond, so retrying it
-      # immediately with a second bounded call would just double the wait
-      # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      # Head equality did not settle it. The exemption reads nothing but this
+      # same captured output - its custody evidence is the gate the daemon
+      # wrote, or the run's own creation time decoded from the run id in it -
+      # so only the coarse scan below ever costs a runs call.
+      if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+        && fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; then
         HAVE_RUN=1
-        RUN_SOURCE=coarse
+      else
+        # The active-or-most-recent run is for another branch, or its
+        # same-branch attribution failed (the CLI is alive and answered) - try
+        # the coarse fallback.
+        # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
+        # primary call means the CLI itself did not respond, so retrying it
+        # immediately with a second bounded call would just double the wait
+        # for no better answer.
+        COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+        fi
       fi
     fi
   fi
@@ -492,7 +544,6 @@ if [ "$HAVE_RUN" = 1 ]; then
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
     outcome=$(strip_quotes "$(nm_field outcome)")
-    awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)
     has_gate=0
     nm_has_gate && has_gate=1
@@ -505,7 +556,18 @@ if [ "$HAVE_RUN" = 1 ]; then
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
-    elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+    # Gate detection asks bin/fm-nm-run-lib.sh's fm_nm_run_is_gate_parked, which
+    # is the ONE owner of the shared gate signals (an awaiting_agent or gate
+    # block, or an awaiting_approval/fix_review status word), plus this reader's
+    # own extra nm_gate_status signal. Routing through it rather than respelling
+    # those signals here is what makes the exemption's safety argument
+    # STRUCTURAL: fm_nm_run_is_pipeline_owned_active accepts a gate as
+    # age-unbounded custody evidence only because gate evidence always lands in
+    # this parked arm, never in the working arm below. Spelled twice, a later
+    # signal added to the library alone would silently move a stranded run into
+    # working and make a wedged crew invisible again; as a union of the shared
+    # predicate with a local extra, parked here is a superset by construction.
+    elif fm_nm_run_is_gate_parked "$RUN_OUT" || [ -n "$gate_status" ]; then
       if [ "$has_gate" = 1 ]; then
         gate=$(nm_gate_line_name)
       else
