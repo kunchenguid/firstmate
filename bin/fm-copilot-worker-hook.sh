@@ -50,6 +50,16 @@ copilot_worker_binding_matches() {
   [ "$COPILOT_WORKER_BINDING_SESSION" = "$session" ]
 }
 
+copilot_worker_settlement_matches() {
+  local path=$1 session=$2
+  if [ -n "$session" ]; then
+    copilot_worker_binding_matches "$path" "$session"
+    return
+  fi
+  copilot_worker_read_binding "$path" || return 1
+  [ "$COPILOT_WORKER_BINDING_GEN" = "$GEN" ]
+}
+
 copilot_worker_clear_binding() {
   local path=$1
   copilot_worker_read_binding "$path" || return 0
@@ -97,29 +107,31 @@ copilot_worker_apply_idle() {
 payload=$(cat 2>/dev/null || true)
 [ -n "$payload" ] || exit 0
 session=$(printf '%s' "$payload" | jq -er '.sessionId | select(type == "string" and length > 0)' 2>/dev/null) || session=
-[ -n "$session" ] || exit 0
 copilot_worker_current_generation_matches || exit 0
 binding=$(copilot_worker_binding_path) || exit 0
 
 case "$EVENT" in
   user-prompt-submitted)
+    [ -n "$session" ] || exit 0
     copilot_worker_bind_session "$binding" "$session" || exit 0
     copilot_worker_apply_busy || exit 0
     ;;
   agent-stop)
-    turnend_failed=0
-    copilot_worker_binding_matches "$binding" "$session" || exit 0
-    copilot_worker_apply_idle || exit 0
+    settle_failed=0
+    copilot_worker_settlement_matches "$binding" "$session" || exit 0
+    copilot_worker_apply_idle || settle_failed=1
     if [ -n "$TURNEND" ] && ! touch "$TURNEND" 2>/dev/null; then
-      turnend_failed=1
+      settle_failed=1
     fi
-    copilot_worker_clear_binding "$binding" || exit 0
-    [ "$turnend_failed" -eq 0 ] || exit 0
+    copilot_worker_clear_binding "$binding" || settle_failed=1
+    [ "$settle_failed" -eq 0 ] || exit 1
     ;;
   session-end)
-    copilot_worker_binding_matches "$binding" "$session" || exit 0
-    copilot_worker_apply_idle || exit 0
-    copilot_worker_clear_binding "$binding" || exit 0
+    settle_failed=0
+    copilot_worker_settlement_matches "$binding" "$session" || exit 0
+    copilot_worker_apply_idle || settle_failed=1
+    copilot_worker_clear_binding "$binding" || settle_failed=1
+    [ "$settle_failed" -eq 0 ] || exit 1
     ;;
   *) exit 2 ;;
 esac
