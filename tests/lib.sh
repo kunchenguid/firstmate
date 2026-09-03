@@ -182,6 +182,30 @@ SH
   done
 }
 
+# fm_fake_json_capable_perl <fakebin> installs a perl that satisfies the exact
+# `perl -MJSON::PP -e1` capability probe and delegates every other invocation to
+# the host perl. Fixtures that assert on bootstrap output need it: the probe
+# reads a host capability, so without the stub a host whose perl lacks JSON::PP
+# adds a MISSING_MANUAL line to every bootstrap run in the suite. Only the probe
+# argv is short-circuited, so a real decode still runs against the host perl and
+# fails loudly there rather than yielding a silent empty value.
+fm_fake_json_capable_perl() {
+  local fakebin=$1 real_perl
+  real_perl=$(command -v perl || true)
+  cat > "$fakebin/perl" <<SH
+#!/usr/bin/env bash
+if [ "\$#" -eq 2 ] && [ "\$1" = -MJSON::PP ] && [ "\$2" = -e1 ]; then
+  exit 0
+fi
+if [ -z "$real_perl" ]; then
+  echo "perl: not found" >&2
+  exit 127
+fi
+exec "$real_perl" "\$@"
+SH
+  chmod +x "$fakebin/perl"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

@@ -233,17 +233,32 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
+# perl's JSON::PP is packaged separately on minimal installs, so a home can
+# have perl and still lack the decoder every show-field read below depends on.
+# Without this guard the decode yields an empty string inside a command
+# substitution and the caller silently reads a missing field instead of
+# failing, so the decoding commands prove the module once, up front, in the
+# main shell. The binding commands never decode a task field, so they stay
+# usable on a home that has not installed the module yet.
+JSONPP_INSTALL_HINT="Fedora/RHEL: 'sudo dnf install perl-JSON-PP', Debian/Ubuntu: 'sudo apt install libjson-pp-perl', macOS/other: 'cpan JSON::PP'"
+
+require_json_decoder() {
+  perl -MJSON::PP -e1 >/dev/null 2>&1 \
+    || fail "perl JSON::PP module is required to decode task fields; install the OS package - $JSONPP_INSTALL_HINT"
+}
+
 decode_shown_value() {  # <shown-field>
-  local value=$1
+  local value=$1 decoded
   case "$value" in
     \"*\")
-      printf '%s' "$value" | perl -MJSON::PP -e '
+      decoded=$(printf '%s' "$value" | perl -MJSON::PP -e '
         local $/;
         my $value = decode_json(<STDIN>);
         binmode STDOUT, ":raw";
         utf8::encode($value) if utf8::is_utf8($value);
         print $value;
-      '
+      ') || fail "decoding a task field through perl JSON::PP failed; install the OS package - $JSONPP_INSTALL_HINT"
+      printf '%s' "$decoded"
       ;;
     *) printf '%s' "$value" ;;
   esac
@@ -987,15 +1002,15 @@ EOF
 }
 
 case "${1:-}" in
-  hold) shift; command_hold "$@" ;;
-  answer) shift; command_answer "$@" ;;
-  answers) shift; command_answers "$@" ;;
+  hold) shift; require_json_decoder; command_hold "$@" ;;
+  answer) shift; require_json_decoder; command_answer "$@" ;;
+  answers) shift; require_json_decoder; command_answers "$@" ;;
   bind) shift; command_bind "$@" ;;
   unbind) shift; command_unbind "$@" ;;
   binding) shift; command_binding "$@" ;;
-  complete) shift; command_complete "$@" ;;
-  verify) shift; command_verify "$@" ;;
-  diverged) shift; command_diverged "$@" ;;
+  complete) shift; require_json_decoder; command_complete "$@" ;;
+  verify) shift; require_json_decoder; command_verify "$@" ;;
+  diverged) shift; require_json_decoder; command_diverged "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
