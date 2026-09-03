@@ -24,9 +24,12 @@
 #       per tick, through the version 2 presentation journal only; silent on
 #       tmux and on a Herdr task without a bound projection; a failed rename
 #       warns and retries on the cadence, a hand-changed label is left alone
-#   (f) tick throttle: one phase re-read per cadence window per task, and the
-#       real watcher launches the tick as a detached single-flight child that
-#       never holds its poll loop
+#   (f) tick throttle: one phase re-read per cadence window per task, keyed on
+#       the tick's own stamp so a snapshot read between ticks never postpones
+#       it; the real watcher launches the tick as a detached single-flight
+#       child that never holds its poll loop, and its state/.progress-tick.pid
+#       marker keeps that single flight across processes (a live holder
+#       suppresses the launch, a dead one is reclaimed)
 #   (g) label grammar: the base is recovered from a decorated label and the
 #       token stays the last segment
 #   (h) an unreadable (unknown) observation never resets the last known
@@ -509,6 +512,12 @@ test_tick_reads_phase_once_per_cadence() {
   [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 2 ] || fail "each task is read once inside the cadence: $(cat "$d/crew.log")"
   FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 60)) 'state: working · source: pane · busy' 0 tick
   [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 4 ] || fail "the cadence boundary re-reads every task: $(cat "$d/crew.log")"
+  # A fleet-snapshot read (the `show` path) between two ticks advances the
+  # record's accumulators but is not a tick, so it never postpones the re-read.
+  FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 110)) 'state: working · source: pane · busy' 0 show th1 >/dev/null
+  [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 5 ] || fail "show reads the task once: $(cat "$d/crew.log")"
+  FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 120)) 'state: working · source: pane · busy' 0 tick
+  [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 7 ] || fail "a snapshot read between ticks must not delay the cadence re-read: $(cat "$d/crew.log")"
   : > "$d/crew.log"
   FM_PROGRESS_REFRESH_SECS=0 FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 600)) 'state: working · source: pane · busy' 0 tick
   [ ! -s "$d/crew.log" ] || fail "FM_PROGRESS_REFRESH_SECS=0 disables the tick"
@@ -545,6 +554,83 @@ test_watcher_launches_tick_detached_with_single_flight() {
   [ -f "$d/state/.progress-wt1" ] || fail "the detached tick must still publish the observation record: $(cat "$d/watch.err")"
   grep -q "^phase=implementing$" "$d/state/.progress-wt1" || fail "the detached tick records the phase: $(cat "$d/state/.progress-wt1")"
   pass "the watcher launches the progress tick detached with a single-flight guard and keeps polling while it runs"
+}
+
+# watch_start <case>: run the real watcher over the case with a quick poll and
+# an instant fake current state; sets WATCH_PID. The watcher's own triage may
+# read that state too and its summary refresh advances the observation record
+# through the fleet snapshot, so the tick's evidence is the record's tick_at=,
+# which only the tick writes.
+WATCH_PID=
+watch_start() {
+  local d=$1
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" \
+    FM_CREW_STATE_BIN="$d/fakebin/fm-crew-state.sh" FM_CAPTAIN_HOLD_BIN="$d/fakebin/fm-captain-hold.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · busy' FM_PROGRESS_REFRESH_SECS=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$d/watch.out" 2> "$d/watch.err" &
+  WATCH_PID=$!
+}
+
+beat_of() {  # <case> -> the beacon's mtime
+  stat -c %Y "$1/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$1/state/.last-watcher-beat"
+}
+
+wait_for() {  # <tenths> <command...>: poll a command for up to that many tenths
+  local i=0 limit=$1
+  shift
+  while [ "$i" -lt "$limit" ] && ! "$@"; do sleep 0.1; i=$((i + 1)); done
+  "$@"
+}
+
+ticked() {  # <record>: the tick has re-read this task at least once
+  grep -q '^tick_at=[1-9]' "$1" 2>/dev/null
+}
+
+# The single flight also holds across processes through state/.progress-tick.pid:
+# a marker naming a live process suppresses the launch while the watcher keeps
+# polling, and once that process dies the marker is reclaimed and the tick runs.
+test_watcher_tick_marker_of_live_process_suppresses_launch() {
+  local d holder beat1 beat2 marker
+  d=$(make_case watcher-marker-live)
+  write_task "$d" wm1 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  sleep 60 &
+  holder=$!
+  printf '%s\n' "$holder" > "$d/state/.progress-tick.pid"
+  watch_start "$d"
+  wait_for 60 test -f "$d/state/.last-watcher-beat" || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "the watcher never started polling: $(cat "$d/watch.err")"; }
+  beat1=$(beat_of "$d")
+  sleep 2.5
+  beat2=$(beat_of "$d")
+  [ "$beat2" -gt "$beat1" ] || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "the watcher must keep polling while another process holds the marker"; }
+  ! ticked "$d/state/.progress-wm1" || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "a marker naming a live process must suppress the launch: $(cat "$d/state/.progress-wm1")"; }
+  [ "$(cat "$d/state/.progress-tick.pid")" = "$holder" ] || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "a live holder's marker is never rewritten"; }
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  wait_for 80 ticked "$d/state/.progress-wm1" || { kill "$WATCH_PID" 2>/dev/null; fail "once the holder dies the marker is reclaimed and the tick launches: $(cat "$d/watch.err")"; }
+  kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null || true
+  marker=$(cat "$d/state/.progress-tick.pid")
+  case "$marker" in ''|*[!0-9]*) fail "the reclaimed marker must name the new tick child: '$marker'" ;; esac
+  [ "$marker" != "$holder" ] || fail "the reclaimed marker must name the new tick child, not the dead holder"
+  pass "a marker naming a live process suppresses the tick launch and is reclaimed once that process dies"
+}
+
+# A watcher that starts over a marker left by a dead tick child (a restart
+# after a crash) reclaims it at once and launches.
+test_watcher_tick_reclaims_marker_of_dead_process() {
+  local d dead marker
+  d=$(make_case watcher-marker-dead)
+  write_task "$d" wm2 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  true &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  printf '%s\n' "$dead" > "$d/state/.progress-tick.pid"
+  watch_start "$d"
+  wait_for 80 ticked "$d/state/.progress-wm2" || { kill "$WATCH_PID" 2>/dev/null; fail "a marker naming a dead process must be reclaimed and the tick launched: $(cat "$d/watch.err")"; }
+  kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null || true
+  marker=$(cat "$d/state/.progress-tick.pid")
+  case "$marker" in ''|*[!0-9]*) fail "the reclaimed marker must name the new tick child: '$marker'" ;; esac
+  [ "$marker" != "$dead" ] || fail "the reclaimed marker must name the new tick child, not the dead pid"
+  pass "a marker naming a dead process is reclaimed and the tick launches"
 }
 
 # ---------------------------------------------------------------------------
@@ -584,6 +670,8 @@ test_label_refresh_skips_without_projection_or_on_tmux
 test_label_refresh_failure_warns_once_per_reason
 test_tick_reads_phase_once_per_cadence
 test_watcher_launches_tick_detached_with_single_flight
+test_watcher_tick_marker_of_live_process_suppresses_launch
+test_watcher_tick_reclaims_marker_of_dead_process
 test_label_grammar
 test_unknown_observation_keeps_the_phase_clock
 test_running_long_starts_past_the_75th_percentile

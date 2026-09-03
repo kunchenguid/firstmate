@@ -59,6 +59,13 @@
 #                           the last refresh succeeded), so one reason warns
 #                           once and warns again only after it changes or a
 #                           later success
+#   tick_at=<epoch>         when the watcher tick last re-read this task's
+#                           phase (0 before the first tick); written only by
+#                           fm_progress_tick, which keys its
+#                           FM_PROGRESS_REFRESH_SECS cadence on this field
+#                           alone because observed= is advanced by every
+#                           read, the fleet snapshot's included, and a
+#                           snapshot read must never postpone a label refresh
 # The first observation seeds observed= from the task's spawn instant (the
 # epoch inside spawn_gen=s<epoch>.<pid>.<random>, else the record's mtime), so
 # time before the first observation counts as implementing.
@@ -105,7 +112,8 @@
 #
 # ENVIRONMENT
 #   FM_PROGRESS_REFRESH_SECS   seconds between phase re-reads per task in the
-#                              watcher tick (default 60; 0 disables the tick)
+#                              watcher tick, keyed on the record's tick_at=
+#                              (default 60; 0 disables the tick)
 #   FM_PROGRESS_MIN_SAMPLES    finished tasks a phase needs before its median
 #                              is used (default 3)
 #   FM_PROGRESS_HISTORY_MAX    newest history records considered (default 200)
@@ -338,6 +346,7 @@ _fm_progress_rec_reset() {
   FM_PROGRESS_REC_LABEL=
   FM_PROGRESS_REC_LABEL_ATTEMPT=
   FM_PROGRESS_REC_LABEL_WARNED=
+  FM_PROGRESS_REC_TICK_AT=0
 }
 
 _fm_progress_num() {  # <value> -> value or 0
@@ -371,6 +380,7 @@ fm_progress_record_load() {
       label) FM_PROGRESS_REC_LABEL=$value ;;
       label_attempt) FM_PROGRESS_REC_LABEL_ATTEMPT=$(_fm_progress_num "$value") ;;
       label_warned) FM_PROGRESS_REC_LABEL_WARNED=$value ;;
+      tick_at) FM_PROGRESS_REC_TICK_AT=$(_fm_progress_num "$value") ;;
     esac
   done < "$rec"
   [ -n "$FM_PROGRESS_REC_OBSERVED" ] && [ -n "$FM_PROGRESS_REC_PHASE" ] || {
@@ -403,6 +413,7 @@ fm_progress_record_write() {
     printf 'label=%s\n' "$FM_PROGRESS_REC_LABEL"
     printf 'label_attempt=%s\n' "$FM_PROGRESS_REC_LABEL_ATTEMPT"
     printf 'label_warned=%s\n' "$FM_PROGRESS_REC_LABEL_WARNED"
+    printf 'tick_at=%s\n' "$FM_PROGRESS_REC_TICK_AT"
   } > "$tmp"; then
     rm -f "$tmp"
     return 1
@@ -892,8 +903,10 @@ fm_progress_label_refresh() {
 # One pass over every local task, launched by the watcher as a detached child
 # each poll (bin/fm-watch.sh progress_tick_detached) so no current-state read
 # ever sits on the poll loop's path: re-read the phase no more often than
-# FM_PROGRESS_REFRESH_SECS, then refresh the label when the phase or rounded
-# estimate changed. Bounded, no network, never fails the caller.
+# FM_PROGRESS_REFRESH_SECS, keyed on the record's own tick_at= so a fleet
+# snapshot read in between never postpones the next re-read, then refresh the
+# label when the phase or rounded estimate changed. Bounded, no network, never
+# fails the caller.
 fm_progress_tick() {
   local state=$1 data=$2 now=${3:-} meta id
   [ "$FM_PROGRESS_REFRESH_SECS" -gt 0 ] || return 0
@@ -903,10 +916,12 @@ fm_progress_tick() {
     id=$(basename "$meta" .meta)
     fm_progress_id_valid "$id" || continue
     if fm_progress_record_load "$state" "$id" \
-       && [ $((now - FM_PROGRESS_REC_OBSERVED)) -lt "$FM_PROGRESS_REFRESH_SECS" ]; then
+       && [ $((now - FM_PROGRESS_REC_TICK_AT)) -lt "$FM_PROGRESS_REFRESH_SECS" ]; then
       continue
     fi
     fm_progress_read "$state" "$data" "$id" '' '' "$now" || continue
+    FM_PROGRESS_REC_TICK_AT=$now
+    fm_progress_record_write "$state" "$id" || true
     fm_progress_label_refresh "$state" "$id" "$FM_PROGRESS_LABEL_SUFFIX" "$now" || true
   done
   return 0

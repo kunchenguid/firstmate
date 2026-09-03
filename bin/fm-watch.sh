@@ -1453,11 +1453,18 @@ home_summary_refresh_detached() {
 # poll launches `fm-progress.sh tick` as a detached child under the same
 # single-flight shape as home_summary_refresh_detached (skip while the previous
 # child is alive), and the child's own FM_PROGRESS_REFRESH_SECS cadence keeps an
-# idle launch to one bash start. Its warnings reach this watcher's stderr; its
-# failure never changes what a cycle decided, and it writes no task or endpoint
-# record.
+# idle launch to one bash start. The single flight also holds across a watcher
+# restart and the duplicate-watcher window the self-eviction check closes:
+# state/.progress-tick.pid names the last launched child, a marker whose pid is
+# still alive skips this cycle's launch, and one naming a dead or absent
+# process is stale and reclaimed. That pid is only probed, never signalled or
+# waited on unless this process launched it, and an unreadable marker never
+# blocks the launch. Its warnings reach this watcher's stderr; its failure
+# never changes what a cycle decided, and it writes no task or endpoint record.
 PROGRESS_TICK_PID=
+PROGRESS_TICK_MARKER="$STATE/.progress-tick.pid"
 progress_tick_detached() {
+  local holder tmp
   [ "${FM_PROGRESS_REFRESH_SECS:-60}" != 0 ] || return 0
   if [ -n "$PROGRESS_TICK_PID" ]; then
     if kill -0 "$PROGRESS_TICK_PID" 2>/dev/null; then
@@ -1466,10 +1473,20 @@ progress_tick_detached() {
     wait "$PROGRESS_TICK_PID" 2>/dev/null || true
     PROGRESS_TICK_PID=
   fi
+  holder=$(head -n 1 -- "$PROGRESS_TICK_MARKER" 2>/dev/null || true)
+  case "$holder" in
+    ''|0|*[!0-9]*) ;;
+    *) if kill -0 "$holder" 2>/dev/null; then return 0; fi ;;
+  esac
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_CREW_STATE_BIN="$FM_CREW_STATE_BIN" \
     "$SCRIPT_DIR/fm-progress.sh" tick </dev/null >/dev/null &
   PROGRESS_TICK_PID=$!
+  tmp=$(umask 077; mktemp "$STATE/.progress-tick.pid.XXXXXX" 2>/dev/null) || return 0
+  if ! printf '%s\n' "$PROGRESS_TICK_PID" > "$tmp" 2>/dev/null \
+     || ! mv -f -- "$tmp" "$PROGRESS_TICK_MARKER" 2>/dev/null; then
+    rm -f -- "$tmp"
+  fi
 }
 
 RECONCILE_REQUEST_PID=
