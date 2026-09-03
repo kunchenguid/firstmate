@@ -1438,7 +1438,8 @@ fi
 # a secondmate is a firstmate in its own home and keeps that default. Resolving
 # and validating here refuses a malformed file before any task state is created.
 CLAUDE_AGENT=
-if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ] && [ -f "$CONFIG/crew-claude-agent" ]; then
+case "$LAUNCH" in *__AGENTFLAG__*) CLAUDE_AGENT_SLOT=1 ;; *) CLAUDE_AGENT_SLOT=0 ;; esac
+if [ "$CLAUDE_AGENT_SLOT" -eq 1 ] && [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ] && [ -f "$CONFIG/crew-claude-agent" ]; then
   while IFS= read -r crew_agent_line || [ -n "$crew_agent_line" ]; do
     crew_agent_line="${crew_agent_line#"${crew_agent_line%%[![:space:]]*}"}"
     crew_agent_line="${crew_agent_line%"${crew_agent_line##*[![:space:]]}"}"

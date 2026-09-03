@@ -902,8 +902,28 @@ test_invalid_crew_claude_agent_refuses_the_spawn() {
   pass "an unsafe config/crew-claude-agent token refuses the spawn"
 }
 
+test_raw_launch_command_ignores_crew_claude_agent() {
+  local rec id out status launch
+  id=profile-claude-agent-raw-z25
+  rec=$(make_spawn_case profile-claude-agent-raw claude "$id")
+  read_case_record "$rec"
+  write_crew_claude_agent "$HOME_DIR" 'bad name; rm -rf /'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --resume")
+  status=$?
+  expect_code 0 "$status" "a raw launch command carries no agent slot, so the config must not refuse the spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  case "$launch" in
+    *"claude --resume") ;;
+    *) fail "raw launch command changed"$'\n'"actual: $launch" ;;
+  esac
+  pass "config/crew-claude-agent neither alters nor refuses a raw launch command"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_absent_crew_claude_agent_omits_the_agent_flag
+test_raw_launch_command_ignores_crew_claude_agent
 test_crew_claude_agent_flows_to_crewmate_and_scout_launches
 test_crew_claude_agent_is_omitted_from_secondmate_launches
 test_invalid_crew_claude_agent_refuses_the_spawn

@@ -325,7 +325,9 @@ When `config/crew-dispatch.json` exists, crewmate and scout spawns require an ex
 Firstmate launches Claude workers as fresh `claude` sessions, so without it a worker inherits whatever `agent:` the operator's own global Claude settings select, which is normally a primary-session profile rather than a worker one.
 The first non-empty, non-comment line is the agent name and must be a safe token of letters, digits, `_`, `-`, `.`, and `:`; any other content refuses the spawn instead of launching.
 When it is present, `fm-spawn.sh` adds `--agent '<name>'` to claude crewmate and scout launches, including a relaunch onto claude; secondmate launches never carry it, because a secondmate is a firstmate in its own home and keeps the operator's default profile.
-An absent file leaves every launch command unchanged.
+An absent file leaves every launch command unchanged, as does a raw launch command, which carries no agent slot to substitute and is therefore never refused over this file's contents.
+The name is validated as a safe token only; it is never checked to exist, and `claude --agent <unknown>` refuses to start, so an agent name that the launching machine's Claude installation does not define makes every claude crewmate and scout pane in that home exit immediately with no spawn-time signal.
+The same applies in a secondmate home that inherits the file, where the primary's profile name may not exist in that machine's Claude configuration at all.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
