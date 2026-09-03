@@ -512,7 +512,7 @@ fm_backlog_record_publish() {
 #
 # Usage: fm_meta_set <meta> <state-root> <key> <value> [<key> <value>...]
 fm_meta_set() {
-  local meta=$1 root=$2 tmp line mkey mvalue drop i rc=0
+  local meta=$1 root=$2 tmp dir base line mkey mvalue drop i rc=0
   local -a mkeys=() mvalues=()
   shift 2
   if [ "$#" -eq 0 ] || [ $(( $# % 2 )) -ne 0 ]; then
@@ -539,7 +539,13 @@ fm_meta_set() {
     mvalues+=("$mvalue")
   done
   fm_backlog_record_present "$meta" "task record" "$root" || return 1
-  tmp=$(mktemp "${meta%/*}/.$(basename "$meta").set.XXXXXX" 2>/dev/null) || {
+  # Staged beside the record so the publication below is a same-directory
+  # rename, and named by parameter expansion rather than basename because this
+  # library runs under the curated PATH the lifecycle scripts pin.
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  tmp=$(mktemp "$dir/.$base.set.XXXXXX" 2>/dev/null) || {
     FM_BACKLOG_TRANSITION_ERROR="task record update could not be staged beside $meta"
     return 1
   }
