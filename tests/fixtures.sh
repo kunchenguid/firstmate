@@ -332,18 +332,29 @@ SH
   printf '%s\n' "$fb"
 }
 
+# herdr_process_info: the single owner of herdr's `pane process-info` response
+# shape.
+#
+# Every case that drives the idle-shell proof depends on this exact envelope
+# being what herdr reports, so it is built in one place: a field rename in a
+# future herdr release is then one edit here rather than a silent divergence
+# between the suites that would each still pass against their own stale copy.
+herdr_process_info() {  # <pane> <shell-pid> <fg-pgid> <foreground-processes-json>
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":%s}}}\n' \
+    "$1" "$2" "$3" "$4"
+}
+
 # herdr_bare_shell_process_info: the inventory herdr reports for a pane whose
 # agent has exited - one foreground process, which is the pane's own shell.
 # <real-pid> must be a REAL live pid with no child, because the
 # operating-system half of the idle-shell proof is answered by the real `ps`.
 herdr_bare_shell_process_info() {  # <pane> <real-pid>
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"}]}}}\n' \
-    "$1" "$2" "$2" "$2"
+  herdr_process_info "$1" "$2" "$2" \
+    "$(printf '[{"pid":%s,"name":"zsh","argv0":"zsh"}]' "$2")"
 }
 
 # herdr_live_process_info: the same pane with a real harness process owning the
 # foreground instead of the shell. Nothing here may ever prove agent-free.
 herdr_live_process_info() {  # <pane> <shell-pid>
-  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"node","argv0":"pi"}]}}}\n' \
-    "$1" "$2"
+  herdr_process_info "$1" "$2" 4242 '[{"pid":4242,"name":"node","argv0":"pi"}]'
 }

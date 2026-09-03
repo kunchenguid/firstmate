@@ -3049,9 +3049,18 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # mapping.
 #
 # A `busy` verdict is corroborated against the pane's own process inventory
-# through fm_backend_herdr_pane_idle_shell_sample - the SAME proof
-# fm_backend_herdr_pane_agent_state uses, so the liveness verdict and the busy
-# verdict can never disagree about what the pane is. The registry is written by
+# through fm_backend_herdr_pane_idle_shell_sample, the SAME proof
+# fm_backend_herdr_pane_agent_state uses, so neither verdict can ever downgrade
+# a pane on a rule the other does not apply. Only a REPORTED-BUSY state needs
+# that corroboration, because `busy` is the only native verdict that can wedge a
+# pane: bin/fm-busy-lib.sh's record-free fallthrough and
+# bin/fm-supervise-daemon.sh's pane_is_busy both act on `busy` alone and treat a
+# native `idle` as no evidence at all, falling back to their own. So the two
+# verdicts do still differ for a stale registration last reported idle - that
+# pane reads `dead` from the classifier and `idle` here - which is deliberate:
+# corroborating the idle branch would pay an inventory read on every poll of
+# every healthy pane (a live Claude reports idle through a whole turn) to change
+# an answer nothing is wedged by. The registry is written by
 # whatever reports into it and a report is not withdrawn when the process that
 # made it goes away, so a harness killed mid-turn leaves `agent get` answering
 # `working` forever. Nothing else clears that: bin/fm-busy-lib.sh's record-free
