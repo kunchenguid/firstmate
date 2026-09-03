@@ -1435,6 +1435,37 @@ launch_template() {
   esac
 }
 
+raw_launch_uses_claude_local() {  # <raw-launch>
+  local launch=$1
+  # shellcheck disable=SC2086
+  set -- $launch
+  while [ "$#" -gt 0 ]; do
+    case "$1" in [A-Za-z_]*=*) shift ;; *) break ;; esac
+  done
+  case "${1:-}" in
+    claude-local|*/claude-local) return 0 ;;
+    env|*/env)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --) shift; break ;;
+          -u|--unset|-C|--chdir) shift; [ "$#" -gt 0 ] || return 1; shift ;;
+          -u?*|--unset=*|-C?*|--chdir=*|-i|--ignore-environment|-0|--null) shift ;;
+          -*) shift ;;
+          [A-Za-z_]*=*) shift ;;
+          *) break ;;
+        esac
+      done
+      ;;
+    command|*/command)
+      shift
+      case "${1:-}" in -p|--) shift ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+  case "${1:-}" in claude-local|*/claude-local) return 0 ;; *) return 1 ;; esac
+}
+
 # Whether this spawn's harness came from an EXPLICIT per-spawn argument (a
 # positional name, --harness, or a raw launch command) rather than from
 # config resolution. The claude-local opt-in gate below is the only consumer:
@@ -1448,7 +1479,7 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
-    if [ "$HARNESS" = claude-local ]; then
+    if raw_launch_uses_claude_local "$LAUNCH"; then
       echo "error: a raw claude-local command is refused because it bypasses the bounded local-model launch context; use --harness claude-local --model <exact-model-id>." >&2
       exit 1
     fi

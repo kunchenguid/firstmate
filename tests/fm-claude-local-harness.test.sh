@@ -278,19 +278,14 @@ test_spawn_arms_an_executable_eviction_check() {
 
 # The bounded launch context lives in the canonical template. A raw launch
 # command is the unverified-adapter escape hatch and would run whatever it
-# names verbatim, so a raw command whose executable is called claude-local
+# names verbatim, so a raw command whose effective executable is claude-local
 # would pass the local-model gates and then launch with no endpoint pin, no
 # model pin, and no context bound. It is refused, and the refusal names the
 # form that does carry the bounds.
-test_raw_claude_local_command_is_refused() {
-  local home fakebin endpoint case_dir id out
-  read -r home fakebin endpoint case_dir <<<"$(make_world raw)"
-  id="cl-raw-x1"
-  fm_test_spawn_brief "$home" "$id" "tiny brief"
-
-  run_spawn "$home" "$fakebin" "$endpoint" "$id" "$home/projects" \
-    "claude-local --model local-coder" --scout \
-    && fail "a raw claude-local launch command was accepted"
+assert_raw_claude_local_command_is_refused() {  # <home> <fakebin> <endpoint> <id> <command>
+  local home=$1 fakebin=$2 endpoint=$3 id=$4 command=$5 out
+  run_spawn "$home" "$fakebin" "$endpoint" "$id" "$home/projects" "$command" --scout \
+    && fail "a raw claude-local launch command was accepted: $command"
   out=$(cat "$RUN_OUT")
   case "$out" in
     *"bypasses the bounded local-model launch context"*) : ;;
@@ -302,8 +297,34 @@ test_raw_claude_local_command_is_refused() {
   esac
   [ ! -e "$home/state/$id.meta" ] && [ ! -e "$home/state/$id.check.sh" ] \
     || fail "a refused raw claude-local command left task state behind"
+}
 
-  pass "a raw launch command named claude-local is refused in favour of the harness form"
+test_raw_claude_local_commands_are_refused() {
+  local home fakebin endpoint case_dir project worktree out
+  read -r home fakebin endpoint case_dir <<<"$(make_world raw)"
+  fm_test_spawn_brief "$home" "cl-raw-bare-x1" "tiny brief"
+  fm_test_spawn_brief "$home" "cl-raw-env-x1" "tiny brief"
+  fm_test_spawn_brief "$home" "cl-raw-command-x1" "tiny brief"
+  assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
+    "cl-raw-bare-x1" "claude-local --model local-coder"
+  assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
+    "cl-raw-env-x1" "env -i LOCAL=1 claude-local --model local-coder"
+  assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
+    "cl-raw-command-x1" "command claude-local --model local-coder"
+
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  fm_test_spawn_brief "$home" "cl-raw-ordinary-x1" "tiny brief"
+  fm_git_worktree "$project" "$worktree" "fm/cl-raw-ordinary-x1"
+  FM_FAKE_PANE_PATH="$worktree" run_spawn "$home" "$fakebin" "$endpoint" "cl-raw-ordinary-x1" "$project" \
+    "env -i SAFE=1 unverified-runner --flag" --scout || {
+      out=$(cat "$RUN_OUT")
+      fail "an ordinary raw env launch was changed by the claude-local guard: $out"
+    }
+  [ -e "$home/state/cl-raw-ordinary-x1.meta" ] \
+    || fail "an ordinary raw env launch did not publish its task record"
+
+  pass "bare, env, and command raw claude-local launches are refused without changing ordinary raw launches"
 }
 
 # A tmux and ps pair that answers the endpoint's agent-state classifier with
@@ -504,7 +525,7 @@ test_missing_model_is_refused
 test_it_inherits_claudes_verified_tables
 test_it_uses_claudes_shared_busy_signature
 test_spawn_arms_an_executable_eviction_check
-test_raw_claude_local_command_is_refused
+test_raw_claude_local_commands_are_refused
 test_eviction_check_is_gated_on_worker_liveness
 test_fresh_dispatch_rollback_retires_the_eviction_check
 test_incomplete_dispatch_rollback_still_retires_the_eviction_check
