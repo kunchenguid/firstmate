@@ -258,7 +258,7 @@ The default window is 1,000,000 tokens, which is where Claude Code compacts a Fa
 [`verification/stow-memory.md`](verification/stow-memory.md#stow-nudge-calibration) records the evidence behind those defaults.
 
 The optional local, gitignored `config/stow-nudge` tunes or disables the nudge for this home.
-It is either the single word `off` or key=value lines: `window=<tokens>` replaces the auto-compact window the measure targets and must be at least 100,000, `percent=<1..99>` replaces the 60 percent growth threshold, and `hours=<n>` replaces the 3 hour horizon.
+It is either the single word `off` or key=value lines: `window=<tokens>` replaces the auto-compact window the measure targets and must be at least 100,000, `percent=<1..99>` replaces the 60 percent growth threshold, and `hours=<n>` replaces the 3 hour horizon; every number is plain decimal digits with no leading zero.
 Any other content disables the nudge and is reported at session start as a `STOW_NUDGE:` bootstrap diagnostic until corrected.
 The file is per home and is not inherited by secondmate homes, because stow cadence is a property of the home doing the stowing.
 The session-start digest also reports the last recorded pass as a `BOOTSTRAP_INFO:` fact, on every start when that pass is older than the horizon and otherwise only with verbose facts.

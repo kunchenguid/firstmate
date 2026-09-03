@@ -473,7 +473,7 @@ test_config_off_tuning_env_and_malformed() {
   write_transcript "$t" 70000
   run_check "$home" "$t" >/dev/null
   append_turn "$t" 900000
-  for bad in 'window=abc' 'window=99999' 'percent=0' 'percent=100' 'hours=-1' 'cadence=3' 'just words'; do
+  for bad in 'window=abc' 'window=99999' 'window=0200000' 'window=0900000' 'percent=0' 'percent=08' 'percent=100' 'hours=-1' 'hours=08' 'cadence=3' 'just words'; do
     printf '%s\n' "$bad" > "$home/config/stow-nudge"
     out=$(run_check "$home" "$t"); expect_code 0 "$?" "malformed '$bad' disables the nudge"
     [ -z "$out" ] || fail "malformed '$bad' nudged: $out"
@@ -486,6 +486,13 @@ test_config_off_tuning_env_and_malformed() {
   printf 'window=99999\n' > "$home/config/stow-nudge"
   out=$(FM_HOME="$home" "$MARK" summary)
   [ "$out" = "window must be at least 100000 tokens, got '99999'" ] || fail "unexpected below-floor reason: $out"
+  # A leading zero would be read as octal by arithmetic, so it is not a number.
+  printf 'window=0200000\n' > "$home/config/stow-nudge"
+  out=$(FM_HOME="$home" "$MARK" summary)
+  [ "$out" = "window must be a positive token count, got '0200000'" ] || fail "unexpected leading-zero reason: $out"
+  printf 'hours=08\n' > "$home/config/stow-nudge"
+  out=$(FM_HOME="$home" "$MARK" summary)
+  [ "$out" = "hours must be a positive integer, got '08'" ] || fail "unexpected leading-zero hours reason: $out"
   rm -f "$home/config/stow-nudge"
   ln -s /dev/null "$home/config/stow-nudge"
   out=$(FM_HOME="$home" "$MARK" summary); expect_code 1 "$?" "a symlinked config is malformed"
@@ -579,7 +586,20 @@ test_window_floor_in_config_and_environment() {
   out=$(CLAUDE_CODE_AUTO_COMPACT_WINDOW=50000 run_check "$home" "$t"); expect_code 3 "$?" "the default window measures instead"
   assert_contains "$out" "620k context tokens with no /stow pass recorded (threshold 588k)" "the 1M default must set the threshold"
   out=$(FM_HOME="$home" CLAUDE_CODE_AUTO_COMPACT_WINDOW=50000 "$MARK" summary); expect_code 0 "$?" "an ignored override is not a malformed config"
-  pass "fm-stow-mark config: a window under 100k is malformed in the file and ignored in the environment"
+
+  # A leading-zero override is not a token count either: under a 300k window
+  # 180k of growth from 20k would be due (threshold 168k); the 1M default applies.
+  home=$(make_home "$TMP_ROOT/window-floor-env-octal")
+  t="$home/transcript.jsonl"
+  write_transcript "$t" 20000
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW=0300000 run_check "$home" "$t" >/dev/null
+  append_turn "$t" 200000
+  out=$(CLAUDE_CODE_AUTO_COMPACT_WINDOW=0300000 run_check "$home" "$t"); expect_code 0 "$?" "a leading-zero environment window is ignored"
+  [ -z "$out" ] || fail "leading-zero environment window nudged: $out"
+  append_turn "$t" 640000
+  out=$(CLAUDE_CODE_AUTO_COMPACT_WINDOW=0300000 run_check "$home" "$t"); expect_code 3 "$?" "the default window measures instead of the octal reading"
+  assert_contains "$out" "620k context tokens with no /stow pass recorded (threshold 588k)" "the 1M default must set the threshold"
+  pass "fm-stow-mark config: a window under 100k or with a leading zero is malformed in the file and ignored in the environment"
 }
 
 # --- DIGEST: summary --------------------------------------------------------

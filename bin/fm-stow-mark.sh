@@ -75,7 +75,8 @@
 #   percent=<1..99>   how far toward the window the context may grow since the
 #                     binding before the nudge fires; default 60
 #   hours=<n>         wall-clock horizon since the binding; default 3
-# Blank lines and #-comments are ignored and the last value of a repeated key
+# Every number is plain decimal digits with no sign or leading zero. Blank
+# lines and #-comments are ignored and the last value of a repeated key
 # wins. Any other content, a symlink, or a non-regular file makes the file
 # malformed: `check` then treats the nudge as disabled, and `summary` exits 1
 # with the reason so bootstrap can surface it as a STOW_NUDGE line.
@@ -104,14 +105,14 @@ case "$TAIL_BYTES" in ''|*[!0-9]*|0) TAIL_BYTES=262144 ;; esac
 WINDOW_FLOOR=100000
 
 usage() {
-  sed -n '2,92{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,93{s/^# \{0,1\}//;p;}' "$0"
 }
 
 is_positive_int() {
   case "${1-}" in
-    ''|*[!0-9]*) return 1 ;;
+    ''|0*|*[!0-9]*) return 1 ;;
   esac
-  [ "$1" -gt 0 ]
+  return 0
 }
 
 # --- configuration -----------------------------------------------------------
