@@ -365,7 +365,7 @@ test_sweep_refuses_unmarked_and_non_tmpdir_roots() {
 }
 
 test_sweep_kills_a_process_that_ignores_term() {
-  local harness root pid alive
+  local harness root pid alive ready tries
   # The shape that actually leaked is TERM-resistant: the pane shell holding the
   # fixture tree is an interactive login shell, and every one of the 99 found on
   # this machine survived SIGTERM and needed SIGKILL. A sweep that only TERMed
@@ -375,12 +375,26 @@ test_sweep_kills_a_process_that_ignores_term() {
   root="$harness/stubborn"
   mkdir -p "$root"
   : > "$root/.fm-test-fixture"
-  bash -c 'trap "" TERM; cd "$1" || exit 1; while :; do sleep 0.2; done' _ "$root" \
-    >/dev/null 2>&1 </dev/null &
+  # `kill -0 "$pid"` only proves the process exists - not that it has reached
+  # `trap "" TERM` yet. Sending TERM as soon as the pid appears races the
+  # trap's installation: TERM can arrive first and kill the process with its
+  # default disposition, which would make this "TERM-resistant" case flaky
+  # rather than pinned. A marker written right after the trap is installed
+  # gives a deterministic readiness signal instead.
+  ready="$root/.term-trap-armed"
+  bash -c 'trap "" TERM; : > "$2"; cd "$1" || exit 1; while :; do sleep 0.2; done' \
+    _ "$root" "$ready" >/dev/null 2>&1 </dev/null &
   pid=$!
   disown
   track_sleeper "$pid"
-  while ! kill -0 "$pid" 2>/dev/null; do sleep 0.05; done
+  tries=0
+  while [ ! -e "$ready" ]; do
+    kill -0 "$pid" 2>/dev/null \
+      || fail "the TERM-resistant fixture process exited before arming its trap"
+    tries=$((tries + 1))
+    [ "$tries" -lt 200 ] || fail "the TERM-resistant fixture process never armed its trap"
+    sleep 0.05
+  done
   # Confirm it really is TERM-resistant, so this case cannot pass vacuously
   # against a process that would have died to the TERM pass anyway.
   kill -TERM "$pid" 2>/dev/null
