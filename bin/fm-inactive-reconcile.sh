@@ -63,10 +63,14 @@
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
 # incarnation, state, outcome_key, origin, phase, pr, created_epoch, and
-# notice_emitted. The inactive-path fingerprint binds the spawn incarnation,
-# task id, terminal state, PR text, and sanitized last status; the ledger-path
-# fingerprint instead binds the incarnation, task id, terminal state, literal
-# `ledger` origin, and complete terminal ledger line.
+# notice_emitted, plus optional status_head and ledger_claim fields. The
+# inactive-path fingerprint binds the spawn incarnation, task id, terminal
+# state, PR text, and sanitized last status; the ledger-path fingerprint instead
+# binds the incarnation, task id, terminal state, literal `ledger` origin, and
+# complete terminal ledger line.
+# When a terminal ledger append races just after the inactive path's final read,
+# ledger_claim binds that one ledger fingerprint to the already-delivered
+# inactive receipt so the two publishers cannot report one completion twice.
 # Pending atomically becomes reported after parent append or presented after
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
@@ -182,8 +186,8 @@ record_field_set() {
   mv -f "$tmp" "$record"
 }
 
-ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr>
-  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 tmp
+ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr> [status-head]
+  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 status_head=${9:-} tmp
   RECORD_PENDING=$(record_path "$fingerprint" pending)
   RECORD_PRESENTED=$(record_path "$fingerprint" presented)
   RECORD_REPORTED=$(record_path "$fingerprint" reported)
@@ -209,6 +213,7 @@ ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <or
     printf 'pr=%s\n' "$pr"
     printf 'created_epoch=%s\n' "$(reconcile_now)"
     printf 'notice_emitted=0\n'
+    [ -z "$status_head" ] || printf 'status_head=%s\n' "$status_head"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$RECORD_PENDING" || { rm -f "$tmp"; return 1; }
@@ -358,21 +363,58 @@ child_terminal_ledger_line() { # <status>
   esac
 }
 
+# Claim one already-delivered inactive fallback as the delivery of this ledger
+# event. Both reconciliation paths hold the child's meta lock, so this receipt
+# update serializes their decision even though the child appends its ledger
+# without that lock. The claim stores the exact ledger fingerprint: a retry of
+# this event stays suppressed, while a later terminal line remains a new event.
+claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fingerprint> <predecessor-head>
+  local task=$1 incarnation=$2 state=$3 ledger_fingerprint=$4 predecessor_head=$5 record key claim
+  for record in "$OUTCOME_DIR"/*.reported; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    [ "$(record_value "$record" task_id)" = "$task" ] || continue
+    [ "$(record_value "$record" incarnation)" = "$incarnation" ] || continue
+    [ "$(record_value "$record" state)" = "$state" ] || continue
+    key=$(record_value "$record" outcome_key)
+    case "$key" in inactive-outcome-*) ;; *) continue ;; esac
+    [ "$(record_value "$record" status_head)" = "$predecessor_head" ] || continue
+    claim=$(record_value "$record" ledger_claim)
+    if [ "$claim" = "$ledger_fingerprint" ]; then
+      return 0
+    fi
+    [ -z "$claim" ] || continue
+    record_field_set "$record" ledger_claim "$ledger_fingerprint" || return 2
+    return 0
+  done
+  return 1
+}
+
 # The ledger-first parent delivery for one direct child, for a caller holding
 # the child's meta lock. Returns 0 when the line is delivered, already
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last state note pr mode yolo data incarnation fingerprint outcome_key line
+  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
   pr=$(pr_for_task "$meta" "$status" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
+  previous=$(grep -v '^[[:space:]]*$' "$status" 2>/dev/null \
+    | tail -2 | awk 'NR == 1 { first = $0 } NR == 2 { print first }' || true)
+  predecessor_head=$(sha256_text "$previous")
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
+  if claim_inactive_report_for_ledger "$id" "$incarnation" "$state" "$fingerprint" "$predecessor_head"; then
+    # The fallback line is already on the parent channel. This reported ledger
+    # receipt records that its richer rendering owes no second publication.
+    mark_reported "$RECORD_PENDING" || return 1
+    return 0
+  elif [ "$?" -eq 2 ]; then
+    return 1
+  fi
   note=$(clean_field "$(status_line_note "$last")")
   mode=$(clean_field "$(meta_field "$meta" mode)")
   yolo=$(clean_field "$(meta_field "$meta" yolo)")
@@ -445,8 +487,9 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
-  if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
-    return 0
+  last=$(last_status_line "$status")
+  if [ -n "$self" ]; then
+    case "$(status_line_verb "$last")" in done|failed) return 0 ;; esac
   fi
   case "$state_line" in
     'state: done '*) state='done' ;;
@@ -461,7 +504,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   else
     outcome_key="inactive-outcome-main-$id-$state"
   fi
-  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" || return 1
+  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
   if [ -n "$self" ]; then
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then

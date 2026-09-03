@@ -279,6 +279,48 @@ SH
   pass "terminal lines arriving during state reads remain ledger-owned"
 }
 
+# A terminal append can land after the inactive path's final ledger read but
+# before its already-selected outcome is observed on the next poll. The receipt
+# store reconciles that ledger event with the fallback delivery, while a later
+# same-state completion remains independently deliverable.
+test_terminal_line_after_inactive_delivery_is_not_reported_twice() {
+  make_world inactive-ledger-race; bind_secondmate local
+  write_child "$MATE" child 'working: finishing now'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  [ "$(grep -c 'inactive-outcome-mate-child-done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "inactive fallback did not publish exactly once"
+
+  printf 'done: completion landed after reconciliation\n' >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
+    || fail "one completion was published by both inactive and ledger paths: $(cat "$MAIN/state/mate.status")"
+  [ "$(outcome_count "$MATE" reported)" = 2 ] \
+    || fail "the raced ledger event was not durably reconciled with the fallback receipt"
+
+  printf 'working: retrying after completion\ndone: completed again\n' >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 2 ] \
+    || fail "the inactive claim suppressed a later same-state terminal event: $(cat "$MAIN/state/mate.status")"
+  grep -Fq 'child child done: completed again' "$MAIN/state/mate.status" \
+    || fail "the later same-state terminal event was not delivered"
+  pass "inactive and ledger paths reconcile one raced completion without hiding later events"
+}
+
+# An intervening progress line means the next terminal line is a new completion,
+# not a late ledger rendering of the inactive fallback.
+test_progress_after_inactive_delivery_starts_a_new_event() {
+  make_world inactive-recovery; bind_secondmate local
+  write_child "$MATE" child 'working: first attempt finishing'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  printf 'working: retry started\ndone: retry completed\n' >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 2 ] \
+    || fail "an intervening progress event did not separate two completions: $(cat "$MAIN/state/mate.status")"
+  grep -Fq 'child child done: retry completed' "$MAIN/state/mate.status" \
+    || fail "the completion after recovery was not delivered"
+  pass "progress after an inactive fallback starts a distinct terminal event"
+}
+
 # Receipt identity covers the complete terminal ledger line even when the
 # captain-facing rendering truncates two long notes to the same text.
 test_long_terminal_lines_have_distinct_receipts() {
@@ -749,6 +791,8 @@ test_local_secondmate_delivers_terminal_ledger_line
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery
+test_terminal_line_after_inactive_delivery_is_not_reported_twice
+test_progress_after_inactive_delivery_starts_a_new_event
 test_long_terminal_lines_have_distinct_receipts
 test_secondmate_partial_ledger_line_waits_for_newline
 test_secondmate_remote_route_ledger_delivery
