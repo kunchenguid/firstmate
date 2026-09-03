@@ -1113,6 +1113,99 @@ EOF
   pass "Pi refused handling handshake is classified and not swallowed"
 }
 
+test_pi_arm_ready_default_covers_macos_confirm_budget() {
+  local repo plugin out status
+  repo="$TMP_ROOT/pi-arm-ready-default-root"
+  mkdir -p "$repo"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+if (mod.armReadyTimeoutDefaultMs("darwin") !== 35000) {
+  throw new Error(`darwin default ${mod.armReadyTimeoutDefaultMs("darwin")}`);
+}
+if (mod.armReadyTimeoutDefaultMs("win32") !== 35000) {
+  throw new Error(`win32 default ${mod.armReadyTimeoutDefaultMs("win32")}`);
+}
+if (mod.armReadyTimeoutDefaultMs("linux") !== 12000) {
+  throw new Error(`linux default ${mod.armReadyTimeoutDefaultMs("linux")}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi arm-ready default must stay above the 30s macOS confirm budget: $out"
+  [ -z "$out" ] || fail "Pi arm-ready default test printed output: $out"
+  pass "Pi arm-ready default is 35s on macOS and Windows"
+}
+
+test_pi_delayed_successor_is_kept_inside_macos_ready_budget() {
+  local repo home plugin log killed stop out status
+  repo="$TMP_ROOT/pi-delayed-successor-root"
+  home="$TMP_ROOT/pi-delayed-successor-home"
+  log="$TMP_ROOT/pi-delayed-successor.log"
+  killed="$TMP_ROOT/pi-delayed-successor.killed"
+  stop="$TMP_ROOT/pi-delayed-successor.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: original wake\n'
+  exit 0
+fi
+trap 'printf "killed\n" > "${FM_KILLED_FILE:?}"; exit 0' TERM INT
+sleep 0.25
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  # 400ms outer wait models the 35s Darwin budget; 250ms first beat models a
+  # successor that becomes ready after the old 12s outer wait and before 30s.
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_KILLED_FILE="$killed" FM_STOP_FILE="$stop" FM_PI_ARM_READY_TIMEOUT_MS=400 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-delayed-successor", {}, undefined, undefined, {});
+for (let i = 0; i < 200 && !prompt.includes("original wake"); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 2) throw new Error(`delayed successor was replaced: ${rows.join(" | ")}`);
+if (!prompt.includes("original wake")) throw new Error(`original wake was lost: ${prompt}`);
+if (prompt.includes("could not verify a ready successor")) throw new Error(`delayed successor was treated unready: ${prompt}`);
+if (prompt.includes("could not restore watcher continuity")) throw new Error(`delayed successor triggered restoration failure: ${prompt}`);
+if (existsSync(process.env.FM_KILLED_FILE)) throw new Error("delayed successor was SIGTERMed");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must keep a successor whose first beat lands inside the macOS-ready budget: $out"
+  [ -z "$out" ] || fail "Pi delayed-successor test printed output: $out"
+  pass "Pi delayed successor is kept when first beat lands inside the macOS-ready budget"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
@@ -2318,6 +2411,96 @@ EOF
   pass "OpenCode pre-ready actionable close preserves its successor"
 }
 
+test_opencode_arm_ready_default_covers_macos_confirm_budget() {
+  local plugin out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+if (mod.armReadyTimeoutDefaultMs("darwin") !== 35000) {
+  throw new Error(`darwin default ${mod.armReadyTimeoutDefaultMs("darwin")}`);
+}
+if (mod.armReadyTimeoutDefaultMs("win32") !== 35000) {
+  throw new Error(`win32 default ${mod.armReadyTimeoutDefaultMs("win32")}`);
+}
+if (mod.armReadyTimeoutDefaultMs("linux") !== 12000) {
+  throw new Error(`linux default ${mod.armReadyTimeoutDefaultMs("linux")}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode arm-ready default must stay above the 30s macOS confirm budget: $out"
+  [ -z "$out" ] || fail "OpenCode arm-ready default test printed output: $out"
+  pass "OpenCode arm-ready default is 35s on macOS and Windows"
+}
+
+test_opencode_delayed_successor_is_kept_inside_macos_ready_budget() {
+  local plugin repo home log killed stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-delayed-successor-root"
+  home="$TMP_ROOT/opencode-delayed-successor-home"
+  log="$TMP_ROOT/opencode-delayed-successor.log"
+  killed="$TMP_ROOT/opencode-delayed-successor.killed"
+  stop="$TMP_ROOT/opencode-delayed-successor.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: original wake\n'
+  exit 0
+fi
+trap 'printf "killed\n" > "${FM_KILLED_FILE:?}"; exit 0' TERM INT
+sleep 0.25
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_KILLED_FILE="$killed" FM_STOP_FILE="$stop" FM_OPENCODE_ARM_READY_TIMEOUT_MS=400 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts[0].text;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 200 && !prompt.includes("original wake"); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 2) throw new Error(`delayed successor was replaced: ${rows.join(" | ")}`);
+if (!prompt.includes("original wake")) throw new Error(`original wake was lost: ${prompt}`);
+if (prompt.includes("could not verify a ready successor")) throw new Error(`delayed successor was treated unready: ${prompt}`);
+if (prompt.includes("could not restore watcher continuity")) throw new Error(`delayed successor triggered restoration failure: ${prompt}`);
+if (existsSync(process.env.FM_KILLED_FILE)) throw new Error("delayed successor was SIGTERMed");
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must keep a successor whose first beat lands inside the macOS-ready budget: $out"
+  [ -z "$out" ] || fail "OpenCode delayed-successor test printed output: $out"
+  pass "OpenCode delayed successor is kept when first beat lands inside the macOS-ready budget"
+}
+
 test_opencode_hung_successor_falls_back_to_typed_wake() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -2932,6 +3115,8 @@ test_pi_main_only_check_classes_stay_on_main
 test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
 test_pi_handling_delivery_failure_is_typed_once
+test_pi_arm_ready_default_covers_macos_confirm_budget
+test_pi_delayed_successor_is_kept_inside_macos_ready_budget
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
@@ -2949,6 +3134,8 @@ test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_pre_ready_actionable_close_preserves_its_successor
+test_opencode_arm_ready_default_covers_macos_confirm_budget
+test_opencode_delayed_successor_is_kept_inside_macos_ready_budget
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision

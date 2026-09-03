@@ -4,11 +4,16 @@ import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
-// 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
-// bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
-// SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
-const ARM_READY_TIMEOUT_DEFAULT_MS = process.platform === "win32" ? 35000 : 12000;
-const ARM_READY_TIMEOUT_MS = positiveInteger("FM_OPENCODE_ARM_READY_TIMEOUT_MS", ARM_READY_TIMEOUT_DEFAULT_MS);
+// 35s on macOS and Windows so the outer wait stays above arm's 30s confirm
+// default. A successor whose first beat lands between 12s and 30s must not be
+// SIGTERMed.
+export function armReadyTimeoutDefaultMs(platform = process.platform) {
+  return platform === "darwin" || platform === "win32" ? 35000 : 12000;
+}
+const ARM_READY_TIMEOUT_MS = positiveInteger(
+  "FM_OPENCODE_ARM_READY_TIMEOUT_MS",
+  armReadyTimeoutDefaultMs(),
+);
 const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const REARM_RETRY_BASE_MS = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const REARM_RETRY_MAX_MS = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);

@@ -15,9 +15,10 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 
 # An arm only reports its typed failure after wait_for_healthy_successor has
 # spent the whole confirmation budget, so cases that wait for that failure must
-# outlast the largest production default (30s on MSYS, 10s elsewhere - see
-# ARM_CONFIRM_DEFAULT in bin/fm-watch-arm.sh). This is a ceiling spent only when
-# an arm genuinely fails to exit; a passing case returns as soon as it does.
+# outlast the largest production default (30s on macOS and MSYS, 10s elsewhere -
+# see fm_arm_confirm_timeout_seconds in bin/fm-wake-lib.sh). This is a ceiling
+# spent only when an arm genuinely fails to exit; a passing case returns as soon
+# as it does.
 ARM_FAIL_EXIT_POLLS=400
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
@@ -27,6 +28,52 @@ mark_pr_check_migration_complete() {
   printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
   printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
   chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+}
+
+# Delay or suppress only the watcher's first liveness beacon. Setup uses
+# /usr/bin/touch so this wrapper cannot stall fixture files.
+install_beat_touch_fixture() {  # <fakebin>
+  cat > "$1/touch" <<'SH'
+#!/usr/bin/env bash
+set -u
+real=/usr/bin/touch
+last=${!#}
+case "$last" in
+  *.last-watcher-beat)
+    if [ "${FM_TEST_BEAT_NEVER:-0}" = 1 ]; then
+      exit 0
+    fi
+    delay=${FM_TEST_BEAT_DELAY_SECS:-0}
+    case "$delay" in
+      ''|0) ;;
+      *) sleep "$delay" ;;
+    esac
+    ;;
+esac
+exec "$real" "$@"
+SH
+  chmod +x "$1/touch"
+}
+
+confirm_timeout_seconds_for() {  # <ostype> <state> [explicit-timeout]
+  local ostype=$1 state=$2
+  if [ "$#" -ge 3 ]; then
+    FM_STATE_OVERRIDE="$state" bash -c '
+      OSTYPE=$1
+      FM_ARM_CONFIRM_TIMEOUT=$2
+      # shellcheck disable=SC1090
+      . "$3"
+      fm_arm_confirm_timeout_seconds
+    ' _ "$ostype" "$3" "$LIB"
+  else
+    FM_STATE_OVERRIDE="$state" bash -c '
+      OSTYPE=$1
+      unset FM_ARM_CONFIRM_TIMEOUT
+      # shellcheck disable=SC1090
+      . "$2"
+      fm_arm_confirm_timeout_seconds
+    ' _ "$ostype" "$LIB"
+  fi
 }
 
 drain_and_ack() {  # <state>
@@ -1121,6 +1168,140 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_arm_macos_default_covers_delayed_first_beat() {
+  local dir state fakebin armout armpid i
+  [ "$(uname)" = Darwin ] || {
+    pass "skip: macOS confirm-default delayed-beat coverage runs on Darwin"
+    return 0
+  }
+  dir=$(make_case arm-macos-delayed-beat)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  /usr/bin/touch -t 200001010000 "$state/.last-watcher-beat"
+  install_beat_touch_fixture "$fakebin"
+  # 12s first-beat delay is past the old 10s Darwin default and inside the 30s
+  # macOS budget, without sleeping the full production timeout.
+  unset FM_ARM_CONFIRM_TIMEOUT
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_ATTACH_POLL=0.1 FM_TEST_BEAT_DELAY_SECS=12 \
+    "$WATCH_ARM" > "$armout" 2>"$dir/arm.err" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 250 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    grep -qF 'watcher: FAILED' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" \
+    || fail "macOS default did not confirm a first beat delayed 12s: $(cat "$armout") $(cat "$dir/arm.err")"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "macOS default reported FAILED for a live delayed first beat: $(cat "$armout")"
+  kill -TERM "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm macOS default confirms a first beat delayed past the old 10s budget"
+}
+
+test_arm_confirm_timeout_override_times_out_slow_start() {
+  local dir state fakebin armout armpid status
+  dir=$(make_case arm-confirm-override-timeout)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  /usr/bin/touch -t 200001010000 "$state/.last-watcher-beat"
+  install_beat_touch_fixture "$fakebin"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 FM_TEST_BEAT_DELAY_SECS=2 \
+    "$WATCH_ARM" > "$armout" 2>"$dir/arm.err" &
+  armpid=$!
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "short override did not fail a 2s delayed first beat (status $status): $(cat "$armout")"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
+    || fail "short override omitted the typed confirmation failure: $(cat "$armout")"
+  grep -q "reason=confirmation-timeout" "$state/.watch-cycle-exits.log" \
+    || fail "short override did not record confirmation-timeout: $(cat "$state/.watch-cycle-exits.log")"
+  pass "arm explicit confirm timeout still fails when the first beat misses the budget"
+}
+
+test_arm_confirms_delayed_first_beat_within_explicit_budget() {
+  local dir state fakebin armout armpid i
+  dir=$(make_case arm-confirm-explicit-budget)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  /usr/bin/touch -t 200001010000 "$state/.last-watcher-beat"
+  install_beat_touch_fixture "$fakebin"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=4 FM_TEST_BEAT_DELAY_SECS=2 \
+    "$WATCH_ARM" > "$armout" 2>"$dir/arm.err" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    grep -qF 'watcher: FAILED' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" \
+    || fail "explicit 4s budget did not confirm a 2s delayed first beat: $(cat "$armout") $(cat "$dir/arm.err")"
+  kill -TERM "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm confirms a delayed first beat that arrives inside an explicit budget"
+}
+
+test_arm_confirm_timeout_never_beat_still_fails() {
+  local dir state fakebin armout armpid status
+  dir=$(make_case arm-confirm-never-beat)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  /usr/bin/touch -t 200001010000 "$state/.last-watcher-beat"
+  install_beat_touch_fixture "$fakebin"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 FM_TEST_BEAT_NEVER=1 \
+    "$WATCH_ARM" > "$armout" 2>"$dir/arm.err" &
+  armpid=$!
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "never-beating watcher did not fail (status $status): $(cat "$armout")"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
+    || fail "never-beating watcher omitted the typed confirmation failure: $(cat "$armout")"
+  grep -q "reason=confirmation-timeout" "$state/.watch-cycle-exits.log" \
+    || fail "never-beating watcher did not record confirmation-timeout: $(cat "$state/.watch-cycle-exits.log")"
+  pass "arm still records confirmation-timeout when the first beat never arrives"
+}
+
+test_arm_confirm_timeout_defaults() {
+  local dir state got
+  dir=$(make_case arm-confirm-defaults)
+  state="$dir/state"
+  got=$(confirm_timeout_seconds_for darwin24.0 "$state") \
+    || fail "darwin default resolver failed"
+  [ "$got" = 30 ] || fail "darwin confirm default was $got, expected 30"
+  got=$(confirm_timeout_seconds_for linux-gnu "$state") \
+    || fail "linux default resolver failed"
+  [ "$got" = 10 ] || fail "linux confirm default was $got, expected 10"
+  got=$(confirm_timeout_seconds_for msys "$state") \
+    || fail "msys default resolver failed"
+  [ "$got" = 30 ] || fail "msys confirm default was $got, expected 30"
+  got=$(confirm_timeout_seconds_for darwin24.0 "$state" 1) \
+    || fail "explicit override resolver failed"
+  [ "$got" = 1 ] || fail "explicit confirm override was $got, expected 1"
+  pass "arm confirm timeout defaults to 30s on macOS and MSYS, 10s elsewhere, with env override"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1150,3 +1331,8 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_arm_macos_default_covers_delayed_first_beat
+test_arm_confirm_timeout_override_times_out_slow_start
+test_arm_confirms_delayed_first_beat_within_explicit_budget
+test_arm_confirm_timeout_never_beat_still_fails
+test_arm_confirm_timeout_defaults

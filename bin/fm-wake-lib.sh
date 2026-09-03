@@ -119,6 +119,25 @@ fm_watcher_lock_matches_pid() {
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
+# Seconds fm-watch-arm waits for a freshly forked watcher to lock and beat.
+# FM_ARM_CONFIRM_TIMEOUT wins when set. Otherwise macOS and Git Bash/MSYS use 30
+# so pre-lock migration plus the first beat can finish under ordinary scheduler
+# delay; other platforms use 10. A live child that never beats still fails when
+# this budget elapses; a child that exits earlier fails immediately.
+fm_arm_confirm_timeout_seconds() {
+  case "${FM_ARM_CONFIRM_TIMEOUT:-}" in
+    '')
+      case "${OSTYPE:-}" in
+        darwin*|msys*|mingw*|cygwin*) printf '30\n' ;;
+        *) printf '10\n' ;;
+      esac
+      ;;
+    *)
+      printf '%s\n' "$FM_ARM_CONFIRM_TIMEOUT"
+      ;;
+  esac
+}
+
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
