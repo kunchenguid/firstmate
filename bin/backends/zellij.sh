@@ -359,6 +359,25 @@ fm_backend_zellij_create_task() {  # <session> <label> <cwd>
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
+fm_backend_zellij_recover_task() {  # <session> <label>; 2 means absent
+  local session=$1 label=$2 title tabs matches count tab_id pane_id
+  fm_backend_zellij_session_exists "$session" || return 1
+  title=$(fm_backend_zellij_scoped_title "$label")
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
+  matches=$(printf '%s' "$tabs" | jq -r --arg want "$title" \
+    '.[]? | select(.name == $want) | .tab_id' 2>/dev/null) || return 1
+  count=$(printf '%s\n' "$matches" | grep -c '[^[:space:]]' || true)
+  case "$count" in
+    0) return 2 ;;
+    1) ;;
+    *) echo "error: multiple zellij tabs '$title' exist in session '$session'" >&2; return 1 ;;
+  esac
+  tab_id=${matches%%$'\n'*}
+  pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id")
+  [ -n "$pane_id" ] || return 1
+  printf '%s %s' "$tab_id" "$pane_id"
+}
+
 # fm_backend_zellij_parse_target: split "<session>:<pane_id>" on the FIRST
 # colon (the pane id is a bare integer with no embedded colon, so this is
 # simpler than herdr's equivalent but kept structurally parallel). Sets
@@ -470,10 +489,27 @@ fm_backend_zellij_send_key() {  # <target> <key> [expected-label]
 
 # fm_backend_zellij_send_text_line: send one line of TEXT then submit.
 fm_backend_zellij_send_text_line() {  # <target> <text> [expected-label]
-  fm_backend_zellij_send_literal "$1" "$2" "${3:-}" || return 1
+  fm_backend_zellij_send_literal "$1" "$2" "${3:-}" || return 3
   fm_backend_zellij_send_key "$1" Enter "${3:-}" && return 0
   fm_backend_zellij_send_key "$1" C-c "${3:-}" >/dev/null 2>&1 && return 1
   return 2
+}
+
+fm_backend_zellij_send_launch_line() {  # <target> <text> [expected-label]
+  fm_backend_zellij_target_ready "$1" "${3:-}" || return 1
+  fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action write-chars \
+    --pane-id "$FM_BACKEND_ZELLIJ_PANE" -- "$2"$'\n' >/dev/null 2>&1
+}
+
+fm_backend_zellij_passive_current_path() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} path
+  fm_backend_zellij_target_ready "$target" "$expected_label" || return 1
+  path=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null \
+    | jq -er --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
+      '[.[]? | select(.id == $p and .is_plugin == false)]
+       | select(length == 1) | .[0].pane_cwd
+       | select(type == "string" and startswith("/"))' 2>/dev/null) || return 1
+  printf '%s' "$path"
 }
 
 # fm_backend_zellij_capture: bounded plain-text pane capture. Mirrors
@@ -570,8 +606,11 @@ fm_backend_zellij_composer_observed_append() {  # <target> <before> <text> [expe
 fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} before
   before=$(fm_backend_zellij_composer_content "$target" "$expected_label") \
-    || { printf 'send-failed'; return 0; }
-  fm_backend_zellij_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
+    || { fm_backend_submit_unsent_verdict; return 0; }
+  fm_backend_submit_entering_evidence || { printf 'pending-unproven'; return 0; }
+  fm_backend_zellij_send_literal "$target" "$text" "$expected_label" \
+    || { fm_backend_submit_unsent_verdict; return 0; }
+  fm_backend_submit_typed_evidence || { printf 'pending-unproven'; return 0; }
   sleep "$settle"
   fm_backend_zellij_composer_observed_append "$target" "$before" "$text" "$expected_label" \
     || { printf 'send-failed'; return 0; }

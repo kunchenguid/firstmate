@@ -273,6 +273,7 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 Resolve the project independently for every request.
 An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the registry, work under way, and project code or README.
 Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
+When intake supplies or establishes a complete exact project or initiative, plan, stage, work-unit, and source-system relation, record it through [`bin/fm-work-identity.sh`](bin/fm-work-identity.sh) before generating the brief; otherwise keep the task explicitly unlinked, and never infer a relation or treat a label as identity ([`docs/work-identity.md`](docs/work-identity.md)).
 
 Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.
 Keep `local-only` work in the main home.

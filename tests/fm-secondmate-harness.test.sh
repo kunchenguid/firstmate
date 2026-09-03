@@ -639,10 +639,19 @@ make_launch_capturing_tmux() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_tty}"*) printf '\n'; exit 0 ;;
+  *"#{pane_current_command}"*)
+    if [ -e "${FM_FAKE_AGENT_MARKER:-/nonexistent}" ]; then printf 'pi\n'; else printf 'bash\n'; fi
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    [ ! -e "${FM_FAKE_AGENT_MARKER:-/nonexistent}" ] \
+      || printf 'fm-%s\n' "${FM_FAKE_TASK_ID:-}"
+    exit 0
+    ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
@@ -650,6 +659,13 @@ case "${1:-}" in
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        else
+          case "$a" in
+            *launch-execution*)
+              printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+              : > "$FM_FAKE_AGENT_MARKER"
+              ;;
+          esac
         fi
         prev=$a
       done
@@ -678,6 +694,7 @@ spawn_secondmate_capture() {
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_FAKE_TASK_ID="$id" FM_FAKE_AGENT_MARKER="$launchlog.agent" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
 }
 

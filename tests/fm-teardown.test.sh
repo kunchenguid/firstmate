@@ -188,6 +188,82 @@ write_meta() {
     "spawn_gen=teardown-test-task-x1"
 }
 
+write_spawn_endpoint_receipt() {  # <case-dir> <transaction>
+  local case_dir=$1 transaction=$2 home receipt
+  home=$(cd "$case_dir" && pwd -P)
+  receipt="$case_dir/state/task-x1.spawn-endpoint.json"
+  jq -n -S -c \
+    --arg home "$home" --arg transaction "$transaction" \
+    --arg project "$case_dir/project" --arg worktree "$case_dir/wt" '
+      {schema:"fm-spawn-endpoint.v1",phase:"launch-submitted",
+       binding:{home:$home,home_id:"main",task_id:"task-x1"},
+       transaction_id:$transaction,
+       instructions_sha256:"0000000000000000000000000000000000000000000000000000000000000000",
+       backend:"tmux",kind:"ship",project:$project,
+       endpoint:{label:"fm-task-x1",target:"firstmate:fm-task-x1",
+         details:{session:"firstmate",window_id:"firstmate:fm-task-x1"}},
+       worktree:$worktree}
+    ' > "$receipt" || fail "could not create endpoint receipt fixture"
+  chmod 600 "$receipt"
+}
+
+track_endpoint_teardown_resource_actions() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+: > "$case_dir/backend-resource-action"
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+: > "$case_dir/local-copy-resource-action"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+}
+
+race_teardown_endpoint_retirement() {  # <case-dir> <receipt>
+  local case_dir=$1 receipt=$2 real
+  real=$(command -v python3)
+  cat > "$case_dir/fakebin/python3" <<SH
+#!/usr/bin/env bash
+if [ "\${2:-}" = remove ] && [ "\${5:-}" = "$(basename -- "$receipt")" ] \
+   && [ ! -e "$case_dir/endpoint-retirement-raced" ]; then
+  : > "$case_dir/endpoint-retirement-raced"
+  printf '%s\\n' competing-endpoint-receipt > "$receipt"
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/python3"
+}
+
+configure_completed_dispatch() {
+  local case_dir task=task-x1 launch transaction binding hash
+  case_dir=$(cd "$1" && pwd -P)
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" "$task" firstmate --mode local-only >/dev/null \
+    || fail "dispatch fixture could not create a task brief"
+  launch="$case_dir/state/$task.launch-brief.md"
+  transaction=teardown-dispatch-transaction
+  binding=$(FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-work-identity.sh" dispatch-prepare "$task" \
+      --brief "$case_dir/data/$task/brief.md" --instructions-path "$launch" \
+      --transaction "$transaction") || fail "dispatch fixture could not prepare dispatch"
+  hash=$(printf '%s' "$binding" | jq -r '.instructions_sha256')
+  fm_write_meta "$case_dir/state/$task.meta" \
+    "window=firstmate:fm-$task" "endpoint_task_id=$task" \
+    "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "launch_brief=$launch" "launch_brief_sha256=$hash" \
+    "work_identity_dispatch_transaction=$transaction" "harness=codex" \
+    "kind=ship" "mode=local-only" "yolo=off" \
+    "work_identity_schema=fm-work-identity.v1" "work_identity_status=unlinked"
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-work-identity.sh" dispatch-commit "$task" \
+      --brief "$launch" --meta "$case_dir/state/$task.meta" \
+      --transaction "$transaction" \
+    || fail "dispatch fixture could not commit dispatch"
+}
+
 # Commit something on the worktree's task branch. Args: case_dir [message]
 wt_commit() {
   local case_dir=$1 msg=${2:-wt work}
@@ -583,6 +659,136 @@ test_local_only_fork_remote_allows() {
   ' "$case_dir/state/home-summary.json" >/dev/null \
     || fail "successful task teardown did not publish the task's removal from the home summary ledger"
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
+}
+
+test_malformed_dispatch_receipt_refuses_before_teardown_side_effects() {
+  local case_dir rc
+  case_dir=$(make_case malformed-dispatch-preflight)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/data/task-x1"
+  printf 'launch brief\n' > "$case_dir/state/task-x1.launch-brief.md"
+  printf '{}\n' > "$case_dir/data/task-x1/work-identity-dispatch.json"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_TREEHOUSE_LOG:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" FM_TEARDOWN_DISPATCH_RETIRE_HELD=task-x1 \
+    FM_TEST_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+    PATH="$case_dir/fakebin:$PATH" "$TEARDOWN" task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "malformed dispatch receipt should refuse teardown"
+  assert_contains "$(cat "$case_dir/stderr")" "work identity dispatch state is malformed" \
+    "teardown did not surface owner-backed dispatch receipt validation"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "malformed dispatch receipt was validated only after metadata deletion"
+  assert_present "$case_dir/state/task-x1.launch-brief.md" \
+    "malformed dispatch receipt allowed launch-instruction deletion"
+  assert_absent "$case_dir/treehouse.log" \
+    "malformed dispatch receipt allowed worktree return before refusal"
+  pass "teardown preflights dispatch ownership before destructive cleanup"
+}
+
+test_teardown_refuses_malformed_endpoint_receipt_before_cleanup() {
+  local case_dir receipt rc=0
+  case_dir=$(make_case malformed-endpoint-receipt)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'work_identity_dispatch_transaction=malformed-endpoint-tx' \
+    >> "$case_dir/state/task-x1.meta"
+  receipt="$case_dir/state/task-x1.spawn-endpoint.json"
+  printf '%s\n' malformed > "$receipt"
+  track_endpoint_teardown_resource_actions "$case_dir"
+
+  FM_HOME="$case_dir" FM_TEARDOWN_GUARD_DONE=1 run_teardown "$case_dir" --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "malformed endpoint receipt allowed teardown"
+  assert_contains "$(cat "$case_dir/stderr")" "spawn endpoint receipt is unsafe, malformed, or mismatched" \
+    "teardown did not identify the malformed endpoint receipt"
+  assert_present "$receipt" "malformed endpoint receipt was deleted"
+  assert_present "$case_dir/state/task-x1.meta" "malformed endpoint receipt allowed metadata cleanup"
+  assert_absent "$case_dir/backend-resource-action" \
+    "malformed endpoint receipt allowed backend cleanup"
+  assert_absent "$case_dir/local-copy-resource-action" \
+    "malformed endpoint receipt allowed worktree cleanup"
+  pass "teardown refuses malformed endpoint receipts before cleanup"
+}
+
+test_teardown_refuses_concurrent_endpoint_replacement() {
+  local case_dir receipt transaction rc=0
+  case_dir=$(make_case raced-endpoint-retirement)
+  write_meta "$case_dir" local-only ship
+  transaction=raced-endpoint-retirement-tx
+  printf 'work_identity_dispatch_transaction=%s\n' "$transaction" \
+    >> "$case_dir/state/task-x1.meta"
+  receipt="$case_dir/state/task-x1.spawn-endpoint.json"
+  write_spawn_endpoint_receipt "$case_dir" "$transaction"
+  track_endpoint_teardown_resource_actions "$case_dir"
+  race_teardown_endpoint_retirement "$case_dir" "$receipt"
+
+  FM_HOME="$case_dir" FM_TEARDOWN_GUARD_DONE=1 run_teardown "$case_dir" --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "concurrent endpoint replacement allowed teardown"
+  [ "$(cat "$receipt")" = competing-endpoint-receipt ] \
+    || fail "teardown changed the concurrent endpoint replacement"
+  assert_contains "$(cat "$case_dir/stderr")" "spawn endpoint receipt changed before teardown" \
+    "teardown did not identify the concurrent endpoint replacement"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "concurrent endpoint replacement allowed metadata cleanup"
+  assert_absent "$case_dir/backend-resource-action" \
+    "concurrent endpoint replacement allowed backend cleanup"
+  assert_absent "$case_dir/local-copy-resource-action" \
+    "concurrent endpoint replacement allowed worktree cleanup"
+  pass "teardown retires endpoint receipts conditionally before cleanup"
+}
+
+test_dispatch_receipt_commits_only_after_successful_teardown() {
+  local case_dir receipt quarantine rc=0
+  case_dir=$(make_case dispatch-retirement-commit)
+  configure_completed_dispatch "$case_dir"
+  receipt="$case_dir/data/task-x1/work-identity-dispatch.json"
+  quarantine="$case_dir/data/task-x1/.work-identity-dispatch.json.teardown-quarantine"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ ! -e "$receipt" ] || exit 8
+[ -f "$quarantine" ] || exit 9
+printf '%s\n' receipt-quarantined >> "$case_dir/treehouse.log"
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "failed treehouse return unexpectedly completed teardown"
+  assert_present "$case_dir/treehouse.log" \
+    "destructive teardown started without quarantining its exact dispatch receipt"
+  assert_present "$receipt" \
+    "failed teardown did not restore its quarantined dispatch receipt"
+  assert_absent "$quarantine" \
+    "failed teardown retained its quarantine after restoring the dispatch receipt"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "failed teardown removed task metadata"
+  assert_present "$case_dir/state/task-x1.launch-brief.md" \
+    "failed teardown removed launch instructions"
+
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  rc=0
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" >> "$case_dir/stdout" 2>> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "successful retry should complete dispatch retirement"
+  assert_absent "$receipt" \
+    "successful teardown retained its completed dispatch receipt"
+  pass "dispatch receipts commit retirement only after successful teardown"
 }
 
 test_teardown_closes_the_backlog_item_itself() {
@@ -1700,6 +1906,161 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
   done
 }
 
+configure_secondmate_child_dispatch() {  # <case-dir> <child-id>
+  local case_dir=$1 child=$2 home="$1/secondmate-home" launch transaction binding hash child_wt
+  home=$(cd "$home" && pwd -P)
+  child_wt="$case_dir/$child-wt"
+  rm -f -- "$home/state/$child.meta"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" "$child" firstmate --mode local-only >/dev/null \
+    || fail "child dispatch fixture could not create a task brief"
+  launch="$home/state/$child.launch-brief.md"
+  transaction="teardown-$child-dispatch"
+  binding=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-work-identity.sh" dispatch-prepare "$child" \
+      --brief "$home/data/$child/brief.md" --instructions-path "$launch" \
+      --transaction "$transaction") || fail "child dispatch fixture could not prepare dispatch"
+  hash=$(printf '%s' "$binding" | jq -r '.instructions_sha256')
+  fm_write_meta "$home/state/$child.meta" \
+    "window=firstmate:fm-$child" "endpoint_task_id=$child" \
+    "worktree=$child_wt" "project=$case_dir/project" \
+    "launch_brief=$launch" "launch_brief_sha256=$hash" \
+    "work_identity_dispatch_transaction=$transaction" "harness=codex" \
+    "kind=ship" "mode=local-only" "yolo=off" \
+    "work_identity_schema=fm-work-identity.v1" "work_identity_status=unlinked"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-work-identity.sh" dispatch-commit "$child" \
+      --brief "$launch" --meta "$home/state/$child.meta" \
+      --transaction "$transaction" \
+    || fail "child dispatch fixture could not commit dispatch"
+}
+
+test_forced_secondmate_teardown_cleans_authorized_children() {
+  local case_dir home child rc=0
+  case_dir=$(make_case authorized-child-cleanup)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  configure_secondmate_child_dispatch "$case_dir" child-a
+  : > "$case_dir/kill.log"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/kill.log"
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$3" >> "$case_dir/treehouse.log"
+rm -rf -- "\$3"
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "authorized child teardown should clean the full home: $(cat "$case_dir/stderr")"
+  for child in child-a child-b; do
+    assert_absent "$case_dir/$child-wt" "authorized child teardown orphaned $child's worktree"
+    assert_grep "fm-$child" "$case_dir/kill.log" \
+      "authorized child teardown did not close $child's endpoint"
+    assert_grep "$case_dir/$child-wt" "$case_dir/treehouse.log" \
+      "authorized child teardown did not return $child's worktree"
+  done
+  assert_absent "$home" "authorized child teardown retained the secondmate home"
+  pass "forced teardown cleans authorization-backed child inventory"
+}
+
+configure_secondmate_with_receipt_only_child() {  # <case-dir> <prepared|completed>
+  local case_dir=$1 receipt_state=$2 home="$1/secondmate-home" child=receipt-only-child
+  local launch transaction binding hash
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  home=$(cd "$home" && pwd -P)
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$child" firstmate --mode no-mistakes >/dev/null \
+    || fail "receipt-only fixture could not create a child brief"
+  launch="$home/state/$child.launch-brief.md"
+  transaction='receipt-only-transaction'
+  binding=$(FM_HOME="$home" "$ROOT/bin/fm-work-identity.sh" dispatch-prepare "$child" \
+    --brief "$home/data/$child/brief.md" --instructions-path "$launch" \
+    --transaction "$transaction") || fail "receipt-only fixture could not prepare dispatch"
+  [ "$receipt_state" = completed ] || return 0
+  hash=$(printf '%s' "$binding" | jq -r '.instructions_sha256')
+  fm_write_meta "$home/state/$child.meta" \
+    "window=firstmate:fm-$child" "endpoint_task_id=$child" \
+    "worktree=$case_dir/receipt-only-wt" "project=$case_dir/project" \
+    "launch_brief=$launch" "launch_brief_sha256=$hash" \
+    "work_identity_dispatch_transaction=$transaction" "harness=codex" \
+    "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "work_identity_schema=fm-work-identity.v1" "work_identity_status=unlinked"
+  FM_HOME="$home" "$ROOT/bin/fm-work-identity.sh" dispatch-commit "$child" \
+    --brief "$launch" --meta "$home/state/$child.meta" --transaction "$transaction" \
+    || fail "receipt-only fixture could not commit dispatch"
+  rm -f -- "$home/state/$child.meta" "$launch"
+}
+
+test_forced_secondmate_teardown_refuses_pre_metadata_dispatch_receipt() {
+  local case_dir home rc=0
+  case_dir=$(make_case receipt-only-prepared)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_receipt_only_child "$case_dir" prepared
+  home="$case_dir/secondmate-home"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "receipt-only prepared dispatch was deleted by forced teardown"
+  assert_grep "incomplete work identity dispatch" "$case_dir/stderr" \
+    "receipt-only prepared dispatch refusal did not come from the identity owner"
+  assert_present "$home/data/receipt-only-child/work-identity-dispatch.json" \
+    "forced teardown deleted a prepared receipt without metadata"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "receipt-only prepared dispatch refusal postdated parent mutation"
+  [ -d "$home" ] || fail "receipt-only prepared dispatch refusal removed the secondmate home"
+  pass "forced teardown refuses receipt-only prepared identity dispatches"
+}
+
+test_forced_secondmate_teardown_accepts_completed_receipt_only_home() {
+  local case_dir home rc=0
+  case_dir=$(make_case receipt-only-completed)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_receipt_only_child "$case_dir" completed
+  home="$case_dir/secondmate-home"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "completed receipt-only forced teardown should retire the whole home: $(cat "$case_dir/stderr")"
+  assert_absent "$home" "completed receipt-only forced teardown retained the secondmate home"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "completed receipt-only forced teardown failed after destructive home removal"
+  pass "forced teardown retires completed receipt-only homes exactly"
+}
+
+test_forced_secondmate_teardown_revalidates_authorized_receipt() {
+  local case_dir home receipt replacement root work_identity rc=0
+  case_dir=$(make_case receipt-authorization-change)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_receipt_only_child "$case_dir" completed
+  home="$case_dir/secondmate-home"
+  receipt="$home/data/receipt-only-child/work-identity-dispatch.json"
+  replacement="$case_dir/replacement-dispatch.json"
+  root=$ROOT
+  work_identity="$root/bin/fm-work-identity.sh"
+  printf '%s\n' '{}' > "$replacement"
+  # The single-quoted command is evaluated by the nested shell with these variables.
+  # shellcheck disable=SC2016
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    RECEIPT="$receipt" REPLACEMENT="$replacement" CASE_DIR="$case_dir" \
+    ROOT="$root" TEARDOWN="$TEARDOWN" \
+    "$work_identity" dispatch-retire-run receipt-only-child --whole-home -- \
+    bash -c '
+      rm -f -- "$RECEIPT"
+      ln -s -- "$REPLACEMENT" "$RECEIPT"
+      FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$CASE_DIR/state" \
+        FM_CONFIG_OVERRIDE="$CASE_DIR/config" PATH="$CASE_DIR/fakebin:$PATH" \
+        "$TEARDOWN" task-x1 --force
+    ' > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "changed whole-home dispatch authorization allowed forced teardown"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "changed whole-home dispatch authorization allowed parent metadata removal"
+  [ -d "$home" ] || fail "changed whole-home dispatch authorization allowed home removal"
+  [ -L "$receipt" ] || fail "changed whole-home dispatch receipt was removed before refusal"
+  pass "forced teardown binds whole-home authorization to the exact dispatch receipt"
+}
+
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
   local case_dir home lock ready release holder_pid rc waited=0 child
   case_dir=$(make_case descendant-locks)
@@ -2605,7 +2966,36 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+case "${FM_TEST_ONLY:-}" in
+  authorized-child-cleanup)
+    test_forced_secondmate_teardown_cleans_authorized_children
+    exit 0
+    ;;
+  dispatch-retirement)
+    test_malformed_dispatch_receipt_refuses_before_teardown_side_effects
+    test_teardown_refuses_malformed_endpoint_receipt_before_cleanup
+    test_teardown_refuses_concurrent_endpoint_replacement
+    test_dispatch_receipt_commits_only_after_successful_teardown
+    exit 0
+    ;;
+  review-fixes)
+    test_malformed_dispatch_receipt_refuses_before_teardown_side_effects
+    test_teardown_refuses_malformed_endpoint_receipt_before_cleanup
+    test_teardown_refuses_concurrent_endpoint_replacement
+    test_forced_secondmate_herdr_child_preflight_refuses_before_changes
+    test_forced_secondmate_teardown_refuses_pre_metadata_dispatch_receipt
+    test_forced_secondmate_teardown_accepts_completed_receipt_only_home
+    test_forced_secondmate_teardown_revalidates_authorized_receipt
+    test_forced_secondmate_teardown_cleans_authorized_children
+    exit 0
+    ;;
+esac
+
 test_local_only_fork_remote_allows
+test_malformed_dispatch_receipt_refuses_before_teardown_side_effects
+test_teardown_refuses_malformed_endpoint_receipt_before_cleanup
+test_teardown_refuses_concurrent_endpoint_replacement
+test_dispatch_receipt_commits_only_after_successful_teardown
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
@@ -2619,6 +3009,10 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
+test_forced_secondmate_teardown_refuses_pre_metadata_dispatch_receipt
+test_forced_secondmate_teardown_accepts_completed_receipt_only_home
+test_forced_secondmate_teardown_revalidates_authorized_receipt
+test_forced_secondmate_teardown_cleans_authorized_children
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed

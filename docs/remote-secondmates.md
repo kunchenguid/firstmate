@@ -107,7 +107,8 @@ These steps are never automated and are always reported rather than silently att
 - The first console login on that Mac, and automatic login in System Settings > Users & Groups when the machine runs headless and must come back on its own after a reboot.
 - FileVault, which holds a reboot at pre-boot authentication before any login session exists.
 - Installing any missing required tool that no safe wrapper can resolve.
-- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`.
+- The required remote tool set is `git`, `jq`, `python3`, Herdr protocol 14 or newer, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, or `grok`.
+  Kimi is unavailable for a remote secondmate; the [Herdr backend guide](herdr-backend.md) owns the prompt-receipt limitation.
 - Each worker runtime's own `/login`, and any keychain password prompt that login needs.
 
 Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.
@@ -212,12 +213,15 @@ Move already-judged queued work with the normal command:
 bin/fm-backlog-handoff.sh <id> <item-key>...
 ```
 
-For a remote route, `tasks-axi mv` first moves the dependency-closed set atomically from the primary backlog into `data/handoff/<id>.outbox.md`.
-The outbox is then copied to the remote handoff scratch directory and `fm-backlog-receive.sh` atomically ingests every destination-absent key under the remote backlog's own lock.
-After receipt, the helper sends a marked routed-work instruction through the recorded remote endpoint and removes the outbox only after that wake is confirmed.
-A failed wake leaves the remote backlog intact and the outbox available for `--resume-pending`; an unresolved send is reported without a blind resend.
+Linked and legacy-unlinked work keeps that exact status when ownership moves to the remote home.
+The `fm-work-identity.sh` header owns the source and destination binding plus all prepare, commit, refusal, and recovery mechanics.
+If that owner refuses the source relation, the primary backlog remains unchanged.
+`tasks-axi mv` moves the dependency-closed set atomically from the primary backlog into `data/handoff/<id>.outbox.md`.
+The outbox is copied to the remote handoff scratch directory, and `fm-backlog-receive.sh` atomically ingests every destination-absent key under the remote backlog's own lock.
+The helper sends one marked routed-work instruction through the recorded remote endpoint and removes the outbox only after backlog, exact identity ownership, and wake delivery converge.
+A failed or unresolved step leaves the outbox available for `--resume-pending` without a blind resend.
 Bootstrap retries pending outboxes and emits `SECONDMATE_HANDOFF:` only when one remains.
-There is no two-phase journal and no additional tasks-axi release requirement.
+The identity-owner state adds no tasks-axi release requirement and never mutates external systems or task lifecycle state.
 
 ## Sync, update, and retirement
 

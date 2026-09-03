@@ -136,7 +136,7 @@ cmd_route() {
 
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out herdr_session
+  local current meta out herdr_session recovery_receipt
 
   validate_id "$id"
   validate_home "$id"
@@ -151,21 +151,27 @@ cmd_launch() {
   case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
+  recovery_receipt="$CONTROL_STATE/$id.spawn-endpoint.json"
   if [ -f "$meta" ]; then
     remote_endpoint_require "$id"
     current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
-        print_route "$id"
-        return 0
+        if [ ! -e "$recovery_receipt" ] && [ ! -L "$recovery_receipt" ]; then
+          print_route "$id"
+          return 0
+        fi
         ;;
-      dead)
-        fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
-          || die "could not remove the confirmed agent-less endpoint"
-        ;;
+      dead) ;;
       missing) ;;
       *) die "remote endpoint state is $current; refusing duplicate launch" ;;
     esac
+  fi
+  [ "$harness" != kimi ] \
+    || die "remote Kimi secondmates cannot be launched or resumed because Herdr has no transaction-scoped prompt receipt"
+  if [ -f "$meta" ] && [ "$current" = dead ]; then
+    fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
+      || die "could not remove the confirmed agent-less endpoint"
   fi
   ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness" --backend "$selected_backend")
   [ "$model" = - ] || ARGS+=(--model "$model")
@@ -174,6 +180,7 @@ cmd_launch() {
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
+    FM_REMOTE_SECONDMATE_LAUNCH=1 \
     "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     die "remote host-local secondmate launch failed"

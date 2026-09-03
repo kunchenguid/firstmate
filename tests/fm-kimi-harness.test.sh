@@ -69,23 +69,44 @@ case "${1:-}" in
   send-keys)
     prev=
     literal=
+    run_shell=
     for arg in "$@"; do
-      if [ "$prev" = -l ]; then literal=$arg; break; fi
+      if [ "$prev" = -l ]; then literal=$arg; fi
+      if [ "$prev" = run-shell ]; then run_shell=$arg; fi
       prev=$arg
     done
     if [ -n "$literal" ]; then
       case "$literal" in
         *' --auto')
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          if [ "${FM_FAKE_MUTATE_BRIEF:-yes}" = yes ] && [ -n "${FM_FAKE_LAUNCH_BRIEF:-}" ]; then
+            printf 'mutated delayed kimi brief\n' > "$FM_FAKE_LAUNCH_BRIEF.replacement"
+            mv -f "$FM_FAKE_LAUNCH_BRIEF.replacement" "$FM_FAKE_LAUNCH_BRIEF"
+          fi
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
           ;;
         *)
+          if [ "${FM_FAKE_KILL_BEFORE_POINTER:-no}" = yes ] \
+             && [ ! -e "$FM_FAKE_KIMI_PRESEND_KILLED" ]; then
+            : > "$FM_FAKE_KIMI_PRESEND_KILLED"
+            kill -KILL "$PPID"
+            exit 0
+          fi
           printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
-          printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE"
+          [ -z "$run_shell" ] || sh -c "$run_shell"
+          if [ "${FM_FAKE_KILL_AFTER_POINTER:-no}" = yes ]; then
+            printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+            kill -KILL "$PPID"
+          else
+            printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE"
+          fi
           ;;
       esac
       exit 0
     fi
+    case "${4:-}" in
+      *'.launch-execution.'*) bash -c "$4" </dev/null >/dev/null 2>&1 & ;;
+    esac
     case " $* " in
       *' Enter '*)
         case "$state" in
@@ -132,7 +153,12 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
-  fm_fake_exit0 "$fakebin" kimi
+  cat > "$fakebin/kimi" <<'SH'
+#!/usr/bin/env bash
+printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+exec sleep 5
+SH
+  chmod +x "$fakebin/kimi"
   ln -s "$JQ_BIN" "$fakebin/jq"
   printf '%s\n' "$fakebin"
 }
@@ -169,8 +195,13 @@ run_spawn() {
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
+    FM_FAKE_KILL_AFTER_POINTER="${FM_FAKE_KILL_AFTER_POINTER:-no}" \
+    FM_FAKE_KILL_BEFORE_POINTER="${FM_FAKE_KILL_BEFORE_POINTER:-no}" \
+    FM_FAKE_KIMI_PRESEND_KILLED="$case_dir/kimi.presend-killed" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
+    FM_FAKE_LAUNCH_BRIEF="$home/state/$id.launch-brief.md" \
+    FM_FAKE_MUTATE_BRIEF="${FM_FAKE_MUTATE_BRIEF:-yes}" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
@@ -183,7 +214,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch input body meta task_tmp
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -204,10 +235,14 @@ test_kimi_launch_then_send_is_verified() {
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
 
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
-  pointer=$(cat "$CASE_DIR/pointer.log")
-  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
-    || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
+  input=$(cat "$CASE_DIR/pointer.log")
+  printf '%s' "$input" | "$ROOT/bin/fm-operational-input.sh" kind | grep -qx launch-brief \
+    || fail "kimi delivery was not typed as an immutable launch brief"
+  body=$(printf '%s' "$input" | "$ROOT/bin/fm-operational-input.sh" body)
+  [ "$body" = "brief for kimi" ] \
+    || fail "kimi did not receive the captured launch brief bytes: $body"
+  assert_grep 'mutated delayed kimi brief' "$HOME_DIR/state/$id.launch-brief.md" \
+    "Kimi delivery fixture did not replace the delayed brief path"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
@@ -220,6 +255,423 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+test_kimi_secondmate_commits_identity_only_after_delivery() {
+  local id rec sub out rc=0
+  id="kimi-secondmate-delivery-z9-$$"
+  rec=$(make_spawn_case secondmate-delivery "$id")
+  read_spawn_record "$rec"
+  sub="$CASE_DIR/secondmate-home"
+  mkdir -p "$sub/bin" "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf '%s\n' "$id" > "$sub/.fm-secondmate-home"
+  printf 'secondmate charter\n' > "$sub/data/charter.md"
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 FM_FAKE_PANE_PATH="$sub" \
+    TMUX='fake,1,0' FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    FM_FAKE_POINTER_LOG="$CASE_DIR/pointer.log" FM_FAKE_KIMI_STATE="$CASE_DIR/kimi.state" \
+    FM_FAKE_KIMI_SWALLOWED="$CASE_DIR/kimi.swallowed" FM_FAKE_KIMI_DELIVERY=no \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" FM_FAKE_BRIEF_REAL="$sub/data/charter.md" \
+    FM_FAKE_LAUNCH_BRIEF="$HOME_DIR/state/$id.launch-brief.md" \
+    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" "$SPAWN" "$id" "$sub" --harness kimi --secondmate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "unconfirmed Kimi secondmate delivery unexpectedly committed"
+  assert_contains "$out" "kimi launch brief delivery was not confirmed" \
+    "Kimi secondmate did not fail at delivery confirmation"
+  assert_absent "$HOME_DIR/data/$id/work-identity-unlinked-guard.json" \
+    "failed Kimi delivery permanently classified the secondmate task"
+  assert_present "$HOME_DIR/data/$id/work-identity-unlinked-reservation.json" \
+    "failed Kimi delivery lost its recoverable identity reservation"
+  jq -e '.phase == "launch-submitted"' "$HOME_DIR/state/$id.spawn-endpoint.json" >/dev/null \
+    || fail "failed Kimi delivery lost exact launch acceptance"
+  pass "Kimi secondmate identity commits only after confirmed brief delivery"
+}
+
+test_non_tmux_persistent_kimi_refuses_before_identity_reservation() {
+  local id rec sub out rc=0
+  id="kimi-non-tmux-secondmate-$$"
+  rec=$(make_spawn_case non-tmux-secondmate "$id")
+  read_spawn_record "$rec"
+  sub="$CASE_DIR/secondmate-home"
+  mkdir -p "$sub/bin" "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf '%s\n' "$id" > "$sub/.fm-secondmate-home"
+  printf 'secondmate charter\n' > "$sub/data/charter.md"
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" "$SPAWN" "$id" "$sub" \
+      --harness kimi --secondmate --backend zellij 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "non-tmux persistent Kimi spawn unexpectedly succeeded"
+  assert_contains "$out" "persistent Kimi secondmates require backend=tmux" \
+    "non-tmux persistent Kimi refusal did not identify its acceptance boundary"
+  assert_absent "$HOME_DIR/data/$id/work-identity-unlinked-reservation.json" \
+    "inapplicable Kimi backend published an identity reservation"
+  assert_absent "$HOME_DIR/data/$id/work-identity-unlinked-guard.json" \
+    "inapplicable Kimi backend permanently classified the task"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "inapplicable Kimi backend launched an agent"
+  rc=0
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 FM_REMOTE_SECONDMATE_LAUNCH=1 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" "$SPAWN" "$id" "$sub" \
+      --harness kimi --secondmate --backend herdr 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "remote Herdr Kimi spawn unexpectedly succeeded"
+  assert_contains "$out" "Herdr does not expose a transaction-scoped prompt receipt" \
+    "remote Herdr Kimi refusal did not identify its missing receipt"
+  assert_absent "$HOME_DIR/data/$id/work-identity-unlinked-reservation.json" \
+    "remote Herdr Kimi refusal published an identity reservation"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "remote Herdr Kimi refusal launched an agent"
+  pass "persistent Kimi rejects backends without atomic submission receipts"
+}
+
+test_kimi_interrupted_submit_never_retypes_ambiguous_input() {
+  local id rec sub out rc=0 lines
+  id="kimi-submit-interrupted-r4-$$"
+  rec=$(make_spawn_case interrupted-submit "$id")
+  read_spawn_record "$rec"
+  sub="$CASE_DIR/secondmate-home"
+  mkdir -p "$sub/bin" "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf '%s\n' "$id" > "$sub/.fm-secondmate-home"
+  printf 'secondmate charter\n' > "$sub/data/charter.md"
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 FM_FAKE_PANE_PATH="$sub" \
+    TMUX='fake,1,0' FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    FM_FAKE_POINTER_LOG="$CASE_DIR/pointer.log" FM_FAKE_KIMI_STATE="$CASE_DIR/kimi.state" \
+    FM_FAKE_KIMI_SWALLOWED="$CASE_DIR/kimi.swallowed" FM_FAKE_KILL_AFTER_POINTER=yes \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" FM_FAKE_BRIEF_REAL="$sub/data/charter.md" \
+    FM_FAKE_LAUNCH_BRIEF="$HOME_DIR/state/$id.launch-brief.md" \
+    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" "$SPAWN" "$id" "$sub" --harness kimi --secondmate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "interrupted Kimi submission unexpectedly committed"
+  rc=0
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 FM_FAKE_PANE_PATH="$sub" \
+    TMUX='fake,1,0' FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    FM_FAKE_POINTER_LOG="$CASE_DIR/pointer.log" FM_FAKE_KIMI_STATE="$CASE_DIR/kimi.state" \
+    FM_FAKE_KIMI_SWALLOWED="$CASE_DIR/kimi.swallowed" FM_FAKE_KILL_AFTER_POINTER=no \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" FM_FAKE_BRIEF_REAL="$sub/data/charter.md" \
+    FM_FAKE_LAUNCH_BRIEF="$HOME_DIR/state/$id.launch-brief.md" \
+    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" "$SPAWN" "$id" "$sub" --harness kimi --secondmate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "ambiguous Kimi submission unexpectedly reported success"
+  assert_contains "$out" "submission remains ambiguous" \
+    "Kimi recovery did not preserve an accepted-but-unrendered submission as ambiguous"
+  lines=$(wc -l < "$CASE_DIR/pointer.log" | tr -d ' ')
+  [ "$lines" -eq 1 ] || fail "Kimi recovery retyped ambiguous input $lines times"
+  assert_absent "$HOME_DIR/data/$id/work-identity-unlinked-guard.json" \
+    "ambiguous Kimi delivery permanently classified the secondmate task"
+  pass "Kimi recovery never retypes accepted or ambiguous launch input"
+}
+
+test_non_tmux_definitive_submit_failure_is_retryable() {
+  local evidence="$TMP_ROOT/non-tmux-submit-attempted" verdict
+  (
+    # shellcheck source=bin/backends/zellij.sh disable=SC1091
+    . "$ROOT/bin/backends/zellij.sh"
+    fm_backend_zellij_composer_content() { printf 'before'; }
+    fm_backend_zellij_send_literal() { return 1; }
+    export FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE="${evidence}.entering"
+    export FM_BACKEND_SUBMIT_TYPED_EVIDENCE_FILE="$evidence"
+    export FM_BACKEND_SUBMIT_TYPED_EVIDENCE_TOKEN=non-tmux-retry
+    verdict=$(fm_backend_zellij_send_text_submit target brief 1 0 0 label)
+    [ "$verdict" = unsent ] || fail "definitive non-tmux send failure was not retryable: $verdict"
+    assert_absent "$evidence" "definitive non-tmux send failure published accepted evidence"
+    assert_absent "${evidence}.entering" "definitive non-tmux send failure retained pre-send evidence"
+  )
+  pass "non-tmux definitive send failures remain retryable"
+}
+
+# Background ownership and recovery intentionally share inherited evidence paths.
+# shellcheck disable=SC2031
+test_non_tmux_submission_operation_survives_caller_interruption() {
+  local evidence="$TMP_ROOT/non-tmux-durable-attempt" invoked="$TMP_ROOT/non-tmux-durable-invoked"
+  local release="$TMP_ROOT/non-tmux-durable-release" caller out i=0
+  (
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_send_text_submit() {
+      touch "$invoked"
+      while [ ! -e "$release" ]; do sleep 0.01; done
+      printf 'empty'
+    }
+    fm_backend_send_text_submit_journaled "$evidence" durable-token \
+      zellij target brief 1 0 0 label >/dev/null
+  ) &
+  caller=$!
+  while [ ! -e "$invoked" ] || [ ! -e "${evidence}.operation-owner" ]; do
+    kill -0 "$caller" 2>/dev/null || fail "durable non-tmux submit caller exited before interruption"
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || fail "durable non-tmux submit operation did not start"
+    sleep 0.01
+  done
+  kill -KILL "$caller" 2>/dev/null || fail "could not interrupt non-tmux submit caller"
+  wait "$caller" 2>/dev/null || true
+  touch "$release"
+  i=0
+  while [ ! -e "${evidence}.operation-result" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || fail "durable non-tmux submit operation lost its result"
+    sleep 0.01
+  done
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_send_text_submit() { return 99; }
+    fm_backend_send_text_submit_journaled "$evidence" durable-token \
+      zellij target brief 1 0 0 label
+  ) || fail "durable non-tmux submit result was not recoverable"
+  [ "$out" = empty ] || fail "durable non-tmux submit recovered '$out' instead of empty"
+  pass "non-tmux submission survives interruption through backend-owned evidence"
+}
+
+# Command substitutions intentionally inject backend callbacks resolved after sourcing.
+# shellcheck disable=SC2031,SC2034,SC2100,SC2329
+test_non_tmux_submission_distinguishes_dead_presend_operation() {
+  local evidence="$TMP_ROOT/non-tmux-dead-presend" failed_evidence dead_pid out
+  (exit 0) &
+  dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  printf '%s:%s\n' "$dead_pid" durable-presend > "${evidence}.operation-owner"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_send_text_submit() { fail "dead pre-send operation invoked the backend"; }
+    fm_backend_send_text_submit_journaled "$evidence" durable-presend \
+      zellij target brief 1 0 0 label
+  ) || fail "dead pre-send submission was not recoverable"
+  [ "$out" = unsent ] || fail "dead pre-send submission recovered as '$out' instead of unsent"
+  printf '%s\n' durable-presend > "${evidence}.operation-started"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_send_text_submit() { fail "legacy pre-send operation invoked the backend"; }
+    fm_backend_send_text_submit_journaled "$evidence" durable-presend \
+      zellij target brief 1 0 0 label
+  ) || fail "legacy pre-send submission evidence was not recoverable"
+  [ "$out" = unsent ] \
+    || fail "legacy pre-send submission recovered as '$out' instead of unsent"
+  printf '%s\n' durable-presend > "${evidence}.entering"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_send_text_submit() { fail "dead pre-send operation invoked the backend"; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit_journaled "$evidence" durable-presend \
+      zellij target brief 1 0 0 label
+  ) || fail "dead entering submission evidence was not recoverable"
+  [ "$out" = ambiguous ] \
+    || fail "dead entering submission recovered as '$out' instead of ambiguous"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_send_text_submit() { fail "accepted dead operation invoked the backend"; }
+    fm_backend_composer_state() { printf 'pending'; }
+    fm_backend_send_text_submit_journaled "$evidence" durable-presend \
+      zellij target brief 1 0 0 label
+  ) || fail "accepted entering submission evidence was not recoverable"
+  [ "$out" = ambiguous ] \
+    || fail "accepted entering submission recovered as '$out' instead of ambiguous"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_send_text_submit() { fail "dead Herdr pre-send operation invoked the backend"; }
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_prompt_receipt_state() { printf 'unsent'; }
+    fm_backend_send_text_submit_journaled "$evidence" durable-presend \
+      herdr target brief 1 0 0 label
+  ) || fail "dead Herdr pre-send submission was not recoverable"
+  [ "$out" = unsent ] \
+    || fail "dead Herdr pre-send submission recovered as '$out' instead of unsent"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_send_text_submit() { fail "accepted Herdr operation invoked the backend"; }
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_prompt_receipt_state() { printf 'accepted'; }
+    fm_backend_send_text_submit_journaled "$evidence" durable-presend \
+      herdr target brief 1 0 0 label
+  ) || fail "accepted Herdr submission was not recoverable"
+  [ "$out" = accepted ] \
+    || fail "receipted Herdr submission recovered as '$out' instead of accepted"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source herdr || exit 1
+    fm_backend_herdr_cli() { printf '%s\n' 'FM_SUBMIT:durable-presend'; }
+    fm_backend_herdr_prompt_receipt_state session-a:pane-a durable-presend
+  ) || fail "Herdr interrupted-prompt recovery could not be inspected"
+  [ "$out" = unknown ] \
+    || fail "terminal output was accepted as a durable Herdr receipt: $out"
+  rm -f -- "$evidence" "${evidence}.entering" "${evidence}.operation-owner" \
+    "${evidence}.operation-started" "${evidence}.operation-result"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source herdr || exit 1
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=session-a
+      FM_BACKEND_HERDR_PANE=pane-a
+    }
+    fm_backend_herdr_target_ready() { return 0; }
+    fm_backend_herdr_cli() {
+      local arg previous='' token_value=''
+      printf '%s\n' "$*" >> "$TMP_ROOT/herdr-prompt.log"
+      case "$*" in
+        *" agent get "*)
+          printf '{"result":{"agent":{"agent_status":"idle","state_change_seq":%s,"tokens":{"fm_kimi_submit":"%s"}}}}\n' \
+            "$(cat "$TMP_ROOT/herdr-sequence")" "$(cat "$TMP_ROOT/herdr-token" 2>/dev/null || true)"
+          ;;
+        *" pane report-metadata "*" --token "*)
+          for arg in "$@"; do
+            [ "$previous" != --token ] || token_value=${arg#fm_kimi_submit=}
+            previous=$arg
+          done
+          printf '%s\n' "$token_value" > "$TMP_ROOT/herdr-token"
+          ;;
+        *" pane report-metadata "*" --clear-token "*) rm -f -- "$TMP_ROOT/herdr-token" ;;
+        *" agent prompt "*) printf '8\n' > "$TMP_ROOT/herdr-sequence" ;;
+      esac
+    }
+    printf '7\n' > "$TMP_ROOT/herdr-sequence"
+    FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE="${evidence}.entering" \
+      FM_BACKEND_SUBMIT_TYPED_EVIDENCE_FILE="$evidence" \
+      FM_BACKEND_SUBMIT_TYPED_EVIDENCE_TOKEN=durable-presend \
+      fm_backend_herdr_send_text_submit target brief 1 0 0 label
+  ) || fail "Herdr atomic prompt submission was not accepted"
+  [ "$out" = empty ] || fail "Herdr atomic prompt returned '$out' instead of empty"
+  [ "$(tr -d '\n' < "$evidence")" = durable-presend ] \
+    || fail "Herdr atomic prompt did not publish transaction-scoped acceptance"
+  assert_absent "${evidence}.entering" "Herdr accepted prompt retained pre-acceptance evidence"
+  assert_grep "session-a agent prompt pane-a brief --wait --until working" "$TMP_ROOT/herdr-prompt.log" \
+    "Herdr journaled submission did not use the state-sequenced agent prompt boundary"
+  assert_not_contains "$(cat "$TMP_ROOT/herdr-prompt.log")" "FM_SUBMIT:" \
+    "Herdr submission exposed a terminal-output marker as acceptance authority"
+  printf 'durable-presend\t7\n' > "${evidence}.entering.baseline"
+  printf 'durable-presend:7\n' > "$TMP_ROOT/herdr-token"
+  printf '8\n' > "$TMP_ROOT/herdr-sequence"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source herdr || exit 1
+    fm_backend_herdr_target_ready() {
+      FM_BACKEND_HERDR_SESSION=session-a
+      FM_BACKEND_HERDR_PANE=pane-a
+    }
+    fm_backend_herdr_cli() {
+      printf '{"result":{"agent":{"state_change_seq":%s,"tokens":{"fm_kimi_submit":"%s"}}}}\n' \
+        "$(cat "$TMP_ROOT/herdr-sequence")" "$(cat "$TMP_ROOT/herdr-token")"
+    }
+    FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE="${evidence}.entering" \
+      fm_backend_herdr_prompt_receipt_state session-a:pane-a durable-presend
+  ) || fail "Herdr accepted prompt sequence could not be reconciled"
+  [ "$out" = unknown ] \
+    || fail "an unrelated Herdr state transition recovered as '$out' instead of unknown"
+  printf '7\n' > "$TMP_ROOT/herdr-sequence"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source herdr || exit 1
+    fm_backend_herdr_target_ready() {
+      FM_BACKEND_HERDR_SESSION=session-a
+      FM_BACKEND_HERDR_PANE=pane-a
+    }
+    fm_backend_herdr_cli() {
+      printf '{"result":{"agent":{"state_change_seq":7,"tokens":{"fm_kimi_submit":"durable-presend:7"}}}}\n'
+    }
+    FM_BACKEND_HERDR_RECEIPT_POLLS=1 \
+      FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE="${evidence}.entering" \
+      fm_backend_herdr_prompt_receipt_state session-a:pane-a durable-presend
+  ) || fail "Herdr pre-send prompt sequence could not be reconciled"
+  [ "$out" = unknown ] || fail "Herdr pre-send prompt sequence recovered as '$out'"
+  failed_evidence="$TMP_ROOT/herdr-failed-prompt"
+  out=$(
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source herdr || exit 1
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=session-a
+      FM_BACKEND_HERDR_PANE=pane-a
+    }
+    fm_backend_herdr_target_ready() { return 0; }
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *" agent get "*)
+          printf '%s\n' '{"result":{"agent":{"agent_status":"idle","state_change_seq":7}}}'
+          ;;
+        *" pane report-metadata "*) return 0 ;;
+        *" agent prompt "*) return 1 ;;
+      esac
+    }
+    FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE="${failed_evidence}.entering" \
+      FM_BACKEND_SUBMIT_TYPED_EVIDENCE_FILE="$failed_evidence" \
+      FM_BACKEND_SUBMIT_TYPED_EVIDENCE_TOKEN=failed-prompt \
+      fm_backend_herdr_send_text_submit target brief 1 0 0 label
+  ) || fail "failed Herdr prompt could not be classified"
+  [ "$out" = pending-unproven ] \
+    || fail "failed Herdr prompt was classified as '$out' instead of pending-unproven"
+  assert_absent "$failed_evidence" "failed Herdr prompt published false acceptance evidence"
+  assert_present "${failed_evidence}.entering" "failed Herdr prompt lost ambiguous delivery evidence"
+  pass "Herdr submission fails closed without durable server acceptance"
+}
+
+test_kimi_presend_crash_retries_without_wedging_identity() {
+  local id rec sub out rc=0 lines
+  id="kimi-submit-presend-p5-$$"
+  rec=$(make_spawn_case presend-submit "$id")
+  read_spawn_record "$rec"
+  sub="$CASE_DIR/secondmate-home"
+  mkdir -p "$sub/bin" "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf '%s\n' "$id" > "$sub/.fm-secondmate-home"
+  printf 'secondmate charter\n' > "$sub/data/charter.md"
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 FM_FAKE_PANE_PATH="$sub" \
+    TMUX='fake,1,0' FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    FM_FAKE_POINTER_LOG="$CASE_DIR/pointer.log" FM_FAKE_KIMI_STATE="$CASE_DIR/kimi.state" \
+    FM_FAKE_KIMI_SWALLOWED="$CASE_DIR/kimi.swallowed" FM_FAKE_KILL_BEFORE_POINTER=yes \
+    FM_FAKE_KIMI_PRESEND_KILLED="$CASE_DIR/kimi.presend-killed" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" FM_FAKE_BRIEF_REAL="$sub/data/charter.md" \
+    FM_FAKE_LAUNCH_BRIEF="$HOME_DIR/state/$id.launch-brief.md" \
+    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    FM_KIMI_SUBMISSION_POLLS=2 FM_KIMI_SUBMISSION_INTERVAL=0 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" "$SPAWN" "$id" "$sub" --harness kimi --secondmate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "pre-send Kimi interruption unexpectedly committed"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "pre-send Kimi interruption typed the launch brief"
+  assert_absent "$HOME_DIR/data/$id/work-identity-unlinked-guard.json" \
+    "pre-send Kimi interruption permanently classified the secondmate task"
+  rc=0
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 FM_FAKE_PANE_PATH="$sub" \
+    TMUX='fake,1,0' FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    FM_FAKE_POINTER_LOG="$CASE_DIR/pointer.log" FM_FAKE_KIMI_STATE="$CASE_DIR/kimi.state" \
+    FM_FAKE_KIMI_SWALLOWED="$CASE_DIR/kimi.swallowed" FM_FAKE_KILL_BEFORE_POINTER=yes \
+    FM_FAKE_KIMI_PRESEND_KILLED="$CASE_DIR/kimi.presend-killed" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" FM_FAKE_BRIEF_REAL="$sub/data/charter.md" \
+    FM_FAKE_LAUNCH_BRIEF="$HOME_DIR/state/$id.launch-brief.md" \
+    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    FM_KIMI_SUBMISSION_POLLS=20 FM_KIMI_SUBMISSION_INTERVAL=0 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" "$SPAWN" "$id" "$sub" --harness kimi --secondmate 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "pre-send Kimi interruption did not recover: $out"
+  lines=$(wc -l < "$CASE_DIR/pointer.log" | tr -d ' ')
+  [ "$lines" -eq 1 ] || fail "pre-send Kimi recovery typed the launch brief $lines times"
+  assert_present "$HOME_DIR/data/$id/work-identity-unlinked-guard.json" \
+    "recovered Kimi secondmate did not commit identity after delivery"
+  pass "Kimi pre-send crashes retry exactly once without wedging identity"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -426,16 +878,17 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
   id=kimi-teardown-z8
   rec=$(make_spawn_case teardown "$id")
   read_spawn_record "$rec"
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  out=$(FM_FAKE_MUTATE_BRIEF=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "Kimi spawn should succeed before teardown"
   token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-kimi-turnend")
 
-  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "Kimi teardown failed"
+    "$TEARDOWN" "$id" --force 2>&1) || fail "Kimi teardown failed: $out"
   assert_absent "$WT_DIR/.fm-kimi-turnend" "Kimi token pointer survived teardown"
   assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "Kimi registry token survived teardown"
   assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "Kimi token state survived teardown"
@@ -487,11 +940,11 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
-  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+  assert_contains "$out" "kimi launch brief delivery was not confirmed" \
     "unconfirmed kimi delivery lacked a loud diagnostic"
-  assert_grep 'failed: kimi brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
+  assert_grep 'failed: kimi launch brief delivery was not confirmed' "$HOME_DIR/state/$id.status" \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
-  pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
+  pass "fm-spawn: kimi treats a silent launch-brief drop as a failed spawn"
 }
 
 test_kimi_readiness_gate_precedes_pointer() {
@@ -505,11 +958,11 @@ test_kimi_readiness_gate_precedes_pointer() {
   [ "$rc" -ne 0 ] || fail "kimi spawn without a ready signal should fail"
   assert_contains "$out" "kimi did not show a verified ready signal" \
     "kimi readiness failure lacked a loud diagnostic"
-  [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent before readiness"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi launch brief was sent before readiness"
   jq -e --arg id "$id" 'any(.endpoints[]; .id == $id)' \
     "$HOME_DIR/state/home-summary.json" >/dev/null \
     || fail "kimi readiness failure omitted its durable endpoint from the home summary"
-  pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
+  pass "fm-spawn: kimi never sends the launch brief before an observable ready signal"
 }
 
 test_kimi_detection_uses_ancestry_after_markers() {
@@ -668,7 +1121,27 @@ test_kimi_bordered_prompt_needs_no_override() {
   pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
 }
 
+case "${FM_TEST_ONLY:-}" in
+  non-tmux-submit-recovery)
+    test_non_tmux_definitive_submit_failure_is_retryable
+    test_non_tmux_submission_operation_survives_caller_interruption
+    test_non_tmux_submission_distinguishes_dead_presend_operation
+    exit 0
+    ;;
+  persistent-kimi-applicability)
+    test_non_tmux_persistent_kimi_refuses_before_identity_reservation
+    exit 0
+    ;;
+esac
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable
+test_kimi_secondmate_commits_identity_only_after_delivery
+test_non_tmux_persistent_kimi_refuses_before_identity_reservation
+test_kimi_interrupted_submit_never_retypes_ambiguous_input
+test_non_tmux_definitive_submit_failure_is_retryable
+test_non_tmux_submission_operation_survives_caller_interruption
+test_non_tmux_submission_distinguishes_dead_presend_operation
+test_kimi_presend_crash_retries_without_wedging_identity
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq

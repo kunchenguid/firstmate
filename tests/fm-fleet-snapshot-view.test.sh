@@ -624,6 +624,42 @@ test_view_renders_dead_secondmate_agent_status() {
   pass "fleet view renders secondmate agent liveness"
 }
 
+test_view_renders_unsampled_remote_home_unknown() {
+  local home fakebin out view remote_home
+  home=$(make_home unsampled-remote-home)
+  remote_home=/srv/firstmate/remote-home
+  fm_write_meta "$home/state/a-local.meta" \
+    "window=firstmate:fm-a-local" \
+    "project=$home/missing-local-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/missing-local-home"
+  fm_write_meta "$home/state/z-remote.meta" \
+    "window=firstmate:fm-z-remote" \
+    "project=/srv/firstmate" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$remote_home" \
+    "remote_host=remote.example" \
+    "remote_backend=tmux" \
+    "remote_target=firstmate:fm-z-remote"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SECONDMATES=1 "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .secondmate_current.truncated == 1
+      and (.secondmate_current.records | all(.id != "z-remote"))
+      and (.tasks[] | select(.id == "z-remote") | .paths.home.present == null)
+  ' >/dev/null || fail "remote secondmate was not left explicitly unknown when unsampled: $out"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SECONDMATES=1 "$VIEW")
+  assert_contains "$view" "$remote_home (unknown)" \
+    "view should render an unsampled remote home as unknown"
+  assert_not_contains "$view" "$remote_home (absent)" \
+    "view must not render unknown remote-home presence as absent"
+  pass "fleet view preserves unknown remote-home presence"
+}
+
 # A still-open decision must survive a LATER, UNRELATED terminal event on the same
 # append-only stream. This is the fmdev masking bug: last-event-wins read the trailing
 # `done` and reported pending_decision=false while a needs-decision was still open. The
@@ -912,3 +948,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_view_renders_unsampled_remote_home_unknown

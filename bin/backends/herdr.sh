@@ -100,6 +100,8 @@ FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL=16
 # presentation path uses one narrowly whitelisted raw-socket request after
 # verifying the exact method and parameter schema.
 FM_BACKEND_HERDR_MIN_WORKSPACE_MOVE_PROTOCOL=16
+FM_BACKEND_HERDR_MIN_PROMPT_PROTOCOL=17
+FM_BACKEND_HERDR_MIN_PROMPT_VERSION=0.7.5
 # The version floor for DEFAULT-ON presentation projection. Projection turns
 # every crewmate teardown into a workspace-emptying removal, and the focus-safe
 # removal plan can only avoid Herdr's focus-stealing explicit close while the
@@ -410,6 +412,36 @@ fm_backend_herdr_version_check() {
     return 1
   fi
   return 0
+}
+
+fm_backend_herdr_prompt_version_check() {  # [<session>]
+  local session=${1:-} status running client_protocol client_version server_protocol server_version
+  fm_backend_herdr_tool_check || return 1
+  [ -n "$session" ] || session=$(fm_backend_herdr_session)
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || {
+    echo "error: cannot verify Herdr prompt submission support for session $session" >&2
+    return 1
+  }
+  client_protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
+  client_version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
+  case "$client_protocol" in ''|*[!0-9]*) client_protocol=0 ;; esac
+  if [ "$client_protocol" -lt "$FM_BACKEND_HERDR_MIN_PROMPT_PROTOCOL" ]; then
+    echo "error: persistent Kimi delivery requires Herdr $FM_BACKEND_HERDR_MIN_PROMPT_VERSION or newer (protocol $FM_BACKEND_HERDR_MIN_PROMPT_PROTOCOL); client ${client_version:-unknown} reports protocol $client_protocol" >&2
+    return 1
+  fi
+  running=$(printf '%s' "$status" | jq -r 'if .server.running == true then "true" elif .server.running == false then "false" else "unknown" end' 2>/dev/null) || running=unknown
+  if [ "$running" = true ]; then
+    server_protocol=$(printf '%s' "$status" | jq -r '.server.protocol // empty' 2>/dev/null)
+    server_version=$(printf '%s' "$status" | jq -r '.server.version // empty' 2>/dev/null)
+    case "$server_protocol" in ''|*[!0-9]*) server_protocol=0 ;; esac
+    if [ "$server_protocol" -lt "$FM_BACKEND_HERDR_MIN_PROMPT_PROTOCOL" ]; then
+      echo "error: persistent Kimi delivery requires Herdr $FM_BACKEND_HERDR_MIN_PROMPT_VERSION or newer (protocol $FM_BACKEND_HERDR_MIN_PROMPT_PROTOCOL); session $session server ${server_version:-unknown} reports protocol $server_protocol" >&2
+      return 1
+    fi
+  elif [ "$running" != false ]; then
+    echo "error: cannot verify the Herdr server release for persistent Kimi delivery in session $session" >&2
+    return 1
+  fi
 }
 
 # fm_backend_herdr_session: resolve which named herdr session this normal
@@ -2546,6 +2578,10 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
+fm_backend_herdr_send_launch_line() {  # <target> <text>
+  fm_backend_herdr_send_text_line "$1" "$2"
+}
+
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
@@ -2553,6 +2589,69 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
 fm_backend_herdr_send_literal() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+}
+
+fm_backend_herdr_prompt_snapshot() {  # <target>
+  local out
+  fm_backend_herdr_target_ready "$1" || return 1
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get \
+    "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -er '
+    [.result.agent.state_change_seq, (.result.agent.agent_status // "")]
+    | select((.[0] | type) == "number" and .[0] >= 0)
+    | @tsv
+  ' 2>/dev/null
+}
+
+fm_backend_herdr_prompt_receipt_state() {  # <target> <token>
+  printf 'unknown'
+}
+
+fm_backend_herdr_prompt_baseline_publish() {  # <target> <token>
+  local target=$1 token=$2 snapshot sequence status baseline_file tmp
+  baseline_file=${FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE:-}.baseline
+  [ -n "${FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE:-}" ] || return 1
+  snapshot=$(fm_backend_herdr_prompt_snapshot "$target") || return 1
+  IFS=$'\t' read -r sequence status <<EOF
+$snapshot
+EOF
+  case "$sequence" in ''|*[!0-9]*) return 1 ;; esac
+  case "$status" in idle|done|blocked) ;; *) return 1 ;; esac
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane report-metadata \
+    "$FM_BACKEND_HERDR_PANE" --source firstmate-kimi-submit \
+    --token "fm_kimi_submit=$token:$sequence" >/dev/null 2>&1 || return 1
+  tmp="${baseline_file}.tmp.${BASHPID:-$$}"
+  if ! (umask 077; printf '%s\t%s\n' "$token" "$sequence" > "$tmp") \
+    || ! chmod 600 "$tmp" || ! mv -- "$tmp" "$baseline_file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_backend_herdr_prompt_receipt_clear() {  # <target>
+  fm_backend_herdr_parse_target "$1" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane report-metadata \
+    "$FM_BACKEND_HERDR_PANE" --source firstmate-kimi-submit \
+    --clear-token fm_kimi_submit >/dev/null 2>&1
+}
+
+fm_backend_herdr_submit_journaled_prompt() {  # <target> <text>
+  local target=$1 text=$2 token=${FM_BACKEND_SUBMIT_TYPED_EVIDENCE_TOKEN:-}
+  [ -n "$token" ] || { printf 'pending-unproven'; return 0; }
+  fm_backend_herdr_prompt_baseline_publish "$target" "$token" \
+    || { fm_backend_submit_unsent_verdict; return 0; }
+  fm_backend_submit_entering_evidence || { printf 'pending-unproven'; return 0; }
+  if ! fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent prompt \
+    "$FM_BACKEND_HERDR_PANE" "$text" --wait --until working \
+    --timeout "${FM_BACKEND_HERDR_PROMPT_TIMEOUT_MS:-5000}" >/dev/null 2>&1; then
+    printf 'pending-unproven'
+    return 0
+  fi
+  fm_backend_submit_typed_evidence || { printf 'pending-unproven'; return 0; }
+  fm_backend_herdr_prompt_receipt_clear "$target" || true
+  [ -z "${FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE:-}" ] \
+    || rm -f -- "${FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE}.baseline"
+  printf 'empty'
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
@@ -2790,8 +2889,15 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
-  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
+  fm_backend_herdr_parse_target "$target" || { fm_backend_submit_unsent_verdict; return 0; }
+  if [ -n "${FM_BACKEND_SUBMIT_TYPED_EVIDENCE_FILE:-}" ]; then
+    fm_backend_herdr_submit_journaled_prompt "$target" "$text"
+    return
+  fi
+  fm_backend_submit_entering_evidence || { printf 'pending-unproven'; return 0; }
+  fm_backend_herdr_send_literal "$target" "$text" \
+    || { fm_backend_submit_unsent_verdict; return 0; }
+  fm_backend_submit_typed_evidence || { printf 'pending-unproven'; return 0; }
   sleep "$settle"
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")

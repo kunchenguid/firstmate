@@ -92,6 +92,7 @@ A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - h
 `bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`, which stays a bare adapter name.
 For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
 For a local route, an explicit per-spawn `--harness` flag, positional harness arg, or raw launch command starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
+A local raw secondmate launch is limited to one simple executable command; compounds, pipelines, substitutions, and redirections are not a verifiable persistent process boundary.
 A remote route accepts only a verified harness adapter and refuses a raw launch command at the host boundary.
 When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` flag always wins over the file's token for that axis.
 Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
@@ -187,12 +188,14 @@ bin/fm-backlog-handoff.sh <secondmate-id> <item-key>...
 
 After seeding, run this handoff for the new secondmate's in-scope queued items.
 For an existing or inherited domain, complete record intake first so no already-shipped plan row is handed off as open work.
+Before either placement moves a linked or legacy-unlinked backlog row, the helper invokes `fm-work-identity.sh` to preserve that exact status under the destination home identity.
+The `fm-work-identity.sh` and `fm-backlog-handoff.sh` headers own the prepare, commit, and recovery mechanics rather than this skill.
 For a local route, the helper resolves and validates the secondmate home from `data/secondmates.md`, then delegates the item move to `tasks-axi mv` (the single owner of the backlog format), which moves each named item - and a whole connected set, blocker plus dependents, atomically - from the main `data/backlog.md` into the secondmate home's `data/backlog.md`.
-For a remote route, the same helper first moves the dependency-closed set atomically from the main backlog into `data/handoff/<id>.outbox.md`, then transfers that backlog-format outbox through `fm-on.sh` and lets the remote home's `fm-backlog-receive.sh` move every not-already-present key under the destination lock.
-After a new local placement or a remote outbox receipt becomes durable, the helper sends one marked routed-work instruction through the receiving secondmate's recorded endpoint; missing or failed delivery makes the command fail loudly with the moved work intact, and the same handoff command retries known-undelivered wake intent without moving an already-present item again.
+For a remote route, the same helper moves the dependency-closed set atomically from the main backlog into `data/handoff/<id>.outbox.md`, transfers that backlog-format outbox through `fm-on.sh`, and lets the remote home's `fm-backlog-receive.sh` move every not-already-present key under the destination lock.
+After a new local or remote handoff becomes durable, the helper sends one marked routed-work instruction through the receiving secondmate's recorded endpoint; missing or failed delivery makes the command fail loudly with the moved work intact, and the same handoff command retries known-undelivered wake intent without moving an already-present item again.
 An unresolved delivery attempt is never blindly resent.
-For a remote route, the outbox remains until both backlog receipt and receiver wake are confirmed; `--resume-pending` retries unfinished outboxes, while the script header owns its stable wake-correlation recovery state.
-There is no two-phase handoff journal and no tasks-axi release beyond the already-required atomic `mv` capability.
+For a remote route, the outbox remains until the helper confirms backlog, exact identity ownership, and receiver-wake convergence; `--resume-pending` revalidates and retries that retained work.
+The identity-owner state adds no tasks-axi release beyond the already-required atomic `mv` capability and is not a second backlog journal.
 Bootstrap retries pending outboxes when mutation is authorized and emits `SECONDMATE_HANDOFF:` for any that remain.
 This delegated route remains required when `config/backlog-backend=manual`, which controls only routine firstmate backlog edits.
 It moves each queued item's whole block - the `- [ ] <id> ...` header plus every following two-or-more-space-indented body line and blank separator, up to the next item or column-0 section heading - byte-exact under the same section, treating an indented `## ...` line as body rather than a section boundary, so neither the header nor its body is duplicated or orphaned.

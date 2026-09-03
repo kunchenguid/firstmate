@@ -747,6 +747,10 @@ extract_item_block() {
   ' "$file"
 }
 
+file_link_count() {
+  if [ "$(uname -s)" = Darwin ]; then stat -f '%l' "$1"; else stat -c '%h' "$1"; fi
+}
+
 assert_block_equals() {
   local label=$1 expected=$2 actual=$3
   if [ "$expected" != "$actual" ]; then
@@ -1302,6 +1306,112 @@ EOF
 
 # An entry that genuinely lacks (home: ...) must still fail cleanly (empty parse
 # surfaces as "has no home"), not succeed or mis-parse prose.
+test_same_id_destination_requires_exact_handoff_receipt() {
+  local home="$TMP_ROOT/same-id-main" sub="$TMP_ROOT/same-id-sub" out rc=0
+  setup_homes "$home" "$sub"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] colliding-task - source work that must remain (repo: alpha)
+  exact source body
+
+## Done
+EOF
+  cat > "$sub/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] colliding-task - unrelated destination work (repo: beta)
+  unrelated destination body
+
+## Done
+EOF
+  cp "$home/data/backlog.md" "$home/source.before"
+  cp "$sub/data/backlog.md" "$sub/destination.before"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design colliding-task 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "same-id destination row was accepted without an exact handoff receipt"
+  cmp -s "$home/source.before" "$home/data/backlog.md" \
+    || fail "same-id destination conflict removed or changed source work"
+  cmp -s "$sub/destination.before" "$sub/data/backlog.md" \
+    || fail "same-id destination conflict changed unrelated destination work"
+  assert_absent "$home/data/colliding-task/work-identity-handoff-source.json" \
+    "same-id destination conflict retained source ownership preparation"
+  assert_absent "$sub/data/colliding-task/work-identity-handoff-target.json" \
+    "same-id destination conflict retained target ownership preparation"
+  assert_contains "$out" "same-ID source and destination rows with different content" \
+    "same-id destination conflict did not fail before identity preparation"
+  pass "same-id destination rows require an exact transferred-content receipt"
+}
+
+test_scaffold_parent_swap_refuses_without_external_write() {
+  local home="$TMP_ROOT/scaffold-race-main" sub="$TMP_ROOT/scaffold-race-sub"
+  local outside="$TMP_ROOT/scaffold-race-outside" fakebin="$TMP_ROOT/scaffold-race-bin"
+  local real_cat sub_abs out rc=0
+  setup_homes "$home" "$sub"
+  sub_abs=$(cd "$sub" && pwd -P)
+  mkdir -p "$outside" "$fakebin"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] scaffold-race-item - must remain at source (repo: alpha)
+
+## Done
+EOF
+  real_cat=$(command -v cat)
+  cat > "$fakebin/cat" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "$sub_abs/.fm-secondmate-home" ]; then
+  "$real_cat" "\$1"
+  mv "$sub/data" "$sub/data.original"
+  ln -s "$outside" "$sub/data"
+  exit 0
+fi
+exec "$real_cat" "\$@"
+EOF
+  chmod +x "$fakebin/cat"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-backlog-handoff.sh" design scaffold-race-item 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "handoff followed a destination data-directory swap"
+  assert_contains "$out" "could not anchor destination data directory" \
+    "destination data-directory swap did not fail at the anchored owner boundary"
+  assert_absent "$outside/backlog.md" \
+    "destination data-directory swap published a scaffold outside the validated home"
+  assert_grep 'scaffold-race-item' "$home/data/backlog.md" \
+    "destination data-directory swap changed the source backlog"
+  pass "handoff scaffold stays anchored across a destination parent swap"
+}
+
+test_scaffold_publication_recovers_retained_hardlink() {
+  local home="$TMP_ROOT/scaffold-recovery-main" sub="$TMP_ROOT/scaffold-recovery-sub"
+  local staging
+  setup_homes "$home" "$sub"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] scaffold-recovery-item - must move exactly once (repo: alpha)
+
+## Done
+EOF
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$sub/data/backlog.md"
+  staging="$sub/data/.backlog.md.scaffold-publishing"
+  ln "$sub/data/backlog.md" "$staging"
+
+  local out rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design scaffold-recovery-item 2>&1) || rc=$?
+  assert_absent "$staging" "recovered scaffold retained its publication hardlink"
+  [ "$(file_link_count "$sub/data/backlog.md")" = 1 ] \
+    || fail "recovered destination backlog remained hardlinked"
+  if [ "$rc" -eq 0 ]; then
+    assert_grep 'scaffold-recovery-item' "$sub/data/backlog.md" \
+      "recovered destination did not receive the handed-off work"
+    assert_no_grep 'scaffold-recovery-item' "$home/data/backlog.md" \
+      "recovered handoff retained source work"
+  else
+    assert_contains "$out" "compatible tasks-axi" \
+      "handoff failed after scaffold recovery for an unexpected reason"
+    assert_grep 'scaffold-recovery-item' "$home/data/backlog.md" \
+      "dependency refusal changed source work after scaffold recovery"
+  fi
+  pass "handoff recovers interrupted scaffold publication without hardlinks"
+}
+
 test_registry_home_missing_field_fails_cleanly() {
   local home="$TMP_ROOT/reg-nohome-main"
   local sub="$TMP_ROOT/reg-nohome-sub"
@@ -1332,6 +1442,18 @@ EOF
   pass "registry entry without (home: ...) fails cleanly with has no home"
 }
 
+case "${FM_TEST_ONLY:-}" in
+  scaffold-parent-swap) test_scaffold_parent_swap_refuses_without_external_write ;;
+  scaffold-publication-recovery) test_scaffold_publication_recovers_retained_hardlink ;;
+  same-id-conflict) test_same_id_destination_requires_exact_handoff_receipt ;;
+  '') ;;
+  *) fail "unknown FM_TEST_ONLY selector: $FM_TEST_ONLY" ;;
+esac
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  echo "ALL TESTS PASSED"
+  exit 0
+fi
+
 test_handoff_wakes_live_local_receiver
 test_failed_wake_retries_when_the_item_is_already_present
 test_known_receiver_failure_remains_retryable_after_grace
@@ -1354,6 +1476,9 @@ test_noncanonical_indented_continuations_refuse_without_changes
 test_indented_heading_is_not_section_boundary
 test_registry_home_with_pre_home_parentheses
 test_registry_home_missing_field_fails_cleanly
+test_scaffold_parent_swap_refuses_without_external_write
+test_scaffold_publication_recovers_retained_hardlink
+test_same_id_destination_requires_exact_handoff_receipt
 test_handoff_warns_when_a_moved_item_still_owes_a_public_reply
 test_handoff_is_silent_about_public_commitments_without_the_relay
 

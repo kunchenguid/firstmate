@@ -75,7 +75,7 @@ case "${1:-}" in
           printf 'zsh' > "$D/command"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
-        *'encode launch-brief'*)
+        *'FIRSTMATE_OP: v1 launch-brief:'*)
           cat "$D/becomes" > "$D/command"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
@@ -303,8 +303,42 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   [ "$(journal_field "$dir" rl1 phase)" = complete ] \
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
-  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  assert_grep "FIRSTMATE_OP: v1 launch-brief:" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_relaunch_rebinds_changed_instructions_after_validating_prior_metadata() {
+  local dir out rc snapshot old_hash new_hash
+  dir=$(new_case identity-bound rl35)
+  add_ship_task "$dir" rl35 claude
+  snapshot="$dir/home/state/rl35.launch-brief.md"
+  cp "$dir/home/data/rl35/brief.md" "$snapshot"
+  if command -v shasum >/dev/null 2>&1; then
+    old_hash=$(shasum -a 256 "$snapshot" | awk '{print $1}')
+  else
+    old_hash=$(sha256sum "$snapshot" | awk '{print $1}')
+  fi
+  {
+    printf 'launch_brief=%s\n' "$snapshot"
+    printf 'launch_brief_sha256=%s\n' "$old_hash"
+    printf '%s\n' 'work_identity_schema=fm-work-identity.v1'
+    printf '%s\n' 'work_identity_status=unlinked'
+  } >> "$dir/home/state/rl35.meta"
+
+  out=$(run_control "$dir" rl35 relaunch --note "continue with the rebound instructions"); rc=$?
+  expect_code 0 "$rc" "a metadata-bound relaunch should authorize its progress-note transition"$'\n'"$out"
+  new_hash=$(meta_field "$dir" rl35 launch_brief_sha256)
+  [ -n "$new_hash" ] && [ "$new_hash" != "$old_hash" ] \
+    || fail "relaunch did not bind the changed progress-note instructions"
+  assert_grep 'continue with the rebound instructions' "$snapshot" \
+    "the rebound launch snapshot lost the required progress note"
+  [ "$(meta_field "$dir" rl35 work_identity_status)" = unlinked ] \
+    || fail "relaunch changed the task's explicit work identity status"
+  jq -e --arg hash "$new_hash" \
+    '.state == "completed" and .instructions.sha256 == $hash' \
+    "$dir/home/data/rl35/work-identity-dispatch.json" >/dev/null \
+    || fail "relaunch did not complete the owner-managed metadata binding"
+  pass "fm-control relaunch: changed instructions replace a validated prior metadata binding"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -619,7 +653,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
   assert_contains "$out" "could not retire claude wiring" \
     "the failure should identify prior wiring cleanup"
   [ -e "$hook" ] || fail "the fixture should retain the undeletable prior hook"
-  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+  assert_no_grep "FIRSTMATE_OP: v1 launch-brief:" "$dir/fake/literal" \
     "replacement launch must not be armed after wiring cleanup fails"
   [ "$(journal_field "$dir" rl29 phase)" = failed:launching ] \
     || fail "the transaction should record the partial launch failure"
@@ -1478,6 +1512,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_rebinds_changed_instructions_after_validating_prior_metadata
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context

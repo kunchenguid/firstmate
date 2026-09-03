@@ -33,6 +33,20 @@ SH
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
+  mv "$fakebin/tmux" "$fakebin/tmux-real"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = send-keys ] && [ "${FM_TEST_FAIL_LAUNCH_LITERAL:-0}" = 1 ]; then
+  prev=
+  for arg in "$@"; do
+    [ "$prev" != -l ] || exit 91
+    prev=$arg
+  done
+fi
+exec "$(dirname "$0")/tmux-real" "$@"
+SH
+  chmod +x "$fakebin/tmux"
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -95,6 +109,7 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_TEST_FAIL_LAUNCH_LITERAL="${FM_TEST_FAIL_LAUNCH_LITERAL:-0}" \
     GROK_HOME="$home/grok-home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
@@ -131,8 +146,11 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions"
+  assert_contains "$launch" "$expected" \
+    "no-profile claude launch did not use the canonical launch kind"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" \
+    "no-profile claude launch lost the captured typed instructions"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
@@ -176,8 +194,10 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$id/brief.md'" \
-    "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" \
+    "relative FM_DATA_OVERRIDE lost the captured launch instructions"
+  assert_not_contains "$launch" "$home_real/data/$id/brief.md" \
+    "captured launch instructions still exposed a mutable cross-process brief path"
   pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
 
@@ -205,8 +225,10 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
     "relative FM_HOME leaked into Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$relative_id/brief.md'" \
-    "relative FM_HOME leaked into the default cross-process brief path"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" \
+    "relative FM_HOME lost the captured launch instructions"
+  assert_not_contains "$launch" "$home_real/data/$relative_id/brief.md" \
+    "relative FM_HOME left a mutable cross-process brief path"
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
@@ -225,8 +247,10 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$absolute_id/brief.md'" \
-    "absolute FM_HOME spelling changed in the default cross-process brief path"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" \
+    "absolute FM_HOME lost the captured launch instructions"
+  assert_not_contains "$launch" "$linked_home/data/$absolute_id/brief.md" \
+    "absolute FM_HOME left a mutable cross-process brief path"
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
 
@@ -253,8 +277,10 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
     "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/brief.md'" \
-    "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" \
+    "absolute FM_DATA_OVERRIDE lost the captured launch instructions"
+  assert_not_contains "$launch" "$linked_home/data/$id/brief.md" \
+    "absolute FM_DATA_OVERRIDE left a mutable cross-process brief path"
   pass "absolute override spellings are preserved in spawn launch paths"
 }
 
@@ -462,8 +488,10 @@ test_grok_omits_invalid_max_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
-    "grok launch did not preserve the model flag and typed brief when max effort was omitted"
+  assert_contains "$launch" "grok --always-approve --model 'grok-4'" \
+    "grok launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" \
+    "grok launch lost the captured typed brief when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported max reasoning effort"
@@ -481,8 +509,10 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
-    "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
+  assert_contains "$launch" "grok --always-approve --model 'grok-4'" \
+    "grok launch did not preserve the model flag when xhigh effort was omitted"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" \
+    "grok launch lost the captured typed brief when xhigh effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported xhigh reasoning effort"
@@ -514,7 +544,7 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   assert_not_contains "$launch" " -w " "cursor launch must never allocate a second worktree"
   # An inherited CLAUDECODE would otherwise outrank cursor's own marker.
   assert_contains "$launch" "env -u CLAUDECODE" "cursor launch must clear foreign primary markers"
-  assert_contains "$launch" "encode launch-brief" "cursor launch did not deliver the brief positionally"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" "cursor launch did not deliver the captured brief positionally"
   assert_not_contains "$launch" "--effort" "cursor launch must not invent a separate effort flag"
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
   assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
@@ -593,8 +623,8 @@ test_pi_threads_model_and_max_effort() {
     "pi launch did not force the regular TUI while threading the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
-  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
-    "pi launch lost the canonical typed launch-brief envelope"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" \
+    "pi launch lost the captured typed launch-brief envelope"
   pass "pi receives --model and --thinking max profile flags"
 }
 
@@ -613,8 +643,8 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi-signed launch did not force the regular TUI with Pi's model, thinking, and extension semantics"
-  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
-    "pi-signed launch lost the canonical typed launch-brief envelope"
+  assert_contains "$launch" "FIRSTMATE_OP: v1 launch-brief:" \
+    "pi-signed launch lost the captured typed launch-brief envelope"
   assert_present "$HOME_DIR/state/$id.pi-ext.ts" "pi-signed launch did not install Pi's turn-end extension"
   assert_present "$HOME_DIR/state/$id.busy-gen" "pi-signed spawn did not arm the busy-state contract"
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=fm-spawn" \
@@ -774,6 +804,84 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+test_fresh_metadata_interruption_never_publishes_partial_record() {
+  local rec id out status meta_publish_target
+  id=profile-atomic-meta-z20
+  rec=$(make_spawn_case profile-atomic-meta claude "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/mv" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "${FM_TEST_META_PUBLISH_TARGET:-}" ] \
+   && [ ! -e "${FM_TEST_META_PUBLISH_KILLED:-}" ]; then
+  : > "$FM_TEST_META_PUBLISH_KILLED"
+  kill -KILL "$PPID"
+  exit 99
+fi
+exec "${REAL_MV_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/mv"
+
+  meta_publish_target="$(cd "$HOME_DIR/state" && pwd -P)/$id.meta"
+  out=$(REAL_MV_FOR_TEST="$(command -v mv)" \
+    FM_TEST_META_PUBLISH_TARGET="$meta_publish_target" \
+    FM_TEST_META_PUBLISH_KILLED="$CASE_DIR/meta-publish-killed" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "fresh metadata interruption fixture did not stop publication"
+  assert_present "$CASE_DIR/meta-publish-killed" \
+    "fresh spawn never reached atomic metadata publication"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "interrupted fresh spawn exposed task metadata at its authoritative path"
+  jq -e '.state == "prepared"' "$HOME_DIR/data/$id/work-identity-dispatch.json" >/dev/null \
+    || fail "interrupted metadata publication did not preserve its prepared dispatch"
+  assert_present "$HOME_DIR/state/$id.spawn-endpoint.json" \
+    "interrupted metadata publication lost its endpoint recovery receipt"
+  rm -rf "/tmp/fm-$id"
+  pass "fresh spawn metadata publication is atomic across interruption"
+}
+
+test_invalid_secondmate_launch_does_not_reserve_identity() {
+  local rec id sm out status
+  id=profile-invalid-secondmate-z21
+  rec=$(make_spawn_case profile-invalid-secondmate codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" unsupported-harness --secondmate)
+  status=$?
+  [ "$status" -ne 0 ] || fail "invalid secondmate harness unexpectedly launched"
+  assert_contains "$out" "unknown harness 'unsupported-harness'" \
+    "invalid secondmate launch did not fail during harness validation"
+  assert_absent "$HOME_DIR/data/$id/work-identity-unlinked-guard.json" \
+    "invalid secondmate launch permanently reserved an unapplied task id"
+  pass "secondmate identity reservation follows non-mutating launch validation"
+}
+
+test_failed_secondmate_launch_does_not_commit_identity() {
+  local rec id sm out status
+  id=profile-failed-secondmate-z22
+  rec=$(make_spawn_case profile-failed-secondmate codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(FM_TEST_FAIL_LAUNCH_LITERAL=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  [ "$status" -ne 0 ] || fail "failed secondmate launch fixture unexpectedly completed"
+  assert_absent "$HOME_DIR/data/$id/work-identity-unlinked-guard.json" \
+    "failed secondmate launch committed its permanent unlinked identity"
+  assert_present "$HOME_DIR/data/$id/work-identity-unlinked-reservation.json" \
+    "failed secondmate launch lost its recoverable identity reservation"
+  assert_present "$HOME_DIR/state/$id.spawn-endpoint.json" \
+    "failed secondmate launch lost its exact endpoint recovery receipt"
+  pass "secondmate identity commits only after launch submission"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -785,7 +893,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
-  expect_code 0 "$status" "secondmate spawn should be exempt from the dispatch-profile explicit harness requirement"
+  expect_code 0 "$status" "secondmate spawn should be exempt from the dispatch-profile explicit harness requirement: $out"
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
@@ -822,6 +930,9 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
+test_fresh_metadata_interruption_never_publishes_partial_record
+test_invalid_secondmate_launch_does_not_reserve_identity
+test_failed_secondmate_launch_does_not_commit_identity
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"

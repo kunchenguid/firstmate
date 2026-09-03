@@ -445,11 +445,19 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/work-identity.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/voice-relay.md",
       "audience": "operator-current"
     },
     {
       "path": "docs/watcher-continuity.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/work-identity.md",
       "audience": "operator-current"
     },
     {

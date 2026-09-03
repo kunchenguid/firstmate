@@ -142,6 +142,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 RETRY_BACKOFF=${FM_PF_RETRY_BACKOFF_SECS:-900}
 case "$RETRY_BACKOFF" in ''|*[!0-9]*) RETRY_BACKOFF=900 ;; esac
@@ -157,6 +159,8 @@ die() { printf 'fm-public-followup: %s\n' "$1" >&2; exit "${2:-2}"; }
 
 PF_TEMP_FILES=()
 PF_REGISTRY_LOCK_IDS=()
+PF_BACKLOG_LOCK=
+PF_BACKLOG_LOCK_HELD=0
 pf_registry_lock_held() {
   local wanted=$1 held
   # bash 3.2 + set -u treats "${arr[@]}" on an empty array as unbound.
@@ -183,6 +187,10 @@ pf_registry_lock_release() {
 }
 pf_cleanup() {
   local i
+  if [ "$PF_BACKLOG_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$PF_BACKLOG_LOCK" || true
+    PF_BACKLOG_LOCK_HELD=0
+  fi
   for ((i=${#PF_REGISTRY_LOCK_IDS[@]}-1; i>=0; i--)); do
     fm_pf_registry_lock_release "$STATE" "${PF_REGISTRY_LOCK_IDS[$i]}" 2>/dev/null || true
   done
@@ -210,7 +218,21 @@ require_tools() {
 
 # Every tasks-axi call runs from the home whose backlog owns the obligation, the
 # same convention bin/fm-captain-hold.sh uses for typed backlog state.
-tx() { (cd "$FM_HOME" && tasks-axi "$@"); }
+tx() {
+  local rc=0
+  if [ "${1:-}:${2:-}" = public-followup:list ]; then
+    (cd "$FM_HOME" && tasks-axi "$@")
+    return $?
+  fi
+  mkdir -p "$STATE" || return 1
+  PF_BACKLOG_LOCK="$STATE/.backlog-mutation.lock"
+  fm_lock_acquire_wait "$PF_BACKLOG_LOCK"
+  PF_BACKLOG_LOCK_HELD=1
+  (cd "$FM_HOME" && tasks-axi "$@") || rc=$?
+  fm_lock_release "$PF_BACKLOG_LOCK" || rc=1
+  PF_BACKLOG_LOCK_HELD=0
+  return "$rc"
+}
 
 # obligation_json <id>: the complete typed obligation payload on stdout, empty
 # when the backlog simply has no such public-followup item, and a non-zero exit

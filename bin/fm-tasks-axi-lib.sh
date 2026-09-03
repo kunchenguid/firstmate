@@ -5,8 +5,8 @@
 #
 # Compatible means tasks-axi --version reports FM_TASKS_AXI_MIN or newer,
 # `tasks-axi update --help` exposes --archive-body for recoverable note rewrites,
-# and `tasks-axi mv --help` exposes [<id>...] for atomic multi-ID moves required
-# by secondmate handoffs.
+# and `tasks-axi mv --help` exposes atomic multi-ID moves. Handoff-compatible
+# additionally requires source/target revision preconditions.
 # FM_TASKS_AXI_MIN follows the axi-family floor policy owned beside the floor
 # constants in bin/fm-bootstrap.sh.
 # The feature probes are a separate concern and stay as defense in depth for
@@ -97,6 +97,30 @@ fm_tasks_axi_mv_has_multi_id() {
   command -v tasks-axi >/dev/null 2>&1 || return 1
   output=$(tasks-axi mv --help 2>&1) || return 1
   printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null
+}
+
+fm_tasks_axi_handoff_compatible() {
+  fm_tasks_axi_compatible \
+    && fm_tasks_axi_mv_has_revision_cas \
+    && fm_tasks_axi_rm_has_peer_revision_cas
+}
+
+fm_tasks_axi_mv_has_revision_cas() {
+  local output
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  output=$(tasks-axi mv --help 2>&1) || return 1
+  printf '%s\n' "$output" | grep -F -- '--if-source-sha256' >/dev/null \
+    && printf '%s\n' "$output" | grep -F -- '--if-target-sha256' >/dev/null
+}
+
+fm_tasks_axi_rm_has_peer_revision_cas() {
+  local output
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  output=$(tasks-axi rm --help 2>&1) || return 1
+  printf '%s\n' "$output" | grep -F -- '[<id>...]' >/dev/null \
+    && printf '%s\n' "$output" | grep -F -- '--if-source-sha256' >/dev/null \
+    && printf '%s\n' "$output" | grep -F -- '--if-peer' >/dev/null \
+    && printf '%s\n' "$output" | grep -F -- '--if-peer-sha256' >/dev/null
 }
 
 fm_backlog_backend_value() {

@@ -326,8 +326,8 @@ test_unsafe_delivery_refuses_to_append_launch() {
   pass "uncleared TRACEPARENT input stops before the launch command is appended"
 }
 
-test_failed_metadata_append_unsets_carrier_and_still_launches() {
-  local rec out status meta
+test_failed_metadata_append_refuses_launch_and_releases_lock() {
+  local rec out status meta lock
   rec=$(make_spawn_case tc-metadata-failure)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
@@ -336,15 +336,19 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
   out=$(FM_FAKE_TRACE_METADATA_APPEND_FAIL=1 \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "failed traceparent metadata append must not abort spawn"
-  assert_contains "$out" "spawned $CASE_ID" "spawn should report success after failed metadata append"
+  [ "$status" -ne 0 ] || fail "failed traceparent metadata append unexpectedly launched"
+  assert_contains "$out" "trace metadata could not be validated and published safely" \
+    "failed metadata append did not report the authoritative refusal"
   meta="$HOME_DIR/state/$CASE_ID.meta"
+  lock="$HOME_DIR/state/.meta-$CASE_ID.lock"
 
   ! grep -q '^traceparent=' "$meta" \
-    || fail "failed metadata append must not leave a traceparent= claim in meta"
-  grep -q '^unset TRACEPARENT; .*claude' "$LAUNCH_LOG" \
-    || fail "failed metadata append must unset TRACEPARENT in the launch command"
-  pass "failed traceparent metadata append removes the carrier from the launched task"
+    || fail "failed metadata append left a traceparent claim in metadata"
+  ! grep -q 'claude' "$LAUNCH_LOG" \
+    || fail "failed metadata validation appended the launch command"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] \
+    || fail "failed metadata preflight retained its metadata lock"
+  pass "failed traceparent metadata publication refuses launch and releases its lock"
 }
 
 test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
@@ -565,11 +569,16 @@ test_secondmate_carrier_and_snapshot_share_one_decision() {
   pass "secondmate carrier and FM_TRACE_CONTEXT snapshot always agree, both derived from one frozen decision (file-decided path)"
 }
 
+if [ "${FM_TEST_ONLY:-}" = metadata-refusal ]; then
+  test_failed_metadata_append_refuses_launch_and_releases_lock
+  exit 0
+fi
+
 test_enabled_records_and_injects_identical_carrier_before_launch
 test_disabled_writes_and_injects_neither
 test_failed_delivery_omits_metadata_and_still_launches
 test_unsafe_delivery_refuses_to_append_launch
-test_failed_metadata_append_unsets_carrier_and_still_launches
+test_failed_metadata_append_refuses_launch_and_releases_lock
 test_duplicate_secondmate_spawn_does_not_converge_trace_context
 test_relaunch_reuses_recorded_carrier
 test_session_start_freezes_env_override_and_ignores_later_edits

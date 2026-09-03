@@ -111,22 +111,38 @@ phase_seed() {
 }
 
 phase_spawn() {
+  local meta snapshot
   : > "$LOG"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-spawn.sh" design "$SUB" codex --secondmate >/dev/null \
     || fail "secondmate spawn failed"
 
-  local meta="$HOME_DIR/state/design.meta"
+  meta="$HOME_DIR/state/design.meta"
   assert_grep 'kind=secondmate' "$meta" "spawn meta did not record kind=secondmate"
   assert_grep "home=$SUB_ABS" "$meta" "spawn meta did not record the subhome"
   assert_grep 'projects=alpha, beta, gamma' "$meta" "spawn meta did not record the project list"
+  assert_grep 'work_identity_schema=fm-work-identity.v1' "$meta" \
+    "secondmate metadata did not bind the identity schema"
+  assert_grep 'work_identity_status=unlinked' "$meta" \
+    "secondmate metadata did not explicitly bind absent work identity"
+  snapshot=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+    FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    FM_SNAPSHOT_NOW=2026-08-14T12:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "secondmate spawn metadata disabled fleet publication"
+  printf '%s' "$snapshot" | jq -e '
+    .tasks[] | select(.id == "design")
+    | .kind == "secondmate" and .work_identity.status == "unlinked"
+  ' >/dev/null || fail "fleet snapshot lost the secondmate identity binding"
   # Launch ran in the subhome, with the persistent charter and cleared overrides,
   # and never ran a project-style treehouse get.
   assert_grep "FM_HOME='$SUB_ABS'" "$LOG" "secondmate launch did not set FM_HOME to the subhome"
   assert_grep 'FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE=' "$LOG" "launch did not clear operational overrides"
   assert_grep 'FM_CONFIG_OVERRIDE=' "$LOG" "launch did not clear the config override"
-  assert_grep "$SUB_ABS/data/charter.md" "$LOG" "launch did not use the persistent charter"
+  assert_grep "launch_brief=$HOME_DIR/state/design.launch-brief.md" "$meta" \
+    "secondmate metadata did not bind the immutable charter snapshot"
+  assert_grep 'customer onboarding charter' "$LOG" \
+    "launch did not receive the persistent charter bytes"
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
   assert_no_grep 'turn-ended' "$LOG" "secondmate codex launch referenced a parent turn-ended signal"
   assert_no_grep 'treehouse get' "$LOG" "secondmate spawn ran a project treehouse get"

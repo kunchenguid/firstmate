@@ -1059,6 +1059,54 @@ fm_meta_lock_path() {
   printf '%s/.meta-%s.lock\n' "$dir" "$id"
 }
 
+fm_meta_directory_identity() {
+  if [ "$_FM_UNAME" = Darwin ]; then
+    stat -f '%d:%i' "$1" 2>/dev/null
+  else
+    stat -c '%d:%i' "$1" 2>/dev/null
+  fi
+}
+
+fm_meta_replace_expect() {  # <task.meta>
+  local meta=$1 dir base inode details owner
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  case "$base" in *.meta) ;; *) return 1 ;; esac
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  inode=$(fm_meta_directory_identity "$dir") || return 1
+  owner="$FM_WAKE_LIB_DIR/fm-work-identity-fs.py"
+  details=$(python3 "$owner" describe-replace "$dir" "$inode" "$base") || return 1
+  FM_META_REPLACE_DIRECTORY=$dir
+  FM_META_REPLACE_DIRECTORY_ID=$inode
+  FM_META_REPLACE_NAME=$base
+  FM_META_REPLACE_EXPECTED_STATE=${details%%$'\t'*}
+  FM_META_REPLACE_EXPECTED_DIGEST=${details#*$'\t'}
+  [ "$FM_META_REPLACE_EXPECTED_STATE" != "$details" ]
+}
+
+fm_meta_atomic_replace() {  # <candidate> <task.meta>
+  local candidate=$1 meta=$2 dir base owner
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  dir=${meta%/*}
+  base=${meta##*/}
+  [ "$dir" != "$meta" ] || dir=.
+  [ "${FM_META_REPLACE_DIRECTORY:-}" = "$dir" ] \
+    && [ "${FM_META_REPLACE_NAME:-}" = "$base" ] \
+    && [ -n "${FM_META_REPLACE_DIRECTORY_ID:-}" ] \
+    && [ -n "${FM_META_REPLACE_EXPECTED_STATE:-}" ] \
+    && [ -n "${FM_META_REPLACE_EXPECTED_DIGEST:-}" ] || return 1
+  owner="$FM_WAKE_LIB_DIR/fm-work-identity-fs.py"
+  python3 "$owner" replace "$dir" "$FM_META_REPLACE_DIRECTORY_ID" "$base" "$candidate" \
+    "$FM_META_REPLACE_EXPECTED_STATE" "$FM_META_REPLACE_EXPECTED_DIGEST" || return 1
+  rm -f -- "$candidate"
+  FM_META_REPLACE_DIRECTORY=
+  FM_META_REPLACE_DIRECTORY_ID=
+  FM_META_REPLACE_NAME=
+  FM_META_REPLACE_EXPECTED_STATE=
+  FM_META_REPLACE_EXPECTED_DIGEST=
+}
+
 # fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,
 # as opposed to fm_meta_lock_path, which guards one task's record.
 #

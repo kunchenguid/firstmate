@@ -56,8 +56,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 . "$SCRIPT_DIR/fm-remote-job-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
-REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
-HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi)
+REQUIRED_TOOLS=(git jq python3 herdr tasks-axi treehouse)
+HARNESS_TOOLS=(claude codex opencode pi pi-signed grok)
 OPTIONAL_TOOLS=(tmux no-mistakes gh)
 LAUNCH_AGENT_LABEL=dev.firstmate.herdr.fm-remote
 # The dedicated remote-secondmate session. The user's interactive Herdr work
@@ -338,8 +338,8 @@ report_required_tools() {
 }
 
 report_required_tools_from_worker() {
-  local job_id probe_stdout probe_stderr probe_exit line fact name value
-  local expected=6 count=0 valid=1 seen=' '
+  local job_id probe_stdout probe_stderr probe_exit line fact name value tool allowed
+  local expected=$((${#REQUIRED_TOOLS[@]} + 1)) count=0 valid=1 seen=' '
   if ! job_id=$(fm_remote_job_stage "${HOME:-}" "$FM_ROOT" "${FM_HOME:-}" \
     fm-remote-doctor.sh --worker-tool-probe </dev/null); then
     set_check remote-job-probe "fixable: the remote job worker could not accept the required-tool probe" \
@@ -363,7 +363,12 @@ report_required_tools_from_worker() {
     fact=${line#required }
     name=${fact%%=*}
     value=${fact#*=}
-    case "$name" in git|jq|herdr|tasks-axi|treehouse|harness) ;; *) valid=0; continue ;; esac
+    allowed=0
+    [ "$name" != harness ] || allowed=1
+    for tool in "${REQUIRED_TOOLS[@]}"; do
+      [ "$name" != "$tool" ] || allowed=1
+    done
+    [ "$allowed" -eq 1 ] || { valid=0; continue; }
     case "$seen" in *" $name "*) valid=0; continue ;; esac
     seen="$seen$name "
     count=$((count + 1))
@@ -451,13 +456,42 @@ fix_remote_job_worker() {
 # --- checks -----------------------------------------------------------------
 
 check_herdr() {
-  local resolved
-  if resolved=$(command -v herdr 2>/dev/null) && [ -x "$resolved" ]; then
-    record herdr "ok: $resolved"
+  local resolved status client_protocol client_version running server_protocol server_version
+  if ! resolved=$(command -v herdr 2>/dev/null) || [ ! -x "$resolved" ]; then
+    record herdr "human: the herdr CLI does not resolve on the remote runtime PATH" \
+      "install herdr from https://herdr.dev on that account, or add a ~/.local/bin wrapper for it; a remote second mate always runs on the Herdr backend"
     return 0
   fi
-  record herdr "human: the herdr CLI does not resolve on the remote runtime PATH" \
-    "install herdr from https://herdr.dev on that account, or add a ~/.local/bin wrapper for it; a remote second mate always runs on the Herdr backend"
+  herdr_adapter_load || {
+    record herdr "human: the Herdr adapter cannot inspect the fm-remote session" \
+      "repair or upgrade herdr, then rerun remote doctor"
+    return 0
+  }
+  status=$(fm_backend_herdr_cli "$HERDR_SESSION_NAME" status --json 2>/dev/null) || {
+    record herdr "human: the herdr CLI cannot report the fm-remote release and protocol" \
+      "repair or upgrade herdr, then rerun remote doctor"
+    return 0
+  }
+  client_protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null) || client_protocol=
+  client_version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null) || client_version=
+  case "$client_protocol" in ''|*[!0-9]*) client_protocol=0 ;; esac
+  if [ "$client_protocol" -lt "$FM_BACKEND_HERDR_MIN_PROTOCOL" ]; then
+    record herdr "human: client ${client_version:-unknown} protocol $client_protocol is below the verified Herdr backend minimum" \
+      "upgrade herdr to protocol $FM_BACKEND_HERDR_MIN_PROTOCOL or newer, then rerun remote doctor"
+    return 0
+  fi
+  running=$(printf '%s' "$status" | jq -r 'if .server.running == true then "true" elif .server.running == false then "false" else "unknown" end' 2>/dev/null) || running=unknown
+  if [ "$running" = true ]; then
+    server_protocol=$(printf '%s' "$status" | jq -r '.server.protocol // empty' 2>/dev/null) || server_protocol=
+    server_version=$(printf '%s' "$status" | jq -r '.server.version // empty' 2>/dev/null) || server_version=
+    case "$server_protocol" in ''|*[!0-9]*) server_protocol=0 ;; esac
+    if [ "$server_protocol" -lt "$FM_BACKEND_HERDR_MIN_PROTOCOL" ]; then
+      record herdr "human: fm-remote server ${server_version:-unknown} protocol $server_protocol is below the verified Herdr backend minimum" \
+        "upgrade herdr to protocol $FM_BACKEND_HERDR_MIN_PROTOCOL or newer and restart the fm-remote server, then rerun remote doctor"
+      return 0
+    fi
+  fi
+  record herdr "ok: $resolved version ${client_version:-unknown} protocol $client_protocol"
 }
 
 check_gui_session() {

@@ -155,6 +155,13 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" < "$FM_FAKE_INHERIT_PAYLOAD"
     exit $?
     ;;
+  wrong-summary-home:fm-fleet-snapshot.sh:*)
+    if [ "$_command_action" = --secondmate-home-summary ]; then
+      summary=$("$FM_FAKE_REMOTE_ENTRYPOINT" "$@") || exit $?
+      printf '%s' "$summary" | jq -c --arg home "$FM_FAKE_WRONG_SUMMARY_HOME" '.home = $home'
+      exit $?
+    fi
+    ;;
 esac
 # The readiness gate is answered here rather than by the real doctor, which
 # would inspect and repair the RUNNER's own account. tests/fm-remote-doctor.test.sh
@@ -273,6 +280,7 @@ remote_env() {
   FM_FAKE_INHERIT_ENTERED="$TMP_ROOT/inherit.entered" \
   FM_FAKE_INHERIT_RELEASE="$TMP_ROOT/inherit.release" \
   FM_FAKE_INHERIT_PAYLOAD="$TMP_ROOT/inherit.payload" \
+  FM_FAKE_WRONG_SUMMARY_HOME="$TMP_ROOT/wrong-remote-home" \
   FM_FAKE_LAUNCH_ENTERED="$TMP_ROOT/launch.entered" \
   FM_FAKE_LAUNCH_RELEASE="$TMP_ROOT/launch.release" \
   FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
@@ -663,6 +671,41 @@ fi
 assert_grep "home: $REMOTE_HOME" "$PARENT/data/secondmates.md" "refused remote reassignment changed the durable route"
 pass "remote seed registers the route and provisions the whole home and project clone on that host"
 
+cp "$PARENT/data/ios/brief.md" "$TMP_ROOT/ios-unlinked-brief.md"
+rm -f "$PARENT/data/ios/brief.md"
+remote_env "$ROOT/bin/fm-work-identity.sh" template ios > "$TMP_ROOT/ios-linked-identity.json" \
+  || fail "could not generate linked persistent-secondmate applicability fixture"
+remote_env "$ROOT/bin/fm-work-identity.sh" record ios --file "$TMP_ROOT/ios-linked-identity.json" >/dev/null \
+  || fail "could not record linked persistent-secondmate applicability fixture"
+{
+  printf 'Linked persistent secondmate fixture.\n\n'
+  remote_env "$ROOT/bin/fm-work-identity.sh" brief-block ios
+} > "$PARENT/data/ios/brief.md"
+ssh_before_linked_refusal=$(cat "$SSH_COUNT" 2>/dev/null || echo 0)
+launches_before_linked_refusal=0
+[ ! -f "$HERDR_LOG" ] \
+  || launches_before_linked_refusal=$(grep -c '^tab create' "$HERDR_LOG" || true)
+linked_secondmate_rc=0
+linked_secondmate_out=$(FM_SPAWN_NO_GUARD=1 remote_env \
+  "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1) || linked_secondmate_rc=$?
+[ "$linked_secondmate_rc" -ne 0 ] \
+  || fail "remote persistent secondmate accepted a linked work identity"
+assert_contains "$linked_secondmate_out" \
+  'persistent secondmate control task ios cannot carry a linked work identity' \
+  "linked persistent secondmate refusal did not state its applicability boundary"
+[ "$(cat "$SSH_COUNT" 2>/dev/null || echo 0)" = "$ssh_before_linked_refusal" ] \
+  || fail "linked persistent secondmate refusal reached a remote side effect"
+launches_after_linked_refusal=0
+[ ! -f "$HERDR_LOG" ] \
+  || launches_after_linked_refusal=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_after_linked_refusal" -eq "$launches_before_linked_refusal" ] \
+  || fail "linked persistent secondmate refusal created a remote endpoint"
+assert_absent "$PARENT/state/ios.meta" \
+  "linked persistent secondmate refusal published parent metadata"
+rm -f "$PARENT/data/ios/work-identity.json" "$PARENT/data/ios/brief.md"
+mv "$TMP_ROOT/ios-unlinked-brief.md" "$PARENT/data/ios/brief.md"
+pass "linked persistent secondmate identities refuse before remote effects"
+
 PROTOCOL_HOME="$TMP_ROOT/protocol-home"
 mkdir -p "$PROTOCOL_HOME/config" "$PROTOCOL_HOME/data" "$PROTOCOL_HOME/state"
 printf 'complete inherited payload\n' > "$TMP_ROOT/inherit-complete"
@@ -719,6 +762,10 @@ assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata o
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
 assert_grep 'remote_target=fm-remote:' "$PARENT/state/ios.meta" "parent metadata did not record an fm-remote endpoint"
+assert_grep 'work_identity_schema=fm-work-identity.v1' "$PARENT/state/ios.meta" \
+  "parent metadata did not record the persistent secondmate applicability schema"
+assert_grep 'work_identity_status=unlinked' "$PARENT/state/ios.meta" \
+  "parent metadata did not record the persistent secondmate as explicitly unlinked"
 assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata did not record the pinned Herdr session"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
@@ -1041,6 +1088,25 @@ printf '%s' "$SNAPSHOT" | jq -e '.tasks[] | select(.id == "ios") | .paths.home.p
 printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "local" and .remote == false)' >/dev/null \
   || fail "fleet snapshot lost the existing local secondmate route"
 pass "fleet snapshot projects mixed local and remote structured state"
+MISMATCH_RC=0
+MISMATCH=$(FM_FAKE_SSH_MODE=wrong-summary-home \
+  remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>&1) || MISMATCH_RC=$?
+[ "$MISMATCH_RC" -eq 42 ] \
+  || fail "cross-home remote summary degraded to an available fallback: $MISMATCH"
+assert_contains "$MISMATCH" 'work identity home binding mismatch in secondmate ios' \
+  "cross-home remote summary did not report an identity integrity failure"
+pass "cross-home remote summaries stop parent publication"
+mv "$REMOTE_HOME/data" "$TMP_ROOT/remote-home-data"
+ln -s "$TMP_ROOT/remote-home-data" "$REMOTE_HOME/data"
+UNSAFE_REMOTE_RC=0
+UNSAFE_REMOTE=$(remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>&1) || UNSAFE_REMOTE_RC=$?
+[ "$UNSAFE_REMOTE_RC" -eq 42 ] \
+  || fail "unsafe remote identity home degraded to an available fallback: $UNSAFE_REMOTE"
+assert_contains "$UNSAFE_REMOTE" 'work identity integrity failure in secondmate ios' \
+  "remote identity-owner setup failure was not typed as an integrity failure"
+rm "$REMOTE_HOME/data"
+mv "$TMP_ROOT/remote-home-data" "$REMOTE_HOME/data"
+pass "unsafe remote identity-owner setup stops parent publication"
 rm -f "$PARENT/state/.wake-queue"
 
 # The remote code root updates independently, then the persistent home imports

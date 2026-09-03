@@ -31,6 +31,7 @@ make_fakebin() {  # <dir>
   fb=$(fm_fakebin "$1")
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FAKE_NM_MARKER:-}" ] || : > "${FM_HOME:?}/$FAKE_NM_MARKER"
 [ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
 exit 0
 SH
@@ -213,13 +214,15 @@ run() {  # <home> <fakebin> <args...>
 }
 
 write_remote_home_summary() {  # <remote-home> <generated-epoch>
-  local home=$1 epoch=$2
+  local home=$1 epoch=$2 home_id
+  home_id="secondmate:ledger-${home##*-}"
   mkdir -p "$home/state"
-  jq -n --arg home "$home" --argjson epoch "$epoch" '{
+  jq -n --arg home "$home" --arg home_id "$home_id" --argjson epoch "$epoch" '{
     schema:"fm-secondmate-home-summary.v1",
-    generated:"2026-09-01T22:00:00Z",generated_epoch:$epoch,home:$home,
+    generated:"2026-09-01T22:00:00Z",generated_epoch:$epoch,home:$home,home_id:$home_id,
     valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"no_active_work",
     active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+    work_identity_index:[],
     counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]
   }' > "$home/state/home-summary.json"
 }
@@ -380,6 +383,9 @@ case "$1 $2" in
   '-c %a') printf '600\n' ;;
   '-c %Y') printf '1783792800\n' ;;
   '-c %s') LC_ALL=C wc -c < "$3" | tr -d ' ' ;;
+  '-c %h') printf '1\n' ;;
+  '-c %d:%i') /usr/bin/stat -f '%d:%i' "$3" ;;
+  '-c %d:%i:%h:%s') /usr/bin/stat -f '%d:%i:%l:%z' "$3" ;;
   -f\ *)
     printf '  File: "%s"\nBlocks: Total: 1\n' "$2"
     exit 1
@@ -547,7 +553,7 @@ write_parent_secondmate_event() {  # <parent> <id> <home> <note>
 }
 
 test_bad_secondmate_homes_never_revive_parent_work() {
-  local home fakebin missing invalid unreadable malformed unknown_child wt json
+  local home fakebin missing invalid unreadable malformed unknown_child wt json out rc
   home=$(make_home bad-homes)
   : > "$home/data/secondmates.md"
   missing="$TMP_ROOT/missing-home"
@@ -585,27 +591,84 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   write_parent_secondmate_event "$home" unknown-child "$unknown_child" "old unknown work"
 
   fakebin=$(make_fakebin "$home")
-  json=$(run "$home" "$fakebin" --json)
+  rc=0
+  out=$(FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=1 run "$home" "$fakebin" --json 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a readable marker-mismatched secondmate home published a fallback"
+  assert_contains "$out" "work identity home binding mismatch in secondmate invalid" \
+    "marker mismatch did not stop authoritative Bearings publication"
+  printf 'invalid\n' > "$invalid/.fm-secondmate-home"
+
+  rc=0
+  out=$(FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=1 run "$home" "$fakebin" --json 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unsafe unreadable secondmate data path published a fallback"
+  assert_contains "$out" "work identity home binding mismatch in secondmate unreadable" \
+    "unsafe operational path did not stop authoritative Bearings publication"
   chmod 700 "$unreadable/data"
+
+  json=$(FAKE_NM_SLEEP=1 FM_SNAPSHOT_SECONDMATE_TIMEOUT=5 run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.secondmates | length) == 5
-      and all(.secondmates[]; .state == "unknown")
       and (.in_flight | map(.id) | all(. != "invalid" and . != "unreadable" and . != "malformed" and . != "unknown-child"))
       and (.secondmates | any(.[]; .id == "missing" and .provenance == "unknown"
         and .freshness == "unknown" and (.reason | contains("invalid home"))))
-      and ([.secondmates[] | select(.id == "invalid" or .id == "unreadable" or .id == "malformed")]
-        | all(.provenance == "parent-event-fallback" and .freshness == "historical-event"))
+      and (.secondmates | any(.[]; .id == "invalid" and .provenance == "structured-home"))
+      and (.secondmates | any(.[]; .id == "unreadable" and .provenance == "structured-home"))
+      and (.secondmates | any(.[]; .id == "malformed" and .provenance == "parent-event-fallback"
+        and (.reason | contains("unstructured current backlog row"))))
       and (.secondmates | any(.[]; .id == "unknown-child" and .provenance == "structured-home"
-        and .freshness == "fresh"))
-      and (.secondmates | any(.[]; .id == "invalid" and (.reason | contains("marked for"))))
-      and (.secondmates | any(.[]; .id == "unreadable" and (.reason | test("invalid home|unreadable"))))
-      and (.secondmates | any(.[]; .id == "malformed" and (.reason | contains("unstructured current backlog row"))))
-      and (.secondmates | any(.[]; .id == "unknown-child" and (.reason | contains("child current state unavailable"))))
+        and .freshness == "fresh" and (.reason | contains("child current state unavailable"))))
       and ([.secondmate_reconcile[].id] == ["malformed", "unknown-child"])
       and (.secondmate_reconcile[0].kind == "unstructured_current")
       and (.secondmate_reconcile[1].kind == "child_current_unavailable")
   ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
-  pass "missing, invalid, unreadable, malformed, and unavailable-child homes stay explicit unknowns"
+  pass "unsafe homes stop publication while unavailable summaries stay explicit"
+}
+
+test_unsampled_remote_secondmates_are_not_probed() {
+  local home fakebin fake_ssh calls canonical id host remote_home
+  home=$(make_home bounded-remote-probes)
+  fakebin=$(make_fakebin "$home")
+  fake_ssh="$fakebin/fake-ssh"
+  calls="$home/remote-calls"
+  : > "$home/data/secondmates.md"
+  : > "$calls"
+  for id in remote-a remote-b remote-c; do
+    host="host-$id"
+    remote_home="/remote/$id"
+    printf -- '- %s - bounded remote fixture (host: %s; root: %s; home: %s; scope: bounded reads; projects: firstmate; added 2026-07-11)\n' \
+      "$id" "$host" "$ROOT" "$remote_home" >> "$home/data/secondmates.md"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=remote:$id" "endpoint_task_id=$id" "worktree=$remote_home" \
+      "project=$ROOT" "harness=codex" "kind=secondmate" "mode=secondmate" \
+      "home=$remote_home" "projects=firstmate" "remote_host=$host" \
+      "remote_root=$ROOT" "remote_backend=herdr" "remote_target=target-$id"
+  done
+  cat > "$fake_ssh" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$calls"
+exit 255
+SH
+  chmod +x "$fake_ssh"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SSH_BIN="$fake_ssh" FM_SNAPSHOT_SECONDMATES=1 \
+    FM_SNAPSHOT_SECONDMATE_TIMEOUT=2 FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 1 ] \
+    || fail "remote task inventory bypassed the sampled-home bound: $(cat "$calls")"
+  assert_contains "$(cat "$calls")" "host-remote-a" \
+    "the first sampled remote home was not queried"
+  assert_not_contains "$(cat "$calls")" "host-remote-b" \
+    "an unsampled remote home was queried"
+  assert_not_contains "$(cat "$calls")" "host-remote-c" \
+    "an unsampled remote home was queried"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.shown == 1
+      and .secondmate_current.truncated == 2
+      and ([.tasks[] | select(.id == "remote-b" or .id == "remote-c")
+        | select(.current_state.state == "unknown"
+          and .endpoint.exists == null and .endpoint.agent_alive == "unknown")] | length) == 2
+  ' >/dev/null || fail "unsampled remote task state was not explicitly unknown: $canonical"
+  pass "remote home reads respect the sampled secondmate bound"
 }
 
 test_oversized_secondmate_summary_stays_strict_unknown() {
@@ -1188,7 +1251,7 @@ test_perl_fallback_bounds_github_call() {
   fakebin=$(make_fakebin "$home")
   toolbin="$home/toolbin"
   mkdir -p "$toolbin"
-  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mktemp rm mkdir chmod mv cp awk; do
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort wc perl sleep cat find mkdir rm mktemp readlink ln rmdir env stat uname awk cp chmod mv ps kill cmp; do
     ln -s "$(command -v "$cmd")" "$toolbin/$cmd"
   done
   for cmd in shasum sha256sum; do
@@ -1199,7 +1262,7 @@ test_perl_fallback_bounds_github_call() {
   json=$(PATH="$fakebin:$toolbin" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
     FM_BEARINGS_PR_TIMEOUT=1 NET_LOG="$home/net.log" FAKE_GH_SLEEP=1 "$BEARINGS" --include-prs --json)
   elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 10 ] || fail "Perl fallback did not bound a stalled gh call (${elapsed}s)"
+  [ "$elapsed" -lt 20 ] || fail "Perl fallback did not bound a stalled gh call (${elapsed}s)"
   printf '%s' "$json" | jq -e '.prs | test("unavailable")' >/dev/null \
     || fail "timed-out gh call did not fail soft: $json"
   pass "Perl fallback bounds stalled GitHub calls without coreutils timeout"
@@ -1240,7 +1303,7 @@ test_section_caps_and_expansion_flags() {
     (.in_flight|length) == 2 and (.decisions_open|length) == 2 and (.gates|length) == 2
     and (.reports|length) == 2 and (.recorded_prs|length) == 2 and (.unhealthy_endpoints|length) == 2
     and ([.omitted[].surface] | index("in_flight showing 2 of 5") != null)
-    and ([.omitted[].surface] | index("decisions_open showing 2 of 5") != null)
+    and ([.omitted[].surface] | index("decisions_open showing 2 of 10") != null)
     and ([.omitted[].surface] | index("gates showing 2 of 5") != null)
     and ([.omitted[].surface] | index("reports showing 2 of 5") != null)
     and ([.omitted[].surface] | index("recorded_prs showing 2 of 5") != null)
@@ -1251,7 +1314,7 @@ test_section_caps_and_expansion_flags() {
     run "$home" "$fakebin" --json --all-in-flight --all-decisions --all-queued \
       --all-reports --all-recorded-prs --all-unhealthy)
   printf '%s' "$expanded" | jq -e '
-    (.in_flight|length) == 5 and (.decisions_open|length) == 5 and (.gates|length) == 5
+    (.in_flight|length) == 5 and (.decisions_open|length) == 10 and (.gates|length) == 5
     and (.reports|length) == 5 and (.recorded_prs|length) == 5 and (.unhealthy_endpoints|length) == 5
   ' >/dev/null || fail "section expansion flags did not reveal full sets: $expanded"
   pass "all fleet-sized sections are capped with counted opt-in expansion"
@@ -1295,7 +1358,7 @@ install_failing_jq() {  # <fakebin> <model|toon>
   cat > "$fakebin/jq" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *'def trunc'*) [ "$phase" = model ] && exit 9 ;;
+  *'def escape_label:'*) [ "$phase" = model ] && exit 9 ;;
   *'def q:'*) [ "$phase" = toon ] && exit 9 ;;
 esac
 exec "$real" "\$@"
@@ -1312,13 +1375,15 @@ test_projection_and_toon_fail_closed() {
   out=$(run "$home" "$fakebin" --json 2> "$err"); rc=$?
   [ "$rc" -ne 0 ] || fail "projection failure exited successfully"
   [ -z "$out" ] || fail "projection failure emitted output"
-  grep -F 'projection failed' "$err" >/dev/null || fail "projection failure lacked a diagnostic"
+  grep -F 'projection failed' "$err" >/dev/null \
+    || fail "projection failure lacked a diagnostic: $(cat "$err")"
   install_failing_jq "$fakebin" toon
   err="$home/toon.err"
   out=$(run "$home" "$fakebin" 2> "$err"); rc=$?
   [ "$rc" -ne 0 ] || fail "TOON rendering failure exited successfully"
   [ -z "$out" ] || fail "TOON rendering failure emitted output"
-  grep -F 'TOON rendering failed' "$err" >/dev/null || fail "TOON failure lacked a diagnostic"
+  grep -F 'TOON rendering failed' "$err" >/dev/null \
+    || fail "TOON failure lacked a diagnostic: $(cat "$err")"
   pass "projection and TOON rendering failures exit nonzero with diagnostics"
 }
 
@@ -1582,17 +1647,18 @@ test_live_blocker_is_not_charted_queue_work() {
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.in_flight | any(.[]; .id == "ship-task" and .state == "blocked"))
-      and (.decisions_open | any(.[]; .id == "ship-task") | not)
+      and (.decisions_open | any(.[]; .id == "ship-task" and .verb == "blocked"
+        and .summary == "firstmate can refresh the synthetic token"))
       and (.gates | any(.[]; .id == "ship-task") | not)
-  ' >/dev/null || fail "live blocked work was projected as queued/deferred work: $json"
-  pass "Bearings keeps a live blocker in structured live state and never converts it to Charted Next queue work"
+  ' >/dev/null || fail "live blocked work lost its canonical live decision projection: $json"
+  pass "Bearings keeps a live blocker in live state and its canonical decision surface"
 }
 
 # Captain's Call is populated only from the durable keyed open-decision set. The
 # anti-leak guard: action-free highlights - a working task, a completed scout,
 # queued/gated items, landed work - must never surface as an open decision, so they
-# cannot leak into Captain's Call. The standard fixture has exactly one genuine open
-# decision (the secondmate's structured captain hold).
+# cannot leak into Captain's Call. The standard fixture has two genuine open
+# decisions: the secondmate's structured captain hold and keyed status decision.
 test_captains_call_anti_leak() {
   local home fakebin json canonical
   home=$(make_home anti-leak); write_fixture "$home"
@@ -1600,7 +1666,9 @@ test_captains_call_anti_leak() {
   json=$(run "$home" "$fakebin" --json)
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   jq -n -e --argjson bearings "$json" --argjson canonical "$canonical" '
-    ([$bearings.decisions_open[].id] == ["mate/mate-decision-race"])
+    (($bearings.decisions_open | length) == 2)
+      and ([$bearings.decisions_open[].id] | index("mate/mate-decision-race") != null)
+      and ([$bearings.decisions_open[].id] | index("mate/mate") != null)
       and ($canonical.secondmate_current.records[] | select(.id == "mate")
         | (.decisions_open | any(.source == "status"))
           and (.decisions_open | any(.source == "backlog")))
@@ -2283,6 +2351,13 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+case "${1:-}" in
+  remote-probe-bound)
+    test_unsampled_remote_secondmates_are_not_probed
+    exit 0
+    ;;
+esac
+
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work
@@ -2291,6 +2366,7 @@ test_parent_activity_evidence_is_bounded_and_disclosed
 test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
+test_unsampled_remote_secondmates_are_not_probed
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only

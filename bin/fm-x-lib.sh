@@ -933,6 +933,7 @@ fmx_meta_link_set() {
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock"
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 1; }
+  fm_meta_replace_expect "$meta" || { fm_lock_release "$lock"; return 1; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
   if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
@@ -947,11 +948,7 @@ fmx_meta_link_set() {
     ''|*[!0-9]*) ;;
     *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; } ;;
   esac
-  # STATE is the caller's authorized state directory, never dirname of $meta.
-  # shellcheck disable=SC2153
-  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
-    rm -f "$tmp"; fm_lock_release "$lock"; return 1
-  fi
+  fm_meta_atomic_replace "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
 }
 
@@ -964,15 +961,13 @@ fmx_meta_followups_set() {
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock"
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 1; }
+  fm_meta_replace_expect "$meta" || { fm_lock_release "$lock"; return 1; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
   if ! { grep -vE '^x_followups=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
   printf 'x_followups=%s\n' "$n" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
-  # shellcheck disable=SC2153
-  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
-    rm -f "$tmp"; fm_lock_release "$lock"; return 1
-  fi
+  fm_meta_atomic_replace "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
 }
 
@@ -1038,13 +1033,11 @@ fmx_meta_link_clear() {
     }
     [ "$link_present" -eq 1 ] || { fm_lock_release "$lock"; return 0; }
   fi
+  fm_meta_replace_expect "$meta" || { fm_lock_release "$lock"; return 1; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
   if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
-  # shellcheck disable=SC2153
-  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
-    rm -f "$tmp"; fm_lock_release "$lock"; return 1
-  fi
+  fm_meta_atomic_replace "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
 }

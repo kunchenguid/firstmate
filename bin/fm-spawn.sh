@@ -106,8 +106,10 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   whitespace is treated as a RAW launch command - the crewmate/scout escape hatch
+#   for verifying new adapters. Persistent secondmates require a verified adapter
+#   whose launch boundary can be reconciled before identity commitment. For pi and
+#   pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -130,6 +132,11 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
+#   Ship and scout spawns validate the optional exact work identity through
+#   bin/fm-work-identity.sh before creating an endpoint. A linked intake record
+#   must match the generated instructions byte-for-byte and is bound into meta by
+#   schema/status/SHA-256 fields; an absent record is recorded explicitly as
+#   unlinked. Relaunch validates and preserves the same binding.
 #   Before a secondmate launch, the home is locally fast-forwarded to the primary
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
@@ -158,7 +165,7 @@
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEFINPUT__ shell-quoted immutable operational input captured from the validated launch brief
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -167,7 +174,6 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-#     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
@@ -448,7 +454,9 @@ spawn_remote_secondmate() {
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
   mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
   SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
-  if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_LOCK_HELD=0
+  elif ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
     echo "error: another spawn is already creating task $id" >&2
     return 1
   fi
@@ -467,6 +475,23 @@ spawn_remote_secondmate() {
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
+  fm_lock_release "$registry_lock" || {
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  }
+  if ! fm_lock_acquire_wait "$registry_lock"; then
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  fi
+  [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)" = 1 ] \
+    && [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" host 2>/dev/null || true)" = "$host" ] \
+    && [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" root 2>/dev/null || true)" = "$root" ] \
+    && [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" home 2>/dev/null || true)" = "$home" ] || {
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id route changed during identity reservation" >&2
+      return 1
+    }
   positional=${POS[1]:-}
   if [ "${#POS[@]}" -gt 2 ]; then
     fm_lock_release "$registry_lock" || true
@@ -527,6 +552,7 @@ spawn_remote_secondmate() {
   meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if ! fm_backlog_record_present "$meta" "task record" "$STATE" \
+      || [ "$(fm_pr_file_link_count "$meta" 2>/dev/null || true)" != 1 ] \
       || [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
       || [ "$(fm_meta_get "$meta" remote_host)" != "$host" ] \
       || [ "$(fm_meta_get "$meta" remote_root)" != "$root" ] \
@@ -536,6 +562,11 @@ spawn_remote_secondmate() {
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
       return 1
     fi
+  fi
+  if ! prepare_secondmate_work_identity; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
   fi
   # Gate the host before anything is published or transferred, so a host that
   # cannot hold a durable Herdr endpoint refuses here rather than half-way
@@ -612,10 +643,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     if [ "$rc" -eq 255 ]; then
+      SECONDMATE_RESERVATION_PRESERVE=1
       echo "error: remote secondmate $id is unavailable or launch completion is unknown; preserved route $host:$home" >&2
     fi
     return "$rc"
   fi
+  SECONDMATE_RESERVATION_PRESERVE=1
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
@@ -641,6 +674,13 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
+  if ! commit_secondmate_work_identity; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id launched, but its unlinked identity could not be committed; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -649,8 +689,14 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
-  tmp="$meta.tmp.$$"
-  {
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-secondmate-meta.XXXXXX") || {
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id launched, but its metadata candidate could not be created; preserving the remote route for reconciliation" >&2
+    return 1
+  }
+  if ! {
     echo "window=remote:$id"
     echo "endpoint_task_id=$id"
     echo "worktree=$home"
@@ -669,9 +715,12 @@ spawn_remote_secondmate() {
     echo "remote_backend=$remote_backend"
     echo "remote_herdr_session=$remote_herdr_session"
     echo "remote_target=$remote_target"
+    echo "work_identity_schema=$SECONDMATE_WORK_IDENTITY_SCHEMA"
+    echo "work_identity_status=$SECONDMATE_WORK_IDENTITY_STATUS"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
-  } > "$tmp"
-  if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
+  } > "$tmp" || ! "$SCRIPT_DIR/fm-work-identity.sh" metadata-publish-unlinked \
+    "$id" --file "$tmp"; then
+    rm -f -- "$tmp"
     if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
       SPAWN_TASK_SET_LOCK_HELD=0
       fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
@@ -679,9 +728,10 @@ spawn_remote_secondmate() {
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate $id launched, but its task record could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    echo "error: remote secondmate $id launched, but its metadata could not be published safely; preserving the remote route for reconciliation" >&2
     return 1
   fi
+  rm -f -- "$tmp"
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK"
@@ -714,17 +764,43 @@ SPAWN_CONTROL_LOCK=
 SPAWN_CONTROL_LOCK_HELD=0
 SPAWN_CONTROL_PARENT=0
 SPAWN_META_TMP=
+SPAWN_BRIEF_TMP=
+SPAWN_DISPATCH_PENDING=0
+SPAWN_DISPATCH_TRANSACTION=
+SPAWN_ENDPOINT_RECEIPT=
+SPAWN_ENDPOINT_RECOVERED=0
+SPAWN_ENDPOINT_CREATING_RECOVERY=0
+SPAWN_ENDPOINT_MISSING=0
+SPAWN_ENDPOINT_PHASE=
+SPAWN_ENDPOINT_ENTRY_STATE=
+SPAWN_ENDPOINT_ENTRY_DIGEST=
+SPAWN_ENDPOINT_RETIREMENT_RECOVERED=0
+SPAWN_LAUNCH_SUBMITTED_RECOVERY=0
+SPAWN_KIMI_DELIVERY_RECOVERY=0
+SPAWN_METADATA_RECOVERY=0
+SPAWN_LAUNCH_REQUEST=
+SPAWN_LAUNCH_EXECUTED=
+SPAWN_LAUNCH_REQUEST_TOKEN=
+SPAWN_IDENTITY_HOME=
+SPAWN_IDENTITY_HOME_ID=
+SPAWN_ORCA_OPERATION=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
+SPAWN_PROVISIONAL_HARNESS_WIRING_PENDING=0
+SPAWN_PROVISIONAL_HARNESS_WIRING_RECEIPT=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
+SECONDMATE_RESERVATION_TRANSACTION=
+SECONDMATE_RESERVATION_PENDING=0
+SECONDMATE_RESERVATION_PRESERVE=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+RELAUNCH_REPLACEMENT_AUTH_PATH=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -755,13 +831,969 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_file_link_count() {
+  if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+    stat -f '%l' "$1" 2>/dev/null
+  else
+    stat -c '%h' "$1" 2>/dev/null
+  fi
+}
+
+spawn_file_inode_identity() {
+  if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+    stat -f '%d:%i' "$1" 2>/dev/null
+  else
+    stat -c '%d:%i' "$1" 2>/dev/null
+  fi
+}
+
+spawn_launch_request_paths() {
+  local digest
+  digest=$(printf '%s' "$SPAWN_DISPATCH_TRANSACTION" | spawn_sha256_stream) || return 1
+  SPAWN_LAUNCH_REQUEST="$STATE/.$ID.launch-request.$digest"
+  SPAWN_LAUNCH_EXECUTED="$SPAWN_LAUNCH_REQUEST/executed"
+  SPAWN_LAUNCH_OUTCOME="$SPAWN_LAUNCH_REQUEST/outcome"
+  SPAWN_LAUNCH_GUARD="$STATE/.$ID.launch-execution.$digest"
+  SPAWN_LAUNCH_REQUEST_TOKEN="$SPAWN_DISPATCH_TRANSACTION:$LAUNCH_BRIEF_HASH"
+}
+
+spawn_launch_guard_state_at() {
+  local guard=$1 owner child value pid token
+  if [ ! -e "$guard" ] && [ ! -L "$guard" ]; then
+    printf 'absent'
+    return 0
+  fi
+  [ -d "$guard" ] && [ ! -L "$guard" ] || return 1
+  owner="$guard/owner"
+  child="$guard/child"
+  if [ ! -e "$owner" ] && [ ! -L "$owner" ]; then
+    printf 'abandoned'
+    return 0
+  fi
+  [ -f "$owner" ] && [ ! -L "$owner" ] \
+    && [ "$(spawn_file_link_count "$owner")" = 1 ] || return 1
+  value=$(tr -d '\n' < "$owner") || return 1
+  pid=${value%%:*}
+  token=${value#*:}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+  if [ -e "$child" ] || [ -L "$child" ]; then
+    [ -f "$child" ] && [ ! -L "$child" ] \
+      && [ "$(spawn_file_link_count "$child")" = 1 ] || return 1
+    value=$(tr -d '\n' < "$child") || return 1
+    pid=${value%%:*}
+    token=${value#*:}
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'running'
+    else
+      printf 'exited'
+    fi
+  elif kill -0 "$pid" 2>/dev/null; then
+    printf 'starting'
+  else
+    printf 'abandoned'
+  fi
+}
+
+spawn_launch_guard_state() {
+  spawn_launch_guard_state_at "$SPAWN_LAUNCH_GUARD"
+}
+
+spawn_launch_child_exec_state() {
+  local child="$SPAWN_LAUNCH_GUARD/child" value pid token command
+  [ -f "$child" ] && [ ! -L "$child" ] \
+    && [ "$(spawn_file_link_count "$child")" = 1 ] || { printf 'starting'; return 0; }
+  value=$(tr -d '\n' < "$child") || return 1
+  pid=${value%%:*}
+  token=${value#*:}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+  kill -0 "$pid" 2>/dev/null || { printf 'exited'; return 0; }
+  command=$(ps -o comm= -p "$pid" 2>/dev/null | awk 'NF { print $1; exit }') || return 1
+  command=${command##*/}
+  case "$command" in
+    ''|sh|bash|dash|zsh|ksh) printf 'starting' ;;
+    *) printf 'executed' ;;
+  esac
+}
+
+spawn_launch_guard_cleanup_retryable() {
+  local state entry retired restore=0
+  state=$(spawn_launch_guard_state) || return 1
+  case "$state" in absent) return 0 ;; abandoned) ;; *) return 1 ;; esac
+  [ ! -e "$SPAWN_LAUNCH_EXECUTED" ] && [ ! -L "$SPAWN_LAUNCH_EXECUTED" ] || return 1
+  retired=$(umask 077; mktemp -d "$STATE/.$ID.launch-execution-retired.XXXXXX") || return 1
+  rmdir -- "$retired" || return 1
+  mv -- "$SPAWN_LAUNCH_GUARD" "$retired" || return 1
+  state=$(spawn_launch_guard_state_at "$retired") || restore=1
+  if [ "$restore" -eq 0 ]; then
+    case "$state" in abandoned|starting) ;; *) restore=1 ;; esac
+  fi
+  if [ -e "$retired/child" ] || [ -L "$retired/child" ]; then restore=1; fi
+  if [ "$restore" -eq 1 ]; then
+    mv -- "$retired" "$SPAWN_LAUNCH_GUARD" || return 1
+    return 1
+  fi
+  for entry in "$retired"/* "$retired"/.[!.]* "$retired"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case "${entry##*/}" in owner|.owner.tmp|.child.tmp) ;; *) restore=1; break ;; esac
+    [ -f "$entry" ] && [ ! -L "$entry" ] \
+      && [ "$(spawn_file_link_count "$entry")" = 1 ] || { restore=1; break; }
+  done
+  if [ "$restore" -eq 1 ]; then
+    mv -- "$retired" "$SPAWN_LAUNCH_GUARD" || return 1
+    return 1
+  fi
+  for entry in "$retired"/* "$retired"/.[!.]* "$retired"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    rm -f -- "$entry" || return 1
+  done
+  rmdir -- "$retired"
+}
+
+spawn_launch_guard_cleanup_terminal() {
+  local state entry retired
+  state=$(spawn_launch_guard_state) || return 1
+  case "$state" in absent) return 0 ;; exited|abandoned) ;; *) return 1 ;; esac
+  retired=$(umask 077; mktemp -d "$STATE/.$ID.launch-execution-retired.XXXXXX") || return 1
+  rmdir -- "$retired" || return 1
+  mv -- "$SPAWN_LAUNCH_GUARD" "$retired" || return 1
+  state=$(spawn_launch_guard_state_at "$retired") || return 1
+  case "$state" in exited|abandoned) ;; *) return 1 ;; esac
+  for entry in "$retired"/* "$retired"/.[!.]* "$retired"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case "${entry##*/}" in owner|child|.owner.tmp|.child.tmp) ;; *) return 1 ;; esac
+    [ -f "$entry" ] && [ ! -L "$entry" ] \
+      && [ "$(spawn_file_link_count "$entry")" = 1 ] || return 1
+  done
+  rm -rf -- "$retired"
+}
+
+spawn_launch_request_file_matches() {  # <path> <value>
+  local path=$1 value=$2 links bytes
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  links=$(spawn_file_link_count "$path") || return 1
+  [ "$links" = 1 ] || return 1
+  bytes=$(LC_ALL=C wc -c < "$path" | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$bytes" -le 512 ] || return 1
+  printf '%s\n' "$value" | cmp -s "$path" -
+}
+
+spawn_launch_request_state() {
+  local owner pid outcome guard_state
+  spawn_launch_request_paths || return 1
+  if [ ! -e "$SPAWN_LAUNCH_REQUEST" ] && [ ! -L "$SPAWN_LAUNCH_REQUEST" ]; then
+    printf 'absent'
+    return 0
+  fi
+  [ -d "$SPAWN_LAUNCH_REQUEST" ] && [ ! -L "$SPAWN_LAUNCH_REQUEST" ] || return 1
+  guard_state=$(spawn_launch_guard_state) || return 1
+  if [ -e "$SPAWN_LAUNCH_OUTCOME" ] || [ -L "$SPAWN_LAUNCH_OUTCOME" ]; then
+    [ -f "$SPAWN_LAUNCH_OUTCOME" ] && [ ! -L "$SPAWN_LAUNCH_OUTCOME" ] || return 1
+    [ "$(spawn_file_link_count "$SPAWN_LAUNCH_OUTCOME")" = 1 ] || return 1
+    outcome=$(tr -d '\n' < "$SPAWN_LAUNCH_OUTCOME") || return 1
+    case "$outcome" in
+      "running:$SPAWN_LAUNCH_REQUEST_TOKEN")
+        case "$guard_state" in running) printf 'executed' ;; exited|abandoned) printf 'launch-exited' ;; *) printf 'accepted' ;; esac
+        ;;
+      "exited:"*":$SPAWN_LAUNCH_REQUEST_TOKEN")
+        outcome=${outcome#exited:}
+        outcome=${outcome%:"$SPAWN_LAUNCH_REQUEST_TOKEN"}
+        case "$outcome" in ''|*[!0-9]*) return 1 ;; esac
+        if [ "$outcome" -eq 0 ]; then
+          printf 'launch-exited'
+        else
+          printf 'launch-failed'
+        fi
+        ;;
+      *) return 1 ;;
+    esac
+    return 0
+  fi
+  if [ -e "$SPAWN_LAUNCH_EXECUTED" ] || [ -L "$SPAWN_LAUNCH_EXECUTED" ]; then
+    spawn_launch_request_file_matches "$SPAWN_LAUNCH_EXECUTED" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+    case "$guard_state" in
+      running) printf 'executed' ;;
+      exited|abandoned) printf 'launch-exited' ;;
+      *) printf 'accepted' ;;
+    esac
+    return 0
+  fi
+  case "$guard_state" in
+    running|starting)
+      printf 'accepted'
+      return 0
+      ;;
+    exited)
+      printf 'launch-exited'
+      return 0
+      ;;
+    abandoned)
+      printf 'launch-abandoned'
+      return 0
+      ;;
+  esac
+  if [ -e "$SPAWN_LAUNCH_REQUEST/accepted" ] || [ -L "$SPAWN_LAUNCH_REQUEST/accepted" ]; then
+    spawn_launch_request_file_matches "$SPAWN_LAUNCH_REQUEST/accepted" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+    printf 'accepted'
+    return 0
+  fi
+  owner="$SPAWN_LAUNCH_REQUEST/owner"
+  [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+  [ "$(spawn_file_link_count "$owner")" = 1 ] || return 1
+  pid=$(tr -d '[:space:]' < "$owner")
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -e "$SPAWN_LAUNCH_REQUEST/attempted" ] || [ -L "$SPAWN_LAUNCH_REQUEST/attempted" ]; then
+    spawn_launch_request_file_matches "$SPAWN_LAUNCH_REQUEST/attempted" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+    if [ -e "$SPAWN_LAUNCH_REQUEST/failed" ] || [ -L "$SPAWN_LAUNCH_REQUEST/failed" ]; then
+      [ -f "$SPAWN_LAUNCH_REQUEST/failed" ] && [ ! -L "$SPAWN_LAUNCH_REQUEST/failed" ] || return 1
+      printf 'failed'
+    elif kill -0 "$pid" 2>/dev/null; then
+      printf 'attempted-live'
+    else
+      printf 'attempted-dead'
+    fi
+  elif kill -0 "$pid" 2>/dev/null; then
+    printf 'unattempted-live'
+  else
+    printf 'unattempted-dead'
+  fi
+}
+
+spawn_launch_request_cleanup() {
+  local entry
+  spawn_launch_request_paths || return 1
+  if [ ! -e "$SPAWN_LAUNCH_REQUEST" ] && [ ! -L "$SPAWN_LAUNCH_REQUEST" ]; then return 0; fi
+  [ -d "$SPAWN_LAUNCH_REQUEST" ] && [ ! -L "$SPAWN_LAUNCH_REQUEST" ] || return 1
+  if [ -e "$SPAWN_LAUNCH_REQUEST/kimi-submission" ] \
+    || [ -L "$SPAWN_LAUNCH_REQUEST/kimi-submission" ]; then
+    kimi_submission_cleanup_preflight || return 1
+  fi
+  for entry in "$SPAWN_LAUNCH_REQUEST"/* "$SPAWN_LAUNCH_REQUEST"/.[!.]* "$SPAWN_LAUNCH_REQUEST"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case "${entry##*/}" in owner|attempted|accepted|failed|executed|outcome|kimi-submission|kimi-submit-owner|kimi-submit-go|kimi-submit-attempted|kimi-submit-attempted.entering|kimi-submit-attempted.entering.baseline|kimi-submit-attempted.operation-owner|kimi-submit-attempted.operation-started|kimi-submit-attempted.operation-result|kimi-submit-result|.owner.tmp|.attempted.tmp|.accepted.tmp|.failed.tmp|.executed.tmp|.outcome.tmp|.kimi-submission.tmp|.kimi-submit-owner.tmp|.kimi-submit-go.tmp|.kimi-submit-attempted.tmp|.kimi-submit-attempted.entering.tmp.*|.kimi-submit-attempted.entering.baseline.tmp.*|.kimi-submit-attempted.operation-owner.tmp.*|.kimi-submit-attempted.operation-started.tmp.*|.kimi-submit-attempted.operation-result.tmp.*|.kimi-submit-result.tmp) ;; *) return 1 ;; esac
+    [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+    [ "$(spawn_file_link_count "$entry")" = 1 ] || return 1
+    rm -f -- "$entry" || return 1
+  done
+  rmdir -- "$SPAWN_LAUNCH_REQUEST"
+}
+
+spawn_launch_request_helper() {  # <command>
+  local command=$1 rc=0 tmp
+  set +e
+  umask 077
+  mkdir -m 700 -- "$SPAWN_LAUNCH_REQUEST" 2>/dev/null || exit 0
+  tmp="$SPAWN_LAUNCH_REQUEST/.owner.tmp"
+  printf '%s\n' "${BASHPID:-$$}" > "$tmp" && chmod 600 "$tmp" \
+    && mv -- "$tmp" "$SPAWN_LAUNCH_REQUEST/owner" || exit 1
+  spawn_send_launch_line "$T" "$command" || rc=$?
+  tmp="$SPAWN_LAUNCH_REQUEST/.attempted.tmp"
+  printf '%s\n' "$SPAWN_LAUNCH_REQUEST_TOKEN" > "$tmp" && chmod 600 "$tmp" \
+    && mv -- "$tmp" "$SPAWN_LAUNCH_REQUEST/attempted" || exit 1
+  if [ "$rc" -eq 0 ]; then
+    tmp="$SPAWN_LAUNCH_REQUEST/.accepted.tmp"
+    printf '%s\n' "$SPAWN_LAUNCH_REQUEST_TOKEN" > "$tmp" && chmod 600 "$tmp" \
+      && mv -- "$tmp" "$SPAWN_LAUNCH_REQUEST/accepted" || exit 1
+    exit 0
+  fi
+  tmp="$SPAWN_LAUNCH_REQUEST/.failed.tmp"
+  printf '%s\n' "$rc" > "$tmp" && chmod 600 "$tmp" \
+    && mv -- "$tmp" "$SPAWN_LAUNCH_REQUEST/failed"
+  exit "$rc"
+}
+
+spawn_launch_request_start() {  # <command>
+  local command=$1 helper_pid i=0
+  spawn_launch_request_paths || return 1
+  [ ! -e "$SPAWN_LAUNCH_REQUEST" ] && [ ! -L "$SPAWN_LAUNCH_REQUEST" ] || return 0
+  (trap - EXIT; trap '' HUP INT TERM; spawn_launch_request_helper "$command") \
+    </dev/null >/dev/null 2>&1 &
+  helper_pid=$!
+  while kill -0 "$helper_pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+    if [ -d "$SPAWN_LAUNCH_REQUEST" ] && [ ! -L "$SPAWN_LAUNCH_REQUEST" ] \
+       && { [ -e "$SPAWN_LAUNCH_REQUEST/attempted" ] \
+         || [ -L "$SPAWN_LAUNCH_REQUEST/attempted" ]; }; then
+      break
+    fi
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -d "$SPAWN_LAUNCH_REQUEST" ] && [ ! -L "$SPAWN_LAUNCH_REQUEST" ]
+}
+
+spawn_launch_request_wait() {
+  local state agent_state guard_state i=0 max=${FM_SPAWN_LAUNCH_POLLS:-100} interval=${FM_SPAWN_LAUNCH_INTERVAL:-0.1}
+  while [ "$i" -lt "$max" ]; do
+    state=$(spawn_launch_request_state) || return 1
+    case "$state" in
+      accepted|executed|attempted-live)
+        guard_state=$(spawn_launch_guard_state) || return 1
+        if [ "$guard_state" = running ] \
+          && [ "$(spawn_launch_child_exec_state)" = executed ]; then
+          return 0
+        fi
+        agent_state=$(fm_backend_agent_state "$BACKEND" "$T")
+        [ "$agent_state" != alive ] || return 0
+        ;;
+      launch-exited)
+        [ "$KIND" != secondmate ] || return 2
+        return 0
+        ;;
+      failed|attempted-dead|launch-abandoned|launch-failed) return 2 ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 3
+}
+
+spawn_launch_acceptance_wait() {
+  local state i=0 max=${FM_SPAWN_LAUNCH_POLLS:-100} interval=${FM_SPAWN_LAUNCH_INTERVAL:-0.1}
+  while [ "$i" -lt "$max" ]; do
+    state=$(spawn_launch_request_state) || return 1
+    case "$state" in
+      accepted|executed) return 0 ;;
+      launch-exited|failed|attempted-dead|launch-abandoned|launch-failed) return 2 ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 3
+}
+
+spawn_launch_delivery_wait() {
+  if [ "$KIND" = secondmate ]; then
+    spawn_launch_request_wait
+  else
+    spawn_launch_acceptance_wait
+  fi
+}
+
+spawn_endpoint_receipt_commitment_load() {  # <state-inode> <base>
+  local state_inode=$1 base=$2 state kind _dev inode mode links bytes _mtime _ctime extra commitment
+  state=$(python3 "$SCRIPT_DIR/fm-work-identity-fs.py" describe \
+    "$STATE" "$state_inode" "$base") || return 1
+  IFS=: read -r kind _dev inode mode links bytes _mtime _ctime extra <<EOF
+$state
+EOF
+  [ -z "$extra" ] && [ "$kind" = regular ] || return 1
+  case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$bytes" -le 65536 ] || return 1
+  commitment=$(python3 "$SCRIPT_DIR/fm-work-identity-fs.py" describe-digest \
+    "$STATE" "$state_inode" "$base" "$bytes") || return 1
+  IFS=$'\t' read -r SPAWN_ENDPOINT_ENTRY_STATE SPAWN_ENDPOINT_ENTRY_DIGEST extra <<EOF
+$commitment
+EOF
+  [ -z "$extra" ] && [ "$SPAWN_ENDPOINT_ENTRY_STATE" = "$state" ] || return 1
+  case "$SPAWN_ENDPOINT_ENTRY_DIGEST" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#SPAWN_ENDPOINT_ENTRY_DIGEST}" -eq 64 ]
+}
+
+spawn_endpoint_receipt_retire() {
+  local base state_inode
+  [ -n "$SPAWN_ENDPOINT_RECEIPT" ] || return 1
+  [ -n "$SPAWN_ENDPOINT_ENTRY_STATE" ] && [ -n "$SPAWN_ENDPOINT_ENTRY_DIGEST" ] || return 1
+  base=$(basename -- "$SPAWN_ENDPOINT_RECEIPT") || return 1
+  state_inode=$(spawn_file_inode_identity "$STATE") || return 1
+  python3 "$SCRIPT_DIR/fm-work-identity-fs.py" remove \
+    "$STATE" "$state_inode" "$base" \
+    "$SPAWN_ENDPOINT_ENTRY_STATE" "$SPAWN_ENDPOINT_ENTRY_DIGEST" >/dev/null || return 1
+  SPAWN_ENDPOINT_PHASE=
+  SPAWN_ENDPOINT_ENTRY_STATE=
+  SPAWN_ENDPOINT_ENTRY_DIGEST=
+}
+
+spawn_endpoint_receipt_publish() {  # <phase> [worktree]
+  local phase=$1 worktree=${2:-} details payload payload_digest tmp base state_inode rc=0
+  local source_details source_state source_digest
+  case "$phase" in endpoint-creating|endpoint-created|worktree-unsent|worktree-requesting|worktree-requested|worktree-retryable|worktree-acquired|worktree-ready|launch-prepared|launch-submitted) ;; *) return 1 ;; esac
+  case "$BACKEND" in
+    tmux)
+      details=$(jq -n -S -c --arg session "${SES:-}" --arg window_id "${WT_TARGET:-}" \
+        '{session:$session,window_id:$window_id}') || return 1
+      ;;
+    herdr)
+      details=$(jq -n -S -c --arg session "${HERDR_SES:-}" \
+        --arg workspace_id "${HERDR_WORKSPACE_ID:-}" --arg tab_id "${HERDR_TAB_ID:-}" \
+        --arg pane_id "${HERDR_PANE_ID:-}" \
+        '{session:$session,workspace_id:$workspace_id,tab_id:$tab_id,pane_id:$pane_id}') || return 1
+      ;;
+    zellij)
+      details=$(jq -n -S -c --arg session "${ZELLIJ_SES:-}" \
+        --arg tab_id "${ZELLIJ_TAB_ID:-}" --arg pane_id "${ZELLIJ_PANE_ID:-}" \
+        '{session:$session,tab_id:$tab_id,pane_id:$pane_id}') || return 1
+      ;;
+    cmux)
+      details=$(jq -n -S -c --arg workspace_id "${CMUX_WORKSPACE_ID:-}" \
+        --arg surface_id "${CMUX_SURFACE_ID:-}" \
+        '{workspace_id:$workspace_id,surface_id:$surface_id}') || return 1
+      ;;
+    orca)
+      details=$(jq -n -S -c --arg worktree_id "${ORCA_WORKTREE_ID:-}" \
+        --arg terminal "${ORCA_TERMINAL:-}" \
+        '{worktree_id:$worktree_id,terminal:$terminal}') || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  payload=$(jq -n -S -c \
+    --arg schema fm-spawn-endpoint.v1 --arg phase "$phase" \
+    --arg home "$SPAWN_IDENTITY_HOME" --arg home_id "$SPAWN_IDENTITY_HOME_ID" --arg task "$ID" \
+    --arg transaction "$SPAWN_DISPATCH_TRANSACTION" \
+    --arg instructions_sha256 "$LAUNCH_BRIEF_HASH" --arg backend "$BACKEND" \
+    --arg kind "$KIND" --arg project "$PROJ_ABS" --arg label "$W" --arg target "${T:-}" \
+    --arg worktree "$worktree" --argjson details "$details" \
+    '{schema:$schema,phase:$phase,binding:{home:$home,home_id:$home_id,task_id:$task},
+      transaction_id:$transaction,instructions_sha256:$instructions_sha256,
+      backend:$backend,kind:$kind,project:$project,
+      endpoint:{label:$label,target:(if $phase == "endpoint-creating" and $target == "" then null else $target end),details:$details},
+      worktree:(if $worktree == "" then null else $worktree end)}') || return 1
+  payload_digest=$(printf '%s\n' "$payload" | spawn_sha256_stream) || return 1
+  tmp=$(umask 077; mktemp "$STATE/.$ID.spawn-endpoint.XXXXXX") || return 1
+  if ! printf '%s\n' "$payload" > "$tmp" || ! chmod 600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  base=$(basename -- "$SPAWN_ENDPOINT_RECEIPT") || { rm -f -- "$tmp"; return 1; }
+  state_inode=$(spawn_file_inode_identity "$STATE") || { rm -f -- "$tmp"; return 1; }
+  source_details=$(python3 "$SCRIPT_DIR/fm-work-identity-fs.py" describe-source "$tmp" 65536) \
+    || { rm -f -- "$tmp"; return 1; }
+  source_state=${source_details%%$'\t'*}
+  source_digest=${source_details#*$'\t'}
+  [ "$source_state" != "$source_details" ] && [ "$source_digest" = "$payload_digest" ] \
+    || { rm -f -- "$tmp"; return 1; }
+  if [ -z "$SPAWN_ENDPOINT_PHASE" ]; then
+    python3 "$SCRIPT_DIR/fm-work-identity-fs.py" no-clobber \
+      "$STATE" "$state_inode" "$base" "$tmp" "${base}.publishing" \
+      "$source_state" "$source_digest" >/dev/null || rc=$?
+  else
+    [ -n "$SPAWN_ENDPOINT_ENTRY_STATE" ] && [ -n "$SPAWN_ENDPOINT_ENTRY_DIGEST" ] \
+      || { rm -f -- "$tmp"; return 1; }
+    python3 "$SCRIPT_DIR/fm-work-identity-fs.py" replace \
+      "$STATE" "$state_inode" "$base" "$tmp" \
+      "$SPAWN_ENDPOINT_ENTRY_STATE" "$SPAWN_ENDPOINT_ENTRY_DIGEST" \
+      "$source_state" "$source_digest" >/dev/null || rc=$?
+  fi
+  rm -f -- "$tmp" || return 1
+  [ "$rc" -eq 0 ] || return "$rc"
+  spawn_endpoint_receipt_commitment_load "$state_inode" "$base" || return 1
+  [ "$SPAWN_ENDPOINT_ENTRY_DIGEST" = "$payload_digest" ] || return 1
+  SPAWN_ENDPOINT_PHASE=$phase
+  if [ "$KIND" = secondmate ] && [ "$SECONDMATE_RESERVATION_PENDING" -eq 1 ]; then
+    SECONDMATE_RESERVATION_PRESERVE=1
+  fi
+}
+
+spawn_endpoint_receipt_load() {
+  local receipt=$SPAWN_ENDPOINT_RECEIPT canonical receipt_snapshot target worktree details
+  local base state_inode
+  base=$(basename -- "$receipt") || return 1
+  state_inode=$(spawn_file_inode_identity "$STATE") || return 1
+  spawn_endpoint_receipt_commitment_load "$state_inode" "$base" || {
+    echo "error: spawn endpoint receipt is unsafe: $receipt" >&2
+    return 1
+  }
+  receipt_snapshot=$(python3 "$SCRIPT_DIR/fm-work-identity-fs.py" snapshot \
+    "$STATE" "$state_inode" "$base" \
+    "$SPAWN_ENDPOINT_ENTRY_STATE" "$SPAWN_ENDPOINT_ENTRY_DIGEST") || return 1
+  [ "${#receipt_snapshot}" -le 65535 ] \
+    || { echo "error: spawn endpoint receipt is oversized: $receipt" >&2; return 1; }
+  canonical=$(printf '%s\n' "$receipt_snapshot" | jq -e -S -c -s \
+    --arg home "$SPAWN_IDENTITY_HOME" --arg home_id "$SPAWN_IDENTITY_HOME_ID" --arg task "$ID" \
+    --arg transaction "$SPAWN_DISPATCH_TRANSACTION" \
+    --arg instructions_sha256 "$LAUNCH_BRIEF_HASH" --arg backend "$BACKEND" \
+    --arg kind "$KIND" --arg project "$PROJ_ABS" --arg label "$W" '
+      def exact($keys): (keys | sort) == ($keys | sort);
+      select(length == 1) | .[0] | . as $r | select(
+        type == "object"
+        and exact(["schema","phase","binding","transaction_id","instructions_sha256","backend","kind","project","endpoint","worktree"])
+        and .schema == "fm-spawn-endpoint.v1"
+        and (.phase == "endpoint-creating" or .phase == "endpoint-created"
+          or .phase == "worktree-unsent" or .phase == "worktree-requesting"
+          or .phase == "worktree-requested" or .phase == "worktree-retryable"
+          or .phase == "worktree-acquired" or .phase == "worktree-ready"
+          or .phase == "launch-prepared" or .phase == "launch-submitted")
+        and .binding == {home:$home,home_id:$home_id,task_id:$task}
+        and .transaction_id == $transaction and .instructions_sha256 == $instructions_sha256
+        and .backend == $backend and .kind == $kind and .project == $project
+        and (.endpoint | type == "object" and exact(["label","target","details"])
+          and .label == $label
+          and (if $r.phase == "endpoint-creating" then (.target == null or (.target | type) == "string")
+               else (.target | type) == "string" and (.target | length) > 0 end)
+          and (.details | type) == "object"
+          and (if $backend == "tmux" then (.details | exact(["session","window_id"]))
+               elif $backend == "herdr" then (.details | exact(["session","workspace_id","tab_id","pane_id"]))
+               elif $backend == "zellij" then (.details | exact(["session","tab_id","pane_id"]))
+               elif $backend == "cmux" then (.details | exact(["workspace_id","surface_id"]))
+               elif $backend == "orca" then (.details | exact(["worktree_id","terminal"]))
+               else false end))
+        and (.worktree == null or (.worktree | type) == "string")
+        and (if .phase == "worktree-ready" or .phase == "worktree-acquired"
+               or .phase == "launch-prepared" or .phase == "launch-submitted"
+             then (.worktree | type) == "string" and (.worktree | length) > 0
+             elif .phase == "endpoint-creating" or .phase == "worktree-retryable" then .worktree == null
+             else true end)
+        and (if .phase == "worktree-retryable" or .phase == "worktree-acquired" then
+               ($backend == "zellij" or $backend == "cmux")
+             else true end)
+      ) | $r
+    ' 2>/dev/null) || {
+      echo "error: spawn endpoint receipt is malformed or mismatched: $receipt" >&2
+      return 1
+    }
+  [ "$canonical" = "$receipt_snapshot" ] || {
+    echo "error: spawn endpoint receipt is not canonical: $receipt" >&2
+    return 1
+  }
+  SPAWN_ENDPOINT_PHASE=$(printf '%s' "$canonical" | jq -r '.phase') || return 1
+  if [ "$KIND" = secondmate ] && [ "$SECONDMATE_RESERVATION_PENDING" -eq 1 ]; then
+    SECONDMATE_RESERVATION_PRESERVE=1
+  fi
+  if [ "$SPAWN_ENDPOINT_PHASE" = endpoint-creating ]; then
+    SPAWN_ENDPOINT_CREATING_RECOVERY=1
+    return 0
+  fi
+  target=$(printf '%s' "$canonical" | jq -r '.endpoint.target') || return 1
+  worktree=$(printf '%s' "$canonical" | jq -r '.worktree // ""') || return 1
+  details=$(printf '%s' "$canonical" | jq -c '.endpoint.details') || return 1
+  T=$target
+  WT=$worktree
+  case "$BACKEND" in
+    tmux)
+      printf '%s' "$details" | jq -e '(keys | sort) == (["session","window_id"] | sort)' >/dev/null \
+        || return 1
+      SES=$(printf '%s' "$details" | jq -er '.session | select(length > 0)') || return 1
+      WT_TARGET=$(printf '%s' "$details" | jq -r '.window_id // ""') || return 1
+      [ -n "$WT_TARGET" ] || WT_TARGET=$T
+      [ "$T" = "$SES:$W" ] || return 1
+      ;;
+    herdr)
+      printf '%s' "$details" | jq -e '(keys | sort) == (["session","workspace_id","tab_id","pane_id"] | sort)' >/dev/null \
+        || return 1
+      HERDR_SES=$(printf '%s' "$details" | jq -er '.session | select(length > 0)') || return 1
+      HERDR_WORKSPACE_ID=$(printf '%s' "$details" | jq -er '.workspace_id | select(length > 0)') || return 1
+      HERDR_TAB_ID=$(printf '%s' "$details" | jq -er '.tab_id | select(length > 0)') || return 1
+      HERDR_PANE_ID=$(printf '%s' "$details" | jq -er '.pane_id | select(length > 0)') || return 1
+      [ "$T" = "$HERDR_SES:$HERDR_PANE_ID" ] || return 1
+      WT_TARGET=$T
+      ;;
+    zellij)
+      printf '%s' "$details" | jq -e '(keys | sort) == (["session","tab_id","pane_id"] | sort)' >/dev/null \
+        || return 1
+      ZELLIJ_SES=$(printf '%s' "$details" | jq -er '.session | select(length > 0)') || return 1
+      ZELLIJ_TAB_ID=$(printf '%s' "$details" | jq -er '.tab_id | select(length > 0)') || return 1
+      ZELLIJ_PANE_ID=$(printf '%s' "$details" | jq -er '.pane_id | select(length > 0)') || return 1
+      [ "$T" = "$ZELLIJ_SES:$ZELLIJ_PANE_ID" ] || return 1
+      WT_TARGET=$T
+      ;;
+    cmux)
+      printf '%s' "$details" | jq -e '(keys | sort) == (["workspace_id","surface_id"] | sort)' >/dev/null \
+        || return 1
+      CMUX_WORKSPACE_ID=$(printf '%s' "$details" | jq -er '.workspace_id | select(length > 0)') || return 1
+      CMUX_SURFACE_ID=$(printf '%s' "$details" | jq -er '.surface_id | select(length > 0)') || return 1
+      [ "$T" = "$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID" ] || return 1
+      WT_TARGET=$T
+      ;;
+    orca)
+      printf '%s' "$details" | jq -e '(keys | sort) == (["worktree_id","terminal"] | sort)' >/dev/null \
+        || return 1
+      ORCA_WORKTREE_ID=$(printf '%s' "$details" | jq -er '.worktree_id | select(length > 0)') || return 1
+      ORCA_TERMINAL=$(printf '%s' "$details" | jq -er '.terminal | select(length > 0)') || return 1
+      [ "$T" = "$ORCA_TERMINAL" ] || return 1
+      WT_TARGET=$T
+      ;;
+    *) return 1 ;;
+  esac
+  if [ -n "$WT" ]; then
+    spawn_endpoint_worktree_binding_valid || {
+      echo "error: recorded spawn worktree is invalid or cross-project for $ID: $WT" >&2
+      return 1
+    }
+  fi
+  if [ "$KIND" != secondmate ]; then
+    spawn_provisional_harness_wiring_recover || return 1
+  fi
+  if ! fm_backend_target_exists "$BACKEND" "$target" "$W"; then
+    endpoint_state=$(fm_backend_agent_state "$BACKEND" "$target")
+    if [ "$endpoint_state" = missing ]; then
+      case "$SPAWN_ENDPOINT_PHASE" in
+        launch-prepared|launch-submitted) SPAWN_ENDPOINT_MISSING=1 ;;
+        *)
+          echo "error: recorded spawn endpoint is gone for $ID: $target" >&2
+          return 2
+          ;;
+      esac
+    else
+      echo "error: recorded spawn endpoint is unavailable for $ID: $target" >&2
+      return 1
+    fi
+  fi
+  if [ "$BACKEND" = tmux ] || [ "$BACKEND" = herdr ]; then
+    endpoint_state=$(fm_backend_agent_state "$BACKEND" "$target")
+    case "$SPAWN_ENDPOINT_PHASE:$endpoint_state" in
+      launch-prepared:*) ;;
+      launch-submitted:*) SPAWN_LAUNCH_SUBMITTED_RECOVERY=1 ;;
+      worktree-requesting:dead|worktree-requesting:ambiguous|worktree-requested:dead|worktree-requested:ambiguous) ;;
+      *:dead) ;;
+      *)
+        echo "error: recorded spawn endpoint is not safely recoverable for $ID: $target ($endpoint_state)" >&2
+        return 1
+        ;;
+    esac
+  elif [ "$SPAWN_ENDPOINT_PHASE" = launch-submitted ]; then
+    SPAWN_LAUNCH_SUBMITTED_RECOVERY=1
+  fi
+  SPAWN_ENDPOINT_RECOVERED=1
+}
+
+spawn_endpoint_worktree_binding_valid() {
+  local wt_real project_real wt_top wt_top_real wt_common project_common
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || return 1
+  project_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || return 1
+  if [ "$KIND" = secondmate ]; then
+    [ "$wt_real" = "$project_real" ]
+    return
+  fi
+  wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null) || return 1
+  wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || return 1
+  [ "$wt_real" = "$wt_top_real" ] && [ "$wt_real" != "$project_real" ] || return 1
+  wt_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  project_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$wt_common" = "$project_common" ]
+}
+
+spawn_orca_operation_prepare() {
+  if [ -e "$SPAWN_ORCA_OPERATION" ] || [ -L "$SPAWN_ORCA_OPERATION" ]; then
+    [ -d "$SPAWN_ORCA_OPERATION" ] && [ ! -L "$SPAWN_ORCA_OPERATION" ] || {
+      echo "error: Orca endpoint operation path is unsafe: $SPAWN_ORCA_OPERATION" >&2
+      return 1
+    }
+  else
+    (umask 077; mkdir "$SPAWN_ORCA_OPERATION") || return 1
+  fi
+}
+
+spawn_orca_operation_publish() {  # <result|failure> <payload>
+  local kind=$1 payload=$2 tmp target rc=0
+  case "$kind" in
+    result) target="$SPAWN_ORCA_OPERATION/result.json" ;;
+    failure) target="$SPAWN_ORCA_OPERATION/failure.json" ;;
+    *) return 1 ;;
+  esac
+  tmp=$(umask 077; mktemp "$SPAWN_ORCA_OPERATION/.${kind}.XXXXXX") || return 1
+  if ! printf '%s\n' "$payload" > "$tmp" || ! chmod 600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fm_backend_orca_no_clobber_publish "$tmp" "$target" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2)
+      cmp -s "$tmp" "$target"
+      rc=$?
+      rm -f -- "$tmp"
+      return "$rc"
+      ;;
+    *) rm -f -- "$tmp"; return 1 ;;
+  esac
+}
+
+spawn_orca_operation_helper() {
+  local claim_tmp claim_rc create_response terminal_response raw rc wt_id='' wt_path='' terminal='' payload rest wt_real wt_top wt_top_real proj_real failure_reason=creation orca_name orca_name_digest
+  set +e
+  claim_tmp=$(umask 077; mktemp "$SPAWN_ORCA_OPERATION/.claim.XXXXXX") || exit 1
+  printf '%s\n' "${BASHPID:-$$}" > "$claim_tmp" || { rm -f -- "$claim_tmp"; exit 1; }
+  claim_rc=0
+  fm_backend_orca_no_clobber_publish "$claim_tmp" "$SPAWN_ORCA_OPERATION/claim" || claim_rc=$?
+  case "$claim_rc" in
+    0) ;;
+    2) rm -f -- "$claim_tmp"; exit 0 ;;
+    *) rm -f -- "$claim_tmp"; exit 1 ;;
+  esac
+
+  create_response="$SPAWN_ORCA_OPERATION/create-response.json"
+  orca_name_digest=$(printf '%s' "$SPAWN_DISPATCH_TRANSACTION" | spawn_sha256_stream) || exit 1
+  orca_name="$W-${orca_name_digest:0:16}"
+  raw=$(fm_backend_orca_worktree_create_durable "$PROJ_ABS" "$orca_name" "$create_response")
+  rc=$?
+  if [ "$rc" -eq "$FM_BACKEND_ORCA_WORKTREE_CREATE_IN_PROGRESS" ]; then
+    exit "$FM_BACKEND_ORCA_WORKTREE_CREATE_IN_PROGRESS"
+  fi
+  if [ -n "$raw" ]; then
+    wt_id=${raw%%$'\t'*}
+    if [ "$raw" != "$wt_id" ]; then
+      rest=${raw#*$'\t'}
+      wt_path=${rest%%$'\t'*}
+      if [ "$rest" != "$wt_path" ]; then terminal=${rest#*$'\t'}; fi
+    fi
+  fi
+  if [ "$rc" -eq 3 ] && [ -z "$raw" ]; then
+    failure_reason=compensated
+  elif [ "$rc" -ne 0 ] && [ -n "$wt_id" ] && [ -z "$wt_path" ]; then
+    failure_reason=path
+  fi
+  if [ "$rc" -eq 0 ] && [ -n "$wt_id" ] && [ -n "$wt_path" ]; then
+    wt_real=$(cd "$wt_path" 2>/dev/null && pwd -P)
+    wt_top=$(git -C "$wt_path" rev-parse --show-toplevel 2>/dev/null)
+    wt_top_real=
+    [ -z "$wt_top" ] || wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P)
+    proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P)
+    if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] \
+       || [ "$wt_real" = "$proj_real" ]; then
+      rc=3
+      failure_reason=isolation
+    fi
+  fi
+  if [ "$rc" -eq 0 ] && [ -z "$terminal" ]; then
+    terminal_response="$SPAWN_ORCA_OPERATION/terminal-response.json"
+    terminal=$(fm_backend_orca_terminal_create_durable "$wt_id" "$W" \
+      "$terminal_response" "$SPAWN_ORCA_OPERATION/terminal-create")
+    rc=$?
+    [ "$rc" -ne "$FM_BACKEND_ORCA_TERMINAL_CREATE_IN_PROGRESS" ] \
+      || exit "$FM_BACKEND_ORCA_TERMINAL_CREATE_IN_PROGRESS"
+    [ "$rc" -eq 0 ] || failure_reason=terminal
+  fi
+  if [ "$rc" -eq 0 ] && [ -n "$wt_id" ] && [ -n "$wt_path" ] && [ -n "$terminal" ]; then
+    payload=$(jq -n -S -c \
+      --arg schema fm-spawn-orca-endpoint.v1 \
+      --arg home "$SPAWN_IDENTITY_HOME" --arg home_id "$SPAWN_IDENTITY_HOME_ID" --arg task "$ID" \
+      --arg transaction "$SPAWN_DISPATCH_TRANSACTION" --arg project "$PROJ_ABS" --arg label "$W" \
+      --arg worktree_id "$wt_id" --arg worktree "$wt_path" --arg terminal "$terminal" \
+      '{schema:$schema,binding:{home:$home,home_id:$home_id,task_id:$task},
+        transaction_id:$transaction,project:$project,label:$label,
+        worktree_id:$worktree_id,worktree:$worktree,terminal:$terminal}') || rc=1
+    if [ "$rc" -eq 0 ] && spawn_orca_operation_publish result "$payload"; then
+      exit 0
+    fi
+    exit 1
+  fi
+
+  payload=$(jq -n -S -c \
+    --arg schema fm-spawn-orca-operation-failure.v1 \
+    --arg home "$SPAWN_IDENTITY_HOME" --arg home_id "$SPAWN_IDENTITY_HOME_ID" --arg task "$ID" \
+    --arg transaction "$SPAWN_DISPATCH_TRANSACTION" --arg project "$PROJ_ABS" --arg label "$W" \
+    --arg reason "$failure_reason" --arg worktree_id "$wt_id" --arg worktree "$wt_path" --arg terminal "$terminal" \
+    '{schema:$schema,binding:{home:$home,home_id:$home_id,task_id:$task},
+      transaction_id:$transaction,project:$project,label:$label,reason:$reason,
+      worktree_id:(if $worktree_id == "" then null else $worktree_id end),
+      worktree:(if $worktree == "" then null else $worktree end),
+      terminal:(if $terminal == "" then null else $terminal end)}') || exit 1
+  spawn_orca_operation_publish failure "$payload" || exit 1
+  exit 1
+}
+
+spawn_orca_operation_start() {
+  local error_file="$SPAWN_ORCA_OPERATION/helper.err" links
+  if [ -e "$error_file" ] || [ -L "$error_file" ]; then
+    [ -f "$error_file" ] && [ ! -L "$error_file" ] || return 1
+    links=$(spawn_file_link_count "$error_file") || return 1
+    [ "$links" = 1 ] || return 1
+    : > "$error_file" || return 1
+  else
+    (umask 077; : > "$error_file") || return 1
+  fi
+  (trap - EXIT; trap '' HUP INT TERM; spawn_orca_operation_helper) \
+    </dev/null >/dev/null 2>"$error_file" &
+}
+
+spawn_orca_operation_load() {  # 0=result, 2=in progress, 3=unclaimed, 4=creator exited, 6=recoverable response
+  local file canonical links pid failure_reason create_response_recoverable=0
+  for file in \
+    "$SPAWN_ORCA_OPERATION/result.json" \
+    "$SPAWN_ORCA_OPERATION/failure.json" \
+    "$SPAWN_ORCA_OPERATION/claim" \
+    "$SPAWN_ORCA_OPERATION/terminal-response.json" \
+    "$SPAWN_ORCA_OPERATION/terminal-create.pid" \
+    "$SPAWN_ORCA_OPERATION/terminal-create.start" \
+    "$SPAWN_ORCA_OPERATION/terminal-create.status"
+  do
+    fm_backend_orca_no_clobber_recover "$file" || return 1
+  done
+  file="$SPAWN_ORCA_OPERATION/result.json"
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    links=$(spawn_file_link_count "$file") || return 1
+    [ "$links" = 1 ] || return 1
+    canonical=$(jq -e -S -c -s \
+      --arg home "$SPAWN_IDENTITY_HOME" --arg home_id "$SPAWN_IDENTITY_HOME_ID" --arg task "$ID" \
+      --arg transaction "$SPAWN_DISPATCH_TRANSACTION" --arg project "$PROJ_ABS" --arg label "$W" '
+        def exact($keys): (keys | sort) == ($keys | sort);
+        select(length == 1) | .[0] | . as $r | select(
+          type == "object"
+          and exact(["schema","binding","transaction_id","project","label","worktree_id","worktree","terminal"])
+          and .schema == "fm-spawn-orca-endpoint.v1"
+          and .binding == {home:$home,home_id:$home_id,task_id:$task}
+          and .transaction_id == $transaction and .project == $project and .label == $label
+          and ([.worktree_id,.worktree,.terminal] | all(type == "string" and length > 0))
+        ) | $r
+      ' "$file" 2>/dev/null) || return 1
+    printf '%s\n' "$canonical" | cmp -s "$file" - || return 1
+    ORCA_WORKTREE_ID=$(printf '%s' "$canonical" | jq -r '.worktree_id') || return 1
+    WT=$(printf '%s' "$canonical" | jq -r '.worktree') || return 1
+    ORCA_TERMINAL=$(printf '%s' "$canonical" | jq -r '.terminal') || return 1
+    return 0
+  fi
+
+  file="$SPAWN_ORCA_OPERATION/failure.json"
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    links=$(spawn_file_link_count "$file") || return 1
+    [ "$links" = 1 ] || return 1
+    canonical=$(jq -e -S -c -s \
+      --arg home "$SPAWN_IDENTITY_HOME" --arg home_id "$SPAWN_IDENTITY_HOME_ID" --arg task "$ID" \
+      --arg transaction "$SPAWN_DISPATCH_TRANSACTION" --arg project "$PROJ_ABS" --arg label "$W" '
+        def exact($keys): (keys | sort) == ($keys | sort);
+        select(length == 1) | .[0] | . as $r | select(
+          type == "object"
+          and exact(["schema","binding","transaction_id","project","label","reason","worktree_id","worktree","terminal"])
+          and .schema == "fm-spawn-orca-operation-failure.v1"
+          and .binding == {home:$home,home_id:$home_id,task_id:$task}
+          and .transaction_id == $transaction and .project == $project and .label == $label
+          and (.reason == "creation" or .reason == "isolation" or .reason == "path"
+            or .reason == "terminal" or .reason == "compensated")
+          and ([.worktree_id,.worktree,.terminal] | all(. == null or (type == "string" and length > 0)))
+          and (if .reason == "compensated" then
+            .worktree_id == null and .worktree == null and .terminal == null
+          else true end)
+        ) | $r
+      ' "$file" 2>/dev/null) || return 1
+    printf '%s\n' "$canonical" | cmp -s "$file" - || return 1
+    ORCA_WORKTREE_ID=$(printf '%s' "$canonical" | jq -r '.worktree_id // ""') || return 1
+    WT=$(printf '%s' "$canonical" | jq -r '.worktree // ""') || return 1
+    ORCA_TERMINAL=$(printf '%s' "$canonical" | jq -r '.terminal // ""') || return 1
+    failure_reason=$(printf '%s' "$canonical" | jq -r '.reason') || return 1
+    [ -z "$ORCA_WORKTREE_ID" ] || ORCA_ABORT_CLEANUP=1
+    case "$failure_reason" in
+      compensated) return 5 ;;
+      isolation)
+        echo "error: orca worktree create did not yield an isolated worktree (resolved '$WT'; primary '$PROJ_ABS')" >&2
+        ;;
+      path)
+        echo "error: orca worktree create did not return a path for $W" >&2
+        ;;
+      *)
+        echo "error: Orca endpoint creation failed for $ID; exact partial resources are preserved for cleanup" >&2
+        ;;
+    esac
+    return 1
+  fi
+
+  file="$SPAWN_ORCA_OPERATION/create-response.json"
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    links=$(spawn_file_link_count "$file") || return 1
+    [ "$links" = 1 ] || return 1
+    [ "$(LC_ALL=C wc -c < "$file" | tr -d ' ')" -le 65536 ] || return 1
+    create_response_recoverable=1
+  fi
+
+  file="$SPAWN_ORCA_OPERATION/claim"
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then return 3; fi
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  links=$(spawn_file_link_count "$file") || return 1
+  [ "$links" = 1 ] || return 1
+  pid=$(tr -d '[:space:]' < "$file")
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if kill -0 "$pid" 2>/dev/null; then return 2; fi
+  [ "$create_response_recoverable" -eq 0 ] || return 6
+  return 4
+}
+
+spawn_orca_operation_wait() {
+  local status dispatch_abort_rc=0 started=0 creator_exited=0 i=0 max=${FM_SPAWN_ORCA_CREATE_POLLS:-600} interval=${FM_SPAWN_ORCA_CREATE_INTERVAL:-0.1}
+  while [ "$i" -lt "$max" ]; do
+    set +e
+    spawn_orca_operation_load
+    status=$?
+    set -e
+    case "$status" in
+      0) return 0 ;;
+      3)
+        if [ "$started" -eq 0 ]; then
+          spawn_orca_operation_start || return 1
+          started=1
+        fi
+        ;;
+      2) creator_exited=0 ;;
+      4)
+        creator_exited=$((creator_exited + 1))
+        if [ "$creator_exited" -ge 10 ]; then
+          [ ! -s "$SPAWN_ORCA_OPERATION/helper.err" ] || cat "$SPAWN_ORCA_OPERATION/helper.err" >&2
+          echo "error: Orca endpoint creator stopped without a recoverable result for $ID" >&2
+          return 1
+        fi
+        ;;
+      6)
+        creator_exited=$((creator_exited + 1))
+        if [ "$creator_exited" -ge 10 ]; then
+          rm -f -- "$SPAWN_ORCA_OPERATION/claim" || return 1
+          spawn_orca_operation_start || return 1
+          started=1
+          creator_exited=0
+        fi
+        ;;
+      5)
+        [ ! -s "$SPAWN_ORCA_OPERATION/helper.err" ] || cat "$SPAWN_ORCA_OPERATION/helper.err" >&2
+        spawn_orca_operation_retire || {
+          echo "error: compensated Orca endpoint journal could not be retired for $ID" >&2
+          return 1
+        }
+        spawn_endpoint_receipt_retire || {
+          echo "error: compensated Orca endpoint receipt could not be retired for $ID" >&2
+          return 1
+        }
+        FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+          FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-work-identity.sh" \
+          dispatch-abort "$ID" --transaction "$SPAWN_DISPATCH_TRANSACTION" >/dev/null 2>&1 \
+          || dispatch_abort_rc=$?
+        case "$dispatch_abort_rc" in
+          0) SPAWN_DISPATCH_PENDING=0 ;;
+          *)
+            echo "error: compensated Orca work identity dispatch requires reconciliation for $ID" >&2
+            return 1
+            ;;
+        esac
+        echo "error: Orca endpoint creation failed without leaving resources; rerun spawn to retry" >&2
+        return 1
+        ;;
+      *) return 1 ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  echo "error: Orca endpoint creation is still in progress for $ID; rerun spawn to resume it" >&2
+  return 1
+}
+
+spawn_orca_operation_retire() {
+  local retired
+  [ -n "$SPAWN_ORCA_OPERATION" ] || return 0
+  if [ ! -e "$SPAWN_ORCA_OPERATION" ] && [ ! -L "$SPAWN_ORCA_OPERATION" ]; then return 0; fi
+  [ -d "$SPAWN_ORCA_OPERATION" ] && [ ! -L "$SPAWN_ORCA_OPERATION" ] || return 1
+  retired=$(umask 077; mktemp -d "$STATE/.$ID.spawn-orca-retired.XXXXXX") || return 1
+  rmdir -- "$retired" || return 1
+  mv -- "$SPAWN_ORCA_OPERATION" "$retired" || return 1
+  rm -rf -- "$retired" 2>/dev/null || true
+}
+
+spawn_metadata_transaction_published() {
+  local meta="$STATE/$ID.meta" links count
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  links=$(spawn_file_link_count "$meta") || return 1
+  [ "$links" = 1 ] || return 1
+  count=$(grep -Fxc "work_identity_dispatch_transaction=$SPAWN_DISPATCH_TRANSACTION" "$meta" 2>/dev/null || true)
+  [ "$count" = 1 ]
+}
+
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? orca_cleanup_compensated=0 orca_resource_cleanup_ok=1
+  local preserve_published_launch=0 launch_abort_state
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
-     && [ -n "$SPAWN_META_TMP" ] \
-     && [ ! -e "$SPAWN_META_TMP" ] \
-     && [ ! -L "$SPAWN_META_TMP" ]; then
+     && spawn_metadata_transaction_published; then
     RELAUNCH_REPLACEMENT_PENDING=0
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
@@ -770,7 +1802,8 @@ spawn_abort_cleanup() {
         "$RELAUNCH_REPLACEMENT_HARNESS" \
         "$RELAUNCH_REPLACEMENT_WT" \
         "$RELAUNCH_REPLACEMENT_STATE" \
-        "$ID"; then
+        "$ID" \
+        "$RELAUNCH_REPLACEMENT_AUTH_PATH"; then
       echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
     fi
     if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
@@ -801,49 +1834,92 @@ spawn_abort_cleanup() {
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
-    if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+    if [ -n "${ORCA_TERMINAL:-}" ] \
+      && ! fm_backend_orca_terminal_close_exact "$ORCA_TERMINAL" --absent-ok >/dev/null 2>&1; then
+      orca_resource_cleanup_ok=0
+      echo "warning: Orca terminal cleanup could not be confirmed; preserving the exact endpoint receipt and operation journal for recovery" >&2
     fi
-    if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-        if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-          if ! spawn_fresh_commit_rollback; then
-            status=1
-          fi
-          SPAWN_FRESH_COMMIT_PENDING=0
-        fi
-        mkdir -p "$STATE" 2>/dev/null || true
-        if [ -d "$STATE" ]; then
-          SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
-          {
-            echo "window=$W"
-            echo "endpoint_task_id=$ID"
-            echo "cleanup_recovery=orca"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            [ -z "${MODE:-}" ] || echo "mode=$MODE"
-            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$SPAWN_META_TMP" 2>/dev/null \
-            && fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" \
-            || true
-        fi
-      fi
+    if [ "$orca_resource_cleanup_ok" = 1 ] && [ -n "${ORCA_WORKTREE_ID:-}" ] \
+      && ! fm_backend_orca_remove_worktree "$ORCA_WORKTREE_ID" --absent-ok >/dev/null 2>&1; then
+      orca_resource_cleanup_ok=0
+      echo "warning: Orca worktree cleanup could not be confirmed; preserving the exact endpoint receipt and operation journal for recovery" >&2
     fi
+    [ "$orca_resource_cleanup_ok" -ne 1 ] || orca_cleanup_compensated=1
+  fi
+  if [ "$orca_cleanup_compensated" = 1 ]; then
+    if ! spawn_orca_operation_retire 2>/dev/null; then
+      echo "warning: compensated Orca operation journal could not be retired; preserving its endpoint receipt for recovery" >&2
+    elif [ -n "$SPAWN_ENDPOINT_RECEIPT" ] \
+      && ! spawn_endpoint_receipt_retire 2>/dev/null; then
+      echo "warning: compensated Orca endpoint receipt could not be retired; work identity dispatch requires reconciliation" >&2
+    fi
+  fi
+  if [ "$SPAWN_DISPATCH_PENDING" = 1 ]; then
+    local dispatch_abort_rc=0
+    SPAWN_DISPATCH_PENDING=0
+    if [ -n "$SPAWN_ENDPOINT_RECEIPT" ] \
+       && { [ -e "$SPAWN_ENDPOINT_RECEIPT" ] || [ -L "$SPAWN_ENDPOINT_RECEIPT" ]; }; then
+      echo "warning: work identity dispatch for $ID is preserved with its endpoint receipt for recovery" >&2
+    else
+      FM_HOME="$FM_HOME" \
+        FM_DATA_OVERRIDE="$DATA" \
+        FM_STATE_OVERRIDE="$STATE" \
+        FM_ROOT_OVERRIDE="$FM_ROOT" \
+        "$SCRIPT_DIR/fm-work-identity.sh" dispatch-abort "$ID" \
+          --transaction "$SPAWN_DISPATCH_TRANSACTION" >/dev/null 2>&1 \
+        || dispatch_abort_rc=$?
+      case "$dispatch_abort_rc" in
+        0|4) ;;
+        *) echo "warning: work identity dispatch for $ID requires reconciliation" >&2 ;;
+      esac
+    fi
+  fi
+  if [ "$SECONDMATE_RESERVATION_PENDING" -eq 1 ] \
+     && [ "$SECONDMATE_RESERVATION_PRESERVE" -eq 0 ]; then
+    local reservation_abort_rc=0
+    SECONDMATE_RESERVATION_PENDING=0
+    FM_HOME="$FM_HOME" \
+      FM_DATA_OVERRIDE="$DATA" \
+      FM_STATE_OVERRIDE="$STATE" \
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
+      "$SCRIPT_DIR/fm-work-identity.sh" unlinked-abort "$ID" \
+        --transaction "$SECONDMATE_RESERVATION_TRANSACTION" >/dev/null 2>&1 \
+      || reservation_abort_rc=$?
+    case "$reservation_abort_rc" in
+      0|4) ;;
+      *) echo "warning: persistent secondmate identity reservation for $ID requires reconciliation" >&2 ;;
+    esac
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-    if ! spawn_fresh_commit_rollback; then
+    case "$SPAWN_ENDPOINT_PHASE" in
+      launch-submitted) preserve_published_launch=1 ;;
+      launch-prepared)
+        launch_abort_state=$(spawn_launch_request_state 2>/dev/null || printf ambiguous)
+        case "$launch_abort_state" in
+          accepted|executed|launch-exited|launch-failed|attempted-live|unattempted-live) preserve_published_launch=1 ;;
+        esac
+        ;;
+    esac
+  fi
+  if [ "$preserve_published_launch" = 1 ]; then
+    SPAWN_FRESH_COMMIT_PENDING=0
+    SPAWN_PROVISIONAL_HARNESS_WIRING_PENDING=0
+    echo "warning: published task metadata and exact launch evidence for $ID were preserved for retry" >&2
+  else
+    if [ "$SPAWN_PROVISIONAL_HARNESS_WIRING_PENDING" = 1 ]; then
+      if spawn_provisional_harness_wiring_retire; then
+        SPAWN_PROVISIONAL_HARNESS_WIRING_PENDING=0
+      else
+        status=1
+      fi
+    fi
+    if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ] \
+       && [ "$SPAWN_PROVISIONAL_HARNESS_WIRING_PENDING" = 0 ] \
+       && ! spawn_fresh_commit_rollback; then
       status=1
     fi
   fi
@@ -860,6 +1936,7 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  [ -z "$SPAWN_BRIEF_TMP" ] || rm -f "$SPAWN_BRIEF_TMP" 2>/dev/null || true
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -889,7 +1966,8 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  local harness=$1 wt=$2 state=$3 id=$4 recorded_auth_path=${5:-}
+  local token_path token auth_path path
   # The wiring arms above match on harness PREFIXES, because a task launched
   # from a raw command records that command's basename rather than the exact
   # adapter name. The retirement tables are keyed by the exact adapter, so the
@@ -900,12 +1978,21 @@ clear_relaunch_harness_wiring() {
   harness=$(fm_control_harness_family "$harness") || harness=
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
-  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+  if [ -n "$token_path" ] && { [ -e "$token_path" ] || [ -L "$token_path" ]; }; then
+    [ -f "$token_path" ] && [ ! -L "$token_path" ] \
+      && [ "$(spawn_file_link_count "$token_path")" = 1 ] || return 1
     IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
   fi
-  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
+  if [ -n "$recorded_auth_path" ]; then
+    fm_control_harness_turnend_auth_record_valid \
+      "$harness" "$token" "$recorded_auth_path" || return 1
+    auth_path=$recorded_auth_path
+  else
+    auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
+  fi
   if [ -n "$auth_path" ]; then
-    rm -f -- "$auth_path" || return 1
+    fm_control_harness_turnend_auth_remove_exact \
+      "$harness" "$token" "$auth_path" "$state/$id.turn-ended" || return 1
   fi
   while IFS= read -r path; do
     [ -n "$path" ] || continue
@@ -1038,6 +2125,47 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
 fi
+SECONDMATE_WORK_IDENTITY_SCHEMA=
+SECONDMATE_WORK_IDENTITY_STATUS=
+SECONDMATE_RESERVATION_TRANSACTION="secondmate-spawn:$ID"
+prepare_secondmate_work_identity() {
+  SECONDMATE_RESERVATION_PENDING=1
+  SECONDMATE_WORK_IDENTITY_JSON=$(
+    FM_HOME="$FM_HOME" \
+      FM_DATA_OVERRIDE="$DATA" \
+      FM_STATE_OVERRIDE="$STATE" \
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
+      "$SCRIPT_DIR/fm-work-identity.sh" unlinked-prepare "$ID" \
+        --reason persistent-secondmate \
+        --transaction "$SECONDMATE_RESERVATION_TRANSACTION"
+  ) || return 1
+  SECONDMATE_WORK_IDENTITY_SCHEMA=$(printf '%s' "$SECONDMATE_WORK_IDENTITY_JSON" | jq -er '.schema') \
+    || { echo "error: persistent secondmate work identity projection is malformed for $ID" >&2; return 1; }
+  SECONDMATE_WORK_IDENTITY_STATUS=$(printf '%s' "$SECONDMATE_WORK_IDENTITY_JSON" | jq -er '.status') \
+    || { echo "error: persistent secondmate work identity projection is malformed for $ID" >&2; return 1; }
+  [ "$SECONDMATE_WORK_IDENTITY_STATUS" = unlinked ] || {
+    echo "error: persistent secondmate control task $ID cannot carry a linked work identity; route exact work units to tasks in the secondmate home" >&2
+    return 1
+  }
+}
+
+commit_secondmate_work_identity() {
+  SECONDMATE_WORK_IDENTITY_JSON=$(
+    FM_HOME="$FM_HOME" \
+      FM_DATA_OVERRIDE="$DATA" \
+      FM_STATE_OVERRIDE="$STATE" \
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
+      "$SCRIPT_DIR/fm-work-identity.sh" unlinked-commit "$ID" \
+        --transaction "$SECONDMATE_RESERVATION_TRANSACTION"
+  ) || return 1
+  SECONDMATE_WORK_IDENTITY_SCHEMA=$(printf '%s' "$SECONDMATE_WORK_IDENTITY_JSON" | jq -er '.schema') \
+    || return 1
+  SECONDMATE_WORK_IDENTITY_STATUS=$(printf '%s' "$SECONDMATE_WORK_IDENTITY_JSON" | jq -er '.status') \
+    || return 1
+  [ "$SECONDMATE_WORK_IDENTITY_STATUS" = unlinked ] || return 1
+  SECONDMATE_RESERVATION_PENDING=0
+  SECONDMATE_RESERVATION_PRESERVE=0
+}
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
     exit 0
@@ -1187,11 +2315,60 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+if [ "$KIND" = secondmate ]; then
+  if [ "$RELAUNCH" -eq 1 ] && [ -n "$(fm_meta_get "$RELAUNCH_META" remote_host)" ]; then
+    if spawn_remote_secondmate "$ID"; then
+      exit 0
+    else
+      remote_spawn_rc=$?
+    fi
+    [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
+    echo "error: task $ID records a remote secondmate endpoint but has no remote registry route" >&2
+    exit 1
+  fi
+fi
 
 shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+render_launch() {
+  local template=$1 output='' prefix rest token marker replacement
+  while [[ "$template" == *"__"* ]]; do
+    prefix=${template%%__*}
+    rest=${template#*__}
+    if [[ "$rest" != *"__"* ]]; then
+      output="${output}${prefix}__${rest}"
+      template=
+      break
+    fi
+    token=${rest%%__*}
+    template=${rest#*__}
+    marker="__${token}__"
+    replacement=$marker
+    case "$marker" in
+      __MODELFLAG__) replacement=$MODELFLAG ;;
+      __EFFORTFLAG__) replacement=$EFFORTFLAG ;;
+      __TURNEND__) replacement=$sq_turnend ;;
+      __PIEXT__) replacement=$sq_piext ;;
+      __PITURNEND__) replacement=$sq_piturnend ;;
+      __PIWATCH__) replacement=$sq_piwatch ;;
+      __WORKTREE__) replacement=$sq_worktree ;;
+      __BRIEF__) replacement=$sq_brief ;;
+      __BRIEFINPUT__) replacement=$sq_brief_input ;;
+      __PITUIMODE__) [ "${PI_TUI_MODE+x}" = x ] && replacement=$PI_TUI_MODE ;;
+      __PIBIN__) [ -z "${PI_BIN:-}" ] || replacement=$(shell_quote "$PI_BIN") ;;
+      __CURSORBIN__) [ -z "${CURSOR_BIN:-}" ] || replacement=$(shell_quote "$CURSOR_BIN") ;;
+      __KIMIBIN__) [ -z "${KIMI_BIN:-}" ] || replacement=$(shell_quote "$KIMI_BIN") ;;
+      __MUSEBIN__) [ -z "${MUSE_BIN:-}" ] || replacement=$(shell_quote "$MUSE_BIN") ;;
+      __MUSECONFIG__) [ -z "${MUSE_CONFIG_HOME:-}" ] || replacement=$(shell_quote "$MUSE_CONFIG_HOME") ;;
+      __MUSEDATA__) [ -z "${MUSE_DATA_HOME:-}" ] || replacement=$(shell_quote "$MUSE_DATA_HOME") ;;
+    esac
+    output="${output}${prefix}${replacement}"
+  done
+  printf '%s' "${output}${template}"
 }
 
 resolve_pi_executable() {
@@ -1231,21 +2408,21 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG____BRIEFINPUT__' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __BRIEFINPUT__'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" __BRIEFINPUT__'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt __BRIEFINPUT__' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ __BRIEFINPUT__'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ __BRIEFINPUT__'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1255,7 +2432,7 @@ launch_template() {
     # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG____BRIEFINPUT__' ;;
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
     # --yolo does NOT cover and which would otherwise block every spawn, since
     # each task gets a fresh worktree path cursor has never seen. --yolo is the
@@ -1268,9 +2445,9 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ __BRIEFINPUT__' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
-    # only an absolute brief pointer after the TUI readiness gate below.
+    # the captured immutable operational input after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
@@ -1295,13 +2472,15 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG____BRIEFINPUT__' ;;
     *) return 1 ;;
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1336,6 +2515,14 @@ case "$ARG3" in
     ;;
 esac
 
+if [ "$KIND" = secondmate ] && [ "$RAW_LAUNCH" -eq 1 ]; then
+  if [[ "$LAUNCH" == *[';&|<>`']* || "$LAUNCH" == *"\$("* \
+    || "$LAUNCH" == *$'\n'* || "$LAUNCH" == *$'\r'* ]]; then
+    echo "error: a local secondmate raw launch must be one simple executable command; shell pipelines, compounds, substitutions, and redirections cannot prove the persistent process boundary" >&2
+    exit 1
+  fi
+fi
+
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
 # Claude-compatible hook dialect explicitly rejects the model-reawakening and
@@ -1357,7 +2544,6 @@ case "$HARNESS" in
     if pi_supports_tui_mode "$PI_BIN"; then
       PI_TUI_MODE=' --tui-mode regular'
     fi
-    LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
     ;;
   cursor)
@@ -1558,16 +2744,16 @@ case "$LAUNCH" in
       fi
       exit 1
     fi
-    LAUNCH=${LAUNCH//__MUSEBIN__/$(shell_quote "$MUSE_BIN")}
-    LAUNCH=${LAUNCH//__MUSECONFIG__/$(shell_quote "$MUSE_CONFIG_HOME")}
-    LAUNCH=${LAUNCH//__MUSEDATA__/$(shell_quote "$MUSE_DATA_HOME")}
     ;;
 esac
 
 case "$LAUNCH" in
   *__KIMIBIN__*)
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
-    LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
+    if [ "$KIND" = secondmate ] && [ "$BACKEND" != tmux ]; then
+      echo "error: persistent Kimi secondmates require backend=tmux; Herdr does not expose a transaction-scoped prompt receipt" >&2
+      exit 1
+    fi
     if [ "$KIND" != secondmate ]; then
       "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
         echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
@@ -1705,6 +2891,10 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 if [ "$KIND" = secondmate ]; then
+  SECONDMATE_PREPARATION_RECOVERY=0
+  if [ -e "$STATE/$ID.spawn-endpoint.json" ] || [ -L "$STATE/$ID.spawn-endpoint.json" ]; then
+    SECONDMATE_PREPARATION_RECOVERY=1
+  fi
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
@@ -1714,32 +2904,19 @@ if [ "$KIND" = secondmate ]; then
     fi
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
   fi
-  WT="$PROJ_ABS"
-  # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
-  # PRIMARY checkout's current default-branch commit, so a freshly spawned or
-  # recovery-respawned secondmate always runs the primary's version (AGENTS.md
-  # spawn section). Purely local - no fetch: the home is a worktree of this same
-  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
-  # wrong-branch home is left untouched and launches as-is. The agent re-reads
-  # AGENTS.md fresh on launch, so no nudge is needed here.
-  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
-    case "$sm_ff_out" in
-      *': skipped:'*)
-        sm_ff_line=$(first_line "$sm_ff_out")
-        sm_ff_prefix="secondmate $ID: skipped: "
-        sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
-        echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
-        ;;
-    esac
+  if [ -f "$PROJ_ABS/data/charter.md" ]; then
+    BRIEF="$PROJ_ABS/data/charter.md"
   else
-    echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+    BRIEF="$DATA/$ID/brief.md"
   fi
+  [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+  prepare_secondmate_work_identity || exit 1
   mkdir -p "$PROJ_ABS/state" || {
     echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
     exit 1
   }
-  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
+  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ] \
+     && [ "$SECONDMATE_PREPARATION_RECOVERY" -eq 0 ]; then
     CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
       echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2
       exit 1
@@ -1749,16 +2926,37 @@ if [ "$KIND" = secondmate ]; then
       exit 1
     fi
     CONFIG_INHERIT_LOCK_HELD=1
+  fi
+  WT="$PROJ_ABS"
+  # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
+  # PRIMARY checkout's current default-branch commit, so a freshly spawned or
+  # recovery-respawned secondmate always runs the primary's version (AGENTS.md
+  # spawn section). Purely local - no fetch: the home is a worktree of this same
+  # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
+  # wrong-branch home is left untouched and launches as-is. The agent re-reads
+  # AGENTS.md fresh on launch, so no nudge is needed here.
+  if [ "$SECONDMATE_PREPARATION_RECOVERY" -eq 0 ]; then
+    if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
+      sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
+      case "$sm_ff_out" in
+        *': skipped:'*)
+          sm_ff_line=$(first_line "$sm_ff_out")
+          sm_ff_prefix="secondmate $ID: skipped: "
+          sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
+          echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
+          ;;
+      esac
+    else
+      echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
+    fi
+  fi
+  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ] \
+     && [ "$SECONDMATE_PREPARATION_RECOVERY" -eq 0 ]; then
     # Inheritance propagation: push the primary-authoritative live-safe local inheritance
     # surface into this secondmate home (fm-config-inherit-lib.sh).
     FM_CONFIG_INHERIT_LIVE=1 \
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
       || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
-  fi
-  if [ -f "$PROJ_ABS/data/charter.md" ]; then
-    BRIEF="$PROJ_ABS/data/charter.md"
-  else
-    BRIEF="$DATA/$ID/brief.md"
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
@@ -1766,6 +2964,483 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2; exit 1; }
+BRIEF_SOURCE=$BRIEF
+mkdir -p "$STATE" || { echo "error: could not create state directory for launch brief" >&2; exit 1; }
+STATE=$(cd -P "$STATE" && pwd -P) \
+  || { echo "error: could not anchor state directory for launch brief" >&2; exit 1; }
+BRIEF_SNAPSHOT="$STATE/$ID.launch-brief.md"
+SPAWN_ENDPOINT_RECEIPT="$STATE/$ID.spawn-endpoint.json"
+SPAWN_PROVISIONAL_HARNESS_WIRING_RECEIPT="$STATE/$ID.harness-wiring-provisional.json"
+[ "$BACKEND" != orca ] || SPAWN_ORCA_OPERATION="$STATE/$ID.spawn-orca-operation"
+SPAWN_ENDPOINT_BASE=$(basename -- "$SPAWN_ENDPOINT_RECEIPT") || exit 1
+SPAWN_STATE_INODE=$(spawn_file_inode_identity "$STATE") || exit 1
+SPAWN_ENDPOINT_REMOVAL_JOURNAL="$STATE/.$SPAWN_ENDPOINT_BASE.remove-journal"
+SPAWN_ENDPOINT_REMOVAL_PENDING=0
+if [ -e "$SPAWN_ENDPOINT_REMOVAL_JOURNAL" ] || [ -L "$SPAWN_ENDPOINT_REMOVAL_JOURNAL" ]; then
+  SPAWN_ENDPOINT_REMOVAL_PENDING=1
+fi
+SPAWN_ENDPOINT_RAW_STATE=$(python3 "$SCRIPT_DIR/fm-work-identity-fs.py" describe-raw \
+  "$STATE" "$SPAWN_STATE_INODE" "$SPAWN_ENDPOINT_BASE") || {
+  echo "error: spawn endpoint receipt recovery is unsafe for $ID" >&2
+  exit 1
+}
+if [ "$SPAWN_ENDPOINT_REMOVAL_PENDING" -eq 1 ] && [ "$SPAWN_ENDPOINT_RAW_STATE" = absent ]; then
+  SPAWN_ENDPOINT_RETIREMENT_RECOVERED=1
+fi
+if [ -e "$BRIEF_SNAPSHOT" ] || [ -L "$BRIEF_SNAPSHOT" ]; then
+  [ -f "$BRIEF_SNAPSHOT" ] && [ ! -L "$BRIEF_SNAPSHOT" ] \
+    || { echo "error: launch brief snapshot path is unsafe: $BRIEF_SNAPSHOT" >&2; exit 1; }
+fi
+SPAWN_BRIEF_TMP=$(umask 077; mktemp "$STATE/.$ID.launch-brief.XXXXXX") \
+  || { echo "error: could not create launch brief snapshot" >&2; exit 1; }
+cp "$BRIEF_SOURCE" "$SPAWN_BRIEF_TMP" \
+  || { echo "error: could not snapshot launch brief at $BRIEF_SOURCE" >&2; exit 1; }
+chmod 400 "$SPAWN_BRIEF_TMP" \
+  || { echo "error: could not protect launch brief snapshot" >&2; exit 1; }
+
+spawn_sha256_stream() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    sha256sum | awk '{print $1}'
+  fi
+}
+
+WORK_IDENTITY_STATUS=
+WORK_IDENTITY_SCHEMA=
+WORK_IDENTITY_HASH=
+LAUNCH_BRIEF_HASH=
+SPAWN_DISPATCH_TRANSACTION="spawn:${BASHPID:-$$}:$(date +%s):$RANDOM"
+WORK_IDENTITY_ARGS=(dispatch-prepare "$ID" --brief "$SPAWN_BRIEF_TMP" \
+  --instructions-path "$BRIEF_SNAPSHOT" --transaction "$SPAWN_DISPATCH_TRANSACTION")
+if [ "$RELAUNCH" -eq 0 ]; then
+  WORK_IDENTITY_ARGS+=(--resume)
+fi
+if [ "$RELAUNCH" -eq 1 ]; then
+  PRIOR_LAUNCH_BRIEF=$(fm_meta_get "$RELAUNCH_META" launch_brief)
+  if [ -z "$PRIOR_LAUNCH_BRIEF" ] || { [ ! -e "$PRIOR_LAUNCH_BRIEF" ] && [ ! -L "$PRIOR_LAUNCH_BRIEF" ]; }; then
+    if [ -e "$STATE/$ID.control-relaunch.brief-prior" ] || [ -L "$STATE/$ID.control-relaunch.brief-prior" ]; then
+      PRIOR_LAUNCH_BRIEF="$STATE/$ID.control-relaunch.brief-prior"
+    else
+      PRIOR_LAUNCH_BRIEF=$BRIEF_SOURCE
+    fi
+  fi
+  WORK_IDENTITY_ARGS+=(--meta "$RELAUNCH_META" --prior-brief "$PRIOR_LAUNCH_BRIEF")
+fi
+WORK_DISPATCH_JSON=$(
+  FM_HOME="$FM_HOME" \
+    FM_DATA_OVERRIDE="$DATA" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_ROOT_OVERRIDE="$FM_ROOT" \
+    "$SCRIPT_DIR/fm-work-identity.sh" "${WORK_IDENTITY_ARGS[@]}"
+) || exit 1
+SPAWN_DISPATCH_PENDING=1
+SPAWN_DISPATCH_TRANSACTION=$(printf '%s' "$WORK_DISPATCH_JSON" | jq -er '.transaction_id') \
+  || { echo "error: work identity dispatch binding has no transaction receipt for $ID" >&2; exit 1; }
+WORK_IDENTITY_JSON=$(printf '%s' "$WORK_DISPATCH_JSON" | jq -ec '.work_identity') \
+  || { echo "error: work identity dispatch binding is malformed for $ID" >&2; exit 1; }
+LAUNCH_BRIEF_HASH=$(printf '%s' "$WORK_DISPATCH_JSON" | jq -er '.instructions_sha256') \
+  || { echo "error: work identity dispatch binding has no instructions digest for $ID" >&2; exit 1; }
+WORK_IDENTITY_STATUS=$(printf '%s' "$WORK_IDENTITY_JSON" | jq -er '.status') \
+  || { echo "error: work identity projection has no status for $ID" >&2; exit 1; }
+WORK_IDENTITY_SCHEMA=$(printf '%s' "$WORK_IDENTITY_JSON" | jq -er '.schema') \
+  || { echo "error: work identity projection has no schema for $ID" >&2; exit 1; }
+WORK_IDENTITY_HASH=$(printf '%s' "$WORK_IDENTITY_JSON" | jq -r '.sha256 // ""')
+SPAWN_IDENTITY_HOME=$(printf '%s' "$WORK_IDENTITY_JSON" | jq -er '.binding.home') \
+  || { echo "error: work identity projection has no physical home binding for $ID" >&2; exit 1; }
+SPAWN_IDENTITY_HOME_ID=$(printf '%s' "$WORK_IDENTITY_JSON" | jq -er '.binding.home_id') \
+  || { echo "error: work identity projection has no home binding for $ID" >&2; exit 1; }
+rm -f -- "$SPAWN_BRIEF_TMP" \
+  || { echo "error: could not retire validated launch brief candidate" >&2; exit 1; }
+SPAWN_BRIEF_TMP=
+BRIEF=$BRIEF_SNAPSHOT
+SPAWN_BRIEF_BODY=$(cat "$BRIEF" || exit $?; printf '\034') \
+  || { echo "error: could not capture validated launch brief" >&2; exit 1; }
+SPAWN_BRIEF_BODY=${SPAWN_BRIEF_BODY%$'\034'}
+CAPTURED_BRIEF_HASH=$(printf '%s' "$SPAWN_BRIEF_BODY" | spawn_sha256_stream) \
+  || { echo "error: could not hash captured launch brief" >&2; exit 1; }
+if [ -n "$LAUNCH_BRIEF_HASH" ] && [ "$CAPTURED_BRIEF_HASH" != "$LAUNCH_BRIEF_HASH" ]; then
+  echo "error: launch brief changed after identity validation: $BRIEF" >&2
+  exit 1
+fi
+LAUNCH_BRIEF_HASH=$CAPTURED_BRIEF_HASH
+# shellcheck source=bin/fm-operational-input.sh
+# shellcheck disable=SC1091
+. "$FM_ROOT/bin/fm-operational-input.sh"
+fm_operational_input_construct launch-brief "$SPAWN_BRIEF_BODY" SPAWN_BRIEF_INPUT \
+  || { echo "error: could not encode captured launch brief" >&2; exit 1; }
+unset SPAWN_BRIEF_BODY
+W="fm-$ID"
+spawn_provisional_harness_wiring_receipt_publication_recover() {
+  local receipt=$SPAWN_PROVISIONAL_HARNESS_WIRING_RECEIPT base state_inode
+  base=$(basename -- "$receipt") || return 1
+  state_inode=$(spawn_file_inode_identity "$STATE") || return 1
+  python3 "$SCRIPT_DIR/fm-work-identity-fs.py" describe-raw \
+    "$STATE" "$state_inode" "$base" >/dev/null
+}
+
+spawn_provisional_harness_wiring_receipt_load() {
+  local receipt=$SPAWN_PROVISIONAL_HARNESS_WIRING_RECEIPT canonical links bytes
+  spawn_provisional_harness_wiring_receipt_publication_recover || return 1
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  links=$(spawn_file_link_count "$receipt") || return 1
+  [ "$links" = 1 ] || return 1
+  bytes=$(LC_ALL=C wc -c < "$receipt" | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$bytes" -le 4096 ] || return 1
+  canonical=$(jq -e -S -c -s \
+    --arg home "$SPAWN_IDENTITY_HOME" --arg home_id "$SPAWN_IDENTITY_HOME_ID" \
+    --arg task "$ID" --arg kind "$KIND" --arg worktree "$WT" '
+      def exact($keys): (keys | sort) == ($keys | sort);
+      select(length == 1) | .[0] | . as $r | select(
+        type == "object"
+        and exact(["schema","binding","transaction_id","harness","kind","worktree","auth_path"])
+        and .schema == "fm-spawn-harness-wiring.v1"
+        and .binding == {home:$home,home_id:$home_id,task_id:$task}
+        and (.transaction_id | type) == "string" and (.transaction_id | length) > 0
+        and (.harness == "grok" or .harness == "kimi")
+        and .kind == $kind and .worktree == $worktree
+        and (.auth_path | type) == "string" and (.auth_path | length) > 0
+      ) | $r
+    ' "$receipt" 2>/dev/null) || return 1
+  printf '%s\n' "$canonical" | cmp -s "$receipt" - || return 1
+  SPAWN_PROVISIONAL_RECEIPT_TRANSACTION=$(printf '%s' "$canonical" | jq -r '.transaction_id') || return 1
+  SPAWN_PROVISIONAL_RECEIPT_HARNESS=$(printf '%s' "$canonical" | jq -r '.harness') || return 1
+  SPAWN_PROVISIONAL_RECEIPT_AUTH_PATH=$(printf '%s' "$canonical" | jq -r '.auth_path') || return 1
+  fm_control_harness_turnend_auth_record_valid \
+    "$SPAWN_PROVISIONAL_RECEIPT_HARNESS" "" \
+    "$SPAWN_PROVISIONAL_RECEIPT_AUTH_PATH"
+}
+
+spawn_provisional_harness_wiring_receipt_publish() {  # <harness> <auth-path>
+  local harness=$1 auth_path=$2 payload tmp receipt=$SPAWN_PROVISIONAL_HARNESS_WIRING_RECEIPT
+  local base state_inode rc=0 source_details source_state source_digest
+  fm_control_harness_turnend_auth_record_valid "$harness" "" "$auth_path" || return 1
+  payload=$(jq -n -S -c \
+    --arg schema fm-spawn-harness-wiring.v1 \
+    --arg home "$SPAWN_IDENTITY_HOME" --arg home_id "$SPAWN_IDENTITY_HOME_ID" \
+    --arg task "$ID" --arg transaction "$SPAWN_DISPATCH_TRANSACTION" \
+    --arg harness "$harness" --arg kind "$KIND" --arg worktree "$WT" \
+    --arg auth_path "$auth_path" \
+    '{schema:$schema,binding:{home:$home,home_id:$home_id,task_id:$task},
+      transaction_id:$transaction,harness:$harness,kind:$kind,
+      worktree:$worktree,auth_path:$auth_path}') || return 1
+  tmp=$(umask 077; mktemp "$STATE/.$ID.harness-wiring-provisional.XXXXXX") || return 1
+  if ! printf '%s\n' "$payload" > "$tmp" || ! chmod 600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  base=$(basename -- "$receipt") || { rm -f -- "$tmp"; return 1; }
+  state_inode=$(spawn_file_inode_identity "$STATE") || { rm -f -- "$tmp"; return 1; }
+  source_details=$(python3 "$SCRIPT_DIR/fm-work-identity-fs.py" describe-source "$tmp" 4096) \
+    || { rm -f -- "$tmp"; return 1; }
+  source_state=${source_details%%$'\t'*}
+  source_digest=${source_details#*$'\t'}
+  [ "$source_state" != "$source_details" ] \
+    || { rm -f -- "$tmp"; return 1; }
+  python3 "$SCRIPT_DIR/fm-work-identity-fs.py" no-clobber \
+    "$STATE" "$state_inode" "$base" "$tmp" "${base}.publishing" \
+    "$source_state" "$source_digest" || rc=$?
+  rm -f -- "$tmp" || return 1
+  [ "$rc" -eq 0 ]
+}
+
+spawn_provisional_harness_wiring_receipt_retire() {
+  local receipt=$SPAWN_PROVISIONAL_HARNESS_WIRING_RECEIPT
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] && return 0
+  spawn_provisional_harness_wiring_receipt_load || return 1
+  rm -f -- "$receipt"
+}
+
+spawn_provisional_harness_wiring_metadata_matches_receipt() {
+  local meta="$STATE/$ID.meta" family
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    return 2
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] \
+    && [ "$(spawn_file_link_count "$meta")" = 1 ] || return 1
+  fm_backend_validate_task_endpoint "$meta" "$ID" >/dev/null 2>&1 || return 1
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = "$BACKEND" ] \
+    && [ "$FM_BACKEND_VALIDATED_TARGET" = "$T" ] || return 1
+  [ "$(fm_backend_meta_exact_value "$meta" work_identity_dispatch_transaction)" = "$SPAWN_PROVISIONAL_RECEIPT_TRANSACTION" ] \
+    || return 1
+  family=$(fm_control_harness_family "$(fm_backend_meta_exact_value "$meta" harness)") || return 1
+  [ "$family" = "$SPAWN_PROVISIONAL_RECEIPT_HARNESS" ] \
+    && [ "$(fm_backend_meta_exact_value "$meta" kind)" = "$KIND" ] \
+    && [ "$(fm_backend_meta_exact_value "$meta" project)" = "$PROJ_ABS" ] \
+    && [ "$(fm_backend_meta_exact_value "$meta" worktree)" = "$WT" ] \
+    && [ "$(fm_backend_meta_exact_value "$meta" harness_turnend_auth_path)" = "$SPAWN_PROVISIONAL_RECEIPT_AUTH_PATH" ]
+}
+
+spawn_provisional_harness_wiring_recover() {
+  local receipt=$SPAWN_PROVISIONAL_HARNESS_WIRING_RECEIPT metadata_rc=0
+  spawn_provisional_harness_wiring_receipt_publication_recover || {
+    echo "error: provisional harness wiring publication is unsafe: $receipt" >&2
+    return 1
+  }
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] && return 0
+  spawn_provisional_harness_wiring_receipt_load || {
+    echo "error: provisional harness wiring receipt is unsafe or mismatched: $receipt" >&2
+    return 1
+  }
+  spawn_provisional_harness_wiring_metadata_matches_receipt || metadata_rc=$?
+  case "$metadata_rc" in
+    0)
+      if [ "$SPAWN_PROVISIONAL_RECEIPT_TRANSACTION" != "$SPAWN_DISPATCH_TRANSACTION" ]; then
+        [ "$RELAUNCH" -eq 1 ] || {
+          echo "error: published harness wiring transaction is mismatched for $ID" >&2
+          return 1
+        }
+      else
+        SPAWN_METADATA_RECOVERY=1
+      fi
+      ;;
+    2)
+      clear_relaunch_harness_wiring \
+        "$SPAWN_PROVISIONAL_RECEIPT_HARNESS" "$WT" "$STATE" "$ID" \
+        "$SPAWN_PROVISIONAL_RECEIPT_AUTH_PATH" || {
+        echo "error: provisional harness authorization is unsafe or mismatched: $SPAWN_PROVISIONAL_RECEIPT_AUTH_PATH" >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "error: published task metadata is unsafe or mismatched for provisional harness wiring: $STATE/$ID.meta" >&2
+      return 1
+      ;;
+  esac
+  rm -f -- "$receipt"
+}
+
+spawn_provisional_harness_auth_path() {  # <harness> <auth-root>
+  local harness=$1 root=$2 digest candidate
+  fm_control_harness_turnend_auth_root_valid "$harness" "$root" || return 1
+  mkdir -p "$root" || return 1
+  digest=$(printf '%s' "$SPAWN_DISPATCH_TRANSACTION:$harness:$root:$ID" | spawn_sha256_stream) \
+    || return 1
+  case "$digest" in *[!0-9a-fA-F]*|'') return 1 ;; esac
+  candidate="$root/fm.${digest:0:12}"
+  fm_control_harness_turnend_auth_record_valid "$harness" "" "$candidate" || return 1
+  [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  printf '%s\n' "$candidate"
+}
+
+spawn_provisional_harness_auth_create() {  # <auth-path>
+  local auth_path=$1
+  [ ! -e "$auth_path" ] && [ ! -L "$auth_path" ] || return 1
+  (umask 077; set -o noclobber; printf '%s\n' "$TURNEND" > "$auth_path") 2>/dev/null \
+    || return 1
+  [ -f "$auth_path" ] && [ ! -L "$auth_path" ] \
+    && [ "$(spawn_file_link_count "$auth_path")" = 1 ]
+}
+
+spawn_provisional_harness_wiring_retire() {
+  local meta="$STATE/$ID.meta" recorded_harness recorded_kind recorded_worktree recorded_auth_path
+  local published=0
+  [ "$KIND" != secondmate ] || return 0
+  if spawn_metadata_transaction_published; then
+    published=1
+    recorded_harness=$(fm_meta_get "$meta" harness)
+    recorded_kind=$(fm_meta_get "$meta" kind)
+    recorded_worktree=$(fm_meta_get "$meta" worktree)
+    recorded_auth_path=$(fm_meta_get "$meta" harness_turnend_auth_path)
+  else
+    recorded_harness=$HARNESS
+    recorded_kind=$KIND
+    recorded_worktree=$WT
+    recorded_auth_path=${HARNESS_TURNEND_AUTH_PATH:-}
+  fi
+  [ -n "$recorded_harness" ] && [ "$recorded_kind" = "$KIND" ] \
+    && [ -n "$recorded_worktree" ] && [ "$recorded_worktree" = "$WT" ] || return 1
+  clear_relaunch_harness_wiring \
+    "$recorded_harness" "$recorded_worktree" "$STATE" "$ID" "$recorded_auth_path" || return 1
+  spawn_provisional_harness_wiring_receipt_retire || return 1
+  if [ "$published" -eq 0 ] && [ -n "${BUSY_GEN:-}" ]; then
+    "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$BUSY_GEN" >/dev/null 2>&1 \
+      || return 1
+    [ ! -e "$STATE/$ID.busy-state" ] && [ ! -L "$STATE/$ID.busy-state" ] \
+      && [ ! -e "$STATE/$ID.busy-gen" ] && [ ! -L "$STATE/$ID.busy-gen" ] || return 1
+  fi
+}
+
+spawn_terminal_launch_reset() {
+  local busy_gen=
+  if spawn_metadata_transaction_published; then
+    busy_gen=$(fm_meta_get "$STATE/$ID.meta" busy_gen)
+    BUSY_GEN=$busy_gen
+    spawn_provisional_harness_wiring_retire || return 1
+    spawn_fresh_commit_rollback || return 1
+  fi
+  spawn_launch_request_cleanup || return 1
+  spawn_launch_guard_cleanup_terminal || return 1
+  SPAWN_FRESH_COMMIT_PENDING=0
+  spawn_endpoint_receipt_publish worktree-ready "$WT"
+}
+
+spawn_missing_endpoint_compensate() {
+  local busy_gen='' guard_state
+  guard_state=$(spawn_launch_guard_state) || return 1
+  case "$guard_state" in absent|exited|abandoned) ;; *) return 1 ;; esac
+  if spawn_metadata_transaction_published; then
+    busy_gen=$(fm_meta_get "$STATE/$ID.meta" busy_gen)
+    spawn_provisional_harness_wiring_retire || return 1
+  fi
+  if [ "$KIND" != secondmate ] && [ -d "$WT" ]; then
+    if [ "$BACKEND" = orca ]; then
+      fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID" --absent-ok >/dev/null 2>&1 \
+        || return 1
+    else
+      (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1 || return 1
+    fi
+  fi
+  if [ -n "$busy_gen" ]; then
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+      FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-work-identity.sh" \
+      dispatch-retire-run "$ID" -- "$FM_ROOT/bin/fm-busy-event.sh" \
+        retire "$STATE" "$ID" --gen "$busy_gen" >/dev/null || return 1
+  else
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+      FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-work-identity.sh" \
+      dispatch-retire-run "$ID" -- true >/dev/null || return 1
+  fi
+  spawn_launch_request_cleanup || return 1
+  spawn_launch_guard_cleanup_terminal || return 1
+  spawn_endpoint_receipt_retire || return 1
+  SPAWN_DISPATCH_PENDING=0
+  SPAWN_FRESH_COMMIT_PENDING=0
+}
+
+spawn_exited_launch_compensate() {
+  local endpoint_state
+  if [ "$SPAWN_ENDPOINT_MISSING" -ne 1 ]; then
+    fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" || return 1
+    case "$BACKEND" in
+      tmux|herdr)
+        endpoint_state=$(fm_backend_agent_state "$BACKEND" "$T")
+        [ "$endpoint_state" = missing ] || return 1
+        ;;
+      *)
+        ! fm_backend_target_exists "$BACKEND" "$T" "$W" || return 1
+        ;;
+    esac
+    SPAWN_ENDPOINT_MISSING=1
+  fi
+  spawn_missing_endpoint_compensate
+}
+
+if [ "$RELAUNCH" -eq 0 ] \
+   && { [ -e "$SPAWN_ENDPOINT_RECEIPT" ] || [ -L "$SPAWN_ENDPOINT_RECEIPT" ]; }; then
+  endpoint_receipt_rc=0
+  spawn_endpoint_receipt_load || endpoint_receipt_rc=$?
+  if [ "$endpoint_receipt_rc" -eq 2 ]; then
+    echo "error: recorded endpoint is gone for $ID; exact receipt is preserved for reconciliation" >&2
+    exit 1
+  fi
+  [ "$endpoint_receipt_rc" -eq 0 ] || exit "$endpoint_receipt_rc"
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_ENDPOINT_PHASE" = launch-prepared ]; then
+  launch_request_state=$(spawn_launch_request_state) || {
+    echo "error: launch request evidence is unsafe for $ID" >&2
+    exit 1
+  }
+  case "$launch_request_state" in
+    accepted|executed)
+      spawn_metadata_transaction_published || {
+        echo "error: accepted launch has no exact published metadata for $ID" >&2
+        exit 1
+      }
+      SPAWN_METADATA_RECOVERY=1
+      spawn_endpoint_receipt_publish launch-submitted "$WT" || {
+        echo "error: accepted launch could not be journaled for $ID" >&2
+        exit 1
+      }
+      SPAWN_LAUNCH_SUBMITTED_RECOVERY=1
+      ;;
+    launch-exited)
+      spawn_exited_launch_compensate || {
+        echo "error: exited launch for $ID could not be compensated safely" >&2
+        exit 1
+      }
+      echo "error: launch for $ID exited before commit; its provisional publication was compensated - rerun spawn to retry" >&2
+      exit 1
+      ;;
+    launch-failed)
+      if [ "$SPAWN_ENDPOINT_MISSING" -eq 1 ]; then
+        spawn_missing_endpoint_compensate
+      else
+        spawn_terminal_launch_reset
+      fi || {
+        echo "error: failed launch for $ID could not be compensated safely" >&2
+        exit 1
+      }
+      echo "error: launch command for $ID exited unsuccessfully; its provisional publication was compensated - rerun spawn to retry" >&2
+      exit 1
+      ;;
+    absent|failed|unattempted-dead|attempted-dead|launch-abandoned)
+      if [ "$SPAWN_ENDPOINT_MISSING" -eq 1 ]; then
+        echo "error: recorded endpoint disappeared before launch acceptance for $ID; exact evidence is preserved" >&2
+        exit 1
+      fi
+      spawn_launch_guard_cleanup_retryable || {
+        echo "error: retryable execution guard could not be retired for $ID" >&2
+        exit 1
+      }
+      spawn_launch_request_cleanup || {
+        echo "error: retryable launch evidence could not be retired for $ID" >&2
+        exit 1
+      }
+      spawn_endpoint_receipt_publish worktree-ready "$WT" || {
+        echo "error: retryable endpoint receipt could not be restored for $ID" >&2
+        exit 1
+      }
+      if spawn_metadata_transaction_published; then
+        SPAWN_METADATA_RECOVERY=1
+      fi
+      ;;
+    *)
+      echo "error: launch acceptance is ambiguous; exact request evidence is preserved for $ID" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_LAUNCH_SUBMITTED_RECOVERY" -eq 1 ]; then
+  spawn_metadata_transaction_published || {
+    echo "error: submitted launch has no exact published metadata for $ID" >&2
+    exit 1
+  }
+  SPAWN_METADATA_RECOVERY=1
+  launch_request_state=$(spawn_launch_request_state) || {
+    echo "error: submitted launch evidence is unsafe for $ID" >&2
+    exit 1
+  }
+  case "$launch_request_state" in
+    accepted|executed) ;;
+    launch-exited)
+      spawn_exited_launch_compensate || {
+        echo "error: exited submitted launch for $ID could not be compensated safely" >&2
+        exit 1
+      }
+      echo "error: submitted launch for $ID exited before commit; its provisional publication was compensated - rerun spawn to retry" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: submitted launch lacks exact backend acceptance for $ID" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$SPAWN_ENDPOINT_MISSING" -eq 1 ]; then
+    spawn_missing_endpoint_compensate || {
+      echo "error: missing accepted endpoint for $ID could not be compensated safely; exact receipt is preserved" >&2
+      exit 1
+    }
+    echo "error: accepted launch endpoint for $ID disappeared; its published transaction was compensated - rerun spawn to retry" >&2
+    exit 1
+  else
+    spawn_launch_delivery_wait || {
+      echo "error: submitted launch has not published exact backend acceptance for $ID" >&2
+      exit 1
+    }
+  fi
+fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
@@ -1800,9 +3475,6 @@ if [ "$KIND" = ship ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
 fi
-
-BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
-BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -2053,6 +3725,46 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
 fi
+if [ "$RELAUNCH" -eq 0 ] && [ -z "$SPAWN_ENDPOINT_PHASE" ] \
+   && spawn_metadata_transaction_published \
+   && { [ "$SPAWN_ENDPOINT_RETIREMENT_RECOVERED" -eq 1 ] \
+     || { [ "$BACKLOG_TRANSITION" -eq 1 ] \
+       && [ "$BACKLOG_ROW_STATE" = "in_flight no no" ]; }; }; then
+  fm_backend_validate_task_endpoint "$STATE/$ID.meta" "$ID" || exit 1
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = "$BACKEND" ] \
+    && [ "$(fm_meta_get "$STATE/$ID.meta" kind)" = "$KIND" ] \
+    && [ "$(fm_meta_get "$STATE/$ID.meta" project)" = "$PROJ_ABS" ] \
+    && [ "$(fm_meta_get "$STATE/$ID.meta" harness)" = "$HARNESS" ] || {
+      echo "error: committed spawn metadata is mismatched for exact retry of $ID" >&2
+      exit 1
+    }
+  T=$FM_BACKEND_VALIDATED_TARGET
+  WT=$(fm_meta_get "$STATE/$ID.meta" worktree)
+  spawn_endpoint_worktree_binding_valid || {
+    echo "error: committed spawn worktree is invalid or cross-project for $ID: $WT" >&2
+    exit 1
+  }
+  if [ "$KIND" != scout ]; then
+    [ "$(fm_meta_get "$STATE/$ID.meta" mode)" = "$MODE" ] \
+      && [ "$(fm_meta_get "$STATE/$ID.meta" yolo)" = "$YOLO" ] || {
+        echo "error: committed spawn delivery contract is mismatched for exact retry of $ID" >&2
+        exit 1
+      }
+  fi
+  fm_backend_target_exists "$BACKEND" "$T" "$W" || {
+    echo "error: committed spawn endpoint is unavailable for $ID; refusing duplicate launch" >&2
+    exit 1
+  }
+  spawn_launch_request_paths || exit 1
+  spawn_launch_request_cleanup \
+    || echo "warning: committed launch request journal could not be retired for $ID" >&2
+  SPAWN_DISPATCH_PENDING=0
+  SECONDMATE_RESERVATION_PENDING=0
+  SPAWN_DELIVERY=
+  [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+  echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$T worktree=$WT"
+  exit 0
+fi
 
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -2066,6 +3778,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
   WT_TARGET=$T
   SES=${T%%:*}
+elif [ "$SPAWN_ENDPOINT_RECOVERED" = 1 ]; then
+  :
 else
 case "$BACKEND" in
   tmux)
@@ -2077,7 +3791,38 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    if [ "$SPAWN_ENDPOINT_CREATING_RECOVERY" = 1 ]; then
+      set +e
+      WID=$(fm_backend_tmux_recover_task "$SES" "$W")
+      ENDPOINT_RECOVERY_STATUS=$?
+      set -e
+      case "$ENDPOINT_RECOVERY_STATUS" in
+        0)
+          [ "$(fm_backend_agent_state tmux "$T")" = dead ] || {
+            echo "error: endpoint creation intent resolved to a non-empty tmux endpoint for $ID" >&2
+            exit 1
+          }
+          ;;
+        2) WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1 ;;
+        *) exit 1 ;;
+      esac
+    else
+      set +e
+      fm_backend_tmux_recover_task "$SES" "$W" >/dev/null
+      ENDPOINT_RECOVERY_STATUS=$?
+      set -e
+      case "$ENDPOINT_RECOVERY_STATUS" in
+        0) echo "error: window $SES:$W already exists" >&2; exit 1 ;;
+        2) ;;
+        *) exit 1 ;;
+      esac
+      T="$SES:$W"
+      spawn_endpoint_receipt_publish endpoint-creating || {
+        echo "error: could not publish endpoint creation intent for $ID" >&2
+        exit 1
+      }
+      WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    fi
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2249,7 +3994,35 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    if [ "$SPAWN_ENDPOINT_CREATING_RECOVERY" = 1 ]; then
+      set +e
+      ZELLIJ_TASK_IDS=$(fm_backend_zellij_recover_task "$ZELLIJ_SES" "$W")
+      ENDPOINT_RECOVERY_STATUS=$?
+      set -e
+      case "$ENDPOINT_RECOVERY_STATUS" in
+        0) ;;
+        2) ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1 ;;
+        *) exit 1 ;;
+      esac
+    else
+      set +e
+      fm_backend_zellij_recover_task "$ZELLIJ_SES" "$W" >/dev/null
+      ENDPOINT_RECOVERY_STATUS=$?
+      set -e
+      case "$ENDPOINT_RECOVERY_STATUS" in
+        0)
+          echo "error: zellij endpoint for $W already exists in session '$ZELLIJ_SES'" >&2
+          exit 1
+          ;;
+        2) ;;
+        *) exit 1 ;;
+      esac
+      spawn_endpoint_receipt_publish endpoint-creating || {
+        echo "error: could not publish endpoint creation intent for $ID" >&2
+        exit 1
+      }
+      ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    fi
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2261,7 +4034,32 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    if [ "$SPAWN_ENDPOINT_CREATING_RECOVERY" = 1 ]; then
+      set +e
+      CMUX_TASK_IDS=$(fm_backend_cmux_recover_task "$W")
+      ENDPOINT_RECOVERY_STATUS=$?
+      set -e
+      case "$ENDPOINT_RECOVERY_STATUS" in
+        0) ;;
+        2) CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1 ;;
+        *) exit 1 ;;
+      esac
+    else
+      set +e
+      fm_backend_cmux_recover_task "$W" >/dev/null
+      ENDPOINT_RECOVERY_STATUS=$?
+      set -e
+      case "$ENDPOINT_RECOVERY_STATUS" in
+        0) echo "error: cmux endpoint for $W already exists" >&2; exit 1 ;;
+        2) ;;
+        *) exit 1 ;;
+      esac
+      spawn_endpoint_receipt_publish endpoint-creating || {
+        echo "error: could not publish endpoint creation intent for $ID" >&2
+        exit 1
+      }
+      CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    fi
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2272,31 +4070,57 @@ EOF
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
   orca)
-    set +e
-    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
-    ORCA_WT_STATUS=$?
-    set -e
-    if [ "$ORCA_WT_STATUS" -ne 0 ]; then
-      if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-        if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
-          ORCA_ABORT_CLEANUP=1
-        fi
+    if [ "$SPAWN_ENDPOINT_CREATING_RECOVERY" != 1 ]; then
+      if [ -e "$SPAWN_ORCA_OPERATION" ] || [ -L "$SPAWN_ORCA_OPERATION" ]; then
+        echo "error: stale Orca endpoint operation exists without a matching creation receipt: $SPAWN_ORCA_OPERATION" >&2
+        exit 1
       fi
-      exit 1
+      spawn_endpoint_receipt_publish endpoint-creating || {
+        echo "error: could not publish Orca endpoint creation intent for $ID" >&2
+        exit 1
+      }
     fi
-    parse_orca_worktree_result "$ORCA_WT_RAW" || true
+    spawn_orca_operation_prepare || exit 1
+    spawn_orca_operation_wait || exit 1
     ORCA_ABORT_CLEANUP=1
-    if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ]; then
-      echo "error: orca did not return a worktree id/path for $W" >&2
+    if [ -z "$ORCA_WORKTREE_ID" ] || [ -z "$WT" ] || [ -z "$ORCA_TERMINAL" ]; then
+      echo "error: Orca endpoint result is incomplete for $W" >&2
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
-    if [ -z "$ORCA_TERMINAL" ]; then
-      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+    if [ "$SPAWN_ENDPOINT_CREATING_RECOVERY" = 1 ]; then
+      fm_backend_target_exists orca "$ORCA_TERMINAL" "$W" || {
+        echo "error: recovered Orca terminal is unavailable for $W" >&2
+        exit 1
+      }
     fi
     T="$ORCA_TERMINAL"
     ;;
 esac
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_ENDPOINT_RECOVERED" = 0 ]; then
+  endpoint_worktree=
+  if [ "$KIND" = secondmate ] || [ "$BACKEND" = orca ]; then endpoint_worktree=$WT; fi
+  spawn_endpoint_receipt_publish endpoint-created "$endpoint_worktree" || {
+    echo "error: could not publish endpoint recovery receipt for $ID" >&2
+    exit 1
+  }
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+  ORCA_ABORT_CLEANUP=0
+  if [ "$BACKEND" = orca ]; then
+    spawn_orca_operation_retire || {
+      echo "error: exact Orca creation journal could not be retired; endpoint receipt remains authoritative" >&2
+      exit 1
+    }
+  fi
+fi
+if [ "$RELAUNCH" -eq 0 ] && { [ "$KIND" = secondmate ] || [ "$BACKEND" = orca ]; } \
+   && [ "$SPAWN_ENDPOINT_PHASE" != launch-prepared ] \
+   && [ "$SPAWN_ENDPOINT_PHASE" != launch-submitted ]; then
+  spawn_endpoint_receipt_publish worktree-ready "$WT" || {
+    echo "error: could not bind the recovered endpoint worktree for $ID" >&2
+    exit 1
+  }
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
@@ -2326,6 +4150,179 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+spawn_passive_current_path() {  # <target>
+  case "$BACKEND" in
+    zellij) fm_backend_zellij_passive_current_path "$1" "$W" ;;
+    cmux) fm_backend_cmux_passive_current_path "$1" "$W" ;;
+    *) spawn_current_path "$1" ;;
+  esac
+}
+spawn_worktree_request_send() {  # <target> <text>
+  spawn_send_text_line "$1" "$2"
+}
+spawn_worktree_request_result_file_validate() {
+  local result=$1 links bytes canonical
+  [ -f "$result" ] && [ ! -L "$result" ] || return 1
+  links=$(spawn_file_link_count "$result") || return 1
+  [ "$links" = 1 ] || return 1
+  bytes=$(LC_ALL=C wc -c < "$result" | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$bytes" -le 16384 ] || return 1
+  canonical=$(jq -e -S -c --arg holder "$lease_holder" '
+    def exact($keys): (keys | sort) == ($keys | sort);
+    select(type == "object"
+      and exact(["schema","status","exit_status","path","lease_holder","leases"])
+      and .schema == "fm-spawn-worktree-result.v1"
+      and (.status == "ok" or .status == "retryable" or .status == "ambiguous")
+      and (.exit_status | type == "number" and floor == . and . >= 0 and . <= 255)
+      and .lease_holder == $holder
+      and (.leases | type == "array" and length <= 8
+        and all(.[]; type == "object" and exact(["path","lease_id"])
+          and (.path | type == "string" and startswith("/") and length <= 4096)
+          and (.lease_id == null or (.lease_id | type == "string" and length > 0 and length <= 256))))
+      and (if .status == "ok" then
+             (.path | type == "string" and startswith("/") and length <= 4096)
+             and (.leases | length) == 1 and .leases[0].path == .path
+           elif .status == "retryable" then .path == null and (.leases | length) == 0
+           else .path == null end))
+    | .
+  ' "$result" 2>/dev/null) || return 1
+  printf '%s\n' "$canonical" | cmp -s "$result" -
+}
+spawn_worktree_request_result_recover() {
+  local result="$WORKTREE_REQUEST_MARKER/result" candidate="$WORKTREE_REQUEST_MARKER/.result.tmp" links bytes
+  if [ ! -e "$candidate" ] && [ ! -L "$candidate" ]; then return 0; fi
+  if ! spawn_worktree_request_result_file_validate "$candidate"; then
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+    links=$(spawn_file_link_count "$candidate") || return 1
+    [ "$links" = 1 ] || return 1
+    bytes=$(LC_ALL=C wc -c < "$candidate" | tr -d ' ')
+    case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$bytes" -le 16384 ] || return 1
+    rm -f -- "$candidate" || return 1
+    return 0
+  fi
+  if [ ! -e "$result" ] && [ ! -L "$result" ]; then
+    mv -- "$candidate" "$result" || return 1
+    return 0
+  fi
+  spawn_worktree_request_result_file_validate "$result" || return 1
+  cmp -s "$candidate" "$result" || return 1
+  rm -f -- "$candidate"
+}
+spawn_worktree_request_result_load() {
+  local result="$WORKTREE_REQUEST_MARKER/result" canonical status value
+  [ -d "$WORKTREE_REQUEST_MARKER" ] && [ ! -L "$WORKTREE_REQUEST_MARKER" ] || {
+    if [ ! -e "$WORKTREE_REQUEST_MARKER" ] && [ ! -L "$WORKTREE_REQUEST_MARKER" ]; then return 1; fi
+    return 3
+  }
+  spawn_worktree_request_result_recover || return 3
+  if [ ! -e "$result" ] && [ ! -L "$result" ]; then return 1; fi
+  spawn_worktree_request_result_file_validate "$result" || return 3
+  canonical=$(cat "$result") || return 3
+  status=$(printf '%s' "$canonical" | jq -r '.status') || return 3
+  case "$status" in
+    ok)
+      value=$(printf '%s' "$canonical" | jq -r '.path') || return 3
+      printf '%s' "$value"
+      ;;
+    retryable) return 2 ;;
+    ambiguous) return 4 ;;
+    *) return 3 ;;
+  esac
+}
+spawn_worktree_request_owner_state() {
+  local owner="$WORKTREE_REQUEST_MARKER/owner" links bytes pid
+  if [ ! -e "$owner" ] && [ ! -L "$owner" ]; then printf 'absent'; return 0; fi
+  [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+  links=$(spawn_file_link_count "$owner") || return 1
+  [ "$links" = 1 ] || return 1
+  bytes=$(LC_ALL=C wc -c < "$owner" | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$bytes" -le 32 ] || return 1
+  pid=$(tr -d '[:space:]' < "$owner")
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if kill -0 "$pid" 2>/dev/null; then printf 'live'; else printf 'dead'; fi
+}
+spawn_worktree_request_result_publish() {
+  local payload=$1 tmp="$WORKTREE_REQUEST_MARKER/.result.tmp"
+  [ ! -e "$WORKTREE_REQUEST_MARKER/result" ] && [ ! -L "$WORKTREE_REQUEST_MARKER/result" ] || return 1
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
+  printf '%s\n' "$payload" > "$tmp" && chmod 600 "$tmp" \
+    && mv -- "$tmp" "$WORKTREE_REQUEST_MARKER/result"
+}
+spawn_worktree_request_reconcile() {
+  local raw leases count path payload
+  raw=$(treehouse status --json 2>/dev/null) || return 3
+  leases=$(printf '%s' "$raw" | jq -e -S -c --arg holder "$lease_holder" '
+    if type != "array" then error("status is not an array") else
+      [.[] | select(.leased == true and .lease_holder == $holder
+        and (.path | type == "string" and startswith("/") and length <= 4096)
+        and (.lease_id | type == "string" and length > 0 and length <= 256))
+        | {path:.path,lease_id:.lease_id}]
+      | unique_by([.path,.lease_id])
+    end
+  ' 2>/dev/null) || return 3
+  count=$(printf '%s' "$leases" | jq -r 'length') || return 3
+  case "$count" in
+    0) return 2 ;;
+    1)
+      path=$(printf '%s' "$leases" | jq -er '.[0].path') || return 3
+      payload=$(jq -n -S -c --arg schema fm-spawn-worktree-result.v1 \
+        --arg path "$path" --arg lease_holder "$lease_holder" --argjson leases "$leases" \
+        '{schema:$schema,status:"ok",exit_status:0,path:$path,lease_holder:$lease_holder,leases:$leases}') \
+        || return 3
+      spawn_worktree_request_result_publish "$payload" || return 3
+      printf '%s' "$path"
+      ;;
+    *)
+      payload=$(jq -n -S -c --arg schema fm-spawn-worktree-result.v1 \
+        --arg lease_holder "$lease_holder" --argjson leases "$leases" \
+        '{schema:$schema,status:"ambiguous",exit_status:1,path:null,lease_holder:$lease_holder,leases:$leases}') \
+        || return 3
+      spawn_worktree_request_result_publish "$payload" || return 3
+      return 4
+      ;;
+  esac
+}
+spawn_worktree_request_cleanup() {
+  local entry links
+  if [ -d "$WORKTREE_REQUEST_MARKER" ] && [ ! -L "$WORKTREE_REQUEST_MARKER" ]; then
+    for entry in "$WORKTREE_REQUEST_MARKER"/* "$WORKTREE_REQUEST_MARKER"/.[!.]* "$WORKTREE_REQUEST_MARKER"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      case "${entry##*/}" in result|.result.tmp|owner|.owner.tmp) ;; *) return 1 ;; esac
+      [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+      links=$(spawn_file_link_count "$entry") || return 1
+      [ "$links" = 1 ] || return 1
+      rm -f -- "$entry" || return 1
+    done
+    rmdir -- "$WORKTREE_REQUEST_MARKER" || return 1
+  elif [ -e "$WORKTREE_REQUEST_MARKER" ] || [ -L "$WORKTREE_REQUEST_MARKER" ]; then
+    return 1
+  fi
+  if [ -d "$WORKTREE_REQUEST_ACK" ] && [ ! -L "$WORKTREE_REQUEST_ACK" ]; then
+    for entry in "$WORKTREE_REQUEST_ACK"/* "$WORKTREE_REQUEST_ACK"/.[!.]* "$WORKTREE_REQUEST_ACK"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      case "${entry##*/}" in attempted|accepted|.attempted.[A-Za-z0-9]*|.accepted.[A-Za-z0-9]*) ;; *) return 1 ;; esac
+      [ -f "$entry" ] && [ ! -L "$entry" ] || return 1
+      links=$(spawn_file_link_count "$entry") || return 1
+      [ "$links" = 1 ] || return 1
+      rm -f -- "$entry" || return 1
+    done
+    rmdir -- "$WORKTREE_REQUEST_ACK" || return 1
+  elif [ -e "$WORKTREE_REQUEST_ACK" ] || [ -L "$WORKTREE_REQUEST_ACK" ]; then
+    return 1
+  fi
+}
+spawn_send_launch_line() {  # <target> <text>
+  case "$BACKEND" in
+    tmux) fm_backend_tmux_send_launch_line "$1" "$2" ;;
+    herdr) fm_backend_herdr_send_launch_line "$1" "$2" ;;
+    zellij) fm_backend_zellij_send_launch_line "$1" "$2" "$W" ;;
+    orca) fm_backend_orca_send_launch_line "$1" "$2" ;;
+    cmux) fm_backend_cmux_send_launch_line "$1" "$2" "$W" ;;
+  esac
+}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -2343,6 +4340,160 @@ spawn_send_key() {  # <target> <key>
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
+}
+
+spawn_session_backend_worktree_acquire() {
+  local old_request=0 owner_state result_rc reconcile_rc round=0 helper_pid start_wait
+  local poll_max=${FM_SPAWN_WORKTREE_POLLS:-60} poll_interval=${FM_SPAWN_WORKTREE_INTERVAL:-1}
+  local seen='' cd_command
+  WORKTREE_REQUEST_DIGEST=$(printf '%s' "$SPAWN_DISPATCH_TRANSACTION" | spawn_sha256_stream) || return 1
+  WORKTREE_REQUEST_MARKER="$STATE/.$ID.worktree-request.$WORKTREE_REQUEST_DIGEST"
+  WORKTREE_REQUEST_ACK="$WORKTREE_REQUEST_MARKER.send"
+  lease_holder="firstmate-$WORKTREE_REQUEST_DIGEST"
+  case "$SPAWN_ENDPOINT_PHASE" in
+    endpoint-created)
+      if [ -e "$WORKTREE_REQUEST_MARKER" ] || [ -L "$WORKTREE_REQUEST_MARKER" ] \
+         || [ -e "$WORKTREE_REQUEST_ACK" ] || [ -L "$WORKTREE_REQUEST_ACK" ]; then
+        echo "error: stale worktree request evidence exists before acquisition for $ID" >&2
+        return 1
+      fi
+      spawn_endpoint_receipt_publish worktree-requesting || return 1
+      ;;
+    worktree-unsent|worktree-retryable)
+      spawn_worktree_request_cleanup || return 1
+      spawn_endpoint_receipt_publish worktree-requesting || return 1
+      ;;
+    worktree-requesting) ;;
+    worktree-requested) old_request=1 ;;
+    worktree-acquired)
+      [ -n "$WT" ] || return 1
+      ;;
+    *)
+      echo "error: endpoint receipt has no valid local worktree acquisition phase for $ID" >&2
+      return 1
+      ;;
+  esac
+  while [ -z "$WT" ] && [ "$round" -lt 2 ]; do
+    if [ ! -e "$WORKTREE_REQUEST_MARKER" ] && [ ! -L "$WORKTREE_REQUEST_MARKER" ]; then
+      [ "$old_request" -eq 0 ] || break
+      (trap '' HUP INT TERM; cd "$PROJ_ABS" && exec bash "$SCRIPT_DIR/fm-treehouse-worktree-request.sh" \
+        "$WORKTREE_REQUEST_MARKER" "$lease_holder") </dev/null >/dev/null 2>&1 &
+      helper_pid=$!
+      start_wait=0
+      while [ ! -e "$WORKTREE_REQUEST_MARKER/owner" ] && [ ! -L "$WORKTREE_REQUEST_MARKER/owner" ] \
+        && kill -0 "$helper_pid" 2>/dev/null && [ "$start_wait" -lt 100 ]; do
+        sleep 0.01
+        start_wait=$((start_wait + 1))
+      done
+      if [ ! -e "$WORKTREE_REQUEST_MARKER/owner" ] && [ ! -L "$WORKTREE_REQUEST_MARKER/owner" ]; then
+        echo "error: durable worktree request helper did not publish its owner journal for $ID" >&2
+        return 1
+      fi
+    fi
+    for _ in $(seq 1 "$poll_max"); do
+      result_rc=0
+      WT=$(spawn_worktree_request_result_load) || result_rc=$?
+      case "$result_rc" in
+        0) break ;;
+        1)
+          owner_state=$(spawn_worktree_request_owner_state) || {
+            echo "error: worktree request owner evidence is unsafe for $ID" >&2
+            return 1
+          }
+          if [ "$owner_state" = live ]; then
+            WT=
+          else
+            reconcile_rc=0
+            WT=$(spawn_worktree_request_reconcile) || reconcile_rc=$?
+            case "$reconcile_rc" in
+              0) break ;;
+              2)
+                WT=
+                if [ "$old_request" -eq 1 ]; then
+                  sleep "$poll_interval"
+                  continue
+                fi
+                spawn_worktree_request_cleanup || return 1
+                round=$((round + 1))
+                break
+                ;;
+              4)
+                echo "error: treehouse acquisition has several exact leases for $ID at $WORKTREE_REQUEST_MARKER/result" >&2
+                return 1
+                ;;
+              *)
+                echo "error: treehouse lease reconciliation is unsafe for $ID" >&2
+                return 1
+                ;;
+            esac
+          fi
+          ;;
+        2)
+          WT=
+          spawn_endpoint_receipt_publish worktree-retryable || return 1
+          spawn_worktree_request_cleanup || return 1
+          spawn_endpoint_receipt_publish worktree-requesting || return 1
+          round=$((round + 1))
+          break
+          ;;
+        4)
+          echo "error: treehouse acquisition has ambiguous exact lease evidence for $ID at $WORKTREE_REQUEST_MARKER/result" >&2
+          return 1
+          ;;
+        *)
+          echo "error: worktree request result is unsafe for $ID" >&2
+          return 1
+          ;;
+      esac
+      [ -z "$WT" ] || break
+      sleep "$poll_interval"
+    done
+    [ -z "$WT" ] || break
+    if [ "$result_rc" -eq 1 ] && [ "${owner_state:-}" = live ]; then break; fi
+    [ "$old_request" -eq 0 ] || break
+  done
+  if [ -z "$WT" ]; then
+    echo "error: treehouse acquisition remains in progress; exact lease evidence is preserved for $ID" >&2
+    return 1
+  fi
+  if [ "$SPAWN_ENDPOINT_PHASE" != worktree-acquired ]; then
+    spawn_endpoint_receipt_publish worktree-acquired "$WT" || {
+      echo "error: could not preserve the acquired worktree for $ID" >&2
+      return 1
+    }
+  fi
+  for _ in $(seq 1 10); do
+    seen=$(spawn_passive_current_path "$WT_TARGET" || true)
+    [ -z "$seen" ] || [ "$(real_path_or_raw "$seen")" != "$(real_path_or_raw "$WT")" ] || break
+    sleep 0.1
+  done
+  if [ -z "$seen" ] || [ "$(real_path_or_raw "$seen")" != "$(real_path_or_raw "$WT")" ]; then
+    spawn_send_key "$WT_TARGET" C-u || {
+      echo "error: could not clear the pending worktree transition for $ID" >&2
+      return 1
+    }
+    cd_command="cd -- $(shell_quote "$WT")"
+    spawn_send_text_line "$WT_TARGET" "$cd_command" || {
+      echo "error: could not submit the exact worktree transition for $ID" >&2
+      return 1
+    }
+    seen=
+    for _ in $(seq 1 "$poll_max"); do
+      seen=$(spawn_passive_current_path "$WT_TARGET" || true)
+      [ -z "$seen" ] || [ "$(real_path_or_raw "$seen")" != "$(real_path_or_raw "$WT")" ] || break
+      sleep "$poll_interval"
+    done
+  fi
+  if [ -z "$seen" ] || [ "$(real_path_or_raw "$seen")" != "$(real_path_or_raw "$WT")" ]; then
+    echo "error: endpoint did not enter its exact acquired worktree for $ID" >&2
+    return 1
+  fi
+  validate_spawn_worktree "treehouse get" "$T"
+  spawn_endpoint_receipt_publish worktree-ready "$WT" || return 1
+  spawn_worktree_request_cleanup || {
+    echo "error: could not retire exact worktree acquisition evidence for $ID" >&2
+    return 1
+  }
 }
 
 kimi_capture() {
@@ -2379,7 +4530,7 @@ kimi_delivery_is_confirmed() {  # <plain-pane-capture>
   local pane=$1
   kimi_composer_is_empty || return 1
   if { printf '%s\n' "$pane" | grep -Fq '✨' \
-       && printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; } \
+       && printf '%s\n' "$pane" | grep -Fq 'FIRSTMATE_OP:'; } \
      || printf '%s\n' "$pane" \
        | grep -qiE 'context:[[:space:]]*(0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*([.][0-9]+)?)[[:space:]]*%'; then
     return 0
@@ -2403,6 +4554,433 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+kimi_submission_cleanup_preflight() {
+  local path value pid token verdict
+  path="$SPAWN_LAUNCH_REQUEST/kimi-submission"
+  [ -f "$path" ] && [ ! -L "$path" ] \
+    && [ "$(spawn_file_link_count "$path")" = 1 ] || return 1
+  value=$(tr -d '\n' < "$path") || return 1
+  case "$value" in accepted|pending) ;; *) return 1 ;; esac
+  for path in \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-owner" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.operation-owner"; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    [ -f "$path" ] && [ ! -L "$path" ] \
+      && [ "$(spawn_file_link_count "$path")" = 1 ] || return 1
+    value=$(tr -d '\n' < "$path") || return 1
+    pid=${value%%:*}
+    token=${value#*:}
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+  done
+  for path in \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-go" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.entering" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.operation-started"; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    spawn_launch_request_file_matches "$path" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+  done
+  path="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.entering.baseline"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] \
+      && [ "$(spawn_file_link_count "$path")" = 1 ] || return 1
+    IFS=$'\t' read -r token value verdict < "$path" || return 1
+    [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] && [ -z "$verdict" ] || return 1
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  fi
+  path="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.operation-result"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] \
+      && [ "$(spawn_file_link_count "$path")" = 1 ] || return 1
+    IFS=$'\t' read -r token verdict < "$path" || return 1
+    [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+    case "$verdict" in empty|accepted|pending|pending-unproven|unsent|send-failed|ambiguous|unknown) ;; *) return 1 ;; esac
+  fi
+  path="$SPAWN_LAUNCH_REQUEST/kimi-submit-result"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] \
+      && [ "$(spawn_file_link_count "$path")" = 1 ] || return 1
+    IFS=$'\t' read -r token verdict < "$path" || return 1
+    [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+    case "$verdict" in accepted|pending) ;; *) return 1 ;; esac
+  fi
+}
+
+kimi_submission_entering_recovery() {  # <entering-path>
+  local entering=$1 verdict
+  verdict=$(FM_BACKEND_SUBMIT_ENTERING_EVIDENCE_FILE=$entering \
+    FM_BACKEND_SUBMIT_TYPED_EVIDENCE_FILE="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted" \
+    FM_BACKEND_SUBMIT_TYPED_EVIDENCE_TOKEN=$SPAWN_LAUNCH_REQUEST_TOKEN \
+    fm_backend_dead_entering_verdict "$BACKEND" "$T" "$W" \
+      "$entering" "$SPAWN_LAUNCH_REQUEST_TOKEN") || return 1
+  case "$verdict" in accepted|unsent|ambiguous) printf '%s' "$verdict" ;; *) return 1 ;; esac
+}
+
+kimi_submission_state() {
+  local path="$SPAWN_LAUNCH_REQUEST/kimi-submission" owner go attempted entering result operation_owner operation_started operation_result
+  local value links pid token verdict
+  owner="$SPAWN_LAUNCH_REQUEST/kimi-submit-owner"
+  go="$SPAWN_LAUNCH_REQUEST/kimi-submit-go"
+  attempted="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted"
+  entering="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.entering"
+  result="$SPAWN_LAUNCH_REQUEST/kimi-submit-result"
+  operation_owner="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.operation-owner"
+  operation_started="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.operation-started"
+  operation_result="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.operation-result"
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then printf 'absent'; return 0; fi
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  links=$(spawn_file_link_count "$path") || return 1
+  [ "$links" = 1 ] || return 1
+  value=$(tr -d '\n' < "$path") || return 1
+  case "$value" in pending|accepted) printf '%s' "$value"; return 0 ;; prepared) ;; *) return 1 ;; esac
+  if [ -e "$result" ] || [ -L "$result" ]; then
+    [ -f "$result" ] && [ ! -L "$result" ] \
+      && [ "$(spawn_file_link_count "$result")" = 1 ] || return 1
+    IFS=$'\t' read -r token verdict < "$result" || return 1
+    [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+    case "$verdict" in
+      accepted|pending|ambiguous|unsent) printf '%s' "$verdict" ;;
+      send-failed) printf 'ambiguous' ;;
+      *) return 1 ;;
+    esac
+    return 0
+  fi
+  if [ -e "$operation_result" ] || [ -L "$operation_result" ]; then
+    [ -f "$operation_result" ] && [ ! -L "$operation_result" ] \
+      && [ "$(spawn_file_link_count "$operation_result")" = 1 ] || return 1
+    IFS=$'\t' read -r token verdict < "$operation_result" || return 1
+    [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+    case "$verdict" in
+      empty|accepted) printf 'accepted' ;;
+      pending|pending-unproven) printf 'pending' ;;
+      unsent) printf 'unsent' ;;
+      *) printf 'ambiguous' ;;
+    esac
+    return 0
+  fi
+  if [ -e "$operation_owner" ] || [ -L "$operation_owner" ]; then
+    [ -f "$operation_owner" ] && [ ! -L "$operation_owner" ] \
+      && [ "$(spawn_file_link_count "$operation_owner")" = 1 ] || return 1
+    value=$(tr -d '\n' < "$operation_owner") || return 1
+    pid=${value%%:*}
+    token=${value#*:}
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'submitting'
+    elif [ -e "$attempted" ] || [ -L "$attempted" ]; then
+      spawn_launch_request_file_matches "$attempted" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+      printf 'ambiguous'
+    elif [ -e "$entering" ] || [ -L "$entering" ]; then
+      spawn_launch_request_file_matches "$entering" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+      kimi_submission_entering_recovery "$entering"
+    else
+      if [ -e "$operation_started" ] || [ -L "$operation_started" ]; then
+        spawn_launch_request_file_matches "$operation_started" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+      fi
+      printf 'unsent'
+    fi
+    return 0
+  fi
+  if [ ! -e "$owner" ] && [ ! -L "$owner" ]; then
+    if [ -e "$attempted" ] || [ -L "$attempted" ]; then return 1; fi
+    printf 'prepared'
+    return 0
+  fi
+  [ -f "$owner" ] && [ ! -L "$owner" ] \
+    && [ "$(spawn_file_link_count "$owner")" = 1 ] || return 1
+  value=$(tr -d '\n' < "$owner") || return 1
+  pid=${value%%:*}
+  token=${value#*:}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$token" = "$SPAWN_LAUNCH_REQUEST_TOKEN" ] || return 1
+  if [ ! -e "$go" ] && [ ! -L "$go" ]; then
+    [ ! -e "$attempted" ] && [ ! -L "$attempted" ] || return 1
+    printf 'prepared'
+  else
+    spawn_launch_request_file_matches "$go" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'submitting'
+    else
+      if [ -e "$attempted" ] || [ -L "$attempted" ]; then
+        spawn_launch_request_file_matches "$attempted" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+        printf 'ambiguous'
+      elif [ -e "$entering" ] || [ -L "$entering" ]; then
+        spawn_launch_request_file_matches "$entering" "$SPAWN_LAUNCH_REQUEST_TOKEN" || return 1
+        kimi_submission_entering_recovery "$entering"
+      else
+        printf 'prepared'
+      fi
+    fi
+  fi
+}
+
+kimi_submission_reset_unsent() {
+  local path
+  for path in \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-owner" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-go" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.entering" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.entering.baseline" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.operation-owner" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.operation-started" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted.operation-result" \
+    "$SPAWN_LAUNCH_REQUEST/kimi-submit-result"
+  do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      [ -f "$path" ] && [ ! -L "$path" ] \
+        && [ "$(spawn_file_link_count "$path")" = 1 ] || return 1
+      rm -f -- "$path" || return 1
+    fi
+  done
+}
+
+kimi_submission_publish() {  # <prepared|pending|accepted>
+  local value=$1 tmp="$SPAWN_LAUNCH_REQUEST/.kimi-submission.tmp"
+  case "$value" in prepared|pending|accepted) ;; *) return 1 ;; esac
+  printf '%s\n' "$value" > "$tmp" && chmod 600 "$tmp" \
+    && mv -- "$tmp" "$SPAWN_LAUNCH_REQUEST/kimi-submission"
+}
+
+kimi_submission_helper() {
+  local owner="$SPAWN_LAUNCH_REQUEST/kimi-submit-owner" go="$SPAWN_LAUNCH_REQUEST/kimi-submit-go"
+  local attempted="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted"
+  local result="$SPAWN_LAUNCH_REQUEST/kimi-submit-result" tmp verdict i=0
+  set +e
+  umask 077
+  tmp="$SPAWN_LAUNCH_REQUEST/.kimi-submit-owner.tmp"
+  printf '%s:%s\n' "${BASHPID:-$$}" "$SPAWN_LAUNCH_REQUEST_TOKEN" > "$tmp" \
+    && chmod 600 "$tmp" && mv -- "$tmp" "$owner" || exit 1
+  while ! spawn_launch_request_file_matches "$go" "$SPAWN_LAUNCH_REQUEST_TOKEN" 2>/dev/null; do
+    [ ! -e "$go" ] && [ ! -L "$go" ] || exit 1
+    i=$((i + 1))
+    [ "$i" -lt 1200 ] || exit 3
+    sleep 0.05
+  done
+  verdict=$(fm_backend_send_text_submit_journaled \
+    "$attempted" "$SPAWN_LAUNCH_REQUEST_TOKEN" \
+    "$BACKEND" "$T" "$KIMI_INPUT" "$KIMI_SUBMIT_RETRIES" \
+    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || verdict=ambiguous
+  case "$verdict" in
+    empty|accepted) verdict=accepted ;;
+    pending|pending-unproven) verdict=pending ;;
+    unsent) verdict=unsent ;;
+    send-failed)
+      verdict=$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null) || verdict=unknown
+      case "$verdict" in pending|pending-unproven) verdict=pending ;; *) verdict=ambiguous ;; esac
+      ;;
+    *) verdict=ambiguous ;;
+  esac
+  tmp="$SPAWN_LAUNCH_REQUEST/.kimi-submit-result.tmp"
+  printf '%s\t%s\n' "$SPAWN_LAUNCH_REQUEST_TOKEN" "$verdict" > "$tmp" \
+    && chmod 600 "$tmp" && mv -- "$tmp" "$result"
+}
+
+kimi_submission_start() {
+  local owner="$SPAWN_LAUNCH_REQUEST/kimi-submit-owner" go="$SPAWN_LAUNCH_REQUEST/kimi-submit-go"
+  local attempted="$SPAWN_LAUNCH_REQUEST/kimi-submit-attempted"
+  local result="$SPAWN_LAUNCH_REQUEST/kimi-submit-result" helper_pid owner_value owner_pid i=0 state tmp
+  state=$(kimi_submission_state) || return 1
+  if [ "$state" = prepared ] && { [ -e "$owner" ] || [ -L "$owner" ]; }; then
+    [ ! -e "$attempted" ] && [ ! -L "$attempted" ] || return 1
+    owner_value=$(tr -d '\n' < "$owner") || return 1
+    owner_pid=${owner_value%%:*}
+    case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+    if ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -f -- "$owner" || return 1
+    fi
+  fi
+  if [ ! -e "$owner" ] && [ ! -L "$owner" ] \
+    && [ ! -e "$result" ] && [ ! -L "$result" ]; then
+    (trap - EXIT; trap '' HUP INT TERM; kimi_submission_helper) \
+      </dev/null >/dev/null 2>&1 &
+    helper_pid=$!
+    while [ ! -e "$owner" ] && [ ! -L "$owner" ] \
+      && [ ! -e "$result" ] && [ ! -L "$result" ] \
+      && kill -0 "$helper_pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+      sleep 0.01
+      i=$((i + 1))
+    done
+  fi
+  [ -e "$owner" ] || [ -e "$result" ] || return 1
+  if [ ! -e "$go" ] && [ ! -L "$go" ]; then
+    tmp="$SPAWN_LAUNCH_REQUEST/.kimi-submit-go.tmp"
+    printf '%s\n' "$SPAWN_LAUNCH_REQUEST_TOKEN" > "$tmp" \
+      && chmod 600 "$tmp" && mv -- "$tmp" "$go" || return 1
+  fi
+  spawn_launch_request_file_matches "$go" "$SPAWN_LAUNCH_REQUEST_TOKEN"
+}
+
+kimi_submission_wait() {
+  local state i=0 max=${FM_KIMI_SUBMISSION_POLLS:-100} interval=${FM_KIMI_SUBMISSION_INTERVAL:-0.1}
+  while [ "$i" -lt "$max" ]; do
+    state=$(kimi_submission_state) || return 1
+    case "$state" in accepted|pending|unsent) printf '%s' "$state"; return 0 ;; ambiguous) return 2 ;; esac
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 3
+}
+
+kimi_deliver_launch_brief() {
+  local recovery=${1:-fresh} submission_state composer_state journal=0
+  if [ "$recovery" = recovery ] && kimi_wait_for_delivery; then return 0; fi
+  if [ "$RELAUNCH" -eq 0 ]; then
+    journal=1
+    submission_state=$(kimi_submission_state) || {
+      kimi_spawn_fail "kimi launch brief submission evidence is unsafe"
+      return 1
+    }
+  else
+    submission_state=absent
+  fi
+  if [ "$submission_state" = submitting ]; then
+    submission_state=$(kimi_submission_wait) || {
+      kimi_spawn_fail "kimi launch brief submission remains ambiguous"
+      return 1
+    }
+  fi
+  if [ "$submission_state" = unsent ]; then
+    kimi_submission_reset_unsent || {
+      kimi_spawn_fail "kimi unsent launch brief submission could not be retired"
+      return 1
+    }
+    submission_state=prepared
+  fi
+  if [ "$submission_state" = prepared ] \
+    && { [ -e "$SPAWN_LAUNCH_REQUEST/kimi-submit-owner" ] \
+      || [ -L "$SPAWN_LAUNCH_REQUEST/kimi-submit-owner" ]; }; then
+    composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null) || composer_state=unknown
+    case "$composer_state" in
+      pending|pending-unproven)
+        kimi_submission_publish pending || {
+          kimi_spawn_fail "kimi pending launch brief submission could not be reconciled"
+          return 1
+        }
+        submission_state=pending
+        ;;
+      empty) ;;
+      *)
+        kimi_spawn_fail "kimi launch brief submission remains ambiguous"
+        return 1
+        ;;
+    esac
+  elif [ "$submission_state" = ambiguous ]; then
+    composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null) || composer_state=unknown
+    case "$composer_state" in
+      pending|pending-unproven) submission_state=pending ;;
+      empty)
+        kimi_spawn_fail "kimi launch brief submission remains ambiguous"
+        return 1
+        ;;
+      *)
+        kimi_spawn_fail "kimi launch brief submission remains ambiguous"
+        return 1
+        ;;
+    esac
+  fi
+  if [ "$submission_state" = absent ] || [ "$submission_state" = prepared ]; then
+    if ! kimi_wait_for_ready; then
+      kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+      return 1
+    fi
+    KIMI_INPUT=$SPAWN_BRIEF_INPUT
+    KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
+    KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
+    KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
+    if [ "$journal" -eq 1 ]; then
+      if [ "$submission_state" = absent ]; then
+        kimi_submission_publish prepared || {
+          kimi_spawn_fail "kimi launch brief submission could not be prepared"
+          return 1
+        }
+      fi
+      kimi_submission_start || {
+        kimi_spawn_fail "kimi launch brief submission owner could not be started"
+        return 1
+      }
+      KIMI_SUBMIT_VERDICT=$(kimi_submission_wait) || {
+        kimi_spawn_fail "kimi launch brief submission remains ambiguous"
+        return 1
+      }
+      if [ "$KIMI_SUBMIT_VERDICT" = unsent ]; then
+        kimi_submission_reset_unsent || {
+          kimi_spawn_fail "kimi unsent launch brief submission could not be retired"
+          return 1
+        }
+        kimi_submission_start || {
+          kimi_spawn_fail "kimi launch brief submission owner could not be restarted"
+          return 1
+        }
+        KIMI_SUBMIT_VERDICT=$(kimi_submission_wait) || {
+          kimi_spawn_fail "kimi launch brief submission remains ambiguous"
+          return 1
+        }
+        if [ "$KIMI_SUBMIT_VERDICT" = unsent ]; then
+          kimi_submission_reset_unsent || {
+            kimi_spawn_fail "kimi unsent launch brief submission could not be retired"
+            return 1
+          }
+          kimi_spawn_fail "kimi launch brief could not be submitted"
+          return 1
+        fi
+      fi
+    else
+      KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+        "$BACKEND" "$T" "$KIMI_INPUT" "$KIMI_SUBMIT_RETRIES" \
+        "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
+        kimi_spawn_fail "kimi launch brief could not be submitted"
+        return 1
+      }
+    fi
+    case "$KIMI_SUBMIT_VERDICT" in
+      pending) submission_state=pending ;;
+      accepted|empty) submission_state=accepted ;;
+      *)
+        kimi_spawn_fail "kimi launch brief submission remains ambiguous"
+        return 1
+        ;;
+    esac
+    if [ "$journal" -eq 1 ]; then
+      kimi_submission_publish "$submission_state" || {
+        kimi_spawn_fail "kimi launch brief submission could not be journaled"
+        return 1
+      }
+    fi
+  elif [ "$submission_state" = pending ]; then
+    spawn_send_key "$T" Enter || {
+      kimi_spawn_fail "kimi pending launch brief could not be resubmitted"
+      return 1
+    }
+  fi
+  if ! kimi_wait_for_delivery; then
+    kimi_spawn_fail "kimi launch brief delivery was not confirmed"
+    return 1
+  fi
+}
+
+if [ "$SPAWN_KIMI_DELIVERY_RECOVERY" -eq 1 ]; then
+  kimi_deliver_launch_brief recovery || exit 1
+  commit_secondmate_work_identity || {
+    echo "error: delivered secondmate launch identity requires reconciliation for $ID" >&2
+    exit 1
+  }
+  spawn_endpoint_receipt_retire || {
+    echo "error: delivered secondmate launch receipt could not be retired for $ID" >&2
+    exit 1
+  }
+  spawn_launch_request_cleanup \
+    || echo "warning: delivered secondmate launch request could not be retired for $ID" >&2
+  SPAWN_DISPATCH_PENDING=0
+  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
+    fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME" || true
+  fi
+  echo "spawned $ID harness=$HARNESS kind=secondmate mode=secondmate yolo=off window=$T worktree=$WT"
+  exit 0
+fi
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -2421,55 +4999,182 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
-
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-  # Target the stable window id, not the name: if the name is ever lost (e.g. an
-  # automatic-rename slips through), display-message -t <bad-name> falls back to the
-  # active client's window, which would misread firstmate's OWN pane path as the
-  # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
-  #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  candidate=""
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
-      fi
-    else
-      candidate=""
+  if [ "$SPAWN_ENDPOINT_PHASE" = worktree-ready ]; then
+    recovered_worktree=$WT
+    recovered_seen=
+    for _ in $(seq 1 10); do
+      case "$BACKEND" in
+        zellij|cmux) recovered_seen=$(spawn_passive_current_path "$WT_TARGET" || true) ;;
+        *) recovered_seen=$(spawn_current_path "$WT_TARGET" || true) ;;
+      esac
+      [ -z "$recovered_seen" ] \
+        || [ "$(real_path_or_raw "$recovered_seen")" != "$(real_path_or_raw "$recovered_worktree")" ] \
+        || break
+      sleep 0.5
+    done
+    if [ -z "$recovered_seen" ] \
+       || [ "$(real_path_or_raw "$recovered_seen")" != "$(real_path_or_raw "$recovered_worktree")" ]; then
+      echo "error: recovered endpoint $T is not in its exact recorded worktree for $ID" >&2
+      exit 1
     fi
-    sleep 1
-  done
-  if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
-    exit 1
-  fi
+    validate_spawn_worktree "recovered endpoint" "$T"
+    WORKTREE_REQUEST_DIGEST=$(printf '%s' "$SPAWN_DISPATCH_TRANSACTION" | spawn_sha256_stream) || exit 1
+    WORKTREE_REQUEST_MARKER="$STATE/.$ID.worktree-request.$WORKTREE_REQUEST_DIGEST"
+    WORKTREE_REQUEST_ACK="$WORKTREE_REQUEST_MARKER.send"
+    if [ -e "$WORKTREE_REQUEST_MARKER" ] || [ -L "$WORKTREE_REQUEST_MARKER" ]; then
+      [ -d "$WORKTREE_REQUEST_MARKER" ] && [ ! -L "$WORKTREE_REQUEST_MARKER" ] || {
+        echo "error: exact worktree request marker is unsafe for $ID" >&2
+        exit 1
+      }
+    fi
+    case "$BACKEND" in
+      zellij|cmux)
+        spawn_worktree_request_cleanup || {
+          echo "error: exact worktree request acknowledgement is unsafe for $ID" >&2
+          exit 1
+        }
+        ;;
+    esac
+  else
+    case "$BACKEND" in
+      zellij|cmux)
+        spawn_session_backend_worktree_acquire || exit 1
+        ;;
+      *)
+    WORKTREE_REQUEST_DIGEST=$(printf '%s' "$SPAWN_DISPATCH_TRANSACTION" | spawn_sha256_stream) || exit 1
+    WORKTREE_REQUEST_MARKER="$STATE/.$ID.worktree-request.$WORKTREE_REQUEST_DIGEST"
+    WORKTREE_REQUEST_ACK="$WORKTREE_REQUEST_MARKER.send"
+    WORKTREE_REQUEST_COMMAND="mkdir -m 700 -- $(shell_quote "$WORKTREE_REQUEST_MARKER") && { treehouse get; rc=\$?; if [ \"\$rc\" -ne 0 ]; then rmdir $(shell_quote "$WORKTREE_REQUEST_MARKER") 2>/dev/null || true; fi; [ \"\$rc\" -eq 0 ]; }"
+    worktree_request_recovery=0
+    worktree_request_send_ready=0
+    worktree_request_retryable=0
+    case "$SPAWN_ENDPOINT_PHASE" in
+      endpoint-created)
+        if [ -e "$WORKTREE_REQUEST_MARKER" ] || [ -L "$WORKTREE_REQUEST_MARKER" ]; then
+          echo "error: stale worktree request acknowledgement exists before dispatch for $ID" >&2
+          exit 1
+        fi
+        spawn_endpoint_receipt_publish worktree-requesting || {
+          echo "error: could not publish worktree request intent for $ID" >&2
+          exit 1
+        }
+        spawn_worktree_request_send "$WT_TARGET" "$WORKTREE_REQUEST_COMMAND" || {
+          echo "error: could not send worktree acquisition for $ID; request intent preserved" >&2
+          exit 1
+        }
+        spawn_endpoint_receipt_publish worktree-requested || {
+          echo "error: could not confirm the sent worktree request for $ID" >&2
+          exit 1
+        }
+        ;;
+      worktree-unsent|worktree-requesting|worktree-requested)
+        worktree_request_recovery=1
+        ;;
+      worktree-retryable)
+        echo "error: retryable worktree request is unsupported for backend $BACKEND" >&2
+        exit 1
+        ;;
+      *)
+        echo "error: endpoint receipt has no valid worktree acquisition phase for $ID" >&2
+        exit 1
+        ;;
+    esac
 
-  validate_spawn_worktree "treehouse get" "$T"
+    worktree_poll_max=${FM_SPAWN_WORKTREE_POLLS:-60}
+    worktree_poll_interval=${FM_SPAWN_WORKTREE_INTERVAL:-1}
+    worktree_request_round=0
+    while [ "$worktree_request_round" -lt 2 ] && [ -z "$WT" ]; do
+      candidate=""
+      if [ "$worktree_request_send_ready" -eq 0 ]; then
+        for _ in $(seq 1 "$worktree_poll_max"); do
+        p=$(spawn_current_path "$WT_TARGET" || true)
+        if [ -n "$p" ]; then
+          p_real=$(real_path_or_raw "$p")
+          if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+            if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+              WT="$p"
+              break
+            fi
+            candidate="$p_real"
+          else
+            candidate=""
+          fi
+        else
+          candidate=""
+        fi
+          sleep "$worktree_poll_interval"
+        done
+      fi
+      [ -z "$WT" ] || break
+      [ "$worktree_request_recovery" -eq 1 ] || break
+      if [ "$worktree_request_retryable" -eq 1 ]; then
+        spawn_worktree_request_cleanup || {
+          echo "error: could not retire proven no-resource worktree evidence for $ID" >&2
+          exit 1
+        }
+        worktree_request_retryable=0
+      fi
+
+      worktree_request_idle=0
+      case "$BACKEND" in
+        tmux)
+          [ "$(fm_backend_agent_state "$BACKEND" "$T")" != dead ] || worktree_request_idle=1
+          ;;
+        herdr)
+          if fm_backend_herdr_pane_idle_shell_pid "$HERDR_SES" "$HERDR_PANE_ID" >/dev/null; then
+            worktree_request_idle=1
+          fi
+          ;;
+      esac
+      [ "$worktree_request_idle" -eq 1 ] || break
+      if [ -e "$WORKTREE_REQUEST_MARKER" ] || [ -L "$WORKTREE_REQUEST_MARKER" ]; then
+        [ -d "$WORKTREE_REQUEST_MARKER" ] && [ ! -L "$WORKTREE_REQUEST_MARKER" ] \
+          || { echo "error: worktree request marker is unsafe: $WORKTREE_REQUEST_MARKER" >&2; exit 1; }
+        break
+      fi
+      spawn_endpoint_receipt_publish worktree-requesting || {
+        echo "error: could not republish worktree request intent for $ID" >&2
+        exit 1
+      }
+      worktree_send_rc=0
+      spawn_worktree_request_send "$WT_TARGET" "$WORKTREE_REQUEST_COMMAND" || worktree_send_rc=$?
+      if [ "$worktree_send_rc" -ne 0 ]; then
+        echo "error: could not resume failed worktree acquisition for $ID; request intent preserved" >&2
+        exit 1
+      fi
+      spawn_endpoint_receipt_publish worktree-requested || {
+        echo "error: could not confirm the resumed worktree request for $ID" >&2
+        exit 1
+      }
+      worktree_request_recovery=0
+      worktree_request_send_ready=0
+      worktree_request_round=$((worktree_request_round + 1))
+    done
+    if [ -z "$WT" ]; then
+      echo "error: treehouse get did not enter a worktree; in-flight request preserved for $ID at $T" >&2
+      exit 1
+    fi
+
+    validate_spawn_worktree "treehouse get" "$T"
+    spawn_endpoint_receipt_publish worktree-ready "$WT" || {
+      echo "error: could not bind the recovered endpoint worktree for $ID" >&2
+      exit 1
+    }
+    if [ -e "$WORKTREE_REQUEST_MARKER" ] || [ -L "$WORKTREE_REQUEST_MARKER" ]; then
+      [ -d "$WORKTREE_REQUEST_MARKER" ] && [ ! -L "$WORKTREE_REQUEST_MARKER" ] || {
+        echo "error: worktree request marker is unsafe: $WORKTREE_REQUEST_MARKER" >&2
+        exit 1
+      }
+    fi
+        ;;
+    esac
+  fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ]; then
+  spawn_provisional_harness_wiring_recover || exit 1
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] \
+   && [ "$SPAWN_METADATA_RECOVERY" -eq 0 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -2495,13 +5200,14 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$SPAWN_METADATA_RECOVERY" -eq 0 ]; then
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
   # files and turn-end token registry entries behind, and even a same-harness
   # relaunch would orphan the retired busy generation's token
   # (bin/fm-control-lib.sh owns where those artifacts live).
-  clear_relaunch_harness_wiring "$RELAUNCH_PRIOR_HARNESS" "$WT" "$STATE_REAL" "$ID" || {
+  clear_relaunch_harness_wiring "$RELAUNCH_PRIOR_HARNESS" "$WT" "$STATE_REAL" "$ID" \
+    "$(fm_meta_get "$RELAUNCH_META" harness_turnend_auth_path)" || {
     echo "error: could not retire $RELAUNCH_PRIOR_HARNESS wiring for task $ID; refusing to arm the replacement" >&2
     exit 1
   }
@@ -2510,7 +5216,33 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
+HARNESS_TURNEND_AUTH_PATH=
+if [ "$KIND" != secondmate ] && [ "$SPAWN_METADATA_RECOVERY" -eq 0 ]; then
+  [ "$RELAUNCH" -ne 0 ] || SPAWN_PROVISIONAL_HARNESS_WIRING_PENDING=1
+  HARNESS_FAMILY=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
+  case "$HARNESS_FAMILY" in
+    grok)
+      HARNESS_AUTH_ROOT="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
+      ;;
+    kimi)
+      HARNESS_AUTH_ROOT="$HOME/.kimi-code/fm-turn-end.d"
+      ;;
+
+    *) HARNESS_AUTH_ROOT= ;;
+  esac
+  if [ -n "$HARNESS_AUTH_ROOT" ]; then
+    HARNESS_TURNEND_AUTH_PATH=$(spawn_provisional_harness_auth_path \
+      "$HARNESS_FAMILY" "$HARNESS_AUTH_ROOT") || {
+      echo "error: could not reserve exact $HARNESS_FAMILY turn-end authorization for $ID" >&2
+      exit 1
+    }
+    RELAUNCH_REPLACEMENT_AUTH_PATH=$HARNESS_TURNEND_AUTH_PATH
+    spawn_provisional_harness_wiring_receipt_publish \
+      "$HARNESS_FAMILY" "$HARNESS_TURNEND_AUTH_PATH" || {
+      echo "error: could not journal provisional $HARNESS_FAMILY wiring for $ID" >&2
+      exit 1
+    }
+  fi
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
@@ -2682,12 +5414,13 @@ EOF
       # touches grok's managed config - only firstmate-owned files.
       GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
       GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
-      mkdir -p "$GROK_AUTH_DIR"
-      old_umask=$(umask)
-      umask 077
-      auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
-      umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
+      auth_file=$HARNESS_TURNEND_AUTH_PATH
+      fm_control_harness_turnend_auth_record_valid \
+        grok "${auth_file##*/}" "$auth_file" || exit 1
+      spawn_provisional_harness_auth_create "$auth_file" || {
+        echo "error: could not create exact Grok turn-end authorization for $ID" >&2
+        exit 1
+      }
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
       sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
       cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
@@ -2770,12 +5503,13 @@ EOF
       # task's token pointer and the token resolves through Firstmate's private
       # registry. The installer above owns the format-preserving config edit and
       # the always-zero, silent hook script.
-      KIMI_AUTH_DIR="$HOME/.kimi-code/fm-turn-end.d"
-      old_umask=$(umask)
-      umask 077
-      auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
-      umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
+      auth_file=$HARNESS_TURNEND_AUTH_PATH
+      fm_control_harness_turnend_auth_record_valid \
+        kimi "${auth_file##*/}" "$auth_file" || exit 1
+      spawn_provisional_harness_auth_create "$auth_file" || {
+        echo "error: could not create exact Kimi turn-end authorization for $ID" >&2
+        exit 1
+      }
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
@@ -2829,24 +5563,43 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+
+spawn_commit_backlog_transition() {
+  [ "$BACKLOG_TRANSITION" = 1 ] || return 0
+  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+}
+
+if [ "$SPAWN_METADATA_RECOVERY" -eq 1 ]; then
+  spawn_metadata_transaction_published || {
+    echo "error: definitely unsent secondmate launch has no exact published metadata for $ID" >&2
+    exit 1
+  }
+  SPAWN_GEN=$(fm_meta_get "$STATE/$ID.meta" spawn_gen)
+  [ -n "$SPAWN_GEN" ] || {
+    echo "error: definitely unsent secondmate launch metadata has no incarnation for $ID" >&2
+    exit 1
+  }
+  SPAWN_DISPATCH_PENDING=0
+  if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_SET_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_SET_LOCK"
+  fi
+else
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
-SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
-if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
-else
-  SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
+SPAWN_META_TMP=$(umask 077; mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
+if [ "$RELAUNCH" -eq 0 ]; then
   SPAWN_FRESH_COMMIT_PENDING=1
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project launch_brief launch_brief_sha256 work_identity_dispatch_transaction harness harness_turnend_auth_path kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent work_identity_schema work_identity_status work_identity_sha256 backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2857,7 +5610,12 @@ preserve_relaunch_meta() {
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
+  echo "launch_brief=$BRIEF"
+  echo "launch_brief_sha256=$LAUNCH_BRIEF_HASH"
+  echo "work_identity_dispatch_transaction=$SPAWN_DISPATCH_TRANSACTION"
   echo "harness=$HARNESS"
+  [ -z "$HARNESS_TURNEND_AUTH_PATH" ] || \
+    echo "harness_turnend_auth_path=$HARNESS_TURNEND_AUTH_PATH"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
@@ -2866,6 +5624,11 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ -n "$WORK_IDENTITY_STATUS" ]; then
+    echo "work_identity_schema=$WORK_IDENTITY_SCHEMA"
+    echo "work_identity_status=$WORK_IDENTITY_STATUS"
+    [ "$WORK_IDENTITY_STATUS" != linked ] || echo "work_identity_sha256=$WORK_IDENTITY_HASH"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2904,33 +5667,38 @@ preserve_relaunch_meta() {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
   exit 1
 }
-if [ "$RELAUNCH" -eq 0 ]; then
-  if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
-    echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
-    exit 1
-  fi
-  SPAWN_META_TMP=
-fi
-
-# Fuse the backlog In-flight transition into the publication that just created
-# the record (bin/fm-backlog-transition-lib.sh owns the invariant). It runs under
-# this task's own meta lock, so a steer or teardown racing the same id stays
-# serialized exactly as before. The call itself is deferred to the final commit
-# point below so every earlier launch-delivery failure remains unwindable.
-spawn_commit_backlog_transition() {
-  [ "$BACKLOG_TRANSITION" = 1 ] || return 0
-  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+chmod 600 "$SPAWN_META_PATH" || exit 1
+SPAWN_META_PUBLISH_STARTED=1
+FM_HOME="$FM_HOME" \
+  FM_DATA_OVERRIDE="$DATA" \
+  FM_STATE_OVERRIDE="$STATE" \
+  FM_ROOT_OVERRIDE="$FM_ROOT" \
+  "$SCRIPT_DIR/fm-work-identity.sh" dispatch-publish "$ID" \
+    --brief "$BRIEF" --meta "$SPAWN_META_PATH" \
+    --transaction "$SPAWN_DISPATCH_TRANSACTION" >/dev/null \
+  || exit 1
+spawn_provisional_harness_wiring_receipt_retire || {
+  echo "error: published harness wiring receipt could not be retired for $ID" >&2
+  exit 1
 }
 
-if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_META_PUBLISH_STARTED=1
-  if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
-    echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
-    exit 1
+# Fuse the backlog In-flight transition into the identity owner's publication
+# that just created the record. The call itself is deferred to the final commit
+# point below so every earlier launch-delivery failure remains unwindable.
+[ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_PENDING=0
+SPAWN_META_PUBLISH_STARTED=0
+published_meta_candidate=$SPAWN_META_TMP
+SPAWN_META_TMP=
+rm -f -- "$published_meta_candidate" \
+  || echo "warning: could not retire published metadata candidate for $ID" >&2
+SPAWN_DISPATCH_PENDING=0
+if [ "$RELAUNCH" -eq 0 ]; then
+  if [ "$BACKEND" = orca ]; then
+    spawn_orca_operation_retire || {
+      echo "error: could not retire Orca endpoint operation journal for $ID" >&2
+      exit 1
+    }
   fi
-  RELAUNCH_REPLACEMENT_PENDING=0
-  SPAWN_META_PUBLISH_STARTED=0
-  SPAWN_META_TMP=
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so
@@ -2947,29 +5715,18 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
+sq_brief_input=$(shell_quote "$SPAWN_BRIEF_INPUT")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
-sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
-LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
-LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
-LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
-case "$HARNESS" in
-  pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
-  cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
-esac
-LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
+LAUNCH=$(render_launch "$LAUNCH") || exit 1
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
@@ -3014,78 +5771,172 @@ spawn_record_traceparent() {
   # independent critical section so other metadata interfaces can serialize.
   if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
     SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
-    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    fm_lock_acquire_wait "$SPAWN_META_LOCK" || return 1
     SPAWN_META_LOCK_HELD=1
     acquired=1
   fi
-  SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
-  if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
-     || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
-     || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
-     || ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
+  if ! fm_meta_replace_expect "$meta"; then
     status=1
-    rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  else
+    SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+    if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
+       || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
+       || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
+       || ! fm_meta_atomic_replace "$SPAWN_META_TMP" "$meta"; then
+      status=1
+      rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+    fi
   fi
   SPAWN_META_TMP=
   if [ "$acquired" = 1 ]; then
-    fm_lock_release "$SPAWN_META_LOCK" || status=1
-    SPAWN_META_LOCK_HELD=0
+    if fm_lock_release "$SPAWN_META_LOCK"; then
+      SPAWN_META_LOCK_HELD=0
+    else
+      status=1
+    fi
   fi
   return "$status"
 }
 
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-# Send through the exact channel that already ships GOTMPDIR, so every backend
-# and harness - ship, scout, and secondmate - gets it before launch. Skipped
-# entirely when trace context is off.
-if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    if ! spawn_record_traceparent; then
-      LAUNCH="unset TRACEPARENT; $LAUNCH"
-    fi
+if [ "$RELAUNCH" -eq 0 ]; then
+  spawn_launch_request_paths || exit 1
+  if [ -n "$SPAWN_TRACEPARENT" ]; then
+    spawn_record_traceparent || {
+      echo "error: trace metadata could not be validated and published safely for $ID" >&2
+      exit 1
+    }
+  fi
+  LAUNCH_COMMAND="export GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp")"
+  if [ -n "$SPAWN_TRACEPARENT" ]; then
+    LAUNCH_COMMAND="$LAUNCH_COMMAND && export TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT")"
+  fi
+  LAUNCH_GUARD=$SPAWN_LAUNCH_GUARD
+  sq_launch_outcome=$(shell_quote "$SPAWN_LAUNCH_OUTCOME")
+  sq_launch_token=$(shell_quote "$SPAWN_LAUNCH_REQUEST_TOKEN")
+  sq_launch_request=$(shell_quote "$SPAWN_LAUNCH_REQUEST")
+  sq_launch_guard=$(shell_quote "$LAUNCH_GUARD")
+  if [ "$RAW_LAUNCH" -eq 1 ]; then
+    sq_launch_eval=$(shell_quote "exec env $LAUNCH")
   else
-    TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
-      echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
+    sq_launch_eval=$(shell_quote "$LAUNCH")
+  fi
+  LAUNCH_CHILD_COMMAND="printf '%s:%s\\n' \"\$\$\" $sq_launch_token > $sq_launch_guard/.child.tmp && chmod 600 $sq_launch_guard/.child.tmp && mv $sq_launch_guard/.child.tmp $sq_launch_guard/child || exit 1; exec sh -c $sq_launch_eval"
+  sq_launch_child=$(shell_quote "$LAUNCH_CHILD_COMMAND")
+  LAUNCH_COMMAND="$LAUNCH_COMMAND && if mkdir $sq_launch_guard 2>/dev/null; then printf '%s:%s\\n' \"\$\$\" $sq_launch_token > $sq_launch_guard/.owner.tmp && chmod 600 $sq_launch_guard/.owner.tmp && mv $sq_launch_guard/.owner.tmp $sq_launch_guard/owner || exit 1; set +m 2>/dev/null || true; sh -c $sq_launch_child & launch_pid=\$!; wait \"\$launch_pid\"; launch_rc=\$?; printf 'exited:%s:%s\\n' \"\$launch_rc\" $sq_launch_token > $sq_launch_request/.outcome.tmp && chmod 600 $sq_launch_request/.outcome.tmp && mv $sq_launch_request/.outcome.tmp $sq_launch_outcome; exit \$launch_rc; fi"
+  if [ "$SPAWN_LAUNCH_SUBMITTED_RECOVERY" -ne 1 ]; then
+    spawn_endpoint_receipt_publish launch-prepared "$WT" || {
+      echo "error: launch preparation could not be journaled for $ID" >&2
+      exit 1
+    }
+    spawn_launch_request_start "$LAUNCH_COMMAND" || {
+      echo "error: launch request owner could not be started for $ID" >&2
+      exit 1
+    }
+    launch_delivery_status=0
+    spawn_launch_delivery_wait || launch_delivery_status=$?
+    if [ "$launch_delivery_status" -ne 0 ]; then
+      launch_request_state=$(spawn_launch_request_state) || {
+        echo "error: launch request evidence is unsafe for $ID" >&2
+        exit 1
+      }
+      case "$launch_request_state" in
+        launch-exited)
+          spawn_exited_launch_compensate || {
+            echo "error: terminal launch for $ID could not be compensated safely" >&2
+            exit 1
+          }
+          echo "error: launch for $ID terminated before commit; its provisional publication was compensated - rerun spawn to retry" >&2
+          ;;
+        *)
+          echo "error: launch submission is incomplete or ambiguous; exact request evidence is preserved for $ID" >&2
+          ;;
+      esac
       exit 1
     fi
-    LAUNCH="unset TRACEPARENT; $LAUNCH"
+    spawn_endpoint_receipt_publish launch-submitted "$WT" || {
+      echo "error: launch was accepted, but its exact acceptance receipt could not be published for $ID" >&2
+      exit 1
+    }
   fi
+  launch_request_state=$(spawn_launch_request_state) || {
+    echo "error: accepted launch evidence is unsafe for $ID" >&2
+    exit 1
+  }
+  if [ "$launch_request_state" = accepted ]; then
+    # A transport receipt can race a short-lived child. Give its exact guard
+    # one poll interval to publish a terminal outcome before committing it as
+    # an active worker.
+    sleep "${FM_SPAWN_LAUNCH_INTERVAL:-0.1}"
+    launch_request_state=$(spawn_launch_request_state) || {
+      echo "error: accepted launch evidence is unsafe for $ID" >&2
+      exit 1
+    }
+  fi
+  case "$launch_request_state" in
+    accepted|executed) ;;
+    launch-exited)
+      spawn_exited_launch_compensate || {
+        echo "error: terminal accepted launch for $ID could not be compensated safely" >&2
+        exit 1
+      }
+      echo "error: launch for $ID terminated before commit; its provisional publication was compensated - rerun spawn to retry" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: accepted launch lacks exact backend acceptance for $ID" >&2
+      exit 1
+      ;;
+  esac
+else
+  spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp" || {
+    echo "error: relaunch environment could not be delivered for $ID" >&2
+    exit 1
+  }
+  if [ -n "$SPAWN_TRACEPARENT" ]; then
+    if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+      spawn_record_traceparent || {
+        echo "error: trace metadata could not be validated and published safely for $ID" >&2
+        exit 1
+      }
+    else
+      TRACE_SEND_STATUS=$?
+      if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
+        echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
+        exit 1
+      fi
+      LAUNCH="unset TRACEPARENT; $LAUNCH"
+    fi
+  fi
+  sleep 0.3
+  spawn_send_literal "$T" "$LAUNCH" || {
+    echo "error: relaunch command could not be delivered for $ID" >&2
+    exit 1
+  }
+  sleep 0.3
+  if [ "$KIND" = secondmate ]; then
+    SECONDMATE_RESERVATION_PRESERVE=1
+  fi
+  spawn_send_key "$T" Enter || {
+    echo "error: relaunch command could not be submitted for $ID" >&2
+    exit 1
+  }
 fi
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
-  if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
-    exit 1
+  if [ "$SPAWN_LAUNCH_SUBMITTED_RECOVERY" = 1 ]; then
+    kimi_deliver_launch_brief recovery || exit 1
+  else
+    kimi_deliver_launch_brief || exit 1
   fi
-  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
-  KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
-  KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
-  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
-  if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
-      "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
-      "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+fi
+if [ "$KIND" = secondmate ]; then
+  commit_secondmate_work_identity || {
+    echo "error: secondmate launch completed, but its unlinked identity could not be committed" >&2
     exit 1
-  fi
-  if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
-    exit 1
-  fi
-  if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
-    exit 1
-  fi
+  }
 fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
@@ -3114,20 +5965,20 @@ fi
 SPAWN_BACKLOG_COMMIT_STATUS=0
 if spawn_commit_backlog_transition; then
   SPAWN_FRESH_COMMIT_PENDING=0
+  SPAWN_PROVISIONAL_HARNESS_WIRING_PENDING=0
 else
   SPAWN_BACKLOG_COMMIT_STATUS=$?
   if spawn_commit_backlog_transition; then
     SPAWN_BACKLOG_COMMIT_STATUS=0
     SPAWN_FRESH_COMMIT_PENDING=0
+    SPAWN_PROVISIONAL_HARNESS_WIRING_PENDING=0
   fi
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
-    if spawn_fresh_commit_rollback; then
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
-    else
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
-    fi
+    SPAWN_FRESH_COMMIT_PENDING=0
+    SPAWN_PROVISIONAL_HARNESS_WIRING_PENDING=0
+    echo "error: task $ID's accepted launch could not move its backlog item to In flight ($FM_BACKLOG_TRANSITION_ERROR); exact metadata and launch acceptance were preserved - fix the backlog and re-run the spawn to finish the commit without relaunching" >&2
   else
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
   fi
@@ -3135,6 +5986,14 @@ fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
+fi
+if [ "$RELAUNCH" -eq 0 ]; then
+  spawn_endpoint_receipt_retire || {
+    echo "error: accepted launch receipt could not be retired for $ID" >&2
+    exit 1
+  }
+  spawn_launch_request_cleanup \
+    || echo "warning: accepted launch request journal could not be retired for $ID" >&2
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0

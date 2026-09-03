@@ -233,15 +233,15 @@ jobs:
           printf '%s\n' "$status"
           version=$(printf '%s' "$status" | jq -r '.client.version // empty')
           protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty')
-          [ "$version" = "0.7.4" ] || {
-            echo "::error::expected exact Herdr pin 0.7.4, got ${version:-<empty>}"
+          [ "$version" = "0.7.5" ] || {
+            echo "::error::expected exact Herdr pin 0.7.5, got ${version:-<empty>}"
             exit 1
           }
           case "$protocol" in
             ''|*[!0-9]*) echo "::error::could not read client protocol"; exit 1 ;;
           esac
-          [ "$protocol" -ge 16 ] || {
-            echo "::error::herdr protocol $protocol is below the required floor 16"
+          [ "$protocol" -ge 17 ] || {
+            echo "::error::herdr protocol $protocol is below the required floor 17"
             exit 1
           }
       - name: Start default Herdr session for fleet-state tripwire

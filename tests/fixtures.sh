@@ -107,6 +107,15 @@ fm_test_fake_tmux_spawn() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*)
+    [ -z "${FM_FAKE_TMUX_CURRENT_COMMAND:-}" ] || {
+      printf '%s\n' "$FM_FAKE_TMUX_CURRENT_COMMAND"
+      exit 0
+    }
+    ;;
+  *"#{pane_tty}"*)
+    [ -z "${FM_FAKE_TMUX_CURRENT_COMMAND:-}" ] || exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;

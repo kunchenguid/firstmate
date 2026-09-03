@@ -369,6 +369,32 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
   printf '%s %s' "$wsid" "$sfid"
 }
 
+fm_backend_cmux_recover_task() {  # <label>; 2 means absent
+  local label=$1 title list matches count wsid panes surfaces sfid
+  title=$(fm_backend_cmux_scoped_title "$label")
+  list=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  matches=$(printf '%s' "$list" | jq -r --arg want "$title" \
+    '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null) || return 1
+  count=$(printf '%s\n' "$matches" | grep -c '[^[:space:]]' || true)
+  case "$count" in
+    0) return 2 ;;
+    1) ;;
+    *) echo "error: multiple cmux workspaces '$title' exist" >&2; return 1 ;;
+  esac
+  wsid=${matches%%$'\n'*}
+  panes=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
+  surfaces=$(printf '%s' "$panes" | jq -r \
+    '[.panes[]? | (.surface_ids[]?, .selected_surface_id?)] | map(select(type == "string" and length > 0)) | unique | .[]' \
+    2>/dev/null) || return 1
+  count=$(printf '%s\n' "$surfaces" | grep -c '[^[:space:]]' || true)
+  [ "$count" -eq 1 ] || {
+    echo "error: cmux workspace '$title' does not have one recoverable surface" >&2
+    return 1
+  }
+  sfid=${surfaces%%$'\n'*}
+  printf '%s %s' "$wsid" "$sfid"
+}
+
 # fm_backend_cmux_parse_target: split "<workspace_uuid>:<surface_uuid>" on the
 # FIRST colon (neither UUID contains a colon, so this is unambiguous). Sets
 # FM_BACKEND_CMUX_WORKSPACE and FM_BACKEND_CMUX_SURFACE for the caller.
@@ -506,10 +532,27 @@ fm_backend_cmux_send_key() {  # <target> <key> [expected-label]
 
 # fm_backend_cmux_send_text_line: send one line of TEXT then submit.
 fm_backend_cmux_send_text_line() {  # <target> <text> [expected-label]
-  fm_backend_cmux_send_literal "$1" "$2" "${3:-}" || return 1
+  fm_backend_cmux_send_literal "$1" "$2" "${3:-}" || return 3
   fm_backend_cmux_send_key "$1" Enter "${3:-}" && return 0
   fm_backend_cmux_send_key "$1" C-c "${3:-}" >/dev/null 2>&1 && return 1
   return 2
+}
+
+fm_backend_cmux_send_launch_line() {  # <target> <text> [expected-label]
+  fm_backend_cmux_target_ready "$1" "${3:-}" || return 1
+  fm_backend_cmux_cli send --workspace "$FM_BACKEND_CMUX_WORKSPACE" \
+    --surface "$FM_BACKEND_CMUX_SURFACE" -- "$2"$'\r' >/dev/null 2>&1
+}
+
+fm_backend_cmux_passive_current_path() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} path
+  fm_backend_cmux_target_ready "$target" "$expected_label" || return 1
+  path=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null \
+    | jq -er --arg id "$FM_BACKEND_CMUX_WORKSPACE" \
+      '[.workspaces[]? | select(.id == $id)]
+       | select(length == 1) | .[0].current_directory
+       | select(type == "string" and startswith("/"))' 2>/dev/null) || return 1
+  printf '%s' "$path"
 }
 
 # fm_backend_cmux_capture: bounded plain-text surface capture. No herdr-style
@@ -566,8 +609,11 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
 # of the proof-carrying submit vocabulary.
 fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-}
-  fm_backend_cmux_parse_target "$target" || { printf 'unknown'; return 0; }
-  fm_backend_cmux_send_literal "$target" "$text" "$expected_label" || { printf 'send-failed'; return 0; }
+  fm_backend_cmux_parse_target "$target" || { fm_backend_submit_unsent_verdict; return 0; }
+  fm_backend_submit_entering_evidence || { printf 'pending-unproven'; return 0; }
+  fm_backend_cmux_send_literal "$target" "$text" "$expected_label" \
+    || { fm_backend_submit_unsent_verdict; return 0; }
+  fm_backend_submit_typed_evidence || { printf 'pending-unproven'; return 0; }
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_cmux_send_key fm_backend_cmux_composer_state \
     "$target" "$retries" "$sleep_s" "$expected_label"

@@ -98,6 +98,20 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
   printf '%s\n' "$wid"
 }
 
+fm_backend_tmux_recover_task() {  # <session> <window-name>; 2 means absent
+  local ses=$1 wname=$2 windows count wid
+  windows=$(tmux list-windows -t "$ses" -F '#{window_name}' 2>/dev/null) || return 1
+  count=$(printf '%s\n' "$windows" | grep -c -x "$wname" || true)
+  case "$count" in
+    0) return 2 ;;
+    1) ;;
+    *) echo "error: multiple windows $ses:$wname exist" >&2; return 1 ;;
+  esac
+  wid=$(tmux display-message -p -t "=$ses:=$wname" '#{window_id}' 2>/dev/null) || return 1
+  [ -n "$wid" ] || return 1
+  printf '%s\n' "$wid"
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.
@@ -111,6 +125,10 @@ fm_backend_tmux_current_path() {  # <target>
 # inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
 fm_backend_tmux_send_text_line() {  # <target> <text>
   tmux send-keys -t "$1" "$2" Enter
+}
+
+fm_backend_tmux_send_launch_line() {  # <target> <text>
+  tmux send-keys -t "$1" -l "$2" \; send-keys -t "$1" Enter
 }
 
 # fm_backend_tmux_send_literal: send TEXT as literal bytes with no

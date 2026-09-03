@@ -278,6 +278,31 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
+fm_tmux_literal_quote() {
+  local value=$1
+  value=${value//\'/\'\\\'\'}
+  printf "'%s'" "$value"
+}
+
+fm_tmux_send_literal_with_evidence() {
+  local target=$1 text=$2 path=${FM_BACKEND_SUBMIT_TYPED_EVIDENCE_FILE:-}
+  local token=${FM_BACKEND_SUBMIT_TYPED_EVIDENCE_TOKEN:-} tmp command rc=0
+  if [ -z "$path" ]; then
+    tmux send-keys -t "$target" -l "$text" 2>/dev/null
+    return
+  fi
+  [ -n "$token" ] || return 1
+  tmp="${path}.tmp.${BASHPID:-$$}"
+  if ! (umask 077; printf '%s\n' "$token" > "$tmp") || ! chmod 600 "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  command="mv -- $(fm_tmux_literal_quote "$tmp") $(fm_tmux_literal_quote "$path")"
+  tmux send-keys -t "$target" -l "$text" \; run-shell "$command" 2>/dev/null || rc=$?
+  [ "$rc" -eq 0 ] || rm -f -- "$tmp"
+  return "$rc"
+}
+
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
   # The turn-started baseline must predate our own typing: a pane already
@@ -285,7 +310,9 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target")
   [ "$baseline_state" = idle ] && baseline_idle=1
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
+  fm_tmux_send_literal_with_evidence "$target" "$text" || { printf 'send-failed'; return 0; }
+  fm_backend_submit_entering_evidence || { printf 'pending-unproven'; return 0; }
+  fm_backend_submit_typed_evidence || { printf 'pending-unproven'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
 }
