@@ -49,11 +49,23 @@
 # matching any URL that merely mentions the word. The 333 legitimate merged
 # lines using "session" in its ordinary technical sense still pass.
 #
-# The private work-document rule likewise keys on a path shape, not a word. A
+# The private work-document rules likewise key on a path shape, not a word. A
 # path with a subdirectory under data/, data/<id>/<file>, is the per-task brief
 # or report shape AGENTS.md defines. It catches exactly three real leaks in the
 # same merged history - data/fm-send-reliability-reframe-s1/report.md and
-# data/agentsmd-diet-s2/report.md twice - with zero false positives.
+# data/agentsmd-diet-s2/report.md twice - with zero false positives. The second
+# such shape is the Lavish review artifact, .lavish/<file>, which has zero
+# matches in merged history while the bare word "Lavish" has 59, because this
+# repo develops that integration. Keying on the path and never on the word is
+# what keeps those 59 legitimate messages shipping.
+#
+# WHICH DOCUMENT FAMILIES ARE COVERED. Exactly two: data/<id>/<file> and
+# .lavish/<file>. Deliberately left out, each because it has legitimate merged
+# mentions, are .no-mistakes/, projects/, state/, config/, .env, and the flat
+# named private files directly under data/; their counts and reasons are in
+# REJECTED below. "No reference to internal working documents" is therefore
+# enforced for those two path families, not as a general guarantee over every
+# private file this repo happens to hold.
 #
 # KNOWN RESIDUAL. The trailing rule refuses a subject that ends in a bare
 # ",<space>captain", so a comma list whose last item is the word captain
@@ -61,6 +73,11 @@
 # line exists in merged history and the six lines this rule caught existed only
 # in this shape, so it is kept and the refusal is reworded past rather than
 # narrowed on a case that has never occurred.
+#
+# The same shape of residual applies to the Lavish rule: a commit that
+# legitimately changes the Lavish artifact integration could name ".lavish/" in
+# its own message and would be refused. No such line exists in merged history,
+# and rewording to the bare word clears it, so the rule is kept.
 #
 # REJECTED, with the evidence that rejected them:
 #   - Bare nautical words (ahoy, shipshape, avast). This repo ships an /ahoy
@@ -84,13 +101,24 @@
 #     data/learnings.md, data/projects.md, and data/secondmates.md appear
 #     legitimately in eight merged messages, so requiring a subdirectory keeps
 #     them outside the rule.
-#   - Every state/ path. Merged history contains 46 legitimate mentions.
-#   - projects/ and .no-mistakes/ paths. Both have legitimate merged mentions
-#     and are unrelated to the per-task work-document shape.
+#   - The bare word "Lavish". 59 legitimate merged mentions, because this repo
+#     develops that integration. Only the .lavish/<file> path is refused.
+#   - Every state/ path. 46 legitimate merged mentions.
+#   - Every config/ path. 45 legitimate merged mentions.
+#   - Every .env path. 12 legitimate merged mentions.
+#   - Every projects/ path. 5 legitimate merged mentions, all path-resolution
+#     prose.
+#   - Every .no-mistakes/ path. 1 legitimate merged mention, the architecture
+#     prose "no-mistakes gate worktree (.no-mistakes/repos/".
 #
-# NO BYPASS FLAG. A refusal is always fixable by rewording the message, so there
-# is no case that needs an override. The refusal names the rule, the exact text
-# that matched, and the command that rewords it.
+# NO BYPASS FLAG AND NO BYPASS VARIABLE. A refusal is always fixable by
+# rewording the message, so there is no case that needs an override. The refusal
+# names the rule, the exact text that matched, and the command that rewords it.
+# The default range's base is derived only from the default-branch refs and is
+# not reachable from the environment: a base the caller could choose is an off
+# switch, because a base equal to HEAD leaves an empty range that reports clean
+# having scanned nothing. Explicit bounds belong to --range, which names what it
+# scans instead of silently narrowing the pre-push default.
 #
 # Exit codes: 0 clean, 1 internal voice found, 2 usage error, 3 the scan or
 # commit range could not be completed (fail closed - unknown is not clean).
@@ -105,9 +133,8 @@
 #   fm-prepush-voice-guard.sh --list-patterns  print the rule table
 #   fm-prepush-voice-guard.sh --help           print this usage
 #
-# FM_VOICE_GUARD_BASE overrides the default-branch ref used to bound the default
-# range. Without it, origin/main is authoritative when it resolves and local
-# main is only a fallback, so an ahead local main cannot hide unpushed commits.
+# The default range is bounded by origin/main when it resolves and by local main
+# only as a fallback, so an ahead local main cannot hide unpushed commits.
 set -u
 
 SELF_DIR=
@@ -177,6 +204,11 @@ FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/ses
 # that legitimate commit messages discuss, while spelling the component and
 # outer boundaries avoids GNU-only \b.
 FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}(^|[^[:alnum:]_])data/[[:alnum:]_.-]+/[[:alnum:]_.-]+([^[:alnum:]_/.-]|\$)${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
+
+# The local Lavish review artifact, which is the other private work-document
+# shape this repo produces. Keyed on the dot-prefixed directory path so the 59
+# legitimate merged mentions of the bare word "Lavish" keep shipping.
+FM_VOICE_RULES+=("private-review-artifact${TAB}i${TAB}(^|[^[:alnum:]_])\\.lavish/[[:alnum:]_.-]+([^[:alnum:]_/.-]|\$)${TAB}Published history must not reference a local review artifact. Remove the .lavish/<file> path and describe the durable outcome.")
 
 fm_voice_list_patterns() {
   local rule
@@ -285,10 +317,6 @@ fm_voice_append_scan() {  # <label> <path> <report>
 # fm_lint_changed_base_ref probes candidates. The remote-tracking ref is the
 # publication boundary; local main is only a fallback when it does not resolve.
 fm_voice_default_ref() {
-  if [ -n "${FM_VOICE_GUARD_BASE:-}" ]; then
-    printf '%s\n' "$FM_VOICE_GUARD_BASE"
-    return 0
-  fi
   if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
     printf '%s\n' origin/main
   elif git rev-parse --verify -q main >/dev/null 2>&1; then
@@ -309,9 +337,8 @@ fm_voice_unpublished_commits() {  # <destination>
   base_ref=$(fm_voice_default_ref)
 
   if [ -z "$base_ref" ]; then
-    printf 'fm-prepush-voice-guard.sh: cannot determine which commits are unpublished: no default-branch ref resolved (tried %s).\n' \
-      "${FM_VOICE_GUARD_BASE:-origin/main, main}" >&2
-    printf 'fm-prepush-voice-guard.sh: fetch the default branch (git fetch origin main) or set FM_VOICE_GUARD_BASE, then re-run. An unknown range is not a clean range.\n' >&2
+    printf 'fm-prepush-voice-guard.sh: cannot determine which commits are unpublished: no default-branch ref resolved (tried origin/main, main).\n' >&2
+    printf 'fm-prepush-voice-guard.sh: fetch the default branch (git fetch origin main), or name the bound with --range <a>..<b>, then re-run. An unknown range is not a clean range.\n' >&2
     return 3
   fi
 

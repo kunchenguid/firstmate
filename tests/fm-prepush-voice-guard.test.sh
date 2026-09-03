@@ -257,6 +257,18 @@ test_refuses_a_private_per_task_work_document() {
   pass "refuses a private per-task work-document path"
 }
 
+test_refuses_a_private_review_artifact() {
+  local out rc=0
+
+  out=$(fm_voice_text 'docs: refresh .lavish/sample-board.html before the review') || rc=$?
+  expect_code 1 "$rc" "a local review-artifact path was not refused"
+  assert_contains "$out" "private-review-artifact" \
+    "review-artifact path named the wrong rule"
+  assert_contains "$out" ".lavish/sample-board.html" \
+    "refusal did not name the review-artifact path that matched"
+  pass "refuses a local review-artifact path"
+}
+
 test_passes_nonprivate_paths_and_work_document_words() {
   local out rc message
 
@@ -264,14 +276,18 @@ test_passes_nonprivate_paths_and_work_document_words() {
     'docs: update data/backlog.md' \
     'docs: update data/secondmates.md' \
     'fix: clear state/alpha.status' \
+    'fix: clear state/01ABCDEF.status' \
     'docs: describe projects/alpha' \
+    'docs: document config/crew-harness' \
+    'docs: explain the no-mistakes gate worktree (.no-mistakes/repos/)' \
+    'feat(lavish): open a Lavish review surface for the plan' \
     'docs: report the outcome'
   do
     rc=0
     out=$(fm_voice_text "$message") || rc=$?
     expect_code 0 "$rc" "a legitimate path or bare work-document word was refused"$'\n'"$message"$'\n'"$out"
   done
-  pass "passes flat data files, other private roots, and bare report"
+  pass "passes flat data files, uncovered roots, the bare word Lavish, and bare report"
 }
 
 test_refusal_names_what_matched_and_how_to_fix_it() {
@@ -426,7 +442,7 @@ SH
   pass "fails closed when a commit message cannot be read"
 }
 
-test_base_override_bounds_the_range() {
+test_an_explicit_range_bounds_the_scan() {
   local tmp out rc=0 base
   tmp=$(fm_test_tmproot fm-voice-base)
   fm_voice_repo "$tmp/repo"
@@ -434,9 +450,25 @@ test_base_override_bounds_the_range() {
   base=$(git -C "$tmp/repo" rev-parse HEAD)
   fm_voice_commit "$tmp/repo" 'fix(bin): bound the scan'
 
-  out=$(cd "$tmp/repo" && FM_VOICE_GUARD_BASE="$base" "$GUARD" 2>&1) || rc=$?
-  expect_code 0 "$rc" "an explicit base did not bound the scanned range"$'\n'"$out"
-  pass "FM_VOICE_GUARD_BASE bounds the scanned range"
+  out=$(cd "$tmp/repo" && "$GUARD" --range "$base..HEAD" 2>&1) || rc=$?
+  expect_code 0 "$rc" "an explicit range did not bound the scanned range"$'\n'"$out"
+  pass "an explicit --range scans only what it names"
+}
+
+# The pre-push default must have no environment-reachable base. A caller-chosen
+# base equal to HEAD would leave "git rev-list HEAD --not HEAD" empty, so the
+# guard would report clean having scanned nothing: an off switch on the one
+# check that is meant to be mechanically unavoidable.
+test_the_default_range_has_no_environment_off_switch() {
+  local tmp out rc=0
+  tmp=$(fm_test_tmproot fm-voice-no-off-switch)
+  fm_voice_repo "$tmp/repo"
+  fm_voice_commit "$tmp/repo" 'fix(ci): Captain, an unpublished leak'
+
+  out=$(cd "$tmp/repo" && FM_VOICE_GUARD_BASE=HEAD "$GUARD" 2>&1) || rc=$?
+  expect_code 1 "$rc" "an environment base silenced the pre-push default scan"$'\n'"$out"
+  assert_contains "$out" 'an unpublished leak' "refusal did not name the leaking commit"
+  pass "the default range cannot be narrowed from the environment"
 }
 
 # --- explicit selectors -----------------------------------------------------
@@ -559,6 +591,7 @@ test_refuses_each_address_shape
 test_refuses_a_pointer_to_the_working_session
 test_passes_ordinary_uses_of_the_word_session
 test_refuses_a_private_per_task_work_document
+test_refuses_a_private_review_artifact
 test_passes_nonprivate_paths_and_work_document_words
 test_refusal_names_what_matched_and_how_to_fix_it
 test_scans_only_unpublished_commits
@@ -567,7 +600,8 @@ test_fails_closed_when_the_range_cannot_be_determined
 test_fails_closed_when_the_commit_list_is_unusable
 test_fails_closed_when_the_scanner_errors
 test_fails_closed_when_a_commit_message_cannot_be_read
-test_base_override_bounds_the_range
+test_an_explicit_range_bounds_the_scan
+test_the_default_range_has_no_environment_off_switch
 test_explicit_range_and_commit_selectors
 test_text_mode_reads_a_pull_request_description
 test_rejects_unknown_arguments
