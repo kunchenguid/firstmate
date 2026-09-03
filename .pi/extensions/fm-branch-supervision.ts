@@ -513,15 +513,13 @@ export default function (pi: ExtensionAPI) {
   // wake rows without relying on provider text or incidental session shape.
   let durableReportRevision = 0;
   // The task set the wake being handled right now may be reported on, fixed
-  // deterministically from the eligible rows before the prompt opens and
-  // cleared when it settles: a signal or stale wake names exactly the tasks
-  // its rows resolve to, a heartbeat review may name any task with a live
-  // record at that moment, and `fleet` is always allowed. fm_branch_report
-  // refuses every other task id, so a report typed from memory about a task
-  // the wake never named (or one whose record is already gone) is never
-  // stored or delivered. Null only outside a wake prompt, where no model turn
-  // can reach the tool.
-  let wakeTaskScope: { heartbeat: boolean; rows: string[]; tasks: Set<string> } | null = null;
+  // deterministically from the eligible rows before a signal or stale prompt
+  // opens and cleared when it settles: exactly the tasks those rows resolve
+  // to. fm_branch_report refuses every other task id during such a prompt,
+  // `fleet` included, so a report typed from memory about a task the wake
+  // never named is never stored or delivered. Null outside a wake prompt and
+  // during a heartbeat review, which is not scoped by task.
+  let wakeTaskScope: { rows: string[]; tasks: Set<string> } | null = null;
   let mainStreaming = false;
   let shuttingDown = false;
   // Bumps at every session replacement so a stale chain continuation from the
@@ -932,14 +930,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   function wakeScopeRefusal(task: string): string {
-    if (!wakeTaskScope || task === "fleet" || wakeTaskScope.tasks.has(task)) return "";
-    const allowed = [...wakeTaskScope.tasks].sort();
-    const named = allowed.length === 0 ? "no task" : allowed.join(", ");
-    if (wakeTaskScope.heartbeat) {
-      return `report refused: ${task} has no live task record, so this fleet review cannot report it; live tasks: ${named} (use fleet for a fleet-wide outcome)`;
-    }
+    if (!wakeTaskScope || wakeTaskScope.tasks.has(task)) return "";
+    const named = [...wakeTaskScope.tasks].sort().join(", ");
     const rows = wakeTaskScope.rows.join(", ");
-    return `report refused: the wake being handled (row ${rows}) names ${named}, not ${task}; report only that task or fleet, never a task from memory`;
+    return `report refused: the wake being handled (row ${rows}) names ${named}, not ${task}; report only that task, never fleet or a task from memory`;
   }
 
   function createReportTool(toolGeneration: number): ToolDefinition {
@@ -1240,11 +1234,7 @@ ${context.command}
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
-        wakeTaskScope = {
-          heartbeat,
-          rows: [...scope.eligibleSeqs],
-          tasks: new Set(heartbeat ? scope.liveTasks : scope.eligibleTasks),
-        };
+        wakeTaskScope = heartbeat ? null : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
         try {
           await session.prompt(
             `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,

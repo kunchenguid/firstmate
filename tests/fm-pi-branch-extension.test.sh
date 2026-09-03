@@ -1653,14 +1653,16 @@ if (!ghost.isError || !ghost.content[0].text.includes("names branch-driver, not 
 const gone = await report.execute("gone", { task: "retired-task", verdict: "captain", summary: "PR ready to merge" }, undefined, undefined, {});
 if (!gone.isError) throw new Error(`a report for a task with no record was not refused: ${JSON.stringify(gone)}`);
 const fleet = await report.execute("fleet", { task: "fleet", verdict: "routine", summary: "fleet-wide note" }, undefined, undefined, {});
-if (fleet.isError) throw new Error(`a fleet report was refused during a task-local wake: ${JSON.stringify(fleet)}`);
+if (!fleet.isError || !fleet.content[0].text.includes("never fleet")) {
+  throw new Error(`a fleet-wide report was not refused during a task-local wake: ${JSON.stringify(fleet)}`);
+}
 const named = await report.execute("named", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
 if (named.isError) throw new Error(`the wake's own task was refused: ${JSON.stringify(named)}`);
 finish();
 await settle(() => !existsSync(`${home}/state/.branch-eligible-rows`), "task-local grant release");
 
-// A heartbeat review may report any task with a live record, never a task
-// with none.
+// A heartbeat review is not scoped by task: it may report any task id, a
+// task whose records are already gone, and fleet.
 globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finish = resolve; });
 if (!dispatch("heartbeat", [], true, true).accepted) throw new Error("branch refused the heartbeat");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "heartbeat branch prompt");
@@ -1668,20 +1670,20 @@ const heartbeatSession = globalThis.__fmSessions[globalThis.__fmSessions.length 
 const heartbeatReport = heartbeatSession.options.customTools.find((tool) => tool.name === "fm_branch_report");
 const live = await heartbeatReport.execute("live", { task: "other-task", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
 if (live.isError) throw new Error(`a heartbeat report for a live task was refused: ${JSON.stringify(live)}`);
-const goneInReview = await heartbeatReport.execute("gone-in-review", { task: "retired-task", verdict: "captain", summary: "PR ready to merge" }, undefined, undefined, {});
-if (!goneInReview.isError || !goneInReview.content[0].text.includes("no live task record")) {
-  throw new Error(`a heartbeat report for a task with no record was not refused: ${JSON.stringify(goneInReview)}`);
-}
+const goneInReview = await heartbeatReport.execute("gone-in-review", { task: "retired-task", verdict: "captain", summary: "PR merged and cleaned up" }, undefined, undefined, {});
+if (goneInReview.isError) throw new Error(`a heartbeat report for a task with no record was refused: ${JSON.stringify(goneInReview)}`);
+const fleetInReview = await heartbeatReport.execute("fleet-in-review", { task: "fleet", verdict: "routine", summary: "fleet-wide note" }, undefined, undefined, {});
+if (fleetInReview.isError) throw new Error(`a fleet-wide report was refused during a heartbeat review: ${JSON.stringify(fleetInReview)}`);
 finish();
 
 const stored = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line).task);
-if (JSON.stringify(stored) !== JSON.stringify(["fleet", "branch-driver", "other-task"])) {
+if (JSON.stringify(stored) !== JSON.stringify(["branch-driver", "other-task", "retired-task", "fleet"])) {
   throw new Error(`refused reports reached the durable store: ${JSON.stringify(stored)}`);
 }
 
 // The classification owner names the tasks behind each eligible row: a
 // signal row by its status-log key, a stale row by the endpoint a task's
-// metadata records, with every live record listed for a heartbeat review.
+// metadata records.
 const lib = await import(pathToFileURL(`${dirname(process.env.PLUGIN)}/lib/fm-branch-dispatch.ts`).href);
 writeFileSync(`${home}/state/.wake-queue`, [
   "1\t1\tsignal\tbranch-driver.status\tsignal: done",
@@ -1692,9 +1694,6 @@ const scope = lib.scopeForUnreadWake(`${home}/state`, false);
 if (JSON.stringify([...scope.eligibleTasks].sort()) !== JSON.stringify(["branch-driver", "other-task"])) {
   throw new Error(`eligible rows resolved to the wrong tasks: ${JSON.stringify(scope)}`);
 }
-if (JSON.stringify([...scope.liveTasks].sort()) !== JSON.stringify(["branch-driver", "other-task"])) {
-  throw new Error(`live tasks were not listed from the task records: ${JSON.stringify(scope)}`);
-}
 if (JSON.stringify(scope.eligibleSeqs) !== JSON.stringify(["1", "2"])) {
   throw new Error(`the main-owned check row leaked into the branch claim: ${JSON.stringify(scope)}`);
 }
@@ -1703,7 +1702,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "the report tool must refuse tasks the wake never named: $out"
-  pass "fm_branch_report refuses a task the wake did not name and a task with no live record"
+  pass "fm_branch_report refuses a task the wake did not name, fleet included, while a heartbeat is unscoped"
 }
 
 # The non-heartbeat half of the same recheck: a check-kind row that arrives

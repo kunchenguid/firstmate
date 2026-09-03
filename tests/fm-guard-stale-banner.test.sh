@@ -628,9 +628,8 @@ test_extension_handoff_keeps_queued_wake_warning() {
 # The supervision branch runs guarded commands (fm-peek, fm-crew-state) while
 # handling the very rows that are queued. For that actor the drain warning is
 # not advice, it is the misreading that re-ran a previous acknowledgement in a
-# loop, so the guard names the granted rows instead and says nothing about any
-# other queued row.
-test_branch_actor_sees_its_granted_rows_instead_of_the_drain_warning() {
+# loop, so the guard stays silent about queued rows for that actor.
+test_branch_actor_is_not_told_to_drain_queued_wakes() {
   local dir home out pid
   dir=$(make_guard_case branch-actor-queued-wake)
   home=$(case_home "$dir")
@@ -643,22 +642,20 @@ test_branch_actor_sees_its_granted_rows_instead_of_the_drain_warning() {
     "1700000001	8	check	merge-poll	check: merge-poll: merged" > "$home/state/.wake-queue"
   printf '7\n' > "$home/state/.branch-eligible-rows"
   out=$(run_guard_case_extension_as_branch "$dir")
-  assert_contains "$out" "you are handling wake row 7" \
-    "the branch actor must be told which granted row it is handling"
   assert_not_contains "$out" "queued wakes pending" \
     "the branch actor must not be told to drain the rows it is already handling"
+  assert_not_contains "$out" "wake row" \
+    "the branch actor gets no replacement note about queued rows"
   rm -f "$home/state/.branch-eligible-rows"
   out=$(run_guard_case_extension_as_branch "$dir")
   assert_not_contains "$out" "queued wakes pending" \
     "a branch actor with no grant can drain nothing, so the warning must stay silent"
-  assert_not_contains "$out" "you are handling" \
-    "a branch actor with no grant is handling nothing"
   out=$(run_guard_case_extension "$dir")
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   assert_contains "$out" "queued wakes pending" \
     "main must still be warned about the queued rows"
-  pass "fm-guard: the branch actor is told which granted row it is handling, never to drain first"
+  pass "fm-guard: the branch actor is never told to drain queued wakes while main still is"
 }
 
 test_persistent_model_ignores_pi_extension_evidence() {
@@ -738,7 +735,7 @@ test_extension_without_ownership_evidence_stays_alarm
 test_extension_ownership_needs_every_signal
 test_extension_stale_beacon_alarms_despite_live_session
 test_extension_handoff_keeps_queued_wake_warning
-test_branch_actor_sees_its_granted_rows_instead_of_the_drain_warning
+test_branch_actor_is_not_told_to_drain_queued_wakes
 test_persistent_model_ignores_pi_extension_evidence
 test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy

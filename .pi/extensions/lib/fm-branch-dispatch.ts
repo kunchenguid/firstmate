@@ -36,17 +36,12 @@ export interface UnreadWakeScope {
   /**
    * The exact task ids the eligible signal/stale rows name (a signal row by
    * its status-log key, a stale row through the task metadata recording that
-   * endpoint). The branch may report only these tasks, or `fleet`, while it
-   * handles the wake; a task it merely remembers is refused (docs/
-   * pi-supervision-branch.md "Autonomy"). Empty for a heartbeat.
+   * endpoint). The branch may report only these tasks while it handles the
+   * wake; `fleet` or a task it merely remembers is refused (docs/
+   * pi-supervision-branch.md "Autonomy"). Empty for a heartbeat, which is
+   * not scoped by task.
    */
   eligibleTasks: string[];
-  /**
-   * Every task with a live state/<task>.meta at scan time. A heartbeat review
-   * may report any of them; a task with no live record cannot receive an
-   * outcome.
-   */
-  liveTasks: string[];
   /**
    * True only when this scan itself is untrustworthy: the queue or its
    * metadata could not be read, a line fails the structural tab-field check,
@@ -67,7 +62,6 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   projects: [],
   eligibleSeqs: [],
   eligibleTasks: [],
-  liveTasks: [],
   corrupted: false,
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
@@ -76,7 +70,6 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   projects: [],
   eligibleSeqs: [],
   eligibleTasks: [],
-  liveTasks: [],
   corrupted: true,
 };
 
@@ -125,7 +118,6 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   // The task id behind each key a signal or stale row may carry: the task id
   // itself, or the endpoint its metadata records.
   const taskByKey = new Map<string, string>();
-  const liveTasks: string[] = [];
   try {
     for (const name of readdirSync(state)) {
       if (!name.endsWith(".meta")) continue;
@@ -133,7 +125,6 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
       const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
       const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
-      liveTasks.push(task);
       if (project) {
         metadata.set(task, project);
         taskByKey.set(task, task);
@@ -197,7 +188,6 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     projects: [...projects],
     eligibleSeqs,
     eligibleTasks: [...eligibleTasks],
-    liveTasks,
     corrupted: false,
   };
 }

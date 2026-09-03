@@ -27,11 +27,10 @@
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
 # suppressed by that dedup. Normal wake handling (watcher briefly down between a
 # wake and the next supervision resume) stays inside the grace window and stays
-# silent. The queued-wakes warning is replaced, for the supervision branch
-# actor (FM_SUPERVISION_ACTOR=branch), by a note naming the rows its grant
-# covers, because that actor runs guarded commands while handling exactly those
-# rows and can drain nothing else. Always exits 0: the guard warns, it never
-# blocks.
+# silent. The queued-wakes warning stays silent for the supervision branch
+# actor (FM_SUPERVISION_ACTOR=branch), because that actor runs guarded commands
+# while handling exactly the queued rows its grant covers and can drain nothing
+# else. Always exits 0: the guard warns, it never blocks.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,16 +61,6 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 # The current actor (fm_lease_actor is the one owner of that identity); a
 # malformed value is a wiring bug elsewhere, so the guard just warns as main.
 GUARD_ACTOR=$(fm_lease_actor 2>/dev/null) || GUARD_ACTOR=main
-
-# The sequence numbers currently granted to the branch, comma-joined, from the
-# same snapshot bin/fm-wake-drain.sh consumes; empty when there is no valid
-# grant.
-fm_guard_branch_granted_rows() { # <state>
-  local rows="$1/.branch-eligible-rows"
-  [ -f "$rows" ] && [ ! -L "$rows" ] && [ -s "$rows" ] || return 1
-  awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$rows" || return 1
-  awk 'NR > 1 { printf ", " } { printf "%s", $0 } END { printf "\n" }' "$rows"
-}
 
 # Deterministic episode key from the qualitative down-state (the failing
 # condition), NOT the beacon mtime: under the auto-arm model a healthy
@@ -257,16 +246,11 @@ fi
 # "drain them before anything else" mid-handling reads as "an earlier wake is
 # still pending", which is what made it re-run a previous acknowledgement in a
 # loop. The branch can act on nothing outside its grant anyway, so for that
-# actor the guard names the granted rows it is handling and says nothing about
-# any other queued row.
+# actor the guard stays silent about queued rows.
 if "$queue_pending"; then
   if [ "$READ_ONLY" -eq 1 ]; then
     echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
-  elif [ "$GUARD_ACTOR" = branch ]; then
-    branch_rows=$(fm_guard_branch_granted_rows "$STATE") || branch_rows=
-    [ -z "$branch_rows" ] \
-      || echo "NOTE: you are handling wake row $branch_rows - finish with fm_branch_report, then run the exact WAKE_ACK_REQUIRED command your drain printed." >&2
-  else
+  elif [ "$GUARD_ACTOR" != branch ]; then
     echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
   fi
 fi
