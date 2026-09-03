@@ -22,9 +22,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-startup-network-tests)
+TMP_ROOT=$(fm_test_tmproot fm-startup-network-tests) \
+  || fail "could not allocate startup-network fixture root"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
-FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
 
 # new_world <name>: an FM_HOME plus a fake code root whose bin/ is a real

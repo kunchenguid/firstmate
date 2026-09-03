@@ -30,21 +30,8 @@ CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
-# fm_test_tmproot's own cleanup trap fires when its command substitution exits,
-# so recreate the root before resolving it and clean it up from this file's trap.
-TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
-mkdir -p "$TMP_ROOT"
-TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
-TASK_TMPS=()
-
-relaunch_cleanup() {
-  local d
-  for d in "${TASK_TMPS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
-  done
-  rm -rf "$TMP_ROOT"
-}
-trap relaunch_cleanup EXIT
+TMP_ROOT=$(fm_test_tmproot fm-control-relaunch) \
+  || fail "could not allocate fm-control relaunch fixture root"
 
 # The same lifecycle-modelling tmux stub as tests/fm-control.test.sh: the
 # harness's exit command stops the agent, and a launch-brief literal starts the
@@ -139,7 +126,7 @@ new_case() {
 # add_ship_task <case-dir> <id> [harness]
 add_ship_task() {
   local dir=$1 id=$2 harness=${3:-claude}
-  local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
+  local home="$dir/home" proj="$dir/proj" wt="$dir/wt" task_tmp
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
   printf '# brief for %s\n\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
@@ -152,13 +139,16 @@ add_ship_task() {
     echo "kind=ship"
     echo "mode=no-mistakes"
     echo "yolo=off"
-    echo "tasktmp=/tmp/fm-$id"
+    task_tmp="$FM_TEST_TMP_BASE/fm-$id"
+    mkdir -p "$task_tmp"
+    fm_test_register_cleanup_dir "$task_tmp" \
+      || fail "could not register relaunch task temp root: $task_tmp"
+    echo "tasktmp=$task_tmp"
     echo "model=default"
     echo "effort=default"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
-  TASK_TMPS+=("/tmp/fm-$id")
 }
 
 run_control() {  # <case-dir> <args...>

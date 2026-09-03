@@ -36,7 +36,8 @@ test_fixture_root_gone_after_normal_exit() {
 
 test_fixture_root_gone_after_sigterm() {
   local harness dirfile child_dir pid tries
-  harness=$(fm_test_tmproot fm-test-cleanup-sigterm-harness)
+  harness=$(fm_test_tmproot fm-test-cleanup-sigterm-harness) \
+    || fail "could not allocate signal cleanup harness"
   dirfile="$harness/child-dir"
   bash -c '
     # shellcheck source=tests/lib.sh
@@ -64,7 +65,8 @@ test_fixture_root_gone_after_sigterm() {
 
 test_cleanup_registry_resists_precreation() {
   local harness shared_tmp victim
-  harness=$(fm_test_tmproot fm-test-cleanup-registry-harness)
+  harness=$(fm_test_tmproot fm-test-cleanup-registry-harness) \
+    || fail "could not allocate registry cleanup harness"
   shared_tmp="$harness/shared-tmp"
   victim="$harness/victim"
   mkdir -p "$shared_tmp" "$victim"
@@ -79,9 +81,26 @@ test_cleanup_registry_resists_precreation() {
   pass "the cleanup registry cannot be injected through path precreation"
 }
 
+test_fixture_marker_registration_resists_precreated_symlink() {
+  local harness candidate victim
+  harness=$(fm_test_tmproot fm-test-cleanup-marker-harness) \
+    || fail "could not allocate marker registration harness"
+  candidate="$harness/candidate"
+  victim="$harness/victim"
+  mkdir -p "$candidate"
+  printf 'keep\n' > "$victim"
+  ln -s "$victim" "$candidate/.fm-test-fixture"
+  fm_test_register_cleanup_dir "$candidate" \
+    && fail "fixture registration followed a precreated marker symlink"
+  [ "$(cat "$victim")" = keep ] || fail "fixture registration overwrote the marker symlink target"
+  [ -L "$candidate/.fm-test-fixture" ] || fail "fixture registration replaced the foreign marker symlink"
+  pass "fixture registration refuses a precreated ownership-marker symlink"
+}
+
 test_fixture_registration_failure_rolls_back_root() {
   local harness failure_tmp registry_dir output leaked_root
-  harness=$(fm_test_tmproot fm-test-cleanup-registration-harness)
+  harness=$(fm_test_tmproot fm-test-cleanup-registration-harness) \
+    || fail "could not allocate registration cleanup harness"
   failure_tmp="$harness/tmp"
   registry_dir="$harness/registry-dir"
   mkdir -p "$failure_tmp" "$registry_dir"
@@ -90,16 +109,78 @@ test_fixture_registration_failure_rolls_back_root() {
     fm_test_tmproot fm-test-cleanup-registration-failure 2>/dev/null); then
     fail "fm_test_tmproot succeeded after its cleanup registry rejected registration"
   fi
-  [ -z "$output" ] || fail "fm_test_tmproot published an unregistered fixture root"
+  [ "$output" = "$FM_TEST_TMP_BASE/.fm-test-allocation-failed.$$" ] \
+    || fail "fm_test_tmproot did not publish its absolute non-directory failure sentinel"
   for leaked_root in "$failure_tmp"/fm-test-cleanup-registration-failure.*; do
     [ ! -e "$leaked_root" ] || fail "fm_test_tmproot leaked a root after registration failed"
   done
   pass "failed fixture registration rolls back the new root"
 }
 
+test_initialization_failure_cannot_arm_cleanup_or_delete_cwd() {
+  local harness fakebin isolated_tmp checkout output rc
+  harness=$(fm_test_tmproot fm-test-cleanup-init-failure) \
+    || fail "could not allocate initialization-failure harness"
+  fakebin="$harness/fakebin"
+  isolated_tmp="$harness/tmp"
+  checkout="$harness/checkout"
+  mkdir -p "$fakebin" "$isolated_tmp" "$checkout"
+  printf 'keep\n' > "$checkout/repository-sentinel"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  rc=0
+  output=$(cd "$checkout" && TMPDIR="$isolated_tmp" \
+    FM_PROC_ROOT_OVERRIDE="$harness/no-proc" PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; printf "should-not-run\n"' _ "$LIB" 2>&1) || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "tests/lib.sh continued after owner identity initialization failed"
+  assert_contains "$output" "test owner identity could not be established safely" \
+    "tests/lib.sh did not report its fail-closed initialization error"
+  assert_not_contains "$output" "should-not-run" \
+    "tests/lib.sh returned to a caller after failed initialization"
+  assert_present "$checkout/repository-sentinel" \
+    "failed initialization deleted the caller's cwd"
+  [ -z "$(find "$checkout" -mindepth 1 -maxdepth 1 -name '.fm-test-*' -print -quit)" ] \
+    || fail "failed initialization leaked a relative cleanup artifact into cwd"
+  [ -z "$(find "$isolated_tmp" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || fail "failed initialization leaked a registry or fixture root"
+  pass "failed test initialization exits without arming cwd cleanup"
+}
+
+test_cleanup_refuses_cwd_repo_and_unmarked_paths() {
+  local harness child_tmp candidate output
+  harness=$(fm_test_tmproot fm-test-cleanup-unsafe-input) \
+    || fail "could not allocate unsafe-cleanup harness"
+  child_tmp="$harness/child-tmp"
+  candidate="$child_tmp/unmarked"
+  mkdir -p "$candidate"
+  printf 'keep\n' > "$candidate/sentinel"
+
+  output=$(cd "$harness" && TMPDIR="$child_tmp" bash -c '
+    . "$1"
+    FM_TEST_CLEANUP_DIRS=("" "." "$2" "$3")
+    fm_test_cleanup
+  ' _ "$LIB" "$ROOT" "$candidate" 2>&1)
+
+  assert_present "$ROOT/tests/lib.sh" "cleanup removed the repository root"
+  assert_present "$candidate/sentinel" "cleanup removed an unmarked directory"
+  assert_contains "$output" "refused unsafe test cleanup root: ." \
+    "cleanup did not report its relative cwd refusal"
+  assert_contains "$output" "refused unsafe test cleanup root: $ROOT" \
+    "cleanup did not report its repository-root refusal"
+  assert_contains "$output" "refused unowned test cleanup root: $candidate" \
+    "cleanup did not report its unmarked-root refusal"
+  pass "cleanup refuses empty, relative, repository, cwd, and unmarked roots"
+}
+
 test_orphan_sweep_respects_fixture_ownership() {
   local harness dirfile active_dir stale_dir fresh_dir pid tries
-  harness=$(fm_test_tmproot fm-test-cleanup-orphan-harness)
+  harness=$(fm_test_tmproot fm-test-cleanup-orphan-harness) \
+    || fail "could not allocate orphan cleanup harness"
   dirfile="$harness/active-dir"
   bash -c '
     # shellcheck source=tests/lib.sh
@@ -119,10 +200,10 @@ test_orphan_sweep_respects_fixture_ownership() {
   active_dir=$(cat "$dirfile")
   touch -t 202001010000 "$active_dir/.fm-test-fixture"
 
-  stale_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-stale.XXXXXX")
+  stale_dir=$(mktemp -d "$FM_TEST_TMP_BASE/fm-test-cleanup-stale.XXXXXX")
   printf '%s\n%s\n' "$$" reused-process-identity > "$stale_dir/.fm-test-fixture"
   touch -t 202001010000 "$stale_dir/.fm-test-fixture"
-  fresh_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-fresh.XXXXXX")
+  fresh_dir=$(mktemp -d "$FM_TEST_TMP_BASE/fm-test-cleanup-fresh.XXXXXX")
   : > "$fresh_dir/.fm-test-fixture"
 
   bash -c '
@@ -140,13 +221,14 @@ test_orphan_sweep_respects_fixture_ownership() {
   wait "$pid" 2>/dev/null
   assert_absent "$active_dir" \
     "the active fixture root survived its owning process's teardown"
-  rm -rf "$fresh_dir"
+  printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$fresh_dir/.fm-test-fixture"
+  fm_test_cleanup_one "$fresh_dir" || fail "could not safely retire the fresh orphan fixture"
   pass "the orphan sweep reaps only old fixtures without a live owner"
 }
 
 test_orphan_sweep_reaps_read_only_package_tree() {
   local stale_dir package_dir
-  stale_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-read-only.XXXXXX")
+  stale_dir=$(mktemp -d "$FM_TEST_TMP_BASE/fm-test-cleanup-read-only.XXXXXX")
   package_dir="$stale_dir/packages/extension"
   mkdir -p "$package_dir"
   printf '%s\n%s\n' "$$" reused-process-identity > "$stale_dir/.fm-test-fixture"
@@ -167,6 +249,9 @@ test_orphan_sweep_reaps_read_only_package_tree() {
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_cleanup_registry_resists_precreation
+test_fixture_marker_registration_resists_precreated_symlink
 test_fixture_registration_failure_rolls_back_root
+test_initialization_failure_cannot_arm_cleanup_or_delete_cwd
+test_cleanup_refuses_cwd_repo_and_unmarked_paths
 test_orphan_sweep_respects_fixture_ownership
 test_orphan_sweep_reaps_read_only_package_tree

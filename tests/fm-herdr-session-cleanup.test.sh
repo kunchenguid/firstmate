@@ -7,8 +7,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-TMP_ROOT=$(fm_test_tmproot fm-herdr-session-cleanup)
-FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
+TMP_ROOT=$(fm_test_tmproot fm-herdr-session-cleanup) \
+  || fail "could not allocate Herdr cleanup fixture root"
 trap fm_test_cleanup EXIT
 
 export FM_HOME="$TMP_ROOT/home"

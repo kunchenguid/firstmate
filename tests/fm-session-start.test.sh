@@ -38,14 +38,32 @@ set -u
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
-TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
+TMP_ROOT=$(fm_test_tmproot fm-session-start-tests) \
+  || fail "could not allocate session-start fixture root"
 SESSION_START_TEST_HARNESS_PID=$$
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
-SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
+SESSION_START_SECOND_MATE_TMP="$FM_TEST_TMP_BASE/fm-$SESSION_START_SECOND_MATE_ID"
 SESSION_START_HERDR_SECOND_MATE_ID="fmtest-herdr-${TMP_ROOT##*.}"
-SESSION_START_HERDR_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_HERDR_SECOND_MATE_ID"
-FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT" "$SESSION_START_SECOND_MATE_TMP" "$SESSION_START_HERDR_SECOND_MATE_TMP")
-trap fm_test_cleanup EXIT
+SESSION_START_HERDR_SECOND_MATE_TMP="$FM_TEST_TMP_BASE/fm-$SESSION_START_HERDR_SECOND_MATE_ID"
+session_start_cleanup() {
+  local status=$? extra physical cleanup_status=0
+  for extra in "$SESSION_START_SECOND_MATE_TMP" "$SESSION_START_HERDR_SECOND_MATE_TMP"; do
+    [ -d "$extra" ] && [ ! -L "$extra" ] || continue
+    physical=$(CDPATH='' cd -P -- "$extra" 2>/dev/null && pwd -P) || {
+      printf 'not ok - could not resolve session-start task temp root: %s\n' "$extra" >&2
+      cleanup_status=1
+      continue
+    }
+    fm_test_register_cleanup_dir "$physical" || {
+      printf 'not ok - could not register session-start task temp root: %s\n' "$physical" >&2
+      cleanup_status=1
+    }
+  done
+  fm_test_cleanup
+  [ "$status" -eq 0 ] || return "$status"
+  return "$cleanup_status"
+}
+trap session_start_cleanup EXIT
 fm_git_identity fmtest fmtest@example.invalid
 
 # --- world builders ----------------------------------------------------------

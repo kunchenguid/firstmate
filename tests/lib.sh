@@ -70,7 +70,19 @@ pass() {
 # real caller, never a subshell.
 
 FM_TEST_CLEANUP_DIRS=()
-FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
+FM_TEST_TMP_BASE_RAW=${TMPDIR:-/tmp}
+FM_TEST_TMP_BASE=$(CDPATH='' cd -P -- "$FM_TEST_TMP_BASE_RAW" 2>/dev/null && pwd -P) || {
+  printf 'not ok - test temp base cannot be resolved safely: %s\n' "$FM_TEST_TMP_BASE_RAW" >&2
+  exit 1
+}
+case "$FM_TEST_TMP_BASE" in
+  /*) ;;
+  *) printf 'not ok - test temp base is not absolute: %s\n' "$FM_TEST_TMP_BASE" >&2; exit 1 ;;
+esac
+FM_TEST_CLEANUP_REGISTRY=$(mktemp "$FM_TEST_TMP_BASE/.fm-test-cleanup.$$.XXXXXX") || {
+  printf 'not ok - test cleanup registry could not be created\n' >&2
+  exit 1
+}
 
 fm_test_pid_identity() {
   local pid=$1
@@ -80,31 +92,95 @@ fm_test_pid_identity() {
 
 FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   rm -f "$FM_TEST_CLEANUP_REGISTRY"
-  return 1
+  printf 'not ok - test owner identity could not be established safely\n' >&2
+  exit 1
+}
+
+fm_test_cleanup_path_safe() { # <candidate-root>
+  local candidate=$1 physical current repo
+  case "$candidate" in /*) ;; *) return 1 ;; esac
+  [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  physical=$(CDPATH='' cd -P -- "$candidate" 2>/dev/null && pwd -P) || return 1
+  [ "$physical" = "$candidate" ] || return 1
+  repo=$(CDPATH='' cd -P -- "$ROOT" 2>/dev/null && pwd -P) || return 1
+  case "$physical" in
+    "$FM_TEST_TMP_BASE"/*) ;;
+    "$repo"/.fm-lint-parity.*) ;;
+    *) return 1 ;;
+  esac
+  [ "$physical" != "$FM_TEST_TMP_BASE" ] || return 1
+  current=$(pwd -P) || return 1
+  [ "$physical" != "$current" ] && [ "$physical" != "$repo" ]
+}
+
+fm_test_fixture_marker_matches() { # <root> <owner-pid> <owner-identity>
+  local marker="$1/.fm-test-fixture" first second third
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  IFS= read -r first < "$marker" || return 1
+  second=$(sed -n '2p' "$marker") || return 1
+  third=$(sed -n '3p' "$marker") || return 1
+  [ "$first" = "$2" ] && [ "$second" = "$3" ] && [ -z "$third" ]
+}
+
+fm_test_cleanup_one() { # <registered-root>
+  local root=$1
+  fm_test_cleanup_path_safe "$root" || {
+    printf 'warning: refused unsafe test cleanup root: %s\n' "${root:-<empty>}" >&2
+    return 1
+  }
+  fm_test_fixture_marker_matches "$root" "$$" "$FM_TEST_OWNER_IDENTITY" || {
+    printf 'warning: refused unowned test cleanup root: %s\n' "$root" >&2
+    return 1
+  }
+  find "$root" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+  rm -rf -- "$root"
 }
 
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] && fm_test_cleanup_one "$d" || true
   done
-  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
+  if [ -f "$FM_TEST_CLEANUP_REGISTRY" ] && [ ! -L "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      [ -n "$d" ] && fm_test_cleanup_one "$d" || true
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
 }
 
+fm_test_register_cleanup_dir() { # <existing-absolute-temp-root>
+  local root=$1 marker
+  fm_test_cleanup_path_safe "$root" || return 1
+  marker="$root/.fm-test-fixture"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || return 1
+  if ! (umask 077; set -o noclobber; printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$marker") 2>/dev/null \
+     || ! printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"; then
+    fm_test_fixture_marker_matches "$root" "$$" "$FM_TEST_OWNER_IDENTITY" \
+      && rm -f -- "$marker"
+    return 1
+  fi
+}
+
 fm_test_tmproot() {
-  local prefix=${1:-fm-test} root tmp_base
-  tmp_base=${TMPDIR:-/tmp}
-  tmp_base=${tmp_base%/}
-  root=$(mktemp -d "$tmp_base/${prefix}.XXXXXX") || return 1
-  root=$(cd -P -- "$root" && pwd -P) || return 1
-  if ! printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$root/.fm-test-fixture" ||
-    ! printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"; then
-    rm -rf "$root"
+  local prefix=${1:-fm-test} root raw_root failure_root
+  failure_root="$FM_TEST_TMP_BASE/.fm-test-allocation-failed.$$"
+  raw_root=$(mktemp -d "$FM_TEST_TMP_BASE/${prefix}.XXXXXX") \
+    || { printf '%s\n' "$failure_root"; return 1; }
+  if ! printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$raw_root/.fm-test-fixture"; then
+    printf '%s\n' "$failure_root"
+    return 1
+  fi
+  root=$(cd -P -- "$raw_root" && pwd -P) || {
+    fm_test_cleanup_one "$raw_root" || true
+    printf '%s\n' "$failure_root"
+    return 1
+  }
+  fm_test_cleanup_path_safe "$root" \
+    || { fm_test_cleanup_one "$root" || true; printf '%s\n' "$failure_root"; return 1; }
+  if ! printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"; then
+    fm_test_cleanup_one "$root" || true
+    printf '%s\n' "$failure_root"
     return 1
   fi
   printf '%s\n' "$root"
@@ -126,10 +202,13 @@ FM_TEST_ORPHAN_MAX_AGE_SECONDS=${FM_TEST_ORPHAN_MAX_AGE_SECONDS:-3600}
 fm_test_reap_orphans() {
   local marker dir mtime now owner_pid owner_identity current_identity
   now=$(date +%s)
-  for marker in "${TMPDIR:-/tmp}"/fm-*/.fm-test-fixture; do
+  for marker in "$FM_TEST_TMP_BASE"/fm-*/.fm-test-fixture; do
     [ -e "$marker" ] || continue
+    dir=$(dirname "$marker")
+    fm_test_cleanup_path_safe "$dir" || continue
     owner_pid=$(sed -n '1p' "$marker" 2>/dev/null) || owner_pid=
     owner_identity=$(sed -n '2,$p' "$marker" 2>/dev/null) || owner_identity=
+    fm_test_fixture_marker_matches "$dir" "$owner_pid" "$owner_identity" || continue
     case "$owner_pid" in
       '' | *[!0-9]*) ;;
       *)
@@ -141,7 +220,6 @@ fm_test_reap_orphans() {
     esac
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
-    dir=$(dirname "$marker")
     if [ -d "$dir" ] && [ ! -L "$dir" ]; then
       find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
     fi
