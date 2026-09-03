@@ -1956,6 +1956,62 @@ freshen_spawn_worktree_base() {  # <worktree>
   fi
 }
 
+# Wave 3 worker skill provisioning: make firstmate's worker-facing skills
+# available inside the disposable task worktree as `.agents/skills`, so briefs
+# can reference playbooks and skills just-in-time without dumping them into
+# the supervisor prompt. A project-owned `.agents/skills` path is never
+# touched; a dangling link is cleared and re-provisioned. The link is recorded
+# in the worktree's git info/exclude (same mechanism as the turn-end hook
+# exclusions) so it never trips teardown's uncommitted-work check or leaks
+# into a commit. Runs after validate_spawn_worktree on every path below, and
+# re-checks the primary-checkout boundary here so no caller can provision
+# skills into the checkout firstmate operates from.
+provision_worker_skills() {  # <worktree>
+  local worktree=$1 skills_src skills_dest wt_resolved excl excl_dir excl_path
+  skills_src="$FM_ROOT/.agents/skills"
+  skills_dest="$worktree/.agents/skills"
+  [ -d "$skills_src" ] || {
+    echo "error: worker skill source is missing: $skills_src; refusing to launch a worker without its playbook library" >&2
+    return 1
+  }
+  wt_resolved=$worktree
+  if ! wt_resolved=$(cd "$worktree" 2>/dev/null && pwd -P); then
+    wt_resolved=$worktree
+  fi
+  if [ -n "${PROJ_ABS_REAL:-}" ] && [ "$wt_resolved" = "$PROJ_ABS_REAL" ]; then
+    echo "error: refusing to provision worker skills into the primary checkout '$worktree'; workers run only in isolated worktrees" >&2
+    return 1
+  fi
+  if [ -L "$skills_dest" ]; then
+    if [ -e "$skills_dest" ]; then
+      return 0
+    fi
+    rm -f "$skills_dest" || {
+      echo "error: could not clear dangling worker skills link at '$skills_dest'" >&2
+      return 1
+    }
+  elif [ -e "$skills_dest" ]; then
+    return 0
+  fi
+  mkdir -p "$worktree/.agents" || {
+    echo "error: could not create .agents in task worktree '$worktree'" >&2
+    return 1
+  }
+  if ! ln -s "$skills_src" "$skills_dest"; then
+    echo "error: could not provision worker skills into task worktree '$worktree'" >&2
+    return 1
+  fi
+  excl=$(git -C "$worktree" rev-parse --git-path info/exclude 2>/dev/null || true)
+  [ -n "$excl" ] || return 0
+  case "$excl" in
+    /*) excl_path=$excl ;;
+    *) excl_path="$worktree/$excl" ;;
+  esac
+  excl_dir=$(dirname "$excl_path")
+  mkdir -p "$excl_dir" 2>/dev/null || return 0
+  grep -qxF ".agents/skills" "$excl_path" 2>/dev/null || echo ".agents/skills" >> "$excl_path" || true
+}
+
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -2489,6 +2545,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+if [ "$KIND" != secondmate ]; then
+  provision_worker_skills "$WT" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
