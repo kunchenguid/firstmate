@@ -163,25 +163,14 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
-failure_alarm_session_owner() {
-  local owner
-  owner=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$owner" in *[!0-9]*) owner= ;; esac
-  printf '%s\n' "$owner"
-}
-
 failure_alarm_current() {
-  local owner
-  owner=$(failure_alarm_session_owner)
   fm_autoarm_failure_alarm_current \
-    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$owner"
+    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM"
 }
 
 failure_alarm_claim() {  # <claim-id>
-  local owner
-  owner=$(failure_alarm_session_owner)
   fm_autoarm_failure_alarm_claim \
-    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$1" "$owner"
+    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$1"
 }
 
 budget_reset() {
@@ -189,6 +178,20 @@ budget_reset() {
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
   rm -f "$BUDGET_FILE" 2>/dev/null || true
   fm_lock_release "$BUDGET_LOCK"
+}
+
+reset_failure_episode_if_healthy() {
+  local transition rc
+  transition="$STATE/.claude-autoarm-transition.lock"
+  fm_autoarm_transition_acquire "$STATE" || return 1
+  if ! fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+    fm_lock_release "$transition"
+    return 1
+  fi
+  fm_failure_episode_reset "$STATE" transition-held
+  rc=$?
+  fm_lock_release "$transition"
+  return "$rc"
 }
 
 fm_supervision_status "$STATE" "$GRACE"
@@ -200,7 +203,7 @@ fi
 # by every proof of supervision below.
 allow_supervised_stop() {
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
-  fm_failure_episode_reset "$STATE" && exit 0
+  reset_failure_episode_if_healthy && exit 0
   exit 2
 }
 
@@ -429,7 +432,7 @@ terminal_fail_open() {
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
-    fm_failure_episode_reset "$STATE" || return 1
+    reset_failure_episode_if_healthy || return 1
     return 2
   fi
   # Re-check for a live open generation claim now that both locks are held: a
@@ -462,7 +465,7 @@ i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      fm_failure_episode_reset "$STATE" || exit 2
+      reset_failure_episode_if_healthy || exit 2
     fi
     exit 0
   fi
@@ -471,7 +474,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
 done
 if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    fm_failure_episode_reset "$STATE" || exit 2
+    reset_failure_episode_if_healthy || exit 2
   fi
   exit 0
 fi

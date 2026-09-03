@@ -880,6 +880,57 @@ test_unbound_claude_daemon_ignores_predecessor_alarm() {
   pass "auto-arm: unbound daemons do not inherit predecessor failure suppression"
 }
 
+test_stale_recovery_claimant_owns_failure_suppression() {
+  local dir owner holder first_out first_status second_out second_status failure reset before after
+  dir=$(make_primary_dir "$TMP_ROOT/stale-recovery-claimant-suppression")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  printf '9999999\n' > "$dir/state/.lock"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.lock.acquire"
+  printf '%s\n' "$holder" > "$dir/state/.lock.acquire/pid"
+
+  first_out=$(FM_AUTOARM_SESSION_LEASE_TIMEOUT=1 \
+    run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); first_status=$?
+  failure=$(failure_epoch_path "$dir") \
+    || fail "authenticated stale recovery did not persist its failure"
+  reset=$(failure_epoch_field "$dir" reset)
+  expect_code 2 "$first_status" "authenticated stale recovery contention must fail visibly"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = 9999999 ] \
+    || fail "stale recovery failure lost its unchanged-owner mutation fence"
+  [ "$(failure_epoch_field "$dir" claimant_pid)" = "$owner" ] \
+    || fail "stale recovery failure did not persist its authenticated claimant"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+    "stale recovery notice was not scoped to its authenticated claimant"
+  assert_contains "$first_out" "stale session lock recovery failed" \
+    "authenticated stale recovery did not deliver its first failure"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_alarm_claim \
+      "$1/state" "$1/state/.claude-autoarm-failure-notified" \
+      "$1/state/.claude-autoarm-failure-alarmed" guard
+  ' _ "$dir" || fail "guard could not alarm the authenticated stale-recovery claimant"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed/$reset.$owner" \
+    "guard alarm was not scoped to the authenticated stale-recovery claimant"
+  before=$(find "$dir/state/.claude-autoarm-failure-epochs" -type f | wc -l | tr -d ' ')
+
+  second_out=$(FM_AUTOARM_SESSION_LEASE_TIMEOUT=1 \
+    run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); second_status=$?
+  after=$(find "$dir/state/.claude-autoarm-failure-epochs" -type f | wc -l | tr -d ' ')
+  kill "$holder" "$owner" 2>/dev/null || true
+  wait "$holder" "$owner" 2>/dev/null || true
+
+  expect_code 0 "$second_status" "the alarmed claimant must suppress its later recovery retry"
+  [ -z "$second_out" ] || fail "the alarmed claimant emitted another failure: $second_out"
+  [ "$after" = "$before" ] || fail "the alarmed claimant allocated another failure epoch"
+  assert_present "$failure" "claimant suppression removed the original durable failure"
+  pass "auto-arm: stale recovery suppression follows the authenticated claimant"
+}
+
 test_recovery_revalidates_bridged_owner_after_session_lease_wait() {
   local dir out status owner holder hook failure reset i
   dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-dies-during-recovery-lease")
@@ -3917,6 +3968,7 @@ test_claude_daemon_spawned_by_foreground_lock_owner_arms
 test_claude_daemon_reclaims_stale_lock_to_foreground_owner
 test_unbound_claude_daemon_cannot_reclaim_stale_lock
 test_unbound_claude_daemon_ignores_predecessor_alarm
+test_stale_recovery_claimant_owns_failure_suppression
 test_recovery_revalidates_bridged_owner_after_session_lease_wait
 test_recovered_owner_death_publishes_current_owner_failure
 test_recovered_owner_binding_rejects_successor_transfer

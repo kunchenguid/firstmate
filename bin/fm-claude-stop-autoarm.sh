@@ -185,7 +185,8 @@ autoarm_session_still_owned() {
 autoarm_alarm_current() {
   [ -n "$FAILURE_SUPPRESSION_OWNER_PID" ] || return 1
   fm_autoarm_failure_alarm_current \
-    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$FAILURE_SUPPRESSION_OWNER_PID"
+    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" \
+    "$FAILURE_SUPPRESSION_OWNER_PID" "$SESSION_OWNER_PID"
 }
 
 autoarm_notice_current() {
@@ -199,7 +200,7 @@ autoarm_claim_failure() {  # <reason> [baseline]
   autoarm_alarm_current && exit 0
   fm_autoarm_claim_failure_commit \
     "$STATE" "$baseline" failed "$FAILURE_NOTICE" \
-    "$FM_ROOT" "$SESSION_OWNER_PID" "$authority"
+    "$FM_ROOT" "$SESSION_OWNER_PID" "$authority" "$FAILURE_SUPPRESSION_OWNER_PID"
   failure_rc=$?
   case "$failure_rc" in
     0|3)
@@ -328,7 +329,7 @@ autoarm_commit() {  # <outcome> [marker-file]
   terminal_baseline="$MY_GEN:$pid:arming"
   fm_autoarm_claim_failure_commit \
     "$STATE" "$terminal_baseline" failed "$FAILURE_NOTICE" \
-    "$FM_ROOT" "$SESSION_OWNER_PID" bound
+    "$FM_ROOT" "$SESSION_OWNER_PID" bound "$FAILURE_SUPPRESSION_OWNER_PID"
   failure_rc=$?
   case "$failure_rc" in
     0|3)

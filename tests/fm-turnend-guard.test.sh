@@ -1757,6 +1757,49 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
   pass "fm-turnend-guard --claude: reset contention preserves all episode state until retry"
 }
 
+test_hook_claude_mode_rechecks_health_inside_reset_boundary() {
+  local dir watcher identity holder ready killed guard status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-reset-health-race")
+  ready="$dir/state/transition-holder-ready"
+  killed="$dir/state/watcher-killed"
+  : > "$dir/state/task1.meta"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  sleep 60 &
+  watcher=$!
+  identity=$(watcher_identity "$dir" "$watcher") || fail "could not identify reset-race watcher"
+  record_watcher_lock "$dir" "$watcher" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    identity=$(fm_pid_identity "${BASHPID:-$$}") || exit
+    FM_LOCK_REQUIRE_IDENTITY=1 fm_lock_try_acquire \
+      "$1/state/.claude-autoarm-transition.lock" "$identity" || exit
+    trap '\''kill "$2" 2>/dev/null || true; : > "$3"; exit 0'\'' TERM
+    : > "$4"
+    while :; do sleep 0.05; done
+  ' _ "$dir" "$watcher" "$killed" "$ready" &
+  holder=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+
+  (FM_AUTOARM_TRANSITION_GRACE=1 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 \
+    run_hook_claude "$dir" false > "$dir/guard.out"; printf '%s\n' "$?" > "$dir/guard.status") &
+  guard=$!
+  wait "$guard"
+  status=$(cat "$dir/guard.status" 2>/dev/null || true)
+  wait "$holder" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+
+  assert_present "$killed" "reset boundary did not exercise watcher death after the initial health check"
+  expect_code 2 "$status" "a watcher that dies before reset must keep the turn blocked"
+  assert_present "$dir/state/.turnend-claude-blocks" "health-race reset deleted the block budget"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "health-race reset deleted the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "health-race reset deleted the attended alarm"
+  assert_present "$dir/state/.claude-autoarm-epoch" "health-race reset deleted the failure epoch"
+  pass "fm-turnend-guard --claude: healthy reset rechecks under the transition boundary"
+}
+
 test_hook_claude_mode_stalled_transition_recovery_is_bounded() {
   local dir home pid identity holder ready guard i status hung=0
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stalled-transition-recovery")
@@ -2254,6 +2297,7 @@ test_hook_claude_mode_ignores_legacy_failure_superseded_by_later_success
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_repeated_claim_failures_reach_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
+test_hook_claude_mode_rechecks_health_inside_reset_boundary
 test_hook_claude_mode_stalled_transition_recovery_is_bounded
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
