@@ -19,6 +19,16 @@
 # home with a backlog but no compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
+# The close - and only the close - is replaced by `tasks-axi reopen` with the
+# deliverable recorded while the backlog item is still an open captain call
+# (bin/fm-captain-hold.sh `open` owns that predicate), because the policy holds
+# the very work item a question gates and cleanup must never retire the
+# captain's own question. The same pending-close record carries that intent as
+# `mode=retain`, so an interrupted cleanup replays the retention rather than a
+# close. "Cannot tell" refuses before any destructive step, --force does not
+# lift the deferral (it authorizes discarding unlanded WORK, never the
+# captain's question), and bin/fm-captain-hold.sh answer stays the only act
+# that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -303,6 +313,24 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     exit 1
   fi
   TEARDOWN_META_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+fi
+# Cleanup never closes a captain call (see the header). Asked here, before any
+# destructive step, so "cannot tell" can refuse while everything is intact.
+TEARDOWN_BACKLOG_TRANSITION=close
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+  TEARDOWN_CAPTAIN_OPEN_STATUS=0
+  TEARDOWN_CAPTAIN_OPEN_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" 2>&1) || TEARDOWN_CAPTAIN_OPEN_STATUS=$?
+  case "$TEARDOWN_CAPTAIN_OPEN_STATUS" in
+    0) TEARDOWN_BACKLOG_TRANSITION=retain ;;
+    1) ;;
+    *)
+      echo "error: task $ID cannot be torn down because whether its backlog item is still held for the captain could not be read; fix that read and retry rather than risk closing a captain call with no recorded answer" >&2
+      [ -z "$TEARDOWN_CAPTAIN_OPEN_OUT" ] || printf '%s\n' "$TEARDOWN_CAPTAIN_OPEN_OUT" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 REMOTE_HANDOFF_DIR_PRESENT=0
@@ -1190,7 +1218,9 @@ backlog_refresh_reminder() {
   else
     backlog_display="${DATA%/}/backlog.md"
   fi
-  if [ "$BACKLOG_CLOSED" = 1 ]; then
+  if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
+    printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
+  elif [ "$BACKLOG_CLOSED" = 1 ]; then
     printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
   else
     printf '%s\n' "Backlog: $ID just finished ($BACKLOG_SKIP_REASON). Update $backlog_display - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
@@ -2695,17 +2725,21 @@ if [ "$BACKEND" = herdr ]; then
 fi
 
 BACKLOG_CLOSED=0
+BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
+BACKLOG_TRANSITION_FLAGS=()
+[ "$BACKLOG_TRANSITION" = close ] || BACKLOG_TRANSITION_FLAGS=(--retain)
 BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   backlog_done_args || {
-    echo "error: the pending backlog close for $ID is not replayable; refusing destructive teardown" >&2
+    echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
     exit 1
   }
   BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
   fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+    "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
     "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" \
-    || { echo "error: the pending backlog close for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); retaining every durable task record" >&2; exit 1; }
+    || { echo "error: the pending backlog $BACKLOG_TRANSITION for $ID could not be recorded ($FM_BACKLOG_TRANSITION_ERROR); retaining every durable task record" >&2; exit 1; }
 else
   if [ "$CLEANUP_RECOVERY" = orca ]; then
     BACKLOG_SKIP_REASON="Orca cleanup recovery is not a launched backlog worker"
@@ -2885,14 +2919,20 @@ rm -f "$STATE/$ID.turn-ended" \
 rm -rf "$STATE/$ID.inbox"
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
-# racing the same id stays serialized exactly as it was before.
+# racing the same id stays serialized exactly as it was before. A captain-held
+# row takes the retain transition here instead of the close: same record, same
+# ordering, the row returns to Queued with its deliverable recorded.
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
-  if ! fm_backlog_atomic_transition close "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
+  if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
       "$DATA" "$ID" "$STATE" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
     fm_lock_release "$META_LOCK"
     META_LOCK_HELD=0
-    echo "error: $ID's endpoint and local copy are cleaned up, but its backlog item could not be closed atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending close is recorded and the next session start retries it" >&2
+    if [ "$BACKLOG_TRANSITION" = retain ]; then
+      echo "error: $ID's endpoint and local copy are cleaned up, but its captain-held backlog item could not be returned to Queued atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending retention is recorded and the next session start retries it" >&2
+    else
+      echo "error: $ID's endpoint and local copy are cleaned up, but its backlog item could not be closed atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending close is recorded and the next session start retries it" >&2
+    fi
     exit 1
   fi
 elif [ "$KIND" = secondmate ] && [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then

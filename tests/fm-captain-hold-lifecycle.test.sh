@@ -1168,6 +1168,261 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# The originating work item is itself the captain call, which is what the policy
+# prefers ("hold the work item the question gates"). Cleanup of that finished
+# work must never be the act that closes the captain's own row: the deliverable
+# is recorded on the still-held row, the call keeps reading as open on the
+# board, and only a recorded answer closes it. An ordinary finished task in the
+# same home must still close exactly as before, and discard authority covers
+# unlanded work, never the captain's question.
+test_teardown_never_closes_a_captain_held_task() {
+  local home id plain forced json show
+  home=$(make_home teardown-held)
+  id=sample-attach-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample attachment evidence" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample attachment evidence\n\nThe captain must choose inline or by-reference attachments.\n' \
+    > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" \
+    --reason "captain must choose inline or by-reference attachments" >/dev/null \
+    || fail "could not hold the originating work item for the captain"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed with the origin as its own captain call"
+
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup of a captain-held investigation failed: $(cat "$home/teardown.err")"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the captain-held row is gone after cleanup"
+  assert_not_contains "$show" "state: done" \
+    "cleanup closed the captain call with no recorded answer"
+  assert_contains "$show" "state: queued" "the finished work's row still reads as worked on"
+  assert_contains "$show" "held: yes" "cleanup lifted the captain hold"
+  assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "the deliverable was not recorded on the still-open row"
+  assert_absent "$home/state/$id.meta" "cleanup did not release the finished worker record"
+  assert_absent "$home/state/$id.backlog-close" \
+    "successful cleanup left its pending transition record behind"
+  assert_grep "still held for the captain" "$home/teardown.out" \
+    "cleanup did not say the row stays open for the captain"
+  json=$(run_bearings "$home") || fail "Bearings failed after cleanup of a captain-held task"
+  printf '%s' "$json" | jq -e --arg id "$id" '
+    (.decisions_open | any(.id == $id and .verb == "captain-hold"))
+  ' >/dev/null || fail "the board no longer surfaces the captain call: $json"
+
+  # The ordinary path is untouched: a finished task with no captain call closes.
+  plain=sample-plain-review
+  mkdir -p "$home/data/$plain"
+  tasks_in "$home" add "$plain" "Investigate the sample cache" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the ordinary fixture"
+  write_origin_meta "$home" "$plain"
+  printf 'done: report complete\n' > "$home/state/$plain.status"
+  printf '# Sample cache\n\nNothing waits on the captain.\n' > "$home/data/$plain/report.md"
+  run_captain "$home" complete "$plain" --none >/dev/null \
+    || fail "completion gate failed for the ordinary investigation"
+  run_teardown "$home" "$plain" > "$home/plain.out" 2> "$home/plain.err" \
+    || fail "ordinary cleanup failed: $(cat "$home/plain.err")"
+  show=$(tasks_in "$home" show "$plain" --full) || fail "the ordinary row vanished"
+  assert_contains "$show" "state: done" "ordinary cleanup no longer closes its backlog item"
+  assert_contains "$show" "data/$plain/report.md" "ordinary cleanup lost the report link"
+  assert_absent "$home/state/$plain.backlog-close" "ordinary cleanup left its pending close behind"
+
+  # Discard authority covers unlanded work, never the captain's question.
+  forced=sample-forced-review
+  mkdir -p "$home/data/$forced"
+  tasks_in "$home" add "$forced" "Investigate the sample forced path" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the forced fixture"
+  write_origin_meta "$home" "$forced"
+  printf 'done: report complete\n' > "$home/state/$forced.status"
+  printf '# Sample forced path\n\nOne captain choice remains.\n' > "$home/data/$forced/report.md"
+  run_captain "$home" hold "$forced" --reason "captain must choose the sample forced path" >/dev/null \
+    || fail "could not hold the forced fixture for the captain"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$forced" --force \
+    > "$home/forced.out" 2> "$home/forced.err" \
+    || fail "forced cleanup failed: $(cat "$home/forced.err")"
+  show=$(tasks_in "$home" show "$forced" --full) || fail "forced cleanup erased the captain-held row"
+  assert_not_contains "$show" "state: done" \
+    "discard authority closed a captain call with no recorded answer"
+  assert_contains "$show" "state: queued" "forced cleanup left the captain call reading as worked on"
+  assert_contains "$show" "hold_kind: captain" "forced cleanup dropped the captain hold"
+
+  # Only a recorded answer closes the captain call, and the deliverable survives it.
+  printf 'Ship attachments by reference.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the surviving captain call could not be answered"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered row is gone"
+  assert_contains "$show" "state: done" "the recorded answer did not close the captain call"
+  assert_contains "$show" "Ship attachments by reference." "the captain's words were not recorded"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "the answer lost the recorded deliverable"
+  pass "cleanup leaves a captain-held work item open with its deliverable, and only an answer closes it"
+}
+
+# Retention happens after destructive cleanup, through the same pending record
+# an ordinary close stages first. A cleanup that fails part-way therefore leaves
+# the row exactly as it was, and the next session start finishes the retention
+# instead of closing the captain's question.
+test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
+  local home id wt show rc bootstrap
+  home=$(make_home teardown-held-interrupted)
+  id=sample-held-cleanup-failure
+  wt="$home/projects/$id"
+  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
+  tasks_in "$home" add "$id" "Investigate failed sample cleanup" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the cleanup-failure fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Failed cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" --reason "captain must choose after cleanup retry" >/dev/null \
+    || fail "could not hold the cleanup-failure fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the cleanup-failure fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  assert_present "$home/state/$id.meta" "a failed cleanup removed the task record"
+  assert_present "$home/state/$id.backlog-close" \
+    "a failed cleanup lost the pending record that replays the retention"
+  show=$(tasks_in "$home" show "$id" --full) || fail "a failed cleanup erased the captain call"
+  assert_contains "$show" "state: in_flight" "a failed cleanup changed the row before cleanup succeeded"
+  assert_contains "$show" "hold_kind: captain" "a failed cleanup dropped the captain hold"
+  assert_not_contains "$show" "Deliverable of the finished work" \
+    "the deliverable was recorded before destructive cleanup succeeded"
+
+  fm_fake_exit0 "$home/fakebin" treehouse
+  bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "session start could not replay the interrupted retention: $bootstrap"
+  assert_contains "$bootstrap" "kept the captain call for $id open" \
+    "session start did not report the retained captain call"
+  assert_absent "$home/state/$id.meta" "session start left the interrupted task record behind"
+  assert_absent "$home/state/$id.backlog-close" "session start left the pending record behind"
+  show=$(tasks_in "$home" show "$id" --full) || fail "session start erased the captain call"
+  assert_not_contains "$show" "state: done" "session start closed the captain call with no recorded answer"
+  assert_contains "$show" "state: queued" "session start did not return the captain call to the queue"
+  assert_contains "$show" "hold_kind: captain" "session start dropped the captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "session start did not record the finished work's deliverable"
+  pass "an interrupted cleanup keeps the captain call recoverable and session start retains it"
+}
+
+# A home whose data directory is relocated keeps one backlog; the predicate and
+# the retention must address it the way teardown does, not FM_HOME/data.
+test_teardown_retains_captain_calls_in_a_relocated_backlog() {
+  local home data id show
+  home=$(make_home teardown-relocated-hold)
+  data="$home/records"
+  mv "$home/data" "$data"
+  id=sample-relocated-hold
+  mkdir -p "$home/data" "$data/$id"
+  # A backlog at the default location stays empty, so a wrongly addressed read
+  # would find no row at all.
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  (cd "$home" && tasks-axi add "$id" "Investigate relocated sample hold" --kind scout \
+    --repo sample --start --file "$data/backlog.md" >/dev/null) \
+    || fail "could not create the relocated captain-hold fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Relocated hold\n\nThe captain call remains open.\n' > "$data/$id/report.md"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
+    --reason "captain must choose the relocated sample outcome" >/dev/null \
+    || fail "could not hold the relocated work item"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the relocated captain hold"
+
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" \
+    > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup of the relocated captain hold failed: $(cat "$home/teardown.err")"
+  show=$(cd "$home" && tasks-axi show "$id" --full --file "$data/backlog.md") \
+    || fail "the relocated captain-held row disappeared"
+  assert_not_contains "$show" "state: done" "cleanup closed the relocated captain call"
+  assert_contains "$show" "state: queued" "cleanup left the relocated captain call reading as worked on"
+  assert_contains "$show" "hold_kind: captain" "cleanup dropped the relocated captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report records/$id/report.md" \
+    "cleanup did not record the deliverable in the relocated backlog"
+  assert_absent "$home/state/$id.meta" "cleanup left the relocated task record behind"
+  assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
+  assert_no_grep "$id" "$home/data/backlog.md" "cleanup wrote to the empty default-location backlog"
+  pass "cleanup retains captain calls in the configured backlog"
+}
+
+# "Cannot tell" is not permission to close. A ship row has no separate
+# inventory gate ahead of the close, so the predicate itself must refuse before
+# any destructive step when the hold cannot be read.
+test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read() {
+  local home id rc show
+  home=$(make_home teardown-ship-hold-read-error)
+  id=sample-unreadable-ship-hold
+  tasks_in "$home" add "$id" "Ship the sample change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the unreadable-hold fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$home/projects/missing-$id" \
+    "project=$home/projects/sample" "harness=codex" "kind=ship" "mode=direct-PR" \
+    "spawn_gen=fixture-$id"
+  printf 'done: PR https://github.com/sample/sample/pull/7\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain must approve the sample change" >/dev/null \
+    || fail "could not hold the ship fixture for the captain"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = "${TASKS_AXI_FAIL_SHOW_ID:-}" ]; then
+  printf 'error: temporary backlog read failure\n' >&2
+  exit 75
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+
+  set +e
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    TASKS_AXI_FAIL_SHOW_ID="$id" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup treated an unreadable captain hold as permission to close"
+  assert_present "$home/state/$id.meta" "read uncertainty must refuse before removing the task record"
+  assert_absent "$home/state/$id.backlog-close" "read uncertainty staged a pending transition anyway"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the unreadable captain-held row disappeared"
+  assert_contains "$show" "state: in_flight" "read uncertainty allowed cleanup to move the row"
+  assert_contains "$show" "hold_kind: captain" "read uncertainty dropped the captain hold"
+  assert_grep "could not be read" "$home/teardown.err" "cleanup did not explain the refusal"
+  assert_grep "temporary backlog read failure" "$home/teardown.err" \
+    "the underlying captain-hold read failure was hidden"
+  pass "cleanup refuses a ship row when its captain hold cannot be read"
+}
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
@@ -1185,3 +1440,7 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_teardown_never_closes_a_captain_held_task
+test_interrupted_cleanup_keeps_the_captain_call_recoverable
+test_teardown_retains_captain_calls_in_a_relocated_backlog
+test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read

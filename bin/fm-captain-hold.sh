@@ -15,8 +15,9 @@
 # `<origin>-decision-<key>` identities through bin/fm-decision-hold.sh; those
 # rows are already plain task ids, so they keep working here unchanged, and
 # the legacy inputs noted below resolve them without a migration.
-# All backlog mutations run in the active FM_HOME, which keeps main-home and
-# secondmate-home ownership aligned with the work that discovered the call.
+# All backlog reads and mutations address the active home's configured data
+# directory the way bin/fm-backlog-transition-lib.sh does, which keeps main-home
+# and secondmate-home ownership aligned with the work that discovered the call.
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
@@ -28,6 +29,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
+#   fm-captain-hold.sh open <task-id>
 #   fm-captain-hold.sh diverged
 #
 # `hold` places an existing task under an active captain hold, or creates the
@@ -115,6 +117,17 @@
 # identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
 # unchanged. An entry that exists as a task id is always that task.
 #
+# `open` is the read-only predicate a mechanical closer asks before it may
+# retire a task's row: is this task still an open captain call? Exit 0 means it
+# is (not Done, hold kind captain), 1 means it is not, and 2 means the answer
+# could not be established, so a caller that must never close a live call can
+# treat "cannot tell" as its own case instead of as a no. It prints nothing on
+# 0 or 1 and mutates nothing. bin/fm-teardown.sh asks it before its automatic
+# backlog close and, on 0, returns the row to Queued with its deliverable
+# recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
+# holding the very work item a question gates is safe; `answer` remains the
+# only act that closes a captain call.
+#
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
 #
@@ -137,6 +150,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -214,8 +230,15 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
   DECISION_DIGEST=$(sha256_text "$decision")
 }
 
+# Mutations address the configured data directory's backlog from its root, the
+# way bin/fm-backlog-transition-lib.sh addresses every transition, so a home
+# with a relocated data directory keeps one backlog.
 tasks_axi() {
-  (cd "$FM_HOME" && tasks-axi "$@")
+  local data file root
+  data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
+  file=$(fm_backlog_file "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
+  root=$(fm_backlog_root "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
+  (cd "$root" && tasks-axi "$@" --file "$file")
 }
 
 require_tasks_axi() {
@@ -225,7 +248,9 @@ require_tasks_axi() {
 }
 
 task_show() {  # <id>
-  tasks_axi show "$1" --full 2>/dev/null
+  local data
+  data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
+  fm_backlog_row_show "$data" "$1" --full 2>/dev/null
 }
 
 show_field() {  # <show-output> <field>
@@ -986,6 +1011,34 @@ EOF
   done
 }
 
+# Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
+# A row this home does not carry holds no captain call, so an absent task is a
+# plain no; every other read failure is a 2, printed to stderr, because a
+# mechanical closer must never read "cannot tell" as permission to close.
+command_open() {  # <task-id>
+  local id=${1:-} data state
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  case "$id" in
+    ''|*[!A-Za-z0-9._-]*)
+      printf 'fm-captain-hold: task id must be a non-empty privacy-safe slug: %s\n' "$id" >&2
+      exit 2
+      ;;
+  esac
+  fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
+  data=$(fm_backlog_data_absolute "$DATA") \
+    || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
+  if fm_backlog_row_probe "$data" "$id"; then
+    state=${FM_BACKLOG_ROW_STATE%% *}
+    if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+      return 0
+    fi
+    return 1
+  fi
+  [ "$FM_BACKLOG_ROW_RESULT" != not_found ] || return 1
+  printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_ROW_ERROR" >&2
+  exit 2
+}
+
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
@@ -995,6 +1048,7 @@ case "${1:-}" in
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  open) shift; command_open "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
