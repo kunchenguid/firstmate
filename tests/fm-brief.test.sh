@@ -382,6 +382,43 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# Ship briefs must forbid manual GitHub issue closing and project-board commands
+# (captain order 2026-09-02, root-caused by a fleet-wide GraphQL abuse-limit trip
+# from hand-run `gh issue close` calls); the no-mistakes DOD must also tell the
+# worker to carry that rule into `--intent` so pipeline seats inherit it. A scout
+# brief opens no PR and touches no issue lifecycle, so it must not carry the rule.
+test_ship_briefs_forbid_manual_issue_close_and_board_edits() {
+  local home id mode brief
+  home="$TMP_ROOT/no-manual-issue-close-home"
+  mkdir -p "$home/data"
+
+  for id_mode in "brief-noclose-nm:no-mistakes" "brief-noclose-dp:direct-PR" "brief-noclose-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command" "$brief" \
+      "$id: ship brief must forbid manual issue close/reopen and project-board commands"
+    assert_grep "issues close through" "$brief" \
+      "$id: ship brief must explain issues close via the PR body's closes #N on merge"
+  done
+
+  brief="$home/data/brief-noclose-nm/brief.md"
+  assert_grep "Carry forward this brief's ban on \`gh issue close\`, \`gh issue reopen\`, and \`gh project\` commands so pipeline seats inherit it." "$brief" \
+    "no-mistakes DOD must tell the worker to carry the manual-close ban into --intent"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-noclose-scout some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-noclose-scout/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "gh issue close" "$brief" \
+    "scout brief must not carry the ship-only manual-issue-close ban"
+  assert_no_grep "gh project" "$brief" \
+    "scout brief must not carry the ship-only project-board ban"
+
+  pass "fm-brief.sh: ship briefs forbid manual issue closing and board edits; scout briefs do not"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -772,6 +809,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_briefs_forbid_manual_issue_close_and_board_edits
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

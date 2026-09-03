@@ -336,6 +336,10 @@ STUB
       "$mode: promoted worker was not told to stop for any wrong worktree"
     assert_grep "git checkout -b fm/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
+    assert_grep "Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command" "$payload" \
+      "$mode: promoted worker did not receive the manual issue and project-command ban"
+    assert_grep "issues close through the PR body's \`closes #N\` on merge, and the project board is not used" "$payload" \
+      "$mode: promoted worker did not receive the issue-lifecycle rationale"
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
