@@ -87,6 +87,52 @@ SH
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
 }
 
+# A harness that is pid 1 of its own PID namespace - a container, or the
+# `codex sandbox` this shape was verified in - used to be invisible: the walk
+# stopped as soon as the NEXT pid was 1, so the one process that identifies the
+# session was never examined and the session could not recognize its own lock.
+test_harness_at_namespace_pid1_is_examined() {
+  local dir fakebin got
+  dir="$TMP_ROOT/namespace-pid1"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  1:comm=) printf '%s\n' "${FM_TEST_PID1_COMM:-claude}" ;;
+  1:args=) printf '%s\n' "${FM_TEST_PID1_COMM:-claude}" ;;
+  1:ppid=) printf '%s\n' 0 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-watch.sh' ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '1\n' > "$dir/state/.lock"
+
+  # Non-vacuity: with a host-shaped pid 1 the same table must find nothing, so
+  # this case cannot pass by the walk matching everything it reaches.
+  if FM_TEST_PID1_COMM=systemd lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
+    fail "a host-shaped pid 1 was read as a harness process"
+  fi
+
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the harness at namespace pid 1 was not found in the ancestry at all"
+  [ "$got" = 1 ] || fail "ancestry resolved '$got', expected the namespace harness pid 1"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the session holding the lock at namespace pid 1 did not recognize itself as the owner"
+  pass "session-lock: a harness that is pid 1 of its own namespace is examined, not skipped"
+}
+
 test_ordinary_paths_are_never_harness_processes() {
   local dir fakebin shape
   dir="$TMP_ROOT/ordinary-paths"
@@ -357,6 +403,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live

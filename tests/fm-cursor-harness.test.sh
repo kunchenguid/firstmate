@@ -16,7 +16,9 @@
 #   2. An unrelated `node`/`agent` pane classifies `other`, which the liveness
 #      callers fold into `ambiguous` - NEVER `dead`.
 #   3. Cursor's env marker outranks an inherited CLAUDECODE, because cursor does
-#      not clear it and whichever marker is tested first wins.
+#      not clear it and whichever marker is tested first wins. That ordering
+#      settles the marker layer only: a nearer claude ancestor still outranks
+#      both (tests/fm-harness-precedence.test.sh owns that boundary).
 #   4. The transcript fold brackets a turn: a trailing turn_ended is idle, a
 #      later role:user is busy, and an unresolvable binding is unknown.
 #   5. Cursor is a crewmate/scout adapter only and refuses a secondmate launch.
@@ -175,25 +177,49 @@ test_tmux_classifies_cursor_pane_without_inferring_dead() {
 
 # --- 3. Detection ordering ---------------------------------------------------
 
+# The marker ordering decides only when ancestry has nothing to say, so this
+# case runs against a fake ps that reports a bash chain terminating at pid 1.
+# Without it the suite would assert against whatever harness actually launched
+# it, and the verdicts below would be about the runner rather than the ordering.
 test_cursor_marker_outranks_inherited_claudecode() {
-  local out
+  local out fakebin base_path
+  base_path=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+  fakebin=$(fm_fakebin "$TMP_ROOT/marker-ordering")
+  fm_fake_blind_ancestry "$fakebin"
   # This is the exact hazard: cursor does NOT clear an inherited CLAUDECODE, so
-  # a cursor worker under a claude primary carries both markers.
-  out=$(CLAUDECODE=1 CURSOR_AGENT=1 "$HARNESS")
+  # a cursor session started by hand under a claude primary carries both markers.
+  out=$(PATH="$fakebin:$base_path" CLAUDECODE=1 CURSOR_AGENT=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CLAUDECODE + CURSOR_AGENT must detect cursor, got '$out'"
-  out=$(CLAUDECODE=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
+  out=$(PATH="$fakebin:$base_path" CLAUDECODE=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
   [ "$out" = cursor ] || fail "CLAUDECODE + CURSOR_INVOKED_AS must detect cursor, got '$out'"
   # Both cursor markers stand alone, and neither steals a plain claude session.
-  out=$(env -u CLAUDECODE CURSOR_AGENT=1 "$HARNESS")
+  out=$(env -u CLAUDECODE PATH="$fakebin:$base_path" CURSOR_AGENT=1 "$HARNESS")
   [ "$out" = cursor ] || fail "CURSOR_AGENT alone must detect cursor, got '$out'"
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 "$HARNESS")
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS PATH="$fakebin:$base_path" \
+        CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # A CURSOR_* variable that is not the invocation identity proves nothing.
-  out=$(env -u CURSOR_AGENT CLAUDECODE=1 CURSOR_API_ENDPOINT=https://example \
+  out=$(env -u CURSOR_AGENT PATH="$fakebin:$base_path" CLAUDECODE=1 \
+        CURSOR_API_ENDPOINT=https://example \
         CURSOR_INVOKED_AS=something-else "$HARNESS")
   [ "$out" = claude ] \
     || fail "an unrelated CURSOR_* setting must not claim the cursor identity, got '$out'"
-  pass "fm-harness.sh: cursor's marker outranks an inherited CLAUDECODE"
+  # The ordering is a marker-layer tiebreak, not a licence to overrule the
+  # process tree: with a real cursor-agent ancestor the two agree, and with a
+  # real claude ancestor the retained cursor marker loses.
+  local tree_dir
+  tree_dir="$TMP_ROOT/marker-ordering-trees"
+  mkdir -p "$tree_dir"
+  cp "$(command -v bash)" "$tree_dir/cursor-agent"
+  cp "$(command -v bash)" "$tree_dir/claude"
+  out=$(env -u CLAUDECODE "$tree_dir/cursor-agent" -c \
+    "r=\$(CURSOR_AGENT=1 \"$HARNESS\"); printf '%s' \"\$r\"")
+  [ "$out" = cursor ] || fail "a real cursor-agent ancestor must detect cursor, got '$out'"
+  out=$("$tree_dir/claude" -c \
+    "r=\$(CLAUDECODE=1 CURSOR_AGENT=1 \"$HARNESS\"); printf '%s' \"\$r\"")
+  [ "$out" = claude ] \
+    || fail "a retained CURSOR_AGENT must not rename a real claude ancestor, got '$out'"
+  pass "fm-harness.sh: cursor's marker outranks an inherited CLAUDECODE when ancestry is silent"
 }
 
 test_harness_ancestry_rejects_cursor_named_node_script() {

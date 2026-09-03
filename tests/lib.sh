@@ -182,6 +182,34 @@ SH
   done
 }
 
+# fm_fake_blind_ancestry <fakebin>
+# Blind the parent-chain walks: a query of the FIELD-FIRST per-pid form those walks
+# use - `ps -o comm=|args=|ppid= -p <pid>`, the shape in bin/fm-harness.sh,
+# bin/fm-session-lock-lib.sh, bin/fm-sessionstart-nudge.sh and bin/fm-backend.sh's
+# cmux ancestor detection - reports a bash ancestor terminating at pid 1, so ancestry
+# proves nothing and the marker a case sets is the only evidence left. A case that pins
+# its harness with a marker (CLAUDECODE=1 and friends) needs this, because a structural
+# ancestor of a DIFFERENT harness outranks a marker - without it, the harness the SUITE
+# was launched from decides the verdict.
+# Every other ps query reaches the real ps untouched, and the pid-first form is
+# deliberately among them: bin/fm-tmux-lib.sh and bin/backends/tmux.sh read pane and
+# cursor identity with `ps -p <pid> -o args=`, so intercepting that shape too would make
+# a pane assertion under a PATH-wide blind read `bash` and reject every cursor pane.
+fm_fake_blind_ancestry() {
+  local fakebin=$1 real_ps
+  real_ps=$(command -v ps) || return 1
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  '-o comm= -p '*) printf '%s\n' bash ;;
+  '-o args= -p '*) printf '%s\n' bash ;;
+  '-o ppid= -p '*) printf '%s\n' 1 ;;
+  *) exec "$real_ps" "\$@" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

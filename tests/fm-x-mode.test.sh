@@ -948,8 +948,14 @@ test_reply_text_file_and_stdin() {
 }
 
 test_bootstrap_opt_out_cleanup() {
-  local home out
+  local home out blind
   home="$TMP_ROOT/boot-optout"; mkdir -p "$home"
+  # The remediation wording asserted below is the CLAUDE one, so detect_own has to
+  # answer claude. A marker alone no longer pins that - a structural ancestor of a
+  # different harness outranks it - so blind the ancestry walk too, or the harness
+  # this suite was launched from picks the wording.
+  blind=$(fm_fakebin "$TMP_ROOT/boot-optout-blind")
+  fm_fake_blind_ancestry "$blind"
   # Opt in, artifacts appear.
   printf 'FMX_PAIRING_TOKEN=tok-out\n' > "$home/.env"
   FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
@@ -957,7 +963,7 @@ test_bootstrap_opt_out_cleanup() {
   assert_present "$home/config/x-mode.env" "opt-in must create the cadence config"
   # Opt out: empty the token, re-run bootstrap -> artifacts removed + one off line.
   printf 'FMX_PAIRING_TOKEN=\n' > "$home/.env"
-  out=$(CLAUDECODE=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  out=$(PATH="$blind:$PATH" CLAUDECODE=1 FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "FMX: X mode off" "opt-out must announce X mode off when it removed artifacts"
   assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "opt-out remediation must use neutral automatic-recovery guidance"
   assert_not_contains "$out" "is broken" "opt-out remediation claimed an unverified mechanism failure"

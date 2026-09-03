@@ -5,10 +5,11 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
-# from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
-# the fake ancestry the detection cases set up. Drop the ambient markers so the
-# asserted verdict does not depend on which harness launched the suite.
+# bin/fm-harness.sh answers from environment markers and process ancestry. A
+# suite run from inside Cursor, Claude, Pi, or Grok inherits those markers and
+# its own real ancestry, either of which can decide a case the detection cases
+# meant to control. Drop the ambient markers so the asserted verdict does not
+# depend on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -550,10 +551,13 @@ SH
     -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
+  # Kimi publishes no identity marker, so an inherited CLAUDECODE used to rename
+  # it outright. A structural kimi ancestor now outranks that marker;
+  # tests/fm-harness-precedence.test.sh owns the general boundary.
   out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
-  [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
-  pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
+  [ "$out" = kimi ] || fail "an inherited CLAUDECODE renamed markerless kimi, got '$out'"
+  pass "fm-harness: markerless kimi keeps its ancestry identity under an inherited marker"
 }
 
 test_kimi_session_lock_identity() {
