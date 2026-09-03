@@ -44,9 +44,11 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every state/*.meta, each task's terminal-claim verdict
+#                       from its durable record (bin/fm-done-claim-lib.sh; a
+#                       local read, never a re-verification), a bounded
+#                       state/*.status tail, state/.afk, and a cheap per-task
+#                       endpoint-liveness read: read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -341,6 +343,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-done-claim-lib.sh
+. "$SCRIPT_DIR/fm-done-claim-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -830,6 +834,15 @@ for meta in "$STATE"/*.meta; do
   else
     printf 'endpoint: unknown (no window recorded)\n'
   fi
+
+  # The task's own terminal claim, and whether anything has established it.
+  # A pure local read of the durable verdict record: this digest makes no
+  # network call, so it reports what bin/fm-verify-done.sh last established
+  # rather than re-establishing anything here. Silent for a task that has made
+  # no claim, which is every task still working.
+  fm_done_claim_status "$STATE" "$id"
+  [ "$FM_DONE_CLAIM_STATE" = none ] \
+    || printf 'terminal claim: %s - %s\n' "$FM_DONE_CLAIM_STATE" "$FM_DONE_CLAIM_REASON"
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then

@@ -111,7 +111,10 @@ EOF
     "kind=scout" \
     "mode=scout" \
     "yolo=off"
-  printf 'done: report ready\n' > "$home/state/scout-task.status"
+  printf 'done: report=data/scout-task/report.md - report ready\n' > "$home/state/scout-task.status"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-verify-done.sh" scout-task >/dev/null \
+    || fail "the scout-task claim fixture did not verify against its own report"
   fm_write_meta "$home/state/secondmate-task.meta" \
     "window=firstmate:fm-secondmate-task" \
     "worktree=$home/secondmate-home" \
@@ -475,7 +478,11 @@ EOF
     "kind=scout" \
     "mode=scout"
   record_claude_idle "$home/state" bold-task
-  printf 'done: report ready\n' > "$home/state/bold-task.status"
+  printf 'done: report=%s/bold-task/report.md - report ready\n' "$data" \
+    > "$home/state/bold-task.status"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
+    "$ROOT/bin/fm-verify-done.sh" bold-task >/dev/null \
+    || fail "the bold-task claim fixture did not verify against its own report"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" \
     FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z "$SNAPSHOT" --json)
@@ -757,9 +764,14 @@ test_completed_scout_report_is_pointer_not_pending() {
   record_claude_idle "$home/state" lavish-103
   # Stale needs-decision, then the scout finished (done). No keyed resolution.
   printf 'needs-decision: adopt approach A or B for Lavish issue 103\n' > "$home/state/lavish-103.status"
-  printf 'done: report ready at data/lavish-103/report.md\n' >> "$home/state/lavish-103.status"
+  printf 'done: report=data/lavish-103/report.md - report ready\n' >> "$home/state/lavish-103.status"
   # Completed report whose PROSE reads like the decision.
   printf '# Lavish 103\nThe open question is whether to adopt approach A or B.\nThis needs a captain decision. Recommendation: A.\n' > "$home/data/lavish-103/report.md"
+  # The terminal claim is established, so the reader reports plain `done` here
+  # and this case keeps testing decisions rather than claim verification.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-verify-done.sh" lavish-103 >/dev/null \
+    || fail "the scout claim fixture did not verify against its own report"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '

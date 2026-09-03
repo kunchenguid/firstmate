@@ -1660,18 +1660,23 @@ while :; do
       fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
-        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+        # Both PR-poll terminal outcomes publish through the one owner
+        # (bin/fm-merge-outcome-lib.sh), which dedupes on PR identity AND
+        # outcome. Only `merged` retires the poll: a PR closed without merging
+        # contradicts the task's done record but is not final, because it can
+        # still be reopened and merged, so its poll stays armed to report that.
+        if [ "$is_pr_poll" -eq 1 ] && { [ "$out" = merged ] || [ "$out" = closed-unmerged ]; }; then
           merge_outcome_rc=0
-          fm_merge_outcome_report "$FM_HOME" "$STATE" "$id" "$url" poll \
+          fm_merge_outcome_report "$FM_HOME" "$STATE" "$id" "$url" poll "$out" \
             || merge_outcome_rc=$?
           if [ "$merge_outcome_rc" -ne 0 ]; then
-            triage_log "merge outcome for $id could not be recorded (rc=$merge_outcome_rc)"
+            triage_log "PR $out outcome for $id could not be recorded (rc=$merge_outcome_rc)"
             exit 1
           fi
-          retire_merged_pr_poll "$id"
+          [ "$out" != merged ] || retire_merged_pr_poll "$id"
           touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
-            triage_log "absorbed duplicate merged PR poll result for $id"
+            triage_log "absorbed duplicate $out PR poll result for $id"
             continue
           fi
           wake "$reason"

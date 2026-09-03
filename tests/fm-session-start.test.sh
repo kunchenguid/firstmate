@@ -1139,7 +1139,7 @@ EOF
 }
 
 test_orphan_status_logs_are_printed() {
-  local rec root home fakebin out matched_count orphan_count
+  local rec root home fakebin out matched_count orphan_count fleet_section
   rec=$(new_world orphan-status)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1154,14 +1154,19 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "Orphan status logs (state/*.status without matching .meta)" "digest did not label orphan status logs"
-  assert_contains "$out" "--- task-orphan ---" "digest did not print the orphan status id"
-  assert_contains "$out" "orphan: step 6" "orphan status tail missing the newest line"
-  assert_not_contains "$out" "orphan: step 1" "orphan status tail was not bounded"
-  assert_contains "$out" "$home/state/task-orphan.status" "orphan status tail did not print the full log path"
+  # Scoped to the FLEET STATE section, which is what this test governs. These
+  # status lines carry no recognised verb, so they also reach the digest through
+  # the wake drain's separately bounded unrecognised-line surface; a whole-output
+  # assertion would be measuring that surface instead of this section.
+  fleet_section=$(printf '%s\n' "$out" | awk '/^FLEET STATE$/ { flag = 1 } /^NETWORK CHECKS$/ { flag = 0 } flag')
+  assert_contains "$fleet_section" "Orphan status logs (state/*.status without matching .meta)" "digest did not label orphan status logs"
+  assert_contains "$fleet_section" "--- task-orphan ---" "digest did not print the orphan status id"
+  assert_contains "$fleet_section" "orphan: step 6" "orphan status tail missing the newest line"
+  assert_not_contains "$fleet_section" "orphan: step 1" "orphan status tail was not bounded"
+  assert_contains "$fleet_section" "$home/state/task-orphan.status" "orphan status tail did not print the full log path"
 
-  matched_count=$(printf '%s\n' "$out" | grep -F -c 'matched: surfaced once')
-  orphan_count=$(printf '%s\n' "$out" | grep -F -c 'orphan: step 6')
+  matched_count=$(printf '%s\n' "$fleet_section" | grep -F -c 'matched: surfaced once')
+  orphan_count=$(printf '%s\n' "$fleet_section" | grep -F -c 'orphan: step 6')
   [ "$matched_count" -eq 1 ] || fail "matched status log was printed $matched_count times: $out"
   [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
 

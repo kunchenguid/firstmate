@@ -50,6 +50,11 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# REFUSES, alongside those gates, when the task's own terminal `done:` claim has
+# not been ESTABLISHED. bin/fm-verify-done.sh reads the forge, git, and the
+# validation run and answers verified / unverified / contradicted; cleanup is the
+# point of no return for a claim, so it accepts only `verified`. A task that
+# never claimed done has nothing to verify and is unaffected.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -185,6 +190,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-done-claim-lib.sh
+. "$SCRIPT_DIR/fm-done-claim-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -2629,6 +2636,46 @@ fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
+fi
+
+# A terminal claim is the worker's assertion that the work landed; cleanup is
+# the moment that assertion becomes irreversible, because it removes the local
+# copy and the records that make the claim checkable at all. So a claim must be
+# ESTABLISHED before it may be cleaned up: bin/fm-verify-done.sh reads the forge,
+# git, and the validation run, and this gate refuses anything it could not
+# establish (`unverified`) as well as anything it established as false
+# (`contradicted`). The cheap local read comes first so a task that never claimed
+# done has nothing to verify, passes, and never pays for a subprocess; the
+# landed-work gates above are unchanged and still apply.
+TEARDOWN_CLAIM=
+if [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+  TEARDOWN_CLAIM=$(fm_done_claim_last "$STATE/$ID.status")
+fi
+if [ -n "$TEARDOWN_CLAIM" ]; then
+  TEARDOWN_CLAIM_RC=0
+  TEARDOWN_CLAIM_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-verify-done.sh" "$ID" 2>&1) || TEARDOWN_CLAIM_RC=$?
+  case "$TEARDOWN_CLAIM_RC" in
+    0|2) ;;
+    3)
+      echo "REFUSED: task $ID claims it is done, but that claim could not be established." >&2
+      printf '%s\n' "$TEARDOWN_CLAIM_OUT" >&2
+      echo "Re-run bin/fm-verify-done.sh $ID once the forge and the validation run can be read." >&2
+      echo "A claim written before this contract carries no commit identity and can never be established: append a conforming claim naming the commit that shipped, then verify it." >&2
+      exit 1
+      ;;
+    4)
+      echo "REFUSED: task $ID claims it is done and the claim is contradicted by the forge or the validation run." >&2
+      printf '%s\n' "$TEARDOWN_CLAIM_OUT" >&2
+      echo "This is a stop-and-investigate result: reconcile the claim with what actually shipped before cleanup." >&2
+      exit 1
+      ;;
+    *)
+      echo "REFUSED: the terminal claim for task $ID could not be checked (rc=$TEARDOWN_CLAIM_RC)." >&2
+      printf '%s\n' "$TEARDOWN_CLAIM_OUT" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then

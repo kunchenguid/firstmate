@@ -31,6 +31,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-done-claim-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
@@ -450,11 +452,36 @@ test_ci_ready_done_log_beats_monitoring_run() {
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
   local out; out=$(run_crew_state "$d" feat-ci)
-  assert_contains "$out" "state: done" "ci-ready status log -> done"
+  assert_contains "$out" "state: done-unverified" "a legacy ci-ready claim carries no commit identity, so it is not done"
+  assert_contains "$out" "legacy claim, no commit identity" "the downgrade names why the claim could not be established"
   assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
   assert_contains "$out" "checks green" "ci-ready detail preserves the report"
   assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
   pass "ci-ready status log beats monitoring run"
+}
+
+# A terminal claim is reported as done ONLY while a verdict established for that
+# exact claim stands. This is the other half of the downgrade above: without it
+# the reader would report every claim as unverified and the state would be
+# useless rather than merely strict.
+test_established_claim_is_reported_as_done() {
+  reset_fakes
+  local d claim hash out; d=$(new_case claim-verified)
+  make_repo_on_branch "$d/wt" fm/feat-cv
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cv.meta" "window=fm:fm-feat-cv" "worktree=$d/wt" "kind=ship"
+  claim="done: pr=https://github.com/o/r/pull/2 head=00112233445566778899aabbccddeeff00112233 - shipped"
+  printf '%s\n' "$claim" > "$d/state/feat-cv.status"
+  hash=$(fm_done_claim_hash "$claim") || fail "could not compute the claim identity"
+  printf 'fm-done-verdict-v1\nverified\n%s\n%s\nPR at the claimed head\n' \
+    "$hash" "$(date +%s)" > "$d/state/feat-cv.done-verdict"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cv)"
+  out=$(run_crew_state "$d" feat-cv)
+  # `done-unverified` contains `done`, so the negative assertion is what makes
+  # the positive one mean anything.
+  assert_not_contains "$out" "done-unverified" "an established claim must not be downgraded"
+  assert_contains "$out" "state: done" "an established claim must be reported as done"
+  pass "a claim with a matching verified verdict is reported as done"
 }
 
 # Regression for the PR #252 incident: the crew's own status log never got a
@@ -476,7 +503,7 @@ all CI checks passed - still monitoring until merged or closed
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cigreen)
-  assert_contains "$out" "state: done" "green ci-monitor run -> done"
+  assert_contains "$out" "state: done · " "green ci-monitor run -> done"
   assert_contains "$out" "source: run-step" "green ci-monitor -> run-step source"
   assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
   assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
@@ -492,7 +519,7 @@ test_top_level_ci_checks_green_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/feat-topcigreen)"
   FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-topcigreen)
-  assert_contains "$out" "state: done" "top-level ci with green log -> done"
+  assert_contains "$out" "state: done · " "top-level ci with green log -> done"
   assert_contains "$out" "source: run-step" "top-level ci green -> run-step source"
   assert_contains "$out" "checks green" "top-level ci green detail mentions checks green"
   assert_not_contains "$out" "state: working" "top-level ci green must not stay working"
@@ -508,7 +535,7 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
+  assert_contains "$out" "state: done · " "terminal no-checks ci-monitor run -> done"
   assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
   pass "terminal no-checks ci-monitor marker surfaces done"
 }
@@ -666,7 +693,7 @@ test_terminal_passed() {
   fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-d)"
   local out; out=$(run_crew_state "$d" feat-d)
-  assert_contains "$out" "state: done" "passed run -> done"
+  assert_contains "$out" "state: done · " "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
   pass "terminal passed run is authoritative"
 }
@@ -754,7 +781,7 @@ EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
+  assert_contains "$out" "state: done-unverified" "a legacy coarse-ready claim is not done"
   assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
   assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
   pass "coarse run does not probe another branch's ci log"
@@ -779,7 +806,7 @@ EOF
   local out; out=$(run_crew_state "$d" feat-g)
   assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
   assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
-  assert_contains "$out" "state: done" "falls back to the log verb"
+  assert_contains "$out" "state: done-unverified" "falls back to the log verb, downgraded because the claim is unverified"
   pass "another branch's run is ignored, falls back"
 }
 
@@ -1061,7 +1088,7 @@ test_dead_window_still_reports_terminal_run_step() {
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dead-done)"
   FM_FAKE_TMUX_MISSING=1   # the crew's window has closed
   local out; out=$(run_crew_state "$d" feat-dead-done)
-  assert_contains "$out" "state: done" "closed pane still reports terminal run-step done"
+  assert_contains "$out" "state: done-unverified" "closed pane still reports the terminal run-step, downgraded by its unverified claim"
   assert_contains "$out" "source: run-step" "closed pane does not mask the run-step"
   assert_not_contains "$out" "state: unknown" "closed pane with a run must never be unknown"
   pass "closed pane still reports a terminal run-step"
@@ -1555,6 +1582,7 @@ test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
+test_established_claim_is_reported_as_done
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done

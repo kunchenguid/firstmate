@@ -949,9 +949,16 @@ fm_pr_poll_retirement_recover_all() {
 # matching identity is a no-op; a different PR for the same task reaches its
 # role-routed supervision destination and replaces the marker when its first
 # outcome is published.
-fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number>
+# The marker records WHICH terminal outcome was already delivered for a PR
+# identity, not merely that one was. A v1 marker predates the second outcome and
+# means `merged`; v2 states the outcome on a sixth line. Recording it is what
+# lets a PR closed without merging be reported once, and still let a later
+# reopen-and-merge of that same PR report its own outcome instead of being
+# suppressed as a duplicate.
+fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number> [<outcome>]
   local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
-  local version provider host path number
+  local expected_outcome=${7:-merged}
+  local version provider host path number outcome
   fm_pr_private_file_valid "$marker" 600 "$device" || return 1
   exec 8< "$marker" || return 1
   IFS= read -r version <&8 || { exec 8<&-; return 1; }
@@ -959,46 +966,67 @@ fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path
   IFS= read -r host <&8 || { exec 8<&-; return 1; }
   IFS= read -r path <&8 || { exec 8<&-; return 1; }
   IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  outcome=merged
+  case "$version" in
+    fm-pr-poll-merge-notified-v1) ;;
+    fm-pr-poll-merge-notified-v2)
+      IFS= read -r outcome <&8 || { exec 8<&-; return 1; }
+      fm_pr_poll_outcome_valid "$outcome" || { exec 8<&-; return 1; }
+      ;;
+    *) exec 8<&-; return 1 ;;
+  esac
   if IFS= read -r _extra <&8; then
     exec 8<&-
     return 1
   fi
   exec 8<&-
-  [ "$version" = fm-pr-poll-merge-notified-v1 ] \
+  [ "$outcome" = "$expected_outcome" ] \
     && [ "$provider" = "$expected_provider" ] \
     && [ "$host" = "$expected_host" ] \
     && [ "$path" = "$expected_path" ] \
     && [ "$number" = "$expected_number" ]
 }
 
-fm_pr_poll_merge_already_notified() {  # <state> <id> <provider> <host> <path> <number>
-  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker state_device
+# The terminal outcomes bin/fm-pr-poll.sh may report. `merged` retires the poll;
+# `closed-unmerged` contradicts a done record and deliberately leaves the poll
+# armed, because a closed PR can still be reopened and merged.
+fm_pr_poll_outcome_valid() {  # <outcome>
+  case "${1:-}" in merged|closed-unmerged) return 0 ;; esac
+  return 1
+}
+
+fm_pr_poll_merge_already_notified() {  # <state> <id> <provider> <host> <path> <number> [<outcome>]
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 outcome=${7:-merged}
+  local marker state_device
   fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_outcome_valid "$outcome" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   marker="$state/$id.pr-poll-merge-notified"
   fm_pr_poll_merge_marker_matches "$marker" "$state_device" \
-    "$provider" "$host" "$path" "$number"
+    "$provider" "$host" "$path" "$number" "$outcome"
 }
 
-fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <number>
-  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker tmp state_device
+fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <number> [<outcome>]
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 outcome=${7:-merged}
+  local marker tmp state_device
   fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_outcome_valid "$outcome" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   marker="$state/$id.pr-poll-merge-notified"
   fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
   umask 077
   tmp=$(mktemp "$state/.fm-pr-poll-merge-notified.XXXXXX") || return 1
-  if ! printf '%s\n%s\n%s\n%s\n%s\n' \
-      fm-pr-poll-merge-notified-v1 "$provider" "$host" "$path" "$number" > "$tmp" \
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-merge-notified-v2 "$provider" "$host" "$path" "$number" "$outcome" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! fm_pr_poll_merge_marker_matches "$tmp" "$state_device" \
-      "$provider" "$host" "$path" "$number" \
+      "$provider" "$host" "$path" "$number" "$outcome" \
     || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
     || ! mv -f -- "$tmp" "$marker" \
     || ! fm_pr_poll_merge_marker_matches "$marker" "$state_device" \
-      "$provider" "$host" "$path" "$number"; then
+      "$provider" "$host" "$path" "$number" "$outcome"; then
     rm -f -- "$tmp"
     return 1
   fi

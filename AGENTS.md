@@ -108,7 +108,8 @@ state/               runtime records and signals; gitignored
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
-  <id>.pr-poll-merge-notified  canonical PR identity of the last merge outcome delivered for this task; bin/fm-pr-lib.sh owns the marker format and identity mechanics, while bin/fm-merge-outcome-lib.sh owns locked publication, duplicate suppression, and replacement
+  <id>.pr-poll-merge-notified  canonical PR identity and which terminal outcome was last delivered for this task; bin/fm-pr-lib.sh owns the marker format and identity mechanics, while bin/fm-merge-outcome-lib.sh owns locked publication, duplicate suppression, and replacement
+  <id>.done-verdict  what bin/fm-verify-done.sh established about this task's terminal claim, bound to the exact claim it judged; bin/fm-done-claim-lib.sh owns the format, and a new claim supersedes rather than inherits it
   branch-outcomes.jsonl .branch-outcomes-cursor .branch-outcomes-processed .<task>.branch-outcome-index .branch-outcome-index-ready  Pi supervision-branch durable outcome store, its read cursor, main's processed marker, bounded latest per-task status-coverage caches, and their recovery marker; bin/fm-branch-outcome.sh owns the formats
   branch-session/ .branch-session .branch-mirror-cursor  the branch's per-main-session conversations, the pointer to the current one, and the dialog-mirror cursor; extension-owned (docs/pi-supervision-branch.md)
   .branch-eligible-rows .branch-eligible-owner .main-eligible-rows  per-actor wake-row claims and branch-owner evidence; docs/watcher-continuity.md owns the acknowledgement contract
@@ -371,15 +372,16 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 
 ### PR ready, landing, and teardown
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
-Tell the captain the PR's full `https://...` URL copied from the worker's ready line or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
+A terminal `done:` claim names the exact commit, PR, branch, or report it is claiming, and only `bin/fm-verify-done.sh` decides whether that claim is true; `bin/fm-done-claim-lib.sh` owns the grammar and the durable verdict.
+A claim that has not been established is never done: `bin/fm-crew-state.sh` reports it as `done-unverified`, and teardown refuses it.
+Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from the terminal claim's `pr=` field or the task's `pr=` metadata, never assembled from memory - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's poll, which reports a merge and a close without merge alike.
+Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, copied verbatim from the claim's `pr=` field or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
 Tear down a ship task only after landing is confirmed.
-A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
+A teardown refusal for uncommitted or unlanded work, or for a claim that is unverified or contradicted, is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 

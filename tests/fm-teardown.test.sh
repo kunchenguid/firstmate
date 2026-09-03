@@ -39,6 +39,15 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
+# Also covers the terminal-claim gate: cleanup is the point of no return for a
+# `done:` claim, so a claim the verifier could not establish, or established as
+# false, must refuse alongside the landed-work gates above.
+#   (z1) no terminal claim at all                       -> ALLOW  (nothing asserted)
+#   (z2) legacy claim with no commit identity           -> REFUSE (unverified)
+#   (z3) claim naming a commit that is not the branch   -> REFUSE (contradicted)
+#   (z4) claim naming the branch tip                    -> ALLOW  (verified)
+#   (z5) contradicted claim + --force                   -> ALLOW  (escape hatch)
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -1396,14 +1405,14 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   wt_commit "$case_dir" "merged work"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
-  printf 'working: shipping\ndone: PR https://github.com/example/repo/pull/9 checks green\n' \
+  printf 'working: shipping\ndone: branch=fm/task-x1 head=%s - merged work\n' "$wt_head" \
     > "$case_dir/state/task-x1.status"
   set +e
   FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 0 "$rc" "mate-teardown-delivers: teardown should succeed: $(cat "$case_dir/stderr")"
-  grep -Eq '^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green pr=https://github.com/example/repo/pull/9 mode=local-only$' "$channel" \
+  grep -Eq "^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: branch=fm/task-x1 head=$wt_head - merged work mode=local-only\$" "$channel" \
     || fail "mate-teardown-delivers: the final ledger line did not reach the parent: $(cat "$channel" 2>/dev/null)"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "mate-teardown-delivers: teardown left the task record"
 
@@ -1420,7 +1429,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   wt_commit "$case_dir" "merged work"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
-  printf 'done: PR https://github.com/example/repo/pull/9 checks green\n' > "$case_dir/state/task-x1.status"
+  printf 'done: branch=fm/task-x1 head=%s - merged work\n' "$wt_head" > "$case_dir/state/task-x1.status"
   set +e
   FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -1446,7 +1455,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   rc=$?
   set -e
   expect_code 0 "$rc" "mate-teardown-refuses: rerun after repair should succeed: $(cat "$case_dir/stderr2")"
-  grep -Eq '^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green' "$channel" \
+  grep -Eq "^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: branch=fm/task-x1 head=$wt_head - merged work" "$channel" \
     || fail "mate-teardown-refuses: the rerun did not deliver the final line"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "mate-teardown-refuses: rerun left the task record"
   pass "a secondmate home's teardown delivers the child's final line or refuses until it can"
@@ -2738,6 +2747,111 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# --- terminal-claim gate ----------------------------------------------------
+# A claim is the worker's assertion; cleanup destroys the evidence that could
+# ever check it. These pin that the gate refuses what it could not establish and
+# what it established as false, and lets an established claim through.
+
+# Build a landed local-only case whose status log carries <claim>. Echoes the
+# case dir. The caller reads the branch head back with `git rev-parse` rather
+# than through a global: this runs inside a command substitution, so anything it
+# sets in its own shell dies with that subshell (tests/lib.sh documents the same
+# trap for fm_test_tmproot).
+make_claim_case() {  # <name> <claim-line-or-empty>
+  local name=$1 claim=$2 case_dir head
+  case_dir=$(make_case "$name")
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "claim work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$head"
+  if [ -n "$claim" ]; then
+    printf '%s\n' "$claim" > "$case_dir/state/task-x1.status"
+  else
+    : > "$case_dir/state/task-x1.status"
+  fi
+  printf '%s\n' "$case_dir"
+}
+
+test_no_terminal_claim_is_unaffected_by_the_gate() {
+  local case_dir rc=0
+  case_dir=$(make_claim_case claim-none "")
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a task that never claimed done must not be gated: $(cat "$case_dir/stderr")"
+  pass "a task with no terminal claim is unaffected by the claim gate"
+}
+
+test_legacy_claim_without_commit_identity_refuses() {
+  local case_dir rc=0
+  case_dir=$(make_claim_case claim-legacy "done: ready in branch fm/task-x1")
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a legacy claim with no commit identity was torn down as done"
+  assert_grep "could not be established" "$case_dir/stderr" \
+    "the refusal did not say the claim could not be established"
+  assert_grep "legacy claim, no commit identity" "$case_dir/stderr" \
+    "the refusal did not name the missing commit identity"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "the claim refusal erased the durable task record"
+  pass "a legacy claim with no commit identity refuses cleanup"
+}
+
+test_claim_naming_the_wrong_commit_refuses() {
+  local case_dir rc=0 other
+  case_dir=$(make_claim_case claim-wrong "placeholder")
+  other=$(git -C "$case_dir/wt" rev-parse 'HEAD~1')
+  printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$other" \
+    > "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a claim naming a commit that is not the branch tip was torn down as done"
+  assert_grep "contradicted" "$case_dir/stderr" \
+    "the refusal did not report the claim as contradicted"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "the contradiction refusal erased the durable task record"
+  pass "a claim naming the wrong commit refuses cleanup"
+}
+
+test_established_claim_allows_teardown() {
+  local case_dir rc=0 head
+  case_dir=$(make_claim_case claim-good "placeholder")
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$head" \
+    > "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "an established claim was refused: $(cat "$case_dir/stderr")"
+  pass "a claim naming the branch tip is established and allows cleanup"
+}
+
+test_force_overrides_a_contradicted_claim() {
+  local case_dir rc=0 other
+  case_dir=$(make_claim_case claim-force "placeholder")
+  other=$(git -C "$case_dir/wt" rev-parse 'HEAD~1')
+  printf 'done: branch=fm/task-x1 head=%s - shipped\n' "$other" \
+    > "$case_dir/state/task-x1.status"
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "--force did not override a contradicted claim: $(cat "$case_dir/stderr")"
+  pass "--force remains the explicit escape from a contradicted claim"
+}
+
+
+test_no_terminal_claim_is_unaffected_by_the_gate
+test_legacy_claim_without_commit_identity_refuses
+test_claim_naming_the_wrong_commit_refuses
+test_established_claim_allows_teardown
+test_force_overrides_a_contradicted_claim
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

@@ -126,6 +126,37 @@ status_is_terminal_verb() {
   esac
 }
 
+# The complete set of status-line verbs this fleet recognises. Three of them are
+# overridable constants, so the set is assembled from those owners rather than
+# re-listed as literals. `done-unverified` is deliberately absent: it is a
+# current-STATE token bin/fm-crew-state.sh reports, never a verb anything writes
+# into a status file.
+status_line_verb_is_known() {  # <status-line>
+  local verb
+  verb=$(status_line_verb "${1:-}")
+  case "$verb" in
+    working|needs-decision|blocked|done|failed|note) return 0 ;;
+  esac
+  [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ] && return 0
+  [ "$verb" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ] && return 0
+  [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ] && return 0
+  return 1
+}
+
+# 0 when a non-blank status line carries no recognised verb at all - a worker
+# writing prose ("Migration syntax: OK", "- ruff check: all passed") into the
+# status file. Such a line wakes firstmate and then classifies as nothing, so it
+# used to be absorbed silently and its words were lost. It is surfaced instead:
+# losing a worker's words is worse than showing an unclassifiable line, and this
+# never rejects the line or asks the worker to rewrite it.
+status_line_is_unrecognized() {  # <status-line>
+  case "${1:-}" in
+    *[![:space:]]*) ;;
+    *) return 1 ;;
+  esac
+  ! status_line_verb_is_known "$1"
+}
+
 # 0 if the given (last) status line matches a captain-relevant verb.
 # Verb-aware by default: terminal verbs always match; nonterminal progress verbs
 # (working, resolved, captain-held) and paused never match from free-text prose;
@@ -1418,12 +1449,14 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   return "$rc"
 }
 
-# 0 when a status line is an informational `note:` or a reserved-key
-# pending-reply resolution. Those lines never fold into OPEN DECISIONS, so the
-# drain's unread-status surface is their only guaranteed presentation.
+# 0 when a status line is an informational `note:`, a reserved-key pending-reply
+# resolution, or a line carrying no recognised verb at all. None of these fold
+# into OPEN DECISIONS, so the drain's unread-status surface is their only
+# guaranteed presentation.
 status_line_is_unread_surface() {  # <status-line>
   local line=$1 verb key note resolve held prefix
   [ -n "$line" ] || return 1
+  status_line_is_unrecognized "$line" && return 0
   verb=$(status_line_verb "$line")
   [ "$verb" = note ] && return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}

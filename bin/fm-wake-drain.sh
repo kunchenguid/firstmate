@@ -345,14 +345,26 @@ EOF
   fi
 }
 
-# Print still-unread informational status lines (note: answers and pending-reply
-# resolutions) that the OPEN DECISIONS fold never carries. Uses the same
-# cursor-backed unread span as the annotation path, and runs on every drain -
-# including the empty-queue fast path - so a buried answer cannot be swallowed
-# when the fold later advances the cursor. Prints nothing when nothing is
-# unread, which is the common case.
+# How many unrecognised lines one drain prints before it starts counting them
+# instead. Deliberately bounded where `note:` lines are not: a note is a
+# deliberate captain-facing answer, while unrecognised prose is a worker writing
+# into the wrong channel, and one chatty worker must not be able to bury the
+# rest of the drain. The count still says how many were held back, so nothing
+# disappears silently.
+UNRECOGNISED_STATUS_MAX=${FM_DRAIN_UNRECOGNISED_MAX:-10}
+case "$UNRECOGNISED_STATUS_MAX" in ''|*[!0-9]*) UNRECOGNISED_STATUS_MAX=10 ;; esac
+
+# Print still-unread informational status lines (note: answers, pending-reply
+# resolutions, and lines carrying no recognised verb) that the OPEN DECISIONS
+# fold never carries. Uses the same cursor-backed unread span as the annotation
+# path, and runs on every drain - including the empty-queue fast path - so a
+# buried answer cannot be swallowed when the fold later advances the cursor.
+# A line with no recognised verb is marked UNRECOGNISED rather than shown as an
+# ordinary status line, because it woke firstmate and classified as nothing: the
+# mark is what stops it being read as a state it never claimed. Prints nothing
+# when nothing is unread, which is the common case.
 print_unread_status_section() {
-  local snapshot=${1:-} unread task line shown=0
+  local snapshot=${1:-} unread task line shown=0 unrecognised=0 omitted=0
 
   if [ -n "$snapshot" ]; then
     unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 1
@@ -364,7 +376,17 @@ print_unread_status_section() {
   while IFS=$(printf '\t') read -r task line; do
     [ -n "$task" ] || continue
     [ -n "$line" ] || continue
-    line="$task $line"
+    if status_line_is_unrecognized "$line"; then
+      unrecognised=$((unrecognised + 1))
+      if [ "$unrecognised" -gt "$UNRECOGNISED_STATUS_MAX" ]; then
+        omitted=$((omitted + 1))
+        continue
+      fi
+      fm_cap_line_var "$line" 220
+      line="$task UNRECOGNISED (matches no status verb): $FM_LINE_CAP_LINE"
+    else
+      line="$task $line"
+    fi
     if [ "$shown" -eq 0 ]; then
       printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
     fi
@@ -374,6 +396,10 @@ print_unread_status_section() {
 $unread
 EOF
 
+  if [ "$omitted" -gt 0 ]; then
+    printf 'UNREAD STATUS: %d more unrecognised line(s) omitted; read them in the task status log.\n' \
+      "$omitted" || return 1
+  fi
   [ "$shown" -gt 0 ] || return 0
 }
 

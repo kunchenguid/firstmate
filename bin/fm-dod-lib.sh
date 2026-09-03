@@ -16,8 +16,35 @@
 # scaffolds those two `# Task` subsections; bin/fm-spawn.sh and bin/fm-promote.sh
 # refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders through the helpers
 # below. Other mentions of `--intent` point here rather than restating the rule.
+# The terminal-claim grammar every block below hands the worker is owned by
+# bin/fm-done-claim-lib.sh, which also parses it and owns the durable verdict
+# record; this file renders that owner's template rather than restating it, so
+# the shape a worker is told to write and the shape firstmate verifies cannot
+# drift apart.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+
+# shellcheck source=bin/fm-done-claim-lib.sh
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-done-claim-lib.sh"
+
+# The paragraph every ship mode appends to its terminal instruction. Stated once
+# here because all three modes owe the worker the same two facts: the claim is
+# checked by a machine, and an unprovable claim is not a pass. The static prose
+# lives in a quoted heredoc so its backticks need no escaping; only the claim
+# template itself is interpolated, from its owner.
+fm_dod_claim_rule() {  # <mode> <task-id>
+  cat <<'EOF'
+Append the terminal claim in exactly this shape, then stop:
+
+EOF
+  printf '    %s\n\n' "$(fm_done_claim_template "$1" "$2")"
+  cat <<'EOF'
+`head=` is the full 40-character commit you are claiming - read it from the thing you are claiming, never from memory of what you pushed.
+Firstmate runs `bin/fm-verify-done.sh` on that claim and establishes it against the forge, git, and the validation run's own record before anything treats this task as done.
+A claim it cannot establish stays unverified, and a claim it establishes as false is reported as contradicted; neither is a pass, and cleanup refuses both.
+EOF
+}
 
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.
@@ -169,7 +196,9 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`.
+$(fm_dod_claim_rule direct-PR "$id")
+Read the PR's own head with \`gh-axi pr view {url}\` so the commit you claim is the commit the PR carries.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -180,7 +209,8 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
+When it is implemented and committed, read your branch tip with \`git rev-parse HEAD\`.
+$(fm_dod_claim_rule local-only "$id")
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
@@ -207,7 +237,10 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), you are finished.
+$(fm_dod_claim_rule no-mistakes "$id")
+Read \`head=\` from the PR itself with \`gh-axi pr view {url}\`, not from your last local commit: the pipeline pushes its own fix commits, so the commit you pushed and the commit the PR ships are routinely different.
+Firstmate also compares that commit against the commit the pipeline actually validated. They diverge whenever anything lands after validation, and a claim that hides that divergence is contradicted, not done - so if they differ, say so and let firstmate decide rather than picking one.
 EOF
       ;;
     *)

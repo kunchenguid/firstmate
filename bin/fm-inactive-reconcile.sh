@@ -330,7 +330,15 @@ home_secondmate_id() {
 
 report_to_parent() { # <task> <state> <outcome-key> <fingerprint> <pr>
   local task=$1 state=$2 outcome_key=$3 fingerprint=$4 pr=$5 line
-  line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
+  # The parent channel is a status stream, so this line must lead with a verb the
+  # parent's classifier knows. A terminal state that is not one - an unverified
+  # claim - is a blocker for the parent rather than a completion, and names its
+  # real state in the note instead of being reported as done.
+  if status_line_verb_is_known "$state:"; then
+    line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
+  else
+    line="blocked [key=$outcome_key]: inactive terminal child=$task state=$state fingerprint=$fingerprint"
+  fi
   [ -z "$pr" ] || line="$line pr=$pr"
   fm_parent_channel_report "$FM_HOME" "$STATE" "$line"
 }
@@ -491,8 +499,13 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   if [ -n "$self" ]; then
     case "$(status_line_verb "$last")" in done|failed) return 0 ;; esac
   fi
+  # bin/fm-crew-state.sh reports an unverified terminal CLAIM as
+  # `done-unverified`, and that is still a terminal outcome nobody has
+  # delivered - the whole reason this backstop exists. Matching only `done`
+  # would silently drop exactly the outcomes that most need a supervisor.
   case "$state_line" in
     'state: done '*) state='done' ;;
+    'state: done-unverified '*) state='done-unverified' ;;
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac

@@ -35,7 +35,10 @@
 #     prose-deferred rows out of default views.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     Local current_state is parsed from bin/fm-crew-state.sh <id> and preserves
-#     state, source, detail, and raw line separately. Remote secondmate rows use
+#     state, source, detail, and raw line separately.
+#     `done-unverified` is that reader's token for a task whose terminal claim
+#     has not been established (bin/fm-verify-done.sh); it counts as terminal
+#     wherever a terminal state matters, and never as done. Remote secondmate rows use
 #     an explicit unknown value because their endpoint liveness belongs to
 #     supervision rather than this snapshot path.
 #     paths.status_log.last_event is historical wake-event data only, never
@@ -524,6 +527,10 @@ task_json_lines() {
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
     #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
     #     report POINTER, never as a reopened pending decision.
+    # `done-unverified` clears alongside `done`: the crew TERMINATED either way,
+    # and whether its claim is true is a separate question this fold does not
+    # answer. Treating it as still-running would resurface every stale decision
+    # a finished task left behind.
     # Secondmates are excluded from lifecycle clearing: they are persistent and
     # multiplex many concerns onto one stream, so activity on one concern must
     # never clear another concern's keyed decision. A parked/blocked state, or a
@@ -533,7 +540,8 @@ task_json_lines() {
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+         || { [ "$current_state" = "done" ] || [ "$current_state" = "done-unverified" ] \
+              || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
@@ -728,7 +736,9 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $owned_in_flight[] as $work
          | $tasks[]
          | select(.kind != "secondmate")
-         | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
+         | select(.id == $work.id and (.current_state.state == "done"
+                                       or .current_state.state == "done-unverified"
+                                       or .current_state.state == "failed"))
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
           {kind:"missing_backlog",ids:[],reason:"missing structured backlog"}
