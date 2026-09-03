@@ -589,6 +589,47 @@ test_stalled_transition_holder_cannot_hide_failure() {
   pass "auto-arm: stalled transition holders are fenced before durable failure publication"
 }
 
+test_fenced_arming_transition_rebases_failure() {
+  local dir state ready marker holder baseline rc i
+  dir=$(make_primary_dir "$TMP_ROOT/fenced-arming-transition")
+  state="$dir/state"
+  ready="$state/fenced-arming-ready"
+  marker="$state/.claude-autoarm-failure-notified"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    fm_autoarm_transition_acquire "$state" || exit
+    pid=${BASHPID:-$$}
+    identity=$(fm_pid_identity "$pid") || exit
+    printf "epoch=1 owner_pid=%s outcome=arming updated_at=%s\n%s\n" \
+      "$pid" "$(date +%s)" "$identity" > "$state/.claude-autoarm-epoch"
+    : > "$2"
+    kill -STOP "$pid"
+  ' _ "$dir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "arming transition holder did not publish its claim"
+  baseline="1:$holder:arming"
+
+  FM_AUTOARM_TRANSITION_GRACE=1 bash -c '
+    . "$1"
+    fm_autoarm_claim_failure_commit "$2" absent failed "$3"
+  ' _ "$dir/bin/fm-wake-lib.sh" "$state" "$marker"
+  rc=$?
+  kill -CONT "$holder" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 0 "$rc" "a fenced nonterminal claim must be rebased into a durable failure"
+  assert_present "$marker" "the fenced nonterminal claim did not leave a failure marker"
+  [ "$(failure_epoch_outcome "$dir" "$baseline")" = failed ] \
+    || fail "the fenced nonterminal claim did not leave a failed epoch"
+  [ "$(failure_epoch_field "$dir" baseline "$baseline")" = "$baseline" ] \
+    || fail "the failed epoch did not rebase onto the fenced arming claim"
+  pass "auto-arm: fenced nonterminal claims are rebased into durable failures"
+}
+
 test_fresh_prior_terminal_epoch_cannot_hide_current_failure() {
   local dir out status holder prior_gen
   dir=$(make_primary_dir "$TMP_ROOT/fresh-prior-terminal-failure")
@@ -1587,6 +1628,7 @@ test_failed_close_rewakes_with_failure_banner
 test_claim_path_failure_records_failed_epoch_and_marker
 test_live_claim_mutex_holder_cannot_hide_failure
 test_stalled_transition_holder_cannot_hide_failure
+test_fenced_arming_transition_rebases_failure
 test_fresh_prior_terminal_epoch_cannot_hide_current_failure
 test_concurrent_claim_failures_publish_one_notice_atomically
 test_stale_failure_publisher_cannot_emit_after_success

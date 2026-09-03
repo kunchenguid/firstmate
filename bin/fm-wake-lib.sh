@@ -1138,11 +1138,13 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace>
     return 1
   }
   fm_lock_release "$steal"
+  FM_AUTOARM_TRANSITION_REVOKED_PID=$pid
   return 0
 }
 
 fm_autoarm_transition_acquire() {  # <state-dir>
   local state=$1 grace=${FM_AUTOARM_TRANSITION_GRACE:-2}
+  FM_AUTOARM_TRANSITION_REVOKED_PID=
   case "$grace" in ''|*[!0-9]*|0) grace=2 ;; esac
   while ! fm_autoarm_transition_try_acquire "$state"; do
     if [ "$(fm_path_age "$state/.claude-autoarm-transition.lock")" -ge "$grace" ]; then
@@ -1472,7 +1474,7 @@ fm_autoarm_failure_ledger_read() {  # <state-dir> [record-path]
 }
 
 fm_autoarm_failure_ledger_current() {  # <state-dir>
-  local state=$1 current final failure_dir failure rc=1
+  local state=$1 current final failure_dir failure legacy_updated current_updated rc=1
   current=$(fm_autoarm_claim_signature "$state")
   failure=$(fm_autoarm_failure_record_path "$state" "$current") || return 1
   failure_dir=${failure%/*}
@@ -1487,8 +1489,19 @@ fm_autoarm_failure_ledger_current() {  # <state-dir>
     fi
   fi
   if [ "$rc" -ne 0 ] && fm_autoarm_failure_ledger_read "$state"; then
-    if [ "$FM_AUTOARM_FAILURE_BASELINE" = legacy ] \
-      || [ "$current" = "$FM_AUTOARM_FAILURE_BASELINE" ]; then
+    if [ "$FM_AUTOARM_FAILURE_BASELINE" = legacy ]; then
+      rc=0
+      if fm_autoarm_ledger_read "$state" && [ "$FM_AUTOARM_OUTCOME" != arming ]; then
+        legacy_updated=$(_fm_autoarm_epoch_field \
+          "$state/.claude-autoarm-failure-epoch" updated_at 2>/dev/null || true)
+        current_updated=$(_fm_autoarm_epoch_field \
+          "$state/.claude-autoarm-epoch" updated_at 2>/dev/null || true)
+        case "$legacy_updated:$current_updated" in
+          *[!0-9:]*|:*|*:) ;;
+          *) [ "$current_updated" -le "$legacy_updated" ] || rc=1 ;;
+        esac
+      fi
+    elif [ "$current" = "$FM_AUTOARM_FAILURE_BASELINE" ]; then
       rc=0
     fi
   fi
@@ -1519,10 +1532,8 @@ fm_autoarm_failure_notice_claim() {  # <marker-file> <claim-id>
 }
 
 fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
-  local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition failure_dir failure pid failure_epoch tmp current marker_rc
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition failure_dir failure pid failure_epoch tmp current current_owner current_outcome marker_rc
   transition="$state/.claude-autoarm-transition.lock"
-  failure=$(fm_autoarm_failure_record_path "$state" "$baseline") || return 1
-  failure_dir=${failure%/*}
   case "$outcome" in
     failed|failed-suppressed) ;;
     *) return 1 ;;
@@ -1531,9 +1542,26 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
   fm_autoarm_transition_acquire "$state" || return 1
   current=$(fm_autoarm_claim_signature "$state")
   if [ "$current" != "$baseline" ]; then
-    fm_lock_release "$transition"
-    return 2
+    if fm_autoarm_ledger_read "$state"; then
+      current_owner=$FM_AUTOARM_OWNER
+      current_outcome=$FM_AUTOARM_OUTCOME
+      if [ "$current_outcome" != arming ]; then
+        fm_lock_release "$transition"
+        return 2
+      fi
+      if [ "$current_owner" != "${FM_AUTOARM_TRANSITION_REVOKED_PID:-}" ] \
+        && fm_autoarm_claim_open "$state"; then
+        fm_lock_release "$transition"
+        return 2
+      fi
+    fi
+    baseline=$current
   fi
+  failure=$(fm_autoarm_failure_record_path "$state" "$baseline") || {
+    fm_lock_release "$transition"
+    return 1
+  }
+  failure_dir=${failure%/*}
   if [ -e "$failure_dir" ] || [ -L "$failure_dir" ]; then
     if [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; then
       fm_lock_release "$transition"
