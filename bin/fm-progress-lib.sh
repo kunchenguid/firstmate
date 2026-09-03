@@ -53,7 +53,10 @@
 #                           interval between two observations is attributed to
 #                           the phase seen at the earlier one
 #   label=<suffix>          the last label suffix applied to the worker's Herdr
-#                           workspace, empty when none was applied
+#                           workspace, empty when none was applied; the label
+#                           refresh writes only this and the two fields below,
+#                           merged into the record as it is after its Herdr
+#                           call, never the phase or clock it loaded before
 #   label_attempt=<epoch>   when the last failed label refresh was attempted
 #                           (0 when none is pending), so a failing rename
 #                           retries on the cadence rather than every poll
@@ -900,9 +903,13 @@ fm_progress_read() {
 # silent while that reason persists, warns again after the reason changes or a
 # later success, and retries on the cadence; a hand-changed label is only
 # re-read on that cadence, never renamed, until its journaled base returns.
-# Never touches task or endpoint records.
+# Persists only the label bookkeeping it changed, merged into the record as it
+# is on disk after the Herdr call: that call is where a pass can stall while a
+# replacement tick publishes a fresher observation, and the phase, clock, and
+# accumulators loaded before the stall are never written back. Never touches
+# task or endpoint records.
 fm_progress_label_refresh() {
-  local state=$1 id=$2 suffix=$3 now=${4:-} meta backend rc reason
+  local state=$1 id=$2 suffix=$3 now=${4:-} meta backend rc reason label attempt warned
   meta="$state/$id.meta"
   [ -f "$meta" ] || return 0
   backend=$(_fm_progress_meta_get "$meta" backend)
@@ -924,20 +931,30 @@ fm_progress_label_refresh() {
   rc=$?
   case "$rc" in
     0)
-      FM_PROGRESS_REC_LABEL=$suffix
-      FM_PROGRESS_REC_LABEL_ATTEMPT=0
-      FM_PROGRESS_REC_LABEL_WARNED=
+      label=$suffix
+      attempt=0
+      warned=
       ;;
     2) return 0 ;;
     *)
       reason=${FM_BACKEND_HERDR_PROGRESS_REASON:-failed}
       if [ "$FM_PROGRESS_REC_LABEL_WARNED" != "$reason" ]; then
         echo "warning: herdr progress label for $id: ${FM_BACKEND_HERDR_PROGRESS_MESSAGE:-$reason} (this repeats only if the reason changes)" >&2
-        FM_PROGRESS_REC_LABEL_WARNED=$reason
       fi
-      FM_PROGRESS_REC_LABEL_ATTEMPT=$now
+      label=$FM_PROGRESS_REC_LABEL
+      attempt=$now
+      warned=$reason
       ;;
   esac
+  # Re-read the record the Herdr call may have outlived (a retired one stays
+  # retired) and publish this pass's label bookkeeping on top of it, so the
+  # observation a replacement tick wrote meanwhile stands and the record still
+  # names the suffix last applied, which the next cadence corrects if a
+  # replacement's rename was overtaken.
+  fm_progress_record_load "$state" "$id" || return 0
+  FM_PROGRESS_REC_LABEL=$label
+  FM_PROGRESS_REC_LABEL_ATTEMPT=$attempt
+  FM_PROGRESS_REC_LABEL_WARNED=$warned
   fm_progress_record_write "$state" "$id" || true
   return 0
 }
