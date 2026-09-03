@@ -411,13 +411,21 @@ test_eviction_check_is_gated_on_worker_liveness() {
 
 # The watcher is provisional until the dispatch is committed. A fresh dispatch
 # whose backlog commit fails rolls its record back and tells the operator to
-# re-run the spawn, so the watcher must go with the record: left behind, it
-# keeps running against a task nothing owns, and the prescribed re-run is
-# refused because the slot is still taken.
-test_fresh_dispatch_rollback_retires_the_eviction_check() {
-  local home fakebin endpoint case_dir project worktree id out status real_tasks_axi
-  read -r home fakebin endpoint case_dir <<<"$(make_world rollback)"
-  id="cl-rollback-x1"
+# close out the endpoint by hand and re-run the spawn, so the watcher must go
+# with the record: left behind, it keeps running against a task nothing owns,
+# and the prescribed re-run is refused because the slot is still taken. That
+# holds whether the rollback itself succeeds or is left incomplete by a busy
+# record it could not retire: the record is removed first either way, so no
+# live worker is meant to survive this path.
+# run_rollback_dispatch <variant> where <variant> is clean or busy-retire-fails.
+# Sets ROLLBACK_HOME and ROLLBACK_ID; captures the spawn output in RUN_OUT and
+# returns the spawn's exit status.
+ROLLBACK_HOME=
+ROLLBACK_ID=
+run_rollback_dispatch() {
+  local variant=$1 home fakebin endpoint case_dir project worktree id real_tasks_axi real_rm
+  read -r home fakebin endpoint case_dir <<<"$(make_world "rollback-$variant")"
+  id="cl-rollback-$variant"
   project="$case_dir/project"
   worktree="$case_dir/worktree"
   fm_test_spawn_brief "$home" "$id" "tiny brief"
@@ -435,22 +443,58 @@ fi
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$fakebin/tasks-axi"
-
-  status=0
+  if [ "$variant" = busy-retire-fails ]; then
+    real_rm=$(command -v rm)
+    cat > "$fakebin/rm" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in */$id.busy-gen) exit 1 ;; esac
+done
+exec "$real_rm" "\$@"
+SH
+    chmod +x "$fakebin/rm"
+  fi
+  ROLLBACK_HOME=$home
+  ROLLBACK_ID=$id
   FM_FAKE_PANE_PATH="$worktree" run_spawn "$home" "$fakebin" "$endpoint" \
-    "$id" "$project" --scout --harness claude-local --model local-coder || status=$?
+    "$id" "$project" --scout --harness claude-local --model local-coder
+}
+
+assert_rollback_retired_the_watcher() {  # <status> <expected-message-fragment>
+  local out
   out=$(cat "$RUN_OUT")
-  [ "$status" -ne 0 ] || fail "a dispatch whose backlog commit failed reported success: $out"
+  [ "$1" -ne 0 ] || fail "a dispatch whose backlog commit failed reported success: $out"
   case "$out" in
     *"could not be moved to In flight"*) : ;;
     *) fail "the fixture did not reach the backlog-commit rollback: $out" ;;
   esac
-  [ ! -e "$home/state/$id.meta" ] \
+  case "$out" in
+    *"$2"*) : ;;
+    *) fail "the fixture did not reach the expected rollback outcome ($2): $out" ;;
+  esac
+  [ ! -e "$ROLLBACK_HOME/state/$ROLLBACK_ID.meta" ] \
     || fail "the failed dispatch left its task record behind"
-  [ ! -e "$home/state/$id.check.sh" ] && [ ! -e "$home/state/$id.check-trust" ] \
+  [ ! -e "$ROLLBACK_HOME/state/$ROLLBACK_ID.check.sh" ] \
+    && [ ! -e "$ROLLBACK_HOME/state/$ROLLBACK_ID.check-trust" ] \
     || fail "the failed dispatch left its eviction watcher registered with no record behind it"
+}
 
+test_fresh_dispatch_rollback_retires_the_eviction_check() {
+  local status
+  status=0
+  run_rollback_dispatch clean || status=$?
+  assert_rollback_retired_the_watcher "$status" "its record was removed"
   pass "a fresh dispatch whose backlog commit fails retires its eviction watcher with the record"
+}
+
+test_incomplete_dispatch_rollback_still_retires_the_eviction_check() {
+  local status
+  status=0
+  run_rollback_dispatch busy-retire-fails || status=$?
+  assert_rollback_retired_the_watcher "$status" "failed-dispatch cleanup is incomplete"
+  [ -e "$ROLLBACK_HOME/state/$ROLLBACK_ID.busy-gen" ] \
+    || fail "fixture: the busy generation was retired, so the incomplete-rollback path was not exercised"
+  pass "a fresh dispatch whose rollback is left incomplete still retires its eviction watcher"
 }
 
 test_home_default_cannot_select_it
@@ -463,3 +507,4 @@ test_spawn_arms_an_executable_eviction_check
 test_raw_claude_local_command_is_refused
 test_eviction_check_is_gated_on_worker_liveness
 test_fresh_dispatch_rollback_retires_the_eviction_check
+test_incomplete_dispatch_rollback_still_retires_the_eviction_check
