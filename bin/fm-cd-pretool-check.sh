@@ -16,8 +16,8 @@
 #   <PreToolUse JSON on stdin> | bin/fm-cd-pretool-check.sh
 #   bin/fm-cd-pretool-check.sh --command '<cmd>'
 #
-# Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude, Codex, and Cursor. CLI mode is used by OpenCode and Pi after their
+# Stdin mode extracts .toolArgs.command for Copilot, .toolInput.command for
+# Grok, or .tool_input.command for Claude, Codex, and Cursor. CLI mode is used by OpenCode and Pi after their
 # adapters extract the exact command string. --cursor selects Cursor's own deny
 # rendering and marks this invocation as the Cursor registration rather than the
 # Claude-settings duplicate Cursor also loads.
@@ -49,8 +49,8 @@ usage() {
   cat <<'EOF'
 Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor]
 
-With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
+With no --command, reads a PreToolUse-style JSON payload on stdin (Copilot
+toolArgs.command, Grok toolInput.command, or Claude/Codex tool_input.command).
 Fires only in the real primary firstmate checkout; it is a silent no-op in a
 crewmate/scout task worktree or any non-firstmate repo.
 Exits 0 to allow and 2 to deny a persistent top-level cwd change.
@@ -107,7 +107,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolArgs.command // .toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
 fi
 
 [ -n "$CMD" ] || exit 0

@@ -180,12 +180,20 @@ Applicability turns on one question: does the harness expose built-in delegation
 
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
+| GitHub Copilot CLI | Built-in `task` and related agent tools | Scoped native `preToolUse` guard wired; the current `task` tool and future delegation-shaped names reach the shared classifier. |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | omp | present, per bundled material | Not wired and unverified. omp ships a built-in task delegation tool: its bundled docs list `tools/task.md` and the captain-level `task.maxConcurrency` setting governs it. No Firstmate delegation seatbelt is wired for it yet, and its status stays unverified until a live tool enumeration is recorded the way the Codex row was. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
+
+### GitHub Copilot CLI
+
+Copilot exposes built-in subagent tools, including the current `task` tool.
+Tracked `.github/hooks/fm-primary.json` matches every `preToolUse` event and forwards the native camelCase `toolName` field to the shared classifier.
+The classifier remains scoped to a genuine Firstmate primary, so Copilot workers in linked task worktrees may use their own subagents while a primary must dispatch through Firstmate's durable path.
+`tests/fm-copilot-harness.test.sh` and `tests/fm-subagent-pretool-check.test.sh` cover the registration and payload transport.
 
 ### Codex, verified not applicable
 

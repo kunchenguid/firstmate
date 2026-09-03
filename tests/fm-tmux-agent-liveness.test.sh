@@ -52,6 +52,7 @@ export PATH
 # and is killed on macOS arm64. The symlink name is what the kernel records as
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
+ln -s "$SLEEP_BIN" "$LAB/bin/copilot"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # omp (Oh My Pi) is a single binary whose live process name is the bare word
@@ -159,6 +160,16 @@ new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+new_window copilot "$LAB/bin/copilot" 900
+wait_for_state "$SESSION:copilot" alive \
+  || fail "a running Copilot foreground process must classify alive"
+pass "tmux liveness: a Copilot foreground process classifies alive"
+
+new_window copilot-argv bash -c "exec -a copilot '$SLEEP_BIN' 900"
+wait_for_state "$SESSION:copilot-argv" alive \
+  || fail "a process carrying Copilot only in argv zero must classify alive"
+pass "tmux liveness: Copilot argv-zero identity survives a non-Copilot kernel command"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy

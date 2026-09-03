@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "./bin/fm-copilot-hook.sh session-start",
+        "cwd": ".",
+        "timeoutSec": 180
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "matcher": "bash",
+        "bash": "./bin/fm-copilot-hook.sh pretool-arm",
+        "cwd": ".",
+        "timeoutSec": 10
+      },
+      {
+        "type": "command",
+        "matcher": "bash",
+        "bash": "./bin/fm-copilot-hook.sh pretool-cd",
+        "cwd": ".",
+        "timeoutSec": 10
+      },
+      {
+        "type": "command",
+        "matcher": ".*",
+        "bash": "./bin/fm-copilot-hook.sh pretool-subagent",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "./bin/fm-copilot-hook.sh agent-stop",
+        "cwd": ".",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}
