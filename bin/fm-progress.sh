@@ -8,9 +8,10 @@
 # script is its executable surface.
 #
 # Usage:
-#   fm-progress.sh show <id> [--json]   derive the task's phase now, advance its
-#                                       observation record, print phase, step,
-#                                       elapsed, guess, and label suffix
+#   fm-progress.sh show <id> [--json]   derive the task's phase now and print
+#                                       phase, step, elapsed, guess, and label
+#                                       suffix; writes nothing, the tick alone
+#                                       advances the observation record
 #   fm-progress.sh tick                 one pass over every local task, which
 #                                       the watcher launches as a detached
 #                                       single-flight child each poll: bounded

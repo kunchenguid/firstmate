@@ -51,8 +51,9 @@
 #     progress is the display-only phase and remaining-time guess owned by
 #     bin/fm-progress-lib.sh: {phase,step,since,elapsed_seconds,
 #     estimate:{short,text,low_minutes,high_minutes,basis,samples,overrun},
-#     label_suffix}. Reading it advances the task's observation record
-#     (state/.progress-<id>); phase "unknown" with estimate text "unknown" is
+#     label_suffix}. Reading it never writes the task's observation record
+#     (state/.progress-<id>, advanced by the watcher tick alone); phase
+#     "unknown" with estimate text "unknown" is
 #     the honest answer when the current state could not be read, and remote
 #     secondmate rows carry that same unknown shape without any read.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
@@ -308,7 +309,8 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
 # The display-only progress phase and guess for one local task, from the
 # crew-state line this snapshot already read (never a second read) and the
 # captain-hold role of this home's backlog row. bin/fm-progress-lib.sh owns the
-# derivation and advances the task's observation record as a side effect;
+# derivation and writes nothing here (the watcher tick alone advances the
+# task's observation record, so a snapshot can never overwrite what it wrote);
 # remote secondmate rows and secondmates carry the unknown shape unread.
 progress_unknown_json() {
   jq -n '{phase:"unknown",step:null,since:null,elapsed_seconds:null,

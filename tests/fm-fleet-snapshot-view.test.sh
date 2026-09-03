@@ -185,7 +185,7 @@ test_fixture_snapshot_json() {
     and (.tasks[] | select(.id == "cmux-task") | .progress
       | .phase == "unknown" and .estimate.text == "unknown" and .label_suffix == " · unknown")
   ' >/dev/null || fail "progress phase and guess projection wrong: $(printf '%s' "$out" | jq -c '[.tasks[] | {id, progress}]')"
-  [ -f "$home/state/.progress-ship-task" ] || fail "reading progress must publish the ship task's observation record"
+  [ ! -e "$home/state/.progress-ship-task" ] || fail "a snapshot read derives progress in memory and must never write the observation record (the watcher tick alone advances it): $(cat "$home/state/.progress-ship-task")"
   [ ! -e "$home/state/.progress-secondmate-task" ] || fail "a secondmate must get no observation record"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "scout-task")

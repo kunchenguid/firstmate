@@ -36,8 +36,10 @@
 # predicate onto that phase. It never re-reads raw run logs.
 #
 # OBSERVATION RECORD, state/.progress-<id>, key=value lines, atomically
-# replaced on every observation and removed by teardown through
-# `fm-progress.sh record`:
+# replaced by the watcher tick (fm_progress_tick, its only writer) and removed
+# by teardown through `fm-progress.sh record`. A fleet snapshot, /bearings, or
+# `show` read advances it in memory only and never writes it, so two observers
+# can never overwrite each other's record:
 #   v=1
 #   observed=<epoch>        when the current accumulators were last advanced
 #   phase=<phase>           the phase observed then
@@ -60,12 +62,10 @@
 #                           once and warns again only after it changes or a
 #                           later success
 #   tick_at=<epoch>         when the watcher tick last re-read this task's
-#                           phase (0 before the first tick); written only by
-#                           fm_progress_tick, which keys its
-#                           FM_PROGRESS_REFRESH_SECS cadence on this field
-#                           alone because observed= is advanced by every
-#                           read, the fleet snapshot's included, and a
-#                           snapshot read must never postpone a label refresh
+#                           phase (0 before the first tick); fm_progress_tick
+#                           keys its FM_PROGRESS_REFRESH_SECS cadence on this
+#                           field alone, so no other read can postpone a
+#                           label refresh
 #   spawn_gen=<gen>         the meta's spawn_gen this record belongs to; a
 #                           record whose spawn_gen differs from the meta's
 #                           current one (or has none while the meta has one)
@@ -459,9 +459,13 @@ _fm_progress_rec_add() {  # <key> <secs>
 }
 
 # fm_progress_observe <state-dir> <id> <meta> <phase> <step> <fix-round> [now]
-# Advance the record: charge the interval since the last observation to the
-# phase seen then, open a new phase when it changed, and persist. Leaves
-# FM_PROGRESS_REC_* describing the record as written.
+# Advance the record in memory: charge the interval since the last observation
+# to the phase seen then and open a new phase when it changed. Nothing is
+# written here: fm_progress_tick, the record's only writer, persists
+# FM_PROGRESS_REC_* after its read, and every other reader (the fleet snapshot,
+# /bearings, `show`) leaves the file untouched, so concurrent observers can
+# never overwrite each other's record. Leaves FM_PROGRESS_REC_* describing the
+# record as advanced.
 fm_progress_observe() {
   local state=$1 id=$2 meta=$3 phase=$4 step=$5 round=$6 now=${7:-} prev delta
   [ -n "$now" ] || now=$(fm_progress_now)
@@ -481,8 +485,7 @@ fm_progress_observe() {
     # last known phase keeps its clock, step, and round count.
     _fm_progress_rec_add other "$delta"
     FM_PROGRESS_REC_OBSERVED=$now
-    fm_progress_record_write "$state" "$id"
-    return
+    return 0
   fi
   _fm_progress_rec_add "$(fm_progress_phase_key "$prev")" "$delta"
   if [ "$phase" != "$prev" ]; then
@@ -496,7 +499,6 @@ fm_progress_observe() {
   FM_PROGRESS_REC_OBSERVED=$now
   FM_PROGRESS_REC_PHASE=$phase
   FM_PROGRESS_REC_STEP=$step
-  fm_progress_record_write "$state" "$id"
 }
 
 # --- history ----------------------------------------------------------------
@@ -805,13 +807,15 @@ fm_progress_captain_held() {  # <data-dir> <id>
 # fm_progress_read <state-dir> <data-dir> <id> [crew-state-line] [captain-held 0|1|""] [now]
 # Derives the phase (reading the crew's current state through FM_CREW_STATE_BIN
 # when no line is supplied and the captain-hold predicate when no flag is
-# supplied), advances the observation record, and sets:
+# supplied), advances the observation record in memory without writing it, and
+# sets:
 #   FM_PROGRESS_PHASE FM_PROGRESS_STEP FM_PROGRESS_SINCE FM_PROGRESS_ELAPSED
 #   FM_PROGRESS_ESTIMATE (raw record or none) FM_PROGRESS_SHORT FM_PROGRESS_TEXT
 #   FM_PROGRESS_LABEL_SUFFIX FM_PROGRESS_KIND FM_PROGRESS_MODE
 #   FM_PROGRESS_LOW FM_PROGRESS_HIGH (total minutes, empty without an estimate)
 #   FM_PROGRESS_BASIS (history|default|mixed) FM_PROGRESS_SAMPLES FM_PROGRESS_OVERRUN
-# Returns 1 when the task has no record or is a secondmate (nothing is written).
+# Returns 1 when the task has no record or is a secondmate. Never writes the
+# observation record: fm_progress_tick persists what this read derived.
 # shellcheck disable=SC2034  # FM_PROGRESS_* are this function's outputs, read by callers.
 fm_progress_read() {
   local state=$1 data=$2 id=$3 line=${4:-} held=${5:-} now=${6:-}
@@ -926,7 +930,8 @@ fm_progress_label_refresh() {
 }
 
 # fm_progress_tick <state-dir> <data-dir> [now]
-# One pass over every local task, launched by the watcher as a detached child
+# The observation record's only writer (teardown's `record` retires it). One
+# pass over every local task, launched by the watcher as a detached child
 # each poll (bin/fm-watch.sh progress_tick_detached) so no current-state read
 # ever sits on the poll loop's path: re-read the phase no more often than
 # FM_PROGRESS_REFRESH_SECS, keyed on the record's own tick_at= so a fleet

@@ -18,7 +18,10 @@
 #       accumulators across transitions, fix-round counting, and the run's own
 #       round winning; a record left by an older incarnation of the same id is
 #       discarded, and a read in flight while teardown retires the task never
-#       recreates its record
+#       recreates its record; the tick is the record's only writer, so a
+#       `show` or snapshot read derives the phase in memory and leaves the
+#       file byte-for-byte untouched (two observers can never overwrite each
+#       other)
 #   (c) fallback bands: the documented defaults summed over the phases ahead
 #       per delivery sequence, always as a range, and "running long" past a band
 #   (d) history and median: fewer than three samples keep the bands; three
@@ -133,6 +136,12 @@ progress() {
     "$PROGRESS" "$@"
 }
 
+# observe <case> <now> <crew-state-line> <held>: one tick with its cadence
+# collapsed to a second, so observations seconds apart all reach the record.
+observe() {
+  FM_PROGRESS_REFRESH_SECS=1 progress "$@" tick
+}
+
 phase_of() {  # <show-output>
   local out=$1
   out=${out#phase: }
@@ -231,27 +240,34 @@ test_secondmate_and_remote_are_skipped() {
 # (b) observation record
 
 test_record_accumulates_phases() {
-  local d rec
+  local d rec before out
   d=$(make_case record)
   write_task "$d" r1 ship no-mistakes
-  progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show r1 >/dev/null
+  observe "$d" "$NOW" 'state: working · source: pane · busy' 0
   rec="$d/state/.progress-r1"
-  [ -f "$rec" ] || fail "the first read must publish the observation record"
+  [ -f "$rec" ] || fail "the first tick must publish the observation record"
   grep -q "^secs_implementing=1200$" "$rec" || fail "time since the spawn instant counts as implementing: $(cat "$rec")"
   grep -q "^since=$((NOW - 1200))$" "$rec" || fail "the first phase starts at the spawn instant: $(cat "$rec")"
-  progress "$d" $((NOW + 600)) 'state: working · source: run-step · validating (running) · step: review' 0 show r1 >/dev/null
+  observe "$d" $((NOW + 600)) 'state: working · source: run-step · validating (running) · step: review' 0
   grep -q "^secs_implementing=1800$" "$rec" || fail "the interval up to the transition is charged to implementing: $(cat "$rec")"
   grep -q "^since=$((NOW + 600))$" "$rec" || fail "a transition resets since: $(cat "$rec")"
-  progress "$d" $((NOW + 900)) 'state: working · source: run-step · validating (fixing) · step: review' 0 show r1 >/dev/null
+  observe "$d" $((NOW + 900)) 'state: working · source: run-step · validating (fixing) · step: review' 0
   grep -q "^secs_validating=300$" "$rec" || fail "validating time accumulates: $(cat "$rec")"
   grep -q "^fix_rounds=1$" "$rec" || fail "entering fixing counts one round: $(cat "$rec")"
-  progress "$d" $((NOW + 1000)) 'state: working · source: run-step · validating (fixing) · step: review · fix round: 3' 0 show r1 >/dev/null
+  observe "$d" $((NOW + 1000)) 'state: working · source: run-step · validating (fixing) · step: review · fix round: 3' 0
   grep -q "^fix_rounds=3$" "$rec" || fail "the run's own round count wins when reported: $(cat "$rec")"
-  progress "$d" $((NOW + 1300)) 'state: working · source: run-step · ci running · step: ci' 0 show r1 >/dev/null
+  observe "$d" $((NOW + 1300)) 'state: working · source: run-step · ci running · step: ci' 0
   grep -q "^secs_fixing=400$" "$rec" || fail "fixing time accumulates: $(cat "$rec")"
-  progress "$d" $((NOW + 1400)) 'state: working · source: run-step · ci running · step: ci' 0 show r1 >/dev/null
+  observe "$d" $((NOW + 1400)) 'state: working · source: run-step · ci running · step: ci' 0
   grep -q "^secs_ci=100$" "$rec" || fail "ci time accumulates: $(cat "$rec")"
   grep -q "^phase=ci$" "$rec" || fail "the record carries the current phase: $(cat "$rec")"
+  # A `show` (the fleet snapshot's read) derives the phase in memory and never
+  # writes: the record the tick published stays byte-for-byte the same, so a
+  # snapshot overlapping a tick can never revert what the tick observed.
+  before=$(cat "$rec")
+  out=$(progress "$d" $((NOW + 1500)) 'state: done · source: run-step · checks green: PR ready for review' 0 show r1)
+  [ "$(phase_of "$out")" = ready ] || fail "show derives the live phase: $out"
+  [ "$(cat "$rec")" = "$before" ] || fail "a show must leave the record untouched: $(cat "$rec")"
   pass "the observation record seeds from the spawn instant and charges each interval to the phase seen at its start"
 }
 
@@ -259,8 +275,9 @@ test_unknown_observation_keeps_the_phase_clock() {
   local d rec out
   d=$(make_case unknown-blip)
   write_task "$d" ub ship no-mistakes "spawn_gen=s$((NOW - 3000)).1.1"
-  progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show ub >/dev/null
+  observe "$d" "$NOW" 'state: working · source: pane · busy' 0
   rec="$d/state/.progress-ub"
+  observe "$d" $((NOW + 10)) 'state: unknown · source: none · current state not read' 0
   out=$(progress "$d" $((NOW + 10)) 'state: unknown · source: none · current state not read' 0 show ub)
   [ "$(phase_of "$out")" = unknown ] || fail "an unreadable state displays unknown: $out"
   assert_contains "$out" "guess: unknown" "an unreadable state carries no estimate"
@@ -271,9 +288,9 @@ test_unknown_observation_keeps_the_phase_clock() {
   [ "$(phase_of "$out")" = implementing ] || fail "the real phase returns: $out"
   assert_contains "$out" "elapsed: 51 min" "the clock continues from the original since across the blip"
   # A blip inside fixing must not count a second round.
-  progress "$d" $((NOW + 100)) 'state: working · source: run-step · validating (fixing) · step: review' 0 show ub >/dev/null
-  progress "$d" $((NOW + 130)) 'state: unknown · source: pane · harness state unavailable' 0 show ub >/dev/null
-  progress "$d" $((NOW + 160)) 'state: working · source: run-step · validating (fixing) · step: review' 0 show ub >/dev/null
+  observe "$d" $((NOW + 100)) 'state: working · source: run-step · validating (fixing) · step: review' 0
+  observe "$d" $((NOW + 130)) 'state: unknown · source: pane · harness state unavailable' 0
+  observe "$d" $((NOW + 160)) 'state: working · source: run-step · validating (fixing) · step: review' 0
   grep -q "^fix_rounds=1$" "$rec" || fail "fixing -> unknown -> fixing must stay one round: $(cat "$rec")"
   pass "an unreadable observation is displayed as unknown but never resets the phase clock or inflates fix rounds"
 }
@@ -287,6 +304,7 @@ test_stale_record_of_an_older_incarnation_is_discarded() {
     $((NOW - 90000)) $((NOW - 3600)) $((NOW - 90000)) > "$rec"
   out=$(progress "$d" $((NOW + 600)) 'state: working · source: pane · busy' 0 show ri)
   assert_contains "$out" "elapsed: 10 min" "a re-dispatched id starts its clock at its own spawn instant"
+  observe "$d" $((NOW + 600)) 'state: working · source: pane · busy' 0
   grep -q "^spawn_gen=s$NOW.7.7$" "$rec" || fail "the record is bound to the current incarnation: $(cat "$rec")"
   grep -q "^secs_implementing=600$" "$rec" || fail "the older incarnation's accumulators are discarded: $(cat "$rec")"
   grep -q "^fix_rounds=0$" "$rec" || fail "the older incarnation's rounds are discarded: $(cat "$rec")"
@@ -294,6 +312,7 @@ test_stale_record_of_an_older_incarnation_is_discarded() {
     $((NOW - 3600)) $((NOW - 90000)) > "$rec"
   out=$(progress "$d" $((NOW + 1200)) 'state: working · source: pane · busy' 0 show ri)
   assert_contains "$out" "elapsed: 20 min" "a record without a spawn_gen while the meta has one is discarded"
+  observe "$d" $((NOW + 1200)) 'state: working · source: pane · busy' 0
   grep -q "^secs_implementing=1200$" "$rec" || fail "the unbound record's accumulators are discarded: $(cat "$rec")"
   pass "a record left by an older incarnation of the same id is discarded and the task reseeds from its own spawn instant"
 }
@@ -317,7 +336,7 @@ test_record_without_spawn_epoch_uses_mtime() {
   d=$(make_case mtime)
   fm_write_meta "$d/state/m1.meta" "window=fm:fm-m1" "worktree=$d/wt" "kind=ship" "mode=no-mistakes" "spawn_gen=teardown-test-m1"
   mtime=$(stat -c %Y "$d/state/m1.meta" 2>/dev/null || stat -f %m "$d/state/m1.meta")
-  progress "$d" $((mtime + 60)) 'state: working · source: pane · busy' 0 show m1 >/dev/null
+  observe "$d" $((mtime + 60)) 'state: working · source: pane · busy' 0
   rec="$d/state/.progress-m1"
   grep -q "^secs_implementing=60$" "$rec" || fail "a non-epoch spawn_gen falls back to the record mtime: $(cat "$rec")"
   pass "a spawn instant that cannot be parsed falls back to the record's mtime"
@@ -413,7 +432,7 @@ test_record_hook_appends_history_and_drops_record() {
   local d out line
   d=$(make_case record-hook)
   write_task "$d" done1 ship no-mistakes
-  progress "$d" "$NOW" 'state: working · source: run-step · validating (running) · step: review' 0 show done1 >/dev/null
+  observe "$d" "$NOW" 'state: working · source: run-step · validating (running) · step: review' 0
   out=$(progress "$d" $((NOW + 300)) x 0 record done1)
   assert_contains "$out" "progress: recorded done1 (ship, no-mistakes)" "record names the task, kind, and mode"
   [ ! -e "$d/state/.progress-done1" ] || fail "record must remove the observation record"
@@ -422,7 +441,7 @@ test_record_hook_appends_history_and_drops_record() {
     and .secs.implementing == 1200 and .secs.validating == 300 and .fix_rounds == 0 and .finished == 1788400300' >/dev/null \
     || fail "history line is wrong: $line"
   write_task "$d" done2 ship no-mistakes
-  progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show done2 >/dev/null
+  observe "$d" "$NOW" 'state: working · source: pane · busy' 0
   out=$(progress "$d" $((NOW + 300)) x 0 record done2 --discard)
   assert_contains "$out" "removed without recording history" "--discard drops the record silently"
   [ "$(wc -l < "$d/data/phase-history.jsonl" | tr -d ' ')" = 1 ] || fail "--discard must not append history"
@@ -552,7 +571,7 @@ test_label_refresh_failure_warns_once_per_reason() {
 # (f) tick throttle
 
 test_tick_reads_phase_once_per_cadence() {
-  local d
+  local d before
   d=$(make_case throttle)
   write_task "$d" th1 ship no-mistakes "spawn_gen=s$NOW.1.1"
   write_task "$d" th2 ship no-mistakes "spawn_gen=s$NOW.1.1"
@@ -563,10 +582,13 @@ test_tick_reads_phase_once_per_cadence() {
   [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 2 ] || fail "each task is read once inside the cadence: $(cat "$d/crew.log")"
   FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 60)) 'state: working · source: pane · busy' 0 tick
   [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 4 ] || fail "the cadence boundary re-reads every task: $(cat "$d/crew.log")"
-  # A fleet-snapshot read (the `show` path) between two ticks advances the
-  # record's accumulators but is not a tick, so it never postpones the re-read.
+  # A fleet-snapshot read (the `show` path) between two ticks derives the phase
+  # in memory and never writes the record, so it can neither postpone the
+  # re-read nor overwrite what the tick published.
+  before=$(cat "$d/state/.progress-th1")
   FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 110)) 'state: working · source: pane · busy' 0 show th1 >/dev/null
   [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 5 ] || fail "show reads the task once: $(cat "$d/crew.log")"
+  [ "$(cat "$d/state/.progress-th1")" = "$before" ] || fail "a snapshot read must leave the tick's record untouched: $(cat "$d/state/.progress-th1")"
   FM_FAKE_CREW_STATE_LOG="$d/crew.log" progress "$d" $((NOW + 120)) 'state: working · source: pane · busy' 0 tick
   [ "$(wc -l < "$d/crew.log" | tr -d ' ')" = 7 ] || fail "a snapshot read between ticks must not delay the cadence re-read: $(cat "$d/crew.log")"
   : > "$d/crew.log"
@@ -609,9 +631,9 @@ test_watcher_launches_tick_detached_with_single_flight() {
 
 # watch_start <case>: run the real watcher over the case with a quick poll and
 # an instant fake current state; sets WATCH_PID. The watcher's own triage may
-# read that state too and its summary refresh advances the observation record
-# through the fleet snapshot, so the tick's evidence is the record's tick_at=,
-# which only the tick writes.
+# read that state too, and its summary refresh reads the record through the
+# fleet snapshot without writing it, so the tick's evidence is the record's
+# tick_at=, which only the tick writes.
 WATCH_PID=
 watch_start() {
   local d=$1
