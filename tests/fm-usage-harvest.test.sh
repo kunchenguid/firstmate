@@ -1105,6 +1105,88 @@ JSON
 # absorb: those tokens must not appear in this task's row. The second run
 # proves the harvest stays best effort in its new position, where a failure
 # could otherwise abort teardown before the worktree is ever returned.
+# One teardown harvests every task in every home it recurses through, and a
+# task id is unique only within its own home's state directory. A secondmate
+# child whose own home holds a grandchild with the SAME id therefore stages two
+# different rows, and the recursion into that nested home runs between the
+# outer child's scan and its append. Keyed on the id alone, the grandchild's
+# row overwrites the outer child's staged file, the identity guard then finds
+# the grandchild's row already present and skips, and the outer child's
+# measured usage is lost while its records retire.
+teardown_nested_child_case() {
+  local id=usageharvsm2 child=usageharvsmshared fb state data config smhome gchome out
+  local wt gwt encoded logdir now rows
+  fb="$TMP_ROOT/nest-fakebin"
+  mkdir -p "$fb"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fb/treehouse"
+  chmod +x "$fb/tmux" "$fb/treehouse"
+  state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"; data="$TMP_ROOT/nest-data"
+  smhome="$TMP_ROOT/nest-home"; gchome="$TMP_ROOT/nest-home-inner"
+  mkdir -p "$state" "$config" "$data" "$smhome/state" "$smhome/data" "$smhome/config" \
+    "$gchome/state" "$gchome/data" "$gchome/config" "$TMP_ROOT/nest-proj"
+  printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
+  printf '%s\n' "$child" > "$gchome/.fm-secondmate-home"
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$smhome" "project=$TMP_ROOT/nest-proj" \
+    "home=$smhome" "kind=secondmate" "mode=no-mistakes"
+  printf 'working: routing\n' > "$state/$id.status"
+
+  now=$(date +%s)
+  # The outer child is itself a secondmate, so the cleanup recurses into its
+  # home between that child's scan and its append.
+  wt="$TMP_ROOT/.no-mistakes/wt-outer-$child"
+  fm_write_meta "$smhome/state/$child.meta" \
+    "window=firstmate:fm-$child" "worktree=$wt" "project=$TMP_ROOT/nest-proj" \
+    "harness=claude" "home=$gchome" "kind=secondmate" "mode=no-mistakes" \
+    "model=default" "effort=default"
+  printf 'spawn_gen=s%s.81.1\n' "$((now - 400))" >> "$smhome/state/$child.meta"
+  printf 'working: outer child\n' > "$smhome/state/$child.status"
+
+  # The grandchild shares the outer child's task id, which is legal because it
+  # lives in a different home's state directory.
+  gwt="$TMP_ROOT/.no-mistakes/wt-inner-$child"
+  fm_write_meta "$gchome/state/$child.meta" \
+    "window=firstmate:fm-$child" "worktree=$gwt" "project=$TMP_ROOT/nest-proj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "model=default" "effort=default"
+  printf 'spawn_gen=s%s.82.2\n' "$((now - 300))" >> "$gchome/state/$child.meta"
+  printf 'working: grandchild\n' > "$gchome/state/$child.status"
+
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  logdir="$TMP_ROOT/nest-fake-claude/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgOUT","model":"claude-outer","usage":{"input_tokens":41,"output_tokens":5}}}
+JSON
+  touch -t "$(touch_stamp $((now - 20)))" "$logdir/session.jsonl"
+  encoded=${gwt//\//-}
+  encoded=${encoded//./-}
+  logdir="$TMP_ROOT/nest-fake-claude/$encoded"
+  mkdir -p "$logdir"
+  cat > "$logdir/session.jsonl" <<'JSON'
+{"type":"assistant","message":{"id":"msgIN","model":"claude-inner","usage":{"input_tokens":77,"output_tokens":6}}}
+JSON
+  touch -t "$(touch_stamp $((now - 20)))" "$logdir/session.jsonl"
+  touch -t "$(touch_stamp $((now - 30)))" "$smhome/state/$child.status"
+  touch -t "$(touch_stamp $((now - 30)))" "$gchome/state/$child.status"
+
+  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_USAGE_CLAUDE_DIR="$TMP_ROOT/nest-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/nest-fake-codex" \
+    FM_USAGE_PI_DIR="$TMP_ROOT/nest-fake-pi" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  expect_code 0 "$?" "nested forced secondmate teardown should succeed"$'\n'"$out"
+  rows=$(grep -cF "\"task\":\"$child\"" "$data/usage-ledger.jsonl" 2>/dev/null || true)
+  [ "$rows" = 2 ] \
+    || fail "the two same-named tasks did not both reach the ledger: [$rows]"$'\n'"$(cat "$data/usage-ledger.jsonl" 2>/dev/null)"$'\n'"$out"
+  assert_contains "$(cat "$data/usage-ledger.jsonl")" '"input_tokens":41' \
+    "the outer child's own usage survived the recursion into the nested home"
+  assert_contains "$(cat "$data/usage-ledger.jsonl")" '"input_tokens":77' \
+    "the grandchild's own usage is recorded too"
+  pass "teardown integration: a nested home's same-named task cannot overwrite its parent's row"
+}
+
 teardown_pool_order_case() {
   local proj wt id fb state data config out row occupant thlog encoded logdir base
   id=usageharvpool1
@@ -1802,6 +1884,7 @@ report_no_harness_case
 report_malformed_case
 teardown_status_case
 teardown_child_case
+teardown_nested_child_case
 teardown_pool_order_case
 teardown_refusal_case
 teardown_single_diagnostic_case

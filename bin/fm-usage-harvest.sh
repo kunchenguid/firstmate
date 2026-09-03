@@ -324,8 +324,9 @@ ledger_append_row() {  # <row-json>
 }
 
 # --append-from needs nothing but the staged row: no meta, no status log, no
-# session-log scan. That is what lets teardown run it after its fail-closed
-# refusals, long after the worktree it scanned has been returned.
+# session-log scan. That is what lets teardown run it after the refusals that
+# would retain the task's worktree and status log, long after the worktree it
+# scanned has been returned.
 if [ "$STAGE_MODE" = append ]; then
   [ -f "$STAGE_FILE" ] || { err "no staged usage row for $ID at $STAGE_FILE"; exit 1; }
   STAGED_ROW=$(head -n 1 -- "$STAGE_FILE" 2>/dev/null || true)
