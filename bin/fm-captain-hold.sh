@@ -153,6 +153,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# Resolve the configured backlog once for diagnostics; keep startup non-fatal so
+# commands retain their existing read-error handling.
+CAPTAIN_BACKLOG_FILE=$(fm_backlog_file "$DATA" 2>/dev/null) \
+  || CAPTAIN_BACKLOG_FILE="${DATA%/}/backlog.md"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -381,7 +385,7 @@ resolution_block() {  # <mode>
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show "$id") || fail "captain-held task $id is absent from $CAPTAIN_BACKLOG_FILE"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -408,9 +412,9 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
       printf '%s' "$legacy"
       return 0
     fi
-    fail "no captain-held task $entry and no legacy identity $legacy in $FM_HOME/data/backlog.md"
+    fail "no captain-held task $entry and no legacy identity $legacy in $CAPTAIN_BACKLOG_FILE"
   fi
-  fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
+  fail "no captain-held task $entry in $CAPTAIN_BACKLOG_FILE"
 }
 
 command_hold() {
@@ -529,7 +533,7 @@ command_answer() {
   load_decision "$decision_file"
   acquire_task_control_lock "$id"
   require_tasks_axi
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show "$id") || fail "captain-held task $id is absent from $CAPTAIN_BACKLOG_FILE"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
