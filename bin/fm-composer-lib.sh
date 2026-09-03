@@ -1117,12 +1117,20 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
 }
 
 _fm_composer_leftbar_conflicts_halfbox() {  # <plain-screen> <first-row>
-  local plain=$1 first=$2 raw trimmed
-  [ "$first" -gt 0 ] || return 1
-  raw=$(_fm_composer_screen_row "$((first - 1))" "$plain")
-  trimmed=$raw
-  fm_composer_normalize_trim_var trimmed
-  _fm_composer_half_rule_spaces "$trimmed" '╻' '▄' >/dev/null
+  local plain=$1 first=$2 row raw trimmed
+  row=$((first - 1))
+  while [ "$row" -ge 0 ]; do
+    raw=$(_fm_composer_screen_row "$row" "$plain")
+    trimmed=$raw
+    fm_composer_normalize_trim_var trimmed
+    if [ -z "$trimmed" ]; then
+      row=$((row - 1))
+      continue
+    fi
+    _fm_composer_half_rule_spaces "$trimmed" '╻' '▄' >/dev/null
+    return $?
+  done
+  return 1
 }
 
 _fm_composer_select_cursorless() {

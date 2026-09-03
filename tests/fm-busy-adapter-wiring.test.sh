@@ -312,15 +312,18 @@ test_copilot_hooks_semantic_lifecycle() {
   [ -f "$state/$id.turn-ended" ] || fail "agentStop no longer touches the notification marker"
   out=$(classify copilot "$id" "$state")
   [ "$out" = "idle copilot-hook" ] || fail "agentStop must classify 'idle copilot-hook', got '$out'"
+  assert_absent "$binding" "agentStop must clear the bound parent session"
 
-  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"parent"}' || fail "second userPromptSubmitted hook command failed"
+  run_copilot_hook "$hooks" userPromptSubmitted '{"sessionId":"next-parent"}' || fail "second userPromptSubmitted hook command failed"
   out=$(classify copilot "$id" "$state")
-  [ "$out" = "busy copilot-hook" ] || fail "a repeated parent session must re-open busy state, got '$out'"
+  [ "$out" = "busy copilot-hook" ] || fail "a later top-level session must re-open busy state, got '$out'"
+  assert_grep 'session=next-parent' "$binding" "the next top-level session did not rebind after agentStop"
 
-  run_copilot_hook "$hooks" sessionEnd '{"sessionId":"parent"}' || fail "sessionEnd hook command failed"
+  run_copilot_hook "$hooks" sessionEnd '{"sessionId":"next-parent"}' || fail "sessionEnd hook command failed"
   out=$(classify copilot "$id" "$state")
   [ "$out" = "idle copilot-hook" ] || fail "sessionEnd must classify idle, got '$out'"
-  pass "copilot hooks latch one parent session and classify matching lifecycle events"
+  assert_absent "$binding" "sessionEnd must clear the bound parent session"
+  pass "copilot hooks latch one parent session, clear it on settle, and rebind later sessions"
 }
 
 test_copilot_hooks_ignore_foreign_sessions() {
