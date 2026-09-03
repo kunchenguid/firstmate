@@ -1264,14 +1264,19 @@ test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open() 
 }
 
 test_hook_claude_mode_terminal_boundary_excludes_starting_owner() {
-  local dir fakebin ready release once guard_out guard_status auto_out auto_status guard_pid
+  local dir fakebin ready release once guard_out guard_status auto_out auto_status guard_pid owner
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-terminal-boundary")
   : > "$dir/state/task1.meta"
-  : > "$dir/state/.claude-autoarm-failure-notified"
-  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed updated_at=%s\n' "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
-  seed_claude_budget "$dir" 4 3
   install_integrated_autoarm "$dir"
   write_integrated_failed_arm "$dir"
+  "$dir/fake-claude" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  mkdir -p "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.$owner"
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed session_owner_pid=%s updated_at=%s\n' \
+    "$owner" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  seed_claude_budget "$dir" 4 3
   fakebin="$dir/fakebin"
   ready="$dir/terminal-ready"
   release="$dir/terminal-release"
@@ -1304,9 +1309,11 @@ SH
   ) &
   guard_pid=$!
   IFS= read -r _ < "$ready"
-  auto_out=$(run_integrated_autoarm "$dir"); auto_status=$?
+  auto_out=$(run_integrated_autoarm_for_owner "$dir" "$owner"); auto_status=$?
   printf 'release\n' > "$release"
   wait "$guard_pid"
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
   expect_code 0 "$auto_status" "an owner starting inside the terminal window must lose the existing owner boundary"
   [ -z "$auto_out" ] || fail "excluded terminal-window owner produced output: $auto_out"
   assert_absent "$dir/state/arm-ran" "excluded terminal-window owner started an arm cycle"

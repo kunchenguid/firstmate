@@ -110,7 +110,7 @@ While that attended alarm and its failure episode remain current, later claim or
 Each epoch identity is accounted at most once under the budget lock.
 Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
-The alarm cannot repeat during that failure episode, legacy unbound alarm state remains valid only for an unbound legacy episode, and a later unhealthy stop blocks again.
+The alarm cannot repeat during that failure episode, legacy unbound notice and alarm state remains compatible only when no current session owner is asserted, an authenticated successor replaces the unbound notice with its own scoped marker before publishing failure, and a later unhealthy stop blocks again.
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 

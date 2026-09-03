@@ -1246,6 +1246,39 @@ test_live_claim_mutex_holder_cannot_hide_failure() {
   pass "auto-arm: live claim-mutex contention records a durable failure independently"
 }
 
+test_legacy_predecessor_alarm_cannot_hide_successor_claim_failure() {
+  local dir out status holder owner reset
+  dir=$(make_primary_dir "$TMP_ROOT/legacy-alarm-successor-claim-failure")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed updated_at=1\n' \
+    > "$dir/state/.claude-autoarm-epoch"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$holder" > "$dir/state/.claude-autoarm.lock/pid"
+
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  owner=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  reset=$(failure_epoch_field "$dir" reset)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 2 "$status" "a predecessor legacy alarm must not silence the successor claim failure"
+  assert_contains "$out" "could not claim recovery" \
+    "the successor did not report its failed recovery claim"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+    || fail "the successor failure epoch was not bound to its authenticated owner"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+    "the successor did not replace the legacy notice with an owner-scoped marker"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" \
+    "the predecessor legacy alarm was unexpectedly destroyed"
+  assert_absent "$dir/state/arm-ran" \
+    "the successor reached watcher arming after its claim failed"
+  pass "auto-arm: legacy predecessor alarms cannot hide successor claim failures"
+}
+
 test_identity_unavailable_failure_publication_does_not_self_wedge() {
   local dir state marker rc
   dir=$(make_primary_dir "$TMP_ROOT/identity-unavailable-failure")
@@ -2265,37 +2298,46 @@ test_failed_cycles_notify_once_and_keep_retrying() {
 }
 
 test_post_alarm_claim_failures_do_not_grow_episode_state() {
-  local dir state marker alarm holder status sequence_before sequence_after
+  local dir state marker alarm holder owner status reset sequence_before sequence_after
   local failures_before failures_after i
   dir=$(make_primary_dir "$TMP_ROOT/post-alarm-claim-failures")
   state="$dir/state"
   marker="$state/.claude-autoarm-failure-notified"
   alarm="$state/.claude-autoarm-failure-alarmed"
   : > "$state/task.meta"
-  bash -c '
+  write_arm_fixture "$dir" failed
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$state/.lock"
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" >/dev/null 2>&1
+  status=$?
+  expect_code 2 "$status" "could not seed the owner-bound attended failure episode"
+  reset=$(bash -c '
     . "$1/bin/fm-wake-lib.sh"
-    fm_autoarm_claim_failure_commit "$1/state" absent failed \
-      "$1/state/.claude-autoarm-failure-notified"
-  ' _ "$dir" || fail "could not seed the attended failure episode"
-  : > "$alarm"
+    fm_autoarm_failure_reset_fence "$1/state"
+  ' _ "$dir") || fail "could not read the owner-bound episode reset"
+  mkdir -p "$alarm"
+  : > "$alarm/$reset.$owner"
   sleep 60 &
   holder=$!
   mkdir -p "$state/.claude-autoarm.lock"
   printf '%s\n' "$holder" > "$state/.claude-autoarm.lock/pid"
-  sequence_before=$(find "$state/.claude-autoarm-failure-sequence" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
-  failures_before=$(find "$state/.claude-autoarm-failure-epochs" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')
+  sequence_before=$(find "$state/.claude-autoarm-failure-sequence" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+  failures_before=$(find "$state/.claude-autoarm-failure-epochs" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
 
   i=0
   while [ "$i" -lt 6 ]; do
-    run_autoarm "$dir" >/dev/null 2>&1
+    run_autoarm_from_claude_daemon_bridge "$dir" "$owner" >/dev/null 2>&1
     status=$?
     expect_code 0 "$status" "a current attended alarm must suppress later claim failures"
     i=$((i + 1))
   done
-  sequence_after=$(find "$state/.claude-autoarm-failure-sequence" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
-  failures_after=$(find "$state/.claude-autoarm-failure-epochs" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')
+  sequence_after=$(find "$state/.claude-autoarm-failure-sequence" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+  failures_after=$(find "$state/.claude-autoarm-failure-epochs" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
 
   [ "$sequence_after" -eq "$sequence_before" ] \
     || fail "post-alarm claim failures grew sequence state from $sequence_before to $sequence_after"
@@ -3099,6 +3141,7 @@ test_failed_close_rewakes_with_failure_banner
 test_claim_path_failure_records_failed_epoch_and_marker
 test_stale_recovery_loser_cannot_publish_failure_into_successor_session
 test_live_claim_mutex_holder_cannot_hide_failure
+test_legacy_predecessor_alarm_cannot_hide_successor_claim_failure
 test_identity_unavailable_failure_publication_does_not_self_wedge
 test_stalled_transition_holder_cannot_hide_failure
 test_stalled_transition_steal_holder_falls_back_to_durable_failure
