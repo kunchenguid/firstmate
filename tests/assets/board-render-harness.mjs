@@ -2,11 +2,17 @@
 // shim and print what the renderer actually produced, so board behavior is
 // asserted through the real template rather than by reading its source.
 //
-// Usage: node board-render-harness.mjs <built-board.html>
-// Prints one JSON document: { stats:[{n,label}], charted:[{title,sub,badges,pickable}] }
+// Usage: node board-render-harness.mjs <built-board.html> [clicks-json]
+// clicks-json (optional): an array of {"id":"<element id>"} or
+// {"selector":".bb-chip","match":{"group":"repo","key":"alpha"}} objects,
+// clicked in order after the initial render, so filter-bar interactions can
+// be exercised the same way a captain's click would.
+// Prints one JSON document: { stats:[{n,label}], charted:[{title,sub,badges,pickable}],
+// filterbar:{chips,clearHidden}, deck:{...}, sections:{...} }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
+const clicks = process.argv[3] ? JSON.parse(process.argv[3]) : [];
 
 class Node {
   constructor(tag) {
@@ -14,6 +20,7 @@ class Node {
     this.className = "";
     this.children = [];
     this.attributes = {};
+    this.dataset = {};
     this._text = "";
     this.hidden = false;
     this.disabled = false;
@@ -22,8 +29,18 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    this._listeners = {};
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
+      remove: (c) => {
+        this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" ");
+      },
+      toggle: (c, on) => {
+        const has = this.classList.contains(c);
+        const want = on === undefined ? !has : on;
+        if (want && !has) this.classList.add(c);
+        if (!want && has) this.classList.remove(c);
+      },
       contains: (c) => this.className.split(/\s+/).includes(c),
     };
   }
@@ -34,15 +51,30 @@ class Node {
   }
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
+  remove() {
+    if (!this.parentNode) return;
+    const i = this.parentNode.children.indexOf(this);
+    if (i !== -1) this.parentNode.children.splice(i, 1);
+    this.parentNode = null;
+  }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  addEventListener(type, fn) {
+    (this._listeners[type] = this._listeners[type] || []).push(fn);
+  }
+  click() {
+    for (const fn of this._listeners.click || []) fn({ preventDefault() {} });
+  }
+  // Supports the plain compound-class selectors the template and tests
+  // actually use, e.g. ".bb-chip", ".bb-chip.is-active", ".bb-pick:checked".
   querySelectorAll(sel) {
-    const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
+    const base = checkedOnly ? sel.slice(0, -":checked".length) : sel;
+    const wantClasses = base.split(".").filter(Boolean);
     const out = [];
     const walk = (n) => {
       for (const c of n.children) {
-        if (c.className.split(/\s+/).includes(want) && (!checkedOnly || c.checked)) out.push(c);
+        const classes = c.className.split(/\s+/);
+        if (wantClasses.every((w) => classes.includes(w)) && (!checkedOnly || c.checked)) out.push(c);
         walk(c);
       }
     };
@@ -82,6 +114,20 @@ globalThis.TextEncoder = TextEncoder;
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
 
+// Replay any requested clicks (filter chips, the clear-filters button) now
+// that the page has finished its initial render, so filter-bar interaction
+// can be asserted the same way the fix report requires: through the real
+// template, not by reading its source.
+for (const c of clicks) {
+  const target = c.id
+    ? byId.get(c.id)
+    : (byId.get("bb-filterbar") || new Node("div"))
+        .querySelectorAll(c.selector)
+        .find((n) => !c.match || Object.entries(c.match).every(([k, v]) => n.dataset[k] === v));
+  if (!target) throw new Error("harness click target not found: " + JSON.stringify(c));
+  target.click();
+}
+
 const badgesOf = (row) =>
   row.children
     .filter((c) => c.className.includes("fm-badge"))
@@ -114,4 +160,49 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
-process.stdout.write(JSON.stringify({ stats, charted, empty, more, error: errorText }) + "\n");
+// Filter bar: every chip's group/key/label/count/active state, plus whether
+// the "show everything" clear control is currently visible.
+const filterBarNode = byId.get("bb-filterbar") || new Node("div");
+const filterChips = filterBarNode.querySelectorAll(".bb-chip").map((chip) => ({
+  group: chip.dataset.group,
+  key: chip.dataset.key,
+  label: chip.children[0]?.textContent ?? "",
+  count: Number((chip.children[1]?.textContent ?? "").replace(/[()]/g, "")),
+  active: chip.classList.contains("is-active"),
+}));
+const clearNode = filterBarNode.querySelectorAll(".bb-filter__clear")[0];
+const filterbar = { chips: filterChips, clearHidden: clearNode ? !!clearNode.hidden : true };
+
+// Captain's Call deck: every dealt card (tagged with repo/type) plus whether
+// it is the one currently shown, and the stack counter text the captain
+// actually reads.
+const deckNode = byId.get("bb-call") || new Node("div");
+const deckCards = deckNode.children
+  .filter((c) => c.className.split(/\s+/).includes("bb-decision"))
+  .map((c) => ({ repo: c.dataset.repo, type: c.dataset.type, hidden: !!c.hidden }));
+const deckEmpty = deckNode.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
+const deck = {
+  cards: deckCards,
+  visibleCount: deckCards.filter((c) => !c.hidden).length,
+  stackText: (byId.get("bb-stack-count") || new Node("span")).textContent,
+  empty: deckEmpty,
+};
+
+// The three project-scoped rows sections: repo tag + hidden flag per row,
+// plus whatever empty-state message is currently showing (if any).
+function sectionState(id) {
+  const node = byId.get(id) || new Node("div");
+  return {
+    rows: node.children
+      .filter((c) => c.className.split(/\s+/).includes("bb-row"))
+      .map((c) => ({ repo: c.dataset.repo, hidden: !!c.hidden })),
+    empty: node.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent),
+  };
+}
+const sections = {
+  underway: sectionState("bb-underway"),
+  landed: sectionState("bb-landed"),
+  charted: sectionState("bb-charted"),
+};
+
+process.stdout.write(JSON.stringify({ stats, charted, empty, more, error: errorText, filterbar, deck, sections }) + "\n");
