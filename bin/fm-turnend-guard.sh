@@ -422,15 +422,8 @@ terminal_fail_open() {
 }
 
 failure_episode_verified() {
-  local outcome
   [ ! -e "$STATE/.afk" ] || return 1
-  fm_autoarm_failure_notice_current "$STATE" "$FAILURE_NOTICE" || return 1
-  fm_autoarm_failure_ledger_current "$STATE" && return 0
-  outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-  case "$outcome" in
-    failed|failed-suppressed) return 0 ;;
-    *) return 1 ;;
-  esac
+  fm_autoarm_failure_episode_current "$STATE" "$FAILURE_NOTICE"
 }
 
 i=0

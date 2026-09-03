@@ -138,13 +138,20 @@ need_supervision || exit 0
 
 CLAIM_BASELINE=$(fm_autoarm_claim_signature "$STATE")
 
+autoarm_alarm_current() {
+  [ -f "$FAILURE_ALARM" ] && [ ! -L "$FAILURE_ALARM" ] || return 1
+  fm_autoarm_failure_episode_current "$STATE" "$FAILURE_NOTICE" || return 1
+  [ -f "$FAILURE_ALARM" ] && [ ! -L "$FAILURE_ALARM" ]
+}
+
 autoarm_claim_failure() {  # <reason>
   local reason=$1 failure_rc
+  autoarm_alarm_current && exit 0
   fm_autoarm_claim_failure_commit "$STATE" "$CLAIM_BASELINE" failed "$FAILURE_NOTICE"
   failure_rc=$?
   case "$failure_rc" in
     0|3)
-      [ -e "$FAILURE_ALARM" ] && exit 0
+      autoarm_alarm_current && exit 0
       if [ "$failure_rc" -eq 0 ]; then
         {
           printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism could not claim recovery: %s.\n' "$reason"
@@ -229,6 +236,7 @@ autoarm_commit() {  # <outcome> [marker-file]
   commit_rc=$?
   [ "$commit_rc" -ne 0 ] || return 0
   [ "$commit_rc" -ne 2 ] || return 2
+  autoarm_alarm_current && return 2
   pid=${BASHPID:-$$}
   terminal_baseline="$MY_GEN:$pid:arming"
   fm_autoarm_claim_failure_commit \
@@ -236,7 +244,7 @@ autoarm_commit() {  # <outcome> [marker-file]
   failure_rc=$?
   case "$failure_rc" in
     0|3)
-      [ -e "$FAILURE_ALARM" ] && return 2
+      autoarm_alarm_current && return 2
       if [ "$failure_rc" -eq 0 ]; then
         {
           printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism could not commit its terminal outcome.\n'

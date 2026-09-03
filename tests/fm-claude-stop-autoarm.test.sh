@@ -1306,6 +1306,48 @@ test_failed_cycles_notify_once_and_keep_retrying() {
   pass "auto-arm: consecutive failures keep Stop-owned retry without repeating notice"
 }
 
+test_post_alarm_claim_failures_do_not_grow_episode_state() {
+  local dir state marker alarm holder status sequence_before sequence_after
+  local failures_before failures_after i
+  dir=$(make_primary_dir "$TMP_ROOT/post-alarm-claim-failures")
+  state="$dir/state"
+  marker="$state/.claude-autoarm-failure-notified"
+  alarm="$state/.claude-autoarm-failure-alarmed"
+  : > "$state/task.meta"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_claim_failure_commit "$1/state" absent failed \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir" || fail "could not seed the attended failure episode"
+  : > "$alarm"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$state/.claude-autoarm.lock"
+  printf '%s\n' "$holder" > "$state/.claude-autoarm.lock/pid"
+  sequence_before=$(find "$state/.claude-autoarm-failure-sequence" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+  failures_before=$(find "$state/.claude-autoarm-failure-epochs" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')
+
+  i=0
+  while [ "$i" -lt 6 ]; do
+    run_autoarm "$dir" >/dev/null 2>&1
+    status=$?
+    expect_code 0 "$status" "a current attended alarm must suppress later claim failures"
+    i=$((i + 1))
+  done
+  sequence_after=$(find "$state/.claude-autoarm-failure-sequence" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+  failures_after=$(find "$state/.claude-autoarm-failure-epochs" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  [ "$sequence_after" -eq "$sequence_before" ] \
+    || fail "post-alarm claim failures grew sequence state from $sequence_before to $sequence_after"
+  [ "$failures_after" -eq "$failures_before" ] \
+    || fail "post-alarm claim failures grew immutable records from $failures_before to $failures_after"
+  assert_present "$alarm" "post-alarm claim failures cleared the attended alarm"
+  assert_present "$marker" "post-alarm claim failures cleared the episode notice"
+  pass "auto-arm: attended alarms bound continuing claim-failure state growth"
+}
+
 test_failure_notice_marker_write_refuses_delivery_and_retries() {
   local dir marker out1 out2 out3 status1 status2 status3 gen1 delivered
   dir=$(make_primary_dir "$TMP_ROOT/failed-marker-refusal")
@@ -2077,6 +2119,7 @@ test_terminal_commit_failure_publishes_independent_failure
 test_terminal_commit_supersession_stays_silent
 test_failure_sequence_compacts_at_recovery_reset
 test_failed_cycles_notify_once_and_keep_retrying
+test_post_alarm_claim_failures_do_not_grow_episode_state
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed

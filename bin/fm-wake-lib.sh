@@ -1802,6 +1802,22 @@ fm_autoarm_failure_notice_current() {  # <state-dir> <marker-file>
   [ -f "$marker/$reset" ] && [ ! -L "$marker/$reset" ]
 }
 
+fm_autoarm_failure_episode_current() {  # <state-dir> <marker-file>
+  local state=$1 marker=$2 current final outcome
+  fm_autoarm_failure_notice_current "$state" "$marker" || return 1
+  fm_autoarm_failure_ledger_current "$state" && return 0
+  current=$(fm_autoarm_claim_signature "$state")
+  fm_autoarm_ledger_read "$state" || return 1
+  outcome=$FM_AUTOARM_OUTCOME
+  case "$outcome" in
+    failed|failed-suppressed) ;;
+    *) return 1 ;;
+  esac
+  final=$(fm_autoarm_claim_signature "$state")
+  [ "$final" = "$current" ] || return 1
+  fm_autoarm_failure_notice_current "$state" "$marker"
+}
+
 fm_autoarm_failure_notice_claim() {  # <state-dir> <marker-file> <claim-id> <reset-fence>
   local state=$1 marker=$2 claim_id=$3 reset=$4 current pid marker_tmp target
   current=$(fm_autoarm_failure_reset_fence "$state") || return 1
