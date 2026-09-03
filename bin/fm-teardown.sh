@@ -146,10 +146,11 @@
 #     hours with no live task meta to attribute them to once teardown had
 #     already removed it). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
+#     root via fm_pids_with_cwd_under (bin/fm-proc-cwd-lib.sh, which owns that
+#     boundary for both this reap and firstmate's own test-fixture cleanup, and
+#     explains why cwd rather than a process tree) and sends TERM, then KILL
+#     after a short grace period to any survivor whose process identity still
+#     matches. Both roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
@@ -199,6 +200,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-proc-cwd-lib.sh
+. "$SCRIPT_DIR/fm-proc-cwd-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1592,41 +1595,11 @@ conclude_task_no_mistakes_run() {  # <worktree>
   return 1
 }
 
-# Fix 2 (see script header): pids of every process whose CURRENT WORKING
-# DIRECTORY is exactly $1 or under it, from one bounded system-wide `lsof -a
-# -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
-# documents as slow). Never $$ (this script's own pid). Empty output when
-# nothing matches; failure means the scan could not establish a safe result.
-pids_with_cwd_under() {  # <dir>
-  local dir=$1 out pid path line
-  [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
-  [ -n "$out" ] || return 0
-  pid=
-  while IFS= read -r line; do
-    case "$line" in
-      p*)
-        pid=${line#p}
-        case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-        ;;
-      fcwd) [ -n "$pid" ] || return 1 ;;
-      n*)
-        [ -n "$pid" ] || return 1
-        path=${line#n}
-        case "$path" in
-          "$dir"|"$dir"/*)
-            [ -n "$pid" ] && [ "$pid" != "$$" ] && printf '%s\n' "$pid"
-            ;;
-        esac
-        ;;
-      '') ;;
-      *) return 1 ;;
-    esac
-  done <<EOF
-$out
-EOF
-}
+# Fix 2 (see script header) resolves "which processes are rooted under this
+# directory" through fm_pids_with_cwd_under (bin/fm-proc-cwd-lib.sh), the one
+# owner of that boundary; firstmate's own test-fixture cleanup shares it. The
+# fail-closed policy built on top of it - a scan that cannot establish a safe
+# result refuses destructive teardown - stays here.
 
 task_process_identity() {  # <pid>
   local pid=$1 proc_root stat_line starttime value
@@ -1664,7 +1637,7 @@ task_pids_under_roots() {  # <dir>...
   local dir dir_pids pids=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
-    if ! dir_pids=$(pids_with_cwd_under "$dir"); then
+    if ! dir_pids=$(fm_pids_with_cwd_under "$dir"); then
       TASK_PIDS_FAILED_DIR=$dir
       return 1
     fi

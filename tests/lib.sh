@@ -6,8 +6,9 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # It provides the boilerplate every test file used to re-roll: ok/not-ok
-# reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
-# git identity and fixture builders, state/<id>.meta writers, and the common
+# reporters, a self-cleaning temp root that also reaps processes leaked inside
+# it, fakebin/PATH-shim helpers, deterministic git identity and fixture
+# builders, state/<id>.meta writers, and the common
 # string/exit-code/file assertions. Shared fake-toolchain and spawn-world
 # builders live in tests/fixtures.sh; wake-queue mocks in wake-helpers.sh;
 # secondmate-lifecycle mocks in secondmate-helpers.sh. Suite-specific fakes
@@ -40,6 +41,14 @@ export FM_GATE_REFUSE_BYPASS=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The one owner of "which processes are rooted (by cwd) under this directory",
+# shared with bin/fm-teardown.sh's leaked-process reap. Safe to source here
+# because it is pure: unlike bin/fm-wake-lib.sh (which fm_test_pid_identity
+# below must therefore call in a subshell with FM_STATE_OVERRIDE set), it
+# creates no directories and resolves no home at source time.
+# shellcheck source=bin/fm-proc-cwd-lib.sh
+. "$ROOT/bin/fm-proc-cwd-lib.sh"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -56,7 +65,9 @@ pass() {
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
 # on EXIT/INT/TERM. A test file that needs extra teardown (e.g. killing a
 # daemon) should define its own EXIT trap and call fm_test_cleanup from inside
-# it so registered dirs are still removed.
+# it so registered dirs are still removed. Each registered dir is swept for
+# leaked processes before it is removed - see "leaked-process sweep" below for
+# why that has to happen before, not after.
 #
 # The call site is almost always `TMP_ROOT=$(fm_test_tmproot prefix)`, which
 # forks a subshell to capture stdout. Anything that function does to the
@@ -83,13 +94,89 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+# --- leaked-process sweep ---------------------------------------------------
+#
+# Removing a fixture root does not stop what is still running inside it. The
+# suites that drive the real bin/fm-spawn.sh type `treehouse get` into the
+# task's pane; whenever that pane belongs to a live runtime rather than a stub
+# (an ambient herdr server is the case seen in practice), the REAL
+# `treehouse get` runs, opens its subshell inside the fixture tree, and outlives
+# the tree - leaving a process pair per spawning case whose working directory is
+# a path that no longer exists. Observed 2026-09-03: 74 such `treehouse get`
+# processes plus a child shell each, the oldest 6d18h old, every one traceable to
+# a fixture root under TMPDIR.
+#
+# Production tasks already get this guarantee from bin/fm-teardown.sh's Fix 2.
+# The boundary computation is shared with it (fm_pids_with_cwd_under in
+# bin/fm-proc-cwd-lib.sh, which owns why cwd is the right key); the policy is
+# not, and deliberately differs: teardown is fail-closed because it is about to
+# destroy real work, while this sweep is best-effort because a leaked process
+# must never be able to fail a suite.
+#
+# SCOPE IS THE SAFETY PROPERTY. A sweep that could reach a real task's worktree,
+# another suite's tree, or the primary checkout would be worse than the leak it
+# fixes, so two independent conditions must hold before anything is signalled:
+# the directory must carry the .fm-test-fixture marker only fm_test_tmproot
+# writes, and it must sit under TMPDIR. Neither the registry file nor a caller
+# can widen that: an unmarked or non-TMPDIR path is skipped, not swept.
+
+# fm_test_sweepable_root <dir>
+# True only for a path this suite may sweep processes out of.
+fm_test_sweepable_root() {
+  local dir=$1 tmp_base
+  [ -n "$dir" ] || return 1
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  [ -f "$dir/.fm-test-fixture" ] || return 1
+  tmp_base=${TMPDIR:-/tmp}
+  tmp_base=${tmp_base%/}
+  tmp_base=$(cd -P -- "$tmp_base" 2>/dev/null && pwd -P) || return 1
+  dir=$(cd -P -- "$dir" 2>/dev/null && pwd -P) || return 1
+  # Whole-component test, so a sibling of TMPDIR sharing its prefix never
+  # qualifies. The root itself is never TMPDIR: it must be strictly beneath it.
+  case "$dir" in "$tmp_base"/?*) return 0 ;; esac
+  return 1
+}
+
+# fm_test_sweep_leaked_processes <dir>
+# TERMs, then KILLs, every process whose cwd is under <dir>. Best-effort and
+# always succeeds: an unsweepable path, an unreadable process list, or a
+# survivor is left for the next run's fm_test_reap_orphans rather than raised.
+#
+# Re-deriving the pid set from the cwd boundary immediately before each signal
+# is what keeps the sweep scoped across the grace period: a pid that left the
+# subtree - or was recycled by a process outside it - is simply absent from the
+# next scan, so the boundary itself is the guard and no separate pid-identity
+# bookkeeping is needed to stay inside the fixture root.
+fm_test_sweep_leaked_processes() {
+  local dir=$1 pids pid
+  fm_test_sweepable_root "$dir" || return 0
+  pids=$(fm_pids_with_cwd_under "$dir" 2>/dev/null) || return 0
+  [ -n "$pids" ] || return 0
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null
+  done <<EOF
+$pids
+EOF
+  sleep "${FM_TEST_SWEEP_GRACE:-0.5}"
+  pids=$(fm_pids_with_cwd_under "$dir" 2>/dev/null) || return 0
+  [ -n "$pids" ] || return 0
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null
+  done <<EOF
+$pids
+EOF
+  return 0
+}
+
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
+    [ -n "$d" ] && fm_test_sweep_leaked_processes "$d"
     [ -n "$d" ] && rm -rf "$d"
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
+      [ -n "$d" ] && fm_test_sweep_leaked_processes "$d"
       [ -n "$d" ] && rm -rf "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
@@ -142,6 +229,12 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
+    # A prior run killed hard enough to skip its traps leaked its processes as
+    # well as its root. The owner checks above have already established this
+    # root has no live owner and is older than the age floor, so anything still
+    # rooted in it is orphaned by definition - and sweeping it here is the only
+    # thing that stops those processes accumulating across runs.
+    fm_test_sweep_leaked_processes "$dir"
     if [ -d "$dir" ] && [ ! -L "$dir" ]; then
       find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
     fi
