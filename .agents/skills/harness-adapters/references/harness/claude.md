@@ -28,9 +28,8 @@ Styled capture stays internal to the boolean detector; `fm-peek` and model-facin
 
 ## Feedback drafts
 
-The spawn also passes `--settings '{"feedbackDrafts":"off"}'` to every Claude worker and secondmate, disabling the `/bug`/`/feedback` model-drafted feedback flow (the SendFeedback tool) so a fleet-launched agent never queues or submits a bug report on the captain's behalf.
-`feedbackDrafts` is the documented settings key for this control (Claude Code changelog 2.1.247); the undocumented `CLAUDE_CODE_SEND_FEEDBACK` env var is deliberately not used.
-`--settings` is a per-launch CLI override scoped to this invocation only, same scoping principle as the prompt-suggestion env prefix above; the captain's global `~/.claude/settings.json` is untouched.
+The spawn sets `CLAUDE_CODE_SEND_FEEDBACK=0` for every Claude worker and secondmate, disabling the `/bug`/`/feedback` model-drafted feedback flow (the SendFeedback tool) so a fleet-launched agent never queues or submits a bug report on the captain's behalf.
+The environment variable is the documented per-session control and remains effective independently of managed settings precedence. It is scoped to the launched process and never touches the captain's global `~/.claude/settings.json`.
 
 ## Primary integration
 
