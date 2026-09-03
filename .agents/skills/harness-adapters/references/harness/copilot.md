@@ -24,7 +24,8 @@ Accept the remembered trust choice only for a repository the captain intends to 
 
 ## Detection and liveness
 
-`../../../bin/fm-harness.sh` prefers the current `COPILOT_CLI=1` marker and also recognizes the Linux process shapes observed across releases: command name `copilot`, argv zero ending in `/copilot`, or the bundled executable's `MainThread` command with Copilot argv zero.
+`../../../bin/fm-harness.sh` prefers the nearest real Copilot process in ancestry and falls back to `COPILOT_CLI=1` only when ancestry cannot prove the host.
+It also recognizes the Linux process shapes observed across releases: command name `copilot`, argv zero ending in `/copilot`, or the bundled executable's `MainThread` command with Copilot argv zero.
 The anchored argv-zero rule deliberately does not match editor extensions, plugin paths, or an unrelated command whose later arguments merely mention Copilot.
 
 Tmux normally reports `copilot` through `#{pane_current_command}` even when the kernel command is `MainThread`.
@@ -32,7 +33,8 @@ Tmux normally reports `copilot` through `#{pane_current_command}` even when the 
 
 ## Worker hooks
 
-`../../../bin/fm-spawn.sh` writes `.github/hooks/fm-busy-state.json` into a crew or scout worktree and excludes it from git.
+`../../../bin/fm-spawn.sh` writes `.github/hooks/fm-busy-state-<task-id>.json` into a crew or scout worktree and excludes it from git.
+That install refuses symlinked or non-directory `.github` path components and any pre-existing destination, so a repository cannot redirect or reuse Firstmate's generated worker hook.
 The hook uses absolute Firstmate-owned commands and incarnation tokens, so a stale worker cannot settle a replacement worker's busy record.
 `../../../bin/fm-teardown.sh` and the control-plane relaunch path remove the hook before a worktree is reused.
 
@@ -42,13 +44,14 @@ Their own primary behavior comes from the tracked repository hook below.
 ## Primary integration
 
 Tracked `.github/hooks/fm-primary.json` owns Copilot's primary integration.
-Every entry routes through `../../../bin/fm-copilot-hook.sh`, which requires `COPILOT_CLI=1` so Copilot cloud-agent jobs remain inert.
+Every entry routes through `../../../bin/fm-copilot-hook.sh`, which exits unless the actual host process ancestry is Copilot so non-Copilot runtimes and Copilot cloud-agent jobs remain inert.
 Its native `sessionStart` hook runs the full session-start adapter and returns the digest as `additionalContext`.
 Its `preToolUse` hooks apply the watcher-arm, persistent-directory-change, and built-in-delegation protections through the shared policy scripts.
 Its `agentStop` hook translates the shared turn-end guard's exit-2 refusal into Copilot's native `decision: "block"` continuation.
 
 Copilot also reads `.claude/settings.json`.
-Those tracked Claude entries stand down when `COPILOT_CLI=1`; every non-Copilot Firstmate launch clears that marker so a genuine child adapter retains its own hooks.
+Those tracked Claude compatibility entries resolve the helper root from `CLAUDE_PROJECT_DIR` when present or from the physical hook cwd otherwise, verify that root before executing any helper, and stand down whenever the actual hook host is Copilot.
+Every non-Copilot Firstmate launch still clears inherited Copilot markers so a genuine child adapter retains its own hooks.
 
 Primary watcher supervision uses Copilot's attached asynchronous shell task around `../../../bin/fm-watch-arm.sh`.
 The CLI notifies the model when that task completes, and the `agentStop` hook prevents a blind turn end when supervision is required but no healthy cycle exists.
