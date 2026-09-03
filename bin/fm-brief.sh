@@ -101,6 +101,48 @@ resolve_directory_input() {
   printf '%s\n' "$resolved"
 }
 
+parse_brief_args() {
+  KIND=ship
+  HERDR_LAB=0
+  NO_PROJECTS=0
+  MODE=
+  MODE_SET=0
+  PLAYBOOK=
+  PLAYBOOK_SET=0
+  POS=()
+  want_value=
+  for a in "$@"; do
+    if [ -n "$want_value" ]; then
+      case "$a" in
+        --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+      esac
+      case "$want_value" in
+        mode) MODE=$a; MODE_SET=1 ;;
+        playbook) PLAYBOOK=$a; PLAYBOOK_SET=1 ;;
+        *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
+      esac
+      want_value=
+      continue
+    fi
+    case "$a" in
+      --scout) KIND=scout ;;
+      --secondmate) KIND=secondmate ;;
+      --herdr-lab) HERDR_LAB=1 ;;
+      --no-projects) NO_PROJECTS=1 ;;
+      --mode) want_value=mode ;;
+      --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+      --playbook) want_value=playbook ;;
+      --playbook=*) PLAYBOOK=${a#--playbook=}; PLAYBOOK_SET=1 ;;
+      # yolo never reaches the worker: it is firstmate's merge authority, not a
+      # brief input. Refuse it loudly so it is never silently dropped here and then
+      # believed to have been recorded.
+      --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's merge posture" >&2; exit 1 ;;
+      *) POS+=("$a") ;;
+    esac
+  done
+  [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+}
+
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
 if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
@@ -113,45 +155,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
-KIND=ship
-HERDR_LAB=0
-NO_PROJECTS=0
-MODE=
-MODE_SET=0
-PLAYBOOK=
-PLAYBOOK_SET=0
-POS=()
-want_value=
-for a in "$@"; do
-  if [ -n "$want_value" ]; then
-    case "$a" in
-      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
-    esac
-    case "$want_value" in
-      mode) MODE=$a; MODE_SET=1 ;;
-      playbook) PLAYBOOK=$a; PLAYBOOK_SET=1 ;;
-      *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
-    esac
-    want_value=
-    continue
-  fi
-  case "$a" in
-    --scout) KIND=scout ;;
-    --secondmate) KIND=secondmate ;;
-    --herdr-lab) HERDR_LAB=1 ;;
-    --no-projects) NO_PROJECTS=1 ;;
-    --mode) want_value=mode ;;
-    --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
-    --playbook) want_value=playbook ;;
-    --playbook=*) PLAYBOOK=${a#--playbook=}; PLAYBOOK_SET=1 ;;
-    # yolo never reaches the worker: it is firstmate's merge authority, not a
-    # brief input. Refuse it loudly so it is never silently dropped here and then
-    # believed to have been recorded.
-    --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's merge posture" >&2; exit 1 ;;
-    *) POS+=("$a") ;;
-  esac
-done
-[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+parse_brief_args "$@"
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
