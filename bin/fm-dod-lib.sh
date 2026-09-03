@@ -30,17 +30,78 @@ fm_brief_task_placeholders_present() {  # <file>
   return 1
 }
 
-# Print the body under an exact heading until the next markdown heading of any
-# level. Empty if the heading is missing. A `##` subsection therefore cannot
-# swallow a following `# Setup` / `# Rules` contract.
+# Print an exact ATX heading's body through the next unfenced heading at the
+# same or a higher level. Empty if the heading is missing.
 fm_brief_heading_body() {  # <file> <heading>
   local file=$1 heading=$2
   [ -f "$file" ] || return 0
   awk -v heading="$heading" '
-    $0 == heading { grab=1; next }
-    grab && /^#/ { exit }
-    grab { print }
+    BEGIN {
+      target_level = 0
+      while (substr(heading, target_level + 1, 1) == "#") target_level++
+    }
+    {
+      line = $0
+      scan = line
+      spaces = 0
+      while (spaces < 3 && substr(scan, 1, 1) == " ") {
+        scan = substr(scan, 2)
+        spaces++
+      }
+      marker = substr(scan, 1, 1)
+      marker_len = 0
+      if (marker == "`" || marker == "~") {
+        while (substr(scan, marker_len + 1, 1) == marker) marker_len++
+      }
+      is_fence = marker_len >= 3
+      was_fenced = fenced
+
+      if (is_fence) {
+        rest = substr(scan, marker_len + 1)
+        if (!fenced) {
+          fenced = 1
+          fence_marker = marker
+          fence_len = marker_len
+        } else if (marker == fence_marker && marker_len >= fence_len && rest ~ /^[[:space:]]*$/) {
+          fenced = 0
+        }
+      }
+
+      if (!grab && !was_fenced && line == heading) {
+        grab = 1
+        next
+      }
+      if (!grab) next
+      if (is_fence || was_fenced) {
+        print line
+        next
+      }
+
+      level = 0
+      while (substr(scan, level + 1, 1) == "#") level++
+      if (level > 0 && level <= target_level && substr(scan, level + 1, 1) ~ /^[[:space:]]?$/) exit
+      print line
+    }
   ' "$file"
+}
+
+# Accept the current two-subsection contract only when both bodies have content;
+# briefs predating that contract remain valid when their # Task body has content.
+fm_brief_task_content_valid() {  # <file>
+  local file=$1 intent spec task has_intent=0 has_spec=0
+  [ -f "$file" ] && [ -r "$file" ] || return 1
+  grep -qx -F "## Captain's intent" "$file" && has_intent=1
+  grep -qx -F "## Firstmate spec" "$file" && has_spec=1
+  if [ "$has_intent" -eq 1 ] || [ "$has_spec" -eq 1 ]; then
+    [ "$has_intent" -eq 1 ] && [ "$has_spec" -eq 1 ] || return 1
+    intent=$(fm_brief_heading_body "$file" "## Captain's intent")
+    spec=$(fm_brief_heading_body "$file" "## Firstmate spec")
+    [ -n "$(printf '%s' "$intent" | tr -d '[:space:]')" ] || return 1
+    [ -n "$(printf '%s' "$spec" | tr -d '[:space:]')" ] || return 1
+    return 0
+  fi
+  task=$(fm_brief_heading_body "$file" "# Task")
+  [ -n "$(printf '%s' "$task" | tr -d '[:space:]')" ]
 }
 
 fm_dod_block() {  # <mode> <task-id>

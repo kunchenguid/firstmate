@@ -139,24 +139,15 @@ if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
   echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; write the captain's ship-time ask in ## Captain's intent first (the scout-time ask describes an investigation)" >&2
   exit 1
 fi
+if ! fm_brief_task_content_valid "$SCOUT_BRIEF"; then
+  echo "error: $SCOUT_BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before promotion" >&2
+  exit 1
+fi
 INTENT_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "## Captain's intent")
 SPEC_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "## Firstmate spec")
-INTENT_EMPTY=0
-SPEC_EMPTY=0
-[ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ] && INTENT_EMPTY=1
-[ -z "$(printf '%s' "$SPEC_BODY" | tr -d '[:space:]')" ] && SPEC_EMPTY=1
-if [ "$INTENT_EMPTY" -eq 1 ] && [ "$SPEC_EMPTY" -eq 1 ]; then
-  TASK_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
-  if [ -n "$(printf '%s' "$TASK_BODY" | tr -d '[:space:]')" ]; then
-    INTENT_BODY=$TASK_BODY
-    SPEC_BODY="No separate Firstmate spec was recorded on this brief; the # Task body above is the pre-subsection contract."
-  else
-    INTENT_BODY="Write the captain's ship-time ask here. The scout-time ask describes an investigation."
-    SPEC_BODY="Write Firstmate's ship-time build constraints here."
-  fi
-else
-  [ "$INTENT_EMPTY" -eq 1 ] && INTENT_BODY="Write the captain's ship-time ask here. The scout-time ask describes an investigation."
-  [ "$SPEC_EMPTY" -eq 1 ] && SPEC_BODY="Write Firstmate's ship-time build constraints here."
+if [ -z "$(printf '%s' "$INTENT_BODY$SPEC_BODY" | tr -d '[:space:]')" ]; then
+  INTENT_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
+  SPEC_BODY="No separate Firstmate spec was recorded on this brief; the # Task body above is the pre-subsection contract."
 fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship

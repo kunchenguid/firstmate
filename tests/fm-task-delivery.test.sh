@@ -45,7 +45,7 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   local home=$1 id=$2 mode=${3:-}
   mkdir -p "$home/data/$id"
   {
-    printf 'You are a crewmate.\n\n# Definition of done\n'
+    printf 'You are a crewmate.\n\n# Task\nExercise the delivery contract.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
   } > "$home/data/$id/brief.md"
 }
@@ -214,6 +214,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state"
   meta="$home/state/promote-d1.meta"
+  write_brief "$home" promote-d1
 
   write_scout_meta() {
     printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
@@ -320,6 +321,10 @@ STUB
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+      || fail "$mode: scout brief generation should succeed"
+    fill_brief_subsections "$home/data/$id/brief.md" \
+      "Ship the delivery-contract change." "Preserve the selected delivery mode."
     out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: promotion should succeed"
 
@@ -352,6 +357,7 @@ STUB
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
     # brief, so identical suffixes prove both workers receive the same contract.
+    rm "$home/data/$id/brief.md"
     FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode: ordinary ship brief generation should succeed"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
@@ -460,6 +466,17 @@ EOF
     "unfilled scout spawn did not name the leftover placeholders"
   assert_absent "$home/state/$id.meta" "unfilled scout spawn wrote task metadata"
 
+  id=delivery-empty-ship
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "empty-ship brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "" ""
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of empty Task subsections should exit non-zero"
+  assert_contains "$out" "must contain nonempty ## Captain's intent and ## Firstmate spec" \
+    "empty Task subsections were not rejected semantically"
+  assert_absent "$home/state/$id.meta" "empty-subsection spawn wrote task metadata"
+
   id=promote-unfilled-e1
   meta="$home/state/$id.meta"
   mkdir -p "$home/state"
@@ -472,6 +489,18 @@ EOF
   assert_contains "$out" "write the captain's ship-time ask" \
     "unfilled promotion did not tell firstmate to write the ship-time ask"
   assert_grep 'kind=scout' "$meta" "unfilled promotion still changed the task record"
+
+  id=promote-missing-brief
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion without a scout brief should exit non-zero"
+  assert_contains "$out" "must contain nonempty" \
+    "promotion without a scout brief did not reject missing task content"
+  assert_absent "$home/data/$id/ship-instructions.md" \
+    "promotion without a scout brief fabricated ship instructions"
+  assert_grep 'kind=scout' "$meta" "missing-brief promotion changed the task record"
 
   id=promote-filled-e2
   meta="$home/state/$id.meta"
@@ -494,6 +523,43 @@ EOF
     "promotion copied the scout Setup/Rules contract into Firstmate spec"
   assert_no_grep "# Setup" "$brief" \
     "promotion copied a later brief section into a Task subsection"
+
+  id=promote-nested-spec
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Ship the parser without losing detailed requirements.
+
+## Firstmate spec
+Keep this opening requirement.
+
+### Acceptance criteria
+Keep this nested requirement too.
+
+```markdown
+# This example heading is fenced content.
+```
+
+Keep this closing requirement.
+
+# Setup
+This scout-only setup must not become the spec.
+EOF
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion with nested and fenced spec content should succeed"
+  brief="$home/data/$id/ship-instructions.md"
+  assert_grep "### Acceptance criteria" "$brief" \
+    "promotion truncated the Firstmate spec at a nested heading"
+  assert_grep "# This example heading is fenced content." "$brief" \
+    "promotion treated a fenced example heading as a section boundary"
+  assert_grep "Keep this closing requirement." "$brief" \
+    "promotion dropped spec content after a fenced heading"
+  assert_no_grep "This scout-only setup must not become the spec." "$brief" \
+    "promotion copied the following top-level section into Firstmate spec"
 
   id=promote-legacy-e3
   meta="$home/state/$id.meta"
