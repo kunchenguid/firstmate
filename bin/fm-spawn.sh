@@ -3562,11 +3562,13 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
   fi
 fi
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ]; then
+  LOCAL_MODEL_CHECK_PENDING=0
+fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
-LOCAL_MODEL_CHECK_PENDING=0
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
