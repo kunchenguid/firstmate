@@ -274,6 +274,33 @@ def nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip()) and not is_absent(value)
 
 
+def plan_count(plan: dict[str, Any], field: str) -> int:
+    """A declared count, refused by name rather than coerced into a traceback."""
+    value = plan.get(field)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise GateError(f"{field} must be a nonnegative whole number, got {value!r}")
+    return value
+
+
+def finite_number(value: Any, label: str) -> float:
+    """A declared numeric bound, refused by name rather than coerced."""
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise GateError(f"{label} must be a finite number, got {value!r}")
+    return float(value)
+
+
+def as_object(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def as_sequence(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 # --------------------------------------------------------------------------
 # Plan: corrections 1, 2, 3, 9 (distinct packets, sweep rule, neutral panels,
 # frozen policy) plus the captain's fixed disposition and isolation choices.
@@ -994,10 +1021,9 @@ def check_one_provenance(
 
 
 def build_manifest(plan: dict[str, Any]) -> dict[str, Any]:
-    samples = int(plan.get("samples_per_entrant") or 0)
-    baseline_samples = int(plan.get("samples_per_baseline") or 0)
-    cost_model = plan.get("cost_model") or {}
-    classes = cost_model.get("job_classes") or {}
+    samples = plan_count(plan, "samples_per_entrant")
+    baseline_samples = plan_count(plan, "samples_per_baseline")
+    classes = as_object(as_object(plan.get("cost_model")).get("job_classes"))
 
     tracks_out: dict[str, Any] = {}
     totals = {
@@ -1011,17 +1037,18 @@ def build_manifest(plan: dict[str, Any]) -> dict[str, Any]:
     cost = {"low": 0.0, "base": 0.0, "high": 0.0}
     allowance_required: dict[str, int] = {}
 
-    for name in sorted(plan.get("tracks") or {}):
-        track = plan["tracks"][name]
+    tracks = as_object(plan.get("tracks"))
+    for name in sorted(tracks):
+        track = tracks[name]
         if not isinstance(track, dict):
             continue
-        entrants = track.get("entrants") or []
-        packets = track.get("packets") or []
+        entrants = as_sequence(track.get("entrants"))
+        packets = as_sequence(track.get("packets"))
         entrant_runs = len(entrants) * samples
         baseline_runs = baseline_samples if isinstance(track.get("baseline"), dict) else 0
         scored = entrant_runs + baseline_runs
         spec_jobs = len(packets) if track_requires_specification(track) else 0
-        judge_calls = scored * len(track.get("judges") or [])
+        judge_calls = scored * len(as_sequence(track.get("judges")))
         captures = entrant_runs if track.get("capture_required") is True else 0
 
         tracks_out[name] = {
@@ -1040,8 +1067,11 @@ def build_manifest(plan: dict[str, Any]) -> dict[str, Any]:
         totals["judge_calls"] += judge_calls
         totals["capture_records"] += captures
 
-        run_class = classes.get(str(track.get("run_cost_class", "")))
-        priced: list[tuple[dict[str, Any], int]] = [(entrant, samples) for entrant in entrants]
+        run_class_name = str(track.get("run_cost_class", ""))
+        run_class = classes.get(run_class_name)
+        priced: list[tuple[dict[str, Any], int]] = [
+            (entrant, samples) for entrant in entrants if isinstance(entrant, dict)
+        ]
         if isinstance(track.get("baseline"), dict):
             priced.append((track["baseline"], baseline_samples))
         for candidate, runs in priced:
@@ -1050,12 +1080,13 @@ def build_manifest(plan: dict[str, Any]) -> dict[str, Any]:
                 allowance_required[str(provider)] = allowance_required.get(str(provider), 0) + runs
             elif isinstance(run_class, dict):
                 for bound in cost:
-                    cost[bound] += float(run_class.get(bound, 0)) * runs
+                    label = f"cost_model.job_classes.{run_class_name}.{bound}"
+                    cost[bound] += finite_number(run_class.get(bound), label) * runs
         for key, count in (("spec_authoring", spec_jobs), ("judge_call", judge_calls), ("capture_job", captures)):
             unit = classes.get(key)
             if isinstance(unit, dict):
                 for bound in cost:
-                    cost[bound] += float(unit.get(bound, 0)) * count
+                    cost[bound] += finite_number(unit.get(bound), f"cost_model.job_classes.{key}.{bound}") * count
 
     totals["total_model_jobs"] = totals["scored_outputs"] + totals["spec_jobs"]
     return {
@@ -1132,7 +1163,11 @@ def check_cost_model(plan: dict[str, Any], report: Report) -> None:
 
 def check_manifest(root: Path, plan: dict[str, Any], report: Report) -> None:
     check_cost_model(plan, report)
-    expected = build_manifest(plan)
+    try:
+        expected = build_manifest(plan)
+    except GateError as exc:
+        report.fail("manifest.derived", str(exc))
+        return
     expected["plan_sha256"] = sha256_file(root / "benchmark.json")
 
     path = root / "manifest.json"
@@ -1307,16 +1342,24 @@ def confinement_env(overrides: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def confinement_stderr(stderr: bytes) -> str:
-    """A bounded, control-character-free tail of a wrapper's stderr."""
-    text = stderr.decode("utf-8", "replace")
+def bounded_detail(text: str, limit: int = CONFINEMENT_STDERR_LIMIT) -> str:
+    """A bounded, single-line rendering of output the gate does not trust.
+
+    Every confined command's bytes reach the operator through the gate's
+    line-oriented BENCH_CHECK contract, so a newline in that output would forge
+    a status line and an unbounded tail would flood the report.
+    """
     text = "".join(character if character.isprintable() else " " for character in text)
     text = " ".join(text.split())
-    if not text:
-        return ""
-    if len(text) > CONFINEMENT_STDERR_LIMIT:
-        text = text[:CONFINEMENT_STDERR_LIMIT] + "..."
-    return f": {text}"
+    if len(text) > limit:
+        text = text[:limit] + "..."
+    return text
+
+
+def confinement_stderr(stderr: bytes) -> str:
+    """A bounded, control-character-free tail of a wrapper's stderr."""
+    text = bounded_detail(stderr.decode("utf-8", "replace"))
+    return f": {text}" if text else ""
 
 
 def run_probe(
@@ -1351,13 +1394,16 @@ def run_probe(
         if line.startswith("PROBE "):
             verdict = line.split(" ", 2)[1] if len(line.split(" ", 2)) > 1 else ""
     if verdict == "LEAKED":
-        return "leaked", out.splitlines()[-1] if out else "target was reachable"
+        return "leaked", bounded_detail(out.splitlines()[-1]) if out else "target was reachable"
     if verdict == "DENIED":
         return "denied", "access refused inside the confinement"
     if verdict == "INCONCLUSIVE":
-        return "inconclusive", out.splitlines()[-1] if out else "the probe could not measure the access"
+        return (
+            "inconclusive",
+            bounded_detail(out.splitlines()[-1]) if out else "the probe could not measure the access",
+        )
     detail = err or out or f"exit {proc.returncode} with no probe verdict"
-    return "inconclusive", f"probe produced no verdict ({detail[:160]})"
+    return "inconclusive", f"probe produced no verdict ({bounded_detail(detail, 160)})"
 
 
 def validate_confinement_wrapper(
@@ -1821,7 +1867,11 @@ def check_evaluator(
             "capture_required must explicitly declare true or false for tracks: " + ", ".join(undeclared),
         )
         return
-    expected_captures = build_manifest(plan)["totals"]["capture_records"]
+    try:
+        expected_captures = build_manifest(plan)["totals"]["capture_records"]
+    except GateError as exc:
+        report.fail("evaluator.scope", str(exc))
+        return
     if expected_captures != 30:
         report.fail(
             "evaluator.scope",
@@ -1884,23 +1934,31 @@ def frozen_fixture_perturbations(original: bytes, entropy: bytes) -> list[tuple[
 def blinded_evaluator_run(
     wrapper: list[str],
     program: Path,
-    root: Path,
     workspace: Path,
     payload: bytes,
     timeout: int,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Execute the frozen evaluator against payload behind an opaque path.
+    """Execute the frozen evaluator against payload inside a gate-owned root.
 
     The evaluator never sees the frozen input's own path, so it cannot key an
     answer table on the record it is being asked to derive: every execution
     arrives under a fresh directory and file name that carry no case identity.
+    The confinement exposes only that scratch root, holding a copy of the
+    frozen program and the opaque input, so the benchmark's frozen expected
+    outputs and the execution contract mapping inputs to them stay unreachable
+    from inside the cage - the same treatment the restore drill gives an
+    archived evaluator.
     """
-    run_dir = Path(tempfile.mkdtemp(dir=str(workspace)))
-    target = run_dir / uuid.uuid4().hex
+    run_root = Path(tempfile.mkdtemp(dir=str(workspace)))
+    run_root.chmod(0o755)
+    confined_program = run_root / uuid.uuid4().hex
+    shutil.copyfile(program, confined_program)
+    confined_program.chmod(0o755)
+    target = run_root / uuid.uuid4().hex
     target.write_bytes(payload)
     argv = [
-        *(str(root) if item == "{root}" else item for item in wrapper),
-        str(program),
+        *(str(run_root) if item == "{root}" else item for item in wrapper),
+        str(confined_program),
         "--evaluate",
         str(target),
     ]
@@ -1975,7 +2033,7 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
             ),
         )
         return
-    workspace = Path(tempfile.mkdtemp(dir=str(root), prefix=".fm-bench-blind-"))
+    workspace = Path(tempfile.mkdtemp(prefix="fm-bench-blind-"))
     dependence_input: bytes | None = None
     dependence_stdout: bytes | None = None
     try:
@@ -2042,7 +2100,7 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
                 return
             try:
                 completed = blinded_evaluator_run(
-                    wrapper, program, root, workspace, input_path.read_bytes(), timeout
+                    wrapper, program, workspace, input_path.read_bytes(), timeout
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 report.fail("evaluator.execution", f"content-addressed evaluator could not run: {exc}")
@@ -2117,7 +2175,7 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
             return
         try:
             repeated = blinded_evaluator_run(
-                wrapper, program, root, workspace, dependence_input, timeout
+                wrapper, program, workspace, dependence_input, timeout
             )
         except (OSError, subprocess.SubprocessError) as exc:
             report.fail("evaluator.reproducibility", f"the frozen evaluator could not be re-executed: {exc}")
@@ -2148,7 +2206,7 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
         for pointer, perturbed_input in variants:
             try:
                 perturbed = blinded_evaluator_run(
-                    wrapper, program, root, workspace, perturbed_input, timeout
+                    wrapper, program, workspace, perturbed_input, timeout
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 report.fail("evaluator.input_dependence", f"the perturbed execution could not run: {exc}")
@@ -3537,8 +3595,7 @@ def rerun_archived_evaluator(
         return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}", {}
     for relative, perturbed in perturbed_runs:
         if perturbed.returncode != 0:
-            detail = perturbed.stderr.decode("utf-8", "replace").strip()
-            suffix = f": {detail}" if detail else ""
+            suffix = confinement_stderr(perturbed.stderr)
             return False, (
                 f"perturbed evaluator run for {relative} was inconclusive because the declared "
                 f"form-preserving input exited {perturbed.returncode}{suffix}"
@@ -4028,10 +4085,14 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
 
 
 def promote_evaluate(root: Path, plan: dict[str, Any], report: Report) -> None:
-    rule = plan.get("promotion_rule") or {}
-    samples = int(plan.get("samples_per_entrant") or 0)
-    baseline_samples = int(plan.get("samples_per_baseline") or 0)
-    margin_bar = float(rule.get("practical_margin") or 0)
+    rule = as_object(plan.get("promotion_rule"))
+    try:
+        samples = plan_count(plan, "samples_per_entrant")
+        baseline_samples = plan_count(plan, "samples_per_baseline")
+        margin_bar = finite_number(rule.get("practical_margin"), "promotion_rule.practical_margin")
+    except GateError as exc:
+        report.fail("promote.rule", str(exc))
+        return
     try:
         results = load_results(root, plan, report)
     except GateError as exc:
@@ -4044,8 +4105,9 @@ def promote_evaluate(root: Path, plan: dict[str, Any], report: Report) -> None:
         report.fail("promote.results", "no recorded results; a benchmark with no samples promotes nothing")
         return
 
-    for name in sorted(plan.get("tracks") or {}):
-        track = plan["tracks"][name]
+    tracks = as_object(plan.get("tracks"))
+    for name in sorted(tracks):
+        track = tracks[name]
         if not isinstance(track, dict):
             continue
         promote_track(name, track, results, samples, baseline_samples, margin_bar, rule.get("baseline_veto"), report)
@@ -4621,7 +4683,11 @@ def main(argv: list[str]) -> int:
             check_cost_model(plan, report)
             if report.failed:
                 return report.finish()
-            manifest = build_manifest(plan)
+            try:
+                manifest = build_manifest(plan)
+            except GateError as exc:
+                report.fail("manifest.derived", str(exc))
+                return report.finish()
             manifest["plan_sha256"] = sha256_file(root / "benchmark.json")
             write_json(root / "manifest.json", manifest)
             report.ok("manifest.built", f"manifest.json written for {manifest['totals']['total_model_jobs']} model jobs")

@@ -601,6 +601,19 @@ expect_code 1 "$status" "a manifest from an older plan is refused"
 assert_contains "$out" "generated from a different plan" "the manifest is bound to the plan"
 pass "a manifest built from a different plan is refused"
 
+# A malformed declared scalar must reach the operator as a named refusal with a
+# verdict line, not as a Python traceback indistinguishable from a crash.
+BENCH="$TMP_ROOT/manifest-nonnumeric-samples"
+write_plan "$BENCH" 'plan["samples_per_entrant"] = "six"'
+out=$(run_gate "$BENCH" manifest-build) && status=0 || status=$?
+expect_code 1 "$status" "a non-numeric sample count is refused"
+assert_not_contains "$out" "Traceback" "a malformed sample count is a verdict, not a crash"
+assert_contains "$out" "samples_per_entrant must be a nonnegative whole number" \
+  "the refusal names the malformed plan field"
+assert_contains "$out" "BENCH_RESULT manifest-build refused" "the refusal still carries a verdict line"
+assert_absent "$BENCH/manifest.json" "a refused manifest build writes no manifest"
+pass "a non-numeric sample count refuses by name instead of crashing"
+
 # --- the reproducible, calibrated evaluator ---------------------------------
 
 write_evaluator() {  # <bench-dir> [captures]
@@ -737,6 +750,19 @@ out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
 expect_code 1 "$status" "nine capture jobs cannot cover 30 candidate heads"
 assert_contains "$out" "expected 30 capture records" "the capture count is derived, not asserted"
 pass "nine capture jobs are refused for thirty candidate heads"
+
+# check_evaluator derives the capture field from the plan before any cost-model
+# check runs, so it has to survive a malformed unit price on its own.
+BENCH="$TMP_ROOT/evaluator-nonnumeric-cost"
+write_plan "$BENCH" 'plan["cost_model"]["job_classes"]["judge_call"]["low"] = "a"'
+write_evaluator "$BENCH"
+out=$(run_gate "$BENCH" evaluator-verify) && status=0 || status=$?
+expect_code 1 "$status" "a non-numeric unit price is refused before it is multiplied"
+assert_not_contains "$out" "Traceback" "a malformed unit price is a verdict, not a crash"
+assert_contains "$out" "cost_model.job_classes.judge_call.low must be a finite number" \
+  "the refusal names the malformed cost bound"
+assert_contains "$out" "BENCH_RESULT evaluator-verify refused" "the refusal still carries a verdict line"
+pass "a non-numeric unit price refuses by name inside every gate that prices the plan"
 
 BENCH="$TMP_ROOT/evaluator-drift"
 write_plan "$BENCH"
@@ -1360,6 +1386,54 @@ PY
   assert_contains "$out" "evaluator confinement or execution for determinism/run-1.json exited 3" \
     "the opaque input path matches no entry in a path-keyed answer table"
   pass "the frozen evaluator never sees the path of the record it must derive"
+
+  # A content-keyed answer table is just as fatal as a path-keyed one when the
+  # benchmark root is inside the cage: the frozen expected outputs and the
+  # execution contract that maps inputs to them are the answer key itself.
+  BENCH="$TMP_ROOT/evaluator-answer-key"
+  write_plan "$BENCH"
+  write_evaluator "$BENCH"
+  write_freeze_inputs "$BENCH"
+  write_isolation "$BENCH" "$RESTORE_MECHANISM"
+  python3 - "$BENCH" <<'PY'
+import hashlib, json, shlex, sys
+from pathlib import Path
+bench = Path(sys.argv[1]).resolve()
+program = bench / "scoring" / "evaluator.sh"
+contract = shlex.quote(str(bench / "evaluator" / "execution.json"))
+inputs = shlex.quote(str(bench / "ground-truth" / "evaluator-inputs"))
+outputs = shlex.quote(str(bench / "ground-truth" / "evaluator-outputs"))
+program.write_text(
+    "#!/bin/sh\n"
+    '[ "${1:-}" = --evaluate ] && [ -f "${2:-}" ] || exit 2\n'
+    f"contract={contract}\n"
+    f"inputs={inputs}\n"
+    f"outputs={outputs}\n"
+    '[ -r "$contract" ] || exit 3\n'
+    'payload=$(cat "$2")\n'
+    'for frozen in "$inputs"/*/*.json; do\n'
+    '  [ -f "$frozen" ] || continue\n'
+    '  if [ "$(cat "$frozen")" = "$payload" ]; then\n'
+    '    relative=${frozen#$inputs/}\n'
+    '    exec cat "$outputs/$relative"\n'
+    '  fi\n'
+    "done\n"
+    "exit 4\n"
+)
+program.chmod(0o755)
+contract_path = bench / "evaluator" / "execution.json"
+record = json.loads(contract_path.read_text())
+record["sha256"] = hashlib.sha256(program.read_bytes()).hexdigest()
+contract_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+  run_gate "$BENCH" freeze >/dev/null
+  out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
+  expect_code 1 "$status" "an evaluator that reads the frozen answer key is refused"
+  assert_contains "$out" "evaluator confinement or execution for determinism/run-1.json exited 3" \
+    "execution.json is unreachable from inside the preflight evaluator cage"
+  assert_not_contains "$out" "evaluator.execution ok" \
+    "no record may be derived from the frozen expected outputs"
+  pass "the preflight evaluator cage hides the frozen answer key it must reproduce"
 
   # This evaluator ignores the first perturbable scalar the gate reaches for
   # but still derives its records from the rest of the input, so the gate must
@@ -2899,6 +2973,43 @@ assert_not_contains "$out" "ignored declared scored input" \
   "a failed perturbation is not mislabeled as a no-op evaluator"
 assert_absent "$BENCH/archive/restore-drill.json" "an inconclusive perturbation writes no cleanup receipt"
 pass "perturbation failures are inconclusive rather than invariant"
+
+# The archived evaluator's bytes are untrusted candidate output, so its stderr
+# may not forge extra lines in the gate's line-oriented BENCH_CHECK contract.
+BENCH="$TMP_ROOT/archive-perturbation-stderr"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-perturbation-stderr"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, shlex, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+scoring = sample / "scoring.py"
+expected = shlex.quote(record["sample"])
+scoring.write_text(f"""#!/bin/sh
+value=$(sed -n 's/^[[:space:]]*\"value\":[[:space:]]*\"\\([^\"]*\\)\".*$/\\1/p' \"$1/work.json\")
+if [ \"$value\" != {expected} ]; then
+  printf 'BENCH_CHECK forged.check ok forged by the archived evaluator\\n' >&2
+  printf 'BENCH_RESULT restore-drill ok checks=99 failed=0\\n' >&2
+  exit 9
+fi
+printf '%s\\n' \"$value\"
+""")
+scoring.chmod(0o755)
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a perturbed archived evaluator that fails is refused"
+assert_contains "$out" "was inconclusive because the declared form-preserving input" \
+  "the perturbed run still reports its named refusal"
+[ "$(printf '%s\n' "$out" | grep -c '^BENCH_CHECK forged\.check')" = 0 ] \
+  || fail "archived evaluator stderr forged a BENCH_CHECK status line"
+[ "$(printf '%s\n' "$out" | grep -c '^BENCH_RESULT ')" = 1 ] \
+  || fail "archived evaluator stderr forged an extra BENCH_RESULT line"
+assert_contains "$out" "BENCH_RESULT restore-drill refused" "the only verdict line is the gate's own"
+pass "archived evaluator stderr cannot forge gate status lines"
 
 BENCH="$TMP_ROOT/archive-scratch-evaluator"
 write_plan "$BENCH"
