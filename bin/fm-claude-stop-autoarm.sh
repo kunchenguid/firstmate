@@ -121,6 +121,7 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
 SESSION_AUTHENTICATED=1
+FAILURE_SUPPRESSION_OWNER_PID=
 LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
 case "$LOCK_PID" in
   ''|*[!0-9]*) exit 0 ;;
@@ -148,10 +149,17 @@ EOF
 autoarm_trace_session_probe "$LOCK_PID"
 
 SESSION_OWNER_PID=$LOCK_PID
+FAILURE_SUPPRESSION_OWNER_PID=$SESSION_OWNER_PID
 if ! fm_session_lock_owned_by_self "$STATE" "$FM_ROOT"; then
   SESSION_AUTHENTICATED=0
   fm_harness_pid_alive "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
+  if FAILURE_CLAIMANT_PID=$(fm_claude_daemon_spawned_by_session_owner "$FM_ROOT" 2>/dev/null); then
+    FAILURE_SUPPRESSION_OWNER_PID=$FAILURE_CLAIMANT_PID
+  elif ! fm_claude_daemon_in_session_ancestry \
+    && FAILURE_CLAIMANT_PID=$(fm_harness_ancestry_pid 2>/dev/null); then
+    FAILURE_SUPPRESSION_OWNER_PID=$FAILURE_CLAIMANT_PID
+  fi
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
@@ -173,7 +181,7 @@ autoarm_session_still_owned() {
 
 autoarm_alarm_current() {
   fm_autoarm_failure_alarm_current \
-    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$SESSION_OWNER_PID"
+    "$STATE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$FAILURE_SUPPRESSION_OWNER_PID"
 }
 
 autoarm_notice_current() {
@@ -192,7 +200,8 @@ autoarm_claim_failure() {  # <reason> [baseline]
   case "$failure_rc" in
     0|3)
       autoarm_alarm_current && exit 0
-      if [ "$failure_rc" -eq 0 ]; then
+      if [ "$failure_rc" -eq 0 ] \
+        || [ "$FAILURE_SUPPRESSION_OWNER_PID" != "$SESSION_OWNER_PID" ]; then
         {
           printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism could not claim recovery: %s.\n' "$reason"
           printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook claim path before ending blind.\n'

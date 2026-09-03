@@ -572,6 +572,56 @@ test_stale_recovery_session_lease_timeout_publishes_failure() {
   pass "auto-arm: stalled stale recovery publishes bounded owner-scoped failure state"
 }
 
+test_predecessor_alarm_cannot_suppress_successor_recovery_failure() {
+  local dir holder out status failure reset claimant
+  dir=$(make_primary_dir "$TMP_ROOT/stale-recovery-predecessor-alarm")
+  : > "$dir/state/task.meta"
+  printf '9999999\n' > "$dir/state/.lock"
+  write_arm_fixture "$dir" actionable
+  mkdir -p \
+    "$dir/state/.claude-autoarm-failure-notified" \
+    "$dir/state/.claude-autoarm-failure-alarmed"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.9999999"
+  : > "$dir/state/.claude-autoarm-failure-alarmed/0.9999999"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.lock.acquire"
+  printf '%s\n' "$holder" > "$dir/state/.lock.acquire/pid"
+
+  out=$(printf '%s\n' '{"session_id":"stale-predecessor-alarm"}' \
+    | FM_AUTOARM_SESSION_LEASE_TIMEOUT=1 FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/recovery-claimant"
+      "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+    ' 2>&1); status=$?
+  claimant=$(cat "$dir/state/recovery-claimant" 2>/dev/null || true)
+  failure=$(failure_epoch_path "$dir") \
+    || fail "predecessor alarm suppressed the successor recovery failure record"
+  reset=$(failure_epoch_field "$dir" reset)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 2 "$status" "a predecessor alarm must not suppress a successor recovery failure"
+  case "$claimant" in
+    ''|*[!0-9]*) fail "stale recovery did not record its authenticated delivery claimant" ;;
+  esac
+  [ "$claimant" != 9999999 ] \
+    || fail "stale recovery claimant unexpectedly matched the dead predecessor"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = 9999999 ] \
+    || fail "successor recovery failure escaped the unchanged stale-owner fence"
+  [ "$reset" = 0 ] || fail "successor recovery failure changed the predecessor episode reset"
+  assert_present "$failure" \
+    "successor recovery failure did not persist a durable failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/0.9999999" \
+    "successor recovery failure removed the predecessor notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed/0.9999999" \
+    "successor recovery failure removed the predecessor alarm"
+  assert_contains "$out" "stale session lock recovery failed" \
+    "predecessor alarm suppressed the successor recovery failure banner"
+  assert_absent "$dir/state/arm-ran" \
+    "successor armed after stale recovery failed"
+  pass "auto-arm: predecessor alarms cannot suppress successor recovery failures"
+}
+
 test_zombie_session_owner_recovery_failure_is_visible() {
   local dir state fakeproc owner successor holder out status failure
   dir=$(make_primary_dir "$TMP_ROOT/zombie-session-owner")
@@ -3683,6 +3733,7 @@ test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_stale_recovery_session_lease_timeout_publishes_failure
+test_predecessor_alarm_cannot_suppress_successor_recovery_failure
 test_zombie_session_owner_recovery_failure_is_visible
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
