@@ -497,6 +497,54 @@ SH
   pass "auto-arm: failed claim paths leave a durable failed epoch and marker"
 }
 
+test_live_claim_mutex_holder_cannot_hide_failure() {
+  local dir out status holder lock_after
+  dir=$(make_primary_dir "$TMP_ROOT/live-claim-mutex-failure")
+  : > "$dir/state/task.meta"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$holder" > "$dir/state/.claude-autoarm.lock/pid"
+
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  lock_after=$(cat "$dir/state/.claude-autoarm.lock/pid" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 2 "$status" "a live claim-mutex holder must not hide an eligible claim failure"
+  assert_contains "$out" "could not claim recovery" "claim-mutex failure did not report the failed claim"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "live claim-mutex contention did not write the failure marker"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "live claim-mutex contention did not record outcome=failed"
+  [ "$lock_after" = "$holder" ] || fail "failure reporting replaced the live claim-mutex holder"
+  assert_absent "$dir/state/arm-ran" "claim-mutex failure reached the arm"
+  pass "auto-arm: live claim-mutex contention records a durable failure independently"
+}
+
+test_fresh_prior_terminal_epoch_cannot_hide_current_failure() {
+  local dir out status holder prior_gen
+  dir=$(make_primary_dir "$TMP_ROOT/fresh-prior-terminal-failure")
+  : > "$dir/state/task.meta"
+  prior_gen=17
+  printf 'epoch=%s owner_pid=9999999 outcome=rewake updated_at=%s\n' \
+    "$prior_gen" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$holder" > "$dir/state/.claude-autoarm.lock/pid"
+
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 2 "$status" "a fresh prior terminal epoch must not hide the current claim failure"
+  assert_contains "$out" "could not claim recovery" "fresh-epoch claim failure did not report the failed claim"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "fresh prior terminal epoch suppressed the current failure marker"
+  [ "$(epoch_field "$dir" epoch)" -gt "$prior_gen" ] || fail "current failure did not supersede the prior terminal generation"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "fresh prior terminal epoch still masks outcome=failed"
+  assert_absent "$dir/state/arm-ran" "fresh-epoch claim failure reached the arm"
+  pass "auto-arm: prior terminal freshness cannot suppress a current claim failure"
+}
+
 test_failed_cycles_notify_once_and_keep_retrying() {
   local dir out1 out2 status1 status2
   dir=$(make_primary_dir "$TMP_ROOT/failed-dedup")
@@ -1242,6 +1290,8 @@ test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_claim_path_failure_records_failed_epoch_and_marker
+test_live_claim_mutex_holder_cannot_hide_failure
+test_fresh_prior_terminal_epoch_cannot_hide_current_failure
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries

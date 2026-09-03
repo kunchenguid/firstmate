@@ -1295,43 +1295,42 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
   return 0
 }
 
+# Return a stable token for the current ledger state. A caller snapshots this
+# before attempting its claim, so only a state transition during that exact
+# attempt can prove that another participant handled it.
+fm_autoarm_claim_signature() {  # <state-dir>
+  local state=$1
+  if fm_autoarm_ledger_read "$state"; then
+    printf '%s:%s:%s\n' "$FM_AUTOARM_GEN" "$FM_AUTOARM_OWNER" "$FM_AUTOARM_OUTCOME"
+  else
+    printf 'absent\n'
+  fi
+}
+
 # Publish a terminal failed generation for an eligible hook invocation that
-# could not claim an arming generation. This is a diagnostic handoff, not an
-# open claim: it is allowed to omit pid identity when identity collection is the
-# failure itself, and it refuses to overwrite a fresh terminal/open outcome from
-# a competing generation that already owns this Stop event.
-fm_autoarm_claim_failure_commit() {  # <state-dir> <grace> <fresh-seconds> <outcome> [marker-file]
-  local state=$1 grace=$2 fresh=$3 outcome=$4 marker=${5:-} lock epoch pid gen identity tmp age
+# could not claim an arming generation. This diagnostic handoff never acquires
+# the claim micro-mutex whose contention it may be reporting. It gives a short
+# in-flight writer time to advance the exact pre-attempt ledger snapshot, then
+# commits the failure when a live or hung holder leaves that snapshot unchanged.
+fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} lock epoch pid gen identity tmp current i
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
-  case "$grace" in
-    ''|*[!0-9]*|0) grace=300 ;;
-  esac
-  case "$fresh" in
-    ''|*[!0-9]*|0) fresh=15 ;;
-  esac
   case "$outcome" in
     failed|failed-suppressed) ;;
     *) return 1 ;;
   esac
   pid=${BASHPID:-$$}
   identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
-  fm_lock_try_acquire "$lock" || return 1
-  if fm_autoarm_claim_open "$state" "$grace"; then
-    fm_lock_release "$lock"
-    return 2
-  fi
-  if fm_autoarm_ledger_read "$state"; then
-    age=$(fm_path_age "$epoch")
-    if [ "$age" -lt "$fresh" ]; then
-      case "$FM_AUTOARM_OUTCOME" in
-        rewake|failed|failed-suppressed)
-          fm_lock_release "$lock"
-          return 2
-          ;;
-      esac
-    fi
-  fi
+  i=0
+  while [ -e "$lock" ] && [ "$i" -lt 20 ]; do
+    current=$(fm_autoarm_claim_signature "$state")
+    [ "$current" = "$baseline" ] || return 2
+    sleep 0.02
+    i=$((i + 1))
+  done
+  current=$(fm_autoarm_claim_signature "$state")
+  [ "$current" = "$baseline" ] || return 2
   gen=$(_fm_autoarm_epoch_field "$epoch" epoch 2>/dev/null || true)
   case "$gen" in
     ''|*[!0-9]*) gen=0 ;;
@@ -1342,16 +1341,22 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <grace> <fresh-seconds> <outc
       printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
         "$gen" "$pid" "$outcome" "$(date +%s)"
       [ -z "$identity" ] || printf '%s\n' "$identity"
-    } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$epoch" 2>/dev/null; then
+    } > "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
-    fm_lock_release "$lock"
+    return 1
+  fi
+  current=$(fm_autoarm_claim_signature "$state")
+  if [ "$current" != "$baseline" ]; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 2
+  fi
+  if ! mv -f "$tmp" "$epoch" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
   if [ -n "$marker" ] && ! : > "$marker" 2>/dev/null; then
-    fm_lock_release "$lock"
     return 1
   fi
-  fm_lock_release "$lock"
   return 0
 }
 

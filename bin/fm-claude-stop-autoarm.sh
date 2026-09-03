@@ -63,9 +63,9 @@
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
-# On any uncertainty such as unresolvable ancestry, malformed lock state, or
-# lock contention, it exits 0 and leaves continuity to the synchronous guard and
-# the model.
+# Unresolvable ancestry and malformed session-lock state remain inert, while an
+# eligible generation-claim failure records a failed epoch and marker without
+# depending on the contended claim mutex.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,12 +78,10 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
-EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
-case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -137,6 +135,8 @@ need_supervision() {
 }
 need_supervision || exit 0
 
+CLAIM_BASELINE=$(fm_autoarm_claim_signature "$STATE")
+
 autoarm_claim_failure() {  # <reason>
   local reason=$1 outcome marker
   outcome=failed
@@ -145,7 +145,7 @@ autoarm_claim_failure() {  # <reason>
     outcome='failed-suppressed'
     marker=
   fi
-  if fm_autoarm_claim_failure_commit "$STATE" "$GRACE" "$EPOCH_FRESH" "$outcome" "$marker"; then
+  if fm_autoarm_claim_failure_commit "$STATE" "$CLAIM_BASELINE" "$outcome" "$marker"; then
     [ -e "$FAILURE_ALARM" ] && exit 0
     if [ "$outcome" = failed ]; then
       {
@@ -187,6 +187,7 @@ if [ "$CLAIM_RC" -ne 0 ]; then
   ROLE=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   case "$ROLE" in
     autoarm)
+      fm_autoarm_claim_abandoned "$STATE" "$GRACE" || exit 0
       fm_autoarm_release_abandoned "$STATE" "$GRACE" \
         || autoarm_claim_failure 'abandoned legacy auto-arm claim could not be released'
       fm_autoarm_claim_next "$STATE" "$GRACE"
