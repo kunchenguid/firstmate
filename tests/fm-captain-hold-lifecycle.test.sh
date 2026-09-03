@@ -634,7 +634,7 @@ EOF
 # closes a distinct parent decision and a retry never duplicates a line. A main
 # home publishes nothing anywhere.
 test_secondmate_home_publishes_holds_and_answers() {
-  local parent mate fakebin channel decision
+  local parent mate fakebin channel decision out
   parent=$(make_home parent-channel)
   mate="$TMP_ROOT/channel-mate-home"
   mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
@@ -686,6 +686,24 @@ EOF
     || fail "an answer retry duplicated a parent line: $(cat "$channel")"
   [ "$(grep -c 'captain-hold-mate-call' "$channel")" = 4 ] \
     || fail "unexpected parent channel contents: $(cat "$channel")"
+
+  run_captain "$mate" hold batch-call --title "Choose the batch release" \
+    --reason "batch choice pending" --repo sample >/dev/null \
+    || fail "batch hold failed"
+  mv "$channel" "$channel.saved"
+  mkdir "$channel"
+  out=$(printf 'batch-call\tship now\t\n' \
+    | run_captain "$mate" answers --source "batch retry fixture" 2>&1) \
+    || fail "batch answer did not preserve its durable close: $out"
+  printf '%s\n' "$out" | grep -Fq 'actionable:' \
+    || fail "failed batch parent delivery was not actionable: $out"
+  rmdir "$channel"
+  mv "$channel.saved" "$channel"
+  printf 'batch-call\tship now\t\n' \
+    | run_captain "$mate" answers --source "batch retry fixture" >/dev/null \
+    || fail "idempotent batch answer retry failed"
+  [ "$(grep -c 'resolved \[key=captain-hold-batch-call-1\]' "$channel")" = 1 ] \
+    || fail "batch retry did not restore exactly one parent resolution: $(cat "$channel")"
 
   run_captain "$parent" hold main-call --title "Choose the main release" \
     --reason "main choice pending" --repo sample >/dev/null || fail "main hold failed"

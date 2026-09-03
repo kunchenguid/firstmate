@@ -198,6 +198,21 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   pass "ledger delivery carries the report pointer, the failed verb, and each new terminal line"
 }
 
+# Receipt identity covers the complete terminal ledger line even when the
+# captain-facing rendering truncates two long notes to the same text.
+test_long_terminal_lines_have_distinct_receipts() {
+  local prefix
+  make_world long-ledger; bind_secondmate local
+  prefix=$(awk 'BEGIN { for (i = 0; i < 1300; i++) printf "a" }')
+  write_child "$MATE" child "failed: ${prefix}one"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  printf 'failed: %stwo\n' "$prefix" >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" reported)" = 2 ] \
+    || fail "distinct complete ledger lines collided in the receipt store"
+  pass "complete long ledger lines retain distinct receipt identities"
+}
+
 # A line still being appended has no trailing newline yet and must wait.
 test_secondmate_partial_ledger_line_waits_for_newline() {
   make_world partial; bind_secondmate local
@@ -247,6 +262,49 @@ test_report_subcommand_delivers_and_refuses() {
   run_report "$MAIN" child || fail "report failed in a main home"
   [ ! -e "$MAIN/state/parent-replies.status" ] || fail "a main home wrote a parent reply"
   pass "report delivers a child's final line, owes nothing twice, and refuses only an unwritable channel"
+}
+
+# Teardown calls report while holding the child's metadata lock. A concurrent
+# scan may hold the scan lock while waiting for that metadata lock, so report
+# must not wait for the scan lock in the opposite order.
+test_report_avoids_scan_meta_lock_inversion() {
+  local holder scan_pid report_pid i completed=0
+  make_world report-lock-order; bind_secondmate local
+  write_child "$MATE" child 'done: final word'
+  FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    lock=$(fm_meta_lock_path "$FM_STATE_OVERRIDE/child.meta")
+    fm_lock_acquire_wait "$lock"
+    : > "$2/meta-held"
+    while [ ! -e "$2/release-meta" ]; do sleep 0.05; done
+    fm_lock_release "$lock"
+  ' _ "$ROOT" "$WORLD" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ ! -e "$WORLD/meta-held" ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$WORLD/meta-held" ] || { reap "$holder"; fail "metadata lock holder did not start"; }
+
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE" --startup &
+  scan_pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ ! -e "$MATE/state/.inactive-outcome-reconcile.lock" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$MATE/state/.inactive-outcome-reconcile.lock" ] \
+    || { : > "$WORLD/release-meta"; reap "$holder"; reap "$scan_pid"; fail "scan lock holder did not start"; }
+
+  (run_report "$MATE" child && : > "$WORLD/report-complete") &
+  report_pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ ! -e "$WORLD/report-complete" ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$WORLD/report-complete" ] && completed=1
+  : > "$WORLD/release-meta"
+  reap "$holder"
+  reap "$report_pid"
+  reap "$scan_pid"
+  [ "$completed" -eq 1 ] || fail "report deadlocked behind a scan waiting for the caller's metadata lock"
+  pass "report preserves teardown's metadata-before-scan lock order"
 }
 
 test_local_secondmate_rejects_relative_parent_home() {
@@ -602,9 +660,11 @@ test_reconciliation_never_calls_forge() {
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_ledger_delivery_carries_report_and_failure
+test_long_terminal_lines_have_distinct_receipts
 test_secondmate_partial_ledger_line_waits_for_newline
 test_secondmate_remote_route_ledger_delivery
 test_report_subcommand_delivers_and_refuses
+test_report_avoids_scan_meta_lock_inversion
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing
 test_remote_parent_reply_is_idempotent

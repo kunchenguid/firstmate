@@ -361,7 +361,7 @@ report_child_ledger_locked() { # <id> <meta>
   state=$(status_line_verb "$last")
   pr=$(pr_for_task "$meta" "$status")
   incarnation=$(meta_incarnation "$meta")
-  fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$(clean_field "$last")")
+  fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   outcome_key="child-outcome-$id-$state"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
@@ -594,8 +594,6 @@ case "$mode" in
       printf 'usage: fm-inactive-reconcile.sh report <task-id>\n' >&2
       exit 2
     fi
-    fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
-    trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     report_child "$2"
     ;;
   acknowledge)

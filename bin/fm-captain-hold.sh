@@ -706,7 +706,7 @@ sanitize_field() {  # <text>
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -785,6 +785,12 @@ command_answers() {
       if { [ -z "$release_flag" ] && [ "$state" = "done" ] && [ "$recorded_mode" != released ]; } \
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
+        occurrence=$(resolution_record_count "$body")
+        case "$recorded_mode" in
+          repaired) publish_parent_hold "$id" "$occurrence" resolved "answered (repaired)" ;;
+          released) publish_parent_hold "$id" "$occurrence" resolved released ;;
+          *) publish_parent_hold "$id" "$occurrence" resolved answered ;;
+        esac
         printf 'closed: %s\n' "$id"
         closed=$((closed + 1))
         continue
