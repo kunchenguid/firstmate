@@ -166,6 +166,9 @@ EOF
   [ "$found" -eq 0 ]
 }
 
+# The candidate default-branch refs, probed the same way bin/fm-lint.sh's own
+# fm_lint_changed_base_ref probes them so both agree on what "the default
+# branch" means in a given checkout.
 fm_voice_default_refs() {
   local ref
   if [ -n "${FM_VOICE_GUARD_BASE:-}" ]; then
@@ -173,7 +176,7 @@ fm_voice_default_refs() {
     return 0
   fi
   for ref in origin/main main; do
-    if git rev-parse --verify -q "$ref^{commit}" >/dev/null 2>&1; then
+    if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
       printf '%s\n' "$ref"
     fi
   done
@@ -182,13 +185,17 @@ fm_voice_default_refs() {
 # Commits on HEAD that no known default-branch ref already carries. Excluding
 # every resolvable ref, not just the first, keeps a stale local main from
 # dragging already-published history into the scan.
-fm_voice_unpublished_commits() {
+#
+# Both failure modes return 3, never 1: an unresolvable ref and an unusable
+# rev-list both mean the range is unknown, and an unknown range must not be
+# reported as either clean or leaking.
+fm_voice_unpublished_commits() {  # <destination>
+  local destination=$1
   local -a refs
   local ref
   refs=()
   while IFS= read -r ref; do
     [ -n "$ref" ] || continue
-    git rev-parse --verify -q "$ref^{commit}" >/dev/null 2>&1 || continue
     refs+=("$ref")
   done < <(fm_voice_default_refs)
 
@@ -199,7 +206,11 @@ fm_voice_unpublished_commits() {
     return 3
   fi
 
-  git rev-list HEAD --not "${refs[@]}" 2>/dev/null
+  if ! git rev-list HEAD --not "${refs[@]}" > "$destination" 2>/dev/null; then
+    printf 'fm-voice-guard.sh: cannot list the commits ahead of %s. An unknown range is not a clean range.\n' \
+      "${refs[*]}" >&2
+    return 3
+  fi
 }
 
 MODE=range
@@ -288,7 +299,7 @@ else
     SUBJECT_LABEL='the commits in that range'
   else
     rc=0
-    fm_voice_unpublished_commits > "$COMMITS_FILE" || rc=$?
+    fm_voice_unpublished_commits "$COMMITS_FILE" || rc=$?
     [ "$rc" -eq 0 ] || exit "$rc"
     SUBJECT_LABEL='the commits about to be pushed'
   fi

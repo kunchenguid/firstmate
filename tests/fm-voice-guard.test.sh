@@ -224,6 +224,34 @@ test_fails_closed_when_the_range_cannot_be_determined() {
   pass "fails closed when the unpublished range cannot be determined"
 }
 
+test_fails_closed_when_the_commit_list_is_unusable() {
+  local tmp fakebin out rc=0
+  tmp=$(fm_test_tmproot fm-voice-revlist)
+  fm_voice_repo "$tmp/repo"
+  fm_voice_commit "$tmp/repo" 'fix(ci): Captain, a leak nobody can enumerate'
+
+  # A git that resolves the default branch but cannot enumerate the range. The
+  # guard must not read that as "nothing to report", and must not read it as a
+  # refusal either: it does not know, so it says so.
+  fakebin=$(fm_fakebin "$tmp")
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "rev-parse --is-inside-work-tree") printf 'true\n'; exit 0 ;;
+  "rev-parse --verify -q origin/main") exit 0 ;;
+  "rev-list "*) exit 128 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/git"
+
+  out=$(cd "$tmp/repo" && PATH="$fakebin:$PATH" "$GUARD" 2>&1) || rc=$?
+  expect_code 3 "$rc" "an unusable commit list did not fail closed"$'\n'"$out"
+  assert_contains "$out" "cannot list the commits" \
+    "fail-closed diagnostic did not name the unusable commit list"
+  pass "fails closed when the commit list cannot be enumerated"
+}
+
 test_base_override_bounds_the_range() {
   local tmp out rc=0 base
   tmp=$(fm_test_tmproot fm-voice-base)
@@ -357,6 +385,7 @@ test_refuses_each_address_shape
 test_refusal_names_what_matched_and_how_to_fix_it
 test_scans_only_unpublished_commits
 test_fails_closed_when_the_range_cannot_be_determined
+test_fails_closed_when_the_commit_list_is_unusable
 test_base_override_bounds_the_range
 test_explicit_range_and_commit_selectors
 test_text_mode_reads_a_pull_request_description
