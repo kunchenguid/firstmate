@@ -130,8 +130,9 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
-#   Before a secondmate launch, the home is locally fast-forwarded to the primary
-#   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   Before a secondmate launch, the home is fast-forwarded to the primary's
+#   default-branch commit when safe: directly for a local home, or through the
+#   configured host for a remote home. Skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches

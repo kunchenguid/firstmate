@@ -18,17 +18,19 @@
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
-# never touches the network. A standalone clone moves through that path only when
-# it already has the target; otherwise it is skipped until the origin path updates it.
+# never touches the network. A local standalone clone moves through that path
+# only when it already has the target; otherwise it is skipped until the origin
+# path updates it.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
 # linked-worktree homes.
-# Homes are leased at a detached HEAD on the
-# default branch, so the fast-forward advances HEAD only and never moves the
-# shared default branch or any other worktree's checkout.
+# Locally leased homes start at a detached HEAD on the default branch, so their
+# fast-forward advances HEAD only and never moves the shared default branch or
+# any other worktree's checkout. A standalone remote home may instead advance
+# its checked-out default branch under the same guard.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
