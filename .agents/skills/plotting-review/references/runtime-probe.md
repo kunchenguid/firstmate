@@ -1,7 +1,7 @@
 # Runtime probe pattern
 
 Use this pattern as a starting point for a focused one-off probe or a project test.
-Adapt only `render_call` and the artist assertions to the public plotting surface under review.
+Adapt only `make_render_call` and the artist assertions to the public plotting surface under review.
 
 Set the backend before the Python process imports `matplotlib.pyplot`, preferably at process launch:
 
@@ -23,23 +23,34 @@ from matplotlib._pylab_helpers import Gcf
 from matplotlib.figure import Figure
 
 
-def snapshot():
-    figure_numbers = tuple(plt.get_fignums())
-    current_figure = plt.gcf() if figure_numbers else None
-    current_axes = plt.gca() if current_figure is not None and current_figure.axes else None
+def pyplot_state():
+    figure_numbers = tuple(Gcf.figs)
+    active_manager = Gcf.get_active()
+    current_figure = active_manager.canvas.figure if active_manager is not None else None
+    current_axes = (
+        current_figure._axstack.current() if current_figure is not None else None
+    )
     return {
         "figure_numbers": figure_numbers,
         "current_figure": current_figure,
         "current_axes": current_axes,
+    }
+
+
+def snapshot():
+    state = pyplot_state()
+    return {
+        **state,
         "rc_params": deepcopy(dict(mpl.rcParams)),
         "axes_by_figure": {
             number: tuple(Gcf.figs[number].canvas.figure.axes)
-            for number in figure_numbers
+            for number in state["figure_numbers"]
         },
     }
 
 
-def probe(render_call):
+def probe(make_render_call):
+    render_call = make_render_call()
     before = snapshot()
     calls = {
         name: []
@@ -48,7 +59,9 @@ def probe(render_call):
 
     def record(name):
         def recorder(*args, **kwargs):
-            calls[name].append((args, kwargs))
+            calls[name].append(
+                {"args": args, "kwargs": kwargs, "pyplot_state": pyplot_state()}
+            )
         return recorder
 
     with ExitStack() as stack:
@@ -74,7 +87,8 @@ def probe(render_call):
     }
 
 
-def probe_lifecycle(render_call):
+def probe_lifecycle(make_render_call):
+    render_call = make_render_call()
     before = snapshot()
     returned = render_call()
     after = snapshot()
@@ -85,8 +99,11 @@ Patch both pyplot and figure methods for show and save because libraries may use
 The probe uses Matplotlib's internal figure-manager registry only to inspect already-managed figures without changing which figure is current.
 If the code imported plotting functions into its own module namespace, patch the name looked up by that module as well as, or instead of, the original provider.
 Record arguments rather than delegating to show, save, or close during the observation pass so the probe does not destroy the state it needs to inspect.
+Each call record captures the active figure, active axes, and managed figure numbers at interception time without creating or activating a figure.
 Treat the observation pass's `after` snapshot as counterfactual whenever intercepted lifecycle calls occurred.
-Run `probe_lifecycle` separately with lifecycle methods unpatched and controlled destinations to verify which figures actually remain managed.
+Make the factory construct fresh equivalent fixtures and render callables for each pass.
+Run the observation and unpatched lifecycle passes in separate fresh Python processes so neither can reuse plotting objects or global state mutated by the other.
+Use controlled destinations in the lifecycle pass to verify which figures actually remain managed without affecting project files.
 Run a separate real save smoke test to `io.BytesIO` when saving is part of the contract, and assert that the buffer is nonempty.
 
 Compare identities with `is` for a caller-provided axes, its figure, and a returned axes or figure.
