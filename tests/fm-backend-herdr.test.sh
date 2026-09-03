@@ -1415,6 +1415,68 @@ test_projection_close_restores_exact_prior_focus() {
   pass "herdr presentation focus: exact pane close restores the exact prior workspace and tab"
 }
 
+# At/above the presentation release floor every presentation op is focus-clean,
+# so a post-op focus difference can only be the captain's own change; the
+# restore must not revert it. These two cases pin the gate decision and prove it
+# is load-bearing: the same divergent inputs flip the verdict when only the
+# release changes.
+test_focus_restore_is_a_noop_at_or_above_the_release_floor() {
+  local dir log out
+  dir="$TMP_ROOT/focus-restore-gate-above"; mkdir -p "$dir"
+  log="$dir/log"; : > "$log"
+  out=$(ROOT="$ROOT" LOG="$log" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_presentation_release_supported() { return 0; }
+    # A post-op focus that differs from the snapshot: below the floor this would
+    # trigger a revert, so a no-op here can only come from the gate.
+    fm_backend_herdr_projection_focus_snapshot() { printf "w2\tw2:t1"; }
+    fm_backend_herdr_cli() { printf "%s\n" "$*" >> "$LOG"; }
+    before=$(printf "w1\tw1:t1")
+    set +e
+    fm_backend_herdr_projection_focus_restore fmtest "$before" "workspace create"
+    printf "rc=%s" "$?"
+    set -e
+  ')
+  [ "$out" = "rc=0" ] || fail "focus restore must succeed as a no-op at/above the floor, got '$out'"
+  assert_not_contains "$(cat "$log")" "tab focus" \
+    "focus restore must not re-focus at/above the floor even when post-op focus differs from the snapshot"
+  pass "herdr presentation focus: restore is a no-op at/above the release floor"
+}
+
+test_focus_restore_still_restores_below_the_release_floor() {
+  local dir log out
+  dir="$TMP_ROOT/focus-restore-gate-below"; mkdir -p "$dir"
+  log="$dir/log"; : > "$log"
+  # A file counter, because each focus snapshot runs in a command-substitution
+  # subshell where an in-memory counter would not persist.
+  out=$(ROOT="$ROOT" LOG="$log" CNT="$dir/cnt" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    printf 0 > "$CNT"
+    fm_backend_herdr_presentation_release_supported() { return 1; }
+    fm_backend_herdr_projection_focus_snapshot() {
+      local n; n=$(($(cat "$CNT") + 1)); printf "%s" "$n" > "$CNT"
+      # First read is the post-op focus (the captain moved), second is the
+      # restored focus that must match the pre-op snapshot.
+      if [ "$n" -eq 1 ]; then printf "w2\tw2:t1"; else printf "w1\tw1:t1"; fi
+    }
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$LOG"
+      case "$2 $3" in
+        "tab get") printf "{\"result\":{\"tab\":{\"tab_id\":\"w1:t1\",\"workspace_id\":\"w1\"}}}\n" ;;
+      esac
+    }
+    before=$(printf "w1\tw1:t1")
+    set +e
+    fm_backend_herdr_projection_focus_restore fmtest "$before" "workspace create"
+    printf "rc=%s" "$?"
+    set -e
+  ')
+  [ "$out" = "rc=0" ] || fail "below-floor restore must succeed when it re-focuses the exact prior tab, got '$out'"
+  assert_contains "$(cat "$log")" "tab focus w1:t1" \
+    "below-floor restore must re-focus the exact prior tab, keeping the pre-floor backstop"
+  pass "herdr presentation focus: restore still runs below the release floor"
+}
+
 test_projection_close_refuses_active_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-focus-active-refusal"; mkdir -p "$dir/responses"
@@ -1586,8 +1648,12 @@ test_projection_close_emptying_before_focus_repositions_then_uses_pane_death() {
   death_process_info_fixture w1:p1 "$bgpid" > "$resp/10.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/11.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/12.out"
-  cp "$resp/12.out" "$resp/13.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/14.out"
+  # The version-floor gate in focus_restore reads status first; this below-floor
+  # release keeps the pre-floor backstop active, so the after-snapshot (14/15)
+  # still runs and confirms focus was preserved without a re-focus.
+  printf '%s\n' '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}' > "$resp/13.out"
+  cp "$resp/12.out" "$resp/14.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/15.out"
   make_death_lab "$dir" "$bgpid"
   printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w2","focused":true},{"workspace_id":"w3","focused":false},{"workspace_id":"w1","focused":false}]}}' > "$dir/mover-response"
   fb=$(make_herdr_fakebin "$dir")
@@ -1772,8 +1838,11 @@ test_projection_close_move_failure_falls_back_to_plain_close() {
   printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/9.out"
   printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/11.out"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/12.out"
-  cp "$resp/12.out" "$resp/13.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/14.out"
+  # The version-floor gate in focus_restore reads status first; this below-floor
+  # release keeps the backstop active for the after-snapshot (14/15) below.
+  printf '%s\n' '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}' > "$resp/13.out"
+  cp "$resp/12.out" "$resp/14.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/15.out"
   sleep 300 & bgpid=$!
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
@@ -4537,6 +4606,8 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
+test_focus_restore_is_a_noop_at_or_above_the_release_floor
+test_focus_restore_still_restores_below_the_release_floor
 test_projection_close_refuses_active_tab
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary

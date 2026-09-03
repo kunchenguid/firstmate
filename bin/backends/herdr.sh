@@ -792,8 +792,17 @@ fm_backend_herdr_projection_focus_snapshot() {  # <session>
 # right neighbor (upstream #1621/#1912); both fixes are unreleased.
 # A single tab.focus on the exact response-independent pre-operation tab id
 # restores both the workspace and tab atomically.
+#
+# At/above the presentation release floor those bugs are fixed and every
+# presentation op is focus-clean (verified on 0.8.2), so the only thing this
+# comparison can catch is the captain changing focus during the op window -
+# which the restore would then silently revert. Skip it there. Below the floor,
+# or when the release cannot be confirmed, keep the backstop.
 fm_backend_herdr_projection_focus_restore() {  # <session> <snapshot> <operation>
   local session=$1 before=$2 operation=$3 workspace tab after info restored
+  if fm_backend_herdr_presentation_release_supported "$session"; then
+    return 0
+  fi
   [ -n "$before" ] || {
     echo "warning: herdr presentation $operation had no unambiguous pre-operation focus snapshot" >&2
     return 1

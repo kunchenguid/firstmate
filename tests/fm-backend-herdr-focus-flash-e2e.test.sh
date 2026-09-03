@@ -14,6 +14,9 @@
 # against what Part A measured about this very release.
 # On a future release whose explicit close preserves focus, Part A records
 # that and Parts B and C keep outcome-only assertions, so no version is guessed.
+# Part D reproduces the restore-race (herdr-focus-steal-s1) deterministically:
+# a captain focus change during an op window must survive at or above the floor,
+# where the ops are focus-clean, and must still be reclaimed below it.
 # Every CLI operation is routed through one guarded named non-default lab, and
 # lab teardown verifies that the default fleet session is byte-identical.
 set -u
@@ -403,6 +406,35 @@ else
   [ ! -s "$GATE_ERR" ] \
     || fail "a supported release must warn about nothing: $(cat "$GATE_ERR")"
   pass "version floor: an unconfigured home stays projected on herdr $LIVE_VERSION and the explicit opt-in agrees"
+fi
+
+# --- Part D: the restore backstop must not revert the captain's own focus ----
+# Deterministic version of the report's restore-race probe: snapshot the anchor
+# focus, then have the captain move focus (what would happen mid-op), then run
+# focus_restore directly. At or above the floor the presentation ops are
+# focus-clean, so the only detected change is the captain's own and the gate must
+# leave it; below the floor the pre-floor backstop must still reclaim it.
+read -r _ D_ANCHOR_TAB _ <<<"$(mkws flash-d-anchor)" || fail 'could not create the Part D anchor workspace'
+read -r D_CAPTAIN_WS D_CAPTAIN_TAB _ <<<"$(mkws flash-d-captain)" || fail 'could not create the Part D captain workspace'
+lab tab focus "$D_ANCHOR_TAB" >/dev/null || fail 'could not focus the Part D anchor'
+D_BEFORE=$(focus_snapshot) || fail 'could not capture the Part D pre-op focus'
+# The captain changes focus during the op window.
+lab tab focus "$D_CAPTAIN_TAB" >/dev/null || fail 'could not simulate the Part D captain focus change'
+D_CAPTAIN_FOCUS=$(printf '%s\t%s' "$D_CAPTAIN_WS" "$D_CAPTAIN_TAB")
+PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" bash -c '
+  . "$1/bin/backends/herdr.sh"
+  fm_backend_herdr_cli() { local session=$1; shift; HERDR_SESSION="$session" herdr "$@" --session "$session"; }
+  fm_backend_herdr_projection_focus_restore "$2" "$3" "spawn cleanup"
+' "$ROOT" "$HERDR_LAB_SESSION" "$D_BEFORE" >/dev/null 2>&1 || true
+D_AFTER=$(focus_snapshot) || fail 'could not capture the Part D post-restore focus'
+if [ "$FLOOR_VERDICT" = 0 ]; then
+  [ "$D_AFTER" = "$D_CAPTAIN_FOCUS" ] \
+    || fail "at or above the floor the restore reverted the captain's focus change ($D_CAPTAIN_FOCUS -> $D_AFTER)"
+  pass "restore gate: at or above the floor a captain focus change during the op window survives"
+else
+  [ "$D_AFTER" = "$D_BEFORE" ] \
+    || fail "below the floor the restore backstop did not reclaim focus ($D_BEFORE -> $D_AFTER after $D_CAPTAIN_FOCUS)"
+  pass "restore gate: below the floor the backstop still reclaims the captain's pre-op focus"
 fi
 
 printf 'evidence: herdr=%s protocol=%s steal_live=%s floor_verdict=%s default-session-tripwire=armed\n' \
