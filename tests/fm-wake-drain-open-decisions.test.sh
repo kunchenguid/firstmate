@@ -108,7 +108,7 @@ test_no_open_decisions_prints_nothing() {
   state="$dir/state"
   out="$dir/drain.out"
   printf 'working: on it\n' > "$state/task4.status"
-  printf 'done: shipped clean\n' > "$state/task5.status"
+  printf 'resolved: shipped clean\n' > "$state/task5.status"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with no open decisions"
 

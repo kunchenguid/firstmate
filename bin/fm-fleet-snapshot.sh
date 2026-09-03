@@ -62,10 +62,9 @@
 #     untrusted supplements only and never override readable structured-home facts.
 #     Each structured-home record carries active_children, decisions_open, holds,
 #     queued, landed, endpoints, counts, and omitted. provenance.summary_source
-#     distinguishes "local-ledger", "remote-ledger", "remote-ledger-cache",
-#     "legacy-local-summary", and "legacy-remote-summary"; freshness is "cached"
-#     only for the cache source, and observed_at/age_seconds come from the
-#     selected summary's generation. Every successfully sampled home also carries
+#     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
+#     freshness is "cached" only for the cache source, and observed_at/age_seconds
+#     come from the selected summary's generation. Every successfully sampled home also carries
 #     reconcile_inventory independently of projection trust.
 #     Actionable captain holds
 #     appear in decisions_open; blocked captain holds remain queued with metadata.
@@ -111,10 +110,8 @@ esac
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
-FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
 FM_SNAPSHOT_BUDGET=${FM_SNAPSHOT_BUDGET:-5}
-FM_SNAPSHOT_LEDGER_MODE=${FM_SNAPSHOT_LEDGER_MODE:-on}
 FM_SNAPSHOT_CACHE_DIR=${FM_SNAPSHOT_CACHE_DIR:-$STATE/secondmate-summary-cache}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
@@ -145,13 +142,8 @@ case "$FM_SNAPSHOT_SECONDMATES" in
     exit 2
     ;;
 esac
-validate_positive_bound FM_SNAPSHOT_SECONDMATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_BUDGET "$FM_SNAPSHOT_BUDGET"
-case "$FM_SNAPSHOT_LEDGER_MODE" in
-  on|off) : ;;
-  *) echo "fm-fleet-snapshot: FM_SNAPSHOT_LEDGER_MODE must be on or off" >&2; exit 2 ;;
-esac
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
@@ -187,13 +179,15 @@ usage: fm-fleet-snapshot.sh --json
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a structured snapshot of the firstmate fleet.
-JSON is the stable machine-readable output contract. The default ledger mode
+JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
 aggregation, includes generated_epoch for freshness arithmetic, and marks
 inventory contradictions or unavailable child state invalid.
+kind=secondmate meta records are not child inventory for unowned_current or
+terminal_in_flight; they never have backlog rows.
 Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, hold_until, deferred_marker, and plural
@@ -201,14 +195,11 @@ blocker fields for downstream projections. A captain hold is actionable only
 when every blocker is Done and any hold-until date has arrived.
 Cross-home collection uses FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the
 count bound) and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
-FM_SNAPSHOT_LEDGER_MODE defaults to on. In that mode every sampled remote home's
-state/home-summary.json is fetched concurrently under one FM_SNAPSHOT_BUDGET
-(default 5 seconds), with a valid prior copy under FM_SNAPSHOT_CACHE_DIR used
-when the live read fails, is invalid, or consumes the budget. A live read that
-fails or validates malformed before consuming the budget can start the legacy
-summary fallback inside that same total budget for mixed-fleet compatibility.
-FM_SNAPSHOT_SECONDMATE_TIMEOUT bounds local summary fallback and the diagnostic
-legacy mode selected with FM_SNAPSHOT_LEDGER_MODE=off.
+Every sampled remote home's state/home-summary.json is fetched concurrently
+under one FM_SNAPSHOT_BUDGET (default 5 seconds), with a valid prior copy under
+FM_SNAPSHOT_CACHE_DIR used when the live read fails, is invalid, or consumes the
+budget. A home with neither a valid ledger nor a valid cached copy is reported
+unreadable with the reason; collection never computes a summary in that home.
 Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIMEOUT
 (default 10 seconds); a read that hits the bound reports state unknown. Remote
 secondmate endpoint liveness is not probed by this command.
@@ -254,13 +245,9 @@ last_nonempty_line() {  # <file>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
-# A crew-state read is bounded like every other cross-home read here. For a
-# remote secondmate fm-crew-state.sh reaches its host over ssh, and ssh's own
-# dead-peer detection deliberately never kills a slow-but-alive remote command,
-# so without this bound one unreachable or slow host extends the whole snapshot
-# without limit - and this snapshot is also the producer behind the repeatedly
-# published home ledger. A read that hits the bound is indistinguishable from
-# the already-handled unreadable case: empty output folds to state unknown.
+# A local crew-state read is bounded so one slow child cannot extend this
+# snapshot without limit. Remote secondmate endpoint liveness is never read here.
+# A local read that hits the bound folds to state unknown.
 crew_state_json() {  # <id>
   local id=$1 raw rest state source detail sep
   raw=$(
@@ -472,7 +459,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
-  local remote_host remote_root remote_home_present
+  local remote_host remote_root
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
@@ -492,7 +479,6 @@ task_json_lines() {
     spawn_gen=$(meta_value "$meta" spawn_gen)
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)
-    remote_home_present=null
     if [ -n "$remote_host" ]; then
       backend=$(meta_value "$meta" remote_backend)
       [ -n "$backend" ] || backend=unknown
@@ -515,9 +501,8 @@ task_json_lines() {
     fi
 
     if [ -n "$remote_host" ]; then
-      # Remote endpoint liveness belongs to supervision. The default snapshot
-      # path consumes one home ledger read instead of probing each persistent
-      # endpoint while assembling the parent task inventory.
+      # Remote endpoint liveness belongs to supervision. The snapshot never
+      # probes a persistent remote endpoint while assembling parent inventory.
       current_json=$(jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}')
     else
       current_json=$(crew_state_json "$id")
@@ -561,7 +546,6 @@ task_json_lines() {
     endpoint_exists=null
     agent_alive=not_checked
     if [ -n "$remote_host" ]; then
-      remote_home_present=null
       agent_alive=unknown
     else
       if [ -n "$target" ]; then
@@ -582,7 +566,7 @@ task_json_lines() {
     report_json=$(path_present_json "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
-      home_json=$(jq -n --arg path "$home" --argjson present "$remote_home_present" '{path:$path,present:$present}')
+      home_json=$(jq -n --arg path "$home" '{path:$path,present:null}')
     elif [ -n "$home" ]; then
       home_json=$(path_present_json "$home")
     else
@@ -738,10 +722,12 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select(.requires_child_metadata)
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
     | ([ $tasks[]
+         | select(.kind != "secondmate")
          | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
          | {id,state:.current_state.state} ]) as $unowned_children
     | ([ $owned_in_flight[] as $work
          | $tasks[]
+         | select(.kind != "secondmate")
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
          | {id,state:.current_state.state} ]) as $terminal_in_flight
     | ([if $backlog.present != true then
@@ -768,7 +754,9 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | select($work.current_role != "program")
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
-         | {id,kind,state:.current_state.state,source:.current_state.source,
+         | {id,kind,state:.current_state.state,
+            repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
+            source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
@@ -1024,17 +1012,6 @@ summary_file_oversized() {  # <file>
   [ "$bytes" -gt "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES" ]
 }
 
-legacy_summary_capture() {  # <output> <timeout> <command...>
-  local output=$1 timeout=$2
-  shift 2
-  fm_run_timed "$timeout" bash -c "
-    limit=\$1
-    shift
-    set -o pipefail
-    \"\$@\" | LC_ALL=C head -c \"\$limit\"
-  " fm-legacy-summary "$((FM_SNAPSHOT_SECONDMATE_MAX_BYTES + 1))" "$@" > "$output"
-}
-
 snapshot_cache_prepare() {
   local mode
   SNAPSHOT_CACHE_AVAILABLE=0
@@ -1149,13 +1126,12 @@ bounded_collect() {  # <output> <error> <command...>
 }
 
 collect_one() {  # <manifest-row>
-  local row=$1 id home cache slot fetch fallback status
+  local row=$1 id home cache slot fetch status
   id=$(printf '%s' "$row" | jq -r '.id') || return
   home=$(printf '%s' "$row" | jq -r '.home') || return
   cache=$(printf '%s' "$row" | jq -r '.cache') || return
   slot=$(printf '%s' "$row" | jq -r '.slot') || return
   fetch="$out_dir/$slot.fetch"
-  fallback="$out_dir/$slot.fallback"
   status="$out_dir/$slot.status"
   if bounded_collect "$fetch" "$out_dir/$slot.fetch.err" \
       "$script_dir/fm-on.sh" "$id" fm-remote-file.sh get state/home-summary.json "$max_bytes" \
@@ -1165,12 +1141,6 @@ collect_one() {  # <manifest-row>
   fi
   if [ -n "$cache" ] && valid_summary "$cache" "$home"; then
     printf 'cached\n' > "$status"
-    return
-  fi
-  if bounded_collect "$fallback" "$out_dir/$slot.fallback.err" \
-      "$script_dir/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
-      && valid_summary "$fallback" "$home"; then
-    printf 'fallback\n' > "$status"
     return
   fi
   printf 'failed\n' > "$status"
@@ -1414,8 +1384,8 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
-  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
-  local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot fallback_file legacy_file
+  local activity_scan activities decisions reconciliation provenance freshness reason summary summary_sampled summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
+  local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
@@ -1439,11 +1409,7 @@ secondmate_current_json() {  # <parent-tasks-json>
   shown=$(printf '%s\n' "$rows" | grep -c . || true)
   truncated=$((total - shown))
   if [ -n "$rows" ]; then
-    if [ "$FM_SNAPSHOT_LEDGER_MODE" = on ]; then
-      prepare_remote_summary_collection "$rows" || return 1
-    else
-      SNAPSHOT_COLLECT_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-legacy.XXXXXX") || return 1
-    fi
+    prepare_remote_summary_collection "$rows" || return 1
   fi
 
   while IFS= read -r row; do
@@ -1501,7 +1467,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     summary_age=0
     summary_observed=$SNAPSHOT_NOW
     summary_freshness=fresh
-    if [ -z "$reason" ] && [ "$FM_SNAPSHOT_LEDGER_MODE" = on ]; then
+    if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
         cache_path=$(snapshot_route_cache_path "$id" "$host" "$home" 2>/dev/null || true)
         collection_slot=$(jq -r --arg id "$id" 'select(.id == $id) | .slot' "$SNAPSHOT_COLLECT_DIR/manifest.jsonl" 2>/dev/null | head -1)
@@ -1512,104 +1478,28 @@ secondmate_current_json() {  # <parent-tasks-json>
         elif [ -n "$cache_path" ] && summary=$(summary_file_read "$cache_path" "$home"); then
           summary_source='remote-ledger-cache'
           summary_freshness=cached
-        elif summary=$(summary_file_read "$SNAPSHOT_COLLECT_DIR/$collection_slot.fallback" "$home"); then
-          summary_source='legacy-remote-summary'
-          summary_freshness=fresh
-        elif summary_file_oversized "$SNAPSHOT_COLLECT_DIR/$collection_slot.fallback"; then
-          reason="structured home snapshot exceeded byte limit"
+        elif summary_file_oversized "$SNAPSHOT_COLLECT_DIR/$collection_slot.fetch"; then
+          reason="structured home ledger exceeded byte limit and no valid cached copy is available"
         elif [ "$SNAPSHOT_COLLECTION_TIMED_OUT" -eq 1 ] && [ -z "$collection_status" ]; then
-          reason="structured home snapshot timed out"
+          reason="structured home ledger collection timed out and no valid cached copy is available"
         else
-          reason="structured home snapshot failed"
+          reason="structured home ledger is missing, unreadable, or invalid and no valid cached copy is available"
         fi
+      elif summary=$(summary_file_read "$home/state/home-summary.json" "$home"); then
+        summary_source='local-ledger'
+      elif summary_file_oversized "$home/state/home-summary.json"; then
+        reason="structured home ledger exceeded byte limit"
       else
-        if summary=$(summary_file_read "$home/state/home-summary.json" "$home"); then
-          summary_source='local-ledger'
-        else
-          fallback_file=$(mktemp "$SNAPSHOT_COLLECT_DIR/local-summary.XXXXXX") || return 1
-          summary_rc=0
-          fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
-            FM_ROOT_OVERRIDE="$FM_ROOT" \
-            FM_HOME="$home" \
-            FM_STATE_OVERRIDE="$home/state" \
-            FM_DATA_OVERRIDE="$home/data" \
-            FM_CONFIG_OVERRIDE="$home/config" \
-            FM_PROJECTS_OVERRIDE="$home/projects" \
-            FM_SNAPSHOT_NOW="$SNAPSHOT_NOW" \
-            FM_SNAPSHOT_NOW_EPOCH="$SNAPSHOT_EPOCH" \
-            FM_SNAPSHOT_SECONDMATE_CHILDREN="$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
-            FM_SNAPSHOT_SECONDMATE_QUEUED="$FM_SNAPSHOT_SECONDMATE_QUEUED" \
-            FM_SNAPSHOT_SECONDMATE_DECISIONS="$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
-            FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME="$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-            "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary \
-            > "$fallback_file" 2>/dev/null || summary_rc=$?
-          if [ "$summary_rc" -eq 0 ] && summary=$(summary_file_read "$fallback_file" "$home"); then
-            summary_source='legacy-local-summary'
-            summary_freshness=fresh
-          elif summary_file_oversized "$fallback_file"; then
-            reason="structured home snapshot exceeded byte limit"
-          elif [ "$summary_rc" -eq 124 ]; then
-            reason="structured home snapshot timed out"
-          else
-            reason="structured home snapshot failed"
-          fi
-        fi
+        reason="structured home ledger is missing, unreadable, or invalid"
       fi
       if [ -z "$reason" ]; then
         summary_age=$(snapshot_summary_age "$summary")
         summary_observed=$(printf '%s' "$summary" | jq -r '.generated')
       fi
-    elif [ -z "$reason" ]; then
-      legacy_file=$(umask 077; mktemp "$SNAPSHOT_COLLECT_DIR/legacy-summary.XXXXXX") || return 1
-      if [ "$remote" = true ]; then
-        legacy_summary_capture "$legacy_file" "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
-          < /dev/null 2>/dev/null
-        summary_rc=$?
-        summary_source='legacy-remote-summary'
-      else
-        legacy_summary_capture "$legacy_file" "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
-          FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-          FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" FM_PROJECTS_OVERRIDE="$home/projects" \
-          FM_SNAPSHOT_NOW="$SNAPSHOT_NOW" FM_SNAPSHOT_NOW_EPOCH="$SNAPSHOT_EPOCH" \
-          FM_SNAPSHOT_SECONDMATE_CHILDREN="$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
-          FM_SNAPSHOT_SECONDMATE_QUEUED="$FM_SNAPSHOT_SECONDMATE_QUEUED" \
-          FM_SNAPSHOT_SECONDMATE_DECISIONS="$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
-          FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME="$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-          "$SCRIPT_DIR/fm-fleet-snapshot.sh" --secondmate-home-summary 2>/dev/null
-        summary_rc=$?
-        summary_source='legacy-local-summary'
-      fi
-      if summary_file_oversized "$legacy_file"; then
-        reason="structured home snapshot exceeded byte limit"
-      elif [ "$summary_rc" -ne 0 ]; then
-        [ "$summary_rc" -eq 124 ] && reason="structured home snapshot timed out" || reason="structured home snapshot failed"
-      elif ! jq -e -s --arg home "$home" '
-        length == 1 and (.[0] |
-          .schema == "fm-secondmate-home-summary.v1" and .home == $home
-          and (.generated_epoch | type) == "number"
-          and (.valid | type) == "boolean" and (.state | type) == "string"
-          and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
-          and (.active_children | type) == "array" and (.decisions_open | type) == "array"
-          and (.holds | type) == "array" and (.queued | type) == "array"
-          and (.landed | type) == "array" and (.endpoints | type) == "array"
-          and (.counts | type) == "object" and (.omitted | type) == "array"
-        )
-      ' "$legacy_file" >/dev/null 2>&1; then
-        reason="structured home snapshot was malformed or stale"
-      else
-        summary=$(jq -c -s '.[0]' "$legacy_file") || reason="structured home snapshot was malformed or stale"
-        if [ -z "$reason" ]; then
-          summary_age=$(snapshot_summary_age "$summary")
-          summary_observed=$(printf '%s' "$summary" | jq -r '.generated')
-          summary_freshness=fresh
-        fi
-      fi
-      rm -f -- "$legacy_file"
     fi
     # Failed command substitutions clear their assignment target. Keep the
-    # unsampled fallback record's --argjson input valid without retaining any
-    # rejected or oversized summary fragment.
+    # unsampled record's --argjson input valid without retaining any rejected
+    # or oversized summary fragment.
     if [ -n "$reason" ]; then summary='{}'; fi
     if [ -z "$reason" ]; then
       summary_sampled=true

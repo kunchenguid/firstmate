@@ -1,7 +1,12 @@
 // Firstmate supervision branch for Pi (docs/pi-supervision-branch.md).
 //
-// A persistent second AgentSession - the supervision BRANCH - inside the same
-// pi process as the captain's MAIN session. The watcher extension offers each
+// A second AgentSession - the supervision BRANCH - inside the same pi process
+// as the captain's MAIN session, living for exactly one main session: every
+// main session start (cold start, /new, /resume, /fork, reload) opens a NEW
+// branch conversation, so the branch reasons from today's generated prompt and
+// the current main dialog instead of an older thread's accumulated memory. The
+// durable outcome store, not that conversation, is what carries unacknowledged
+// captain-facing outcomes across the boundary. The watcher extension offers each
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh), then
@@ -33,10 +38,11 @@
 // for the whole process; and a secondary read-only Pi session that never owns
 // the lock must never write markers, clean leases, or accept wakes.
 //
-// Failure direction: every path that cannot reach a working branch falls back
-// to delivering the wake to MAIN exactly as before the branch existed - a
-// broken branch degrades to today's behavior, never to a lost wake. The wake
-// queue itself stays durable until the handler runs the drain's
+// Failure direction: every accepted path that cannot reach a working branch
+// rejects its settlement to the watcher, which retains delivery ownership and
+// routes the wake to MAIN through its consumption-acknowledged path. A broken
+// branch declines later offers, so they take that same watcher path directly.
+// The wake queue itself stays durable until the handler runs the drain's
 // acknowledgement, so a branch that dies mid-handling re-presents its rows at
 // the next drain exactly as a mid-handling main crash always has.
 //
@@ -153,10 +159,10 @@ const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
 // (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
 // request cannot become an unbounded loop of empty turns.
 const PROCESSING_TRIGGERED_ATTEMPTS = 2;
-// One provider failure falls back immediately but leaves room for a transient
-// outage to recover on the next wake. A second consecutive provider failure
-// latches the branch off. While latched, main keeps every wake except one
-// branch recovery probe after each exponentially backed-off cooldown.
+// One provider failure rejects immediately to watcher-owned fallback but leaves
+// room for a transient outage to recover on the next wake. A second consecutive
+// provider failure latches the branch off. While latched, main keeps every wake
+// except one branch recovery probe after each exponentially backed-off cooldown.
 const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
 const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
 const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
@@ -433,13 +439,23 @@ type MirrorCollectionState = {
   // SessionManager. The prompt is mirrored from the event immediately, then
   // this marker suppresses the same persisted entry when turn_end collects it.
   stagedCaptain: { file: string; index: number; text: string } | null;
+  // Set at every main session start, where the branch conversation is
+  // replaced too (createBranch). The durable cursor records what the PREVIOUS
+  // branch conversation already received, so the first collection of a new
+  // main session ignores it and re-anchors to the current main session's
+  // start; otherwise a /resume or reload, which keeps main's own session file,
+  // would leave the fresh branch blind to dialog main itself still has. The
+  // reset is bounded by the current main session and costs only re-delivered
+  // read-only context, which is idempotent.
+  reanchor: boolean;
 };
 
 function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCollectionState): MirrorItem[] {
   const file = sessionManager.getSessionFile() ?? "";
   const entries = sessionManager.getEntries();
   const anchor = collection.collectAnchor ?? readMirrorCursor();
-  const start = anchor.file === file ? Math.min(anchor.index, entries.length) : 0;
+  const start = collection.reanchor || anchor.file !== file ? 0 : Math.min(anchor.index, entries.length);
+  collection.reanchor = false;
   let currentCaptainIndex = -1;
   for (let index = entries.length - 1; index >= start; index -= 1) {
     const entry = entries[index];
@@ -513,6 +529,10 @@ export default function (pi: ExtensionAPI) {
     collectAnchor: null,
     pendingCursor: null,
     stagedCaptain: null,
+    // The first branch conversation of a process is new (see
+    // branchSessionGeneration), so its first collection re-anchors too, even
+    // if this instance never sees a session_start of its own.
+    reanchor: true,
   };
   let currentMainSession: ReadonlyEntries | null = null;
   // Volatile view of the open processing request: the sequences it presented,
@@ -527,6 +547,16 @@ export default function (pi: ExtensionAPI) {
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
   let branchSelectionRevision = 0;
+  // The branch CONVERSATION is scoped to one main session. This records which
+  // session generation the current branch conversation belongs to, and only a
+  // record from the CURRENT generation is ever reopened, so every main session
+  // start - cold start, /new, /resume, /fork, reload - starts the branch on a
+  // new conversation instead of dragging an older thread's memory into today's
+  // supervision rules. The starting -1 makes a process's first build new even
+  // if this instance never sees a session_start. Within one main session the
+  // record is what a model or effort change reopens.
+  let branchSessionGeneration = -1;
+  let branchSessionFile = "";
   // Main's own current model, tracked from the contexts Pi already hands this
   // extension plus its model_select event, because createBranch runs at wake
   // time with no context of its own. It is what "follow main" applies.
@@ -901,7 +931,7 @@ export default function (pi: ExtensionAPI) {
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
           description:
-            "Use captain unconditionally for an outcome that directly answers an explicit captain request, regardless of whether it is healthy, routine, measured, actionable, or requires a decision. Also use captain for work ready for review, captain-only decisions, blockers or failures after recovery is exhausted, needed credentials, and destructive, irreversible, or security-sensitive actions; use routine otherwise.",
+            "Use captain or routine exactly as the \"Verdict: routine or captain\" section of your system prompt decides; that section is the one owner of the rule.",
         }),
         summary: Type.String({
           description:
@@ -966,10 +996,10 @@ export default function (pi: ExtensionAPI) {
   ): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
     // Resolved first, before any session file or prompt work: a model pin Pi
     // cannot honor must fail before this build leaves anything behind. Every
-    // branch build goes through here - first wake of a cold start, and the
-    // reopen after /new, /resume, /fork, or reload - so resolving the model
-    // and the effort here is what makes the captain's current choices
-    // authoritative on all of them.
+    // branch build goes through here - the new conversation each main session
+    // start opens, and the reopen after a model or effort change inside one
+    // session - so resolving the model and the effort here is what makes the
+    // captain's current choices authoritative on all of them.
     const pinned = await branchModelSelection();
     const effort = branchEffortSelection(pinned?.model);
     const prompt = spawnSync("bash", [promptScript], {
@@ -986,17 +1016,22 @@ export default function (pi: ExtensionAPI) {
     if (!actingAsOwner(branchGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
     mkdirSync(sessionsDir, { recursive: true });
     let sessionManager: SessionManager | null = null;
-    try {
-      const recorded = readFileSync(sessionPointer, "utf8").trim();
-      if (recorded && existsSync(recorded)) {
-        sessionManager = SessionManager.open(recorded, sessionsDir);
+    // Only this main session's own branch conversation is continued. The
+    // recorded pointer is never reopened across a session start, so a rebuild
+    // for a model or effort change keeps today's thread while a session start
+    // always opens a new one (branchSessionGeneration).
+    if (branchSessionGeneration === branchGeneration && branchSessionFile) {
+      try {
+        if (existsSync(branchSessionFile)) sessionManager = SessionManager.open(branchSessionFile, sessionsDir);
+      } catch {
+        sessionManager = null;
       }
-    } catch {
-      sessionManager = null;
     }
     if (!sessionManager) {
       sessionManager = SessionManager.create(fmRoot, sessionsDir);
     }
+    branchSessionGeneration = branchGeneration;
+    branchSessionFile = sessionManager.getSessionFile() ?? "";
     // The branch loads no project resources at all: extensions off (so it can
     // never spawn its own branch), skills/context files off (they vary per
     // home and would destabilize the byte-stable prefix). Its whole standing
@@ -1076,7 +1111,10 @@ ${context.command}
     try {
       writeFileSync(sessionPointer, `${sessionManager.getSessionFile()}\n`);
     } catch {
-      // Pointer write failure only costs cross-restart session reuse.
+      // The pointer is a durable record of the branch's current conversation
+      // for operators and for the effort picker's last-resort model lookup;
+      // reopening reads the in-memory record above, so a failed write costs
+      // neither the live session nor its replacement.
     }
     return { session: created.session, sessionManager };
   }
@@ -1136,22 +1174,9 @@ ${context.command}
     }
   }
 
-  async function fallbackToMain(message: string, detail: string): Promise<void> {
-    const body = `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. (Supervision branch unavailable, falling back to main: ${detail})`;
-    let content = body;
-    try {
-      // Marked operational like every watcher injection, so the wake is never
-      // mistaken for captain input (away-mode return semantics, mirror filter).
-      content = encodeFirstmateOperationalInput("watcher", body);
-    } catch {
-      // An encoding failure must not lose the wake; deliver it unmarked.
-    }
-    await pi.sendUserMessage(content, { deliverAs: "followUp" });
-  }
-
-  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): void {
+  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
     const acceptedSelectionRevision = branchSelectionRevision;
-    branchChain = branchChain
+    const delivery = branchChain
       .then(async () => {
         if (shuttingDown || acceptedGeneration !== generation) {
           throw new Error("supervision session was replaced before handling the accepted wake");
@@ -1212,24 +1237,23 @@ ${context.command}
           throw new Error("could not release the branch's settled wake-row grant");
         }
       })
-      .catch(async (error: unknown) => {
+      .catch((error: unknown) => {
         releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
-        try {
-          await fallbackToMain(message, error instanceof Error ? error.message : String(error));
-        } catch {}
+        throw error;
       })
       .finally(() => {
         if (recoveryProbe) finishProviderProbe(acceptedGeneration, acceptedSelectionRevision);
       });
+    branchChain = delivery.catch(() => {});
+    return delivery;
   }
 
   // A model or effort change applies to the next branch turn without waiting
   // for /new: the live session is dropped synchronously so nothing enqueued
   // afterwards can capture it, then disposed in dispatch order behind work
-  // already queued. The branch CONVERSATION is persistent
-  // (state/.branch-session), so the next wake reopens the same conversation
-  // under the new selection. Clearing the broken latch is what lets a
-  // corrected pin recover in place.
+  // already queued. The branch conversation lasts for this main session, so
+  // the next wake reopens the same conversation under the new selection.
+  // Clearing the broken latch is what lets a corrected pin recover in place.
   function releaseBranchForSelectionChange(): void {
     branchBroken = "";
     consecutiveProviderErrors = 0;
@@ -1293,8 +1317,7 @@ ${context.command}
     }
     if (!collectCurrentMainDialog()) return;
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
-    offer.accept();
-    enqueueWake(offer.message, generation, recoveryProbe);
+    offer.accept(enqueueWake(offer.message, generation, recoveryProbe));
   });
 
   pi.on?.("before_agent_start", (event, ctx) => {
@@ -1358,10 +1381,17 @@ ${context.command}
   // Pi emits session_shutdown for ordinary same-process replacements (/new,
   // /resume, /fork, reload) as well as terminal quit, exactly as the watcher
   // extension documents. Shutdown quiesces this generation, clears the
-  // volatile mirror state so the replacement reconstructs from the durable
-  // cursor, and releases the branch session; a replacement session_start
-  // re-arms, and the next wake reopens the persistent branch from its
-  // recorded pointer. Terminal quit simply never fires another session_start.
+  // volatile mirror state, and releases the branch session; a replacement
+  // session_start re-arms. Terminal quit simply never fires another
+  // session_start.
+  //
+  // Bumping the generation here is also what makes the branch conversation
+  // NEW for this main session: the recorded branch session belongs to the
+  // previous generation, so the next wake builds a new one rather than
+  // reopening a thread whose accumulated memory would compete with today's
+  // supervision prompt. The mirror re-anchors with it, so the fresh branch
+  // receives the dialog of the main session it is supervising from that
+  // session's start.
   pi.on?.("session_start", (_event, ctx) => {
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
@@ -1370,6 +1400,10 @@ ${context.command}
     consecutiveProviderErrors = 0;
     providerRecovery = null;
     generation += 1;
+    mirrorCollection.collectAnchor = null;
+    mirrorCollection.pendingCursor = null;
+    mirrorCollection.stagedCaptain = null;
+    mirrorCollection.reanchor = true;
     if (actingAsOwner(generation) && !reconcileUnreadOutcomes(generation)) {
       branchBroken = "could not reconcile unread supervision outcomes into main";
     }

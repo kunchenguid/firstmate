@@ -73,6 +73,14 @@ case "$command_name" in
 esac
 if [ "$slow" -eq 1 ]; then
   printf 'START %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
+  # Do not let scheduler latency turn the concurrency assertion into a race
+  # between equal sleeps. If the fetch worker was launched concurrently, give
+  # it a bounded opportunity to publish its START record.
+  waited=0
+  while ! grep -q '^START fleet-fetch ' "$log" && [ "$waited" -lt 500 ]; do
+    sleep 0.01
+    waited=$((waited + 1))
+  done
   sleep "$sleep_s"
   printf 'END %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
 else
@@ -137,6 +145,11 @@ for arg in "\$@"; do
 done
 if [ "\$slow" -eq 1 ]; then
   printf 'START fleet-fetch git fetch\n' >> '$log'
+  waited=0
+  while ! grep -q '^START host-.* fm-remote-doctor.sh ' '$log' && [ "\$waited" -lt 500 ]; do
+    sleep 0.01
+    waited=\$((waited + 1))
+  done
   sleep "\${FM_FAKE_GIT_FETCH_SLEEP:-0.4}"
   printf 'END fleet-fetch git fetch\n' >> '$log'
 fi

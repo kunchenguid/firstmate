@@ -43,19 +43,22 @@
 #                   The required Herdr CI lane uses this so a missing pin cannot
 #                   silently pass as a gate skip.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
-#                   Plain --changed uses min(4, cpus) workers when multiple
-#                   selected scripts are admissible.
+#                   Plain --changed and a plain list of script paths use
+#                   min(4, cpus) workers when multiple selected scripts are
+#                   admissible; --lane, --family, and --all stay serial unless
+#                   asked for concurrency explicitly.
 #                   N>1 is allowed only when every selected script is proven
 #                   safe to run concurrently: individually in the proven-isolated
 #                   set (bin/fm-test-isolation-proof.sh --list), or in a family
 #                   carrying a recorded concurrent proof
 #                   (list_concurrent_safe_families below). Overall cap is 8;
-#                   family proofs may impose a lower cap. Unproven stateful
-#                   scripts stay serial. Concurrent runs are ordered
-#                   longest-hint-first so the slowest script is not stranded
-#                   alone at the tail. Default is 1 (serial) except for plain
-#                   --changed, which uses the bounded automatic scheduler. Any
-#                   unproven remainder runs serially after that group.
+#                   family proofs may impose a lower cap. Individually proven
+#                   scripts share one phase; scripts admitted only by a family
+#                   proof run in a separate phase for each family. Concurrent
+#                   phases are ordered longest-hint-first. Unproven stateful
+#                   scripts run serially after all concurrent phases. Default is
+#                   1 (serial) except for plain --changed and a plain list of
+#                   script paths, which use the bounded automatic scheduler.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
@@ -249,6 +252,7 @@ family_for_basename() {
     fm-remote-secondmate-trace-context.test.sh|\
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-reconcile.test.sh|\
+    fm-secondmate-restart.test.sh|\
     fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|fm-stow-cascade.test.sh|\
     fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
@@ -438,6 +442,7 @@ list_concurrent_safe_families() {
   cat <<'EOF'
 watcher-wake-lock
 pure-contract-unit
+pr-forge
 EOF
 }
 
@@ -451,7 +456,7 @@ family_is_concurrent_safe() {
 
 concurrent_safe_family_jobs_max() {
   case "$1" in
-    watcher-wake-lock|pure-contract-unit) printf '4\n' ;;
+    watcher-wake-lock|pure-contract-unit|pr-forge) printf '4\n' ;;
     *) printf '1\n' ;;
   esac
 }
@@ -638,6 +643,7 @@ tests/fm-voice-relay.test.sh 28699
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7381
 tests/fm-wake-drain-open-decisions-cursor.test.sh 20629
 tests/fm-wake-drain-open-decisions.test.sh 6240
+tests/fm-wake-drain-outcome-backstop.test.sh 15182
 tests/fm-wake-drain-unread-status.test.sh 35078
 tests/fm-wake-queue.test.sh 56674
 tests/fm-watch-arm.test.sh 58528
@@ -1840,11 +1846,17 @@ for s in "${SCRIPTS[@]}"; do
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done
 
-# Plain --changed uses the bounded representative-suite scheduler; numeric
-# --jobs retains the strict all-script admission rule below.
+# Plain --changed and a plain list of script paths both use the bounded
+# representative-suite scheduler; numeric --jobs retains the strict all-script
+# admission rule below. Naming scripts is how a local verification round asks
+# for exactly those subjects, so it gets bounded concurrency rather than a
+# serial chain of separate runs.
+# The curated selections stay untouched: --lane composes CI shards whose serial
+# lane must stay strictly serial, --family is what the required Herdr lane runs,
+# and --all is a deliberate complete regression.
 AUTO_CONCURRENCY=0
-if [ "$MODE" = changed ] && [ "$JOBS_EXPLICIT" -eq 0 ]; then
-  if [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
+if { [ "$MODE" = changed ] || [ "$MODE" = scripts ]; } && [ "$JOBS_EXPLICIT" -eq 0 ]; then
+  if [ "$MODE" = changed ] && [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
     PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
   fi
   auto_admissible=0
@@ -1858,7 +1870,7 @@ if [ "$MODE" = changed ] && [ "$JOBS_EXPLICIT" -eq 0 ]; then
     [ "$JOBS" -eq 1 ] || AUTO_CONCURRENCY=1
   fi
 fi
-if [ "$JOBS" -gt 1 ] || [ "$MODE" = changed ]; then
+if [ "$JOBS" -gt 1 ] || [ "$MODE" = changed ] || [ "$MODE" = scripts ]; then
   SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
 fi
 
@@ -1878,33 +1890,45 @@ if [ "$JOBS" -gt 1 ] && [ "$AUTO_CONCURRENCY" -eq 0 ]; then
   done
 fi
 
-# Split the run into the proven-concurrent scripts and an unproven remainder.
-# The remainder runs serially AFTER the concurrent group, never beside it, so an
-# unproven script still never shares a machine with another test. An explicit
-# --jobs refused above, so its remainder is always empty.
+# Split the run into proven concurrent phases and an unproven remainder.
+# Individually proven scripts share one phase. Scripts admitted only by a family
+# proof get a separate phase per family, because that proof establishes safety
+# only among members of that family. The serial remainder runs after every
+# concurrent phase, never beside another test.
 CONCURRENT_SCRIPTS=()
 SERIAL_TAIL_SCRIPTS=()
+CONCURRENT_PHASE_BREAK=__fm_test_concurrent_phase_break__
 if [ "$JOBS" -gt 1 ]; then
   SCHEDULE_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-test-sched.XXXXXX")
   : >"$SCHEDULE_TMP"
-  # Two passes: the tail array must be built in this shell, so the weighted
-  # listing is written to a file rather than piped into sort from a loop whose
-  # appends would be lost in a subshell.
   for s in "${SCRIPTS[@]}"; do
     if script_allows_concurrency "$s"; then
-      # Longest first: workers are handed scripts in order, so starting the
-      # longest last strands it running alone at the tail. Measured over the
-      # watcher family, alphabetical order finished in 395s where the balanced
-      # four-worker sum was 205s.
-      printf '%s\t%s\n' "$(portable_serial_weight_for "$s")" "$s" >>"$SCHEDULE_TMP"
+      if is_proven_isolated_script "$s"; then
+        phase=0
+      else
+        family=$(family_for_basename "$(basename "$s")")
+        phase=1
+        while IFS= read -r admitted_family; do
+          [ "$family" = "$admitted_family" ] && break
+          phase=$((phase + 1))
+        done < <(list_concurrent_safe_families)
+      fi
+      # Longest first within each isolation phase: workers are handed scripts
+      # in order, so starting the longest last strands it at the tail.
+      printf '%s\t%s\t%s\n' "$phase" "$(portable_serial_weight_for "$s")" "$s" >>"$SCHEDULE_TMP"
     else
       SERIAL_TAIL_SCRIPTS+=("$s")
     fi
   done
-  while IFS=$'\t' read -r _weight s; do
+  previous_phase=
+  while IFS=$'\t' read -r phase _weight s; do
     [ -n "$s" ] || continue
+    if [ -n "$previous_phase" ] && [ "$phase" != "$previous_phase" ]; then
+      CONCURRENT_SCRIPTS+=("$CONCURRENT_PHASE_BREAK")
+    fi
     CONCURRENT_SCRIPTS+=("$s")
-  done < <(LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 "$SCHEDULE_TMP")
+    previous_phase=$phase
+  done < <(LC_ALL=C sort -t"$(printf '\t')" -k1,1n -k2,2nr -k3,3 "$SCHEDULE_TMP")
   rm -f "$SCHEDULE_TMP"
 fi
 
@@ -2136,6 +2160,12 @@ else
   }
 
   for script in "${CONCURRENT_SCRIPTS[@]+"${CONCURRENT_SCRIPTS[@]}"}"; do
+    if [ "$script" = "$CONCURRENT_PHASE_BREAK" ]; then
+      while [ "$active_workers" -gt 0 ]; do
+        wait_one_completed_job_worker
+      done
+      continue
+    fi
     while [ "$active_workers" -ge "$JOBS" ]; do
       wait_one_completed_job_worker
     done

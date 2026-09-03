@@ -29,13 +29,30 @@ document:
 # `.github/workflows/ci.yml` invokes it directly, with parity asserted by
 # `tests/fm-lint.test.sh` and `tests/fm-lint-workflows.test.sh`.
 #
-# Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
-# Test is intent-targeted validation of whether the change meets its brief;
-# .github/workflows/ci.yml owns broad regression (behavior suite, platform,
-# security, Herdr, tmux, and lifecycle coverage). A full-suite override here
-# would duplicate CI and defeat the targeted Test contract.
+# Pin the test baseline to the repository's own runner rather than leaving each
+# gate agent to chain `bash tests/a.test.sh && bash tests/b.test.sh` by hand.
+# `bin/fm-test-run.sh --changed` selects only the families the branch's changed
+# files map to, runs concurrency-admitted scripts with bounded concurrency, keeps
+# every unproven stateful script serial, and applies its own generous per-script
+# bound - so a verification round is neither a guessed short timeout nor a
+# serial chain. `bin/fm-test-run.sh` owns all of that (see its header).
+#
+# real-herdr-gated is excluded for the same reason the portable CI lanes exclude
+# it: those scripts drive a live Herdr lab, and the dedicated required Herdr lane
+# in .github/workflows/ci.yml owns that coverage. A gate baseline must not start
+# real Herdr sessions on whatever machine it happens to run on.
+#
+# This is still NOT a complete tests/*.test.sh walk, and must not become one.
+# Local no-mistakes Test is intent-targeted validation of whether the change
+# meets its brief; .github/workflows/ci.yml owns broad regression (behavior
+# suite, platform, security, Herdr, tmux, and lifecycle coverage). A full-suite
+# override here would duplicate CI and defeat the targeted Test contract. The
+# configured command is a baseline only: because firstmate always supplies
+# --intent, the Test step still runs its intent-targeted evidence agent on top
+# of it.
 commands:
   lint: 'bin/fm-lint.sh'
+  test: 'bin/fm-test-run.sh --changed --exclude-family real-herdr-gated'
 
 # Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
 # The evidence is not committed to the feature or default branch.

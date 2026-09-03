@@ -1319,6 +1319,139 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+# Mark the case's home as a secondmate home bound to a parent: teardown and
+# fm-pr-check run with FM_HOME="$case_dir/home" so the parent-channel
+# publishers resolve that binding while the task state stays in $case_dir/state.
+configure_secondmate_home() {  # <case-dir> <local|remote> [<parent-home>]
+  local case_dir=$1 route=$2 parent=${3:-} home="$1/home"
+  mkdir -p "$home"
+  printf 'mate-x\n' > "$home/.fm-secondmate-home"
+  {
+    printf 'schema=fm-secondmate-parent.v1\nroute=%s\n' "$route"
+    [ "$route" != local ] || printf 'parent_home=%s\n' "$parent"
+  } > "$home/.fm-secondmate-parent"
+  if [ "$route" = local ]; then
+    # A local parent registers the mate; teardown resolves that registration.
+    mkdir -p "$parent/state" "$parent/data"
+    fm_write_secondmate_meta "$parent/state/mate-x.meta" "$home"
+    printf -- '- mate-x - fixture scope (home: %s; scope: fixture; projects: alpha; added 2026-07-14)\n' \
+      "$home" > "$parent/data/secondmates.md"
+  fi
+}
+
+# Registering a PR inside a secondmate home publishes the child's ready line
+# with the canonical URL on the parent channel from fm-pr-check itself, once;
+# a main home publishes nothing.
+test_secondmate_pr_registration_publishes_ready_line() {
+  local case_dir pr_head channel url
+  url=https://github.com/example/repo/pull/7
+  case_dir=$(make_case mate-pr-ready)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  mkdir -p "$case_dir/parent/state"
+  channel="$case_dir/parent/state/mate-x.status"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" \
+    || fail "mate-pr-ready: fm-pr-check failed: $(cat "$case_dir/pr-check.err")"
+  grep -q '^armed:' "$case_dir/pr-check.out" || fail "mate-pr-ready: poll was not armed"
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url mode=no-mistakes" "$channel" \
+    "mate-pr-ready: the ready line did not reach the parent channel"
+  ! grep -q '^actionable:' "$case_dir/pr-check.err" \
+    || fail "mate-pr-ready: registration reported a channel problem: $(cat "$case_dir/pr-check.err")"
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2>&1 \
+    || fail "mate-pr-ready: re-registration failed"
+  [ "$(grep -c 'child-pr-task-x1' "$channel")" -eq 1 ] \
+    || fail "mate-pr-ready: re-registration duplicated the ready line"
+
+  case_dir=$(make_case main-pr-ready)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \
+    || fail "main-pr-ready: fm-pr-check failed"
+  ! grep -q '^actionable:' "$case_dir/pr-check.err" \
+    || fail "main-pr-ready: a main home reported a channel problem"
+  [ ! -e "$case_dir/state/parent-replies.status" ] || fail "main-pr-ready: a main home wrote a parent reply"
+  pass "fm-pr-check publishes the PR-ready line on a secondmate's parent channel once"
+}
+
+# Tearing a child down inside a secondmate home delivers the child's final
+# ledger line to the parent before the record goes, and refuses (retaining
+# every record) while the parent channel cannot be written; a rerun after the
+# repair delivers and completes.
+test_secondmate_home_teardown_delivers_final_line_or_refuses() {
+  local case_dir rc channel wt_head err seq generation
+
+  case_dir=$(make_case mate-teardown-delivers)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  mkdir -p "$case_dir/parent/state"
+  channel="$case_dir/parent/state/mate-x.status"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'working: shipping\ndone: PR https://github.com/example/repo/pull/9 checks green\n' \
+    > "$case_dir/state/task-x1.status"
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "mate-teardown-delivers: teardown should succeed: $(cat "$case_dir/stderr")"
+  grep -Eq '^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green pr=https://github.com/example/repo/pull/9 mode=local-only$' "$channel" \
+    || fail "mate-teardown-delivers: the final ledger line did not reach the parent: $(cat "$channel" 2>/dev/null)"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "mate-teardown-delivers: teardown left the task record"
+
+  case_dir=$(make_case mate-teardown-refuses)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  # The channel path is occupied by a directory, so no line can be appended.
+  mkdir -p "$case_dir/parent/state/mate-x.status"
+  channel="$case_dir/parent/state/mate-x.status"
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/tasktmp"
+  printf '!\n' > "$case_dir/state/task-x1.grok-turnend-token"
+  printf '!\n' > "$case_dir/state/task-x1.kimi-turnend-token"
+  printf 'tasktmp=%s\n' "$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'done: PR https://github.com/example/repo/pull/9 checks green\n' > "$case_dir/state/task-x1.status"
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "mate-teardown-refuses: teardown proceeded with an undelivered final line"
+  grep -q 'has not reached the parent channel' "$case_dir/stderr" \
+    || fail "mate-teardown-refuses: refusal did not name the parent channel: $(cat "$case_dir/stderr")"
+  [ -f "$case_dir/state/task-x1.meta" ] && [ -f "$case_dir/state/task-x1.status" ] \
+    || fail "mate-teardown-refuses: refusal did not retain the task records"
+  [ -f "$case_dir/state/task-x1.grok-turnend-token" ] \
+    && [ -f "$case_dir/state/task-x1.kimi-turnend-token" ] \
+    && [ -d "$case_dir/tasktmp" ] \
+    || fail "mate-teardown-refuses: refusal removed endpoint records before parent delivery"
+  rmdir "$channel"
+  err=$(FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-wake-drain.sh" 2>&1 >/dev/null)
+  seq=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p')
+  generation=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p')
+  [ -z "$seq" ] || FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$generation" >/dev/null
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "mate-teardown-refuses: rerun after repair should succeed: $(cat "$case_dir/stderr2")"
+  grep -Eq '^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green' "$channel" \
+    || fail "mate-teardown-refuses: the rerun did not deliver the final line"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "mate-teardown-refuses: rerun left the task record"
+  pass "a secondmate home's teardown delivers the child's final line or refuses until it can"
+}
+
 test_teardown_missing_busy_sidecar_completes() {
   local case_dir gen rc
   case_dir=$(make_case missing-busy-sidecar)
@@ -2613,6 +2746,8 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_secondmate_pr_registration_publishes_ready_line
+test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
