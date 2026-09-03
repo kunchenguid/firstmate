@@ -203,7 +203,7 @@ This family is the residual set that used to sit in `unclassified`, and it exist
 
 Two scripts left the residual set rather than joining it.
 `tests/fm-backend-herdr-focus-flash-e2e.test.sh` is a real-Herdr lab regression and is now `real-herdr-gated`, which also moves it out of the portable serial lane and into the required Herdr lane; it had been gate-skipping on Linux CI, so that real-Herdr regression was not running anywhere.
-It was verified locally against herdr 0.8.2 through the guarded named non-default lab, reporting `steal_live=0 floor_verdict=0 default-session-tripwire=armed`, with the fleet's default session unchanged before and after.
+Its current live-backend result is recorded under [workspace-removal focus safety](verification/runtime-backends.md#workspace-removal-focus-safety).
 `tests/fm-claude-stop-autoarm-live-e2e.test.sh` gate-skips on its opt-in variable and is now `live-harness-optin`, since a candidate that gate-skips cannot prove concurrency.
 
 One member needs a current Pi to pass at all.
@@ -213,7 +213,8 @@ On the stale package the case fails serially as well as concurrently, so it is a
 ## Production runner effect of the 2026-09-03 admissions
 
 Each family measured with `bin/fm-test-run.sh --family <name> --jobs <n>` on the same host, back to back, every run reporting 0 failures.
-These pairs are the whole-suite effect as well: the runner gives each admitted family its own concurrent phase and leaves everything else where it was, so admitting these three changes only their three phases.
+Together the pairs quantify the effect when a plain `--changed` or script-list selection contains all three families: the automatic scheduler gives each admitted family its own concurrent phase and leaves unproven work in the serial tail.
+Curated `--family`, `--lane`, and `--all` selections remain serial unless the caller explicitly requests an admissible `--jobs` value, as documented by `bin/fm-test-run.sh --help`.
 
 | family | scripts | `--jobs 1` | `--jobs 4` | speedup | recovered |
 |---|---:|---:|---:|---:|---:|
@@ -223,7 +224,7 @@ These pairs are the whole-suite effect as well: the runner gives each admitted f
 | total | 60 | 2714.1s | 1000.9s | 2.71x | 1713.2s (28.6 min) |
 
 No test was removed, weakened, or skipped to get there.
-The three families hold the same assertions they held before; what changed is one crash injection that no longer races, one elapsed-time assertion that no longer reads the host's speed, and a family map that no longer files a real-Herdr regression and an opt-in live script where they cannot run.
+The three families retain the same coverage guarantees; what changed is one crash injection that no longer races, one equivalent condition-based assertion that no longer reads the host's speed, and a family map that no longer files a real-Herdr regression and an opt-in live script where they cannot run.
 
 ## Scope
 
