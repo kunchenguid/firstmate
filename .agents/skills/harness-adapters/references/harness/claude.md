@@ -16,6 +16,13 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 Fresh-worktree or first-machine launch may show trust or bypass-permissions confirmation.
 Inspect within about 20 seconds, accept the required choice with `FM_HOME=<active-home> ../../../bin/fm-send.sh <window> --key Enter` unless already bound, and verify instructions started.
 
+## Composer shape
+
+Claude draws a bare `❯` plus U+00A0 composer row between two horizontal `─` rules, with the permission and `/rc` footer below the bottom rule.
+Verified on 2.1.258 and 2.1.259, those rows are byte-identical under `/tui default` and `/tui fullscreen` and with focus view on or off, so neither renderer setting changes composer classification.
+While a session mode is active, the top rule carries that mode's label right-aligned in a contrasting truecolor (`──── ultracode ─` for `/effort ultracode`), and `../../../bin/fm-composer-lib.sh` recognises it as a titled rule so the cursorless backends still read the composer empty when idle and pending when typed.
+`../../../docs/verification/runtime-backends.md` under "Composer classification matrix" owns the captures and the live refresh guard.
+
 ## Composer ghost
 
 Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane`.
