@@ -213,6 +213,51 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Canonical pull request or merge request URLs the task's own ready lines name:
+# every status line whose leading verb is "done" (with or without the optional
+# [key=] and corr= tokens), one URL per output line in log order. A URL is
+# recognised when a whitespace-separated word, read from its "https://" part and
+# stripped of the brackets, quotes, and sentence punctuation prose wraps it in,
+# parses under fm_pr_url_parse, so markdown link syntax is read as well. Prints
+# nothing when the status log is absent or names no URL. This is the offline
+# record bin/fm-pr-check.sh copies against so a URL assembled from memory can
+# never displace the one the worker itself reported; nothing here contacts a
+# forge, so a private instance is treated no differently from a public one.
+fm_pr_status_ready_urls() { # <state> <task-id>
+  local state=${1-} id=${2-} f line prefix rest word
+  local provider=$FM_PR_PROVIDER url=$FM_PR_URL host=$FM_PR_HOST path=$FM_PR_PATH
+  local owner=$FM_PR_OWNER repo=$FM_PR_REPO number=$FM_PR_NUMBER
+  f="$state/$id.status"
+  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *:*) ;; *) continue ;; esac
+    prefix=${line%%:*}
+    prefix=${prefix#"${prefix%%[![:space:]]*}"}
+    [ "${prefix%%[[:space:]]*}" = "done" ] || continue
+    rest=$line
+    while [ -n "$rest" ]; do
+      rest=${rest#"${rest%%[![:space:]]*}"}
+      [ -n "$rest" ] || break
+      word=${rest%%[[:space:]]*}
+      rest=${rest#"$word"}
+      case "$word" in
+        *https://*) word="https://${word#*https://}" ;;
+        *) continue ;;
+      esac
+      while :; do
+        case "$word" in
+          *')'|*']'|*'>'|*'"'|*"'"|*'`'|*','|*'.'|*';'|*':'|*'!'|*'?') word=${word%?} ;;
+          *) break ;;
+        esac
+      done
+      fm_pr_url_parse "$word" && printf '%s\n' "$FM_PR_URL"
+    done
+  done < "$f"
+  FM_PR_PROVIDER=$provider FM_PR_URL=$url FM_PR_HOST=$host FM_PR_PATH=$path
+  FM_PR_OWNER=$owner FM_PR_REPO=$repo FM_PR_NUMBER=$number
+  return 0
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null

@@ -622,6 +622,85 @@ run_watcher_bounded() {
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
+# The task's own done line is the one PR record the caller cannot have composed,
+# so a requested URL it contradicts is refused offline before any side effect,
+# while a log naming no URL still records the argument as before.
+test_ready_line_refuses_disagreeing_url() {
+  local dir state real fake before after rc
+  real=https://github.com/owner-real/backpass/pull/108
+  fake=https://github.com/famous-user/backpass/pull/108
+  dir=$(make_case ready-line-copy-or-refuse)
+  state="$dir/home/state"
+
+  # A log that names no URL leaves the argument as the only source.
+  write_task_meta "$dir" number-only
+  printf 'working: PR 108 is open, validating\n' > "$state/number-only.status"
+  run_check_entry "$dir" number-only "$real" >/dev/null 2> "$dir/number-only.err" \
+    || fail "a URL was refused while the status log named none: $(cat "$dir/number-only.err")"
+  grep -qxF "pr=$real" "$state/number-only.meta" || fail "the URL was not recorded when the status log named none"
+
+  # A done line naming the real PR refuses a different spelling with zero side effects.
+  write_task_meta "$dir" task-a
+  printf 'working: setup done\ndone: PR %s checks green\n' "$real" > "$state/task-a.status"
+  : > "$dir/guard.log"
+  before=$(state_snapshot "$state")
+  set +e
+  run_check_entry "$dir" task-a "$fake" > "$dir/fake.out" 2> "$dir/fake.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a URL the ready line contradicts was accepted"
+  after=$(state_snapshot "$state")
+  [ "$before" = "$after" ] || fail "a refused URL left side effects: $(diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") || true)"
+  [ ! -s "$dir/fake.out" ] || fail "a refused URL printed an armed line"
+  [ ! -s "$dir/guard.log" ] || fail "a refused URL still ran the guard"
+  assert_grep "refusing to record $fake" "$dir/fake.err" "the refusal did not name the requested URL"
+  assert_grep "reported by the worker: $real" "$dir/fake.err" "the refusal did not print the recorded URL"
+  ! grep -q '^pr=' "$state/task-a.meta" || fail "a refused URL was recorded in metadata"
+  assert_absent "$state/task-a.check.sh" "a refused URL armed a merge poll"
+
+  # The recorded spelling itself is accepted.
+  run_check_entry "$dir" task-a "$real" >/dev/null 2> "$dir/real.err" \
+    || fail "the ready line's own URL was refused: $(cat "$dir/real.err")"
+  grep -qxF "pr=$real" "$state/task-a.meta" || fail "the ready line's own URL was not recorded"
+  [ -f "$state/task-a.check.sh" ] || fail "the ready line's own URL did not arm a merge poll"
+
+  # The refusal reaches the merge wrapper, so nothing is merged under a wrong spelling.
+  : > "$dir/gh-axi.log"
+  set +e
+  run_merge_entry "$dir" task-a "$fake" -- --merge > /dev/null 2> "$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the merge wrapper accepted a URL the ready line contradicts"
+  ! grep -q '^pr merge' "$dir/gh-axi.log" || fail "the merge wrapper merged under a contradicted URL"
+  grep -qxF "pr=$real" "$state/task-a.meta" || fail "a refused merge replaced the recorded URL"
+
+  # Only done lines count, and prose wrapping around the URL is stripped.
+  write_task_meta "$dir" wrapped
+  printf 'working: rebased after https://github.com/owner-real/backpass/pull/3 merged.\ndone [key=ship]: opened [the PR](%s), checks green.\n' "$real" \
+    > "$state/wrapped.status"
+  run_check_entry "$dir" wrapped "$real" >/dev/null 2> "$dir/wrapped.err" \
+    || fail "a markdown-wrapped ready-line URL was not recognised: $(cat "$dir/wrapped.err")"
+  grep -qxF "pr=$real" "$state/wrapped.meta" || fail "a markdown-wrapped ready-line URL was not recorded"
+  set +e
+  run_check_entry "$dir" wrapped https://github.com/owner-real/backpass/pull/3 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a URL named only on a working line counted as the task's ready line"
+
+  # The comparison is provider-agnostic and needs no forge: a self-hosted merge request behaves the same.
+  write_task_meta "$dir" gitlab-task
+  printf 'done: MR https://gitlab.example.com/group/sub/proj/-/merge_requests/9 ready\n' > "$state/gitlab-task.status"
+  set +e
+  run_check_entry "$dir" gitlab-task https://gitlab.example.com/group/proj/-/merge_requests/9 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a merge request URL the ready line contradicts was accepted"
+  [ ! -s "$dir/glab.log" ] || fail "the offline refusal consulted the forge"
+  run_check_entry "$dir" gitlab-task https://gitlab.example.com/group/sub/proj/-/merge_requests/9 >/dev/null 2> "$dir/gitlab.err" \
+    || fail "the ready line's own merge request URL was refused: $(cat "$dir/gitlab.err")"
+  pass "a PR URL the task's own ready line contradicts is refused offline, and the recorded one is accepted"
+}
+
 test_rejected_metacharacter_bytes_are_inert() {
   local dir family rc before after
   dir=$(make_case rejected-metacharacters)
@@ -2137,6 +2216,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
+test_ready_line_refuses_disagreeing_url
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
