@@ -14,7 +14,9 @@
 #       state
 #   (b) observation record: seeding from the spawn instant, per-phase
 #       accumulators across transitions, fix-round counting, and the run's own
-#       round winning
+#       round winning; a record left by an older incarnation of the same id is
+#       discarded, and a read in flight while teardown retires the task never
+#       recreates its record
 #   (c) fallback bands: the documented defaults summed over the phases ahead
 #       per delivery sequence, always as a range, and "running long" past a band
 #   (d) history and median: fewer than three samples keep the bands; three
@@ -28,8 +30,10 @@
 #       the tick's own stamp so a snapshot read between ticks never postpones
 #       it; the real watcher launches the tick as a detached single-flight
 #       child that never holds its poll loop, and its state/.progress-tick.pid
-#       marker keeps that single flight across processes (a live holder
-#       suppresses the launch, a dead one is reclaimed)
+#       marker keeps that single flight across processes (a live real tick
+#       child suppresses the launch; a dead pid, a recycled pid owned by an
+#       unrelated process, or a marker older than FM_PROGRESS_TICK_MAX_SECS is
+#       reclaimed)
 #   (g) label grammar: the base is recovered from a decorated label and the
 #       token stays the last segment
 #   (h) an unreadable (unknown) observation never resets the last known
@@ -61,6 +65,7 @@ make_case() {  # <name> -> echoes case dir
 set -u
 [ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_CREW_STATE_LOG"
 [ -z "${FM_FAKE_CREW_STATE_SLEEP:-}" ] || sleep "$FM_FAKE_CREW_STATE_SLEEP"
+[ -z "${FM_FAKE_CREW_STATE_RM:-}" ] || rm -f -- "$FM_FAKE_CREW_STATE_RM"
 printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
 exit 0
 SH
@@ -259,6 +264,40 @@ test_unknown_observation_keeps_the_phase_clock() {
   progress "$d" $((NOW + 160)) 'state: working · source: run-step · validating (fixing) · step: review' 0 show ub >/dev/null
   grep -q "^fix_rounds=1$" "$rec" || fail "fixing -> unknown -> fixing must stay one round: $(cat "$rec")"
   pass "an unreadable observation is displayed as unknown but never resets the phase clock or inflates fix rounds"
+}
+
+test_stale_record_of_an_older_incarnation_is_discarded() {
+  local d rec out
+  d=$(make_case reincarnation)
+  write_task "$d" ri ship no-mistakes "spawn_gen=s$NOW.7.7"
+  rec="$d/state/.progress-ri"
+  printf 'v=1\nspawn_gen=s%s.1.1\nobserved=%s\nphase=implementing\nstep=\nsince=%s\nfix_rounds=2\nsecs_implementing=86400\n' \
+    $((NOW - 90000)) $((NOW - 3600)) $((NOW - 90000)) > "$rec"
+  out=$(progress "$d" $((NOW + 600)) 'state: working · source: pane · busy' 0 show ri)
+  assert_contains "$out" "elapsed: 10 min" "a re-dispatched id starts its clock at its own spawn instant"
+  grep -q "^spawn_gen=s$NOW.7.7$" "$rec" || fail "the record is bound to the current incarnation: $(cat "$rec")"
+  grep -q "^secs_implementing=600$" "$rec" || fail "the older incarnation's accumulators are discarded: $(cat "$rec")"
+  grep -q "^fix_rounds=0$" "$rec" || fail "the older incarnation's rounds are discarded: $(cat "$rec")"
+  printf 'v=1\nobserved=%s\nphase=ci\nstep=ci\nsince=%s\nfix_rounds=4\nsecs_implementing=86400\n' \
+    $((NOW - 3600)) $((NOW - 90000)) > "$rec"
+  out=$(progress "$d" $((NOW + 1200)) 'state: working · source: pane · busy' 0 show ri)
+  assert_contains "$out" "elapsed: 20 min" "a record without a spawn_gen while the meta has one is discarded"
+  grep -q "^secs_implementing=1200$" "$rec" || fail "the unbound record's accumulators are discarded: $(cat "$rec")"
+  pass "a record left by an older incarnation of the same id is discarded and the task reseeds from its own spawn instant"
+}
+
+test_read_during_teardown_leaves_no_record() {
+  local d
+  d=$(make_case teardown-race)
+  write_task "$d" tr1 ship no-mistakes
+  FM_FAKE_CREW_STATE_RM="$d/state/tr1.meta" progress "$d" "$NOW" 'state: working · source: pane · busy' 0 show tr1 >/dev/null \
+    || fail "a show whose task vanished underneath it still succeeds"
+  [ ! -e "$d/state/.progress-tr1" ] || fail "a snapshot read in flight while teardown retired the task must not recreate its record: $(cat "$d/state/.progress-tr1")"
+  write_task "$d" tr2 ship no-mistakes
+  FM_FAKE_CREW_STATE_RM="$d/state/tr2.meta" progress "$d" "$NOW" 'state: unknown · source: none · pane gone' 0 tick \
+    || fail "a tick whose task vanished underneath it still succeeds"
+  [ ! -e "$d/state/.progress-tr2" ] || fail "a tick in flight while teardown retired the task must not recreate its record: $(cat "$d/state/.progress-tr2")"
+  pass "a read that was in flight while teardown retired the task leaves no observation record behind"
 }
 
 test_record_without_spawn_epoch_uses_mtime() {
@@ -587,31 +626,91 @@ ticked() {  # <record>: the tick has re-read this task at least once
   grep -q '^tick_at=[1-9]' "$1" 2>/dev/null
 }
 
+marker_of() {  # <case> -> the tick marker's pid
+  cat "$1/state/.progress-tick.pid" 2>/dev/null
+}
+
+marker_moved_from() {  # <case> <pid>: the watcher has rewritten the marker
+  [ "$(marker_of "$1")" != "$2" ]
+}
+
+# tick_start <case>: run one real `fm-progress.sh tick` in the background whose
+# current-state read sleeps, so it stays alive as a genuine tick child; sets
+# TICK_PID.
+TICK_PID=
+tick_start() {
+  local d=$1
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_DATA_OVERRIDE="$d/data" \
+    FM_CREW_STATE_BIN="$d/fakebin/fm-crew-state.sh" FM_CAPTAIN_HOLD_BIN="$d/fakebin/fm-captain-hold.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · busy' FM_FAKE_CREW_STATE_SLEEP=6 \
+    FM_PROGRESS_REFRESH_SECS=1 "$PROGRESS" tick >/dev/null 2>&1 &
+  TICK_PID=$!
+}
+
 # The single flight also holds across processes through state/.progress-tick.pid:
-# a marker naming a live process suppresses the launch while the watcher keeps
-# polling, and once that process dies the marker is reclaimed and the tick runs.
-test_watcher_tick_marker_of_live_process_suppresses_launch() {
+# a marker naming a live real tick child suppresses the launch while the
+# watcher keeps polling, and once that child exits the marker is reclaimed.
+test_watcher_tick_marker_of_live_tick_child_suppresses_launch() {
   local d holder beat1 beat2 marker
-  d=$(make_case watcher-marker-live)
+  d=$(make_case watcher-marker-tick)
   write_task "$d" wm1 ship no-mistakes "spawn_gen=s$NOW.1.1"
-  sleep 60 &
-  holder=$!
+  tick_start "$d"
+  holder=$TICK_PID
   printf '%s\n' "$holder" > "$d/state/.progress-tick.pid"
   watch_start "$d"
   wait_for 60 test -f "$d/state/.last-watcher-beat" || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "the watcher never started polling: $(cat "$d/watch.err")"; }
   beat1=$(beat_of "$d")
   sleep 2.5
   beat2=$(beat_of "$d")
-  [ "$beat2" -gt "$beat1" ] || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "the watcher must keep polling while another process holds the marker"; }
-  ! ticked "$d/state/.progress-wm1" || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "a marker naming a live process must suppress the launch: $(cat "$d/state/.progress-wm1")"; }
-  [ "$(cat "$d/state/.progress-tick.pid")" = "$holder" ] || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "a live holder's marker is never rewritten"; }
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
-  wait_for 80 ticked "$d/state/.progress-wm1" || { kill "$WATCH_PID" 2>/dev/null; fail "once the holder dies the marker is reclaimed and the tick launches: $(cat "$d/watch.err")"; }
+  [ "$beat2" -gt "$beat1" ] || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "the watcher must keep polling while a tick child holds the marker"; }
+  [ "$(marker_of "$d")" = "$holder" ] || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "a marker naming a live tick child must suppress the launch: marker $(marker_of "$d"), tick $holder"; }
+  wait "$holder" 2>/dev/null || true
+  wait_for 80 marker_moved_from "$d" "$holder" || { kill "$WATCH_PID" 2>/dev/null; fail "once the tick child exits the marker is reclaimed and the tick launches: $(cat "$d/watch.err")"; }
   kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null || true
-  marker=$(cat "$d/state/.progress-tick.pid")
+  marker=$(marker_of "$d")
   case "$marker" in ''|*[!0-9]*) fail "the reclaimed marker must name the new tick child: '$marker'" ;; esac
-  [ "$marker" != "$holder" ] || fail "the reclaimed marker must name the new tick child, not the dead holder"
-  pass "a marker naming a live process suppresses the tick launch and is reclaimed once that process dies"
+  pass "a marker naming a live tick child suppresses the launch and is reclaimed once that child exits"
+}
+
+# A recycled pid now owned by an unrelated process is not a running tick: the
+# launch goes ahead while that process is still alive.
+test_watcher_tick_marker_of_unrelated_process_is_reclaimed() {
+  local d holder marker
+  d=$(make_case watcher-marker-unrelated)
+  write_task "$d" wm2 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  sleep 60 &
+  holder=$!
+  printf '%s\n' "$holder" > "$d/state/.progress-tick.pid"
+  watch_start "$d"
+  wait_for 80 ticked "$d/state/.progress-wm2" || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "a marker naming an unrelated live process must not suppress the launch: $(cat "$d/watch.err")"; }
+  kill -0 "$holder" 2>/dev/null || { kill "$WATCH_PID" 2>/dev/null; fail "the unrelated process must still be alive for this case to mean anything"; }
+  kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null || true
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  marker=$(marker_of "$d")
+  case "$marker" in ''|*[!0-9]*) fail "the reclaimed marker must name the new tick child: '$marker'" ;; esac
+  [ "$marker" != "$holder" ] || fail "the reclaimed marker must name the new tick child, not the unrelated process"
+  pass "a marker naming a live unrelated process is reclaimed and the tick launches"
+}
+
+# A marker older than FM_PROGRESS_TICK_MAX_SECS is stale even while its tick
+# child is alive: it is reclaimed with one warning on the watcher's stderr.
+test_watcher_tick_marker_older_than_max_is_reclaimed_with_a_warning() {
+  local d holder marker
+  d=$(make_case watcher-marker-old)
+  write_task "$d" wm3 ship no-mistakes "spawn_gen=s$NOW.1.1"
+  tick_start "$d"
+  holder=$TICK_PID
+  printf '%s\n' "$holder" > "$d/state/.progress-tick.pid"
+  sleep 2.5
+  FM_PROGRESS_TICK_MAX_SECS=1 watch_start "$d"
+  wait_for 80 marker_moved_from "$d" "$holder" || { kill "$WATCH_PID" "$holder" 2>/dev/null; fail "a marker past the age bound must be reclaimed while its tick child lives: $(cat "$d/watch.err")"; }
+  kill -0 "$holder" 2>/dev/null || { kill "$WATCH_PID" 2>/dev/null; fail "the overlong tick child must still be alive for this case to mean anything"; }
+  kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  marker=$(marker_of "$d")
+  case "$marker" in ''|*[!0-9]*) fail "the reclaimed marker must name the new tick child: '$marker'" ;; esac
+  [ "$(grep -c "reclaiming the marker" "$d/watch.err")" = 1 ] || fail "the age bound expiring warns exactly once: $(cat "$d/watch.err")"
+  pass "a marker older than FM_PROGRESS_TICK_MAX_SECS is reclaimed with one warning even while its tick child lives"
 }
 
 # A watcher that starts over a marker left by a dead tick child (a restart
@@ -660,6 +759,8 @@ test_phase_pr_recorded_without_run_is_ci
 test_phase_open_decision_and_hold
 test_secondmate_and_remote_are_skipped
 test_record_accumulates_phases
+test_stale_record_of_an_older_incarnation_is_discarded
+test_read_during_teardown_leaves_no_record
 test_record_without_spawn_epoch_uses_mtime
 test_default_bands_by_sequence
 test_running_long_past_the_band
@@ -670,7 +771,9 @@ test_label_refresh_skips_without_projection_or_on_tmux
 test_label_refresh_failure_warns_once_per_reason
 test_tick_reads_phase_once_per_cadence
 test_watcher_launches_tick_detached_with_single_flight
-test_watcher_tick_marker_of_live_process_suppresses_launch
+test_watcher_tick_marker_of_live_tick_child_suppresses_launch
+test_watcher_tick_marker_of_unrelated_process_is_reclaimed
+test_watcher_tick_marker_older_than_max_is_reclaimed_with_a_warning
 test_watcher_tick_reclaims_marker_of_dead_process
 test_label_grammar
 test_unknown_observation_keeps_the_phase_clock

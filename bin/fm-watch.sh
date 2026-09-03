@@ -1455,16 +1455,42 @@ home_summary_refresh_detached() {
 # child is alive), and the child's own FM_PROGRESS_REFRESH_SECS cadence keeps an
 # idle launch to one bash start. The single flight also holds across a watcher
 # restart and the duplicate-watcher window the self-eviction check closes:
-# state/.progress-tick.pid names the last launched child, a marker whose pid is
-# still alive skips this cycle's launch, and one naming a dead or absent
-# process is stale and reclaimed. That pid is only probed, never signalled or
-# waited on unless this process launched it, and an unreadable marker never
-# blocks the launch. Its warnings reach this watcher's stderr; its failure
-# never changes what a cycle decided, and it writes no task or endpoint record.
+# state/.progress-tick.pid names the last launched child, and it counts as a
+# running tick only while that pid is alive, its command line is the tick (read
+# from the proc root the way bin/fm-wake-lib.sh does, else a portable ps), and
+# the marker is younger than FM_PROGRESS_TICK_MAX_SECS, so a recycled pid or a
+# wedged child never suppresses the tick silently; anything else is stale and
+# reclaimed, with one warning when the age bound is what expired. That pid is
+# only probed, never signalled or waited on unless this process launched it,
+# and an unreadable marker never blocks the launch. Its warnings reach this
+# watcher's stderr; its failure never changes what a cycle decided, and it
+# writes no task or endpoint record.
 PROGRESS_TICK_PID=
 PROGRESS_TICK_MARKER="$STATE/.progress-tick.pid"
+PROGRESS_TICK_MAX_SECS=${FM_PROGRESS_TICK_MAX_SECS:-600}
+case "$PROGRESS_TICK_MAX_SECS" in ''|*[!0-9]*) PROGRESS_TICK_MAX_SECS=600 ;; esac
+progress_tick_marker_live() {
+  local holder args proc_root born
+  holder=$(head -n 1 -- "$PROGRESS_TICK_MARKER" 2>/dev/null || true)
+  case "$holder" in ''|0|*[!0-9]*) return 1 ;; esac
+  kill -0 "$holder" 2>/dev/null || return 1
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$holder/cmdline" ]; then
+    args=$(tr '\0' ' ' < "$proc_root/$holder/cmdline" 2>/dev/null || true)
+  else
+    args=$(LC_ALL=C ps -o args= -p "$holder" 2>/dev/null || true)
+  fi
+  case "$args" in *fm-progress.sh*tick*) ;; *) return 1 ;; esac
+  born=$(stat_mtime "$PROGRESS_TICK_MARKER") || return 1
+  case "$born" in ''|*[!0-9]*) return 1 ;; esac
+  if [ $(( $(date +%s) - born )) -gt "$PROGRESS_TICK_MAX_SECS" ]; then
+    echo "warning: progress tick $holder has held $PROGRESS_TICK_MARKER longer than ${PROGRESS_TICK_MAX_SECS}s; reclaiming the marker" >&2
+    return 1
+  fi
+  return 0
+}
 progress_tick_detached() {
-  local holder tmp
+  local tmp
   [ "${FM_PROGRESS_REFRESH_SECS:-60}" != 0 ] || return 0
   if [ -n "$PROGRESS_TICK_PID" ]; then
     if kill -0 "$PROGRESS_TICK_PID" 2>/dev/null; then
@@ -1473,11 +1499,7 @@ progress_tick_detached() {
     wait "$PROGRESS_TICK_PID" 2>/dev/null || true
     PROGRESS_TICK_PID=
   fi
-  holder=$(head -n 1 -- "$PROGRESS_TICK_MARKER" 2>/dev/null || true)
-  case "$holder" in
-    ''|0|*[!0-9]*) ;;
-    *) if kill -0 "$holder" 2>/dev/null; then return 0; fi ;;
-  esac
+  ! progress_tick_marker_live || return 0
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_CREW_STATE_BIN="$FM_CREW_STATE_BIN" \
     "$SCRIPT_DIR/fm-progress.sh" tick </dev/null >/dev/null &

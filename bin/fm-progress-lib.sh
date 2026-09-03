@@ -66,9 +66,18 @@
 #                           alone because observed= is advanced by every
 #                           read, the fleet snapshot's included, and a
 #                           snapshot read must never postpone a label refresh
+#   spawn_gen=<gen>         the meta's spawn_gen this record belongs to; a
+#                           record whose spawn_gen differs from the meta's
+#                           current one (or has none while the meta has one)
+#                           is treated as absent, so a re-dispatched or
+#                           relaunched incarnation of the same id starts its
+#                           accumulators again from its own spawn instant
 # The first observation seeds observed= from the task's spawn instant (the
 # epoch inside spawn_gen=s<epoch>.<pid>.<random>, else the record's mtime), so
 # time before the first observation counts as implementing.
+# A record is only ever written while state/<id>.meta still exists, checked
+# right before the write, so a read that was in flight while teardown retired
+# the record cannot recreate it.
 # An observation whose derived phase is unknown (an unreadable current state)
 # charges its interval to secs_other and leaves phase=, step=, since=, and the
 # fix-round count untouched: the caller displays unknown with no estimate, but
@@ -114,6 +123,9 @@
 #   FM_PROGRESS_REFRESH_SECS   seconds between phase re-reads per task in the
 #                              watcher tick, keyed on the record's tick_at=
 #                              (default 60; 0 disables the tick)
+#   FM_PROGRESS_TICK_MAX_SECS  age past which bin/fm-watch.sh treats its
+#                              state/.progress-tick.pid marker as stale even
+#                              while the pid it names is alive (default 600)
 #   FM_PROGRESS_MIN_SAMPLES    finished tasks a phase needs before its median
 #                              is used (default 3)
 #   FM_PROGRESS_HISTORY_MAX    newest history records considered (default 200)
@@ -347,16 +359,18 @@ _fm_progress_rec_reset() {
   FM_PROGRESS_REC_LABEL_ATTEMPT=
   FM_PROGRESS_REC_LABEL_WARNED=
   FM_PROGRESS_REC_TICK_AT=0
+  FM_PROGRESS_REC_SPAWN_GEN=
 }
 
 _fm_progress_num() {  # <value> -> value or 0
   case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac
 }
 
-# fm_progress_record_load <state-dir> <id>: sets FM_PROGRESS_REC_*; 1 when absent
-# or unreadable (every field is then reset).
+# fm_progress_record_load <state-dir> <id>: sets FM_PROGRESS_REC_*; 1 when absent,
+# unreadable, or written for another incarnation of the id (its spawn_gen
+# differs from the meta's current one); every field is then reset.
 fm_progress_record_load() {
-  local rec key value line
+  local rec key value line meta
   _fm_progress_rec_reset
   rec=$(fm_progress_record_path "$1" "$2")
   [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
@@ -381,19 +395,28 @@ fm_progress_record_load() {
       label_attempt) FM_PROGRESS_REC_LABEL_ATTEMPT=$(_fm_progress_num "$value") ;;
       label_warned) FM_PROGRESS_REC_LABEL_WARNED=$value ;;
       tick_at) FM_PROGRESS_REC_TICK_AT=$(_fm_progress_num "$value") ;;
+      spawn_gen) FM_PROGRESS_REC_SPAWN_GEN=$value ;;
     esac
   done < "$rec"
   [ -n "$FM_PROGRESS_REC_OBSERVED" ] && [ -n "$FM_PROGRESS_REC_PHASE" ] || {
     _fm_progress_rec_reset
     return 1
   }
+  meta="$1/$2.meta"
+  if [ -f "$meta" ] && [ "$FM_PROGRESS_REC_SPAWN_GEN" != "$(_fm_progress_meta_get "$meta" spawn_gen)" ]; then
+    _fm_progress_rec_reset
+    return 1
+  fi
   [ -n "$FM_PROGRESS_REC_SINCE" ] || FM_PROGRESS_REC_SINCE=$FM_PROGRESS_REC_OBSERVED
   return 0
 }
 
-# fm_progress_record_write <state-dir> <id>: atomically publish FM_PROGRESS_REC_*.
+# fm_progress_record_write <state-dir> <id>: atomically publish FM_PROGRESS_REC_*;
+# a successful no-op once state/<id>.meta is gone, so a read in flight during
+# teardown never recreates a retired record.
 fm_progress_record_write() {
   local rec tmp
+  [ -f "$1/$2.meta" ] || return 0
   rec=$(fm_progress_record_path "$1" "$2")
   tmp=$(mktemp "$1/.progress-$2.XXXXXX" 2>/dev/null) || return 1
   if ! {
@@ -414,6 +437,7 @@ fm_progress_record_write() {
     printf 'label_attempt=%s\n' "$FM_PROGRESS_REC_LABEL_ATTEMPT"
     printf 'label_warned=%s\n' "$FM_PROGRESS_REC_LABEL_WARNED"
     printf 'tick_at=%s\n' "$FM_PROGRESS_REC_TICK_AT"
+    printf 'spawn_gen=%s\n' "$FM_PROGRESS_REC_SPAWN_GEN"
   } > "$tmp"; then
     rm -f "$tmp"
     return 1
@@ -442,6 +466,7 @@ fm_progress_observe() {
   [ -n "$now" ] || now=$(fm_progress_now)
   if ! fm_progress_record_load "$state" "$id"; then
     _fm_progress_rec_reset
+    FM_PROGRESS_REC_SPAWN_GEN=$(_fm_progress_meta_get "$meta" spawn_gen)
     FM_PROGRESS_REC_OBSERVED=$(fm_progress_spawn_epoch "$meta")
     [ "$FM_PROGRESS_REC_OBSERVED" -le "$now" ] || FM_PROGRESS_REC_OBSERVED=$now
     FM_PROGRESS_REC_PHASE=implementing
