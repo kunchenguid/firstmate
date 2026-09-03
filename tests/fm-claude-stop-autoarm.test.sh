@@ -559,6 +559,25 @@ test_live_claim_mutex_holder_cannot_hide_failure() {
   pass "auto-arm: live claim-mutex contention records a durable failure independently"
 }
 
+test_identity_unavailable_failure_publication_does_not_self_wedge() {
+  local dir state marker rc
+  dir=$(make_primary_dir "$TMP_ROOT/identity-unavailable-failure")
+  state="$dir/state"
+  marker="$state/.claude-autoarm-failure-notified"
+
+  bash -c '
+    . "$1"
+    fm_pid_identity() { return 1; }
+    fm_autoarm_claim_failure_commit "$2" absent failed "$3"
+  ' _ "$dir/bin/fm-wake-lib.sh" "$state" "$marker"
+  rc=$?
+
+  expect_code 0 "$rc" "failure publication must not repeat an unavailable identity dependency"
+  assert_present "$marker" "identity-unavailable failure did not write the failure marker"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "identity-unavailable failure did not record outcome=failed"
+  pass "auto-arm: failure publication does not depend on process identity"
+}
+
 test_stalled_transition_holder_cannot_hide_failure() {
   local dir state ready holder out status i
   dir=$(make_primary_dir "$TMP_ROOT/stalled-transition-failure")
@@ -587,6 +606,36 @@ test_stalled_transition_holder_cannot_hide_failure() {
   [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "transition-stall failure did not record outcome=failed"
   assert_absent "$state/arm-ran" "transition-stall failure reached the arm"
   pass "auto-arm: stalled transition holders are fenced before durable failure publication"
+}
+
+test_stalled_transition_steal_holder_falls_back_to_durable_failure() {
+  local dir state ready holder out status i
+  dir=$(make_primary_dir "$TMP_ROOT/stalled-transition-steal")
+  state="$dir/state"
+  ready="$state/transition-steal-ready"
+  : > "$state/task.meta"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$1/state/.claude-autoarm-transition.lock.steal" || exit
+    : > "$2"
+    kill -STOP "${BASHPID:-$$}"
+  ' _ "$dir" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition steal holder did not acquire its boundary"
+
+  out=$(FM_AUTOARM_FAILURE_TRANSITION_ATTEMPTS=5 run_autoarm "$dir" 2>/dev/null); status=$?
+  kill -0 "$holder" 2>/dev/null || fail "unverified transition steal holder was signalled"
+  kill -CONT "$holder" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 0 "$status" "a stalled transition steal holder must fall back without wedging the Stop hook"
+  [ -z "$out" ] || fail "fallback failure publication emitted a stale retry: $out"
+  assert_present "$state/.claude-autoarm-failure-notified" "transition-steal fallback did not write the failure marker"
+  [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "transition-steal fallback did not record outcome=failed"
+  pass "auto-arm: stalled transition steal owners fall back to durable failure state"
 }
 
 test_pid_reused_transition_holder_cannot_hide_failure() {
@@ -709,7 +758,7 @@ test_revoked_pid_reuse_defers_to_replacement_claim() {
 
   FM_TEST_OWNER="$owner" FM_TEST_OLD_IDENTITY="$old_identity" bash -c '
     . "$1"
-    fm_autoarm_transition_acquire() {
+    fm_autoarm_failure_transition_acquire() {
       fm_autoarm_transition_try_acquire "$1" || return 1
       FM_AUTOARM_TRANSITION_REVOKED_PID=$FM_TEST_OWNER
       FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE="1:$FM_TEST_OWNER:arming"
@@ -1725,7 +1774,9 @@ test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_claim_path_failure_records_failed_epoch_and_marker
 test_live_claim_mutex_holder_cannot_hide_failure
+test_identity_unavailable_failure_publication_does_not_self_wedge
 test_stalled_transition_holder_cannot_hide_failure
+test_stalled_transition_steal_holder_falls_back_to_durable_failure
 test_pid_reused_transition_holder_cannot_hide_failure
 test_zombie_transition_holder_cannot_hide_failure
 test_fenced_arming_transition_rebases_failure

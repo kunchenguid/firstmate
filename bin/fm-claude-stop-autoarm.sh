@@ -153,6 +153,7 @@ autoarm_claim_failure() {  # <reason>
       fi
       exit 2
       ;;
+    4) exit 0 ;;
   esac
   exit 0
 }

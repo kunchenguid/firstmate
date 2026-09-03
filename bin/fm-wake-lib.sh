@@ -1112,7 +1112,7 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace>
   lock="$state/.claude-autoarm-transition.lock"
   steal="$lock.steal"
   [ "$(fm_path_age "$lock")" -ge "$grace" ] || return 1
-  FM_LOCK_REQUIRE_IDENTITY=1 fm_lock_try_acquire "$steal" || return 1
+  FM_LOCK_REQUIRE_IDENTITY=0 fm_lock_try_acquire "$steal" || return 1
   owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
   pid=$(cat "$lock/pid" 2>/dev/null || true)
   recorded=$(cat "$lock/pid-identity" 2>/dev/null || true)
@@ -1195,6 +1195,28 @@ fm_autoarm_transition_acquire() {  # <state-dir>
     fi
     sleep 0.02
   done
+}
+
+fm_autoarm_failure_transition_acquire() {  # <state-dir>
+  local state=$1 grace=${FM_AUTOARM_TRANSITION_GRACE:-2}
+  local attempts=${FM_AUTOARM_FAILURE_TRANSITION_ATTEMPTS:-150} i=0
+  FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE=
+  FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=
+  case "$grace" in ''|*[!0-9]*|0) grace=2 ;; esac
+  case "$attempts" in ''|*[!0-9]*|0) attempts=150 ;; esac
+  [ "$attempts" -le 250 ] || attempts=250
+  while [ "$i" -lt "$attempts" ]; do
+    if FM_LOCK_REQUIRE_IDENTITY=0 fm_lock_try_acquire \
+      "$state/.claude-autoarm-transition.lock"; then
+      return 0
+    fi
+    if [ "$(fm_path_age "$state/.claude-autoarm-transition.lock")" -ge "$grace" ]; then
+      fm_autoarm_transition_revoke_stalled "$state" "$grace" || true
+    fi
+    i=$((i + 1))
+    sleep 0.02
+  done
+  return 1
 }
 
 _fm_failure_episode_clear() {  # <state-dir>
@@ -1585,15 +1607,70 @@ fm_autoarm_failure_notice_claim() {  # <marker-file> <claim-id>
   return 1
 }
 
-fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
-  local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition failure_dir failure pid failure_epoch tmp current current_outcome current_identity revoked marker_rc
-  transition="$state/.claude-autoarm-transition.lock"
+_fm_autoarm_claim_failure_publish() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} failure_dir failure pid failure_epoch tmp marker_rc
   case "$outcome" in
     failed|failed-suppressed) ;;
     *) return 1 ;;
   esac
   pid=${BASHPID:-$$}
-  fm_autoarm_transition_acquire "$state" || return 1
+  failure=$(fm_autoarm_failure_record_path "$state" "$baseline") || {
+    return 1
+  }
+  failure_dir=${failure%/*}
+  if [ -e "$failure_dir" ] || [ -L "$failure_dir" ]; then
+    if [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; then
+      return 1
+    fi
+  elif ! mkdir "$failure_dir" 2>/dev/null \
+    && { [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; }; then
+    return 1
+  fi
+  failure_epoch="$(date +%s)${pid}"
+  tmp="$failure_dir/.failure.tmp.$pid"
+  if ! printf 'epoch=%s owner_pid=%s outcome=%s baseline=%s updated_at=%s\n' \
+      "$failure_epoch" "$pid" "$outcome" "$baseline" "$(date +%s)" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! ln "$tmp" "$failure" 2>/dev/null \
+    && { [ ! -f "$failure" ] || [ -L "$failure" ]; }; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  if ! fm_autoarm_failure_ledger_read "$state" "$failure" \
+    || [ "$FM_AUTOARM_FAILURE_BASELINE" != "$baseline" ]; then
+    return 1
+  fi
+  failure_epoch=$FM_AUTOARM_FAILURE_EPOCH
+  if [ -z "$marker" ]; then
+    return 0
+  fi
+  fm_autoarm_failure_notice_claim "$marker" "$failure_epoch"
+  marker_rc=$?
+  case "$marker_rc" in
+    0) return 0 ;;
+    2) return 3 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition current current_outcome current_identity revoked publish_rc
+  transition="$state/.claude-autoarm-transition.lock"
+  case "$outcome" in
+    failed|failed-suppressed) ;;
+    *) return 1 ;;
+  esac
+  if ! fm_autoarm_failure_transition_acquire "$state"; then
+    _fm_autoarm_claim_failure_publish "$state" "$baseline" "$outcome" "$marker"
+    publish_rc=$?
+    case "$publish_rc" in
+      0|3) return 4 ;;
+      *) return 1 ;;
+    esac
+  fi
   current=$(fm_autoarm_claim_signature "$state")
   if [ "$current" != "$baseline" ]; then
     if fm_autoarm_ledger_read "$state"; then
@@ -1616,54 +1693,10 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
     fi
     baseline=$current
   fi
-  failure=$(fm_autoarm_failure_record_path "$state" "$baseline") || {
-    fm_lock_release "$transition"
-    return 1
-  }
-  failure_dir=${failure%/*}
-  if [ -e "$failure_dir" ] || [ -L "$failure_dir" ]; then
-    if [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; then
-      fm_lock_release "$transition"
-      return 1
-    fi
-  elif ! mkdir "$failure_dir" 2>/dev/null \
-    && { [ ! -d "$failure_dir" ] || [ -L "$failure_dir" ]; }; then
-    fm_lock_release "$transition"
-    return 1
-  fi
-  failure_epoch="$(date +%s)${pid}"
-  tmp="$failure_dir/.failure.tmp.$pid"
-  if ! printf 'epoch=%s owner_pid=%s outcome=%s baseline=%s updated_at=%s\n' \
-      "$failure_epoch" "$pid" "$outcome" "$baseline" "$(date +%s)" > "$tmp" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
-    fm_lock_release "$transition"
-    return 1
-  fi
-  if ! ln "$tmp" "$failure" 2>/dev/null \
-    && { [ ! -f "$failure" ] || [ -L "$failure" ]; }; then
-    rm -f "$tmp" 2>/dev/null || true
-    fm_lock_release "$transition"
-    return 1
-  fi
-  rm -f "$tmp" 2>/dev/null || true
-  if ! fm_autoarm_failure_ledger_read "$state" "$failure" \
-    || [ "$FM_AUTOARM_FAILURE_BASELINE" != "$baseline" ]; then
-    fm_lock_release "$transition"
-    return 1
-  fi
-  failure_epoch=$FM_AUTOARM_FAILURE_EPOCH
-  if [ -z "$marker" ]; then
-    fm_lock_release "$transition"
-    return 0
-  fi
-  fm_autoarm_failure_notice_claim "$marker" "$failure_epoch"
-  marker_rc=$?
+  _fm_autoarm_claim_failure_publish "$state" "$baseline" "$outcome" "$marker"
+  publish_rc=$?
   fm_lock_release "$transition"
-  case "$marker_rc" in
-    0) return 0 ;;
-    2) return 3 ;;
-    *) return 1 ;;
-  esac
+  return "$publish_rc"
 }
 
 # Write a new outcome for a generation this process still owns, re-verified
