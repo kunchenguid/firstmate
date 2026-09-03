@@ -220,6 +220,44 @@ try {
 ' "$proc_path"
 }
 
+fm_claude_process_is_daemon() {  # <process-pid>
+  local process_pid=$1 args=${2:-} argv_json
+  if argv_json=$(fm_claude_process_argv_json "$process_pid"); then
+    printf '%s' "$argv_json" | node -e '
+const fs = require("fs");
+try {
+  const argv = JSON.parse(fs.readFileSync(0, "utf8"));
+  if (!Array.isArray(argv) || argv.some(value => typeof value !== "string")) throw new Error();
+  if (argv.length < 3 || argv[1] !== "daemon" || argv[2] !== "run") throw new Error();
+} catch (_) {
+  process.exit(1);
+}
+'
+    return $?
+  fi
+  [ -n "$args" ] || args=$(ps -o args= -p "$process_pid" 2>/dev/null) || return 1
+  case " $args " in
+    *' daemon run '*) return 0 ;;
+  esac
+  return 1
+}
+
+fm_claude_daemon_in_session_ancestry() {
+  local pids pid comm args
+  pids=$(fm_harness_ancestry_pids) || return 1
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || continue
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    fm_harness_process_matches "$comm" "$args" || continue
+    [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || continue
+    fm_claude_process_is_daemon "$pid" "$args" && return 0
+  done <<EOF
+$pids
+EOF
+  return 1
+}
+
 fm_claude_daemon_spawned_by_owner_for_process() {  # <process-pid> <root-real>
   local process_pid=$1 root_real=$2 argv_json fields spawned_pid spawned_cwd spawned_real
   argv_json=$(fm_claude_process_argv_json "$process_pid") || return 1

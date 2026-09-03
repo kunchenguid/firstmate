@@ -322,6 +322,33 @@ run_autoarm_from_claude_daemon_bridge() {  # <dir> <foreground-lock-owner-pid>
   return "$rc"
 }
 
+run_autoarm_from_unbound_claude_daemon() {  # <dir>
+  local dir=$1 rc=0
+  mkdir -p "$dir/fake-argv"
+  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" /bin/bash -c '
+        exec -a "$FM_HOME/fake-argv/claude" /bin/bash -c '"'"'
+          export FM_PROC_ROOT="$FM_HOME/unreadable-proc"
+          "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+          rc=$?
+          exit "$rc"
+        '"'"' daemon run
+      ' 2>&1 || rc=$?
+  printf 'RC=%s\n' "$rc" >&2
+  return "$rc"
+}
+
+pause_session_lease_acquire() {
+  cat >> "$1/bin/fm-wake-lib.sh" <<'SH'
+fm_autoarm_session_lease_acquire() {
+  local state=$1
+  : > "$state/session-lease-waiting"
+  while [ ! -e "$state/session-lease-release" ]; do sleep 0.01; done
+  fm_lock_try_acquire "$state/.lock.acquire"
+}
+SH
+}
+
 pause_terminal_transition_acquire() {
   cat >> "$1/bin/fm-wake-lib.sh" <<'SH'
 fm_autoarm_transition_acquire() {
@@ -688,6 +715,88 @@ test_claude_daemon_reclaims_stale_lock_to_foreground_owner() {
   [ "$(epoch_field "$dir" session_owner_pid)" = "$owner" ] \
     || fail "recovered generation was not bound to the authenticated foreground owner"
   pass "auto-arm: detached stale recovery publishes the authenticated foreground owner"
+}
+
+test_unbound_claude_daemon_cannot_reclaim_stale_lock() {
+  local dir out status failure reset
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-unbound-stale-recovery")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  printf '9999999\n' > "$dir/state/.lock"
+
+  out=$(run_autoarm_from_unbound_claude_daemon "$dir" 2>/dev/null); status=$?
+  failure=$(failure_epoch_path "$dir") \
+    || fail "unbound daemon recovery failure left no durable record"
+  reset=$(failure_epoch_field "$dir" reset)
+
+  expect_code 2 "$status" "a detached daemon without authenticated foreground metadata must fail visibly"
+  [ "$(cat "$dir/state/.lock" 2>/dev/null || true)" = 9999999 ] \
+    || fail "unbound daemon replaced the stale session owner"
+  assert_absent "$dir/state/arm-ran" \
+    "unbound daemon armed without authenticated foreground ownership"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = 9999999 ] \
+    || fail "unbound-daemon failure was not fenced to the unchanged stale owner"
+  assert_present "$failure" "unbound daemon did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.9999999" \
+    "unbound daemon did not persist its stale-owner notice"
+  assert_contains "$out" "stale session lock recovery failed" \
+    "unbound daemon did not deliver its recovery failure"
+  pass "auto-arm: detached daemons fail closed without authenticated foreground ownership"
+}
+
+test_recovery_revalidates_bridged_owner_after_session_lease_wait() {
+  local dir out status owner holder hook failure reset i
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-dies-during-recovery-lease")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  pause_session_lease_acquire "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  sleep 60 &
+  holder=$!
+  printf '9999999\n' > "$dir/state/.lock"
+  mkdir -p "$dir/state/.lock.acquire"
+  printf '%s\n' "$holder" > "$dir/state/.lock.acquire/pid"
+
+  out="$dir/recovery-owner-death.out"
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/session-lease-waiting" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/state/session-lease-waiting" ]; then
+    kill "$hook" "$holder" "$owner" 2>/dev/null || true
+    wait "$hook" "$holder" "$owner" 2>/dev/null || true
+    fail "bridged recovery did not reach the session lease wait"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  rm -f "$dir/state/.lock.acquire/pid"
+  rmdir "$dir/state/.lock.acquire"
+  : > "$dir/state/session-lease-release"
+  wait "$hook"
+  status=$?
+  failure=$(failure_epoch_path "$dir") \
+    || fail "owner death during recovery lease wait left no durable record"
+  reset=$(failure_epoch_field "$dir" reset)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 2 "$status" "a bridged owner dying during recovery lease wait must fail visibly"
+  [ "$(cat "$dir/state/.lock" 2>/dev/null || true)" = 9999999 ] \
+    || fail "recovery published the dead selected owner over its stale predecessor"
+  assert_absent "$dir/state/arm-ran" \
+    "recovery armed after its authenticated foreground owner died"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = 9999999 ] \
+    || fail "lease-wait owner-death failure was not fenced to the stale predecessor"
+  assert_present "$failure" "lease-wait owner death did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.9999999" \
+    "lease-wait owner death did not persist its stale-owner notice"
+  assert_contains "$(cat "$out")" "stale session lock recovery failed" \
+    "lease-wait owner death did not deliver its recovery failure"
+  pass "auto-arm: stale recovery revalidates bridged ownership after lease waits"
 }
 
 test_generation_claim_is_bound_to_serialized_session_owner() {
@@ -3338,6 +3447,8 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_claude_daemon_spawned_by_foreground_lock_owner_arms
 test_claude_daemon_reclaims_stale_lock_to_foreground_owner
+test_unbound_claude_daemon_cannot_reclaim_stale_lock
+test_recovery_revalidates_bridged_owner_after_session_lease_wait
 test_generation_claim_is_bound_to_serialized_session_owner
 test_stalled_session_lease_publishes_bound_failure
 test_terminal_session_lease_timeout_publishes_failure
