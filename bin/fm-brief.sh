@@ -6,8 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--playbook <name>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--playbook <name>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -22,6 +22,13 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --playbook embeds the Wave 1 checklist at data/playbooks/<name>.md into the
+#   brief's # Task section as `## Playbook: <name>`, alongside the {TASK} and
+#   {FIRSTMATE_SPEC} fill sites (which it never replaces). The name is closed-set
+#   validated against that directory: an unknown name fails loudly and writes
+#   nothing. Refused on secondmate charters, which carry no Task section. Ship
+#   briefs additionally carry the five-point Evidence Gate in their Definition
+#   of done, whatever the playbook.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -111,6 +118,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+PLAYBOOK=
+PLAYBOOK_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -120,6 +129,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      playbook) PLAYBOOK=$a; PLAYBOOK_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -132,6 +142,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --playbook) want_value=playbook ;;
+    --playbook=*) PLAYBOOK=${a#--playbook=}; PLAYBOOK_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -169,6 +181,31 @@ fi
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
+fi
+
+# A playbook is a closed-set reference to a Wave 1 checklist under the home's
+# data/playbooks/ directory. The name carries no path characters, so a hostile
+# or mistyped value cannot escape that directory; a missing checklist stops the
+# scaffold rather than embedding a dangling reference. Secondmate charters
+# carry no Task section, so the flag is refused there the same way --mode is.
+PLAYBOOK_SECTION=""
+if [ "$PLAYBOOK_SET" -eq 1 ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --playbook applies only to ship or scout briefs; a secondmate charter carries no Task section to embed it in" >&2
+    exit 1
+  fi
+  case "$PLAYBOOK" in
+    ''|-*|*[!A-Za-z0-9_-]*)
+      echo "error: --playbook must be a plain checklist name ([A-Za-z0-9_-], not starting with '-', got '$PLAYBOOK')" >&2
+      exit 1 ;;
+  esac
+  PLAYBOOK_FILE="$DATA/playbooks/$PLAYBOOK.md"
+  [ -f "$PLAYBOOK_FILE" ] || {
+    echo "error: unknown playbook '$PLAYBOOK': no checklist at $PLAYBOOK_FILE" >&2
+    exit 1
+  }
+  PLAYBOOK_BODY=$(cat "$PLAYBOOK_FILE")
+  PLAYBOOK_SECTION=$(printf '## Playbook: %s\n\nThe following project playbook applies to this task; follow its checklist alongside the intent above.\n\n%s\n' "$PLAYBOOK" "$PLAYBOOK_BODY")
 fi
 
 BRIEF="$DATA/$ID/brief.md"
@@ -325,12 +362,34 @@ fi
 # scaffolds): workers must never activate optmem.
 OPTMEM_BAN='**HARD RULE — SKIP OPTMEM ENTIRELY:** Never run ~/.optmem/memo (wake/nap/note). You are a crewmate; AGENTS.md exempts you. Any memo call wastes budget — go straight to the task.'
 
+TASK_BODY="{TASK}"
+if [ -n "$PLAYBOOK_SECTION" ]; then
+  TASK_BODY="{TASK}
+
+$PLAYBOOK_SECTION"
+fi
+
+# The five-point Evidence Gate every ship brief carries in its Definition of
+# done. Quoted heredoc keeps the backticked check names literal at scaffold
+# time; the ship scaffold below expands this variable once, and that single
+# expansion pass never re-executes backticks, so the gate renders verbatim.
+IFS= read -r -d '' EVIDENCE_GATE <<'EOF' || true
+## Evidence Gate
+Prove the change against this gate before reporting done; a fix without its proof is not done:
+1. `SUBTRACT FIRST`: remove or simplify existing code before adding new logic; justify every added line the subtraction could not cover.
+2. `WALK GATE`: run the `how`/`why` understanding pass only when the change crosses module boundaries; otherwise record a 1-line skip reason in the terminal output.
+3. `ARTIFACT PROOF`: capture the failing test's execution output before the fix and the passing test's execution output after it; both transcripts ship with the terminal report.
+4. `NO-SLOP CHECK`: run the `comment-sicko` / `no-comments` pass to purge unnecessary AI-generated comments before commit.
+5. `LEVER CHECK`: provide the CLI or script command proof that demonstrates the live verification end to end.
+EOF
+EVIDENCE_GATE=${EVIDENCE_GATE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
-{TASK}
+$TASK_BODY
 TESTS: {TESTS}
 VERIFY: every command runs once under \`timeout 60\`; running the full test suite is forbidden; the demo runs exactly once; any failure = needs-decision, never silent retries.
 
@@ -407,7 +466,7 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
-{TASK}
+$TASK_BODY
 TESTS: {TESTS}
 VERIFY: every command runs once under \`timeout 60\`; running the full test suite is forbidden; the demo runs exactly once; any failure = needs-decision, never silent retries.
 
@@ -460,5 +519,7 @@ If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, ad
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
+
+$EVIDENCE_GATE
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

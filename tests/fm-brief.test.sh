@@ -766,6 +766,109 @@ test_every_brief_carries_tests_and_verify_lines() {
   pass "fm-brief.sh: every ship mode and scout brief carries the TESTS and VERIFY lines"
 }
 
+write_playbooks() {
+  local home=$1
+  mkdir -p "$home/data/playbooks"
+  cat > "$home/data/playbooks/bug-fix.md" <<'EOF'
+# Bug-fix playbook
+
+- [ ] reproduce the failure first
+- [ ] `run the failing spec`
+EOF
+}
+
+# --playbook embeds the named Wave 1 checklist into the brief's # Task section
+# without disturbing the {TASK} fill site, and every ship
+# brief carries the five-point Evidence Gate in its Definition of done.
+test_playbook_embeds_checklist_and_ship_carries_evidence_gate() {
+  local home id brief
+  home="$TMP_ROOT/playbook-home"
+  mkdir -p "$home/data"
+  write_playbooks "$home"
+  id="brief-playbook-p1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --playbook bug-fix >/dev/null 2>&1 \
+    || fail "ship brief with a valid --playbook should scaffold"
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "playbook brief was not scaffolded"
+  assert_grep "## Playbook: bug-fix" "$brief" "brief missing its Playbook subsection"
+  assert_grep "reproduce the failure first" "$brief" "brief did not embed the playbook checklist"
+  assert_grep 'run the failing spec' "$brief" "brief mangled the playbook's backticked command"
+  [ "$(grep -c -F '{TASK}' "$brief")" = 1 ] \
+    || fail "playbook embed must leave exactly one {TASK} fill site"
+  for gate in "SUBTRACT FIRST" "WALK GATE" "ARTIFACT PROOF" "NO-SLOP CHECK" "LEVER CHECK"; do
+    assert_grep "$gate" "$brief" "ship brief missing evidence gate $gate"
+  done
+  assert_grep 'how' "$brief" "WALK GATE lost its how/why pass"
+  assert_grep 'comment-sicko' "$brief" "NO-SLOP CHECK lost its comment-sicko pass"
+  assert_grep 'no-comments' "$brief" "NO-SLOP CHECK lost its no-comments pass"
+  pass "fm-brief.sh: --playbook embeds the checklist and ship briefs carry the Evidence Gate"
+}
+
+# The Evidence Gate is a ship contract: it renders for every ship mode and
+# never leaks into a scout brief, even one carrying a playbook.
+test_evidence_gate_is_ship_only() {
+  local home id brief mode
+  home="$TMP_ROOT/evidence-gate-home"
+  mkdir -p "$home/data"
+  write_playbooks "$home"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-gate-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "ship brief ($mode) should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_grep "## Evidence Gate" "$brief" "$mode brief missing the Evidence Gate heading"
+    for gate in "SUBTRACT FIRST" "WALK GATE" "ARTIFACT PROOF" "NO-SLOP CHECK" "LEVER CHECK"; do
+      assert_grep "$gate" "$brief" "$mode brief missing evidence gate $gate"
+    done
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-gate-scout some-proj --scout --playbook bug-fix >/dev/null 2>&1 \
+    || fail "scout brief with a valid --playbook should scaffold"
+  brief="$home/data/brief-gate-scout/brief.md"
+  assert_grep "## Playbook: bug-fix" "$brief" "scout brief did not embed the playbook"
+  assert_no_grep "## Evidence Gate" "$brief" "scout brief must not carry the ship Evidence Gate"
+  assert_no_grep "SUBTRACT FIRST" "$brief" "scout brief must not carry evidence gate prose"
+  pass "fm-brief.sh: the Evidence Gate renders for every ship mode and no scout brief"
+}
+
+# An unknown, malformed, or missing playbook stops the scaffold with a clear
+# error and writes nothing; a charter carries no Task section, so --playbook
+# is refused there the same way --mode is.
+test_invalid_playbook_fails_loudly() {
+  local home out status
+  home="$TMP_ROOT/invalid-playbook-home"
+  mkdir -p "$home/data"
+  write_playbooks "$home"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pb-bad1 some-proj --mode local-only --playbook nope 2>&1); status=$?
+  expect_code 1 "$status" "unknown playbook must fail"
+  assert_contains "$out" "unknown playbook 'nope'" "unknown playbook refusal did not name the playbook"
+  assert_absent "$home/data/brief-pb-bad1/brief.md" "refused playbook scaffold still wrote a brief"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pb-bad2 some-proj --mode local-only --playbook '../secret' 2>&1); status=$?
+  expect_code 1 "$status" "path-traversal playbook must fail"
+  assert_contains "$out" "plain checklist name" "traversal refusal did not explain the name contract"
+  assert_absent "$home/data/brief-pb-bad2/brief.md" "traversal playbook scaffold still wrote a brief"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pb-bad3 some-proj --mode local-only --playbook= 2>&1); status=$?
+  expect_code 1 "$status" "empty playbook value must fail"
+  assert_absent "$home/data/brief-pb-bad3/brief.md" "empty playbook scaffold still wrote a brief"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-pb-bad4 some-proj --mode local-only --playbook 2>&1); status=$?
+  expect_code 1 "$status" "missing playbook value must fail"
+  assert_contains "$out" "requires a value" "missing value refusal did not explain itself"
+
+  mkdir -p "$TMP_ROOT/empty-home/data"
+  out=$(FM_HOME="$TMP_ROOT/empty-home" "$ROOT/bin/fm-brief.sh" brief-pb-bad5 some-proj --mode local-only --playbook bug-fix 2>&1); status=$?
+  expect_code 1 "$status" "playbook with no playbooks directory must fail"
+  assert_contains "$out" "unknown playbook 'bug-fix'" "absent-library refusal did not name the playbook"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER=x "$ROOT/bin/fm-brief.sh" brief-pb-bad6 --secondmate --no-projects --playbook bug-fix 2>&1); status=$?
+  expect_code 1 "$status" "playbook on a secondmate charter must fail"
+  assert_contains "$out" "carries no Task section" "charter refusal did not explain why"
+  assert_absent "$home/data/brief-pb-bad6/brief.md" "refused charter scaffold still wrote a brief"
+  pass "fm-brief.sh: invalid --playbook values fail loudly and write nothing"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -809,4 +912,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_every_brief_carries_tests_and_verify_lines
 test_scout_and_secondmate_load_decision_hold_policy
+test_playbook_embeds_checklist_and_ship_carries_evidence_gate
+test_evidence_gate_is_ship_only
+test_invalid_playbook_fails_loudly
 test_scout_and_secondmate_scaffold
