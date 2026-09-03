@@ -405,9 +405,10 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+    # Always render the fold's accepted key, including "default". A note may
+    # legitimately mention a deeper [key=...] token as prose; hiding the default
+    # key would make that prose look like the argument accepted by --resolve-key.
+    line="$task [key=$key] $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.

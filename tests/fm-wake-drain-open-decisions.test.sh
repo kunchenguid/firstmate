@@ -37,6 +37,28 @@ test_buried_decision_still_surfaces() {
   pass "a needs-decision buried under later routine/other-key lines still reports as open"
 }
 
+test_default_key_is_rendered_explicitly_when_note_mentions_a_key() {
+  local dir state out expected
+  dir=$(make_case explicit-default-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The trailing token is deliberately prose under the fold grammar. The
+  # rendering must lead with the actual default key so the adjacent
+  # --resolve-key hint cannot make the prose token look accepted.
+  printf 'needs-decision: choose the lint response [key=lint-1]\n' > "$state/task-default.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed on a default-key decision with a prose key token"
+
+  expected='task-default [key=default] needs-decision: choose the lint response [key=lint-1]'
+  grep -Fx "$expected" "$out" >/dev/null \
+    || fail "the open decision did not render its accepted default key: $(cat "$out")"
+  if grep -Fx 'task-default needs-decision: choose the lint response [key=lint-1]' "$out" >/dev/null; then
+    fail "the ambiguous keyless rendering remained visible: $(cat "$out")"
+  fi
+  pass "a default-key open decision renders the key accepted by --resolve-key"
+}
+
 test_explicit_resolution_closes_it() {
   local dir state out
   dir=$(make_case resolved)
@@ -216,6 +238,7 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 }
 
 test_buried_decision_still_surfaces
+test_default_key_is_rendered_explicitly_when_note_mentions_a_key
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it

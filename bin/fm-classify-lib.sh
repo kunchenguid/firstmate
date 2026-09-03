@@ -450,7 +450,10 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
-# most-recently-opened-last order; prints nothing when none are open. Pure read of
+# most-recently-opened-last order; prints nothing when none are open. The key
+# column is also the display authority: a consumer that offers a key-based close
+# command must render it even when its value is "default", so a prose key token
+# in the summary cannot be mistaken for the record's accepted key. Pure read of
 # the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
 # is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.

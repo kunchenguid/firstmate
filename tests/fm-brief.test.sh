@@ -782,6 +782,31 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_status_key_position_is_taught_in_every_scaffold() {
+  local home expected brief
+  home="$TMP_ROOT/status-key-position-home"
+  mkdir -p "$home/data"
+  # shellcheck disable=SC2016 # Backticks are literal expected Markdown, not shell expressions.
+  expected='When you use `[key=<slug>]`, place it before the colon (`needs-decision [key=<slug>]: ...`) or at the very head of the note (`needs-decision: [key=<slug>] ...`); a token later in the summary is prose and does not key the record.'
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" key-position-ship repo --mode no-mistakes >/dev/null 2>&1 \
+    || fail "ship brief with the decision-key instruction did not scaffold"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" key-position-scout repo --scout >/dev/null 2>&1 \
+    || fail "scout brief with the decision-key instruction did not scaffold"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Route fixture work.' \
+    "$ROOT/bin/fm-brief.sh" key-position-secondmate --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate brief with the decision-key instruction did not scaffold"
+
+  for brief in \
+    "$home/data/key-position-ship/brief.md" \
+    "$home/data/key-position-scout/brief.md" \
+    "$home/data/key-position-secondmate/brief.md"; do
+    assert_grep "$expected" "$brief" \
+      "$brief did not teach both accepted key positions or distinguish later prose tokens"
+  done
+  pass "fm-brief.sh: every scaffold teaches the accepted decision-key positions"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -801,5 +826,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_status_key_position_is_taught_in_every_scaffold
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
