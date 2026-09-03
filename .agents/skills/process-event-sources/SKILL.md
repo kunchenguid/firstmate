@@ -54,6 +54,12 @@ bin/fm-procevent-quota.sh arm [--interval <secs>] [--threshold <percent>] [--pro
 
 It keeps polling through unknown quota and wakes when known quota drops below the configured threshold, runway becomes `exhausted_now`, or polling fails.
 
+When the optional Telegram bridge is configured, the captain's inbound channel is armed and handled through `bin/fm-procevent-telegram.sh`.
+Its header owns the allowlist, the note write, and the acknowledgement discipline; [`docs/telegram-bridge.md`](../../../docs/telegram-bridge.md) owns operator setup.
+An allowed message becomes an ordinary captain inbox note that wakes you on its own, so a quiet collection cycle is deliberately silent and you only hear about this source when something needs you.
+`classify` returns `unconfigured`, `error`, `disabled`, `busy`, or `idle`: `unconfigured` means somebody messaged the bot before an allowed chat id was set, and the only action is to relay that chat id to the captain for confirmation - never allowlist it yourself, because the first sender need not be him.
+`busy` and `idle` are both silent and need no action; never run `poll` yourself in a conversational turn, because that is the second collector `busy` exists to turn away.
+
 For a "do X as soon as Y is true" request whose condition AND action are both genuinely exact and deterministic, register a condition->action watch instead of re-checking in conversational turns:
 
 ```sh
@@ -65,7 +71,7 @@ Eligibility is a firstmate judgment made BEFORE arming, because the scripts cann
 Never bind an action that is destructive, irreversible, or security-sensitive, an action needing captain approval or any gate decision, or an action whose right form depends on what the condition finds - those keep the existing check-fires-then-firstmate-decides flow, for which a plain custom check or another adapter stays correct.
 When in doubt, arm only the condition half as an ordinary check and keep the action as a wake-time decision.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, `bin/fm-procevent-quota.sh --help`, and `bin/fm-procevent-remote-reply.sh --help` own the exact commands and flags.
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-when.sh --help`, `bin/fm-procevent-quota.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, and `bin/fm-procevent-telegram.sh --help` own the exact commands and flags.
 
 An explicitly enabled external adapter registers through `bin/fm-procevent.sh register-extension`, never through a package-discovered script or package-supplied argv.
 [`docs/configuration.md`](../../../docs/configuration.md#trusted-external-process-event-adapters-configextensionsd) owns setup and [`docs/extension-bindings.md`](../../../docs/extension-bindings.md) owns the narrow trusted-code and untrusted-evidence boundary.

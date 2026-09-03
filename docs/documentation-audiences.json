@@ -31,7 +31,8 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
-    "docs/remote-secondmates.md"
+    "docs/remote-secondmates.md",
+    "docs/telegram-bridge.md"
   ],
   "requiredOwnerPointers": [
     {
@@ -399,6 +400,10 @@
     {
       "path": "docs/supervision-protocols/unknown.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/telegram-bridge.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/tmux-backend.md",

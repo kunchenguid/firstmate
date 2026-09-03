@@ -756,6 +756,21 @@ The published `lavish-axi poll` clears feedback destructively before returning i
 Never describe this path as at-least-once, no-loss, or lossless.
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
+## Telegram bridge (.env)
+
+The optional Telegram bridge lets the captain send work to a firstmate home from a phone and receive escalations back.
+It is off unless the home's gitignored `.env` carries a non-empty `TELEGRAM_BOT_TOKEN`, and it needs `curl` and `jq`.
+[`docs/telegram-bridge.md`](telegram-bridge.md) owns setup, the chat-id allowlist, the security boundary, and what an inbound message may and may not do; only the keys themselves are listed here.
+
+| Key in `.env` | Holds |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | The credential from @BotFather. Its presence is the opt-in; with no token nothing polls, nothing sends, and nothing is written. |
+| `TELEGRAM_ALLOWED_CHAT_ID` | The one chat allowed to queue notes, and the chat escalations are sent to. Required for inbound: with none set every message is dropped. |
+| `TELEGRAM_BOT_NAME` | Optional bot @handle, shown by `bin/fm-telegram.sh status`. |
+
+Each may be overridden by the matching environment variable for a single run.
+The chat id cannot be known until the captain has messaged the bot once, so [`docs/telegram-bridge.md`](telegram-bridge.md) carries that one manual step.
+
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
@@ -915,6 +930,17 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+# Telegram bridge; see "Telegram bridge (.env)" above and docs/telegram-bridge.md
+TELEGRAM_BOT_TOKEN=       # overrides the .env bot token; its presence is the whole opt-in
+TELEGRAM_ALLOWED_CHAT_ID= # overrides the .env allowed chat id; absent or malformed drops every inbound message
+TELEGRAM_BOT_NAME=        # overrides the .env bot @handle
+FM_TELEGRAM_ENV_FILE=     # alternate .env-style file the bridge reads its keys from
+FM_TELEGRAM_API_BASE=https://api.telegram.org  # Bot API root; exists so tests can drive a local stand-in
+FM_TELEGRAM_HTTP_TIMEOUT=120   # seconds before one Bot API request is abandoned
+FM_TELEGRAM_POLL_TIMEOUT=50    # seconds one long-poll waits on Telegram for a new message
+FM_TELEGRAM_POLL_MAX_CYCLES=60 # long-polls before the collector recycles; nothing is lost, Telegram holds messages 24h
+FM_TELEGRAM_POLL_FAIL_LIMIT=5  # consecutive failed requests before the cycle ends and reports the outage once
+FM_TELEGRAM_POLL_FAIL_DELAY=10 # seconds between retries during an outage
 # spoken interface and captain inbox; see "Spoken interface and captain inbox" above
 FM_VOICE_REGION=        # overrides config/voice-region for one relay run
 FM_VOICE_MODEL=         # overrides config/voice-model for one relay run

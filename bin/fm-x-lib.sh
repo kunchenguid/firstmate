@@ -8,6 +8,7 @@
 #
 # This file is sourced, never executed. It defines:
 #   fmx_env_get <key> <file>   - read one KEY=VALUE from a .env-style file
+#                                (thin alias for bin/fm-env-lib.sh's fm_env_get)
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
@@ -56,24 +57,13 @@ if ! command -v fm_backlog_atomic_transition >/dev/null 2>&1; then
   . "$_FM_X_LIB_DIR/fm-backlog-transition-lib.sh"
 fi
 
-# Read the value of KEY from a .env-style file: last assignment wins; tolerates a
-# leading "export ", surrounding whitespace, and one layer of matching single or
-# double quotes. Prints nothing (and succeeds) when the file or key is absent, so
-# callers can treat empty output as "unset".
-fmx_env_get() {
-  local key=$1 file=$2 line val
-  [ -f "$file" ] || return 0
-  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null | tail -n1) || return 0
-  [ -n "$line" ] || return 0
-  val=${line#*=}
-  val=${val#"${val%%[![:space:]]*}"}   # strip leading whitespace
-  val=${val%"${val##*[![:space:]]}"}   # strip trailing whitespace (incl. CR)
-  case "$val" in
-    \"*\") val=${val#\"}; val=${val%\"} ;;
-    \'*\') val=${val#\'}; val=${val%\'} ;;
-  esac
-  printf '%s' "$val"
-}
+# Relay's name for the shared `.env` reader, kept because ten call sites use it.
+# The contract itself is owned once by bin/fm-env-lib.sh; this delegates rather
+# than carrying a second copy that could drift from it.
+# shellcheck source=bin/fm-env-lib.sh
+. "$_FM_X_LIB_DIR/fm-env-lib.sh"
+
+fmx_env_get() { fm_env_get "$@"; }
 
 fmx_poll_shim_content() {
   local home=$1 root=$2
