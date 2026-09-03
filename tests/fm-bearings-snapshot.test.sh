@@ -2288,8 +2288,9 @@ SH
   pass "reused live state is discarded when task generation changes"
 }
 
-test_large_local_snapshot_composes_under_five_seconds_without_projection_drift() {
-  local home fakebin worktree serial parallel parallel_file snapshot_pid started elapsed i
+test_large_local_snapshot_overlaps_local_reads_without_projection_drift() {
+  local home fakebin worktree serial parallel parallel_file snapshot_pid i
+  local serial_started serial_elapsed parallel_started parallel_elapsed saved
   home=$(make_home large-local-snapshot)
   worktree="$home/projects/shared-worktree"
   fm_git_init_commit "$worktree"
@@ -2329,7 +2330,19 @@ SH
   done
 
   serial=$(FAKE_NM_DELAY=0 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 run "$home" "$fakebin" --json)
-  started=$(date +%s)
+
+  # Serialized reads pay every worker's delay end to end while concurrent reads
+  # overlap them. Time both runs and compare, because the two pay the same
+  # composition overhead: the difference isolates the overlap this change
+  # delivers, where an absolute wall-clock budget would instead measure how
+  # loaded the host happens to be and flake on a busy runner.
+  serial_started=$(date +%s)
+  FAKE_NM_DELAY=1 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=1 \
+    run "$home" "$fakebin" --json >/dev/null \
+    || fail "serialized local snapshot failed"
+  serial_elapsed=$(( $(date +%s) - serial_started ))
+
+  parallel_started=$(date +%s)
   parallel_file="$home/parallel-snapshot.json"
   FAKE_NM_DELAY=1 FAKE_NM_SIGNAL="$home/nm-started" \
     FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8 \
@@ -2347,9 +2360,13 @@ SH
   fi
   wait "$snapshot_pid" || fail "concurrent local snapshot failed"
   parallel=$(<"$parallel_file")
-  elapsed=$(( $(date +%s) - started ))
-  [ "$elapsed" -lt 5 ] \
-    || fail "five local current-state reads exceeded the local composition target (${elapsed}s)"
+  parallel_elapsed=$(( $(date +%s) - parallel_started ))
+  # Five one-second reads serialize into five seconds and overlap into about
+  # one, so at least two of those four seconds must show up as real savings.
+  # Serializing the reads again collapses that difference to roughly zero.
+  saved=$(( serial_elapsed - parallel_elapsed ))
+  [ "$saved" -ge 2 ] \
+    || fail "concurrent local reads saved no measurable time (serial ${serial_elapsed}s vs concurrent ${parallel_elapsed}s)"
   [ "$parallel" = "$serial" ] \
     || fail "concurrent local observation changed the fm-bearings.v1 projection"
   printf '%s' "$parallel" | jq -e '
@@ -2358,7 +2375,7 @@ SH
       and ([.in_flight[].id] | sort) == ["local-1","local-2","local-3","local-4","local-5"]
       and ([.in_flight[] | select(.id == "local-1" and .kind == "ship")] | length) == 1
   ' >/dev/null || fail "large local snapshot lost a worker row: $parallel"
-  pass "large local snapshot stays under five seconds with byte-identical serial and concurrent projections"
+  pass "large local snapshot overlaps local reads with byte-identical serial and concurrent projections"
 }
 
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache() {
@@ -2483,7 +2500,7 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
 
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_relaunched_task_does_not_inherit_reused_endpoint_state
-test_large_local_snapshot_composes_under_five_seconds_without_projection_drift
+test_large_local_snapshot_overlaps_local_reads_without_projection_drift
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work
