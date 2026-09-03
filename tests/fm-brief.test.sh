@@ -798,6 +798,37 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_status_protocol_covers_done_into_a_wait() {
+  local home kind id brief
+  home="$TMP_ROOT/done-into-wait-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout secondmate; do
+    id="brief-done-into-wait-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep '`done:` is a terminal report' "$brief" \
+      "$kind brief does not clarify that done is a terminal report, not a wait declaration"
+    assert_grep 'not a declaration of a wait' "$brief" \
+      "$kind brief does not clarify that done is a terminal report, not a wait declaration"
+    assert_grep 'right after the `done:` line' "$brief" \
+      "$kind brief does not tell a worker finishing into a wait to declare it with paused right after done"
+  done
+  pass "fm-brief.sh: every status-protocol variant tells a worker finishing into a wait to declare paused after done"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -866,5 +897,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_status_protocol_covers_done_into_a_wait
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
