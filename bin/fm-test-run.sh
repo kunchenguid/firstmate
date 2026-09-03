@@ -43,8 +43,10 @@
 #                   The required Herdr CI lane uses this so a missing pin cannot
 #                   silently pass as a gate skip.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
-#                   Plain --changed uses min(4, cpus) workers when multiple
-#                   selected scripts are admissible.
+#                   Plain --changed and a plain list of script paths use
+#                   min(4, cpus) workers when multiple selected scripts are
+#                   admissible; --lane, --family, and --all stay serial unless
+#                   asked for concurrency explicitly.
 #                   N>1 is allowed only when every selected script is proven
 #                   safe to run concurrently: individually in the proven-isolated
 #                   set (bin/fm-test-isolation-proof.sh --list), or in a family
@@ -54,14 +56,17 @@
 #                   scripts stay serial. Concurrent runs are ordered
 #                   longest-hint-first so the slowest script is not stranded
 #                   alone at the tail. Default is 1 (serial) except for plain
-#                   --changed, which uses the bounded automatic scheduler. Any
-#                   unproven remainder runs serially after that group.
+#                   --changed and a plain list of script paths, which use the
+#                   bounded automatic scheduler. Any unproven remainder runs
+#                   serially after that group.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
-#                   record it as exit 124 (0 disables, the default). The
-#                   --changed applies 900s automatically: no real script
-#                   approaches it, so it only converts a HUNG
-#                   script into a bounded failure. --max-wall-ms is checked
+#                   record it as exit 124 (0 disables, the default). Plain
+#                   --changed and a plain list of script paths apply 900s
+#                   automatically: no real script approaches it, so it only
+#                   converts a HUNG script into a bounded failure, and a local
+#                   verification round never has to guess a shorter bound of its
+#                   own. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
 #                   External interruption cleanup is outside this runner's
 #                   guarantee; configured per-script bounds remain authoritative.
@@ -438,6 +443,7 @@ list_concurrent_safe_families() {
   cat <<'EOF'
 watcher-wake-lock
 pure-contract-unit
+pr-forge
 EOF
 }
 
@@ -451,7 +457,7 @@ family_is_concurrent_safe() {
 
 concurrent_safe_family_jobs_max() {
   case "$1" in
-    watcher-wake-lock|pure-contract-unit) printf '4\n' ;;
+    watcher-wake-lock|pure-contract-unit|pr-forge) printf '4\n' ;;
     *) printf '1\n' ;;
   esac
 }
@@ -1841,10 +1847,16 @@ for s in "${SCRIPTS[@]}"; do
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done
 
-# Plain --changed uses the bounded representative-suite scheduler; numeric
-# --jobs retains the strict all-script admission rule below.
+# Plain --changed and a plain list of script paths both use the bounded
+# representative-suite scheduler; numeric --jobs retains the strict all-script
+# admission rule below. Naming scripts is how a local verification round asks
+# for exactly those subjects, so it gets the same bounded concurrency and the
+# same automatic per-script bound rather than a serial chain of separate runs.
+# The curated selections stay untouched: --lane composes CI shards whose serial
+# lane must stay strictly serial, --family is what the required Herdr lane runs,
+# and --all is a deliberate complete regression.
 AUTO_CONCURRENCY=0
-if [ "$MODE" = changed ] && [ "$JOBS_EXPLICIT" -eq 0 ]; then
+if { [ "$MODE" = changed ] || [ "$MODE" = scripts ]; } && [ "$JOBS_EXPLICIT" -eq 0 ]; then
   if [ "${#SCRIPTS[@]}" -gt 0 ] && [ "$PER_SCRIPT_TIMEOUT_SECS" -eq 0 ]; then
     PER_SCRIPT_TIMEOUT_SECS=$CHANGED_DEFAULT_TIMEOUT_SECS
   fi
@@ -1859,7 +1871,7 @@ if [ "$MODE" = changed ] && [ "$JOBS_EXPLICIT" -eq 0 ]; then
     [ "$JOBS" -eq 1 ] || AUTO_CONCURRENCY=1
   fi
 fi
-if [ "$JOBS" -gt 1 ] || [ "$MODE" = changed ]; then
+if [ "$JOBS" -gt 1 ] || [ "$MODE" = changed ] || [ "$MODE" = scripts ]; then
   SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
 fi
 

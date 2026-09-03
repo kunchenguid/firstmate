@@ -422,6 +422,100 @@ SH
   pass "changed defaults to bounded automatic scheduling with serial override"
 }
 
+# A local verification round names the subjects it cares about. Exercise begin/end
+# markers from real fixture processes to prove that a plain list of script paths
+# gets the same bounded automatic scheduling and the same automatic per-script
+# bound as --changed, so verifying several subjects is one bounded concurrent run
+# rather than a serial chain of separate `bash tests/X.test.sh` invocations.
+test_script_list_uses_bounded_automatic_concurrency() {
+  local tmp repo script parallel_shape serial_shape mixed_shape expected_jobs
+  local timeout_repo timeout_script rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-script-list.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  # fm-cd-pretool-check and fm-pr-merge are individually proven isolated;
+  # fm-backend-orca is not, so it must still land in the serial tail.
+  for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh fm-backend-orca.test.sh; do
+    cat >"$repo/tests/$script" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+echo "ok - script-list concurrency fixture"
+SH
+    chmod +x "$repo/tests/$script"
+  done
+
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh \
+      --json "$tmp/parallel.json") >"$tmp/parallel.out" 2>"$tmp/parallel.err" \
+    || fail "default script-list run failed: $(cat "$tmp/parallel.err")"
+  parallel_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/parallel.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$parallel_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN ] \
+    || fail "a plain script list did not use bounded concurrent scheduling: $parallel_shape"
+
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh \
+      --jobs 1 --json "$tmp/serial.json") >"$tmp/serial.out" 2>"$tmp/serial.err" \
+    || fail "explicit serial script-list run failed: $(cat "$tmp/serial.err")"
+  serial_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/serial.out" | head -n 2 | awk '{print $1}' | paste -sd, -)
+  [ "$serial_shape" = FM_TEST_BEGIN,FM_TEST_END ] \
+    || fail "explicit --jobs 1 did not force a serial script list: $serial_shape"
+
+  # An unproven script in the list is scheduled around, never refused and never
+  # run beside another script.
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-cd-pretool-check.test.sh tests/fm-pr-merge.test.sh \
+      tests/fm-backend-orca.test.sh) >"$tmp/mixed.out" 2>"$tmp/mixed.err" \
+    || fail "mixed proven/unproven script list failed: $(cat "$tmp/mixed.err")"
+  mixed_shape=$(grep -E '^FM_TEST_(BEGIN|END)' "$tmp/mixed.out" | awk '{print $1}' | paste -sd, -)
+  [ "$mixed_shape" = FM_TEST_BEGIN,FM_TEST_BEGIN,FM_TEST_END,FM_TEST_END,FM_TEST_BEGIN,FM_TEST_END ] \
+    || fail "an unproven script was not kept in the serial tail: $mixed_shape"
+
+  expected_jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+  case "$expected_jobs" in
+    ''|*[!0-9]*) expected_jobs=1 ;;
+  esac
+  [ "$expected_jobs" -le 4 ] || expected_jobs=4
+  [ "$expected_jobs" -ge 1 ] || expected_jobs=1
+  python3 - "$tmp/parallel.json" "$tmp/serial.json" "$expected_jobs" <<'PYJSON' \
+    || fail "script-list timing artifacts did not record their resolved worker counts"
+import json, sys
+automatic = json.load(open(sys.argv[1], encoding="utf-8"))
+serial = json.load(open(sys.argv[2], encoding="utf-8"))
+expected = int(sys.argv[3])
+assert automatic["selection"].split(";")[-1] == f"jobs={expected}"
+assert serial["selection"].split(";")[-1] == "jobs=1"
+PYJSON
+
+  # A named script inherits the same automatic bound --changed applies, so a
+  # verification round never has to guess a shorter one of its own.
+  timeout_repo="$tmp/timeout-repo"
+  timeout_script=tests/fm-calm-pi-extension.test.sh
+  mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
+  cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
+  cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
+fm_run_timed() {
+  [ "$1" -eq 900 ] || return 99
+  return 124
+}
+SH
+  cat >"$timeout_repo/$timeout_script" <<'SH'
+#!/usr/bin/env bash
+touch should-not-run
+echo "not ok - automatic timeout helper was bypassed"
+SH
+  chmod +x "$timeout_repo/bin/fm-test-run.sh" "$timeout_repo/$timeout_script"
+  set +e
+  (cd "$timeout_repo" && bin/fm-test-run.sh "$timeout_script") \
+    >"$tmp/timeout.out" 2>"$tmp/timeout.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "a named script hitting the automatic bound must fail the run, got $rc"
+  grep -Eq '^FM_TEST_END .+ tests/fm-calm-pi-extension\.test\.sh exit=124 ' "$tmp/timeout.out" \
+    || fail "a named script did not receive the automatic timeout: $(cat "$tmp/timeout.out")"
+  [ ! -e "$timeout_repo/should-not-run" ] || fail "automatic timeout helper did not own the named script"
+
+  rm -rf "$tmp"
+  pass "a plain script list defaults to bounded automatic scheduling with the automatic per-script bound"
+}
+
 test_empty_selection_emits_summary() {
   local tmp repo out json rc fake_bin real_git
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
@@ -934,6 +1028,9 @@ test_max_wall_ms_is_a_result_not_advice() {
   fast=tests/fm-budget-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
+  # A named script carries the runner's automatic per-script bound, so the
+  # fixture repo ships the bound's owner exactly as the real repo does.
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cat >"$repo/$fast" <<'SH'
 #!/usr/bin/env bash
 sleep 1
@@ -1202,6 +1299,7 @@ test_changed_runner_surfaces_select_their_family
 test_changed_dependency_selection_and_unmapped_failure
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency
+test_script_list_uses_bounded_automatic_concurrency
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
