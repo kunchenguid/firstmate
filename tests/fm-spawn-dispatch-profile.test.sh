@@ -131,7 +131,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -345,7 +345,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -s workspace-write -a never" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -395,7 +395,7 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "claude --permission-mode auto --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
   pass "claude receives --model and --effort profile flags"
@@ -412,7 +412,7 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -s workspace-write -a never" \
     "codex launch did not thread model and reasoning effort config"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
@@ -428,10 +428,55 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "codex --model 'gpt-5' -s workspace-write -a never" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
+}
+
+# codex runs sandboxed with no escalation path, so anything the brief tells a
+# worker to write outside its worktree has to be granted at launch or the model
+# just sees "operation not permitted". These two cases pin the grant to exactly
+# what bin/fm-brief.sh permits, in both directions: the paths must be there, and
+# the firstmate home itself must NOT be.
+test_codex_ship_grants_only_the_brief_permitted_state_dir() {
+  local rec id out status launch
+  id=profile-codex-grant-z30
+  rec=$(make_spawn_case profile-codex-grant codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex ship spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--add-dir '$HOME_DIR/state'" \
+    "codex ship launch did not grant the state dir the status file lives in"
+  assert_not_contains "$launch" "--add-dir '$HOME_DIR/data" \
+    "codex ship launch must not grant a scout report dir a crewmate never writes"
+  assert_not_contains "$launch" "--add-dir '$HOME_DIR'" \
+    "codex launch must never grant the whole firstmate home"
+  pass "codex crewmate is granted exactly the state dir its status file needs"
+}
+
+test_codex_scout_also_grants_its_own_report_dir() {
+  local rec id out status launch
+  id=profile-codex-scout-grant-z31
+  rec=$(make_spawn_case profile-codex-scout-grant codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "codex scout spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--add-dir '$HOME_DIR/state'" \
+    "codex scout launch did not grant the state dir the status file lives in"
+  assert_contains "$launch" "--add-dir '$HOME_DIR/data/$id'" \
+    "codex scout launch did not grant the one data dir its report lives in"
+  assert_not_contains "$launch" "--add-dir '$HOME_DIR/data'" \
+    "codex scout launch must grant its own data dir, not every task's"
+  assert_not_contains "$launch" "--add-dir '$HOME_DIR'" \
+    "codex launch must never grant the whole firstmate home"
+  pass "codex scout is granted its own report dir alongside the state dir"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -500,7 +545,7 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+  assert_contains "$launch" "--trust --auto-review --sandbox enabled --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
     "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
   # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
   # literal `cursor agent` command cannot run on a machine that has only the
@@ -806,6 +851,8 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
+test_codex_ship_grants_only_the_brief_permitted_state_dir
+test_codex_scout_also_grants_its_own_report_dir
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

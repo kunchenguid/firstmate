@@ -159,11 +159,16 @@ WS_COUNT=$(printf '%s' "$WS_TABS" | jq -r '.result.tabs? // [] | length')
 pass "fixed: the workspace holds exactly the 2 replacement tabs after both respawns - no leaked husk tabs, no destroyed workspace"
 
 # --- 4. a GENUINELY live duplicate still refuses, unchanged -----------------
-# Register a real agent (herdr's own native registration primitive) on one of
-# the freshly-respawned panes, then confirm a further same-labeled spawn
-# attempt refuses exactly as before - the husk fix must never touch a pane
-# that actually has something registered in it.
+# Give one of the freshly-respawned panes a real running foreground process and
+# register a real agent on it (herdr's own native registration primitive), then
+# confirm a further same-labeled spawn attempt refuses exactly as before - the
+# husk fix must never touch a pane that is actually running something.
+# Both halves matter: a registration standing over a bare idle shell is the
+# husk shape, because a report is not withdrawn when the process that made it
+# goes away (docs/herdr-backend.md "Restart and liveness behavior").
 
+herdr_pane_run_foreground "$SESSION" "$NEW_CREW_PANE_ID" \
+  || fail "could not give the respawned crewmate-shaped pane a running foreground process"
 herdr pane report-agent "$NEW_CREW_PANE_ID" --source fm-respawn-e2e --agent fm-respawn-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the respawned crewmate-shaped pane"
 

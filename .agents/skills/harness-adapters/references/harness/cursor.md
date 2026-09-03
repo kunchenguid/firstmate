@@ -8,14 +8,15 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 | Fact | Value |
 |---|---|
 | Binary | `fm_cursor_resolve_binary` in `../../../bin/fm-cursor-lib.sh` resolves stable launcher `cursor-agent` or legacy `agent`, never `cursor`; both symlink into `~/.local/share/cursor-agent/versions/<version>/cursor-agent`, whose target auto-update replaces. |
-| Launch | Positional instructions with `--trust`, `--yolo`, optional `--model <model>`, and `--workspace <absolute-task-worktree>`, after clearing foreign primary markers. |
+| Launch | Positional instructions with `--trust`, the autonomy flags `../../../bin/fm-spawn.sh` owns, optional `--model <model>`, and `--workspace <absolute-task-worktree>`, after clearing foreign primary markers. |
 | Models | Use current-account `cursor-agent --list-models` or legacy `agent --list-models`; the drifting observed list had only `cursor-grok-4.5-high` and `cursor-grok-4.5-high-fast` for Grok plus several `xhigh` ids, so choose a returned reasoning id and never assume low or medium Grok. |
 | Busy state | `../../../bin/fm-busy-lib.sh` folds the per-conversation transcript as `cursor-transcript`: `role:user` opens and typed `turn_ended` closes success or abort, covering manual interrupt; nothing is armed or seeded, and this backend-agnostic source was identical on tmux and Herdr. |
 | Exit command | `/exit`. |
 | Interrupt | Single Escape returns the placeholder with no clear key; control makes no cancellation claim because an aborted transcript close appeared within seconds in some runs and not within twenty in others. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Cursor discovers Firstmate's user skills. |
 | Resume | No verified native pane resume; use deterministic relaunch. |
-| Autonomy | `--yolo`, documented alias for `--force`; footer `Run Everything`. |
+| Autonomy | `--auto-review --sandbox enabled`, so a crewmate runs under Cursor's own review and sandbox controls, plus the `--add-dir` writable roots below; `../../../bin/fm-spawn.sh` owns the exact flags. `--yolo`, the documented alias for `--force` whose footer reads `Run Everything`, switches both off and is not used. |
+| Sandboxed writes | The sandbox normally refuses writes outside the workspace, and `--auto-review` then parks the turn on a manual approval prompt an unattended crewmate cannot clear, so the paths the brief permits outside the worktree are granted with `--add-dir`; `../../../docs/verification/runtime-backends.md` owns the measurement under "Crewmate autonomy and the status-file write contract". |
 | Trust | `--trust` suppresses the dialog; `--yolo` does not, and every task has a fresh path. |
 | Marker | `CURSOR_INVOKED_AS=cursor-agent` on agent and children, plus `CURSOR_AGENT=1` on child or tool processes; other `CURSOR_*` variables are not identity markers. |
 | Effort | No verified flag; `references/common/model-and-effort.md` owns unsupported-value handling. |
@@ -61,7 +62,9 @@ Refresh with `FM_HARNESS_LIVENESS_DRIFT=1 ../../../bin/fm-test-run.sh ../../../t
 
 Firstmate enters its acquired worktree and passes the same absolute path through `--workspace`.
 Never pass Cursor `-w` or `--worktree`, which allocates a second copy under `~/.cursor/worktrees` and breaks isolation.
-The CLI supports repeatable `--add-dir`, but the adapter adds none; positional instructions need no grant to their private directory.
+The adapter also passes repeatable `--add-dir <path>` for the writable roots the sandbox posture needs; `../../../bin/fm-spawn.sh` owns which ones, and they are the only paths a worker may write outside its worktree.
+The brief rides inline as the positional prompt, so the private brief directory needs no grant.
+`--add-dir` adds writable roots only: Cursor still records the `--workspace` path as its project `workspacePath`, the exact identity `state/<id>.cursor-session` binds the busy fold to.
 Example: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor --model cursor-grok-4.5-high`.
 
 ## Primary integration

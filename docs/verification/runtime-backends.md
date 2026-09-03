@@ -267,7 +267,7 @@ This guard is the refresh command after any harness upgrade; it spends a small n
 ## Herdr
 
 The compatibility floor is protocol 14.
-The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
+The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, with agent lifecycle control and the agent-free proof measured on Herdr 0.8.2, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
@@ -635,24 +635,71 @@ Polling remained active and is covered as the fallback for capability, connect, 
 
 ### Agent lifecycle control
 
-Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-09-01 on Herdr 0.8.2, and first measured 2026-08-02 on Herdr 0.7.5:
 
 ```sh
 tests/fm-control-herdr-smoke.test.sh
 ```
 
-Observed output:
+Observed output on Herdr 0.8.2:
 
 ```text
 ok - real herdr: exit on a pane with no registered agent is idempotent success
 ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
+ok - real herdr: a reported registration the pane's own process inventory contradicts reads agent-free
+ok - real herdr: an exited worker's pane is positively eligible for its replacement instead of being typed into
+ok - real herdr: interrupt still refuses on a pane whose registration outlived its agent
+ok - real herdr: the same registration over a running foreground process stays alive
 ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
-ok - real herdr: no control verb removed the endpoint or the task's local copy
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
+ok - real herdr: no control verb removed the endpoint, the task's local copy, or its branch
 ```
 
-The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
-That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+The registry written through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so the case drives the registry and the pane's processes apart deliberately and runs the identical registered reading twice: once over a plain shell and once over a real foreground process, with no real agent launched.
+
+Herdr 0.8.2 keeps such a report registered even though the pane runs nothing but its shell, measured in an isolated `fm-lab-` session:
+
+```text
+herdr pane report-agent <pane> --source fm-control-smoke --agent fm-control-smoke-agent --state idle
+herdr agent get <pane>   -> {"agent_status":"idle"}
+herdr pane process-info  -> foreground_processes [{"name":"zsh","argv0":"zsh"}]
+```
+
+That is why the classifier corroborates the registry against the pane's own inventory rather than trusting a reported registration alone.
+Herdr does validate a report claiming a source it owns itself: an otherwise identical `--source herdr:pi --agent pi` report on the same shell-only pane was rejected and `agent get` still answered `agent_not_found`.
+
+`tests/fm-control-herdr-smoke.test.sh` is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+
+### Agent-free proof across installed harnesses
+
+The classifier's negative verdict rests on `pane process-info` naming a lone bare idle shell, and both that name and its argv0 come from the harness vendor, so the proof is measured against every installed harness rather than a stub.
+Measured 2026-09-01 on Herdr 0.8.2, macOS aarch64, in an isolated `fm-lab-` session:
+
+```sh
+FM_HERDR_AGENT_FREE_PROOF=1 tests/fm-herdr-agent-free-proof-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+# herdr: herdr 0.8.2
+# claude 2.1.252 (Claude Code): foreground=[2.1.252/claude] state=alive
+ok - herdr agent-free proof: claude 2.1.252 (Claude Code) running in a Herdr pane never proves a bare idle shell
+# codex codex-cli 0.150.1: foreground=[codex/codex] state=alive
+ok - herdr agent-free proof: codex codex-cli 0.150.1 running in a Herdr pane never proves a bare idle shell
+# opencode 1.17.11: foreground=[opencode/opencode] state=alive
+ok - herdr agent-free proof: opencode 1.17.11 running in a Herdr pane never proves a bare idle shell
+# pi 0.84.4: foreground=[node/pi] state=alive
+ok - herdr agent-free proof: pi 0.84.4 running in a Herdr pane never proves a bare idle shell
+# cursor 2026.08.31-4057e58: foreground=[node/cursor-agent] state=alive
+ok - herdr agent-free proof: cursor 2026.08.31-4057e58 running in a Herdr pane never proves a bare idle shell
+# unverified on this machine (not installed): pi-signed grok kimi muse
+# checked 5 installed harness(es) on herdr herdr 0.8.2 in workspace w1
+```
+
+Every installed harness owns the pane's foreground under its own argv0, so none can satisfy the shell-only proof, and Herdr registered each of them within the guard's wait.
+`pi-signed`, `grok`, `kimi`, and `muse` were not installed on that machine and remain unverified here; the guard reports them explicitly and refuses a pass that checked nothing.
+This is the command that refreshes this record; run it after every harness upgrade.
 
 ### Away-mode transport
 
@@ -917,6 +964,70 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 | Exit | `/exit` |
 | Skill invocation | `/<skill>`; cursor discovers firstmate's user-level skills, and `/no-mistakes` autocompleted with firstmate's own description and invoked the skill |
 | Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
+
+The `Workspace trust` and `Autonomy` rows record what the `--yolo` flag itself does, measured when that flag was still the launch default.
+`bin/fm-spawn.sh` now launches cursor with `--trust --auto-review --sandbox enabled` plus the brief-permitted `--add-dir` roots instead, and the [Crewmate autonomy and the status-file write contract](#crewmate-autonomy-and-the-status-file-write-contract) record owns the readings for that posture.
+
+### Crewmate autonomy and the status-file write contract
+
+`tests/fm-crewmate-autonomy-live-e2e.test.sh` is the opt-in real-harness guard for the launch and write contract.
+Run it after a harness upgrade or a `bin/fm-spawn.sh` launch-template change:
+
+```sh
+FM_CREWMATE_AUTONOMY_LIVE=1 tests/fm-crewmate-autonomy-live-e2e.test.sh
+```
+
+The guard creates a private `fm-lab-` Herdr session and a lab `FM_HOME` below `$HOME`, never the default session or `/tmp`.
+It first sends no key and reports whether the harness reached its composer without a dialog, then submits one prompt asking the crewmate itself to append its status file and a scout report while attempting one ungranted sibling path.
+The lab home matters because Codex's `workspace-write` sandbox permits `/tmp` and `$TMPDIR` by default, which would make a status-file write there vacuous.
+
+#### Recorded readings, 2026-09-02
+
+Measured on macOS aarch64 with Herdr 0.8.2, in an isolated `fm-lab-` session whose lab `FM_HOME` sat under `$HOME`.
+Harness versions under measurement: Claude Code 2.1.258, Codex CLI 0.152.1, Cursor Agent 2026.08.31-4057e58.
+
+Observed output, exit status 0:
+
+```text
+# herdr: herdr 0.8.2
+# lab home: <$HOME>/.fm-crewmate-autonomy-lab-61295 (status files outside the lab worktree)
+# claude: accepted-workspace-trust
+# claude 2.1.258 (Claude Code): NOT unattended - reached its composer only via accepted-workspace-trust (see the record in docs/verification/runtime-backends.md)
+# claude 2.1.258 (Claude Code): ready=accepted-workspace-trust submit=empty reply=landed
+ok - crewmate write contract: claude 2.1.258 (Claude Code) appends its status file and writes its scout report, both outside its worktree
+# claude 2.1.258 (Claude Code): carries no sandbox flag, and did write outside the brief-permitted directories (/Users/npayette/.fm-crewmate-autonomy-lab-61295/denied/claude-61295.status); its posture is an approval classifier, not a filesystem boundary
+# codex: accepted-directory-trust
+# codex: declined-hook-trust
+# codex codex-cli 0.152.1: NOT unattended - reached its composer only via accepted-directory-trust,declined-hook-trust (see the record in docs/verification/runtime-backends.md)
+# codex codex-cli 0.152.1: ready=accepted-directory-trust,declined-hook-trust submit=empty reply=landed
+ok - crewmate write contract: codex codex-cli 0.152.1 appends its status file and writes its scout report, both outside its worktree
+ok - narrow grant: codex codex-cli 0.152.1 is still refused a write outside the two brief-permitted directories
+ok - unattended launch: cursor 2026.08.31-4057e58 reaches an empty composer with no key sent
+# cursor 2026.08.31-4057e58: ready=unattended submit=empty reply=landed
+ok - crewmate write contract: cursor 2026.08.31-4057e58 appends its status file and writes its scout report, both outside its worktree
+ok - workspace binding: cursor 2026.08.31-4057e58 still records the task worktree as its exact workspacePath under the added writable roots
+ok - narrow grant: cursor 2026.08.31-4057e58 is still refused a write outside the two brief-permitted directories
+# checked 3 installed harness(es) on herdr herdr 0.8.2
+```
+
+| Harness and version | Unattended launch | The two brief-permitted writes | An ungranted sibling path |
+| --- | --- | --- | --- |
+| Claude Code 2.1.258 | Not unattended: the workspace-trust dialog stood before the composer and the guard reached it only via `accepted-workspace-trust`. An earlier reading in this work saw the identical dialog under the former `--dangerously-skip-permissions`, so it is not a consequence of `--permission-mode auto`. | Both landed. | Also landed, and is recorded rather than failed: `--permission-mode auto` is an approval classifier, not a filesystem sandbox, so this posture has no grant to keep narrow. |
+| Codex CLI 0.152.1 | Not unattended: a directory-trust dialog and then `Hooks need review` stood before the composer, cleared as `accepted-directory-trust,declined-hook-trust`. | Both landed under `-s workspace-write -a never` plus the two `--add-dir` grants. | Refused, so the grant is proven narrow rather than merely sufficient. |
+| Cursor Agent 2026.08.31-4057e58 | Unattended: an empty composer with no key sent under `--trust --auto-review --sandbox enabled`. | Both landed under the same two `--add-dir` grants. | Refused, so that grant is proven narrow too. |
+
+The granted set is exactly what `bin/fm-brief.sh` permits a worker outside its worktree: `state/` for the status file every worker appends, plus `data/<id>/` for a scout's report.
+Cursor still records the task worktree as its exact `workspacePath` under the added writable roots, so the `state/<id>.cursor-session` binding the busy fold depends on survives the grant.
+
+The `--add-dir` grant is what turns the Codex reading from broken into passing.
+Without it the same guard measured a Codex crewmate's status append failing with `operation not permitted`, and `-a never` left the model no way to ask, so such a worker could not report done, blocked, or needs-decision at all.
+
+An earlier guard iteration accidentally installed Codex CLI 0.152.1 over 0.150.1 when Enter landed on its update modal.
+Version 0.150.1 remains on disk, and the guard now waits for an empty composer to stay empty for ten seconds and dismisses an update offer with Escape rather than Enter before it can submit anything.
+The run above is also the Codex 0.152.1 compatibility evidence: it launched through the adapter's own posture, the shared composer classifier read `empty` and held it for the full settle window, and the shared submit path returned `empty` with the crewmate's reply landing in the pane.
+
+Not established here: the guard measures claude, codex, and cursor, so neither axis was read for opencode, pi, grok, kimi, or muse.
+Neither is the captain's own fleet covered, because every reading was taken in a throwaway lab home and lab session rather than a real task.
 
 ### End-to-end
 
