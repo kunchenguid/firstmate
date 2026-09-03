@@ -396,7 +396,7 @@ ledger_pass() {
     valid_id "$id" || continue
     [ "$(meta_field "$meta" kind)" != secondmate ] || continue
     lock=$(fm_meta_lock_path "$meta") || continue
-    fm_lock_acquire_wait "$lock" || continue
+    fm_lock_try_acquire "$lock" || continue
     report_child_ledger_locked "$id" "$meta" || true
     fm_lock_release "$lock"
   done

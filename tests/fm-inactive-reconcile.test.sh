@@ -175,6 +175,39 @@ test_local_secondmate_delivers_terminal_ledger_line() {
   pass "secondmate delivers a child's terminal ledger line once, on the next poll, from the ledger alone"
 }
 
+# A busy child cannot keep later ledger outcomes from being visited, and is
+# retried on the next poll after its lifecycle lock becomes available.
+test_busy_child_does_not_starve_later_ledger_outcomes() {
+  local holder i delivered=0
+  make_world busy-ledger; bind_secondmate local
+  write_child "$MATE" a-busy 'done: busy child finished'
+  write_child "$MATE" b-ready 'done: later child finished'
+  printf 'epoch=%s\ncursor=\n' "$(date +%s)" > "$MATE/state/.inactive-outcome-reconcile"
+  FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    lock=$(fm_meta_lock_path "$FM_STATE_OVERRIDE/a-busy.meta")
+    fm_lock_acquire_wait "$lock"
+    : > "$2/busy-lock-held"
+    while [ ! -e "$2/release-busy-lock" ]; do sleep 0.05; done
+    fm_lock_release "$lock"
+  ' _ "$ROOT" "$WORLD" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ ! -e "$WORLD/busy-lock-held" ]; do sleep 0.05; i=$((i + 1)); done
+  if [ -e "$WORLD/busy-lock-held" ]; then
+    FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+    grep -Fq 'child-outcome-b-ready-done' "$MAIN/state/mate.status" 2>/dev/null && delivered=1
+  fi
+  : > "$WORLD/release-busy-lock"
+  reap "$holder"
+  [ "$delivered" -eq 1 ] \
+    || fail "a busy early child starved a later terminal ledger outcome"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  grep -Fq 'child-outcome-a-busy-done' "$MAIN/state/mate.status" \
+    || fail "the skipped busy child was not retried on the next poll"
+  pass "busy child locks do not starve later ledger outcomes"
+}
+
 # A scout's done line carries its report pointer, a failed line is delivered
 # under the failed verb, and a later terminal line after recovery is a new
 # delivery rather than a suppressed duplicate.
@@ -659,6 +692,7 @@ test_reconciliation_never_calls_forge() {
 
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
+test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_long_terminal_lines_have_distinct_receipts
 test_secondmate_partial_ledger_line_waits_for_newline
