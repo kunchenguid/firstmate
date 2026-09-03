@@ -24,13 +24,14 @@
 #                     six-task sweep rule, a common neutral judge panel, no
 #                     adaptive ninth sample, and the captain's fixed rulings
 #   freeze / freeze-check
-#                     freeze every input before labels exist, then prove the
-#                     frozen inputs are unchanged
+#                     require every planned private input, freeze it before
+#                     labels exist, then prove the inputs are unchanged
 #   provenance-check  positive coverage of every original author, reviewer,
 #                     and judge before a historical packet is replayed
 #   isolation-verify  run the sibling-access probe set inside each entrant's
-#                     confinement, prove its in-root private paths are ignored
-#                     by Git, and refuse unless every probe is denied
+#                     trusted launch-capable confinement, prove its in-root
+#                     private paths are ignored by Git, and refuse unless every
+#                     probe is denied
 #   evaluator-verify  environment lock, published score map, zero-weight
 #                     validity gates, two identical dry-runs, mutation
 #                     calibration, and one bound capture record per planned head
@@ -40,9 +41,11 @@
 #   preflight         all of the above; writes preflight.receipt on a pass
 #
 # Post-run gates:
-#   promote-evaluate  reconcile void reruns, then apply the six-task sweep,
-#                     margin, and declared baseline veto to recorded results
-#   archive-verify    recompute every archived content address
+#   promote-evaluate  reconcile void reruns, require finite composites, then
+#                     apply the sweep, margin, and baseline veto
+#   archive-verify    require the exact planned sample identities, regular
+#                     self-contained files, role-specific evidence groups, and
+#                     recomputed content addresses
 #   restore-drill     restore each bundle into a fresh repository, rebind its
 #                     tree, then rerun a deterministic archived evaluator twice
 #                     with its declared structured perturbation in confined,

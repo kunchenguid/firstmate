@@ -135,6 +135,16 @@ REQUIRED_ARCHIVE_GROUPS = (
     "key_and_verdict",
 )
 
+ARCHIVE_GROUP_REQUIREMENTS = {
+    "packet_and_ground_truth": {"packet.md", "ground-truth.md"},
+    "tree_binding": {"tree-binding.json"},
+    "transcript": {"transcript.md"},
+    "capture_and_scoring": {"capture.json"},
+    "judging": {"judging.json"},
+    "timing_cost_quota": {"timing.json"},
+    "key_and_verdict": {"verdict.md"},
+}
+
 PRIVATE_STORAGE_KEYS = (
     "private_object_store",
     "private_tmp",
@@ -1236,6 +1246,50 @@ def run_probe(
     return "inconclusive", f"probe produced no verdict ({detail[:160]})"
 
 
+def validate_confinement_wrapper(
+    wrapper: Any,
+    *,
+    require_enforcing: bool,
+) -> tuple[str | None, str]:
+    if not isinstance(wrapper, list) or not wrapper or not all(
+        isinstance(item, str) and item for item in wrapper
+    ):
+        return None, "exec_wrapper must be a non-empty argv list"
+    confine = Path(__file__).with_name("fm-bench-confine.sh").resolve()
+    if Path(wrapper[0]).expanduser().resolve() != confine or not os.access(confine, os.X_OK):
+        return None, "exec_wrapper must use the executable bin/fm-bench-confine.sh wrapper"
+    options = wrapper[1:]
+    if not options or options[-1] != "--":
+        return None, "confinement wrapper must end with --"
+    mechanism = "auto"
+    allow_values: list[str] = []
+    seen_singletons: set[str] = set()
+    index = 0
+    while index < len(options) - 1:
+        option = options[index]
+        if option not in ("--allow", "--mechanism", "--image") or index + 1 >= len(options) - 1:
+            return None, f"confinement wrapper has unsupported option: {option}"
+        value = options[index + 1]
+        if not value:
+            return None, f"confinement wrapper has an empty value for {option}"
+        if option == "--allow":
+            allow_values.append(value)
+        else:
+            if option in seen_singletons:
+                return None, f"confinement wrapper repeats {option}"
+            seen_singletons.add(option)
+            if option == "--mechanism":
+                mechanism = value
+        index += 2
+    if allow_values != ["{root}"]:
+        return None, "confinement wrapper must expose exactly its opaque entrant root"
+    if mechanism not in ("auto", "container", "bwrap", "none"):
+        return None, f"confinement wrapper names an unsupported mechanism: {mechanism}"
+    if require_enforcing and mechanism == "none":
+        return None, "restore drill requires an enforcing confinement mechanism, not none"
+    return mechanism, "trusted confinement wrapper and supported arguments verified"
+
+
 class ProbeControls:
     """Positive controls that make a denial verdict meaningful.
 
@@ -1287,6 +1341,11 @@ def check_isolation(root: Path, report: Report, timeout: int) -> None:
     if not isinstance(wrapper, list) or not wrapper or not all(isinstance(item, str) for item in wrapper):
         report.fail("isolation.exec_wrapper", "exec_wrapper must be the argv prefix that confines an entrant")
         return
+    mechanism, wrapper_detail = validate_confinement_wrapper(wrapper, require_enforcing=False)
+    if mechanism is None:
+        report.fail("isolation.exec_wrapper", wrapper_detail)
+    else:
+        report.ok("isolation.exec_wrapper", wrapper_detail)
     entrants = record.get("entrants")
     if not isinstance(entrants, list) or not entrants:
         report.fail("isolation.entrants", "entrants must be a non-empty list of provisioned per-entrant roots")
@@ -1850,20 +1909,108 @@ def archive_samples(root: Path) -> list[Path]:
     directory = root / "archive"
     if not directory.is_dir():
         return []
-    return sorted(path for path in directory.iterdir() if path.is_dir() and (path / "manifest.json").is_file())
+    samples: list[Path] = []
+    for path in directory.iterdir():
+        if path.name == "restore-drill.json":
+            continue
+        try:
+            mode = path.lstat().st_mode
+        except OSError:
+            continue
+        if stat.S_ISDIR(mode):
+            samples.append(path)
+    return sorted(samples)
+
+
+def planned_sample_identities(plan: dict[str, Any]) -> set[tuple[str, str, str, str]]:
+    identities: set[tuple[str, str, str, str]] = set()
+    for track_name in sorted(plan.get("tracks") or {}):
+        track = plan["tracks"][track_name]
+        if not isinstance(track, dict):
+            continue
+        packets = [
+            str(packet.get("id", ""))
+            for packet in (track.get("packets") or [])
+            if isinstance(packet, dict)
+        ]
+        for entrant in (track.get("entrants") or []):
+            if isinstance(entrant, dict):
+                identities.update(
+                    (str(track_name), "entrant", str(entrant.get("name", "")), packet)
+                    for packet in packets
+                )
+        baseline = track.get("baseline")
+        if isinstance(baseline, dict):
+            identities.update(
+                (str(track_name), "baseline", str(baseline.get("name", "")), str(packet))
+                for packet in (track.get("baseline_packets") or [])
+            )
+    return identities
+
+
+def render_sample_identity(identity: tuple[str, str, str, str]) -> str:
+    track, role, candidate, packet = identity
+    return f"{track}/{role}/{candidate}@{packet}"
+
+
+def archived_regular_files(sample: Path) -> tuple[set[str], list[str]]:
+    stored: set[str] = set()
+    invalid: list[str] = []
+    pending = [sample]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = sorted(directory.iterdir(), key=lambda path: path.name)
+        except OSError as exc:
+            invalid.append(f"{directory.relative_to(sample).as_posix() or '.'} ({exc})")
+            continue
+        for path in entries:
+            relative = path.relative_to(sample).as_posix()
+            try:
+                mode = path.lstat().st_mode
+            except OSError as exc:
+                invalid.append(f"{relative} ({exc})")
+                continue
+            if stat.S_ISDIR(mode):
+                pending.append(path)
+            elif stat.S_ISREG(mode):
+                if relative != "manifest.json":
+                    stored.add(relative)
+            else:
+                invalid.append(relative)
+    return stored, sorted(invalid)
 
 
 def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[bool, str]:
     """Verify every sample archive by recomputing its content addresses."""
-    samples = archive_samples(root)
-    expected = build_manifest(plan)["totals"]["scored_outputs"]
+    archive_root = root / "archive"
+    invalid_roots: list[str] = []
+    if archive_root.is_dir():
+        for entry in archive_root.iterdir():
+            if entry.name == "restore-drill.json":
+                continue
+            try:
+                if not stat.S_ISDIR(entry.lstat().st_mode):
+                    invalid_roots.append(entry.name)
+            except OSError:
+                invalid_roots.append(entry.name)
     ok = report.require(
-        len(samples) == expected,
+        not invalid_roots,
+        "archive.storage",
+        "every sample root is a real directory inside the archive",
+        "archive sample roots are symlinks or special files: " + ", ".join(sorted(invalid_roots)),
+    )
+    samples = archive_samples(root)
+    expected_identities = planned_sample_identities(plan)
+    ok = report.require(
+        len(samples) == len(expected_identities),
         "archive.coverage",
         f"{len(samples)} sample archives, one per scored output",
-        f"expected {expected} sample archives, found {len(samples)}",
-    )
+        f"expected {len(expected_identities)} sample archives, found {len(samples)}",
+    ) and ok
     digests: list[str] = []
+    seen_identities: set[tuple[str, str, str, str]] = set()
+    duplicate_identities: set[tuple[str, str, str, str]] = set()
     for sample in samples:
         check = f"archive.{sample.name}"
         try:
@@ -1875,13 +2022,80 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
         groups = record.get("groups")
         files = record.get("files")
         binding = record.get("tree_binding")
-        if not isinstance(groups, dict) or not isinstance(files, dict) or not isinstance(binding, dict):
-            report.fail(check, "an archive manifest needs groups, files, and tree_binding objects")
+        identity = record.get("identity")
+        if (
+            not isinstance(groups, dict)
+            or not isinstance(files, dict)
+            or not isinstance(binding, dict)
+            or not isinstance(identity, dict)
+        ):
+            report.fail(check, "an archive manifest needs identity, groups, files, and tree_binding objects")
             ok = False
             continue
-        empty = [name for name in REQUIRED_ARCHIVE_GROUPS if not groups.get(name)]
-        if empty:
-            report.fail(check, f"archive groups are empty or absent: {', '.join(empty)}")
+        if record.get("sample") != sample.name:
+            report.fail(check, f"manifest sample {record.get('sample')!r} does not match directory {sample.name!r}")
+            ok = False
+            continue
+        sample_identity = tuple(str(identity.get(key, "")) for key in ("track", "role", "candidate", "packet"))
+        if not all(sample_identity):
+            report.fail(check, "sample identity must name track, role, candidate, and packet")
+            ok = False
+            continue
+        if sample_identity in seen_identities:
+            duplicate_identities.add(sample_identity)
+        seen_identities.add(sample_identity)
+        missing_groups = sorted(set(REQUIRED_ARCHIVE_GROUPS) - set(groups))
+        unexpected_groups = sorted(set(groups) - set(REQUIRED_ARCHIVE_GROUPS))
+        if missing_groups or unexpected_groups:
+            detail = []
+            if missing_groups:
+                detail.append("missing " + ", ".join(missing_groups))
+            if unexpected_groups:
+                detail.append("unexpected " + ", ".join(unexpected_groups))
+            report.fail(check, "archive evidence groups do not match the required schema: " + "; ".join(detail))
+            ok = False
+            continue
+        malformed_groups = [
+            name
+            for name in REQUIRED_ARCHIVE_GROUPS
+            if not isinstance(groups.get(name), list)
+            or not groups[name]
+            or not all(isinstance(item, str) and item for item in groups[name])
+        ]
+        if malformed_groups:
+            report.fail(check, f"archive groups are empty or malformed: {', '.join(malformed_groups)}")
+            ok = False
+            continue
+        missing_artifacts = [
+            f"{name}: {', '.join(sorted(required - set(groups[name])))}"
+            for name, required in ARCHIVE_GROUP_REQUIREMENTS.items()
+            if not required <= set(groups[name])
+        ]
+        candidate_group = groups["candidate_bundle_and_projection"]
+        if not any(relative.endswith(".bundle") for relative in candidate_group):
+            missing_artifacts.append(
+                "candidate_bundle_and_projection: candidate bundle (archive cannot be rejudged)"
+            )
+        if not any(relative.endswith(".diff") for relative in candidate_group):
+            missing_artifacts.append("candidate_bundle_and_projection: neutral projection")
+        scoring_group = groups["capture_and_scoring"]
+        if not any(relative.endswith((".py", ".sh")) for relative in scoring_group):
+            missing_artifacts.append("capture_and_scoring: executable scoring program")
+        owners: dict[str, str] = {}
+        reused: list[str] = []
+        for name in REQUIRED_ARCHIVE_GROUPS:
+            for relative in groups[name]:
+                if relative in owners:
+                    reused.append(f"{relative} ({owners[relative]} and {name})")
+                else:
+                    owners[relative] = name
+        if missing_artifacts or reused:
+            detail = []
+            if missing_artifacts:
+                detail.append("missing required artifacts " + "; ".join(missing_artifacts))
+            if reused:
+                detail.append("files reused across evidence roles " + "; ".join(sorted(reused)))
+            report.fail(check, "archive evidence groups are not role-specific: " + "; ".join(detail))
             ok = False
             continue
         bound_missing = [
@@ -1904,11 +2118,11 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             ok = False
             continue
         sample_root = sample.resolve()
-        stored = {
-            path.relative_to(sample).as_posix()
-            for path in sample.rglob("*")
-            if path.is_file() and path.resolve() != sample_root / "manifest.json"
-        }
+        stored, invalid_entries = archived_regular_files(sample)
+        if invalid_entries:
+            report.fail(check, "archive entries are symlinks or special files: " + ", ".join(invalid_entries))
+            ok = False
+            continue
         unexpected = sorted(stored - set(files))
         if unexpected:
             report.fail(check, f"archive files are not content-addressed: {', '.join(unexpected)}")
@@ -1923,7 +2137,11 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             if not is_within(target, sample_root):
                 bad.append(f"{relative} (escapes sample archive)")
                 continue
-            if not target.is_file():
+            try:
+                target_mode = (sample / relative).lstat().st_mode
+            except OSError:
+                target_mode = 0
+            if not stat.S_ISREG(target_mode):
                 bad.append(f"{relative} (absent)")
             elif sha256_file(target) != files[relative]:
                 bad.append(f"{relative} (hash mismatch)")
@@ -1940,6 +2158,22 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             )
         )
         report.ok(check, f"{len(files)} files verified across {len(REQUIRED_ARCHIVE_GROUPS)} evidence groups")
+    missing_identities = sorted(expected_identities - seen_identities)
+    unexpected_identities = sorted(seen_identities - expected_identities)
+    identity_detail = []
+    if missing_identities:
+        identity_detail.append("missing " + ", ".join(render_sample_identity(item) for item in missing_identities))
+    if unexpected_identities:
+        identity_detail.append("unexpected " + ", ".join(render_sample_identity(item) for item in unexpected_identities))
+    if duplicate_identities:
+        identity_detail.append("duplicate " + ", ".join(render_sample_identity(item) for item in sorted(duplicate_identities)))
+    identity_ok = report.require(
+        not identity_detail,
+        "archive.identity_coverage",
+        f"archive identities exactly cover all {len(expected_identities)} planned scored outputs",
+        "archive identities do not match the planned scored outputs: " + "; ".join(identity_detail),
+    )
+    ok = ok and identity_ok
     return ok, sha256_bytes("".join(sorted(digests)).encode("utf-8"))
 
 
@@ -1970,31 +2204,9 @@ def restore_confinement(root: Path) -> tuple[list[str] | None, str]:
     if "isolation" not in (receipt.get("stages") or []):
         return None, "the preflight receipt does not record the isolation stage"
     wrapper = isolation.get("exec_wrapper")
-    if not isinstance(wrapper, list) or not wrapper or not all(isinstance(item, str) and item for item in wrapper):
-        return None, "isolation exec_wrapper must be a non-empty argv list"
-    confine = Path(__file__).with_name("fm-bench-confine.sh").resolve()
-    if Path(wrapper[0]).expanduser().resolve() != confine or not os.access(confine, os.X_OK):
-        return None, "restore drill requires the executable bin/fm-bench-confine.sh wrapper"
-    options = wrapper[1:]
-    if not options or options[-1] != "--":
-        return None, "restore confinement wrapper must end with --"
-    mechanism = "auto"
-    allow_values: list[str] = []
-    index = 0
-    while index < len(options) - 1:
-        option = options[index]
-        if option not in ("--allow", "--mechanism", "--image") or index + 1 >= len(options) - 1:
-            return None, f"restore confinement wrapper has unsupported option: {option}"
-        value = options[index + 1]
-        if option == "--allow":
-            allow_values.append(value)
-        elif option == "--mechanism":
-            mechanism = value
-        index += 2
-    if allow_values != ["{root}"]:
-        return None, "restore confinement must expose exactly its opaque run root"
-    if mechanism == "none":
-        return None, "restore drill requires an enforcing confinement mechanism, not none"
+    mechanism, detail = validate_confinement_wrapper(wrapper, require_enforcing=True)
+    if mechanism is None:
+        return None, detail
     return wrapper, mechanism
 
 
@@ -2993,15 +3205,26 @@ def promote_track(
         report.fail(f"{prefix}.verdict", "no standing route: the sample set is incomplete")
         return
 
+    for record in scored:
+        composite = record.get("composite")
+        if (
+            not isinstance(composite, (int, float))
+            or isinstance(composite, bool)
+            or not math.isfinite(float(composite))
+        ):
+            report.fail(
+                f"{prefix}.composite",
+                f"{record.get('_path')} has no finite numeric composite",
+            )
+            report.fail(f"{prefix}.verdict", "no standing route: a composite is not finite")
+            return
+
     by_packet: dict[str, dict[str, float]] = {}
     blockers: set[str] = set()
     for record in scored:
         if record.get("role") != "entrant":
             continue
-        composite = record.get("composite")
-        if not isinstance(composite, (int, float)) or isinstance(composite, bool):
-            report.fail(f"{prefix}.composite", f"{record.get('_path')} has no numeric composite")
-            return
+        composite = record["composite"]
         by_packet.setdefault(str(record.get("packet")), {})[str(record.get("candidate"))] = float(composite)
         if record.get("blocker_class") is True:
             blockers.add(str(record.get("candidate")))
@@ -3145,13 +3368,41 @@ def baseline_veto_clear(
 def frozen_inputs(root: Path, plan: dict[str, Any]) -> dict[str, str]:
     """Every input that must be fixed before labels are assigned."""
     hashes: dict[str, str] = {"benchmark.json": sha256_file(root / "benchmark.json")}
+    files_by_kind: dict[str, list[Path]] = {}
+    missing_kinds: list[str] = []
     for relative in ("packets", "ground-truth", "scoring", "judge-prompts"):
         directory = root / relative
         if not directory.is_dir():
+            missing_kinds.append(relative)
             continue
-        for path in sorted(directory.rglob("*")):
-            if path.is_file():
-                hashes[str(path.relative_to(root))] = sha256_file(path)
+        files = sorted(path for path in directory.rglob("*") if path.is_file())
+        if not files:
+            missing_kinds.append(relative)
+            continue
+        files_by_kind[relative] = files
+        for path in files:
+            hashes[str(path.relative_to(root))] = sha256_file(path)
+    if missing_kinds:
+        raise GateError(
+            "required private benchmark inputs are absent or empty: " + ", ".join(missing_kinds)
+        )
+    expected_packets = {
+        str(packet.get("id", ""))
+        for track in (plan.get("tracks") or {}).values()
+        if isinstance(track, dict)
+        for packet in (track.get("packets") or [])
+        if isinstance(packet, dict) and nonempty_str(packet.get("id"))
+    }
+    for kind in ("packets", "ground-truth"):
+        present = {
+            path.relative_to(root / kind).parts[0]
+            if len(path.relative_to(root / kind).parts) > 1
+            else path.stem
+            for path in files_by_kind[kind]
+        }
+        missing = sorted(expected_packets - present)
+        if missing:
+            raise GateError(f"{kind} is missing planned packet inputs: {', '.join(missing)}")
     tuples = [
         f"{name}:{candidate.get('harness')}/{candidate.get('model')}@{candidate.get('effort')}"
         for name in sorted(plan.get("tracks") or {})
@@ -3170,7 +3421,11 @@ def freeze(root: Path, plan: dict[str, Any], report: Report) -> None:
     if (root / "key.json").exists():
         report.fail("freeze.before_labels", "key.json already exists; the freeze must precede label assignment")
         return
-    hashes = frozen_inputs(root, plan)
+    try:
+        hashes = frozen_inputs(root, plan)
+    except GateError as exc:
+        report.fail("freeze.inputs", str(exc))
+        return
     write_json(root / "freeze.json", {"schema": FREEZE_SCHEMA, "hashes": hashes})
     report.ok("freeze.written", f"{len(hashes)} inputs frozen before any label was assigned")
 
@@ -3189,7 +3444,11 @@ def check_freeze(root: Path, plan: dict[str, Any], report: Report) -> None:
     if not isinstance(stored, dict):
         report.fail("freeze.present", "freeze.json carries no hash map")
         return
-    current = frozen_inputs(root, plan)
+    try:
+        current = frozen_inputs(root, plan)
+    except GateError as exc:
+        report.fail("freeze.intact", str(exc))
+        return
     changed = sorted(key for key in set(stored) | set(current) if stored.get(key) != current.get(key))
     report.require(
         not changed,
@@ -3267,9 +3526,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Benchmark directory layout: benchmark.json (the frozen plan), packets/, ground-truth/, "
             "scoring/, judge-prompts/, provenance/<packet>.json, isolation.json, allowance.json, "
             "evaluator/{lock.json,score-map.json,determinism/,mutations/,captures/}, manifest.json, "
-            "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with evaluator_rerun.scored_inputs "
-            "and at least one pure-data evaluator_rerun.input_perturbations entry, and the generated "
-            "preflight.receipt and archive/restore-drill.json."
+            "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with a structured sample identity, "
+            "the eight role-specific evidence groups, evaluator_rerun.scored_inputs, and at least one pure-data "
+            "evaluator_rerun.input_perturbations entry, and the generated preflight.receipt and "
+            "archive/restore-drill.json."
         ),
     )
     parser.add_argument("--bench", help="benchmark directory (default: $FM_BENCH_ROOT)")
