@@ -2367,8 +2367,13 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
     lease_rc=$?
     [ "$lease_rc" -eq 0 ] || session_lease=
     if ! _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" "$authority"; then
-      [ -z "$session_lease" ] || fm_lock_release "$session_lease"
-      return 4
+      if [ "$authority" = bound ] \
+        && _fm_autoarm_session_authorized "$state" "$session_root" "$session_owner" stale; then
+        authority=stale
+      else
+        [ -z "$session_lease" ] || fm_lock_release "$session_lease"
+        return 4
+      fi
     fi
   fi
   _fm_autoarm_claim_failure_commit \

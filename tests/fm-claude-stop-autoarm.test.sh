@@ -378,6 +378,22 @@ fm_autoarm_session_lease_acquire() {
 SH
 }
 
+pause_failure_publication_session_lease() {
+  cat >> "$1/bin/fm-wake-lib.sh" <<'SH'
+fm_autoarm_session_lease_acquire() {
+  local state=$1 calls
+  calls=$(cat "$state/session-lease-calls" 2>/dev/null || true)
+  case "$calls" in ''|*[!0-9]*) calls=0 ;; esac
+  calls=$((calls + 1))
+  printf '%s\n' "$calls" > "$state/session-lease-calls"
+  [ "$calls" -ne 1 ] || return 1
+  : > "$state/failure-session-lease-waiting"
+  while [ ! -e "$state/failure-session-lease-release" ]; do sleep 0.01; done
+  fm_lock_try_acquire "$state/.lock.acquire"
+}
+SH
+}
+
 pause_recovery_after_lock_publication() {
   mv "$1/bin/fm-lock.sh" "$1/bin/fm-lock-real.sh"
   cat > "$1/bin/fm-lock.sh" <<'SH'
@@ -1201,6 +1217,71 @@ test_generation_claim_wait_owner_death_publishes_failure() {
   assert_claim_wait_owner_death_failure "$released_dir" 0
   assert_claim_wait_owner_death_failure "$contended_dir" 1
   pass "auto-arm: generation claim owner death publishes durable failure state"
+}
+
+assert_failure_wait_owner_death_failure() {  # <dir> <contended>
+  local dir=$1 contended=$2 owner holder='' hook out status i failure reset
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  pause_failure_publication_session_lease "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  if [ "$contended" -eq 1 ]; then
+    sleep 60 &
+    holder=$!
+    mkdir -p "$dir/state/.lock.acquire"
+    printf '%s\n' "$holder" > "$dir/state/.lock.acquire/pid"
+  fi
+
+  out="$dir/failure-wait-owner-death.out"
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/failure-session-lease-waiting" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/state/failure-session-lease-waiting" ]; then
+    kill "$hook" "$owner" ${holder:+"$holder"} 2>/dev/null || true
+    wait "$hook" "$owner" ${holder:+"$holder"} 2>/dev/null || true
+    fail "failure publication did not reach its session lease wait"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  : > "$dir/state/failure-session-lease-release"
+  wait "$hook"
+  status=$?
+  failure=$(failure_epoch_path "$dir") \
+    || fail "owner death during failure publication left no durable record"
+  reset=$(failure_epoch_field "$dir" reset)
+  if [ -n "$holder" ]; then
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+  fi
+
+  expect_code 2 "$status" "owner death during failure publication must fail visibly"
+  [ "$(cat "$dir/state/.lock" 2>/dev/null || true)" = "$owner" ] \
+    || fail "failure publication was not fenced to the unchanged dead owner"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+    || fail "failure publication did not reclassify its dead bound owner"
+  assert_present "$failure" \
+    "owner death during failure publication did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+    "owner death during failure publication did not persist its notice"
+  assert_contains "$(cat "$out")" "generation claim could not be recorded" \
+    "owner death during failure publication did not deliver its notice"
+  assert_absent "$dir/state/arm-ran" \
+    "hook armed after its owner died during failure publication"
+}
+
+test_failure_publication_wait_owner_death_publishes_failure() {
+  local released_dir contended_dir
+  released_dir=$(make_primary_dir "$TMP_ROOT/failure-wait-owner-death-release")
+  contended_dir=$(make_primary_dir "$TMP_ROOT/failure-wait-owner-death-contention")
+  assert_failure_wait_owner_death_failure "$released_dir" 0
+  assert_failure_wait_owner_death_failure "$contended_dir" 1
+  pass "auto-arm: failure publication owner death remains durable"
 }
 
 test_terminal_session_lease_timeout_publishes_failure() {
@@ -3814,6 +3895,7 @@ test_authenticated_daemon_survives_delivery_parent_exit
 test_generation_claim_is_bound_to_serialized_session_owner
 test_stalled_session_lease_publishes_bound_failure
 test_generation_claim_wait_owner_death_publishes_failure
+test_failure_publication_wait_owner_death_publishes_failure
 test_terminal_session_lease_timeout_publishes_failure
 test_reset_session_lease_timeout_publishes_failure
 test_successor_session_gets_own_failure_notice
