@@ -14,13 +14,13 @@
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
-        { "harness": "pi", "model": "openai-codex/gpt-5.6-sol", "effort": "high", "codexHome": "/home/example/.codex-3" }
+        { "harness": "codex", "model": "gpt-5.5", "effort": "high", "codexHome": "/home/example/.codex-3" }
       ],
       "why": "Use a strong coding profile for big, ambiguous work; resolve the alternatives through quota-array-dispatch."
     }
   ],
   "default": [
     { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
+    { "harness": "pi", "model": "openai-codex/gpt-5.6-sol", "effort": "medium", "piAgentDir": "/home/example/.pi/agent-3" }
   ]
 }
