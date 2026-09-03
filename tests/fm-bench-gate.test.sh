@@ -1461,6 +1461,66 @@ PY
     "no record may be derived from the frozen expected outputs"
   pass "the preflight evaluator cage hides the frozen answer key it must reproduce"
 
+  # The cage carries the evaluator's own frozen code package - the whole
+  # scoring/ tree plus its frozen calibration - and nothing that answers for
+  # it. One evaluator asserts both halves from inside the confinement.
+  BENCH="$TMP_ROOT/evaluator-code-package"
+  write_plan "$BENCH"
+  write_evaluator "$BENCH"
+  write_freeze_inputs "$BENCH"
+  write_isolation "$BENCH" "$RESTORE_MECHANISM"
+  mkdir -p "$BENCH/scoring/lib"
+  printf 'FIXTURE_SCHEMA=fm-bench-evaluator-input.v1\n' > "$BENCH/scoring/lib/helper.sh"
+  python3 - "$BENCH" <<'PY'
+import hashlib, json, shlex, sys
+from pathlib import Path
+bench = Path(sys.argv[1]).resolve()
+program = bench / "scoring" / "evaluator.sh"
+contract = shlex.quote(str(bench / "evaluator" / "execution.json"))
+outputs = shlex.quote(str(bench / "ground-truth" / "evaluator-outputs"))
+program.write_text(
+    "#!/bin/sh\n"
+    '[ "${1:-}" = --evaluate ] && [ -f "${2:-}" ] || exit 2\n'
+    'here=$(dirname "$0")\n'
+    '. "$here/lib/helper.sh" || exit 4\n'
+    '[ "$FIXTURE_SCHEMA" = fm-bench-evaluator-input.v1 ] || exit 5\n'
+    '[ -r "$here/../evaluator/score-map.json" ] || exit 6\n'
+    '[ -r "$here/../evaluator/lock.json" ] || exit 7\n'
+    f"[ -e {contract} ] && exit 8\n"
+    f"[ -e {outputs} ] && exit 9\n"
+    '[ -e "$here/../evaluator/execution.json" ] && exit 10\n'
+    "sed 's/\"schema\":\"fm-bench-evaluator-input.v1\",\"fixture\":/"
+    "\"schema\":\"fm-bench-evaluator-output.v1\",\"result\":/' \"$2\"\n"
+)
+program.chmod(0o755)
+contract_path = bench / "evaluator" / "execution.json"
+record = json.loads(contract_path.read_text())
+record["sha256"] = hashlib.sha256(program.read_bytes()).hexdigest()
+contract_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+  run_gate "$BENCH" freeze >/dev/null
+  out=$(run_gate "$BENCH" evaluator-execute-verify) \
+    || fail "a multi-file evaluator must run inside the cage with its own package: $out"
+  assert_contains "$out" "generated all 39 golden, mutation, and capture records" \
+    "the evaluator derived every record from its own frozen code package"
+  assert_contains "$out" "evaluator.input_dependence ok" "the cage still proves input dependence"
+  pass "the cage carries the frozen evaluator code package but never its answer key"
+
+  # A symlink under scoring/ would be resolved as it crossed into the cage, so
+  # it must be refused rather than used to smuggle an expected-output record.
+  BENCH="$TMP_ROOT/evaluator-package-symlink"
+  write_plan "$BENCH"
+  write_evaluator "$BENCH"
+  write_freeze_inputs "$BENCH"
+  write_isolation "$BENCH" "$RESTORE_MECHANISM"
+  ln -s "$BENCH/ground-truth/evaluator-outputs" "$BENCH/scoring/answers"
+  run_gate "$BENCH" freeze >/dev/null
+  out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
+  expect_code 1 "$status" "a symlink in the evaluator package is refused"
+  assert_contains "$out" "unsupported entry: answers" "the refusal names the smuggling entry"
+  assert_not_contains "$out" "Traceback" "a symlinked package entry is a verdict, not a crash"
+  pass "the evaluator package refuses symlinks that would carry the answer key inside"
+
   # This evaluator ignores the first perturbable scalar the gate reaches for
   # but still derives its records from the rest of the input, so the gate must
   # escalate to a later scalar rather than call it input-blind.
@@ -3722,4 +3782,28 @@ ALLOWANCE
   out=$(guard "bench-b1-k7" "$BENCH")
   assert_contains "$out" "rc=1" "the entrant stays held"
   pass "preflight refuses evidence the launch boundary is guaranteed to reject"
+
+  # Evidence the gate can open but not read is reached by a stage rather than
+  # by the launch screen, so the stage itself must carry the verdict and the
+  # revocation instead of aborting the run and stranding a passing receipt.
+  if [ "$(id -u)" != 0 ]; then
+    rm -f "$BENCH/packets/A1/fixture.bin"
+    run_gate "$BENCH" freeze >/dev/null
+    out=$(run_gate "$BENCH" preflight) || fail "the repaired benchmark must clear preflight again: $out"
+    assert_present "$BENCH/preflight.receipt" "the clearance is minted again before the stage test"
+    chmod 000 "$BENCH/evaluator/determinism/run-1.json"
+    out=$(run_gate "$BENCH" preflight) && status=0 || status=$?
+    chmod 644 "$BENCH/evaluator/determinism/run-1.json"
+    expect_code 1 "$status" "an unreadable evaluator record may not clear preflight"
+    assert_not_contains "$out" "Traceback" "an unreadable stage input is a verdict, not a crash"
+    assert_contains "$out" "benchmark evidence cannot be read" "the stage names the unreadable evidence"
+    assert_contains "$out" "evaluator/determinism/run-1.json" "the refusal is file-specific"
+    assert_contains "$out" "BENCH_RESULT preflight refused" "the aborted stage still carries a verdict line"
+    assert_contains "$out" "BENCH_NOTE preflight the prior clearance is revoked" \
+      "a stage that cannot read its evidence withdraws the standing clearance"
+    assert_absent "$BENCH/preflight.receipt" "no stale passing receipt survives an aborted stage"
+    out=$(guard "bench-b1-k7" "$BENCH")
+    assert_contains "$out" "rc=1" "the entrant stays held after the clearance is withdrawn"
+    pass "an unreadable stage input refuses by name and withdraws the clearance"
+  fi
 fi

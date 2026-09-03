@@ -35,6 +35,7 @@ import sys
 import tempfile
 import uuid
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,7 @@ EVIDENCE_TREES = (
     "evaluator",
 )
 UNUSABLE_EVIDENCE_KINDS = ("symlink", "special", "unreadable")
+EVALUATOR_CONFIG_FILES = ("lock.json", "score-map.json")
 MAX_PNG_RASTER_BYTES = 128 * 1024 * 1024
 NORMALIZED_RUN_TIME_NS = 1_600_000_000_000_000_000
 
@@ -1947,9 +1949,70 @@ def frozen_fixture_perturbations(original: bytes, entropy: bytes) -> list[tuple[
     return variants
 
 
+def copy_real_tree(source: Path, destination: Path) -> None:
+    """Copy a frozen tree, admitting only lstat-verified files and directories.
+
+    A symlink inside the copied tree would be resolved as it crossed the
+    boundary, so a link pointing at an expected-output record would carry the
+    answer key into a cage built to exclude it.
+    """
+    destination.mkdir(parents=True)
+    directory_modes: list[tuple[Path, int]] = []
+    try:
+        entries = sorted(source.rglob("*"), key=lambda item: item.relative_to(source).as_posix())
+        for path in entries:
+            relative = path.relative_to(source)
+            target = destination / relative
+            mode = path.lstat().st_mode
+            if stat.S_ISDIR(mode):
+                target.mkdir(parents=True, exist_ok=True)
+                directory_modes.append((target, stat.S_IMODE(mode)))
+            elif stat.S_ISREG(mode):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+                target.chmod(stat.S_IMODE(mode))
+            else:
+                raise GateError(
+                    f"the frozen evaluator package holds an unsupported entry: {relative.as_posix()}"
+                )
+        for target, mode in directory_modes:
+            target.chmod(mode)
+    except OSError as exc:
+        raise GateError(f"the frozen evaluator package cannot be staged: {exc}") from exc
+
+
+def stage_evaluator_package(root: Path, base: Path, package: Path) -> None:
+    """The frozen evaluator's own code and calibration, with no answer key.
+
+    The cage carries the whole frozen scoring/ tree, so a multi-file evaluator
+    keeps the sibling modules it imports, plus the frozen evaluator
+    configuration it calibrates against. The expected-output records and the
+    execution contract that maps each input to one of them stay outside, so no
+    run can look up what it is being asked to derive.
+    """
+    package.mkdir(parents=True)
+    copy_real_tree(root / "scoring", package / "scoring")
+    for name in EVALUATOR_CONFIG_FILES:
+        source = base / name
+        try:
+            mode = source.lstat().st_mode
+        except OSError:
+            continue
+        if not stat.S_ISREG(mode):
+            raise GateError(f"frozen evaluator configuration is not a regular file: evaluator/{name}")
+        target = package / "evaluator" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copyfile(source, target)
+        except OSError as exc:
+            raise GateError(f"frozen evaluator configuration cannot be read: evaluator/{name} ({exc})") from exc
+        target.chmod(stat.S_IMODE(mode))
+
+
 def blinded_evaluator_run(
     wrapper: list[str],
-    program: Path,
+    package: Path,
+    program_name: str,
     workspace: Path,
     payload: bytes,
     timeout: int,
@@ -1959,22 +2022,20 @@ def blinded_evaluator_run(
     The evaluator never sees the frozen input's own path, so it cannot key an
     answer table on the record it is being asked to derive: every execution
     arrives under a fresh directory and file name that carry no case identity.
-    The confinement exposes only that scratch root, holding a copy of the
-    frozen program and the opaque input, so the benchmark's frozen expected
-    outputs and the execution contract mapping inputs to them stay unreachable
-    from inside the cage - the same treatment the restore drill gives an
-    archived evaluator.
+    The confinement exposes only that scratch root, holding a fresh copy of the
+    frozen evaluator package and the opaque input, so the benchmark's frozen
+    expected outputs and the execution contract mapping inputs to them stay
+    unreachable from inside the cage - the same treatment the restore drill
+    gives an archived evaluator.
     """
     run_root = Path(tempfile.mkdtemp(dir=str(workspace)))
     run_root.chmod(0o755)
-    confined_program = run_root / uuid.uuid4().hex
-    shutil.copyfile(program, confined_program)
-    confined_program.chmod(0o755)
+    shutil.copytree(package, run_root, dirs_exist_ok=True)
     target = run_root / uuid.uuid4().hex
     target.write_bytes(payload)
     argv = [
         *(str(run_root) if item == "{root}" else item for item in wrapper),
-        str(confined_program),
+        str(run_root / program_name),
         "--evaluate",
         str(target),
     ]
@@ -2053,6 +2114,12 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
     dependence_input: bytes | None = None
     dependence_stdout: bytes | None = None
     try:
+        package = workspace / "package"
+        try:
+            stage_evaluator_package(root, base, package)
+        except GateError as exc:
+            report.fail("evaluator.execution", str(exc))
+            return
         generated = 0
         input_root = (root / "ground-truth" / "evaluator-inputs").resolve()
         output_root = (root / "ground-truth" / "evaluator-outputs").resolve()
@@ -2116,7 +2183,7 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
                 return
             try:
                 completed = blinded_evaluator_run(
-                    wrapper, program, workspace, input_path.read_bytes(), timeout
+                    wrapper, package, str(program_name), workspace, input_path.read_bytes(), timeout
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 report.fail("evaluator.execution", f"content-addressed evaluator could not run: {exc}")
@@ -2191,7 +2258,7 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
             return
         try:
             repeated = blinded_evaluator_run(
-                wrapper, program, workspace, dependence_input, timeout
+                wrapper, package, str(program_name), workspace, dependence_input, timeout
             )
         except (OSError, subprocess.SubprocessError) as exc:
             report.fail("evaluator.reproducibility", f"the frozen evaluator could not be re-executed: {exc}")
@@ -2222,7 +2289,7 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
         for pointer, perturbed_input in variants:
             try:
                 perturbed = blinded_evaluator_run(
-                    wrapper, program, workspace, perturbed_input, timeout
+                    wrapper, package, str(program_name), workspace, perturbed_input, timeout
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 report.fail("evaluator.input_dependence", f"the perturbed execution could not run: {exc}")
@@ -4579,12 +4646,19 @@ PREFLIGHT_STAGES = (
 
 
 def preflight(root: Path, plan: dict[str, Any], report: Report, timeout: int) -> None:
-    check_plan(plan, report)
-    check_freeze(root, plan, report)
-    check_provenance(root, plan, report)
-    check_isolation(root, report, timeout)
-    check_evaluator(root, plan, report, execute=True, timeout=timeout)
-    check_manifest(root, plan, report)
+    stages: tuple[tuple[str, Callable[[], None]], ...] = (
+        ("plan", lambda: check_plan(plan, report)),
+        ("freeze", lambda: check_freeze(root, plan, report)),
+        ("provenance", lambda: check_provenance(root, plan, report)),
+        ("isolation", lambda: check_isolation(root, report, timeout)),
+        ("evaluator", lambda: check_evaluator(root, plan, report, execute=True, timeout=timeout)),
+        ("manifest", lambda: check_manifest(root, plan, report)),
+    )
+    for name, stage in stages:
+        try:
+            stage()
+        except GateError as exc:
+            report.fail(f"{name}.stage", str(exc))
     receipt = root / "preflight.receipt"
     if report.captain_stop or report.failed:
         revoked = receipt.is_file()
@@ -4745,8 +4819,7 @@ def main(argv: list[str]) -> int:
         elif args.subcommand == "launch-check":
             check_launch_evidence(root, report)
     except GateError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_USAGE
+        report.fail(f"{args.subcommand}.gate", str(exc))
     return report.finish()
 
 
