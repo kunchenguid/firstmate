@@ -11,11 +11,10 @@
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
 # escalation rule and --yes ban. The instructions also carry `# Task` with
 # `## Captain's intent` and `## Firstmate spec` copied from the scout brief.
-# Firstmate rewrites those subsections to the ship-time ask before promoting:
-# the scout-time ask describes an investigation. Promotion refuses leftover
-# `{TASK}` / `{FIRSTMATE_SPEC}` placeholders (bin/fm-dod-lib.sh). Heading-body
-# copies stop at the next markdown heading of any level. A pre-subsection
-# scout brief with a filled `# Task` keeps that body instead of fill-in prose.
+# Captain's intent remains the original ask; ship-time build instructions belong
+# in Firstmate spec. Promotion refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
+# placeholders (bin/fm-dod-lib.sh). For a pre-subsection scout brief, the first
+# nonempty Task line is treated as the original ask and the remainder as spec.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
@@ -136,7 +135,7 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
-  echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; write the captain's ship-time ask in ## Captain's intent first (the scout-time ask describes an investigation)" >&2
+  echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; preserve the original ask in ## Captain's intent and put ship-time instructions in ## Firstmate spec before promotion" >&2
   exit 1
 fi
 if ! fm_brief_task_content_valid "$SCOUT_BRIEF"; then
@@ -146,8 +145,12 @@ fi
 INTENT_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "## Captain's intent")
 SPEC_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "## Firstmate spec")
 if [ -z "$(printf '%s' "$INTENT_BODY$SPEC_BODY" | tr -d '[:space:]')" ]; then
-  INTENT_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
-  SPEC_BODY="No separate Firstmate spec was recorded on this brief; the # Task body above is the pre-subsection contract."
+  TASK_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "# Task")
+  INTENT_BODY=$(printf '%s\n' "$TASK_BODY" | awk 'NF { print; exit }')
+  SPEC_BODY=$(printf '%s\n' "$TASK_BODY" | awk 'seen { print } !seen && NF { seen=1 }')
+  if [ -z "$(printf '%s' "$SPEC_BODY" | tr -d '[:space:]')" ]; then
+    SPEC_BODY="No separate Firstmate spec was recorded on this pre-subsection brief."
+  fi
 fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship

@@ -430,7 +430,7 @@ EOF
 # public brief/spawn/promote path. Filling both subsections lets the spawn
 # delivery checks proceed (the fake tmux still fails later).
 test_spawn_and_promote_require_filled_task_subsections() {
-  local rec home proj fakebin out status id brief meta
+  local rec home proj fakebin out status id brief meta intent_body spec_body
   rec=$(make_home subsections)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -514,8 +514,10 @@ EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion of an unfilled scout brief should exit non-zero"
-  assert_contains "$out" "write the captain's ship-time ask" \
-    "unfilled promotion did not tell firstmate to write the ship-time ask"
+  assert_contains "$out" "preserve the original ask in ## Captain's intent" \
+    "unfilled promotion did not preserve the original captain ask boundary"
+  assert_contains "$out" "ship-time instructions in ## Firstmate spec" \
+    "unfilled promotion assigned ship-time instructions to captain intent"
   assert_grep 'kind=scout' "$meta" "unfilled promotion still changed the task record"
 
   id=promote-missing-brief
@@ -536,17 +538,17 @@ EOF
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
     || fail "filled promote scout brief should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" \
-    "Ship the identity check the captain chose." \
-    "Do not add a classifier."
+    "Investigate why the identity check is failing." \
+    "Ship the identity-check fix without adding a classifier."
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "promotion of a filled scout brief should succeed"
   assert_grep 'kind=ship' "$meta" "filled promotion did not restore ship teardown protection"
   brief="$home/data/$id/ship-instructions.md"
-  assert_grep "Ship the identity check the captain chose." "$brief" \
-    "promotion did not copy the filled Captain's intent into ship instructions"
-  assert_grep "Do not add a classifier." "$brief" \
-    "promotion did not copy the filled Firstmate spec into ship instructions"
+  assert_grep "Investigate why the identity check is failing." "$brief" \
+    "promotion did not preserve the original Captain's intent"
+  assert_grep "Ship the identity-check fix without adding a classifier." "$brief" \
+    "promotion did not copy ship-time instructions into Firstmate spec"
   assert_no_grep "SCOUT task" "$brief" \
     "promotion copied the scout Setup/Rules contract into Firstmate spec"
   assert_no_grep "# Setup" "$brief" \
@@ -597,7 +599,10 @@ EOF
 You are a crewmate.
 
 # Task
-Investigate the fold's session-floor refusal and recommend a ship.
+Investigate the fold's session-floor refusal.
+
+Reproduce the refusal before changing code.
+Ship the narrow session-floor fix with a regression test.
 
 # Setup
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -606,12 +611,18 @@ EOF
   status=$?
   expect_code 0 "$status" "promotion of a pre-subsection scout brief should succeed"
   brief="$home/data/$id/ship-instructions.md"
-  assert_grep "Investigate the fold's session-floor refusal and recommend a ship." "$brief" \
-    "legacy promotion discarded the existing # Task body"
-  assert_no_grep "Write the captain's ship-time ask here" "$brief" \
-    "legacy promotion replaced a real task with fill-in prose"
-  assert_no_grep "This is a SCOUT task" "$brief" \
-    "legacy promotion copied the scout Setup section into Task"
+  intent_body=$(awk '$0 == "## Captain'\''s intent" { emit=1; next } emit && /^## / { exit } emit { print }' "$brief")
+  spec_body=$(awk '$0 == "## Firstmate spec" { emit=1; next } emit && /^# / { exit } emit { print }' "$brief")
+  assert_contains "$intent_body" "Investigate the fold's session-floor refusal." \
+    "legacy promotion discarded the original captain ask"
+  assert_not_contains "$intent_body" "Reproduce the refusal" \
+    "legacy promotion classified build instructions as captain intent"
+  assert_contains "$spec_body" "Reproduce the refusal before changing code." \
+    "legacy promotion discarded Firstmate's pre-subsection instructions"
+  assert_contains "$spec_body" "Ship the narrow session-floor fix with a regression test." \
+    "legacy promotion omitted ship-time instructions from Firstmate spec"
+  assert_not_contains "$spec_body" "This is a SCOUT task" \
+    "legacy promotion copied the scout Setup section into Firstmate spec"
   pass "fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled"
 }
 
