@@ -1660,7 +1660,7 @@ test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit() {
 }
 
 test_terminal_publish_holds_session_acquisition_lease() {
-  local dir out owner successor hook acquirer status acquire_status i owner_at_publish
+  local dir out owner successor hook acquirer status acquire_status i owner_at_publish failure reset
   dir=$(make_primary_dir "$TMP_ROOT/daemon-terminal-session-lease")
   out="$dir/hook.out"
   : > "$dir/state/task.meta"
@@ -1706,7 +1706,26 @@ test_terminal_publish_holds_session_acquisition_lease() {
   kill "$acquirer" 2>/dev/null || true
   wait "$acquirer" 2>/dev/null || true
 
-  expect_code 0 "$status" "the prior daemon must suppress output after its foreground owner exits"
+  # After the terminal mutation releases its lease, either participant may run
+  # first: successor transfer makes the prior daemon silent, while observing
+  # the still-recorded dead owner publishes the required durable failure.
+  case "$status" in
+    0) ;;
+    2)
+      failure=$(failure_epoch_path "$dir") \
+        || fail "unchanged owner death after terminal publication left no durable failure"
+      reset=$(failure_epoch_field "$dir" reset)
+      [ "$(failure_epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+        || fail "post-publication owner-death failure was not fenced to the dead owner"
+      assert_present "$failure" \
+        "post-publication owner death did not persist its failed epoch"
+      assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+        "post-publication owner death did not persist its owner-scoped notice"
+      assert_contains "$(cat "$out")" "authenticated session owner died during terminal commit" \
+        "post-publication owner death did not deliver its failure notice"
+      ;;
+    *) fail "the prior daemon returned unexpected status $status after releasing terminal publication" ;;
+  esac
   expect_code 0 "$acquire_status" "the successor session did not acquire after terminal mutation released its lease"
   [ "$owner_at_publish" = "$owner" ] || fail "session ownership transferred before terminal publication: expected $owner, got $owner_at_publish"
   [ "$successor" != "$owner" ] || fail "successor session did not replace the dead foreground owner"
@@ -2081,6 +2100,44 @@ test_stalled_transition_holder_cannot_hide_failure() {
   pass "auto-arm: stalled transition holders are fenced before durable failure publication"
 }
 
+test_slow_live_transition_holder_is_not_revoked_on_age() {
+  local dir state ready release holder revoke_rc i lock_pid
+  dir=$(make_primary_dir "$TMP_ROOT/slow-live-transition")
+  state="$dir/state"
+  ready="$state/slow-transition-ready"
+  release="$state/slow-transition-release"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_transition_acquire "$1/state" || exit
+    : > "$2"
+    while [ ! -e "$3" ]; do sleep 0.02; done
+    fm_lock_release "$1/state/.claude-autoarm-transition.lock"
+  ' _ "$dir" "$ready" "$release" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "slow transition holder did not acquire its boundary"
+  sleep 1
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_autoarm_transition_revoke_stalled "$2" 1
+  ' _ "$dir/bin/fm-wake-lib.sh" "$state"
+  revoke_rc=$?
+  kill -0 "$holder" 2>/dev/null \
+    || fail "transition age alone terminated a live owner still doing valid work"
+  lock_pid=$(cat "$state/.claude-autoarm-transition.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$holder" ] \
+    || fail "transition age alone detached the live owner's lock"
+  : > "$release"
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 1 "$revoke_rc" "a slow live transaction must not be classified as stalled from age alone"
+  assert_absent "$state/.claude-autoarm-transition.lock" \
+    "slow live transaction did not release its own lock"
+  pass "auto-arm: transition age alone cannot revoke slow valid work"
+}
+
 test_transition_revocation_does_not_signal_released_owner() {
   local dir state ready release released done_marker holder revoke_rc i
   dir=$(make_primary_dir "$TMP_ROOT/transition-release-race")
@@ -2145,6 +2202,7 @@ test_transition_revocation_rechecks_identity_before_signalling() {
   i=0
   while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
   [ -e "$ready" ] || fail "transition identity-race holder did not acquire its lock"
+  kill -STOP "$holder" 2>/dev/null || fail "transition identity-race holder could not be stopped"
   sleep 1
 
   FM_TEST_OWNER="$holder" FM_TEST_SIGNAL_LOG="$signal_log" bash -c '
@@ -2179,6 +2237,7 @@ test_transition_revocation_rechecks_identity_before_signalling() {
   revoked_count=$(find "$state" -maxdepth 1 \
     -name '.claude-autoarm-transition.lock.revoked.*' | wc -l | tr -d ' ')
   [ "$revoked_count" -eq 0 ] || fail "identity-mismatched revoked lock was not discarded"
+  kill -CONT "$holder" 2>/dev/null || true
   : > "$release"
   wait "$holder" 2>/dev/null || true
 
@@ -4071,6 +4130,7 @@ test_live_claim_mutex_holder_cannot_hide_failure
 test_legacy_predecessor_alarm_cannot_hide_successor_claim_failure
 test_identity_unavailable_failure_publication_does_not_self_wedge
 test_stalled_transition_holder_cannot_hide_failure
+test_slow_live_transition_holder_is_not_revoked_on_age
 test_transition_revocation_does_not_signal_released_owner
 test_transition_revocation_rechecks_identity_before_signalling
 test_stalled_transition_steal_holder_falls_back_to_durable_failure

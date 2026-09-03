@@ -57,6 +57,25 @@ fm_pid_zombie() {
   [ "${stat_fields[0]:-}" = Z ]
 }
 
+fm_pid_stopped() {
+  local pid=$1 proc_root stat_line state
+  local -a stat_fields
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    case "${stat_fields[0]:-}" in T|t) return 0 ;; esac
+    return 1
+  fi
+  state=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
+  state=${state#"${state%%[![:space:]]*}"}
+  case "$state" in T*) return 0 ;; esac
+  return 1
+}
+
 fm_pid_identity() {
   local pid=$1 out proc_root stat_line starttime cmdline_hex identity_key
   local -a stat_fields
@@ -1155,6 +1174,14 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace> [caller-identity
     && [ "$FM_AUTOARM_IDENTITY" = "$recorded" ]; then
     revoked_signature="$FM_AUTOARM_GEN:$FM_AUTOARM_OWNER:$FM_AUTOARM_OUTCOME"
     revoked_identity=$FM_AUTOARM_IDENTITY
+  fi
+  # Age alone is not evidence that a live transition stopped making progress.
+  # Only an identity-matched process the kernel reports as stopped is safe to
+  # signal; a slow running or sleeping owner keeps its transaction and callers
+  # use their bounded, reset-fenced failure fallback instead.
+  if ! fm_pid_stopped "$pid"; then
+    fm_lock_release "$steal"
+    return 1
   fi
   caller_pid=${BASHPID:-$$}
   revoked_lock="$lock.revoked.$caller_pid"

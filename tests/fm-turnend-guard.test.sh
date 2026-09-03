@@ -1807,7 +1807,7 @@ test_hook_claude_mode_rechecks_health_inside_reset_boundary() {
       "$1/state/.claude-autoarm-transition.lock" "$identity" || exit
     trap '\''kill "$2" 2>/dev/null || true; : > "$3"; exit 0'\'' TERM
     : > "$4"
-    while :; do sleep 0.05; done
+    kill -STOP "${BASHPID:-$$}"
   ' _ "$dir" "$watcher" "$killed" "$ready" &
   holder=$!
   while [ ! -e "$ready" ]; do sleep 0.01; done
