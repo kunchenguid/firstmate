@@ -583,6 +583,10 @@ test_secondmate_hold_stays_in_authoritative_home() {
   cp "$ROOT/.tasks.toml" "$mate/.tasks.toml"
   printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
   printf 'sample-mate\n' > "$mate/.fm-secondmate-home"
+  # A seeded home always carries its parent binding; teardown delivers the
+  # scout's final line through it before removing the record.
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -603,14 +607,18 @@ EOF
     || fail "secondmate-owned hold creation failed"
   run_captain "$mate" complete "$origin" sample-release-call >/dev/null \
     || fail "secondmate-owned completion failed"
-  run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
-    || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
-  tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
-
+  # The parent registers the mate before its children are ever torn down;
+  # teardown resolves that registration to deliver the scout's final line.
   printf -- '- sample-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
     "$mate" > "$parent/data/secondmates.md"
   fm_write_secondmate_meta "$parent/state/sample-mate.meta" "$mate" \
     "firstmate:fm-sample-mate" sample
+  run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
+    || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
+  tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
+  assert_grep "done [key=child-outcome-$origin-done]: child $origin done: report and visual review complete mode=scout report=data/$origin/report.md" \
+    "$parent/state/sample-mate.status" "the scout's final line did not reach the parent at teardown"
+
   json=$(run_bearings "$parent") || fail "parent Bearings could not read the secondmate captain call"
   printf '%s' "$json" | jq -e '
     .decisions_open | any(.owner == "sample-mate" and .verb == "captain-hold"
@@ -619,6 +627,71 @@ EOF
   assert_no_grep "sample-release-call" "$parent/data/backlog.md" "secondmate call leaked into the main backlog"
   assert_grep "sample-release-call" "$mate/data/backlog.md" "secondmate call left its authoritative backlog"
   pass "main-home and secondmate-home captain calls remain correctly routed"
+}
+
+# Inside a secondmate home a hold and its answer reach the parent channel from
+# the script itself, keyed per hold occurrence, so a re-held task opens and
+# closes a distinct parent decision and a retry never duplicates a line. A main
+# home publishes nothing anywhere.
+test_secondmate_home_publishes_holds_and_answers() {
+  local parent mate fakebin channel decision
+  parent=$(make_home parent-channel)
+  mate="$TMP_ROOT/channel-mate-home"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  cp "$ROOT/.tasks.toml" "$mate/.tasks.toml"
+  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
+  printf 'channel-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  fakebin=$(fm_fakebin "$mate")
+  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  channel="$parent/state/channel-mate.status"
+  decision="$mate/decision.txt"
+
+  run_captain "$mate" hold mate-call --title "Choose the mate release" \
+    --reason "release choice pending" --repo sample >/dev/null \
+    || fail "mate hold failed"
+  assert_grep 'needs-decision [key=captain-hold-mate-call-1]: captain hold mate-call: release choice pending' \
+    "$channel" "the mate's hold did not reach the parent channel"
+  run_captain "$mate" hold mate-call --reason "release choice pending" >/dev/null \
+    || fail "repeated mate hold failed"
+  [ "$(grep -c 'captain-hold-mate-call-1' "$channel")" = 1 ] \
+    || fail "a repeated hold duplicated the parent decision: $(cat "$channel")"
+
+  printf 'ship it later\n' > "$decision"
+  run_captain "$mate" answer mate-call --decision-file "$decision" --release >/dev/null \
+    || fail "mate release answer failed"
+  assert_grep 'resolved [key=captain-hold-mate-call-1]: captain hold mate-call: released' \
+    "$channel" "the released answer did not close the parent decision"
+
+  run_captain "$mate" hold mate-call --reason "second release choice" >/dev/null \
+    || fail "re-hold after release failed"
+  assert_grep 'needs-decision [key=captain-hold-mate-call-2]: captain hold mate-call: second release choice' \
+    "$channel" "a re-held task did not open a distinct parent decision"
+  printf 'ship it\n' > "$decision"
+  run_captain "$mate" answer mate-call --decision-file "$decision" >/dev/null \
+    || fail "mate close answer failed"
+  assert_grep 'resolved [key=captain-hold-mate-call-2]: captain hold mate-call: answered' \
+    "$channel" "the closing answer did not close the second parent decision"
+  run_captain "$mate" answer mate-call --decision-file "$decision" >/dev/null \
+    || fail "idempotent answer retry failed"
+  [ "$(grep -c 'captain-hold-mate-call-2' "$channel")" = 2 ] \
+    || fail "an answer retry duplicated a parent line: $(cat "$channel")"
+  [ "$(grep -c 'captain-hold-mate-call' "$channel")" = 4 ] \
+    || fail "unexpected parent channel contents: $(cat "$channel")"
+
+  run_captain "$parent" hold main-call --title "Choose the main release" \
+    --reason "main choice pending" --repo sample >/dev/null || fail "main hold failed"
+  [ ! -e "$parent/state/parent-replies.status" ] || fail "a main home wrote a parent reply"
+  assert_no_grep 'captain-hold-main-call' "$channel" "a main home's hold leaked onto a mate channel"
+  pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
 }
 
 # The one keyed-answer intake, fed through the real process-event runner by a
@@ -1178,6 +1251,7 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_secondmate_home_publishes_holds_and_answers
 test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working

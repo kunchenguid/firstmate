@@ -3,14 +3,34 @@
 #
 # Usage:
 #   fm-inactive-reconcile.sh scan [--startup]
+#   fm-inactive-reconcile.sh report <task-id>
 #   fm-inactive-reconcile.sh acknowledge <fingerprint>
 #
 # This is an adjunct to the existing watcher poll loop and session-start path,
 # not a watcher, daemon, PR poll, or forge client of its own.
-# `scan` evaluates at most once per FM_INACTIVE_RECONCILE_SECS (default 900,
-# valid 60..1800) per home, except that --startup performs the same scan
-# immediately in the locked session start's deferred worker. Each scan uses an
-# aggregate FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
+# In a secondmate home every `scan` invocation, which is every watcher poll,
+# first runs the LEDGER-FIRST parent delivery: a direct child whose status
+# ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
+# so that line is published on the parent channel at once through
+# bin/fm-parent-channel-lib.sh as
+#   <state> [key=child-outcome-<child>-<state>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
+# carrying the child's recorded PR, delivery mode, merge posture, and scout
+# report pointer, without consulting fm-crew-state.sh and without waiting for
+# the inactive cadence. A line still being appended (no trailing newline yet)
+# is left for the next poll. This is what keeps a mate's PR-ready, finding,
+# and failure outcomes from depending on the mate model appending them
+# (docs/secondmate-parent-channel.md). A main home has no parent channel and
+# skips this path: its watcher already signals every child status line.
+# `report <task-id>` runs that same delivery for one child on behalf of a
+# caller that already holds the child's meta lock, which bin/fm-teardown.sh
+# does before it removes the child's record; it exits 0 when the line is
+# delivered or nothing is owed, and non-zero when the parent channel could not
+# be written, so teardown refuses instead of discarding an undelivered outcome.
+# The cadence-gated scan below then evaluates at most once per
+# FM_INACTIVE_RECONCILE_SECS (default 900, valid 60..1800) per home, except
+# that --startup performs the same scan immediately in the locked session
+# start's deferred worker. Each scan uses an aggregate
+# FM_INACTIVE_RECONCILE_BUDGET_SECS deadline (default 10, valid 1..30) and
 # resumes after its last visited child on the next scan.
 # The scan enforces that budget itself through a whole-second deadline, and the
 # first due child of every scan is always visited with at least a one-second
@@ -23,7 +43,10 @@
 #
 # It considers only a direct ordinary crewmate whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
-# captain-held. It then uses fm-crew-state.sh as the sole current-state source.
+# captain-held. In a secondmate home a child whose ledger already ends in a
+# terminal done or failed line belongs to the ledger-first path above and is
+# skipped here, so one outcome is never reported twice. It then uses
+# fm-crew-state.sh as the sole current-state source.
 # Only a done or failed state is suspicious enough to create a durable terminal
 # outcome record or wake the supervisor.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
@@ -31,8 +54,9 @@
 #
 # A terminal-outcomes/<fingerprint>.pending record remains until its upstream
 # receipt is durable.
-# In a secondmate home, that receipt is an idempotent parent-channel status
-# append.
+# In a secondmate home, that receipt is an idempotent parent-channel append
+# through bin/fm-parent-channel-lib.sh; the ledger-first path and the inactive
+# path share the same receipt store and fingerprint shape.
 # In a main home, a presentation-stage record is acknowledged by fm-wake-drain
 # only after its corresponding inactive-outcome wake is handled.
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
@@ -62,8 +86,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
-# shellcheck source=bin/fm-secondmate-parent-lib.sh
-. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
@@ -290,44 +314,104 @@ pr_for_task() { # <meta> <status>
 }
 
 home_secondmate_id() {
-  local marker="$FM_HOME/.fm-secondmate-home" id
-  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
-    return 1
-  fi
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 2
-  [ "$(wc -c < "$marker")" -eq "$(LC_ALL=C tr -d '\0' < "$marker" | wc -c)" ] || return 2
-  id=$(cat "$marker" 2>/dev/null) || return 2
-  valid_id "$id" || return 2
-  printf '%s\n' "$id"
+  fm_parent_channel_home_id "$FM_HOME"
 }
 
-append_once() { # <path> <line>
-  local path=$1 line=$2
-  [ ! -L "$path" ] || return 1
-  mkdir -p "$(dirname "$path")" || return 1
-  if grep -Fqx -- "$line" "$path" 2>/dev/null; then
-    return 0
-  fi
-  printf '%s\n' "$line" >> "$path"
-}
-
-report_to_parent() { # <self-id> <task> <state> <outcome-key> <fingerprint> <pr>
-  local self=$1 task=$2 state=$3 outcome_key=$4 fingerprint=$5 pr=$6 parent_record destination line
-  parent_record="$FM_HOME/.fm-secondmate-parent"
-  fm_secondmate_parent_record_parse "$parent_record" || return 1
-  case "$FM_SECONDMATE_PARENT_ROUTE" in
-    local)
-      [ -n "$FM_SECONDMATE_PARENT_HOME" ] || return 1
-      destination="$FM_SECONDMATE_PARENT_HOME/state/$self.status"
-      ;;
-    remote)
-      destination="$STATE/parent-replies.status"
-      ;;
-    *) return 1 ;;
-  esac
+report_to_parent() { # <task> <state> <outcome-key> <fingerprint> <pr>
+  local task=$1 state=$2 outcome_key=$3 fingerprint=$4 pr=$5 line
   line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
   [ -z "$pr" ] || line="$line pr=$pr"
-  append_once "$destination" "$line"
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$line"
+}
+
+# Queue the once-per-record notice that a parent report could not be written.
+# A home seeded without its parent binding cannot report upward at all, and
+# every later terminal outcome fails the same way for the same reason, so the
+# binding is named when it is the cause.
+notice_parent_report_failed() { # <record> <fingerprint> <payload>
+  local record=$1 fingerprint=$2 payload=$3
+  if ! fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent"; then
+    payload="$payload (missing or unreadable parent binding .fm-secondmate-parent)"
+  fi
+  queue_notice_once "$record" "inactive-reconcile:$fingerprint" "$payload" || true
+}
+
+# The whole terminal line a child's ledger ends in, or non-zero when the ledger
+# is absent, unusable, still being appended (no trailing newline yet), or does
+# not end in a done or failed line.
+child_terminal_ledger_line() { # <status>
+  local status=$1 last
+  [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
+  [ "$(tail -c 1 "$status" | od -An -tu1 | tr -d '[:space:]')" = 10 ] || return 1
+  last=$(last_status_line "$status")
+  case "$(status_line_verb "$last")" in
+    done|failed) printf '%s\n' "$last" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The ledger-first parent delivery for one direct child, for a caller holding
+# the child's meta lock. Returns 0 when the line is delivered, already
+# delivered, or nothing is owed, and 1 when it is owed but the parent channel
+# could not be written (the notice is queued once per record).
+report_child_ledger_locked() { # <id> <meta>
+  local id=$1 meta=$2 status last state note pr mode yolo data incarnation fingerprint outcome_key line
+  status="$STATE/$id.status"
+  last=$(child_terminal_ledger_line "$status") || return 0
+  state=$(status_line_verb "$last")
+  pr=$(pr_for_task "$meta" "$status")
+  incarnation=$(meta_incarnation "$meta")
+  fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$(clean_field "$last")")
+  outcome_key="child-outcome-$id-$state"
+  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
+  [ -n "$RECORD_PENDING" ] || return 0
+  note=$(clean_field "$(status_line_note "$last")")
+  mode=$(clean_field "$(meta_field "$meta" mode)")
+  yolo=$(clean_field "$(meta_field "$meta" yolo)")
+  data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+  line="$state [key=$outcome_key]: child $id $state: $note"
+  [ -z "$pr" ] || line="$line pr=$pr"
+  [ -z "$mode" ] || line="$line mode=$mode"
+  [ -z "$yolo" ] || line="$line yolo=$yolo"
+  if [ -f "$data/$id/report.md" ] && [ ! -L "$data/$id/report.md" ]; then
+    line="$line report=data/$id/report.md"
+  fi
+  if fm_parent_channel_report "$FM_HOME" "$STATE" "$line"; then
+    mark_reported "$RECORD_PENDING" || return 1
+    return 0
+  fi
+  notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
+    "child outcome needs parent report: child=$id state=$state"
+  return 1
+}
+
+# Every direct child's ledger, under its meta lock. Cheap file reads only, so
+# it runs on every poll in a secondmate home; a delivery failure is already
+# queued as a notice and never fails the scan.
+ledger_pass() {
+  local meta id lock
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    valid_id "$id" || continue
+    [ "$(meta_field "$meta" kind)" != secondmate ] || continue
+    lock=$(fm_meta_lock_path "$meta") || continue
+    fm_lock_acquire_wait "$lock" || continue
+    report_child_ledger_locked "$id" "$meta" || true
+    fm_lock_release "$lock"
+  done
+}
+
+# The `report <task-id>` entry point: the caller holds the child's meta lock.
+report_child() { # <id>
+  local id=$1 meta rc=0
+  mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
+  [ ! -L "$OUTCOME_DIR" ] || return 1
+  home_secondmate_id >/dev/null || { rc=$?; [ "$rc" -eq 1 ] && return 0; return 1; }
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  [ "$(meta_field "$meta" kind)" != secondmate ] || return 0
+  report_child_ledger_locked "$id" "$meta"
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
@@ -339,6 +423,10 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
   status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1 && return 0
+  # A ledger that states its own outcome is the ledger-first path's to deliver.
+  if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
+    return 0
+  fi
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -360,18 +448,11 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
   if [ -n "$self" ]; then
-    if report_to_parent "$self" "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
+    if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
       mark_reported "$RECORD_PENDING" || return 1
     else
-      payload="inactive terminal outcome needs parent report: child=$id state=$state"
-      # A home seeded without its parent binding cannot report upward at all,
-      # and every later terminal outcome fails the same way for the same
-      # reason. Name the missing binding so the diagnostic points at the repair
-      # instead of reading as one report that happened to fail.
-      if ! fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent"; then
-        payload="$payload (missing or unreadable parent binding .fm-secondmate-parent)"
-      fi
-      queue_notice_once "$RECORD_PENDING" "inactive-reconcile:$fingerprint" "$payload" || true
+      notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
+        "inactive terminal outcome needs parent report: child=$id state=$state"
     fi
     return 0
   fi
@@ -431,22 +512,23 @@ scan() {
   local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
+  if self=$(home_secondmate_id); then
+    # The ledger-first delivery is per poll, not per cadence.
+    ledger_pass
+  else
+    marker_rc=$?
+    self=''
+  fi
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     return 0
   fi
   cursor=$(scan_marker_cursor)
   valid_id "$cursor" || cursor=''
   write_scan_marker "$cursor" || return 1
-  if self=$(home_secondmate_id); then
-    :
-  else
-    marker_rc=$?
-    self=''
-    if [ "$marker_rc" -ne 1 ]; then
-      publish_actionable "inactive-reconcile-diagnostic:invalid-secondmate-home" \
-        "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
-      return 0
-    fi
+  if [ -z "$self" ] && [ "$marker_rc" -ne 1 ]; then
+    publish_actionable "inactive-reconcile-diagnostic:invalid-secondmate-home" \
+      "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
+    return 0
   fi
   deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   SCAN_FIRST_VISIT_PENDING=1
@@ -506,6 +588,15 @@ case "$mode" in
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     scan "$2"
+    ;;
+  report)
+    if [ "$#" -ne 2 ] || ! valid_id "$2"; then
+      printf 'usage: fm-inactive-reconcile.sh report <task-id>\n' >&2
+      exit 2
+    fi
+    fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
+    trap 'fm_lock_release "$SCAN_LOCK"' EXIT
+    report_child "$2"
     ;;
   acknowledge)
     [ "$#" -eq 2 ] || { printf 'usage: fm-inactive-reconcile.sh acknowledge <fingerprint>\n' >&2; exit 2; }

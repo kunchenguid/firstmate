@@ -8,8 +8,8 @@
 # path.
 #
 # The destination is the home's role, never the caller's choice:
-#   - a secondmate home reports upward to its parent on the same reply channel
-#     bin/fm-inactive-reconcile.sh's report_to_parent already uses, in the same
+#   - a secondmate home reports upward on its parent channel, resolved and
+#     appended through bin/fm-parent-channel-lib.sh in the same
 #     "<state> [key=<slug>]: <note>" shape the charter contract defines;
 #   - a main home reports to the captain through the durable wake queue.
 # A poll observed in a secondmate home also receives a local durable wake after
@@ -29,37 +29,8 @@
 _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$_FM_MERGE_OUTCOME_LIB_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-secondmate-parent-lib.sh
-. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-secondmate-parent-lib.sh"
-
-# The secondmate identity of the home reporting, or non-zero when this home is
-# a main home (1) or carries an unusable identity marker (2). Mirrors
-# bin/fm-inactive-reconcile.sh's home_secondmate_id, which owns the same
-# marker's contract.
-fm_merge_outcome_home_id() {  # <home>
-  local home=$1 marker id
-  marker="$home/.fm-secondmate-home"
-  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
-    return 1
-  fi
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 2
-  [ "$(wc -c < "$marker")" -eq "$(LC_ALL=C tr -d '\0' < "$marker" | wc -c)" ] || return 2
-  id=$(cat "$marker" 2>/dev/null) || return 2
-  fm_pr_task_id_valid "$id" || return 2
-  printf '%s\n' "$id"
-}
-
-# Append <line> to <path> unless that exact line is already there, so a repeat
-# report of the same merge cannot duplicate it.
-fm_merge_outcome_append_once() {  # <path> <line>
-  local path=$1 line=$2
-  [ ! -L "$path" ] || return 1
-  mkdir -p "$(dirname "$path")" || return 1
-  if grep -Fqx -- "$line" "$path" 2>/dev/null; then
-    return 0
-  fi
-  printf '%s\n' "$line" >> "$path"
-}
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$_FM_MERGE_OUTCOME_LIB_DIR/fm-parent-channel-lib.sh"
 
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -79,7 +50,7 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 # than treat it as success: the merge landed and the record did not.
 fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   local home=$1 state=$2 id=$3 url=$4 origin=$5
-  local self='' self_rc=0 destination='' line lock status=0
+  local self_rc=0 destination='' line lock status=0
   local provider host path number
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
@@ -93,20 +64,12 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   number=$FM_PR_NUMBER
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
 
-  if self=$(fm_merge_outcome_home_id "$home"); then
-    fm_secondmate_parent_record_parse "$home/.fm-secondmate-parent" || return 3
-    case "$FM_SECONDMATE_PARENT_ROUTE" in
-      local)
-        [ -n "$FM_SECONDMATE_PARENT_HOME" ] || return 3
-        destination="$FM_SECONDMATE_PARENT_HOME/state/$self.status"
-        ;;
-      remote) destination="$state/parent-replies.status" ;;
-      *) return 3 ;;
-    esac
+  if destination=$(fm_parent_channel_destination "$home" "$state"); then
     line="done [key=merged-$id]: merged $id $FM_PR_URL"
   else
     self_rc=$?
     [ "$self_rc" -eq 1 ] || return 3
+    destination=''
   fi
 
   STATE=$state
@@ -123,7 +86,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   fi
 
   if [ -n "$destination" ]; then
-    fm_merge_outcome_append_once "$destination" "$line" || status=1
+    fm_parent_channel_append_once "$destination" "$line" || status=1
   fi
   if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
     fm_wake_append check "merged-$id-$FM_PR_URL" \

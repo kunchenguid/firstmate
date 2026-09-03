@@ -104,6 +104,16 @@ run_reconcile() { # <home> [--startup]
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
 
+# The teardown-side entry point: deliver one child's terminal ledger line for a
+# caller holding its meta lock.
+run_report() { # <home> <child>
+  local home=$1 child=$2
+  PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
+    FM_FORGE_LOG="$WORLD/forge.log" "$RECON" report "$child"
+}
+
 wake_count() { # <home> <key prefix>
   grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
 }
@@ -140,14 +150,103 @@ test_main_direct_terminal_presentation_receipt() {
   pass "main direct terminal presentation has a durable receipt"
 }
 
-# A secondmate independently reports a genuinely terminal inactive child.
-test_local_secondmate_reports_terminal_child() {
-  make_world local; bind_secondmate local; write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+# A secondmate delivers a child's terminal ledger line to the parent on the
+# very next poll, from the ledger alone: no current-state read, no inactive
+# cadence, and no line appended by the mate model. The delivery carries the
+# child's note, recorded PR, delivery mode, and merge posture, happens once,
+# and takes the outcome away from the inactive path so it is never reported
+# twice.
+test_local_secondmate_delivers_terminal_ledger_line() {
+  local expected
+  make_world local; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  expected='done [key=child-outcome-child-done]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off'
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  grep -Fxq "$expected" "$MAIN/state/mate.status" \
+    || fail "secondmate did not deliver the child's ledger line on a plain poll: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "ledger delivery receipt was not durable"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(grep -c 'child-outcome-child-done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "a second poll delivered the same ledger line again"
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
-  grep -Fq 'done [key=inactive-outcome-mate-child-done]:' "$MAIN/state/mate.status" \
-    || fail "secondmate did not append its durable parent report"
-  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "secondmate report receipt was not durable"
-  pass "secondmate reports its own inactive terminal child"
+  ! grep -q 'inactive-outcome-' "$MAIN/state/mate.status" \
+    || fail "the inactive path reported a child the ledger delivery already owned"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "the inactive path minted a second receipt"
+  pass "secondmate delivers a child's terminal ledger line once, on the next poll, from the ledger alone"
+}
+
+# A scout's done line carries its report pointer, a failed line is delivered
+# under the failed verb, and a later terminal line after recovery is a new
+# delivery rather than a suppressed duplicate.
+test_secondmate_ledger_delivery_carries_report_and_failure() {
+  make_world ledger-shapes; bind_secondmate local
+  write_child "$MATE" scout 'done: report written'
+  mkdir -p "$MATE/data/scout"
+  printf '# findings\n' > "$MATE/data/scout/report.md"
+  write_child "$MATE" boom 'failed: build broke'
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  grep -Fxq 'done [key=child-outcome-scout-done]: child scout done: report written pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off report=data/scout/report.md' \
+    "$MAIN/state/mate.status" || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
+  grep -Fxq 'failed [key=child-outcome-boom-failed]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off' \
+    "$MAIN/state/mate.status" || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
+  printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  grep -Fq 'done [key=child-outcome-boom-done]: child boom done: fixed on retry' "$MAIN/state/mate.status" \
+    || fail "a new terminal line after recovery was not delivered"
+  [ "$(grep -c 'child-outcome-boom-' "$MAIN/state/mate.status")" = 2 ] \
+    || fail "recovery delivered the wrong number of lines: $(cat "$MAIN/state/mate.status")"
+  pass "ledger delivery carries the report pointer, the failed verb, and each new terminal line"
+}
+
+# A line still being appended has no trailing newline yet and must wait.
+test_secondmate_partial_ledger_line_waits_for_newline() {
+  make_world partial; bind_secondmate local
+  write_child "$MATE" child 'working: nearly there'
+  printf 'done: half writ' >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ ! -e "$MAIN/state/mate.status" ] || ! grep -q 'child-outcome-' "$MAIN/state/mate.status" \
+    || fail "an unterminated ledger line was delivered: $(cat "$MAIN/state/mate.status")"
+  printf 'ten\n' >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  grep -Fq 'done [key=child-outcome-child-done]: child child done: half written' "$MAIN/state/mate.status" \
+    || fail "the completed line was not delivered once its newline landed"
+  pass "a ledger line still being appended waits for its newline"
+}
+
+# The remote route delivers the same line into this home's parent-replies
+# input, once.
+test_secondmate_remote_route_ledger_delivery() {
+  make_world remote-ledger; bind_secondmate remote
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(grep -c 'child-outcome-child-done' "$MATE/state/parent-replies.status")" = 1 ] \
+    || fail "remote ledger delivery was not once-only: $(cat "$MATE/state/parent-replies.status" 2>/dev/null)"
+  pass "the remote route carries a child's ledger line once"
+}
+
+# `report <child>` is the teardown-side delivery: it delivers or says nothing
+# is owed with 0, and returns non-zero only when the channel cannot be written.
+test_report_subcommand_delivers_and_refuses() {
+  local rc
+  make_world report; bind_secondmate local
+  write_child "$MATE" child 'done: final word'
+  run_report "$MATE" child || fail "report refused a deliverable ledger line"
+  grep -Fq 'done [key=child-outcome-child-done]: child child done: final word' "$MAIN/state/mate.status" \
+    || fail "report did not deliver the child's final line"
+  run_report "$MATE" child || fail "report did not treat an already delivered line as owed nothing"
+  write_child "$MATE" quiet 'working: nothing terminal'
+  run_report "$MATE" quiet || fail "report refused a child that owes nothing"
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  write_child "$MATE" stuck 'failed: cannot reach anyone'
+  rc=0
+  run_report "$MATE" stuck >/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "report claimed delivery through an unusable parent binding"
+  [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 1 ] || fail "undeliverable report did not queue its notice"
+  write_child "$MAIN" child 'done: main home child'
+  run_report "$MAIN" child || fail "report failed in a main home"
+  [ ! -e "$MAIN/state/parent-replies.status" ] || fail "a main home wrote a parent reply"
+  pass "report delivers a child's final line, owes nothing twice, and refuses only an unwritable channel"
 }
 
 test_local_secondmate_rejects_relative_parent_home() {
@@ -199,7 +298,7 @@ test_invalid_secondmate_marker_blocks_routing() {
 
 # A remote child route writes the existing mirror input once even across restarts.
 test_remote_parent_reply_is_idempotent() {
-  make_world remote; bind_secondmate remote; write_child "$MATE" child 'done: green'
+  make_world remote; bind_secondmate remote; write_child "$MATE" child 'working: quiet since'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
   [ "$(grep -c 'inactive-outcome-mate-child-done' "$MATE/state/parent-replies.status")" = 1 ] \
@@ -212,10 +311,10 @@ test_remote_parent_reply_is_idempotent() {
 # when its terminal state and status text match the retired worker exactly.
 test_reused_task_id_reports_each_incarnation() {
   make_world reused-id; bind_secondmate remote
-  write_child "$MATE" child 'failed: terminal' spawn-one
+  write_child "$MATE" child 'working: quiet since' spawn-one
   FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
   rm -f "$MATE/state/child.meta" "$MATE/state/child.status" "$MATE/state/child.turn-ended"
-  write_child "$MATE" child 'failed: terminal' spawn-two
+  write_child "$MATE" child 'working: quiet since' spawn-two
   FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
   [ "$(outcome_count "$MATE" reported)" = 2 ] \
     || fail "reused task id collided with the retired incarnation receipt"
@@ -229,7 +328,7 @@ test_reused_task_id_reports_each_incarnation() {
 test_legacy_metadata_rewrite_keeps_receipt_identity() {
   local meta tmp
   make_world legacy-rewrite; bind_secondmate remote
-  write_child "$MATE" child 'failed: terminal' spawn-old
+  write_child "$MATE" child 'working: quiet since' spawn-old
   meta="$MATE/state/child.meta"
   tmp="$MATE/state/.child.meta.legacy"
   awk '$0 !~ /^spawn_gen=/' "$meta" > "$tmp"
@@ -255,7 +354,7 @@ test_legacy_metadata_rewrite_keeps_receipt_identity() {
 test_relaunch_cannot_replace_metadata_during_state_snapshot() {
   local recon_pid update_pid record i
   make_world relaunch-race; bind_secondmate remote
-  write_child "$MATE" child 'failed: terminal' spawn-old
+  write_child "$MATE" child 'working: quiet since' spawn-old
   cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 : > "${FM_RACE_WORLD:?}/state-started"
@@ -361,6 +460,35 @@ test_watcher_hook_and_idle_secondmate_exemption() {
   pass "watcher hook wakes for terminal loss and preserves idle secondmate exemption"
 }
 
+# The real watcher poll in a secondmate home delivers a child's terminal ledger
+# line to the parent channel on its first cycle, with no line appended by the
+# mate and no wake needed in the mate home for it.
+test_watcher_poll_delivers_child_ledger_line_to_parent() {
+  local pid i
+  make_world watcher-ledger; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  prime_seen "$MATE/state" "$MATE/state/child.status"
+  PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" FM_DATA_OVERRIDE="$MATE/data" \
+    FM_CONFIG_OVERRIDE="$MATE/config" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" FM_FORGE_LOG="$WORLD/forge.log" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_FAKE_CREW_STATE='unknown' "$WATCH" > "$WORLD/mate-watch.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    grep -q 'child-outcome-child-done' "$MAIN/state/mate.status" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  reap "$pid"
+  grep -Fxq 'done [key=child-outcome-child-done]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off' \
+    "$MAIN/state/mate.status" \
+    || fail "the watcher poll did not deliver the child's ledger line to the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null; cat "$WORLD/mate-watch.out")"
+  [ ! -s "$WORLD/forge.log" ] || fail "ledger delivery invoked a forge command"
+  pass "the real watcher poll delivers a child's terminal ledger line to the parent channel"
+}
+
 # A stalled authoritative state read consumes only the aggregate scan budget.
 # The durable scan position lets the next invocation reach the following child.
 test_stalled_state_read_is_bounded_and_scan_progresses() {
@@ -423,10 +551,15 @@ test_missing_parent_binding_names_itself() {
   make_world missing-binding
   printf 'mate\n' > "$MATE/.fm-secondmate-home"
   write_child "$MATE" child 'done: PR merged'
+  write_child "$MATE" quiet 'working: quiet since'
   out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup)
   case "$out" in
-    *"actionable: inactive terminal outcome needs parent report"*".fm-secondmate-parent"*) ;;
-    *) fail "a missing parent binding did not name itself: $out" ;;
+    *"actionable: child outcome needs parent report: child=child"*".fm-secondmate-parent"*) ;;
+    *) fail "a missing parent binding did not name itself for a ledger delivery: $out" ;;
+  esac
+  case "$out" in
+    *"actionable: inactive terminal outcome needs parent report: child=quiet"*".fm-secondmate-parent"*) ;;
+    *) fail "a missing parent binding did not name itself for an inactive report: $out" ;;
   esac
   [ "$(outcome_count "$MATE" reported)" = 0 ] \
     || fail "an outcome that never reached a parent was recorded as reported"
@@ -437,7 +570,7 @@ test_notice_recovery_does_not_duplicate_wake() {
   local record err seq generation
   make_world notice-recovery; bind_secondmate remote
   printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
-  write_child "$MATE" child 'failed: terminal'
+  write_child "$MATE" child 'working: quiet since'
   FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
   [ "$(wake_count "$MATE" 'inactive-reconcile:')" = 1 ] || fail "parent-report failure did not queue one notice"
 
@@ -467,7 +600,11 @@ test_reconciliation_never_calls_forge() {
 }
 
 test_main_direct_terminal_presentation_receipt
-test_local_secondmate_reports_terminal_child
+test_local_secondmate_delivers_terminal_ledger_line
+test_secondmate_ledger_delivery_carries_report_and_failure
+test_secondmate_partial_ledger_line_waits_for_newline
+test_secondmate_remote_route_ledger_delivery
+test_report_subcommand_delivers_and_refuses
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing
 test_remote_parent_reply_is_idempotent
@@ -478,6 +615,7 @@ test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
+test_watcher_poll_delivers_child_ledger_line_to_parent
 test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake

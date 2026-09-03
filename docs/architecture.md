@@ -52,6 +52,7 @@ No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start sends the same bounded local scan through `bin/fm-startup-network.sh`'s deferred worker so current-state reads never block the digest.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
 A secondmate retains a durable receipt for its idempotent report through the established parent route, and main-home captain presentation retains a separate receipt; neither path performs a forge or PR check.
+A secondmate home's terminal child ledger lines, PR registrations, captain holds, and merges are published on that same parent route by the scripts that record them, so no captain-facing outcome depends on the mate model appending it ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 Each `fm-wake-drain.sh` presentation runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
