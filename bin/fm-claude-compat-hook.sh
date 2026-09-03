@@ -5,11 +5,13 @@ HELPER=${1:-}
 shift || true
 
 resolve_hook_root() {
-  local candidate=${CLAUDE_PROJECT_DIR:-} root
+  local candidate=${CLAUDE_PROJECT_DIR:-} root cwd
   if [ -n "$candidate" ]; then
     root=$(cd "$candidate" 2>/dev/null && pwd -P) || return 1
   else
-    root=$(pwd -P 2>/dev/null) || return 1
+    cwd=$(pwd -P 2>/dev/null) || return 1
+    root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || return 1
+    root=$(cd "$root" 2>/dev/null && pwd -P) || return 1
   fi
   printf '%s\n' "$root"
 }
