@@ -2245,6 +2245,66 @@ test_transition_revocation_rechecks_identity_before_signalling() {
   pass "auto-arm: transition revocation rechecks identity immediately before signalling"
 }
 
+test_transition_revocation_rechecks_stopped_state_before_signalling() {
+  local dir state ready release terminated holder revoke_rc i lock_pid
+  dir=$(make_primary_dir "$TMP_ROOT/transition-revocation-resume-race")
+  state="$dir/state"
+  ready="$state/transition-resume-ready"
+  release="$state/transition-resume-release"
+  terminated="$state/transition-resume-terminated"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_transition_acquire "$1/state" || exit
+    trap '\'' : > "$2"; exit 0 '\'' TERM
+    : > "$3"
+    kill -STOP "${BASHPID:-$$}"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    fm_lock_release "$1/state/.claude-autoarm-transition.lock"
+  ' _ "$dir" "$terminated" "$ready" "$release" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition resume-race holder did not acquire its lock"
+  sleep 1
+
+  FM_TEST_OWNER="$holder" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    eval "$(declare -f fm_pid_stopped | sed '\''1s/^fm_pid_stopped /fm_pid_stopped_current /'\'')"
+    stopped_snapshot=0
+    fm_pid_stopped() {
+      if [ "$stopped_snapshot" -eq 0 ] && [ "$1" = "$FM_TEST_OWNER" ]; then
+        fm_pid_stopped_current "$1" || return 1
+        stopped_snapshot=1
+        command kill -CONT "$1" || return 1
+        i=0
+        while [ "$i" -lt 200 ] && fm_pid_stopped_current "$1"; do
+          sleep 0.01
+          i=$((i + 1))
+        done
+        fm_pid_stopped_current "$1" && return 1
+        return 0
+      fi
+      fm_pid_stopped_current "$1"
+    }
+    fm_autoarm_transition_revoke_stalled "$1/state" 1
+  ' _ "$dir"
+  revoke_rc=$?
+  assert_absent "$terminated" \
+    "transition revocation signalled an owner that resumed before the signal boundary"
+  kill -0 "$holder" 2>/dev/null \
+    || fail "transition revocation terminated an owner that resumed valid work"
+  lock_pid=$(cat "$state/.claude-autoarm-transition.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$holder" ] \
+    || fail "transition revocation did not restore the resumed owner's lock"
+  : > "$release"
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 1 "$revoke_rc" "a resumed transaction must not be signalled from an earlier stopped-state snapshot"
+  assert_absent "$state/.claude-autoarm-transition.lock" \
+    "resumed transaction did not release its restored lock"
+  pass "auto-arm: transition revocation rechecks stopped state immediately before signalling"
+}
+
 test_stalled_transition_steal_holder_falls_back_to_durable_failure() {
   local dir state ready holder out status i
   dir=$(make_primary_dir "$TMP_ROOT/stalled-transition-steal")
@@ -4133,6 +4193,7 @@ test_stalled_transition_holder_cannot_hide_failure
 test_slow_live_transition_holder_is_not_revoked_on_age
 test_transition_revocation_does_not_signal_released_owner
 test_transition_revocation_rechecks_identity_before_signalling
+test_transition_revocation_rechecks_stopped_state_before_signalling
 test_stalled_transition_steal_holder_falls_back_to_durable_failure
 test_pid_reused_transition_holder_cannot_hide_failure
 test_zombie_transition_holder_cannot_hide_failure

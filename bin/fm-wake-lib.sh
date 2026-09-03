@@ -1206,6 +1206,11 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace> [caller-identity
     FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=$revoked_identity
     return 0
   fi
+  if ! fm_pid_stopped "$pid"; then
+    mv "$revoked_lock" "$lock" 2>/dev/null || true
+    fm_lock_release "$steal"
+    return 1
+  fi
   if ! kill -TERM "$pid" 2>/dev/null; then
     if current=$(fm_pid_identity "$pid" 2>/dev/null) \
       && [ "$current" = "$recorded" ]; then
