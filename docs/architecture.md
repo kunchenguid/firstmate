@@ -401,15 +401,16 @@ Credentials never enter Pi or a process argument.
 An unchanged session, configuration identity, generation, healthy transport, and matching live Pi owner make startup a silent no-op; healthy transport without live Pi ownership is a distinct state that triggers same-generation ownership recovery without restarting that transport.
 
 The extension binds canonical `FM_HOME`, stable home identity, full persisted Pi session UUID and file, session and header cwd, verified Firstmate lock ancestry, exact P2P chat, and binding generation.
-It calls only the current extension API's `sendUserMessage` with native steer delivery, so a busy Pi receives Feishu input after the current turn's tool calls and before its next model call, while no RPC Pi, SDK `AgentSession`, headless Pi, direct JSONL writer, or second process can become conversation authority.
+It calls only the current extension API's metadata-bearing `sendMessage` with `triggerTurn: true` and native steer delivery, so a busy Pi receives Feishu input after the current turn's tool calls and before its next model call, while no RPC Pi, SDK `AgentSession`, headless Pi, direct JSONL writer, or second process can become conversation authority.
 Native TUI input is not intercepted, transformed, copied into Feishu state, acknowledged, or reinjected.
 Watcher and turn-end operational messages call Pi directly and never enter Feishu state.
 The bridge records one owner-fenced handoff for each durable Feishu event and offers all pending events to Pi without a Firstmate scheduling policy.
 Pi owns native TUI order, steering order, and pending-message sequencing.
 
-A privacy-safe leading marker carries only the derived delivery reference and generation.
-The marker lets session restart reconcile a prior native-queue handoff and render the authorized source badge; it does not govern outbound eligibility.
-Native TUI and operational user messages remain unmarked, unclassified, and unmodified.
+Private custom-message `details` carries only its schema, the derived delivery reference, and generation; Pi excludes it from model content.
+The renderer verifies metadata and exact content against the durable accepted event, then displays only the captain's body, while a context hook performs the same verification before adding the source fence to model text.
+The metadata lets session restart reconcile a prior native-queue handoff and does not govern outbound eligibility.
+Native TUI and operational user messages remain unmarked, unclassified, and unmodified, and body text cannot assert trusted provenance.
 Feishu and TUI use the same normal Pi tool path with no channel-specific tool fence or confirmation command.
 
 The transport authenticates through the SDK's app-credential mechanism, verifies the safe app fingerprint and P2P chat, and durably publishes accepted SDK callbacks before returning.

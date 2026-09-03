@@ -2,7 +2,7 @@
 name: feishu-channel
 description: >-
   Agent-only procedure for Firstmate's private Feishu current-Pi channel.
-  Load when a user message carries the authorized Feishu source badge, before a local /fm-feishu-* control operation, or when session start reports a FEISHU diagnostic.
+  Load when trusted Pi metadata classifies an input as authorized Feishu, before a local /fm-feishu-* control operation, or when session start reports a FEISHU diagnostic.
 user-invocable: false
 metadata:
   internal: true
@@ -24,8 +24,9 @@ Use normal Firstmate project intake, approval, merge, destructive-action, and se
 Do not expose the open ID, chat ID, message ID, delivery marker, app identity, private state path, or transport mechanics in a captain-facing answer.
 
 Native TUI and Firstmate operational input never pass through Feishu durable state.
-The bridge offers only accepted durable Feishu events to Pi through `sendUserMessage` with native steer delivery.
-Text-only input retains the normal string form, while images use Pi's native image-content shape after private byte-hash verification.
+The bridge offers only accepted durable Feishu events to Pi as metadata-bearing custom messages with native steer delivery.
+The TUI renderer shows only the captain's message body, while model-context transformation adds the source fence after matching the private durable event and exact content.
+Text-only input retains the normal string body, while images use Pi's native image-content shape after private byte-hash verification.
 Pi therefore delivers a busy-session Feishu message after the current Assistant turn's tool calls and before the next model call, while an idle session starts a normal turn.
 Pi owns input ordering and scheduling.
 Do not reconstruct a cross-channel queue around it.

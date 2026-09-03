@@ -2,7 +2,7 @@
 
 This record contains current deterministic evidence for the optional Feishu current-Pi channel.
 The configuration-driven lifecycle, bounded SDK reconnect and process-replacement paths, native inbound image path, and outbound post Markdown path were verified on 2026-08-25 against Pi `0.84.3` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
-The executable inbound numbered-link regression and partial-element fallback cases were added and rerun on 2026-09-02 with Node `22.22.2`, and the tracked extension typecheck passed against Pi `0.84.4`.
+The executable inbound body-only rendering, source-metadata, numbered-link, and partial-element fallback cases were rerun on 2026-09-03 with Node `22.22.2`, and the tracked extension typecheck passed against Pi `0.84.4`.
 
 ## Official SDK selection evidence
 
@@ -23,7 +23,7 @@ The package declarations expose `WSClient` lifecycle callbacks and `close()`, `C
 The installed `WSClient` implementation routes socket close into its automatic reconnect loop, distinguishes pre-ready success through `onReady` from post-ready success through `onReconnected`, accepts server-provided unbounded retry counts, and exposes `onError` for terminal initial or exhausted retry outcomes.
 The resource response exposes a one-consumption `getReadableStream()` and response headers.
 The official message-create contract accepts `msg_type: "post"` with a JSON-stringified locale/content matrix, and the post content contract accepts an `md` element carrying Markdown text.
-Pi's installed declarations expose `sendUserMessage(content: string | (TextContent | ImageContent)[], options)` and native image content as `{ type: "image", data: string, mimeType: string }`.
+Pi's installed declarations expose `sendMessage` custom content and private `details`, `registerMessageRenderer`, the pre-provider `context` transform, and native image content as `{ type: "image", data: string, mimeType: string }`.
 The focused regression exercises that exact extension boundary as well as the fixed outbound `zh_cn` matrix with one row and one `{ "tag": "md", "text": ... }` element.
 The package is pinned in `package.json` and `package-lock.json`.
 No project dependency was installed into this worktree while recording this evidence.
@@ -52,7 +52,9 @@ ok - official-SDK long-connection transport is inert, identity-fenced, deduplica
 The first section uses disposable private homes and persisted fake Pi session headers.
 It proves that the extension registers no TUI input, message-end, turn-start, or tool-call hook.
 It proves that native TUI and ordinary Firstmate operational input do not enter Feishu state.
-It proves that accepted Feishu text is durably recorded and offered to Pi through native steer delivery with an exact session and generation fence.
+It proves that accepted Feishu text is durably recorded and offered to Pi through metadata-bearing native steer delivery with an exact session and generation fence.
+It proves text-only, image-only, ordered text-plus-images, slash-like, and spoof-shaped bodies render as the exact captain body without transport title, source badge, slash instruction, private identifier, or bridge framing.
+It proves only metadata plus exact-content matches against durable accepted events receive model-context source fencing, while native TUI text, spoofed provenance text, unknown metadata, and metadata paired with changed content remain untrusted.
 It also proves image-only and ordered text-plus-multiple-image delivery as native Pi content, exact byte preservation, private `0600` envelopes/cache files, resource/message replay convergence, stale-claim substitution refusal, MIME and object-size mismatch refusal, retry after partial download, bounded durable retry backoff that honors `Retry-After` for retriable media downloads with the retry ceiling preserved, strict ingress FIFO that holds later text behind a not-ready media head until ready or terminal refusal, any-single-locale post acceptance preferring `zh_cn`, partial malformed and unsupported element fallback with valid surrounding content preserved, whole-post malformed and unsupported quarantine without transport failure, attachment-count and malformed-key refusal, unsupported-type metadata, symlink containment, bounded terminal cleanup, and media-originated parity with Pi's existing tool path.
 A separate live process holds a real two-link pairing lock beyond the normal acquisition wait while the public Pi lifecycle pump runs; the test proves that neither entry is removed while the owner is live, one retry notice, pending-message preservation, automatic recovery after the owner releases only the canonical entry, and one native-queue offer across repeated timer ticks.
 Exact inbound-state fixtures prove stale dead-owner recovery removes only the revalidated canonical entry and reacquires serialization while the unknown alias remains, fresh dead-owner and malformed-record refusal preserve both links, canonical inode replacement refuses without deleting either object, and symlink and directory locks remain terminally unsafe.
@@ -67,7 +69,7 @@ It then reproduces the reported shape with an active exact-session binding and h
 It also proves that `/reload` cannot repair a missing owner because reload does not rerun the ownership-acquiring startup digest, that wrong-owner reload and `agent_start` remain inert, that a later owned `agent_start` can retry safely, and that disabled configuration creates no channel state or transport.
 It exercises session replacement through the registered Pi lifecycle and proves automatic exact current-session hard takeover from an old live owner with offered inbound, pending outbound, and terminal delivery uncertainty present.
 The public lifecycle and shared state-owner checks prove stable inbound delivery references, stable outbound event and chunk UUID identities, pending registration-intent transfer, receipt-first uncertainty reconciliation, immediate prior-session inbound and mirroring fences, and already-current idempotence.
-The compatibility `/fm-feishu-rebind` command checks prove wrong-owner and invalid-configuration refusal, Feishu-origin refusal, concise body-free output, no credential or private-identifier leakage, and that slash-like Feishu message text remains ordinary native-queue content rather than command execution.
+The compatibility `/fm-feishu-rebind` command checks prove wrong-owner and invalid-configuration refusal, non-local refusal, concise body-free output, no credential or private-identifier leakage, and that slash-like Feishu message text remains ordinary native-queue content rather than command execution.
 
 The process-recovery fixture starts from the production failure shape: the initiating trigger is a terminal long-connection process outcome, valid configuration and a successful P2P probe are the masking conditions that exclude setup failure, and the visible symptom is degraded transport with one durable outbound response still pending.
 It first proves that transient SDK reconnect keeps the original owner incarnation and starts no replacement.

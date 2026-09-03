@@ -10,14 +10,16 @@ import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { Box, Container, Image, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 import {
   disablePairing,
   statusSummary,
 } from "../../bin/fm-feishu-state.mjs";
 import {
+  FEISHU_INBOUND_CUSTOM_TYPE,
   firstmateSessionLockOwnership,
   registerFeishuNativeChannel,
+  visibleFeishuContent,
 } from "./lib/fm-feishu-native-channel.ts";
 import { FIRSTMATE_SESSION_START_SETTLED_EVENT } from "./lib/fm-operational-input.ts";
 
@@ -107,6 +109,46 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`, { mode: 0o600 });
 }
 
+function feishuMarkdownTheme(theme: Parameters<Parameters<ExtensionAPI["registerMessageRenderer"]>[1]>[2]): MarkdownTheme {
+  return {
+    heading: (text) => theme.fg("mdHeading", text),
+    link: (text) => theme.fg("mdLink", text),
+    linkUrl: (text) => theme.fg("mdLinkUrl", text),
+    code: (text) => theme.fg("mdCode", text),
+    codeBlock: (text) => theme.fg("mdCodeBlock", text),
+    codeBlockBorder: (text) => theme.fg("mdCodeBlockBorder", text),
+    quote: (text) => theme.fg("mdQuote", text),
+    quoteBorder: (text) => theme.fg("mdQuoteBorder", text),
+    hr: (text) => theme.fg("mdHr", text),
+    listBullet: (text) => theme.fg("mdListBullet", text),
+    bold: (text) => theme.bold(text),
+    italic: (text) => theme.italic(text),
+    underline: (text) => theme.underline(text),
+    strikethrough: (text) => theme.strikethrough(text),
+  };
+}
+
+function renderFeishuInbound(message: Parameters<Parameters<ExtensionAPI["registerMessageRenderer"]>[1]>[0], outputPad: number, theme: Parameters<Parameters<ExtensionAPI["registerMessageRenderer"]>[1]>[2]) {
+  const visible = visibleFeishuContent(message);
+  if (!visible) return undefined;
+  const body = new Container();
+  const parts = typeof visible === "string" ? [{ type: "text" as const, text: visible }] : visible;
+  const markdownTheme = feishuMarkdownTheme(theme);
+  for (const part of parts) {
+    if (part.type === "text") {
+      body.addChild(new Markdown(part.text, 0, 0, markdownTheme, { color: (text) => theme.fg("userMessageText", text) }, {
+        preserveOrderedListMarkers: true,
+        preserveBackslashEscapes: true,
+      }));
+    } else {
+      body.addChild(new Image(part.data, part.mimeType, { fallbackColor: (text) => theme.fg("userMessageText", text) }));
+    }
+  }
+  const box = new Box(outputPad, 1, (text) => theme.bg("userMessageBg", text));
+  box.addChild(body);
+  return box;
+}
+
 export default function (pi: ExtensionAPI) {
   const nativeChannel = registerFeishuNativeChannel(pi);
   let stopListeningForSessionStart: (() => void) | undefined;
@@ -115,6 +157,8 @@ export default function (pi: ExtensionAPI) {
     stopListeningForSessionStart = pi.events.on(FIRSTMATE_SESSION_START_SETTLED_EVENT, markLoaded);
   };
   listenForSessionStart();
+
+  pi.registerMessageRenderer(FEISHU_INBOUND_CUSTOM_TYPE, (message, { outputPad }, theme) => renderFeishuInbound(message, outputPad, theme));
 
   pi.registerEntryRenderer<{ kind?: string; message?: string }>("fm-feishu-local-alert", (entry, _options, theme) => {
     const box = new Box(1, 0, (text) => theme.bg("toolErrorBg", text));
