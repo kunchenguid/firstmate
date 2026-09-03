@@ -1113,9 +1113,31 @@ mv "$BENCH/benchmark.json" "$BENCH/benchmark-real.json"
 ln -s "$BENCH/benchmark-real.json" "$BENCH/benchmark.json"
 out=$(guard "bench-b1-k7" "$BENCH")
 assert_contains "$out" "rc=1" "a launch artifact replaced by a symlink is refused"
-assert_contains "$out" "launch evidence is symlinked or a special file: benchmark.json" \
+assert_contains "$out" "launch evidence is unreadable, symlinked, or a special file: benchmark.json" \
   "the refusal names the substituted artifact"
 pass "substituted launch evidence is refused by type, not only by bytes"
+
+if [ "$(id -u)" != 0 ]; then
+  BENCH="$TMP_ROOT/evidence-unreadable"
+  write_plan "$BENCH"
+  write_provenance "$BENCH" A1 cleared
+  write_provenance "$BENCH" C1 cleared
+  write_evaluator "$BENCH"
+  run_gate "$BENCH" manifest-build >/dev/null
+  write_freeze_inputs "$BENCH"
+  run_gate "$BENCH" freeze >/dev/null
+  write_receipt "$BENCH"
+  out=$(guard "bench-b1-k7" "$BENCH")
+  assert_contains "$out" "rc=0" "a receipt over readable evidence permits the launch"
+  chmod 000 "$BENCH/evaluator/score-map.json"
+  out=$(guard "bench-b1-k7" "$BENCH")
+  chmod 644 "$BENCH/evaluator/score-map.json"
+  assert_contains "$out" "rc=1" "evidence the gate cannot read withdraws the clearance"
+  assert_contains "$out" "launch evidence is unreadable, symlinked, or a special file: evaluator/score-map.json" \
+    "the refusal names the unreadable artifact instead of raising"
+  assert_not_contains "$out" "Traceback" "an unreadable artifact is a verdict, not a crash"
+  pass "unreadable launch evidence is a named refusal on the spawn path"
+fi
 
 out=$(FM_BENCH_LAUNCH_BYPASS=1 bash -c '
   . "$1/bin/fm-bench-launch-lib.sh"
@@ -1339,9 +1361,10 @@ PY
     "the opaque input path matches no entry in a path-keyed answer table"
   pass "the frozen evaluator never sees the path of the record it must derive"
 
-  # This evaluator derives every record correctly but normalises away the one
-  # value the gate edits, so it reproduces its records without reading them.
-  BENCH="$TMP_ROOT/evaluator-input-blind"
+  # This evaluator ignores the first perturbable scalar the gate reaches for
+  # but still derives its records from the rest of the input, so the gate must
+  # escalate to a later scalar rather than call it input-blind.
+  BENCH="$TMP_ROOT/evaluator-partial-blind"
   write_plan "$BENCH"
   write_evaluator "$BENCH"
   write_freeze_inputs "$BENCH"
@@ -1367,10 +1390,49 @@ contract["sha256"] = hashlib.sha256(program.read_bytes()).hexdigest()
 contract_path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
 PY
   run_gate "$BENCH" freeze >/dev/null
+  out=$(run_gate "$BENCH" evaluator-execute-verify) \
+    || fail "an evaluator that reads a later scalar must not be called input-blind: $out"
+  assert_contains "$out" "edit of /fixture/pixel in determinism/run-1.json moved" \
+    "the gate escalates past a scalar the evaluator legitimately ignores"
+  pass "the dependence probe escalates across every perturbable golden scalar"
+
+  # This evaluator also derives every record correctly, but normalises away
+  # every value the gate can edit, so no perturbation can move its output.
+  BENCH="$TMP_ROOT/evaluator-input-blind"
+  write_plan "$BENCH"
+  write_evaluator "$BENCH"
+  write_freeze_inputs "$BENCH"
+  write_isolation "$BENCH" "$RESTORE_MECHANISM"
+  python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+program = bench / "scoring" / "evaluator.sh"
+golden = json.loads((bench / "evaluator" / "determinism" / "run-1.json").read_text())
+normalise = "".join(
+    "    -e 's/\"%s\":[^,}]*/\"%s\":%s/' \\\n"
+    % (key, key, json.dumps(value, separators=(",", ":")))
+    for key, value in sorted(golden.items())
+)
+program.write_text(
+    "#!/bin/sh\n"
+    "[ \"${1:-}\" = --evaluate ] && [ -f \"${2:-}\" ] || exit 2\n"
+    "sed \\\n"
+    + normalise
+    + "    -e 's/\"schema\":\"fm-bench-evaluator-input.v1\",\"fixture\":/"
+    "\"schema\":\"fm-bench-evaluator-output.v1\",\"result\":/' \"$2\"\n"
+)
+program.chmod(0o755)
+contract_path = bench / "evaluator" / "execution.json"
+contract = json.loads(contract_path.read_text())
+contract["sha256"] = hashlib.sha256(program.read_bytes()).hexdigest()
+contract_path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
+PY
+  run_gate "$BENCH" freeze >/dev/null
   out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
-  expect_code 1 "$status" "an evaluator blind to the perturbed value is refused"
-  assert_contains "$out" "the frozen evaluator ignored its input" \
-    "a gate-owned edit of the golden input must move the evaluator output"
+  expect_code 1 "$status" "an evaluator blind to every perturbable value is refused"
+  assert_contains "$out" "no gate-owned edit of any of the" \
+    "input-blindness is declared only after every perturbable scalar is tried"
   pass "preflight proves the frozen evaluator reads the input it is handed"
 fi
 
@@ -3254,6 +3316,38 @@ expect_code 1 "$status" "an unplanned archived track is a named refusal"
 assert_contains "$out" "names unplanned track 'retired-track'" \
   "stale track identity cannot reach empty-panel arithmetic"
 pass "promotion refuses an unplanned track without a traceback"
+
+BENCH="$TMP_ROOT/promote-empty-panel"
+write_plan "$BENCH"
+write_results "$BENCH" sweep
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+plan_path = bench / "benchmark.json"
+plan = json.loads(plan_path.read_text())
+plan["tracks"]["A"]["judges"] = []
+plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+sample = next(
+    path
+    for path in sorted((bench / "archive").iterdir())
+    if json.loads((path / "manifest.json").read_text())["identity"]["track"] == "A"
+)
+judging = sample / "judging.json"
+payload = (json.dumps({"panel": [], "scores": []}, indent=2, sort_keys=True) + "\n").encode()
+judging.write_bytes(payload)
+manifest_path = sample / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["files"]["judging.json"] = hashlib.sha256(payload).hexdigest()
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "a track with no declared judge panel is a named refusal"
+assert_contains "$out" "declares no judge panel to score against" \
+  "an empty panel cannot reach the composite arithmetic"
+assert_contains "$out" "BENCH_RESULT promote-evaluate refused" \
+  "the refusal is a verdict rather than a traceback"
+pass "promotion refuses an empty judge panel before averaging it"
 
 BENCH="$TMP_ROOT/promote-sample-link"
 write_plan "$BENCH"
