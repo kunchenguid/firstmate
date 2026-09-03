@@ -32,7 +32,7 @@ document:
 # Pin the test baseline to the repository's own runner rather than leaving each
 # gate agent to chain `bash tests/a.test.sh && bash tests/b.test.sh` by hand.
 # `bin/fm-test-run.sh --changed` selects only the families the branch's changed
-# files map to, runs the proven-isolated ones with bounded concurrency, keeps
+# files map to, runs concurrency-admitted scripts with bounded concurrency, keeps
 # every unproven stateful script serial, and applies its own generous per-script
 # bound - so a verification round is neither a guessed short timeout nor a
 # serial chain. `bin/fm-test-run.sh` owns all of that (see its header).

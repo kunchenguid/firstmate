@@ -52,13 +52,13 @@
 #                   set (bin/fm-test-isolation-proof.sh --list), or in a family
 #                   carrying a recorded concurrent proof
 #                   (list_concurrent_safe_families below). Overall cap is 8;
-#                   family proofs may impose a lower cap. Unproven stateful
-#                   scripts stay serial. Concurrent runs are ordered
-#                   longest-hint-first so the slowest script is not stranded
-#                   alone at the tail. Default is 1 (serial) except for plain
-#                   --changed and a plain list of script paths, which use the
-#                   bounded automatic scheduler. Any unproven remainder runs
-#                   serially after that group.
+#                   family proofs may impose a lower cap. Individually proven
+#                   scripts share one phase; scripts admitted only by a family
+#                   proof run in a separate phase for each family. Concurrent
+#                   phases are ordered longest-hint-first. Unproven stateful
+#                   scripts run serially after all concurrent phases. Default is
+#                   1 (serial) except for plain --changed and a plain list of
+#                   script paths, which use the bounded automatic scheduler.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
