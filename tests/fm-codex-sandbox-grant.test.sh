@@ -87,7 +87,14 @@ make_case() {  # <name> -> home|proj|wt|fakebin|launchlog|id
   fm_git_worktree "$proj" "$wt" "wt-$name"
   id="$name-t1"
   mkdir -p "$home/data/$id"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+brief for $id
+
+## Firstmate spec
+Exercise the codex writable-roots grant under test.
+EOF
   printf '%s\n' "$home|$proj|$wt|$fakebin|$launchlog|$id"
 }
 
