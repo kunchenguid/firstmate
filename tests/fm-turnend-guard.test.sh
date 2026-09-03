@@ -1548,6 +1548,35 @@ test_hook_claude_mode_consumes_independent_claim_failure_epoch() {
   pass "fm-turnend-guard --claude: independent claim failures override unrelated main-ledger success"
 }
 
+test_hook_claude_mode_accounts_claimant_scoped_failure() {
+  local dir claimant out status budget_epoch budget_count
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-claimant-failure")
+  : > "$dir/state/task1.meta"
+  printf '9999999\n' > "$dir/state/.lock"
+  sleep 60 &
+  claimant=$!
+  mkdir -p \
+    "$dir/state/.claude-autoarm-failure-epochs" \
+    "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=123 owner_pid=777 outcome=failed baseline=absent reset=0 updated_at=%s session_owner_pid=9999999 claimant_pid=%s\n' \
+    "$(date +%s)" "$claimant" \
+    > "$dir/state/.claude-autoarm-failure-epochs/absent.123"
+  : > "$dir/state/.claude-autoarm-failure-notified/0.$claimant"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  budget_count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks" 2>/dev/null || true)
+  budget_epoch=$(sed -n '3s/^epoch=//p' "$dir/state/.turnend-claude-blocks" 2>/dev/null || true)
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+
+  expect_code 0 "$status" "the first claimant-scoped failure must own its Stop handoff"
+  [ -z "$out" ] || fail "claimant-scoped failure handoff produced output: $out"
+  [ "$budget_count" = 0 ] || fail "claimant-scoped failure did not initialize the failure budget"
+  [ "$budget_epoch" = failure:123:777 ] \
+    || fail "guard budget did not select the claimant-scoped failure epoch"
+  pass "fm-turnend-guard --claude: claimant-scoped failures drive guard budgeting"
+}
+
 test_hook_claude_mode_ignores_failure_superseded_by_later_success() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-superseded-claim-failure")
@@ -2292,6 +2321,7 @@ test_hook_claude_mode_blocks_on_stuck_generation_claim
 test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_consumes_independent_claim_failure_epoch
+test_hook_claude_mode_accounts_claimant_scoped_failure
 test_hook_claude_mode_ignores_failure_superseded_by_later_success
 test_hook_claude_mode_ignores_legacy_failure_superseded_by_later_success
 test_hook_claude_mode_integrated_monotonic_fail_open
