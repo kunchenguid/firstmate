@@ -4,9 +4,10 @@
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
 # filled in. Ship and scout `# Task` sections have two subsections Firstmate
 # fills before dispatch: `{TASK}` under `## Captain's intent` (the captain's
-# own ask plus only the context needed to read it, including the test scope
-# that counts as proof - targeted tests by default for a surgical change;
-# AGENTS.md section 7's proportional-validation doctrine and section 11) and
+# own ask plus only the context needed to read it, including the substance of
+# any report, decision, or PR the ask refers to, and the test scope that
+# counts as proof - targeted tests by default for a surgical change; AGENTS.md
+# section 7's proportional-validation doctrine and section 11) and
 # `{FIRSTMATE_SPEC}` under `## Firstmate spec` (build instructions, which are
 # never the captain's intent). bin/fm-dod-lib.sh owns the no-mistakes
 # `--intent` contract those subsections feed; bin/fm-spawn.sh refuses leftover

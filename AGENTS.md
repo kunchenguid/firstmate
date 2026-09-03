@@ -541,8 +541,8 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 
 ## 11. Crewmate briefs
 
-`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, and scaffold-specific safety mechanics; `bin/fm-dod-lib.sh` owns the shared ship review rule, delivery preflight, mode-specific definitions of done, and what a no-mistakes worker may pass as `--intent`, rendered into briefs and promotions.
-Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask plus only the context needed to read it, and fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with Firstmate's build instructions.
+`bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, and scaffold-specific safety mechanics; `bin/fm-dod-lib.sh` owns the shared ship review rule, delivery preflight, mode-specific definitions of done, and what a no-mistakes worker may pass as `--intent`, including its rule that the string must be self-sufficient, rendered into briefs and promotions.
+Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask plus only the context needed to read it, including the substance of any report, decision, or PR the ask refers to, and fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with Firstmate's build instructions.
 Firstmate names the test scope at intake as part of that proof: targeted tests covering the changed surface are the default proof for a surgical change under section 7's proportional-validation doctrine.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
