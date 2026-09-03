@@ -220,8 +220,8 @@ try {
 ' "$proc_path"
 }
 
-fm_claude_daemon_spawned_by_matches() {  # <process-pid> <lock-pid> <root-real>
-  local process_pid=$1 lock_pid=$2 root_real=$3 argv_json fields spawned_pid spawned_cwd spawned_real
+fm_claude_daemon_spawned_by_owner_for_process() {  # <process-pid> <root-real>
+  local process_pid=$1 root_real=$2 argv_json fields spawned_pid spawned_cwd spawned_real
   argv_json=$(fm_claude_process_argv_json "$process_pid") || return 1
   fields=$(printf '%s' "$argv_json" | node -e '
 const fs = require("fs");
@@ -297,22 +297,28 @@ try {
 } catch (_) {
   process.exit(1);
 }
-') || return 1
+  ') || return 1
   spawned_pid=${fields%%$'\n'*}
-  [ "$spawned_pid" = "$lock_pid" ] || return 1
   [ "$fields" != "$spawned_pid" ] || return 1
   spawned_cwd=${fields#*$'\n'}
   [ -n "$spawned_cwd" ] || return 1
   spawned_real=$(fm_session_resolve_dir "$spawned_cwd") || return 1
-  [ "$spawned_real" = "$root_real" ]
+  [ "$spawned_real" = "$root_real" ] || return 1
+  fm_harness_pid_alive "$spawned_pid" || return 1
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
+  printf '%s\n' "$spawned_pid"
 }
 
-fm_claude_daemon_spawned_by_lock_owner() {  # <lock-pid> <root>
-  local lock_pid=$1 root=${2:-} root_real pids pid comm args
-  [ -n "$root" ] || return 1
+fm_claude_daemon_spawned_by_matches() {  # <process-pid> <lock-pid> <root-real>
+  local process_pid=$1 lock_pid=$2 root_real=$3 spawned_pid
+  spawned_pid=$(fm_claude_daemon_spawned_by_owner_for_process \
+    "$process_pid" "$root_real") || return 1
+  [ "$spawned_pid" = "$lock_pid" ]
+}
+
+fm_claude_daemon_spawned_by_session_owner() {  # <root>
+  local root=$1 root_real pids pid comm args candidate owner=''
   root_real=$(fm_session_resolve_dir "$root") || return 1
-  fm_harness_pid_alive "$lock_pid" || return 1
-  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
@@ -320,11 +326,24 @@ fm_claude_daemon_spawned_by_lock_owner() {  # <lock-pid> <root>
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     fm_harness_process_matches "$comm" "$args" || continue
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || continue
-    fm_claude_daemon_spawned_by_matches "$pid" "$lock_pid" "$root_real" && return 0
+    candidate=$(fm_claude_daemon_spawned_by_owner_for_process \
+      "$pid" "$root_real" 2>/dev/null) || continue
+    if [ -n "$owner" ] && [ "$candidate" != "$owner" ]; then
+      return 1
+    fi
+    owner=$candidate
   done <<EOF
 $pids
 EOF
-  return 1
+  [ -n "$owner" ] || return 1
+  printf '%s\n' "$owner"
+}
+
+fm_claude_daemon_spawned_by_lock_owner() {  # <lock-pid> <root>
+  local lock_pid=$1 root=${2:-} owner
+  [ -n "$root" ] || return 1
+  owner=$(fm_claude_daemon_spawned_by_session_owner "$root") || return 1
+  [ "$owner" = "$lock_pid" ]
 }
 
 fm_harness_pid_zombie() {  # <pid>

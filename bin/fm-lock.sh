@@ -37,6 +37,10 @@ AUTOARM_MODE=0
 [ "${1:-}" != "--autoarm" ] || AUTOARM_MODE=1
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+if [ "$AUTOARM_MODE" -eq 1 ]; then
+  bridged_owner=$(fm_claude_daemon_spawned_by_session_owner "$FM_ROOT" 2>/dev/null || true)
+  [ -z "$bridged_owner" ] || me=$bridged_owner
+fi
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1

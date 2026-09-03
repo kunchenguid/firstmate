@@ -1108,7 +1108,8 @@ fm_autoarm_transition_try_acquire() {  # <state-dir>
 }
 
 fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace> [caller-identity]
-  local state=$1 grace=$2 caller_identity=${3:-} lock steal owner pid recorded current i revoked_signature revoked_identity
+  local state=$1 grace=$2 caller_identity=${3:-} lock steal owner pid recorded current i
+  local revoked_signature revoked_identity revoked_lock caller_pid
   lock="$state/.claude-autoarm-transition.lock"
   steal="$lock.steal"
   [ "$(fm_path_age "$lock")" -ge "$grace" ] || return 1
@@ -1155,9 +1156,33 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace> [caller-identity
     revoked_signature="$FM_AUTOARM_GEN:$FM_AUTOARM_OWNER:$FM_AUTOARM_OUTCOME"
     revoked_identity=$FM_AUTOARM_IDENTITY
   fi
-  if ! kill -TERM "$pid" 2>/dev/null; then
+  caller_pid=${BASHPID:-$$}
+  revoked_lock="$lock.revoked.$caller_pid"
+  if [ -e "$revoked_lock" ] || [ -L "$revoked_lock" ] \
+    || ! mv "$lock" "$revoked_lock" 2>/dev/null; then
     fm_lock_release "$steal"
     return 1
+  fi
+  if ! fm_lock_points_to_owner "$revoked_lock" "$owner"; then
+    mv "$revoked_lock" "$lock" 2>/dev/null || true
+    fm_lock_release "$steal"
+    return 1
+  fi
+  if ! kill -TERM "$pid" 2>/dev/null; then
+    if current=$(fm_pid_identity "$pid" 2>/dev/null) \
+      && [ "$current" = "$recorded" ]; then
+      mv "$revoked_lock" "$lock" 2>/dev/null || true
+      fm_lock_release "$steal"
+      return 1
+    fi
+    fm_lock_remove_path "$revoked_lock" || {
+      fm_lock_release "$steal"
+      return 1
+    }
+    fm_lock_release "$steal"
+    FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE=$revoked_signature
+    FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=$revoked_identity
+    return 0
   fi
   kill -CONT "$pid" 2>/dev/null || true
   i=0
@@ -1170,11 +1195,12 @@ fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace> [caller-identity
   if current=$(fm_pid_identity "$pid" 2>/dev/null) \
     && [ "$current" = "$recorded" ]; then
     kill -KILL "$pid" 2>/dev/null || {
+      mv "$revoked_lock" "$lock" 2>/dev/null || true
       fm_lock_release "$steal"
       return 1
     }
   fi
-  fm_lock_remove_path "$lock" || {
+  fm_lock_remove_path "$revoked_lock" || {
     fm_lock_release "$steal"
     return 1
   }
@@ -1298,7 +1324,7 @@ fm_autoarm_failure_sequence_compact() {  # <state-dir> <through-epoch>
   fi
   [ "$current" -ge "$through" ] || current=$through
   pid=${BASHPID:-$$}
-  tmp="$sequence/.high-water.tmp.$pid"
+  tmp="$state/.claude-autoarm-failure-sequence-high-water.tmp.$pid"
   if ! printf '%s\n' "$current" > "$tmp" 2>/dev/null \
     || ! mv -f "$tmp" "$high_water" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
@@ -1596,6 +1622,19 @@ fm_autoarm_ledger_read() {  # <state-dir>
   return 0
 }
 
+fm_autoarm_session_owner_current() {  # <state-dir> <session-owner-pid>
+  local state=$1 expected_owner=$2 current_owner
+  case "$expected_owner" in ''|*[!0-9]*) return 1 ;; esac
+  command -v fm_harness_pid_alive >/dev/null 2>&1 || return 1
+  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
+  current_owner=$(cat "$state/.lock" 2>/dev/null) || return 1
+  [ "$current_owner" = "$expected_owner" ] || return 1
+  fm_harness_pid_alive "$expected_owner" || return 1
+  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
+  current_owner=$(cat "$state/.lock" 2>/dev/null) || return 1
+  [ "$current_owner" = "$expected_owner" ]
+}
+
 # True while the CURRENT ledger claim is open and healthy - the defer predicate
 # both Stop participants use. Open means: outcome "arming", a live claimant
 # whose mandatory recorded identity recomputes and matches its pid, and not
@@ -1607,22 +1646,33 @@ fm_autoarm_ledger_read() {  # <state-dir>
 # build's entry gets its deference from its held role-carrying lock through
 # the legacy shim, and anything else must not defer.
 fm_autoarm_claim_open() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current session_owner
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current
+  local gen owner outcome session_owner identity
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
   esac
   fm_autoarm_ledger_read "$state" || return 1
+  gen=$FM_AUTOARM_GEN
+  owner=$FM_AUTOARM_OWNER
+  outcome=$FM_AUTOARM_OUTCOME
+  session_owner=$FM_AUTOARM_SESSION_OWNER
+  identity=$FM_AUTOARM_IDENTITY
   [ "$FM_AUTOARM_OUTCOME" = arming ] || return 1
   fm_pid_alive "$FM_AUTOARM_OWNER" || return 1
   [ -n "$FM_AUTOARM_IDENTITY" ] || return 1
   current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 1
   [ -n "$current" ] || return 1
   [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
-  if [ -n "$FM_AUTOARM_SESSION_OWNER" ]; then
-    [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
-    session_owner=$(cat "$state/.lock" 2>/dev/null) || return 1
-    [ "$session_owner" = "$FM_AUTOARM_SESSION_OWNER" ] || return 1
+  if [ -n "$session_owner" ]; then
+    fm_autoarm_session_owner_current "$state" "$session_owner" || return 1
+    fm_autoarm_ledger_read "$state" || return 1
+    [ "$FM_AUTOARM_GEN" = "$gen" ] \
+      && [ "$FM_AUTOARM_OWNER" = "$owner" ] \
+      && [ "$FM_AUTOARM_OUTCOME" = "$outcome" ] \
+      && [ "$FM_AUTOARM_SESSION_OWNER" = "$session_owner" ] \
+      && [ "$FM_AUTOARM_IDENTITY" = "$identity" ] || return 1
+    fm_autoarm_session_owner_current "$state" "$session_owner" || return 1
   fi
   if [ "$(fm_path_age "$epoch")" -ge "$grace" ] \
     && [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ]; then

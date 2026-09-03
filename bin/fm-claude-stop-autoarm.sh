@@ -205,6 +205,19 @@ autoarm_claim_failure() {  # <reason>
   exit 0
 }
 
+autoarm_session_current_or_fail() {  # <reason>
+  local reason=$1 current_owner
+  autoarm_session_still_owned && return 0
+  current_owner=$(cat "$STATE/.lock" 2>/dev/null || true)
+  if [ "$SESSION_AUTHENTICATED" -eq 1 ] \
+    && [ "$current_owner" = "$SESSION_OWNER_PID" ] \
+    && ! fm_harness_pid_alive "$SESSION_OWNER_PID"; then
+    SESSION_AUTHENTICATED=0
+    autoarm_claim_failure "$reason"
+  fi
+  return 1
+}
+
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
 # remain the single acquisition owner, then re-verify current-session identity
@@ -232,9 +245,9 @@ fi
 # pre-generation build (or the guard's own terminal-check), which the legacy
 # shim defers to while genuinely deciding and reclaims once when proven
 # abandoned.
-autoarm_session_still_owned || exit 0
+autoarm_session_current_or_fail 'authenticated session owner died before generation claim' || exit 0
 fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
-autoarm_session_still_owned || exit 0
+autoarm_session_current_or_fail 'authenticated session owner died before generation publication' || exit 0
 fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID"
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
@@ -243,10 +256,10 @@ if [ "$CLAIM_RC" -ne 0 ]; then
   case "$ROLE" in
     autoarm)
       if fm_autoarm_claim_abandoned "$STATE" "$GRACE"; then
-        autoarm_session_still_owned || exit 0
+        autoarm_session_current_or_fail 'authenticated session owner died before legacy claim recovery' || exit 0
         fm_autoarm_release_abandoned "$STATE" "$GRACE" \
           || autoarm_claim_failure 'abandoned legacy auto-arm claim could not be released'
-        autoarm_session_still_owned || exit 0
+        autoarm_session_current_or_fail 'authenticated session owner died before recovered generation claim' || exit 0
         fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID"
         CLAIM_RC=$?
         [ "$CLAIM_RC" -eq 0 ] \
@@ -278,14 +291,14 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # already-printed banner is never delivered by a losing generation.
 autoarm_commit() {  # <outcome> [marker-file]
   local commit_rc failure_rc terminal_baseline pid
-  autoarm_session_still_owned || return 2
+  autoarm_session_current_or_fail 'authenticated session owner died before terminal commit' || return 2
   if [ -n "${2:-}" ]; then
     fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2" "$FM_ROOT" "$SESSION_OWNER_PID"
   else
     fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT" "$SESSION_OWNER_PID"
   fi
   commit_rc=$?
-  autoarm_session_still_owned || return 2
+  autoarm_session_current_or_fail 'authenticated session owner died during terminal commit' || return 2
   [ "$commit_rc" -ne 0 ] || return 0
   [ "$commit_rc" -ne 2 ] || return 2
   autoarm_alarm_current && return 2
@@ -340,7 +353,7 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
   # watcher/wake state: re-verify generation ownership before every arm
   # invocation, first attempt and retries alike.
-  if ! autoarm_session_still_owned \
+  if ! autoarm_session_current_or_fail 'authenticated session owner died before watcher arm' \
     || ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
@@ -387,7 +400,7 @@ if ! need_supervision; then
 fi
 
 if [ "$HEALTHY" -eq 1 ]; then
-  if ! autoarm_session_still_owned \
+  if ! autoarm_session_current_or_fail 'authenticated session owner died before watcher reset' \
     || ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
@@ -423,7 +436,7 @@ fi
 if [ "$ACTIONABLE" -eq 1 ]; then
   # Cheap early-out before composing the banner; the real commit decision is
   # the owned terminal write below.
-  if ! autoarm_session_still_owned \
+  if ! autoarm_session_current_or_fail 'authenticated session owner died before actionable handoff' \
     || ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
@@ -447,7 +460,7 @@ fi
 # commits in the same owned critical section as the winning failed write, so a
 # losing generation can neither consume nor deliver it.
 if ! autoarm_notice_current; then
-  if ! autoarm_session_still_owned \
+  if ! autoarm_session_current_or_fail 'authenticated session owner died before failure handoff' \
     || ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0

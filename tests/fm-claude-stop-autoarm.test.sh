@@ -138,6 +138,21 @@ printf 'signal: task.status done: transferred session\n'
 exit 0
 SH
       ;;
+    owner-dies-actionable)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+kill "$FM_TEST_LOCK_OWNER" 2>/dev/null || true
+i=0
+while [ "$i" -lt 200 ] && kill -0 "$FM_TEST_LOCK_OWNER" 2>/dev/null; do
+  sleep 0.01
+  i=$((i + 1))
+done
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'signal: task.status done: owner exited\n'
+exit 0
+SH
+      ;;
     stalled-terminal-actionable)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -651,6 +666,30 @@ SH
   pass "auto-arm: Claude daemon spawned-by metadata lets the foreground-owned home arm"
 }
 
+test_claude_daemon_reclaims_stale_lock_to_foreground_owner() {
+  local dir out status owner lock_after
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-spawned-by-stale-recovery")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '9999999\n' > "$dir/state/.lock"
+
+  out=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status=$?
+  lock_after=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+
+  expect_code 2 "$status" "a detached daemon must recover a stale lock for its authenticated foreground owner"
+  [ "$lock_after" = "$owner" ] \
+    || fail "detached stale recovery published daemon ownership instead of foreground ownership"
+  assert_contains "$out" "fixture-win actionable" \
+    "detached stale recovery did not deliver the foreground session's watcher close"
+  [ "$(epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+    || fail "recovered generation was not bound to the authenticated foreground owner"
+  pass "auto-arm: detached stale recovery publishes the authenticated foreground owner"
+}
+
 test_generation_claim_is_bound_to_serialized_session_owner() {
   local dir owner claimant successor claim_rc open_rc i
   dir=$(make_primary_dir "$TMP_ROOT/daemon-bound-generation")
@@ -688,7 +727,11 @@ test_generation_claim_is_bound_to_serialized_session_owner() {
   expect_code 0 "$(cat "$dir/state/successor-lock-rc" 2>/dev/null || true)" "successor did not acquire after claim publication"
   [ "$(epoch_field "$dir" session_owner_pid)" = "$owner" ] \
     || fail "generation did not retain its authenticated foreground session owner"
-  bash -c '. "$1/bin/fm-wake-lib.sh"; fm_autoarm_claim_open "$1/state" 300' _ "$dir"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-session-lock-lib.sh"
+    fm_autoarm_claim_open "$1/state" 300
+  ' _ "$dir"
   open_rc=$?
   kill "$successor" 2>/dev/null || true
   wait "$successor" 2>/dev/null || true
@@ -910,6 +953,32 @@ test_claude_daemon_losing_session_owner_cannot_commit() {
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "former session daemon elected a terminal notice"
   assert_not_contains "$(cat "$out")" "firstmate watcher wake" "former session daemon delivered terminal output"
   pass "auto-arm: daemon bridge revalidates session authority before terminal commit"
+}
+
+test_claude_daemon_owner_death_publishes_failure() {
+  local dir out status owner failure reset
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-owner-death-failure")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" owner-dies-actionable
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  out=$(run_autoarm_from_claude_daemon_bridge "$dir" "$owner" 2>/dev/null); status=$?
+  wait "$owner" 2>/dev/null || true
+  failure=$(failure_epoch_path "$dir") \
+    || fail "unchanged dead session owner left no durable auto-arm failure"
+  reset=$(failure_epoch_field "$dir" reset)
+
+  expect_code 2 "$status" "an unchanged dead foreground owner must fail visibly"
+  assert_present "$failure" "owner death did not persist a failed epoch"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+    || fail "owner-death failure was not fenced to the unchanged dead session owner"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+    "owner death did not persist its owner-scoped notice"
+  assert_contains "$out" "authenticated session owner died" \
+    "owner death did not deliver the automatic failure notice"
+  pass "auto-arm: unchanged authenticated owner death publishes durable failure state"
 }
 
 test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit() {
@@ -1369,6 +1438,53 @@ test_stalled_transition_holder_cannot_hide_failure() {
   [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "transition-stall failure did not record outcome=failed"
   assert_absent "$state/arm-ran" "transition-stall failure reached the arm"
   pass "auto-arm: stalled transition holders are fenced before durable failure publication"
+}
+
+test_transition_revocation_does_not_signal_released_owner() {
+  local dir state ready release released done holder revoke_rc i
+  dir=$(make_primary_dir "$TMP_ROOT/transition-release-race")
+  state="$dir/state"
+  ready="$state/transition-release-ready"
+  release="$state/transition-release"
+  released="$state/transition-released"
+  done="$state/transition-release-done"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_transition_acquire "$1/state" || exit
+    : > "$2"
+    while [ ! -e "$3" ]; do sleep 0.01; done
+    fm_lock_release "$1/state/.claude-autoarm-transition.lock"
+    : > "$4"
+    while [ ! -e "$5" ]; do sleep 0.01; done
+  ' _ "$dir" "$ready" "$release" "$released" "$done" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "transition release-race holder did not acquire its lock"
+  sleep 1
+
+  FM_TEST_RELEASE="$release" FM_TEST_RELEASED="$released" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_ledger_read() {
+      : > "$FM_TEST_RELEASE"
+      i=0
+      while [ "$i" -lt 200 ] && [ ! -e "$FM_TEST_RELEASED" ]; do
+        sleep 0.01
+        i=$((i + 1))
+      done
+      [ -e "$FM_TEST_RELEASED" ] || return 1
+      return 1
+    }
+    fm_autoarm_transition_revoke_stalled "$1/state" 1
+  ' _ "$dir"
+  revoke_rc=$?
+  kill -0 "$holder" 2>/dev/null \
+    || fail "transition revocation signalled an owner that had already released its lock"
+  : > "$done"
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 1 "$revoke_rc" "a completed transition release must win against stale revocation"
+  pass "auto-arm: transition release wins atomically against stale revocation"
 }
 
 test_stalled_transition_steal_holder_falls_back_to_durable_failure() {
@@ -2318,6 +2434,31 @@ test_failure_sequence_compacts_at_recovery_reset() {
   pass "auto-arm: recovery reset compacts sequence history without weakening fences"
 }
 
+test_failure_sequence_survives_interrupted_compaction_with_dotglob() {
+  local dir state sequence crash_rc next
+  dir=$(make_primary_dir "$TMP_ROOT/failure-sequence-dotglob-crash")
+  state="$dir/state"
+  sequence="$state/.claude-autoarm-failure-sequence"
+  mkdir -p "$sequence/1"
+
+  bash -O dotglob -c '
+    . "$1/bin/fm-wake-lib.sh"
+    mv() {
+      kill -KILL "${BASHPID:-$$}"
+    }
+    fm_autoarm_failure_sequence_compact "$1/state" 1
+  ' _ "$dir" >/dev/null 2>&1
+  crash_rc=$?
+  expect_code 137 "$crash_rc" "the compaction crash fixture did not interrupt before publication"
+
+  next=$(bash -O dotglob -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_autoarm_failure_sequence_next "$1/state"
+  ' _ "$dir") || fail "interrupted compaction poisoned failure allocation under dotglob"
+  [ "$next" -gt 1 ] || fail "post-crash failure allocation did not remain monotonic"
+  pass "auto-arm: interrupted compaction cannot poison dotglob failure allocation"
+}
+
 test_failed_cycles_notify_once_and_keep_retrying() {
   local dir out1 out2 status1 status2 owner
   dir=$(make_primary_dir "$TMP_ROOT/failed-dedup")
@@ -2969,6 +3110,36 @@ record_autoarm_v2_claim() {
     "$gen" "$owner" "$outcome" "$identity" > "$dir/state/.claude-autoarm-epoch"
 }
 
+test_bound_open_claim_rejects_zombie_session_owner() {
+  local dir claimant session_owner identity fakeproc open_rc
+  dir=$(make_primary_dir "$TMP_ROOT/v2-zombie-session-owner")
+  sleep 60 &
+  claimant=$!
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  session_owner=$!
+  identity=$(fm_test_pid_identity "$claimant") \
+    || fail "could not identify the open-claim owner"
+  printf 'epoch=464 owner_pid=%s outcome=arming session_owner_pid=%s updated_at=%s\n%s\n' \
+    "$claimant" "$session_owner" "$(date +%s)" "$identity" \
+    > "$dir/state/.claude-autoarm-epoch"
+  printf '%s\n' "$session_owner" > "$dir/state/.lock"
+  fakeproc="$dir/proc"
+  mkdir -p "$fakeproc/$session_owner"
+  printf '%s (zombie fixture) Z 1\n' "$session_owner" > "$fakeproc/$session_owner/stat"
+
+  FM_PROC_ROOT_OVERRIDE="$fakeproc" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-session-lock-lib.sh"
+    fm_autoarm_claim_open "$1/state" 300
+  ' _ "$dir"
+  open_rc=$?
+  kill "$claimant" "$session_owner" 2>/dev/null || true
+  wait "$claimant" "$session_owner" 2>/dev/null || true
+
+  expect_code 1 "$open_rc" "an open claim must reject a zombie foreground session owner"
+  pass "auto-arm: open claims require a live non-zombie session owner"
+}
+
 # A live open generation claim needs no lock to keep the gate closed: the
 # ledger alone defers a concurrent firing, however old the entry, while the
 # watcher keeps beating the beacon.
@@ -3166,6 +3337,7 @@ test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_claude_daemon_spawned_by_foreground_lock_owner_arms
+test_claude_daemon_reclaims_stale_lock_to_foreground_owner
 test_generation_claim_is_bound_to_serialized_session_owner
 test_stalled_session_lease_publishes_bound_failure
 test_terminal_session_lease_timeout_publishes_failure
@@ -3173,6 +3345,7 @@ test_reset_session_lease_timeout_publishes_failure
 test_successor_session_gets_own_failure_notice
 test_successor_session_ignores_predecessor_attended_alarm
 test_claude_daemon_losing_session_owner_cannot_commit
+test_claude_daemon_owner_death_publishes_failure
 test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit
 test_terminal_publish_holds_session_acquisition_lease
 test_claude_daemon_losing_owner_during_record_lock_wait_cannot_mutate
@@ -3188,6 +3361,7 @@ test_live_claim_mutex_holder_cannot_hide_failure
 test_legacy_predecessor_alarm_cannot_hide_successor_claim_failure
 test_identity_unavailable_failure_publication_does_not_self_wedge
 test_stalled_transition_holder_cannot_hide_failure
+test_transition_revocation_does_not_signal_released_owner
 test_stalled_transition_steal_holder_falls_back_to_durable_failure
 test_pid_reused_transition_holder_cannot_hide_failure
 test_zombie_transition_holder_cannot_hide_failure
@@ -3208,6 +3382,7 @@ test_terminal_commit_failure_publishes_independent_failure
 test_terminal_failure_fallback_cannot_publish_after_session_transfer
 test_terminal_commit_supersession_stays_silent
 test_failure_sequence_compacts_at_recovery_reset
+test_failure_sequence_survives_interrupted_compaction_with_dotglob
 test_failed_cycles_notify_once_and_keep_retrying
 test_post_alarm_claim_failures_do_not_grow_episode_state
 test_failure_notice_marker_write_refuses_delivery_and_retries
@@ -3230,6 +3405,7 @@ test_identity_matched_arming_claim_is_never_reclaimed
 test_terminal_check_claim_is_never_reclaimed
 test_stuck_live_legacy_owner_is_retired_and_reclaimed
 test_stopped_legacy_owner_is_reclaimed_with_term_pending
+test_bound_open_claim_rejects_zombie_session_owner
 test_open_generation_claim_defers_without_any_lock
 test_stuck_generation_claim_is_superseded_and_rearms
 test_identityless_ledger_never_defers

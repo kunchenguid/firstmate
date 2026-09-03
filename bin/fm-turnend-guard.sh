@@ -154,6 +154,8 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
@@ -311,7 +313,7 @@ budget_account_current_epoch() {
 }
 
 autoarm_owns_recovery() {
-  local role outcome age epoch_path
+  local role outcome age epoch_path terminal_session_owner=''
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
   # A live OPEN generation claim owns recovery: the ledger names a live,
   # identity-matched owner still arming that is not stuck (fm_autoarm_claim_open
@@ -340,13 +342,20 @@ autoarm_owns_recovery() {
     && fm_autoarm_failure_ledger_current "$STATE"; then
     outcome=$FM_AUTOARM_FAILURE_OUTCOME
     epoch_path=$FM_AUTOARM_FAILURE_PATH
+    terminal_session_owner=$FM_AUTOARM_FAILURE_SESSION_OWNER
   else
-    outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+    outcome=
+    if fm_autoarm_ledger_read "$STATE"; then
+      outcome=$FM_AUTOARM_OUTCOME
+      terminal_session_owner=$FM_AUTOARM_SESSION_OWNER
+    fi
   fi
   case "$outcome" in
     rewake)
       age=$(fm_path_age "$epoch_path")
-      if [ "$age" -lt "$EPOCH_FRESH" ]; then
+      if [ "$age" -lt "$EPOCH_FRESH" ] \
+        && { [ -z "$terminal_session_owner" ] \
+          || fm_autoarm_session_owner_current "$STATE" "$terminal_session_owner"; }; then
         fm_autoarm_failure_notice_current "$STATE" "$FAILURE_NOTICE" \
           && budget_account_current_epoch || true
         return 0
