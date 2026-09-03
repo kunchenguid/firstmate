@@ -635,7 +635,6 @@ task_json_lines() {
   local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local decision_line decision_verb
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -716,16 +715,8 @@ task_json_lines() {
       [ splits("\n") | select(length > 0)
         | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
         | select(. != null) ]')
-    pending_decision=0
-    blocked_event=0
-    while IFS= read -r decision_line || [ -n "$decision_line" ]; do
-      decision_verb=${decision_line#*$'\t'}
-      decision_verb=${decision_verb%%$'\t'*}
-      case "$decision_verb" in
-        needs-decision) pending_decision=1 ;;
-        blocked) blocked_event=1 ;;
-      esac
-    done <<< "$open_decisions_tsv"
+    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
+    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
 
     endpoint_exists=null
     agent_alive=not_checked
