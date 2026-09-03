@@ -405,13 +405,14 @@ def check_promotion_rule(plan: dict[str, Any], report: Report) -> None:
         report.require(
             isinstance(delta, (int, float))
             and not isinstance(delta, bool)
-            and delta <= 0
+            and delta == 0
             and isinstance(losses, int)
             and not isinstance(losses, bool)
-            and 0 <= losses < baseline_sample_count,
+            and 0 <= losses <= 1
+            and losses < baseline_sample_count,
             "promotion.baseline_veto",
-            "baseline veto bounds recorded",
-            "baseline_veto needs max_negative_mean_quality_delta <= 0 and a loss maximum below samples_per_baseline",
+            "baseline veto bounds preserve the zero mean floor and at most one loss",
+            "baseline_veto must keep max_negative_mean_quality_delta at 0 and max_losses_of_three between 0 and 1",
         )
     else:
         report.fail("promotion.baseline_veto", "baseline_veto must be an object")
@@ -2007,7 +2008,7 @@ def validate_archived_evaluator_declaration(
     argv = rerun.get("argv")
     expected = rerun.get("result_hash")
     scored_inputs = rerun.get("scored_inputs")
-    perturbations = rerun.get("input_perturbations")
+    perturbations = rerun.get("input_perturbations", {})
     if not isinstance(argv, list) or len(argv) != 1 or not isinstance(argv[0], str) or not argv[0]:
         return None, "archived evaluator argv must name exactly one executable evaluator file"
     if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
@@ -2018,12 +2019,16 @@ def validate_archived_evaluator_declaration(
         or not all(isinstance(item, str) and item for item in scored_inputs)
     ):
         return None, "archived evaluator scored_inputs must name at least one restored candidate file"
-    if (
-        not isinstance(perturbations, dict)
-        or len(set(scored_inputs)) != len(scored_inputs)
-        or set(perturbations) != set(scored_inputs)
-    ):
-        return None, "archived evaluator input_perturbations must define every scored input exactly once"
+    if len(set(scored_inputs)) != len(scored_inputs):
+        return None, "archived evaluator scored_inputs must not contain duplicates"
+    if not isinstance(perturbations, dict):
+        return None, "archived evaluator input_perturbations must be an object when declared"
+    unexpected_perturbations = sorted(set(perturbations) - set(scored_inputs))
+    if unexpected_perturbations:
+        return None, (
+            "archived evaluator input_perturbations name undeclared scored inputs: "
+            + ", ".join(unexpected_perturbations)
+        )
     files = record.get("files")
     groups = record.get("groups")
     if not isinstance(files, dict) or argv[0] not in files:
@@ -2036,14 +2041,16 @@ def validate_archived_evaluator_declaration(
     if not os.access(evaluator, os.X_OK):
         return None, "archived evaluator file is not executable"
     restored_root = restored_tree.resolve()
-    input_paths: list[Path] = []
+    perturbable_paths: list[Path] = []
     for relative in scored_inputs:
         candidate = (restored_tree / relative).resolve()
         if not is_within(candidate, restored_root):
             return None, f"archived evaluator scored input escapes the restored candidate: {relative}"
         if not candidate.is_file():
             return None, f"archived evaluator scored input is not a restored candidate file: {relative}"
-        perturbation = perturbations.get(relative)
+        if relative not in perturbations:
+            continue
+        perturbation = perturbations[relative]
         if (
             not isinstance(perturbation, dict)
             or perturbation.get("kind") != "json-value"
@@ -2058,11 +2065,11 @@ def validate_archived_evaluator_declaration(
             return None, f"archived evaluator scored input perturbation is invalid for {relative}: {exc}"
         if not isinstance(current, (str, int, float, bool)) or current is None:
             return None, f"archived evaluator perturbation pointer must select a scalar value: {relative}"
-        input_paths.append(Path(relative))
+        perturbable_paths.append(Path(relative))
     return {
         "argv": argv[0],
         "expected": expected,
-        "input_paths": input_paths,
+        "perturbable_paths": perturbable_paths,
         "perturbations": perturbations,
     }, "archived evaluator declaration validated"
 
@@ -2103,14 +2110,27 @@ def randomized_string_like(value: str, entropy: bytes) -> str:
     return "".join(output)
 
 
-def perturb_json_input(path: Path, pointer: str, entropy: bytes) -> None:
-    document = json.loads(path.read_text(encoding="utf-8"))
+def canonical_json_bytes(document: Any) -> bytes:
+    return (json.dumps(document, separators=(",", ":"), sort_keys=True) + "\n").encode()
+
+
+def set_json_pointer_value(document: Any, pointer: str, replacement: Any) -> Any:
     parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer.removeprefix("/").split("/")]
     parent = document
     for part in parts[:-1]:
         parent = parent[int(part)] if isinstance(parent, list) else parent[part]
     leaf = parts[-1]
     current = parent[int(leaf)] if isinstance(parent, list) else parent[leaf]
+    if isinstance(parent, list):
+        parent[int(leaf)] = replacement
+    else:
+        parent[leaf] = replacement
+    return current
+
+
+def perturb_json_input(path: Path, pointer: str, entropy: bytes) -> None:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    current = json_pointer_value(document, pointer)
     if isinstance(current, bool):
         replacement: Any = not current
     elif isinstance(current, int):
@@ -2121,11 +2141,28 @@ def perturb_json_input(path: Path, pointer: str, entropy: bytes) -> None:
         replacement = randomized_string_like(current, entropy)
     else:
         raise ValueError(f"JSON pointer {pointer!r} does not select a supported scalar")
-    if isinstance(parent, list):
-        parent[int(leaf)] = replacement
-    else:
-        parent[leaf] = replacement
-    path.write_text(json.dumps(document, separators=(",", ":"), sort_keys=True) + "\n", encoding="utf-8")
+    set_json_pointer_value(document, pointer, replacement)
+    path.write_bytes(canonical_json_bytes(document))
+
+
+def prepare_json_differential(genuine: Path, perturbed: Path, pointer: str, entropy: bytes) -> None:
+    genuine_document = json.loads(genuine.read_text(encoding="utf-8"))
+    perturbed_document = json.loads(perturbed.read_text(encoding="utf-8"))
+    if genuine_document != perturbed_document:
+        raise ValueError("the two restored scored-input copies differ before perturbation")
+    canonical = canonical_json_bytes(genuine_document)
+    genuine.write_bytes(canonical)
+    perturbed.write_bytes(canonical_json_bytes(perturbed_document))
+    perturb_json_input(perturbed, pointer, entropy)
+    final_genuine = json.loads(genuine.read_text(encoding="utf-8"))
+    final_perturbed = json.loads(perturbed.read_text(encoding="utf-8"))
+    original = json_pointer_value(final_genuine, pointer)
+    changed = json_pointer_value(final_perturbed, pointer)
+    if original == changed:
+        raise ValueError(f"JSON pointer {pointer!r} did not change")
+    set_json_pointer_value(final_perturbed, pointer, original)
+    if canonical_json_bytes(final_perturbed) != genuine.read_bytes():
+        raise ValueError(f"prepared scored-input copies differ outside JSON pointer {pointer!r}")
 
 
 def rerun_archived_evaluator(
@@ -2134,11 +2171,11 @@ def rerun_archived_evaluator(
     restored_tree: Path,
     wrapper: list[str],
     declaration: dict[str, Any],
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     files = record["files"]
     evaluator_name = declaration["argv"]
     expected = declaration["expected"]
-    input_paths = declaration["input_paths"]
+    perturbable_paths = declaration["perturbable_paths"]
     perturbations = declaration["perturbations"]
     try:
         with tempfile.TemporaryDirectory(prefix="fm-bench-evaluator-") as first_workspace, tempfile.TemporaryDirectory(
@@ -2150,7 +2187,7 @@ def rerun_archived_evaluator(
                 for relative in files:
                     source = (sample / relative).resolve()
                     if not is_within(source, sample.resolve()) or not source.is_file():
-                        return False, f"archived evaluator input is unavailable: {relative}"
+                        return False, f"archived evaluator input is unavailable: {relative}", "failed"
                     destination = scratch / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, destination)
@@ -2159,11 +2196,15 @@ def rerun_archived_evaluator(
                 run_roots.append((scratch, run_tree))
             genuine_scratch, genuine_tree = run_roots[0]
             perturbed_scratch, perturbed_tree = run_roots[1]
-            for relative in input_paths:
+            for relative in perturbable_paths:
+                genuine_input = (genuine_tree / relative).resolve()
                 perturbed_input = (perturbed_tree / relative).resolve()
-                if not is_within(perturbed_input, perturbed_tree.resolve()):
-                    return False, f"archived evaluator scored input cannot be perturbed inside scratch: {relative}"
-                perturb_json_input(
+                if not is_within(genuine_input, genuine_tree.resolve()) or not is_within(
+                    perturbed_input, perturbed_tree.resolve()
+                ):
+                    return False, f"archived evaluator scored input cannot be prepared inside scratch: {relative}", "failed"
+                prepare_json_differential(
+                    genuine_input,
                     perturbed_input,
                     perturbations[str(relative)]["pointer"],
                     os.urandom(32),
@@ -2188,26 +2229,28 @@ def rerun_archived_evaluator(
                 timeout=60,
             )
     except subprocess.TimeoutExpired:
-        return False, "archived evaluator exceeded the 60-second restore-drill limit"
+        return False, "archived evaluator exceeded the 60-second restore-drill limit", "failed"
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-        return False, f"archived evaluator could not execute: {exc}"
+        return False, f"archived evaluator could not execute: {exc}", "failed"
     if genuine.returncode != 0:
         detail = genuine.stderr.decode("utf-8", "replace").strip()
         suffix = f": {detail}" if detail else ""
-        return False, f"archived evaluator confinement or execution exited {genuine.returncode}{suffix}"
-    if perturbed.returncode != 0:
+        return False, f"archived evaluator confinement or execution exited {genuine.returncode}{suffix}", "failed"
+    if perturbable_paths and perturbed.returncode != 0:
         detail = perturbed.stderr.decode("utf-8", "replace").strip()
         suffix = f": {detail}" if detail else ""
         return False, (
             "perturbed evaluator run was inconclusive because the declared form-preserving input "
             f"exited {perturbed.returncode}{suffix}"
-        )
+        ), "failed"
     actual = sha256_bytes(genuine.stdout)
     if actual != expected:
-        return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}"
+        return False, f"archived evaluator result hash {actual[:12]} does not match {expected[:12]}", "failed"
+    if not perturbable_paths:
+        return True, actual, "unproven"
     if perturbed.stdout == genuine.stdout:
-        return False, "archived evaluator ignored its declared scored inputs; their perturbation did not change output"
-    return True, actual
+        return False, "archived evaluator ignored its declared scored inputs; their perturbation did not change output", "failed"
+    return True, actual, "proven"
 
 
 def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
@@ -2227,6 +2270,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
     selected_samples = samples[:RESTORE_EVALUATOR_SAMPLE_LIMIT]
     selected_names = {sample.name for sample in selected_samples}
     selected_validated: dict[str, tuple[Path, dict[str, Any], dict[str, Any], Path]] = {}
+    dependence: dict[str, str] = {}
     validated_count = 0
     reran = 0
     with tempfile.TemporaryDirectory(prefix="fm-bench-selected-") as selected_workdir:
@@ -2349,7 +2393,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                 )
                 for sample in selected_samples:
                     archived_sample, record, declaration, restored_tree = selected_validated[sample.name]
-                    reran_ok, rerun_detail = rerun_archived_evaluator(
+                    reran_ok, rerun_detail, dependence_status = rerun_archived_evaluator(
                         archived_sample,
                         record,
                         restored_tree,
@@ -2363,14 +2407,25 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                     reran += 1
                     report.ok(
                         f"restore.{sample.name}.evaluator_rerun",
-                        "confined archived evaluator rerun reproduced the genuine result and changed under scored-input perturbation",
+                        "confined archived evaluator rerun reproduced the recorded genuine result",
                     )
+                    dependence[sample.name] = dependence_status
+                    if dependence_status == "proven":
+                        report.ok(
+                            f"restore.{sample.name}.evaluator_dependence",
+                            "proven; identically prepared copies differ only at declared JSON pointers and output changed",
+                        )
+                    else:
+                        report.ok(
+                            f"restore.{sample.name}.evaluator_dependence",
+                            "unproven; no sound form-preserving perturbation was declared for the restored scored inputs",
+                        )
 
     ok = report.require(
         reran == len(selected_samples) if selected_samples else False,
         "restore.evaluator_rerun",
         f"confined deterministic evaluator rerun completed for: {', '.join(sorted(selected_names))}",
-        "at least one deterministic archived evaluator must complete its confined differential rerun",
+        "at least one deterministic archived evaluator must complete its confined genuine rerun",
     )
     drill_ok = drill_ok and ok
     post_recheck = Report("archive-post-rerun", quiet=True)
@@ -2390,6 +2445,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                 "archive_digest": archive_digest,
                 "samples": len(samples),
                 "evaluator_samples": sorted(selected_names),
+                "evaluator_dependence": dict(sorted(dependence.items())),
             },
         )
         report.ok("restore.receipt", "restore drill receipt written; cleanup may now be authorised")
@@ -2489,19 +2545,22 @@ def promote_track(
     scored = [record for record in track_results if record.get("status") == "scored"]
     voided = [record for record in track_results if record.get("status") == "void"]
     scored_pairs = {
-        (str(record.get("candidate")), str(record.get("packet")))
+        (str(record.get("role")), str(record.get("candidate")), str(record.get("packet")))
         for record in scored
-        if record.get("role") == "entrant"
     }
     unreplaced_voids = [
         record
         for record in voided
-        if record.get("role") != "entrant"
-        or (str(record.get("candidate")), str(record.get("packet"))) not in scored_pairs
+        if (
+            str(record.get("role")),
+            str(record.get("candidate")),
+            str(record.get("packet")),
+        )
+        not in scored_pairs
     ]
     if unreplaced_voids:
         missing = sorted(
-            f"{record.get('candidate')}@{record.get('packet')}" for record in unreplaced_voids
+            f"{record.get('role')}:{record.get('candidate')}@{record.get('packet')}" for record in unreplaced_voids
         )
         report.fail(
             f"{prefix}.voids",
@@ -2510,7 +2569,7 @@ def promote_track(
     else:
         report.ok(
             f"{prefix}.voids",
-            f"all {len(voided)} voided samples have scored replacements on the same entrant and packet",
+            f"all {len(voided)} voided samples have scored replacements with the same role, candidate, and packet",
         )
 
     complete = True
@@ -2810,7 +2869,7 @@ def build_parser() -> argparse.ArgumentParser:
             "scoring/, judge-prompts/, provenance/<packet>.json, isolation.json, allowance.json, "
             "evaluator/{lock.json,score-map.json,determinism/,mutations/,captures/}, manifest.json, "
             "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with evaluator_rerun.scored_inputs "
-            "and evaluator_rerun.input_perturbations, and the generated "
+            "and optional sound evaluator_rerun.input_perturbations, and the generated "
             "preflight.receipt and archive/restore-drill.json."
         ),
     )
