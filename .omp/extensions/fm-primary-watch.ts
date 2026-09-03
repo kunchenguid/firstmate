@@ -38,6 +38,7 @@ interface OmpApi {
 type LockOwnership = "owned" | "missing" | "other";
 type CloseClassification = { kind: "actionable" | "failure"; message: string };
 type ArmResult = { ok: boolean; message: string };
+type PendingActionable = { classification: CloseClassification; predecessorPid: string };
 type Generation = {
   id: number;
   sessionFile: string | null;
@@ -47,6 +48,7 @@ type Generation = {
   retryTimer: NodeJS.Timeout | null;
   retryFailures: number;
   restoring: boolean;
+  pendingActionable: PendingActionable[];
   sequence: number;
   stopPromise: Promise<void> | null;
 };
@@ -135,6 +137,7 @@ function createGeneration(sessionFile: string | null = null): Generation {
     retryTimer: null,
     retryFailures: 0,
     restoring: false,
+    pendingActionable: [],
     sequence: 0,
     stopPromise: null,
   };
@@ -325,6 +328,53 @@ export default function (omp: OmpApi) {
     owner.retryTimer = timer;
   }
 
+  function restoreAfterActionableClose(
+    owner: Generation,
+    classification: CloseClassification,
+    predecessorPid: string,
+  ): void {
+    if (!generationIsLive(owner)) return;
+    if (owner.restoring) {
+      owner.pendingActionable.push({ classification, predecessorPid });
+      return;
+    }
+    owner.restoring = true;
+    void (async () => {
+      try {
+        let failure = "";
+        let recovery: { generation: string; watcherPid: string } | undefined;
+        for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
+          if (!generationIsLive(owner)) return;
+          const replacement = startArm(owner, predecessorPid);
+          const successor = owner.child;
+          if (replacement.ok && successor && await waitForReadiness(successor)) {
+            recovery = armRecovery.get(successor);
+            break;
+          }
+          failure = replacement.message;
+          if (successor && !(await retireArm(successor))) break;
+          if (attempt < retryLimit) {
+            const delay = Promise.withResolvers<void>();
+            const timer = setTimeout(delay.resolve, retryDelay(attempt + 1));
+            timer.unref();
+            await delay.promise;
+          }
+        }
+        if (!generationIsLive(owner)) return;
+        if (!recovery) failure = `${failure}\nwatcher: FAILED - OMP extension could not restore watcher continuity`;
+        if (recovery && !confirmHandlingDelivery(recovery)) {
+          failure = "watcher: FAILED - handling delivery confirmation was rejected";
+        }
+        await deliverWake(owner, failure ? `${classification.message}\n\n${failure}` : classification.message);
+      } finally {
+        if (!generationIsLive(owner)) return;
+        owner.restoring = false;
+        const pending = owner.pendingActionable.shift();
+        if (pending) restoreAfterActionableClose(owner, pending.classification, pending.predecessorPid);
+      }
+    })();
+  }
+
   function startArm(owner: Generation, predecessorPid = ""): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: "watcher: not armed - OMP session is shutting down" };
     const ownership = lockOwnership();
@@ -395,36 +445,7 @@ export default function (omp: OmpApi) {
         scheduleRetry(owner, classification.message, predecessor);
         return;
       }
-      if (owner.restoring) return;
-      owner.restoring = true;
-      void (async () => {
-        let failure = "";
-        let recovery: { generation: string; watcherPid: string } | undefined;
-        for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-          if (!generationIsLive(owner)) return;
-          const replacement = startArm(owner, predecessor);
-          const successor = owner.child;
-          if (replacement.ok && successor && await waitForReadiness(successor)) {
-            recovery = armRecovery.get(successor);
-            break;
-          }
-          failure = replacement.message;
-          if (successor && !(await retireArm(successor))) break;
-          if (attempt < retryLimit) {
-            const delay = Promise.withResolvers<void>();
-            const timer = setTimeout(delay.resolve, retryDelay(attempt + 1));
-            timer.unref();
-            await delay.promise;
-          }
-        }
-        if (!generationIsLive(owner)) return;
-        if (!recovery) failure = `${failure}\nwatcher: FAILED - OMP extension could not restore watcher continuity`;
-        if (recovery && !confirmHandlingDelivery(recovery)) {
-          failure = "watcher: FAILED - handling delivery confirmation was rejected";
-        }
-        await deliverWake(owner, failure ? `${classification.message}\n\n${failure}` : classification.message);
-        if (generationIsLive(owner)) owner.restoring = false;
-      })();
+      restoreAfterActionableClose(owner, classification, predecessor);
     });
     child.on("error", (error) => {
       if (settled) return;

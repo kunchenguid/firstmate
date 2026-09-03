@@ -85,6 +85,11 @@ case "${1:-}" in
       printf 'signal: fixture task completed\n'
       exit 0
     fi
+    if [ "$count" -eq 2 ]; then
+      sleep 0.05
+      printf 'signal: successor task completed\n'
+      exit 0
+    fi
     (
       trap 'printf "watch-child-term %s\n" "$$" >> "$log"; exit 0' TERM INT
       while :; do sleep 0.05; done
@@ -117,6 +122,7 @@ rmSync(`${state}/.lock`, { force: true });
 const handlers = new Map();
 let tool;
 const session = { file: "session-a.jsonl" };
+let deliveries = 0;
 const context = {
   sessionManager: { getSessionFile: () => session.file },
   ui: { notify: () => {} },
@@ -124,8 +130,12 @@ const context = {
 const api = {
   on: (event, handler) => handlers.set(event, handler),
   sendUserMessage: async (content) => {
-    appendFileSync(`${state}/watcher.log`, "deliver\n");
-    writeFileSync(`${state}/delivery`, content);
+    deliveries += 1;
+    const delivery = deliveries;
+    appendFileSync(`${state}/watcher.log`, `deliver-start ${delivery}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    appendFileSync(`${state}/watcher.log`, `deliver ${delivery}\n`);
+    writeFileSync(`${state}/delivery-${delivery}`, content);
   },
   registerCommand: () => {},
   registerTool: (definition) => { tool = definition; },
@@ -159,25 +169,31 @@ if (foreign.details.ok) throw new Error("foreign session generation armed the wa
 const result = await tool.execute("call-1", {}, undefined, undefined, context);
 if (!result.details.ok) throw new Error(`arm tool failed: ${result.details.message}`);
 const deadline = Date.now() + 5000;
-while (!existsSync(`${state}/delivery`) && Date.now() < deadline) {
+while (!existsSync(`${state}/delivery-2`) && Date.now() < deadline) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (!existsSync(`${state}/delivery`)) throw new Error("watcher wake was not delivered");
+if (!existsSync(`${state}/delivery-2`)) throw new Error("successor watcher wake was not delivered");
 let log = readFileSync(`${state}/watcher.log`, "utf8").trim().split(/\n/);
 const start1 = log.findIndex((line) => line.startsWith("start 1 "));
 const start2 = log.findIndex((line) => line.startsWith("start 2 "));
-const confirm = log.findIndex((line) => line.startsWith("confirm g2 "));
-const deliver = log.indexOf("deliver");
-if (!(start1 >= 0 && start2 > start1 && confirm > start2 && deliver > confirm)) {
-  throw new Error(`successor/confirmation/delivery order was ${log.join(" | ")}`);
+const start3 = log.findIndex((line) => line.startsWith("start 3 "));
+const confirm2 = log.findIndex((line) => line.startsWith("confirm g2 "));
+const deliver1 = log.indexOf("deliver 1");
+const confirm3 = log.findIndex((line) => line.startsWith("confirm g3 "));
+const deliver2 = log.indexOf("deliver 2");
+if (!(start1 >= 0 && start2 > start1 && confirm2 > start2 && deliver1 > confirm2
+  && start3 > deliver1 && confirm3 > start3 && deliver2 > confirm3)) {
+  throw new Error(`successor closure restoration order was ${log.join(" | ")}`);
 }
-const message = readFileSync(`${state}/delivery`, "utf8");
-if (!message.includes("signal: fixture task completed")) throw new Error("actionable wake was lost");
+const firstMessage = readFileSync(`${state}/delivery-1`, "utf8");
+const secondMessage = readFileSync(`${state}/delivery-2`, "utf8");
+if (!firstMessage.includes("signal: fixture task completed")) throw new Error("initial actionable wake was lost");
+if (!secondMessage.includes("signal: successor task completed")) throw new Error("successor actionable wake was lost");
 if (!existsSync(`${state}/.omp-watch-extension-loaded`)) throw new Error("watcher health marker missing after lock acquisition");
 if (handlers.has("session_stop")) throw new Error("ordinary session_stop must not terminate watcher supervision");
 await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, context);
 log = readFileSync(`${state}/watcher.log`, "utf8").trim().split(/\n/);
-for (const expected of ["arm-term 2", "arm-reaped 2"]) {
+for (const expected of ["arm-term 3", "arm-reaped 3"]) {
   if (!log.includes(expected)) throw new Error(`session_shutdown bypassed watcher cleanup: ${log.join(" | ")}`);
 }
 if (!log.some((line) => line.startsWith("watch-child-term "))) {
@@ -229,10 +245,10 @@ const deadline = Date.now() + 3000;
 let log = "";
 while (Date.now() < deadline) {
   log = existsSync(`${state}/watcher.log`) ? readFileSync(`${state}/watcher.log`, "utf8") : "";
-  if (log.includes("arm-reaped 2") && log.includes("watch-child-term ")) break;
+  if (log.includes("arm-reaped 3") && log.includes("watch-child-term ")) break;
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (!log.includes("arm-term 2") || !log.includes("arm-reaped 2") || !log.includes("watch-child-term ")) {
+if (!log.includes("arm-term 3") || !log.includes("arm-reaped 3") || !log.includes("watch-child-term ")) {
   throw new Error(`process exit bypassed the watcher arm cleanup trap: ${log}`);
 }
 const watcherPid = Number(readFileSync(`${state}/watcher-child-pid`, "utf8").trim());
