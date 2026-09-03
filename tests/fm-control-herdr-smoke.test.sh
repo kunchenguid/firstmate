@@ -123,6 +123,28 @@ registered_status() {
     | jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
+# wait_agent_state: poll the recovery-grade verdict for <want> across a bounded
+# settle window and echo the last verdict observed.
+#
+# The classifier settles its NEGATIVE verdict from one strict instantaneous
+# sample of the pane's process inventory, and an idle interactive shell
+# transiently hosts short-lived prompt helpers (a zsh prompt redraw spawning
+# starship as a second foreground process), so a single sample can legitimately
+# still read `alive` while one is in flight. That is the documented contract in
+# bin/backends/herdr.sh and docs/herdr-backend.md, and every production caller
+# that acts on the negative verdict polls, so this case polls too. It still
+# fails when the pane never reaches the verdict at all.
+wait_agent_state() {  # <want>
+  local want=$1 attempt=0 state=
+  while [ "$attempt" -lt 100 ]; do
+    state=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
+    [ "$state" = "$want" ] && break
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  printf '%s' "$state"
+}
+
 # --- no registered agent: the endpoint exists but hosts no agent ------------
 
 OUT=$(run_control hsmoke exit) || fail "exit against an agent-free herdr pane should be idempotent success: $OUT"
@@ -151,9 +173,9 @@ register_agent idle || fail "could not leave a registration on the task pane"
 [ -n "$(registered_status)" ] \
   || fail "herdr did not keep the registration, so this case cannot exercise the contradiction"
 
-STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
+STATE=$(wait_agent_state dead)
 [ "$STATE" = dead ] \
-  || fail "a registration whose pane holds only its shell must classify agent-free, got '$STATE'"
+  || fail "a registration whose pane holds only its shell must classify agent-free within the settle window, got '$STATE'"
 pass "real herdr: a reported registration the pane's own process inventory contradicts reads agent-free"
 
 OUT=$(run_control hsmoke exit) \
