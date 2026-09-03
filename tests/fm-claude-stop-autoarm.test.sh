@@ -322,6 +322,35 @@ run_autoarm_from_claude_daemon_bridge() {  # <dir> <foreground-lock-owner-pid>
   return "$rc"
 }
 
+run_autoarm_from_reparentable_claude_daemon() {  # <dir> <foreground-lock-owner-pid>
+  local dir=$1 lock_owner=$2
+  mkdir -p "$dir/fake-argv"
+  cat > "$dir/fake-argv/daemon.js" <<'JS'
+const fs = require("fs");
+const { spawn } = require("child_process");
+const home = process.env.FM_HOME;
+const owner = Number(process.env.FM_TEST_LOCK_OWNER);
+const fakeClaude = `${home}/fake-argv/claude`;
+const proc = `${home}/proc/${process.pid}`;
+const spawnedBy = JSON.stringify({ label: "claude", cwd: home, pid: owner });
+fs.mkdirSync(proc, { recursive: true });
+fs.writeFileSync(`${proc}/cmdline`, Buffer.from([
+  fakeClaude, "daemon", "run", "--spawned-by", spawnedBy, "",
+].join("\0")));
+fs.writeFileSync(`${home}/state/daemon-delivery-pid`, `${process.pid}\n`);
+const hook = spawn(`${home}/bin/fm-claude-stop-autoarm.sh`, [], {
+  env: { ...process.env, FM_PROC_ROOT: `${home}/proc` },
+  stdio: ["pipe", "inherit", "inherit"],
+});
+fs.writeFileSync(`${home}/state/reparented-hook-pid`, `${hook.pid}\n`);
+hook.stdin.end('{"session_id":"sess-autoarm","stop_hook_active":false}\n');
+hook.on("exit", code => process.exit(code === null ? 1 : code));
+JS
+  FM_HOME="$dir" FM_TEST_LOCK_OWNER="$lock_owner" /bin/bash -c '
+    exec -a "$FM_HOME/fake-argv/claude" node "$FM_HOME/fake-argv/daemon.js"
+  '
+}
+
 run_autoarm_from_unbound_claude_daemon() {  # <dir>
   local dir=$1 rc=0
   mkdir -p "$dir/fake-argv"
@@ -347,6 +376,19 @@ fm_autoarm_session_lease_acquire() {
   fm_lock_try_acquire "$state/.lock.acquire"
 }
 SH
+}
+
+pause_recovery_after_lock_publication() {
+  mv "$1/bin/fm-lock.sh" "$1/bin/fm-lock-real.sh"
+  cat > "$1/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env bash
+"$(dirname "$0")/fm-lock-real.sh" "$@"
+rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
+: > "$FM_HOME/state/recovery-published"
+while [ ! -e "$FM_HOME/state/recovery-publish-release" ]; do sleep 0.01; done
+SH
+  chmod +x "$1/bin/fm-lock.sh" "$1/bin/fm-lock-real.sh"
 }
 
 pause_terminal_transition_acquire() {
@@ -799,6 +841,159 @@ test_recovery_revalidates_bridged_owner_after_session_lease_wait() {
   pass "auto-arm: stale recovery revalidates bridged ownership after lease waits"
 }
 
+test_recovered_owner_death_publishes_current_owner_failure() {
+  local dir out status owner hook failure reset i
+  dir=$(make_primary_dir "$TMP_ROOT/recovered-owner-dies-after-publication")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  pause_recovery_after_lock_publication "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '9999999\n' > "$dir/state/.lock"
+
+  out="$dir/recovered-owner-death.out"
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/recovery-published" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/state/recovery-published" ]; then
+    kill "$hook" "$owner" 2>/dev/null || true
+    wait "$hook" "$owner" 2>/dev/null || true
+    fail "stale recovery did not reach its post-publication boundary"
+  fi
+  [ "$(cat "$dir/state/.lock" 2>/dev/null || true)" = "$owner" ] \
+    || fail "stale recovery did not publish the authenticated foreground owner"
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  : > "$dir/state/recovery-publish-release"
+  wait "$hook"
+  status=$?
+  failure=$(failure_epoch_path "$dir") \
+    || fail "recovered owner death left no durable failure record"
+  reset=$(failure_epoch_field "$dir" reset)
+
+  expect_code 2 "$status" "a recovered owner dying after publication must fail visibly"
+  assert_absent "$dir/state/arm-ran" \
+    "stale recovery armed after its recovered foreground owner died"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+    || fail "recovered-owner failure remained fenced to the stale predecessor"
+  assert_present "$failure" "recovered owner death did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+    "recovered owner death did not persist its owner-scoped notice"
+  assert_contains "$(cat "$out")" "recovered session owner died" \
+    "recovered owner death did not deliver its failure notice"
+  pass "auto-arm: recovered owner death publishes under the recovered owner fence"
+}
+
+test_recovered_owner_binding_rejects_successor_transfer() {
+  local dir out status owner hook successor i
+  dir=$(make_primary_dir "$TMP_ROOT/recovered-owner-successor-transfer")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  pause_recovery_after_lock_publication "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '9999999\n' > "$dir/state/.lock"
+
+  out="$dir/recovered-owner-transfer.out"
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/recovery-published" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/state/recovery-published" ]; then
+    kill "$hook" "$owner" 2>/dev/null || true
+    wait "$hook" "$owner" 2>/dev/null || true
+    fail "stale recovery did not reach its successor-transfer boundary"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    "$FM_HOME/bin/fm-lock-real.sh" >/dev/null 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/state/recovery-successor-rc"
+    sleep 60; :
+  ' &
+  successor=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/recovery-successor-rc" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  expect_code 0 "$(cat "$dir/state/recovery-successor-rc" 2>/dev/null || true)" \
+    "successor did not acquire after the recovered owner died"
+  : > "$dir/state/recovery-publish-release"
+  wait "$hook"
+  status=$?
+
+  expect_code 0 "$status" "recovery hook must stand down after ownership transfers to a successor"
+  [ "$(cat "$dir/state/.lock" 2>/dev/null || true)" = "$successor" ] \
+    || fail "recovery hook rebound itself to the successor session"
+  assert_absent "$dir/state/arm-ran" \
+    "recovery hook armed after ownership transferred to a successor"
+  assert_absent "$dir/state/.claude-autoarm-failure-epochs" \
+    "recovery hook published failure state into the successor session"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" \
+    "recovery hook published a notice into the successor session"
+  kill "$successor" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+  pass "auto-arm: recovered owner binding rejects successor-session transfer"
+}
+
+test_authenticated_daemon_survives_delivery_parent_exit() {
+  local dir out owner delivery daemon hook hook_parent i
+  dir=$(make_primary_dir "$TMP_ROOT/daemon-proof-loss-after-claim")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  pause_claim_epoch_publish "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  out="$dir/reparented-daemon.out"
+  run_autoarm_from_reparentable_claude_daemon "$dir" "$owner" > "$out" 2>&1 &
+  delivery=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/claim-publish-waiting" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/state/claim-publish-waiting" ]; then
+    kill "$delivery" "$owner" 2>/dev/null || true
+    wait "$delivery" "$owner" 2>/dev/null || true
+    fail "daemon hook did not reach its authenticated claim boundary"
+  fi
+  daemon=$(cat "$dir/state/daemon-delivery-pid" 2>/dev/null || true)
+  hook=$(cat "$dir/state/reparented-hook-pid" 2>/dev/null || true)
+  kill "$daemon" 2>/dev/null || true
+  wait "$delivery" 2>/dev/null || true
+  kill -0 "$hook" 2>/dev/null \
+    || fail "reparenting fixture killed the authenticated hook with its delivery parent"
+  hook_parent=$(ps -o ppid= -p "$hook" 2>/dev/null | tr -d ' ')
+  [ "$hook_parent" != "$daemon" ] \
+    || fail "delivery-parent exit did not remove the hook's daemon ancestry proof"
+  : > "$dir/state/claim-publish-release"
+  i=0
+  while [ "$i" -lt 400 ] && kill -0 "$hook" 2>/dev/null; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  kill "$owner" "$hook" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+
+  assert_present "$dir/state/arm-ran" \
+    "authenticated hook abandoned watcher arming after delivery-parent exit"
+  [ "$(epoch_outcome "$dir")" = rewake ] \
+    || fail "authenticated hook did not commit its rewake after delivery-parent exit"
+  assert_contains "$(cat "$out")" "fixture-win actionable" \
+    "authenticated hook did not deliver its watcher close after proof loss"
+  pass "auto-arm: authenticated owner binding survives delivery-parent proof loss"
+}
+
 test_generation_claim_is_bound_to_serialized_session_owner() {
   local dir owner claimant successor claim_rc open_rc i
   dir=$(make_primary_dir "$TMP_ROOT/daemon-bound-generation")
@@ -1088,6 +1283,54 @@ test_claude_daemon_owner_death_publishes_failure() {
   assert_contains "$out" "authenticated session owner died" \
     "owner death did not deliver the automatic failure notice"
   pass "auto-arm: unchanged authenticated owner death publishes durable failure state"
+}
+
+test_terminal_publication_owner_death_rebases_failure() {
+  local dir out status owner hook failure reset baseline i
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-publication-owner-death")
+  out="$dir/hook.out"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  pause_terminal_epoch_publish "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/terminal-publish-waiting" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/state/terminal-publish-waiting" ]; then
+    kill "$hook" "$owner" 2>/dev/null || true
+    wait "$hook" "$owner" 2>/dev/null || true
+    fail "terminal owner-death fixture did not reach publication"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  : > "$dir/state/terminal-publish-release"
+  wait "$hook"
+  status=$?
+  failure=$(failure_epoch_path "$dir") \
+    || fail "terminal publication owner death left no durable failure record"
+  reset=$(failure_epoch_field "$dir" reset)
+  baseline="$(epoch_field "$dir" epoch):$(epoch_field "$dir" owner_pid):$(epoch_outcome "$dir")"
+
+  expect_code 2 "$status" "owner death during terminal publication must fail visibly"
+  [ "$(epoch_outcome "$dir")" = rewake ] \
+    || fail "terminal owner-death fixture did not publish its terminal ledger state"
+  [ "$(failure_epoch_field "$dir" baseline)" = "$baseline" ] \
+    || fail "owner-death failure did not rebase to the terminal ledger signature"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+    || fail "terminal owner-death failure was not fenced to its unchanged session owner"
+  assert_present "$failure" "terminal owner death did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+    "terminal owner death did not persist its owner-scoped notice"
+  assert_contains "$(cat "$out")" "authenticated session owner died during terminal commit" \
+    "terminal owner death did not deliver its failure notice"
+  pass "auto-arm: terminal owner death rebases durable failure publication"
 }
 
 test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit() {
@@ -3449,6 +3692,9 @@ test_claude_daemon_spawned_by_foreground_lock_owner_arms
 test_claude_daemon_reclaims_stale_lock_to_foreground_owner
 test_unbound_claude_daemon_cannot_reclaim_stale_lock
 test_recovery_revalidates_bridged_owner_after_session_lease_wait
+test_recovered_owner_death_publishes_current_owner_failure
+test_recovered_owner_binding_rejects_successor_transfer
+test_authenticated_daemon_survives_delivery_parent_exit
 test_generation_claim_is_bound_to_serialized_session_owner
 test_stalled_session_lease_publishes_bound_failure
 test_terminal_session_lease_timeout_publishes_failure
@@ -3457,6 +3703,7 @@ test_successor_session_gets_own_failure_notice
 test_successor_session_ignores_predecessor_attended_alarm
 test_claude_daemon_losing_session_owner_cannot_commit
 test_claude_daemon_owner_death_publishes_failure
+test_terminal_publication_owner_death_rebases_failure
 test_claude_daemon_losing_owner_during_terminal_lock_wait_cannot_commit
 test_terminal_publish_holds_session_acquisition_lease
 test_claude_daemon_losing_owner_during_record_lock_wait_cannot_mutate

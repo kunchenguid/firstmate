@@ -168,7 +168,7 @@ CLAIM_BASELINE=$(fm_autoarm_claim_signature "$STATE")
 autoarm_session_still_owned() {
   [ "$SESSION_AUTHENTICATED" -eq 1 ] \
     && _fm_autoarm_session_authorized \
-      "$STATE" "$FM_ROOT" "$SESSION_OWNER_PID" owned
+      "$STATE" "$FM_ROOT" "$SESSION_OWNER_PID" bound
 }
 
 autoarm_alarm_current() {
@@ -181,12 +181,12 @@ autoarm_notice_current() {
     "$STATE" "$FAILURE_NOTICE" "$SESSION_OWNER_PID"
 }
 
-autoarm_claim_failure() {  # <reason>
-  local reason=$1 failure_rc authority=owned
+autoarm_claim_failure() {  # <reason> [baseline]
+  local reason=$1 baseline=${2:-$CLAIM_BASELINE} failure_rc authority=bound
   [ "$SESSION_AUTHENTICATED" -eq 1 ] || authority=stale
   autoarm_alarm_current && exit 0
   fm_autoarm_claim_failure_commit \
-    "$STATE" "$CLAIM_BASELINE" failed "$FAILURE_NOTICE" \
+    "$STATE" "$baseline" failed "$FAILURE_NOTICE" \
     "$FM_ROOT" "$SESSION_OWNER_PID" "$authority"
   failure_rc=$?
   case "$failure_rc" in
@@ -206,14 +206,15 @@ autoarm_claim_failure() {  # <reason>
 }
 
 autoarm_session_current_or_fail() {  # <reason>
-  local reason=$1 current_owner
+  local reason=$1 current_owner failure_baseline
   autoarm_session_still_owned && return 0
   current_owner=$(cat "$STATE/.lock" 2>/dev/null || true)
   if [ "$SESSION_AUTHENTICATED" -eq 1 ] \
     && [ "$current_owner" = "$SESSION_OWNER_PID" ] \
     && ! fm_harness_pid_alive "$SESSION_OWNER_PID"; then
+    failure_baseline=$(fm_autoarm_claim_signature "$STATE")
     SESSION_AUTHENTICATED=0
-    autoarm_claim_failure "$reason"
+    autoarm_claim_failure "$reason" "$failure_baseline"
   fi
   return 1
 }
@@ -223,14 +224,17 @@ autoarm_session_current_or_fail() {  # <reason>
 # remain the single acquisition owner, then re-verify current-session identity
 # before touching any auto-arm state.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
-  "$SCRIPT_DIR/fm-lock.sh" --autoarm >/dev/null 2>&1 \
+  RECOVERY_RESULT=$("$SCRIPT_DIR/fm-lock.sh" --autoarm 2>/dev/null) \
     || autoarm_claim_failure 'stale session lock recovery failed'
-  fm_session_lock_owned_by_self "$STATE" "$FM_ROOT" || autoarm_claim_failure 'stale session lock recovery did not restore current-session ownership'
-  SESSION_OWNER_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$RECOVERY_RESULT" in
+    'lock acquired: harness pid '*) SESSION_OWNER_PID=${RECOVERY_RESULT##* } ;;
+    *) SESSION_OWNER_PID= ;;
+  esac
   case "$SESSION_OWNER_PID" in
     ''|*[!0-9]*) autoarm_claim_failure 'stale session lock recovery did not publish a valid owner' ;;
   esac
   SESSION_AUTHENTICATED=1
+  autoarm_session_current_or_fail 'recovered session owner died before authentication completed' || exit 0
 fi
 
 # --- single-flight generation claim --------------------------------------------
@@ -248,7 +252,7 @@ fi
 autoarm_session_current_or_fail 'authenticated session owner died before generation claim' || exit 0
 fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
 autoarm_session_current_or_fail 'authenticated session owner died before generation publication' || exit 0
-fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID"
+fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID" bound
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
   [ "$CLAIM_RC" -eq 2 ] && exit 0
@@ -260,7 +264,7 @@ if [ "$CLAIM_RC" -ne 0 ]; then
         fm_autoarm_release_abandoned "$STATE" "$GRACE" \
           || autoarm_claim_failure 'abandoned legacy auto-arm claim could not be released'
         autoarm_session_current_or_fail 'authenticated session owner died before recovered generation claim' || exit 0
-        fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID"
+        fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID" bound
         CLAIM_RC=$?
         [ "$CLAIM_RC" -eq 0 ] \
           || { [ "$CLAIM_RC" -eq 2 ] && exit 0; autoarm_claim_failure 'generation claim failed after releasing abandoned legacy claim'; }
@@ -293,9 +297,9 @@ autoarm_commit() {  # <outcome> [marker-file]
   local commit_rc failure_rc terminal_baseline pid
   autoarm_session_current_or_fail 'authenticated session owner died before terminal commit' || return 2
   if [ -n "${2:-}" ]; then
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2" "$FM_ROOT" "$SESSION_OWNER_PID"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2" "$FM_ROOT" "$SESSION_OWNER_PID" bound
   else
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT" "$SESSION_OWNER_PID"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT" "$SESSION_OWNER_PID" bound
   fi
   commit_rc=$?
   autoarm_session_current_or_fail 'authenticated session owner died during terminal commit' || return 2
@@ -306,7 +310,7 @@ autoarm_commit() {  # <outcome> [marker-file]
   terminal_baseline="$MY_GEN:$pid:arming"
   fm_autoarm_claim_failure_commit \
     "$STATE" "$terminal_baseline" failed "$FAILURE_NOTICE" \
-    "$FM_ROOT" "$SESSION_OWNER_PID" owned
+    "$FM_ROOT" "$SESSION_OWNER_PID" bound
   failure_rc=$?
   case "$failure_rc" in
     0|3)
@@ -329,7 +333,7 @@ autoarm_commit() {  # <outcome> [marker-file]
 autoarm_record() {  # <outcome>
   autoarm_session_still_owned || return 0
   fm_autoarm_write_owned \
-    "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT" "$SESSION_OWNER_PID" \
+    "$STATE" "$MY_GEN" "$1" '' "$FM_ROOT" "$SESSION_OWNER_PID" bound \
     >/dev/null 2>&1 || true
 }
 
@@ -405,7 +409,7 @@ if [ "$HEALTHY" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  fm_autoarm_reset_owned "$STATE" "$MY_GEN" "$FM_ROOT" "$SESSION_OWNER_PID"
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN" "$FM_ROOT" "$SESSION_OWNER_PID" bound
   RESET_RC=$?
   if [ "$RESET_RC" -eq 0 ]; then
     autoarm_record clean
