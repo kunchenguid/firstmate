@@ -148,28 +148,56 @@ fm_test_sweepable_root() {
 # leak one process per spawning case.
 #
 # Re-deriving the pid set from the cwd boundary immediately before each signal
-# is what keeps the sweep scoped across the grace period: a pid that left the
-# subtree - or was recycled by a process outside it - is simply absent from the
-# next scan, so the boundary itself is the guard and no separate pid-identity
-# bookkeeping is needed to stay inside the fixture root.
+# keeps the sweep scoped across the grace period: a pid that left the subtree
+# is simply absent from the next scan. That alone does not close the window
+# between listing a pid and signalling it: if that pid has already exited and
+# the OS recycled the number for an unrelated process, a cwd-only recheck can
+# still find a match (the new process may itself sit under <dir>, or the
+# recheck may simply run before the kernel has reused it) and signal a process
+# this sweep never leaked. fm_test_pid_identity (shared with fm_pid_identity in
+# bin/fm-wake-lib.sh) is captured per pid alongside the scan and re-verified
+# immediately before every signal for the same reason production teardown's
+# reap_task_worktree_processes binds identity rather than trusting a pid number
+# alone; a pid whose identity has changed is left alone.
 fm_test_sweep_leaked_processes() {
-  local dir=$1 pids pid
+  local dir=$1 pids pid identity current i
+  local -a tracked_pids tracked_identities
   fm_test_sweepable_root "$dir" || return 0
   pids=$(fm_pids_with_cwd_under "$dir" 2>/dev/null) || return 0
   [ -n "$pids" ] || return 0
+  tracked_pids=()
+  tracked_identities=()
   while IFS= read -r pid; do
-    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null
+    [ -n "$pid" ] || continue
+    identity=$(fm_test_pid_identity "$pid" 2>/dev/null) || continue
+    tracked_pids+=("$pid")
+    tracked_identities+=("$identity")
   done <<EOF
 $pids
 EOF
-  sleep "${FM_TEST_SWEEP_GRACE:-0.5}"
+  [ "${#tracked_pids[@]}" -gt 0 ] || return 0
+
   pids=$(fm_pids_with_cwd_under "$dir" 2>/dev/null) || return 0
-  [ -n "$pids" ] || return 0
-  while IFS= read -r pid; do
-    [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null
-  done <<EOF
-$pids
-EOF
+  for i in "${!tracked_pids[@]}"; do
+    pid=${tracked_pids[$i]}
+    if printf '%s\n' "$pids" | grep -qFx "$pid" \
+      && current=$(fm_test_pid_identity "$pid" 2>/dev/null) \
+      && [ "$current" = "${tracked_identities[$i]}" ]; then
+      kill -TERM "$pid" 2>/dev/null
+    fi
+  done
+
+  sleep "${FM_TEST_SWEEP_GRACE:-0.5}"
+
+  pids=$(fm_pids_with_cwd_under "$dir" 2>/dev/null) || return 0
+  for i in "${!tracked_pids[@]}"; do
+    pid=${tracked_pids[$i]}
+    if printf '%s\n' "$pids" | grep -qFx "$pid" \
+      && current=$(fm_test_pid_identity "$pid" 2>/dev/null) \
+      && [ "$current" = "${tracked_identities[$i]}" ]; then
+      kill -KILL "$pid" 2>/dev/null
+    fi
+  done
   return 0
 }
 

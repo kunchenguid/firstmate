@@ -401,6 +401,49 @@ test_sweep_kills_a_process_that_ignores_term() {
   pass "the sweep escalates to KILL for a process that ignores TERM"
 }
 
+test_sweep_leaves_a_pid_alone_once_its_identity_no_longer_matches() {
+  local harness root pid alive
+  # A cwd-only recheck closes the "left the subtree" case but not PID reuse:
+  # if the pid the sweep scanned has already exited and the OS handed the
+  # number to an unrelated process by the time the sweep is about to signal,
+  # a cwd-only recheck cannot tell the difference. fm_test_pid_identity is
+  # overridden here, in a child shell, to return a different value on every
+  # call - exactly what re-deriving identity for a reused pid would look like
+  # - so the pre-signal identity recheck can never match what was captured at
+  # scan time. The real sleeper must therefore survive untouched.
+  harness=$(fm_test_tmproot fm-test-cleanup-sweep-identity)
+  root="$harness/reused"
+  mkdir -p "$root"
+  : > "$root/.fm-test-fixture"
+  pid=$(start_cwd_sleeper "$root") || fail "the identity-check sleeper never started"
+  track_sleeper "$pid"
+
+  # A plain shell variable would not do: each call to fm_test_pid_identity runs
+  # inside the command substitution that captures its output, which is a
+  # subshell, so an in-memory counter would never actually advance in the
+  # caller. A counter file survives across that subshell boundary instead.
+  bash -c '
+    # shellcheck source=tests/lib.sh
+    . "$1"
+    counter="$2/identity-calls"
+    fm_test_pid_identity() {
+      local n
+      n=$(( $(cat "$counter" 2>/dev/null || echo 0) + 1 ))
+      printf "%s\n" "$n" > "$counter"
+      printf "identity-%s\n" "$n"
+    }
+    fm_test_sweep_leaked_processes "$3"
+  ' _ "$LIB" "$harness" "$root" \
+    || fail "the sweep failed rather than no-op'ing on an identity mismatch"
+
+  alive=0
+  proc_is_alive "$pid" && alive=1
+  reap_sleeper "$pid"
+  [ "$alive" -eq 1 ] \
+    || fail "the sweep signalled a pid whose identity no longer matched what it captured at scan time"
+  pass "the sweep leaves a pid alone once its identity no longer matches what was captured at scan time"
+}
+
 test_sweep_never_reaches_a_registered_repo_checkout_dir() {
   local repo_dir pid
   # Not hypothetical: tests/fm-lint.test.sh registers a cleanup dir created by
@@ -490,6 +533,7 @@ test_cleanup_sweeps_processes_leaked_in_its_own_root
 test_sweep_cannot_reach_outside_its_own_root
 test_sweep_refuses_unmarked_and_non_tmpdir_roots
 test_sweep_kills_a_process_that_ignores_term
+test_sweep_leaves_a_pid_alone_once_its_identity_no_longer_matches
 test_sweep_never_reaches_a_registered_repo_checkout_dir
 test_sweep_never_signals_the_sweeping_shell
 test_orphan_sweep_reaps_processes_left_in_a_stale_root
