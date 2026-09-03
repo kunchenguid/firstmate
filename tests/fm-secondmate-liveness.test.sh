@@ -136,6 +136,61 @@ test_tmux_agent_state_classifies() {
   pass "fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable"
 }
 
+test_tmux_endpoint_blocks_respawn_when_window_inventory_is_unreadable() {
+  local fb out
+  fb=$(make_failed_probe_tmux "$TMP_ROOT/tmux-blocks-unreadable" unreadable)
+  out=$(PATH="$fb:$BASE_PATH" bash -c '
+    . "$0/bin/fm-backend.sh"
+    if fm_backend_endpoint_blocks_respawn tmux sess:fm-sm1 fm-sm1; then echo blocks=yes; else echo blocks=no; fi
+  ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "an unreadable tmux window inventory must not claim the endpoint is retryable"
+  pass "fm_backend_endpoint_blocks_respawn: unreadable tmux inventory blocks a respawn"
+}
+
+test_tmux_endpoint_blocks_respawn_when_adapter_cannot_be_loaded() {
+  local empty out
+  empty="$TMP_ROOT/no-backend-adapters"
+  mkdir -p "$empty"
+  out=$(bash -c '
+    . "$0/bin/fm-backend.sh"
+    FM_BACKEND_LIB_DIR=$1
+    unset _FM_BACKEND_TMUX_SOURCED
+    if fm_backend_endpoint_blocks_respawn tmux sess:fm-sm1 fm-sm1 2>/dev/null; then echo blocks=yes; else echo blocks=no; fi
+  ' "$ROOT" "$empty")
+  assert_contains "$out" "blocks=yes" \
+    "an unloadable backend adapter must not read as a retired endpoint"
+  pass "fm_backend_endpoint_blocks_respawn: an unloadable adapter blocks a respawn"
+}
+
+test_tmux_window_exists_matches_the_name_literally() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/tmux-literal-name")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf '%s\n' fm-v1a2-fix; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c '
+    . "$0/bin/fm-backend.sh"
+    fm_backend_source tmux
+    if fm_backend_tmux_window_exists firstmate "fm-v1.2-fix"; then echo dotted=yes; else echo dotted=no; fi
+    if fm_backend_tmux_window_exists firstmate fm-v1a2-fix; then echo exact=yes; else echo exact=no; fi
+    if fm_backend_endpoint_blocks_respawn tmux firstmate:fm-v1.2-fix fm-v1.2-fix; then echo blocks=yes; else echo blocks=no; fi
+  ' "$ROOT")
+  assert_contains "$out" "dotted=no" \
+    "a dot in a task id must not match another window as a regex wildcard"
+  assert_contains "$out" "exact=yes" \
+    "the literal window name present in the inventory must still be found"
+  assert_contains "$out" "blocks=no" \
+    "a window that does not exist must not read as an endpoint surviving cleanup"
+  pass "fm_backend_tmux_window_exists: window names match literally, not as regexes"
+}
+
 test_tmux_agent_state_rejects_malformed_targets_before_probe() {
   local fakebin marker target out
   fakebin=$(fm_fakebin "$TMP_ROOT/tmux-malformed")
@@ -541,6 +596,9 @@ test_sweep_noop_with_no_secondmate_meta() {
 }
 
 test_tmux_agent_state_classifies
+test_tmux_endpoint_blocks_respawn_when_window_inventory_is_unreadable
+test_tmux_endpoint_blocks_respawn_when_adapter_cannot_be_loaded
+test_tmux_window_exists_matches_the_name_literally
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility

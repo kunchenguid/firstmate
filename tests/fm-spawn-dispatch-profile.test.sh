@@ -182,7 +182,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
 }
 
 test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
-  local rec relative_id absolute_id out status launch home_real linked_home
+  local rec relative_id absolute_id out status launch home_real linked_home absolute_wt
   relative_id=profile-relative-home-defaults-z1c
   absolute_id=profile-absolute-home-defaults-z1d
   rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
@@ -210,12 +210,17 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  # Two independent spawns in one home: the relative-spelling launch above now
+  # holds a durable claim on WT_DIR, so the absolute-spelling launch needs its
+  # own free worktree rather than a slot another recorded task still owns.
+  absolute_wt="$CASE_DIR/wt-absolute"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-home-defaults-absolute "$absolute_wt"
   : > "$LAUNCH_LOG"
   out=$(
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
       FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
       FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$absolute_wt" TMUX="fake,1,0" \
       CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
       GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
       "$SPAWN" "$absolute_id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -707,14 +712,24 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status pane_dir
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  # A batch launches several tasks into one home, and treehouse gives each of
+  # them its OWN worktree; two tasks sharing one is the collision fm-spawn now
+  # refuses. Model that with a worktree per created window (fm-<id>) instead of
+  # a single shared pane path.
+  pane_dir="$CASE_DIR/batch-worktrees"
+  mkdir -p "$pane_dir"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-batch-a "$pane_dir/fm-$id1"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt-profile-batch-b "$pane_dir/fm-$id2"
+
+  out=$(FM_FAKE_PANE_PATH_DIR="$pane_dir" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"

@@ -71,6 +71,23 @@ fm_backend_tmux_container_ensure() {
   fi
 }
 
+# fm_backend_tmux_window_exists: does <session> hold a window named EXACTLY
+# <window-name>? The session inventory is the only sound source. Verified
+# empirically against tmux 3.7b: `display-message -p -t "$ses:$wname"` resolves
+# an absent window by fnmatch and then by PREFIX, and when nothing matches at
+# all it silently falls back to the client's current window and still exits 0 -
+# anchoring the target (`=ses:=wname`) does not suppress that fallback either.
+# The same fallback is why fm_backend_tmux_agent_state insists on the inventory.
+# This is the exact predicate fm_backend_tmux_create_task refuses on, so it is
+# also the only honest answer to "would a leftover window refuse the next
+# spawn?" - callers needing that proof share this one definition.
+fm_backend_tmux_window_exists() {  # <session> <window-name>
+  local ses=$1 wname=$2 windows
+  [ -n "$ses" ] && [ -n "$wname" ] || return 1
+  windows=$(tmux list-windows -t "$ses" -F '#{window_name}') || return 2
+  printf '%s\n' "$windows" | grep -qxF -- "$wname"
+}
+
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,
 # refusing an existing <window-name> in <session>. Mirrors fm-spawn.sh's
 # duplicate-check-then-new-window sequence, including the exact error text
@@ -87,9 +104,15 @@ fm_backend_tmux_container_ensure() {
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  local ses=$1 wname=$2 proj_abs=$3 wid exists_status
+  if fm_backend_tmux_window_exists "$ses" "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
+    return 1
+  else
+    exists_status=$?
+  fi
+  if [ "$exists_status" -ne 1 ]; then
+    echo "error: could not inspect tmux windows in session '$ses'; refusing to create '$wname'" >&2
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1

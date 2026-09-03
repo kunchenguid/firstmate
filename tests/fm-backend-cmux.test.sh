@@ -1103,6 +1103,131 @@ test_secondmate_spawn_refuses_cmux_backend() {
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
+# --- endpoint-blocks-respawn: the workspace title, not the surface ----------
+
+# cmux gates a fresh task on the workspace TITLE (fm_backend_cmux_create_task),
+# so a surface-scoped liveness read can report the endpoint gone while the
+# workspace that refuses the next spawn is still listed.
+test_endpoint_blocks_respawn_sees_the_workspace_a_surface_read_misses() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn"; mkdir -p "$dir/responses"
+  cmux_panes_empty_response "$dir" 1
+  cmux_workspace_list_response "$dir" 2 \
+    aaaaaaaa-0000-0000-0000-000000000000 "$(cmux_expected_scoped_title fm-corph "$dir")"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      t=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+      if fm_backend_target_exists cmux "$t"; then echo liveness=present; else echo liveness=gone; fi
+      if fm_backend_endpoint_blocks_respawn cmux "$t" fm-corph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "liveness=gone" \
+    "the surface-scoped liveness read should report a closed surface gone"
+  assert_contains "$out" "blocks=yes" \
+    "a workspace still carrying this task's title refuses the next spawn, so the endpoint is not retired"
+  pass "fm_backend_endpoint_blocks_respawn: a cmux workspace outliving its surface still blocks a respawn"
+}
+
+# And it must not invent a collision from another task's workspace.
+test_endpoint_blocks_respawn_clear_when_no_workspace_carries_the_title() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-clear"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1 \
+    aaaaaaaa-0000-0000-0000-000000000000 "$(cmux_expected_scoped_title fm-other "$dir")"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      t=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+      if fm_backend_endpoint_blocks_respawn cmux "$t" fm-corph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=no" \
+    "an unrelated workspace title must not be reported as this task's leftover endpoint"
+  pass "fm_backend_endpoint_blocks_respawn: an unrelated cmux workspace leaves the slot retryable"
+}
+
+test_endpoint_blocks_respawn_when_workspace_inventory_is_unreadable() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-unreadable"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      t=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+      if fm_backend_endpoint_blocks_respawn cmux "$t" fm-corph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "an unreadable cmux workspace inventory must not claim the endpoint is retryable"
+  pass "fm_backend_endpoint_blocks_respawn: unreadable cmux inventory blocks a respawn"
+}
+
+# cmux can exit successfully while returning malformed data. That is no more
+# evidence of absence than a nonzero inventory command: a cleanup warning must
+# remain visible until a well-formed workspace inventory proves the title gone.
+# A listed entry that carries the title but no usable id is the same class of
+# unreadable inventory: the workspace is demonstrably still there, so nothing
+# about it proves the next spawn's title is free.
+test_endpoint_blocks_respawn_when_matching_entry_has_no_id() {
+  local dir fb out title
+  dir="$TMP_ROOT/blocks-respawn-null-id"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-corph "$dir")
+  printf '{"workspaces":[{"title":"%s"}]}\n' "$title" > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      t=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+      if fm_backend_endpoint_blocks_respawn cmux "$t" fm-corph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "a listed workspace whose entry carries no usable id must not be reported retired"
+  pass "fm_backend_endpoint_blocks_respawn: a matching cmux entry with no usable id blocks a respawn"
+}
+
+# The same unreadable entry must not license a duplicate workspace either: the
+# create-task duplicate gate refuses instead of adding a second same-titled one.
+test_create_task_refuses_when_matching_entry_has_no_id() {
+  local dir fb out status title
+  dir="$TMP_ROOT/create-task-null-id"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-nullid1 "$dir")
+  printf '{"workspaces":[{"title":"%s"}]}\n' "$title" > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-nullid1 /tmp/proj' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should refuse when the workspace inventory cannot be read"
+  assert_contains "$out" "could not inspect cmux workspaces" \
+    "create_task did not report the unreadable workspace inventory"
+  if grep -q 'new-workspace' "$dir/log" 2>/dev/null; then
+    fail "create_task created a second workspace despite an unreadable inventory"
+  fi
+  pass "fm_backend_cmux_create_task: refuses a matching entry with no usable id instead of duplicating the title"
+}
+
+test_endpoint_blocks_respawn_when_workspace_inventory_is_malformed() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-malformed"; mkdir -p "$dir/responses"
+  printf '{not-json\n' > "$dir/responses/1.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      t=aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111
+      if fm_backend_endpoint_blocks_respawn cmux "$t" fm-corph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "a malformed cmux workspace inventory must not claim the endpoint is retryable"
+  pass "fm_backend_endpoint_blocks_respawn: malformed cmux inventory blocks a respawn"
+}
+
 test_version_check_accepts_current_version
 test_version_check_accepts_newer_version
 test_version_check_refuses_old_version
@@ -1134,6 +1259,7 @@ test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
 test_capture_trims_locally
+
 test_capture_fails_when_read_screen_fails_empty
 test_capture_fails_when_target_not_ready
 test_send_key_normalizes_and_targets
@@ -1164,3 +1290,9 @@ test_kill_is_best_effort_when_close_workspace_fails
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend
+test_endpoint_blocks_respawn_sees_the_workspace_a_surface_read_misses
+test_endpoint_blocks_respawn_clear_when_no_workspace_carries_the_title
+test_endpoint_blocks_respawn_when_workspace_inventory_is_unreadable
+test_endpoint_blocks_respawn_when_workspace_inventory_is_malformed
+test_endpoint_blocks_respawn_when_matching_entry_has_no_id
+test_create_task_refuses_when_matching_entry_has_no_id

@@ -82,6 +82,8 @@ test_stale_pool_base_refreshes_before_branching() {
   id='pool-current-base-repeat-r1'
   mkdir -p "$HOME_DIR/data/$id"
   printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  # The refresh repeat needs a genuinely free slot, not the first task's live claim.
+  rm "$HOME_DIR/state/pool-current-base-r1.meta"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"
@@ -278,6 +280,8 @@ strand_submodule_pin_via_spawn() {  # <seed-id>
     || fail "the first spawn did not move the pooled base across the moved submodule pin"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
     || fail "the first spawn did not strand the submodule on the pin the old base recorded"
+  # Retire the seed task's claim before the next spawn inspects the free slot's residue.
+  rm "$HOME_DIR/state/$id.meta"
 }
 
 test_stale_submodule_pin_explains_itself() {

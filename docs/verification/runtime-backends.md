@@ -30,6 +30,29 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Window-name resolution
+
+Window-name resolution was verified on 2026-08-29 with tmux 3.7b on macOS, on a private socket holding one session with the single window `fm-auth-fix`.
+
+```sh
+tmux -S "$socket" display-message -p -t 'fmdoc:fm-auth' '#{window_name}'
+tmux -S "$socket" display-message -p -t '=fmdoc:=fm-auth' '#{window_name}'
+tmux -S "$socket" display-message -p -t 'fmdoc:nope' '#{window_name}'
+tmux -S "$socket" list-windows -t fmdoc -F '#{window_name}' | grep -qx fm-auth
+```
+
+Observed output:
+
+```text
+fm-auth-fix
+fm-auth-fix
+fm-auth-fix
+# the list-windows match exited 1
+```
+
+Every `display-message` form answered for a window whose name was never asked for and still exited 0: an absent window name resolves by fnmatch and then by prefix, a name matching nothing at all falls back to the client's current window, and anchoring the target (`=session:=window`) suppresses neither fallback.
+Only the session inventory answers window identity exactly, so `fm_backend_tmux_window_exists` is the one definition shared by the create-task duplicate refusal and `fm-spawn.sh`'s read-back of an endpoint it retired after refusing a claimed worktree. The agent-liveness probe applies the same session-inventory rule through its own `list-windows` read, because it needs that command's stderr to separate a missing window from an unreadable one.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

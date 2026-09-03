@@ -100,13 +100,26 @@ fm_test_fake_gh_axi() {
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
 # suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
+#
+# FM_FAKE_PANE_PATH_DIR opts into per-window pane paths: `new-window -n <name>`
+# records <name> and pane_current_path then answers "<dir>/<name>" instead of
+# the one shared FM_FAKE_PANE_PATH. That models the real thing a multi-task
+# spawn depends on - treehouse hands every task its OWN worktree - which a
+# single fixed pane path cannot express once two tasks run in one home.
 fm_test_fake_tmux_spawn() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+fm_fake_pane_path() {
+  if [ -n "${FM_FAKE_PANE_PATH_DIR:-}" ] && [ -r "$FM_FAKE_PANE_PATH_DIR/.last-window" ]; then
+    printf '%s/%s\n' "$FM_FAKE_PANE_PATH_DIR" "$(cat "$FM_FAKE_PANE_PATH_DIR/.last-window")"
+    return 0
+  fi
+  printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+}
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*) fm_fake_pane_path; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -116,7 +129,20 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_PANE_PATH_DIR:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-n" ]; then
+          printf '%s\n' "$a" > "$FM_FAKE_PANE_PATH_DIR/.last-window"
+          break
+        fi
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+  has-session|new-session|kill-window|set-window-option) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

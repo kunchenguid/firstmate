@@ -134,6 +134,18 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   They also refuse when another task's durable metadata already claims that
+#   resolved worktree, without consulting process or treehouse occupancy state.
+#   The refusal names the owning task AND the record file it read, because a
+#   claim is not proof of a live worker: a teardown that aborted after
+#   returning the lease leaves a record whose worktree is genuinely free, and
+#   only removing that record clears the slot.
+#   That refusal attempts to retire the endpoint it just created. For every
+#   backend but orca - whose terminal and worktree use the orca abort path
+#   instead - it then reads back the NAME its next spawn would collide on
+#   (fm_backend_endpoint_blocks_respawn), because a backend close is only
+#   best-effort. A survivor is named so the operator can retire the one thing
+#   that would refuse the retry.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -727,6 +739,7 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -836,6 +849,22 @@ spawn_abort_cleanup() {
             || true
         fi
       fi
+    fi
+  fi
+  if [ "$SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP" = 1 ]; then
+    SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=0
+    # The four-argument kill every other endpoint-retiring call site uses: the
+    # recorded zellij tab id and the expected label keep the close on the TAB
+    # when a transient pane lookup comes up empty, instead of degrading to a
+    # close-pane that leaves the empty tab behind.
+    # Every backend's kill is contractually best-effort (fm_backend_kill), so
+    # its exit status alone never proves the endpoint is gone. Retryability is
+    # what this cleanup owes the caller, and only a read-back of the name that
+    # gates the next spawn can establish it; a survivor is named so it can be
+    # retired by hand.
+    fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" || true
+    if fm_backend_endpoint_blocks_respawn "$BACKEND" "$T" "$W" 2>/dev/null; then
+      echo "warning: the new $BACKEND endpoint $T named $W survived the refusal of claimed worktree '$WT'; retire it before retrying task $ID, or the next spawn will refuse the leftover $W" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -1825,6 +1854,78 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# assert_spawn_worktree_unclaimed: refuse a candidate worktree that another
+# still-recorded task in THIS home already records as its worktree=.
+#
+# The claim set is deliberately this home's own $STATE/*.meta and nothing else.
+# The invariant it establishes therefore holds within one firstmate home, not
+# across homes. The uncovered condition is two or more homes sharing a single
+# treehouse pool for the same project: treehouse marks a pooled slot in-use by
+# live PROCESS detection, so after a terminal-app or session restart kills every
+# pane, every pooled slot reads AVAILABLE. A spawn in one home can then be handed
+# a worktree that a DIFFERENT home's state/<id>.meta still claims, this scan
+# finds no claim in its own $STATE, and the launch proceeds - after which
+# freshen_spawn_worktree_base resets that worktree to origin's default-branch
+# tip, losing any uncommitted work in it.
+#
+# A present worktree= value that cannot resolve to a real path refuses because
+# it cannot prove a candidate is free, while an absent worktree= remains
+# skipped. Failing closed on every unreadable record was rejected because a
+# single unreadable record would wedge every spawn in this home.
+#
+# That wedge is not limited to a corrupt or half-written record; there is a
+# routine path into it. bin/fm-teardown.sh deletes an orca task's worktree
+# (fm_backend_remove_worktree) before it removes the durable record, and record
+# removal has an explicitly handled failure exit ("$ID's endpoint and local copy
+# are cleaned up, but its task record could not be removed"). A record that
+# survives that window points at a directory that no longer exists, so it cannot
+# resolve, and from then on EVERY spawn in this home refuses - including spawns
+# targeting entirely unrelated worktrees - until an operator removes the stale
+# record by hand. The refusal message already names the owning task, the record
+# file, and the unresolvable path, which is what an operator needs to clear it.
+#
+# A --relaunch is exempt from the unresolvable-value refusal and continues past
+# such a record exactly as an absent value is skipped. A relaunch allocates no
+# worktree - $WT is the task's own recorded copy, where its endpoint already
+# sits - and freshen_spawn_worktree_base only runs when RELAUNCH is 0, so the
+# destructive base reset this refusal exists to prevent cannot occur there.
+# Without the exemption a single stale foreign record would refuse every
+# relaunch in the home, so a guard meant to prevent losing work would block the
+# recovery path used to replace a stuck worker. A resolved foreign claim that
+# matches the candidate still refuses on relaunch, as does an unresolvable value
+# on a fresh spawn.
+#
+# Widening the scan across sibling homes is tracked separately and is
+# deliberately out of scope here: it would add a cross-home read, and a new
+# failure mode, to the spawn path.
+assert_spawn_worktree_unclaimed() {
+  local wt_real meta owner recorded recorded_real
+  wt_real=$(real_path_or_raw "$WT")
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    owner=${meta##*/}
+    owner=${owner%.meta}
+    [ "$owner" != "$ID" ] || continue
+    recorded=$(fm_meta_get "$meta" worktree)
+    [ -n "$recorded" ] || continue
+    if ! recorded_real=$(cd "$recorded" 2>/dev/null && pwd -P); then
+      [ "$RELAUNCH" -eq 0 ] || continue
+      if [ "$BACKEND" != orca ]; then
+        SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=1
+      fi
+      echo "error: task $owner record $meta has worktree='$recorded', but that recorded path could not be resolved; refusing to launch task $ID because an unresolvable claim is not evidence of a free worktree." >&2
+      return 1
+    fi
+    [ "$recorded_real" != "$wt_real" ] || {
+      if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+        SPAWN_WORKTREE_CLAIM_ABORT_CLEANUP=1
+      fi
+      echo "error: allocated worktree '$WT' is already claimed by task $owner in $meta; refusing to launch task $ID. That record claims the worktree; it does not prove a live worker. If $owner has already finished, the record is a leftover from an incomplete cleanup and must be removed before this worktree can be used." >&2
+      return 1
+    }
+  done
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -2468,6 +2569,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+fi
+if [ "$KIND" != secondmate ]; then
+  assert_spawn_worktree_unclaimed || exit 1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1

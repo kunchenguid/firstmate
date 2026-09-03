@@ -463,6 +463,27 @@ test_create_task_refuses_duplicate_label() {
   pass "fm_backend_zellij_create_task: refuses a duplicate home-scoped tab title (zellij's own new-tab has no uniqueness check)"
 }
 
+# A `list-tabs --json` that exits 0 while printing a non-JSON missing-session
+# response cannot prove no tab already holds this title, so create_task must
+# refuse rather than call new-tab on an inventory it never read.
+test_create_task_refuses_when_tab_inventory_is_not_json() {
+  local dir fb out status
+  dir="$TMP_ROOT/dup-task-not-json"; mkdir -p "$dir/responses"
+  printf 'Session firstmate not found\n' > "$dir/responses/1.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_create_task firstmate fm-nonjson1 /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should refuse a successful non-JSON tab inventory"
+  assert_contains "$out" "could not inspect zellij tabs" \
+    "create_task did not report the unreadable tab inventory"
+  if grep -q 'new-tab' "$dir/log" 2>/dev/null; then
+    fail "create_task created a tab despite never reading the tab inventory"
+  fi
+  pass "fm_backend_zellij_create_task: refuses when list-tabs exits 0 with non-JSON output"
+}
+
 test_create_task_creates_and_parses_ids() {
   local dir fb out title
   dir="$TMP_ROOT/create-task"; mkdir -p "$dir/responses"
@@ -1318,6 +1339,7 @@ test_server_ensure_skips_attach_when_already_exists
 test_dispatch_routes_zellij_backend
 test_dispatch_busy_state_unknown_for_zellij
 test_create_task_refuses_duplicate_label
+test_create_task_refuses_when_tab_inventory_is_not_json
 test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active
@@ -1333,6 +1355,90 @@ test_expected_label_allows_matching_task_tab
 test_expected_label_rejects_reused_pane_id
 test_current_path_probes_with_marker_and_ignores_prompt_paths
 test_current_path_ignores_tilde_prefixed_banner_lines
+# --- endpoint-blocks-respawn: the tab, not the pane -------------------------
+
+# Closing a tab's only pane does NOT close the now-empty tab (this adapter's
+# header, verified against real zellij 0.44.0). A pane-scoped liveness read
+# therefore reports the endpoint gone while the tab that refuses the next
+# spawn is still listed, so the respawn-blocking read has to ask about the TAB.
+test_endpoint_blocks_respawn_sees_the_tab_a_pane_read_misses() {
+  local dir fb title out
+  dir="$TMP_ROOT/blocks-respawn"; mkdir -p "$dir/responses"
+  title=$(zellij_expected_scoped_title fm-zorph "$dir")
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[{"tab_id":4,"name":"%s"}]\n' "$title" > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      if fm_backend_target_exists zellij firstmate:7; then echo liveness=present; else echo liveness=gone; fi
+      if fm_backend_endpoint_blocks_respawn zellij firstmate:7 fm-zorph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "liveness=gone" \
+    "the pane-scoped liveness read should report a closed pane gone"
+  assert_contains "$out" "blocks=yes" \
+    "an empty tab that outlived its pane still refuses the next spawn, so the endpoint is not retired"
+  pass "fm_backend_endpoint_blocks_respawn: a zellij tab outliving its pane still blocks a respawn"
+}
+
+# The same read must not invent a collision: with no tab carrying this task's
+# scoped title, the slot is genuinely retryable.
+test_endpoint_blocks_respawn_clear_when_no_tab_carries_the_title() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-clear"; mkdir -p "$dir/responses"
+  printf '[{"tab_id":4,"name":"%s"}]\n' "$(zellij_expected_scoped_title fm-other "$dir")" \
+    > "$dir/responses/1.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      if fm_backend_endpoint_blocks_respawn zellij firstmate:7 fm-zorph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=no" \
+    "an unrelated tab title must not be reported as this task's leftover endpoint"
+  pass "fm_backend_endpoint_blocks_respawn: an unrelated zellij tab leaves the slot retryable"
+}
+
+test_endpoint_blocks_respawn_when_tab_inventory_is_unreadable() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-unreadable"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      if fm_backend_endpoint_blocks_respawn zellij firstmate:7 fm-zorph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "an unreadable zellij tab inventory must not claim the endpoint is retryable"
+  pass "fm_backend_endpoint_blocks_respawn: unreadable zellij inventory blocks a respawn"
+}
+
+test_endpoint_blocks_respawn_when_tab_inventory_is_not_json() {
+  local dir fb out
+  dir="$TMP_ROOT/blocks-respawn-not-json"; mkdir -p "$dir/responses"
+  # Zellij actions can exit successfully while printing a non-JSON missing-session
+  # response. That is unreadable inventory, not proof that a named tab is gone.
+  printf 'Session firstmate not found\n' > "$dir/responses/1.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_HOME="$dir" \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      if fm_backend_endpoint_blocks_respawn zellij firstmate:7 fm-zorph; then echo blocks=yes; else echo blocks=no; fi
+    ' "$ROOT")
+  assert_contains "$out" "blocks=yes" \
+    "a successful non-JSON zellij tab inventory must not claim the endpoint is retryable"
+  pass "fm_backend_endpoint_blocks_respawn: successful non-JSON zellij inventory blocks a respawn"
+}
+
+test_endpoint_blocks_respawn_sees_the_tab_a_pane_read_misses
+test_endpoint_blocks_respawn_clear_when_no_tab_carries_the_title
+test_endpoint_blocks_respawn_when_tab_inventory_is_unreadable
+test_endpoint_blocks_respawn_when_tab_inventory_is_not_json
 test_kill_resolves_tab_and_closes_by_id
 test_kill_falls_back_to_close_pane_when_tab_lookup_empty
 test_kill_closes_recorded_tab_when_pane_already_gone

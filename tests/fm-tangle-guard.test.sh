@@ -187,7 +187,182 @@ test_spawn_isolation_abort() {
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
-# --- GUARD 1c: fm-spawn tmux window construction ----------------------------
+# --- GUARD 1c: fm-spawn durable worktree claims ----------------------------
+
+test_spawn_durable_worktree_claims() {
+  local home proj claimed free own alias broken recover fakebin rec out status
+  home="$TMP_ROOT/spawn-claim-home"
+  mkdir -p "$home/data" "$home/state"
+  proj=$(make_repo "$TMP_ROOT/spawn-claim-proj")
+  claimed="$TMP_ROOT/spawn-claim-wt"
+  free="$TMP_ROOT/spawn-free-wt"
+  own="$TMP_ROOT/spawn-own-wt"
+  alias="$TMP_ROOT/spawn-claim-alias"
+  broken="$TMP_ROOT/spawn-claim-broken"
+  git -C "$proj" worktree add -q --detach "$claimed" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$free" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$own" >/dev/null 2>&1
+  ln -s "$claimed" "$alias"
+  ln -s "$TMP_ROOT/spawn-claim-removed" "$broken"
+  fakebin=$(make_spawn_record_fakebin "$TMP_ROOT/spawn-claim-fake")
+  rec="$TMP_ROOT/spawn-claim.log"
+  : > "$rec"
+
+  {
+    echo 'window=firstmate:fm-incumbent'
+    echo 'endpoint_task_id=incumbent'
+    echo "worktree=$alias/"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+  } > "$home/state/incumbent.meta"
+
+  # fm-collision-gg7-fix is an unrelated live task whose window name EXTENDS the
+  # contender's. It is what tmux's fnmatch/prefix resolution (and its fallback to
+  # the current window) would wrongly report as the contender's own surviving
+  # endpoint, and it is also the window an operator would kill if the refusal
+  # named a target that resolves by prefix.
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_WINDOWS='fm-collision-gg7-fix' \
+    run_spawn "$home" collision-gg7 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "spawn into another live task's worktree should refuse"
+  assert_contains "$out" "claimed by task incumbent in $home/state/incumbent.meta" \
+    "the collision refusal must name the owning task and the durable record it read"
+  assert_contains "$out" "does not prove a live worker" \
+    "the refusal must not present a durable claim as proof that a worker is running"
+  assert_contains "$out" "leftover from an incomplete cleanup and must be removed" \
+    "the refusal must tell the operator how to clear a stale claim"
+  assert_not_contains "$out" "claimed by live task" \
+    "the refusal must not assert liveness the record cannot prove"
+  assert_absent "$home/state/collision-gg7.meta" "a collision refusal must not publish contender metadata"
+  assert_grep 'kill-window -t =firstmate:=fm-collision-gg7' "$rec" \
+    "a collision refusal must retire the new endpoint so treehouse can reallocate the slot"
+  assert_no_grep 'send-keys -t firstmate:fm-collision-gg7 -l' "$rec" \
+    "a collision refusal must not type an agent launch command"
+  assert_not_contains "$out" "survived the refusal" \
+    "a retired endpoint must not be reported as a survivor, even beside a prefix-sharing sibling window"
+
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_TMUX_KILL_FAIL=1 \
+    run_spawn "$home" kill-failed-ii9 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "spawn into another live task's worktree should refuse"
+  assert_not_contains "$out" "survived the refusal" \
+    "a failed close must still read back an already-gone endpoint before warning"
+
+  # A close that reports success while the window survives is not a retirement:
+  # the leftover endpoint is exactly what refuses the next attempt, so it has to
+  # be named rather than swallowed behind the best-effort kill's exit status.
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_TMUX_KILL_NOOP=1 \
+    run_spawn "$home" stuck-jj0 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "spawn into another live task's worktree should refuse"
+  assert_contains "$out" "endpoint firstmate:fm-stuck-jj0 named fm-stuck-jj0 survived" \
+    "a surviving endpoint must be named so the operator can retire it"
+  out=$(FM_TMUX_REC="$rec" run_spawn "$home" stuck-jj0 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "the leftover endpoint should block the next attempt"
+  assert_contains "$out" "window firstmate:fm-stuck-jj0 already exists" \
+    "the endpoint the warning named is what refuses the retry"
+
+  rm "$home/state/incumbent.meta"
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_WINDOWS='fm-collision-gg7-fix' \
+    run_spawn "$home" collision-gg7 "$proj" "$claimed" "$fakebin")
+  status=$?
+  expect_code 0 "$status" "the same spawn should be retryable after the durable claim retires"
+  assert_contains "$out" 'spawned collision-gg7' "the retry did not launch after the claim retired"
+
+  {
+    echo 'window=firstmate:fm-broken-claim'
+    echo "worktree=$broken"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+  } > "$home/state/broken-claim.meta"
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" \
+    run_spawn "$home" unresolvable-kk1 "$proj" "$free" "$fakebin")
+  status=$?
+  expect_code 1 "$status" "an unresolvable foreign worktree claim should refuse"
+  assert_contains "$out" "task broken-claim record $home/state/broken-claim.meta" \
+    "the unresolvable-claim refusal did not name the owning record"
+  assert_contains "$out" "worktree='$broken'" \
+    "the unresolvable-claim refusal did not report the recorded path"
+  assert_contains "$out" "could not be resolved; refusing to launch task unresolvable-kk1" \
+    "the unresolvable-claim refusal did not explain why it stopped the spawn"
+  assert_grep 'kill-window -t =firstmate:=fm-unresolvable-kk1' "$rec" \
+    "an unresolvable claim refusal must retire the endpoint it created"
+
+  # The same unresolvable foreign record must NOT wedge the recovery path: a
+  # relaunch allocates no worktree and never refreshes a pooled base, so the
+  # destructive reset the refusal above prevents cannot happen on a relaunch.
+  recover="$TMP_ROOT/spawn-recover-wt"
+  git -C "$proj" worktree add -q --detach "$recover" >/dev/null 2>&1
+  fm_test_spawn_brief "$home" recover-ll2 brief
+  {
+    echo 'window=firstmate:fm-recover-ll2'
+    echo 'endpoint_task_id=recover-ll2'
+    echo "worktree=$recover/"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'tasktmp=/tmp/fm-recover-ll2'
+    echo 'model=default'
+    echo 'effort=default'
+  } > "$home/state/recover-ll2.meta"
+  : > "$rec"
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_WINDOWS='fm-recover-ll2' FM_FAKE_PANE_COMMAND=zsh \
+    fm_test_run_spawn "$home" "$recover" "$fakebin" recover-ll2 --relaunch)
+  status=$?
+  expect_code 0 "$status" \
+    "an unrelated unresolvable claim must not block relaunching a correctly recorded task"
+  assert_contains "$out" 'spawned recover-ll2' "the relaunch did not report success"
+  assert_not_contains "$out" 'could not be resolved' \
+    "the relaunch must not refuse on another record's unresolvable worktree value"
+  rm "$home/state/recover-ll2.meta"
+  rm "$home/state/broken-claim.meta"
+
+  {
+    echo 'window=firstmate:fm-missing-claim'
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+  } > "$home/state/missing-claim.meta"
+  out=$(FM_TMUX_REC="$rec" run_spawn "$home" free-hh8 "$proj" "$free" "$fakebin")
+  status=$?
+  expect_code 0 "$status" "a different, genuinely free worktree should remain launchable"
+  assert_contains "$out" 'spawned free-hh8' "the free-worktree spawn did not report success"
+  rm "$home/state/missing-claim.meta"
+
+  fm_test_spawn_brief "$home" own-ii9 brief
+  {
+    echo 'window=firstmate:fm-own-ii9'
+    echo 'endpoint_task_id=own-ii9'
+    echo "worktree=$own/"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+    echo 'mode=no-mistakes'
+    echo 'yolo=off'
+    echo 'tasktmp=/tmp/fm-own-ii9'
+    echo 'model=default'
+    echo 'effort=default'
+  } > "$home/state/own-ii9.meta"
+  out=$(FM_TMUX_REC="$rec" FM_FAKE_WINDOWS='fm-own-ii9' FM_FAKE_PANE_COMMAND=zsh \
+    fm_test_run_spawn "$home" "$own" "$fakebin" own-ii9 --relaunch)
+  status=$?
+  expect_code 0 "$status" "a relaunch into the task's own recorded worktree should remain allowed"
+  assert_contains "$out" 'spawned own-ii9' "the own-worktree relaunch did not report success"
+  assert_not_contains "$out" 'is already claimed by task' \
+    "the own-worktree relaunch treated its own metadata as a collision"
+  pass "fm-spawn: durable canonical worktree claims refuse collisions, release retries, and leave free slots launchable"
+}
+
+# --- GUARD 1d: fm-spawn tmux window construction ----------------------------
 
 # The prevention guard also depends on fm-spawn building robust tmux commands
 # under a non-default tmux config (base-index 1, automatic-rename on). A RECORDING
@@ -202,20 +377,68 @@ test_spawn_isolation_abort() {
 #     window id, never the (possibly-renamed) name - a lost name would let
 #     display-message fall back to the active client's window and misread firstmate's
 #     OWN pane as the worktree, tangling a hook into the primary checkout.
+# The fake also models WINDOW LIVENESS, because retryability after a refused
+# spawn is a real tmux state question: `new-window` records the created name,
+# `kill-window` retires it, and `list-windows` answers from that set - so a
+# spawn that leaves its window behind is refused by the same exact
+# duplicate-name check real tmux enforces. FM_FAKE_TMUX_KILL_NOOP=1 makes
+# kill-window a no-op, reproducing the best-effort close that reports success
+# while the window survives.
+# `display-message` deliberately succeeds for EVERY target, matching tmux 3.7b
+# measured behavior: an absent window resolves by fnmatch, then by prefix, and
+# otherwise falls back to the client's current window, exiting 0 either way -
+# even for `=session:=window` or a session that does not exist. Any endpoint
+# check that trusts it therefore reports a live sibling, so this fake makes
+# that unsoundness observable instead of hiding it behind exact matching.
 make_spawn_record_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+FM_FAKE_TMUX_LIVE=\${FM_FAKE_TMUX_LIVE:-"$dir/live-windows"}
+SH
+  cat >> "$fakebin/tmux" <<'SH'
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
+: >> "$FM_FAKE_TMUX_LIVE"
+
+live_names() {
+  local n
+  for n in ${FM_FAKE_WINDOWS:-}; do printf '%s\n' "$n"; done
+  cat "$FM_FAKE_TMUX_LIVE"
+}
+
+flag_value() {  # <flag> <args...>
+  local want=$1 prev=
+  shift
+  for a in "$@"; do
+    [ "$prev" = "$want" ] && { printf '%s\n' "$a"; return 0; }
+    prev=$a
+  done
+  return 1
+}
+
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf '%s\n' "${FM_FAKE_PANE_COMMAND:-zsh}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
-  list-windows) exit 0 ;;
+  new-window)
+    name=$(flag_value -n "$@") || name=
+    [ -z "$name" ] || printf '%s\n' "$name" >> "$FM_FAKE_TMUX_LIVE"
+    printf '%s\n' "@spawnwid"; exit 0 ;;
+  kill-window)
+    if [ "${FM_FAKE_TMUX_KILL_NOOP:-0}" != 1 ]; then
+      target=$(flag_value -t "$@") || target=
+      name=${target#*:}
+      name=${name#=}
+      grep -vx "$name" "$FM_FAKE_TMUX_LIVE" > "$FM_FAKE_TMUX_LIVE.next" || true
+      mv "$FM_FAKE_TMUX_LIVE.next" "$FM_FAKE_TMUX_LIVE"
+    fi
+    [ "${FM_FAKE_TMUX_KILL_FAIL:-0}" != 1 ] || exit 1
+    exit 0 ;;
+  list-windows) live_names; exit 0 ;;
   has-session|new-session|send-keys|set-window-option) exit 0 ;;
 esac
 exit 0
@@ -269,9 +492,143 @@ test_spawn_tmux_window_construction() {
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }
 
+# A recording fake `zellij` for a full spawn drive-through. It models the two
+# facts this guard depends on: `new-tab` registers a titled tab that
+# `list-tabs` keeps returning, and `close-pane` does NOT remove the now-empty
+# tab (verified real zellij behavior, recorded in bin/backends/zellij.sh's
+# header) while `close-tab-by-id` does. FM_FAKE_ZJ_PANES_FAIL_AFTER_DUMPS makes
+# `list-panes` start failing once worktree discovery has finished, reproducing
+# the transient CLI failure that leaves the kill with no resolvable owning tab.
+make_spawn_zellij_fakebin() {  # <dir> -> echoes fakebin path
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/zellij" <<SH
+#!/usr/bin/env bash
+set -u
+FM_FAKE_ZJ_STATE=\${FM_FAKE_ZJ_STATE:-"$dir/zjstate"}
+SH
+  cat >> "$fakebin/zellij" <<'SH'
+mkdir -p "$FM_FAKE_ZJ_STATE"
+tabs="$FM_FAKE_ZJ_STATE/tabs"
+dumps="$FM_FAKE_ZJ_STATE/dumps"
+: >> "$tabs"
+[ -f "$dumps" ] || echo 0 > "$dumps"
+[ -z "${FM_ZJ_REC:-}" ] || printf 'zellij %s\n' "$*" >> "$FM_ZJ_REC"
+
+zj_flag_value() {  # <flag> <args...>
+  local want=$1 prev= a
+  shift
+  for a in "$@"; do
+    [ "$prev" = "$want" ] && { printf '%s\n' "$a"; return 0; }
+    prev=$a
+  done
+  return 1
+}
+
+zj_tabs_json() {
+  local id name first=1
+  printf '['
+  while IFS=$'\t' read -r id name; do
+    [ -n "$id" ] || continue
+    [ "$first" = 1 ] || printf ','
+    printf '{"tab_id":%s,"name":"%s","active":false}' "$id" "$name"
+    first=0
+  done < "$tabs"
+  printf ']\n'
+}
+
+case "${1:-}" in
+  --version) printf 'zellij 0.44.0\n'; exit 0 ;;
+  list-sessions) printf '%s\n' "${FM_FAKE_ZJ_SESSION:-firstmate}"; exit 0 ;;
+  attach) exit 0 ;;
+esac
+
+case "${4:-}" in
+  list-tabs) zj_tabs_json; exit 0 ;;
+  new-tab)
+    name=$(zj_flag_value --name "$@") || name=
+    printf '4\t%s\n' "$name" >> "$tabs"
+    printf '4\n'
+    exit 0 ;;
+  list-panes)
+    [ "$(cat "$dumps")" -lt "${FM_FAKE_ZJ_PANES_FAIL_AFTER_DUMPS:-9999}" ] || exit 1
+    printf '[{"id":7,"tab_id":4,"is_plugin":false}]\n'
+    exit 0 ;;
+  dump-screen)
+    echo $(( $(cat "$dumps") + 1 )) > "$dumps"
+    printf '%s\n%s\n%s\n' '__FM_ZELLIJ_CWD_BEGIN__' "${FM_FAKE_PANE_PATH:-}" '__FM_ZELLIJ_CWD_END__'
+    exit 0 ;;
+  close-tab-by-id)
+    grep -v "^${5:-}$(printf '\t')" "$tabs" > "$tabs.next" || true
+    mv "$tabs.next" "$tabs"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/zellij"
+  fm_fake_exit0 "$fakebin" treehouse
+  printf '%s\n' "$fakebin"
+}
+
+# The claim refusal must retire the endpoint it just created even when the
+# backend's own pane->tab lookup transiently fails, because the leftover TAB -
+# not the pane - is what refuses the retry. The spawn is holding the tab id it
+# captured at create time, so the close has to carry it.
+test_spawn_claim_cleanup_retires_the_zellij_tab() {
+  local home proj claimed fakebin rec out status blocks
+  home="$TMP_ROOT/spawn-zj-home"
+  mkdir -p "$home/data" "$home/state"
+  proj=$(make_repo "$TMP_ROOT/spawn-zj-proj")
+  claimed="$TMP_ROOT/spawn-zj-wt"
+  git -C "$proj" worktree add -q --detach "$claimed" >/dev/null 2>&1
+  fakebin=$(make_spawn_zellij_fakebin "$TMP_ROOT/spawn-zj-fake")
+  rec="$TMP_ROOT/spawn-zj.log"
+  : > "$rec"
+  {
+    echo 'window=firstmate:9'
+    echo "worktree=$claimed"
+    echo "project=$proj"
+    echo 'harness=codex'
+    echo 'kind=ship'
+    echo 'backend=zellij'
+  } > "$home/state/zincumbent.meta"
+
+  fm_test_spawn_brief "$home" zj-collide-kk1 brief
+  out=$(FM_ZJ_REC="$rec" FM_FAKE_ZJ_PANES_FAIL_AFTER_DUMPS=2 \
+    fm_test_run_spawn "$home" "$claimed" "$fakebin" \
+      zj-collide-kk1 "$proj" codex --backend zellij --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 1 "$status" "a zellij spawn into a claimed worktree should refuse"
+  assert_contains "$out" "claimed by task zincumbent" \
+    "the zellij collision refusal did not name the owning record"
+  assert_grep 'close-tab-by-id 4' "$rec" \
+    "the claim cleanup must close the tab it created, using the tab id the spawn already holds"
+  assert_no_grep 'close-pane' "$rec" \
+    "closing only the pane leaves behind the empty tab that refuses the retry"
+  assert_not_contains "$out" "survived the refusal" \
+    "a fully retired zellij endpoint must not be reported as a survivor"
+
+  # The retryability claim, read from the backend's own tab inventory through
+  # the same predicate a fresh spawn is refused by.
+  blocks=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE='' \
+    bash -c '
+      . "$0/bin/fm-backend.sh"
+      if fm_backend_endpoint_blocks_respawn zellij firstmate:7 fm-zj-collide-kk1; then
+        echo blocks=yes
+      else
+        echo blocks=no
+      fi
+    ' "$ROOT")
+  assert_contains "$blocks" "blocks=no" \
+    "the refused allocation must be retryable without manual cleanup"
+  pass "fm-spawn: a claim refusal retires the zellij tab it created, even when the pane lookup fails"
+}
+
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_durable_worktree_claims
+test_spawn_claim_cleanup_retires_the_zellij_tab
 test_spawn_tmux_window_construction

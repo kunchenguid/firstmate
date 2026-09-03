@@ -330,9 +330,37 @@ fm_backend_cmux_scoped_title() {  # <fm-task-label>
 # so this adopts the FIRST match `jq` returns, mirroring herdr's/zellij's own
 # duplicate-check posture.
 fm_backend_cmux_workspace_id_for_label() {  # <label>
-  local label=$1
-  fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null \
-    | jq -r --arg want "$label" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null | head -1
+  local label=$1 workspaces workspace_id
+  workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 2
+  # A successful cmux command can still emit unusable data. Validate the
+  # inventory before looking for a title: the old jq|head pipeline let head
+  # hide jq's parse failure and falsely reported a surviving workspace gone.
+  printf '%s' "$workspaces" | jq -e 'type == "object" and (.workspaces | type == "array")' >/dev/null 2>&1 || return 2
+  # Existence is decided by the matched ENTRY, never by its id: a listed
+  # workspace whose entry carries the title but no usable id string is an
+  # unreadable inventory too, not proof the title is free.
+  workspace_id=$(printf '%s' "$workspaces" \
+    | jq -r --arg want "$label" '
+        [.workspaces[] | select(.title == $want)] as $matched
+        | if ($matched | length) == 0 then ""
+          elif ($matched[0].id | type) == "string" and (($matched[0].id | length) > 0) then $matched[0].id
+          else error("cmux workspace entry carries no usable id")
+          end' 2>/dev/null) || return 2
+  printf '%s' "$workspace_id"
+}
+
+# fm_backend_cmux_workspace_exists: does a live workspace already carry the
+# title <label> resolves to? This is the exact predicate
+# fm_backend_cmux_create_task refuses on, so it is also the only honest answer
+# to "would a leftover workspace refuse the next spawn of this task?" - a
+# surface-scoped liveness read answers a different question.
+fm_backend_cmux_workspace_exists() {  # <fm-task-label>
+  local label=$1 workspace_id lookup_status
+  [ -n "$label" ] || return 1
+  workspace_id=$(fm_backend_cmux_workspace_id_for_label "$(fm_backend_cmux_scoped_title "$label")")
+  lookup_status=$?
+  [ "$lookup_status" -eq 0 ] || return "$lookup_status"
+  [ -n "$workspace_id" ]
 }
 
 fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
@@ -351,18 +379,26 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title out wsid sfid exists_status
   title=$(fm_backend_cmux_scoped_title "$label")
-  dup=$(fm_backend_cmux_workspace_id_for_label "$title")
-  if [ -n "$dup" ]; then
+  if fm_backend_cmux_workspace_exists "$label"; then
     echo "error: cmux workspace '$title' already exists" >&2
+    return 1
+  else
+    exists_status=$?
+  fi
+  if [ "$exists_status" -ne 1 ]; then
+    echo "error: could not inspect cmux workspaces; refusing to create '$title'" >&2
     return 1
   fi
   out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids 2>&1) || {
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
+  wsid=$(fm_backend_cmux_workspace_id_for_label "$title") || {
+    echo "error: could not inspect cmux workspaces after creating '$title'" >&2
+    return 1
+  }
   [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
   [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
