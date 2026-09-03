@@ -138,6 +138,10 @@ if [ -n "${FM_BENCH_RUNTIME_IMAGE:-}" ] && [ -n "${FM_BENCH_PROVIDER_NETWORK:-}"
   && [ -n "${FM_BENCH_PROVIDER_PROXY:-}" ] && [ -n "${FM_BENCH_PROVIDER_PROXY_CONTAINER:-}" ] \
   && [ -n "${FM_BENCH_HARNESS_BIN:-}" ] && command -v docker >/dev/null 2>&1; then
   launch=$(
+    # `$1` inside the single-quoted script is the confined shell's own positional
+    # argument, not this test's: the harness path is passed through argv so it
+    # never has to be re-quoted into the probe.
+    # shellcheck disable=SC2016
     "$CONFINE" --purpose entrant --mechanism container --image "$FM_BENCH_RUNTIME_IMAGE" \
       --provider-network "$FM_BENCH_PROVIDER_NETWORK" --provider-proxy "$FM_BENCH_PROVIDER_PROXY" \
       --provider-proxy-container "$FM_BENCH_PROVIDER_PROXY_CONTAINER" --allow "$ISO/e1" -- \
