@@ -309,6 +309,12 @@ test_raw_claude_local_commands_are_refused() {
     "cl-raw-bare-x1" "claude-local --model local-coder"
   assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
     "cl-raw-env-x1" "env -i LOCAL=1 claude-local --model local-coder"
+  fm_test_spawn_brief "$home" "cl-raw-env-delimiter-x1" "tiny brief"
+  assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
+    "cl-raw-env-delimiter-x1" "env -- LOCAL=1 claude-local --model local-coder"
+  fm_test_spawn_brief "$home" "cl-raw-env-split-x1" "tiny brief"
+  assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
+    "cl-raw-env-split-x1" "env -S 'claude-local --model local-coder'"
   assert_raw_claude_local_command_is_refused "$home" "$fakebin" "$endpoint" \
     "cl-raw-command-x1" "command claude-local --model local-coder"
 
@@ -325,6 +331,64 @@ test_raw_claude_local_commands_are_refused() {
     || fail "an ordinary raw env launch did not publish its task record"
 
   pass "bare, env, and command raw claude-local launches are refused without changing ordinary raw launches"
+}
+
+test_dispatch_profile_default_cannot_select_it() {
+  local home fakebin endpoint case_dir id project worktree out
+  read -r home fakebin endpoint case_dir <<<"$(make_world dispatch-default)"
+  id="cl-dispatch-default-x1"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  fm_test_spawn_brief "$home" "$id" "tiny brief"
+  fm_git_worktree "$project" "$worktree" "fm/$id"
+  printf '%s\n' '{"default":{"harness":"claude-local","model":"local-coder"}}' \
+    > "$home/config/crew-dispatch.json"
+
+  FM_FAKE_PANE_PATH="$worktree" run_spawn "$home" "$fakebin" "$endpoint" "$id" "$project" \
+    claude-local --scout --model local-coder \
+    && fail "a dispatch default was allowed to select claude-local"
+  out=$(cat "$RUN_OUT")
+  case "$out" in
+    *"config/crew-dispatch.json default cannot select claude-local"*) : ;;
+    *) fail "the dispatch-default refusal did not name its config boundary: $out" ;;
+  esac
+  case "$out" in
+    *"matched rule profile"*"--harness claude-local"*) : ;;
+    *) fail "the dispatch-default refusal did not name the supported opt-in paths: $out" ;;
+  esac
+  assert_absent "$home/state/$id.meta" "the dispatch-default refusal wrote task metadata"
+
+  pass "a crew-dispatch default cannot select claude-local"
+}
+
+test_dispatch_rule_and_explicit_harness_can_select_it() {
+  local home fakebin endpoint case_dir project rule_wt explicit_wt out status
+  local rule_id="cl-dispatch-rule-x1" explicit_id="cl-dispatch-explicit-x1"
+  read -r home fakebin endpoint case_dir <<<"$(make_world dispatch-opt-in)"
+  project="$case_dir/project"
+  rule_wt="$case_dir/rule-wt"
+  explicit_wt="$case_dir/explicit-wt"
+  fm_test_spawn_brief "$home" "$rule_id" "tiny brief"
+  fm_test_spawn_brief "$home" "$explicit_id" "tiny brief"
+  fm_git_worktree "$project" "$rule_wt" "fm/$rule_id"
+  git -C "$project" worktree add --quiet -b "fm/$explicit_id" "$explicit_wt" \
+    || fail "could not create an explicit-harness worktree"
+  printf '%s\n' '{"rules":[{"when":"short local task","use":{"harness":"claude-local","model":"local-coder"}}],"default":{"harness":"codex"}}' \
+    > "$home/config/crew-dispatch.json"
+
+  status=0
+  FM_FAKE_PANE_PATH="$rule_wt" run_spawn "$home" "$fakebin" "$endpoint" "$rule_id" "$project" \
+    --scout --harness claude-local --model local-coder || status=$?
+  [ "$status" -eq 0 ] || fail "a matched dispatch rule could not select claude-local: $(cat "$RUN_OUT")"
+  assert_present "$home/state/$rule_id.meta" "matched dispatch rule did not publish metadata"
+
+  status=0
+  FM_FAKE_PANE_PATH="$explicit_wt" run_spawn "$home" "$fakebin" "$endpoint" "$explicit_id" "$project" \
+    --scout --harness claude-local --model local-coder || status=$?
+  [ "$status" -eq 0 ] || fail "an explicit per-task harness could not select claude-local: $(cat "$RUN_OUT")"
+  assert_present "$home/state/$explicit_id.meta" "explicit claude-local harness did not publish metadata"
+
+  pass "matched dispatch rules and explicit harnesses can select claude-local"
 }
 
 # A tmux and ps pair that answers the endpoint's agent-state classifier with
@@ -526,6 +590,8 @@ test_it_inherits_claudes_verified_tables
 test_it_uses_claudes_shared_busy_signature
 test_spawn_arms_an_executable_eviction_check
 test_raw_claude_local_commands_are_refused
+test_dispatch_profile_default_cannot_select_it
+test_dispatch_rule_and_explicit_harness_can_select_it
 test_eviction_check_is_gated_on_worker_liveness
 test_fresh_dispatch_rollback_retires_the_eviction_check
 test_incomplete_dispatch_rollback_still_retires_the_eviction_check

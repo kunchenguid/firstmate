@@ -993,6 +993,22 @@ spawn_herdr_presentation_order_lock_release() {
   fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
 }
 
+crew_dispatch_default_uses_claude_local() {  # <config>
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e '
+    def profiles: if type == "array" then . else [.] end;
+    (.default? | profiles | any(.harness? == "claude-local"))
+  ' "$1" >/dev/null 2>&1
+}
+
+dispatch_harness_required_error() {  # <config>
+  if crew_dispatch_default_uses_claude_local "$1"; then
+    echo "error: config/crew-dispatch.json default cannot select claude-local; it is opt-in only. Use a matched rule profile, or pass --harness claude-local --model <exact-model-id> for one explicit task." >&2
+  else
+    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+  fi
+}
+
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
 # the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
@@ -1007,7 +1023,7 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
-    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+    dispatch_harness_required_error "$CONFIG/crew-dispatch.json"
     exit 1
   fi
   rc=0
@@ -1448,7 +1464,21 @@ raw_launch_uses_claude_local() {  # <raw-launch>
       shift
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --) shift; break ;;
+          --)
+            shift
+            while [ "$#" -gt 0 ]; do
+              case "$1" in [A-Za-z_]*=*) shift ;; *) break ;; esac
+            done
+            break
+            ;;
+          -S|--split-string)
+            shift
+            while [ "$#" -gt 0 ]; do
+              case "$1" in *claude-local*) return 0 ;; esac
+              shift
+            done
+            return 1
+            ;;
           -u|--unset|-C|--chdir) shift; [ "$#" -gt 0 ] || return 1; shift ;;
           -u?*|--unset=*|-C?*|--chdir=*|-i|--ignore-environment|-0|--null) shift ;;
           -*) shift ;;
@@ -1499,7 +1529,7 @@ case "$ARG3" in
       harness_src='config/secondmate-harness (falling back to config/crew-harness)'
     else
       if [ -f "$CONFIG/crew-dispatch.json" ]; then
-        echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+        dispatch_harness_required_error "$CONFIG/crew-dispatch.json"
         exit 1
       fi
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
@@ -1521,10 +1551,14 @@ esac
 # These three run BEFORE home, project, and brief resolution, so the caller gets
 # the refusal that explains the boundary rather than an unrelated earlier error.
 if [ "$HARNESS" = claude-local ]; then
-  # 1. Reachable only through an explicit per-spawn harness argument. A dispatch
-  #    profile always supplies one (fm-spawn requires an explicit harness whenever
-  #    config/crew-dispatch.json exists), and so does a per-task captain
-  #    instruction; config/crew-harness and config/secondmate-harness must not.
+  if [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ] \
+     && crew_dispatch_default_uses_claude_local "$CONFIG/crew-dispatch.json"; then
+    dispatch_harness_required_error "$CONFIG/crew-dispatch.json"
+    exit 1
+  fi
+  # 1. Reachable only through an explicit per-spawn harness argument. A matched
+  #    dispatch profile supplies one, and so does a per-task captain instruction;
+  #    config/crew-harness, config/secondmate-harness, and a dispatch default must not.
   if [ "$HARNESS_EXPLICIT" -ne 1 ]; then
     echo "error: claude-local is opt-in only and cannot be selected by a home-wide default ($harness_src). Pass it explicitly for one task, or select it from a config/crew-dispatch.json profile." >&2
     exit 1

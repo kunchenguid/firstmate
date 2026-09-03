@@ -18,7 +18,7 @@ Offer it for short, attended, local work the captain has asked to keep on his ow
 
 | Gate | Refuses |
 |---|---|
-| Opt-in | Selection from `config/crew-harness` or `config/secondmate-harness`; only an explicit per-spawn harness or a dispatch profile reaches it. |
+| Opt-in | Selection from `config/crew-harness`, `config/secondmate-harness`, or a `config/crew-dispatch.json` default; only an explicit per-task harness or a matched rule profile reaches it. |
 | Kind | `--secondmate`, in the spawn and in the control plane that decides a relaunch before stopping the running agent. |
 | Mode | `--mode no-mistakes`. |
 | Model | An omitted `--model`; the id is the endpoint's own catalog id and is never guessed. |
