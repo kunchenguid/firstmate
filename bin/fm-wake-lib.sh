@@ -1224,17 +1224,26 @@ fm_autoarm_failure_transition_acquire() {  # <state-dir>
 }
 
 fm_autoarm_failure_sequence_latest() {  # <state-dir>
-  local state=$1 sequence path name max=0
+  local state=$1 sequence high_water path name value max=0
   sequence="$state/.claude-autoarm-failure-sequence"
   if [ ! -e "$sequence" ] && [ ! -L "$sequence" ]; then
     printf '0\n'
     return 0
   fi
   [ -d "$sequence" ] && [ ! -L "$sequence" ] || return 1
+  high_water="$sequence/high-water"
+  if [ -e "$high_water" ] || [ -L "$high_water" ]; then
+    [ -f "$high_water" ] && [ ! -L "$high_water" ] || return 1
+    value=$(cat "$high_water" 2>/dev/null) || return 1
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$value" -le 9000000000000000000 ] 2>/dev/null || return 1
+    max=$value
+  fi
   for path in "$sequence"/*; do
     [ -e "$path" ] || [ -L "$path" ] || continue
-    [ -d "$path" ] && [ ! -L "$path" ] || return 1
     name=${path##*/}
+    [ "$name" != high-water ] || continue
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
     case "$name" in ''|*[!0-9]*) return 1 ;; esac
     [ "$name" -le 9000000000000000000 ] 2>/dev/null || return 1
     [ "$name" -le "$max" ] || max=$name
@@ -1243,7 +1252,7 @@ fm_autoarm_failure_sequence_latest() {  # <state-dir>
 }
 
 fm_autoarm_failure_sequence_next() {  # <state-dir>
-  local state=$1 sequence now max floor next i=0
+  local state=$1 sequence now max floor next high_water i=0
   sequence="$state/.claude-autoarm-failure-sequence"
   if [ -e "$sequence" ] || [ -L "$sequence" ]; then
     [ -d "$sequence" ] && [ ! -L "$sequence" ] || return 1
@@ -1259,6 +1268,14 @@ fm_autoarm_failure_sequence_next() {  # <state-dir>
   while [ "$i" -lt 250 ]; do
     next=$((max + 1))
     if mkdir "$sequence/$next" 2>/dev/null; then
+      high_water=$(cat "$sequence/high-water" 2>/dev/null || printf '0\n')
+      case "$high_water" in ''|*[!0-9]*) return 1 ;; esac
+      if [ "$next" -le "$high_water" ]; then
+        rmdir "$sequence/$next" 2>/dev/null || true
+        max=$(fm_autoarm_failure_sequence_latest "$state") || return 1
+        i=$((i + 1))
+        continue
+      fi
       printf '%s\n' "$next"
       return 0
     fi
@@ -1267,6 +1284,39 @@ fm_autoarm_failure_sequence_next() {  # <state-dir>
     i=$((i + 1))
   done
   return 1
+}
+
+fm_autoarm_failure_sequence_compact() {  # <state-dir> <through-epoch>
+  local state=$1 through=$2 sequence high_water current pid tmp path name
+  case "$through" in ''|*[!0-9]*) return 1 ;; esac
+  sequence="$state/.claude-autoarm-failure-sequence"
+  [ -d "$sequence" ] && [ ! -L "$sequence" ] || return 1
+  high_water="$sequence/high-water"
+  current=0
+  if [ -e "$high_water" ] || [ -L "$high_water" ]; then
+    [ -f "$high_water" ] && [ ! -L "$high_water" ] || return 1
+    current=$(cat "$high_water" 2>/dev/null) || return 1
+    case "$current" in ''|*[!0-9]*) return 1 ;; esac
+  fi
+  [ "$current" -ge "$through" ] || current=$through
+  pid=${BASHPID:-$$}
+  tmp="$sequence/.high-water.tmp.$pid"
+  if ! printf '%s\n' "$current" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$high_water" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  for path in "$sequence"/*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    name=${path##*/}
+    [ "$name" != high-water ] || continue
+    [ -d "$path" ] && [ ! -L "$path" ] || return 1
+    case "$name" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$name" -le "$current" ]; then
+      rmdir "$path" 2>/dev/null || return 1
+    fi
+  done
+  return 0
 }
 
 fm_autoarm_failure_reset_fence() {  # <state-dir>
@@ -1312,6 +1362,7 @@ fm_autoarm_failure_reset_advance() {  # <state-dir>
     rm -f "$tmp" 2>/dev/null || true
     return 1
   fi
+  fm_autoarm_failure_sequence_compact "$state" "$next" || return 1
   return 0
 }
 

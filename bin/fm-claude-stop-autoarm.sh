@@ -215,15 +215,39 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # this generation. Success means this generation's translation WINS and the
 # caller exits 2 unconditionally. Markerless outcomes commit with the owned
 # ledger write; a notice wins only when its following marker write succeeds in
-# the same hold. Failure means refused or unverifiable: the caller goes silent
-# (cleanup, exit 0) - the harness discards the collected stderr on exit 0, so
-# even an already-printed banner is never delivered by a losing generation.
+# the same hold. Verified supersession makes the caller go silent, while an
+# unavailable terminal write publishes an independent failure before the
+# caller continues. The harness discards collected stderr on exit 0, so even an
+# already-printed banner is never delivered by a losing generation.
 autoarm_commit() {  # <outcome> [marker-file]
+  local commit_rc failure_rc terminal_baseline pid
   if [ -n "${2:-}" ]; then
     fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" "$2"
   else
     fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1"
   fi
+  commit_rc=$?
+  [ "$commit_rc" -ne 0 ] || return 0
+  [ "$commit_rc" -ne 2 ] || return 2
+  pid=${BASHPID:-$$}
+  terminal_baseline="$MY_GEN:$pid:arming"
+  fm_autoarm_claim_failure_commit \
+    "$STATE" "$terminal_baseline" failed "$FAILURE_NOTICE"
+  failure_rc=$?
+  case "$failure_rc" in
+    0|3)
+      [ -e "$FAILURE_ALARM" ] && return 2
+      if [ "$failure_rc" -eq 0 ]; then
+        {
+          printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism could not commit its terminal outcome.\n'
+          printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook commit path before ending blind.\n'
+        } >&2
+      fi
+      return 0
+      ;;
+    2|4) return 2 ;;
+  esac
+  return 1
 }
 
 # Best-effort ownership-checked record for exit-0 paths, where supersession

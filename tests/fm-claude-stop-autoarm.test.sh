@@ -1159,6 +1159,85 @@ test_failure_reader_rejects_record_superseded_during_selection() {
   pass "auto-arm: current-failure selection rejects a concurrently superseded record"
 }
 
+test_terminal_commit_failure_publishes_independent_failure() {
+  local dir out status baseline failure
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-commit-failure")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  cat >> "$dir/bin/fm-wake-lib.sh" <<'SH'
+fm_autoarm_write_owned() {
+  return 1
+}
+SH
+
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+
+  expect_code 2 "$status" "an unavailable terminal commit must request a visible recovery turn"
+  assert_contains "$out" "could not commit its terminal outcome" "terminal commit failure did not report its fallback"
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "fixture did not leave the claimed generation open"
+  baseline="$(epoch_field "$dir" epoch):$(epoch_field "$dir" owner_pid):arming"
+  failure=$(failure_epoch_path "$dir" "$baseline")
+  assert_present "$failure" "terminal commit failure did not publish an independent failed epoch"
+  [ "$(failure_epoch_field "$dir" baseline)" = "$baseline" ] \
+    || fail "terminal commit failure did not retain the exact arming signature"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "terminal commit failure did not publish its notice marker"
+  pass "auto-arm: unavailable terminal commits publish durable independent failure state"
+}
+
+test_terminal_commit_supersession_stays_silent() {
+  local dir status
+  dir=$(make_primary_dir "$TMP_ROOT/terminal-commit-superseded")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  cat >> "$dir/bin/fm-wake-lib.sh" <<'SH'
+fm_autoarm_write_owned() {
+  return 2
+}
+SH
+
+  run_autoarm "$dir" >/dev/null 2>&1; status=$?
+
+  expect_code 0 "$status" "verified terminal supersession must remain silent"
+  assert_absent "$dir/state/.claude-autoarm-failure-epochs" "verified supersession published a false independent failure"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "verified supersession consumed a failure notice"
+  pass "auto-arm: verified terminal supersession remains silent"
+}
+
+test_failure_sequence_compacts_at_recovery_reset() {
+  local dir state first stalled reset next count stale_rc
+  dir=$(make_primary_dir "$TMP_ROOT/failure-sequence-compaction")
+  state="$dir/state"
+  first=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_autoarm_failure_sequence_next "$1/state"' _ "$dir") \
+    || fail "could not allocate the first failure sequence"
+  stalled=$first
+  for _ in 1 2 3 4 5 6 7 8 9; do
+    stalled=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_autoarm_failure_sequence_next "$1/state"' _ "$dir") \
+      || fail "could not allocate a historical failure sequence"
+  done
+
+  bash -c '. "$1/bin/fm-wake-lib.sh"; fm_failure_episode_reset "$1/state"' _ "$dir" \
+    || fail "recovery reset could not compact the failure sequence"
+  reset=$(cat "$state/.claude-autoarm-failure-reset")
+  [ "$reset" -gt "$stalled" ] || fail "recovery reset did not advance past historical allocations"
+  [ "$(cat "$state/.claude-autoarm-failure-sequence/high-water")" = "$reset" ] \
+    || fail "sequence compaction did not preserve the reset high-water value"
+  count=$(find "$state/.claude-autoarm-failure-sequence" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+  [ "$count" -eq 0 ] || fail "sequence compaction retained $count obsolete token directories"
+
+  next=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_autoarm_failure_sequence_next "$1/state"' _ "$dir") \
+    || fail "could not allocate after sequence compaction"
+  [ "$next" -gt "$reset" ] || fail "post-reset failure sequence did not remain monotonic"
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    _fm_autoarm_claim_failure_publish "$1/state" absent failed "$2" 0 \
+      "$1/state/.claude-autoarm-failure-notified"
+  ' _ "$dir" "$stalled"
+  stale_rc=$?
+  expect_code 4 "$stale_rc" "a pre-reset stalled publisher must remain fenced after compaction"
+  assert_absent "$state/.claude-autoarm-failure-epochs" "pre-reset stalled publisher recreated failure state"
+  pass "auto-arm: recovery reset compacts sequence history without weakening fences"
+}
+
 test_failed_cycles_notify_once_and_keep_retrying() {
   local dir out1 out2 status1 status2
   dir=$(make_primary_dir "$TMP_ROOT/failed-dedup")
@@ -1942,6 +2021,9 @@ test_recovery_reset_cannot_be_followed_by_stalled_failure_publication
 test_lockless_failure_publication_cannot_cross_recovery_reset
 test_lockless_failure_notice_is_released_after_ledger_advance
 test_failure_reader_rejects_record_superseded_during_selection
+test_terminal_commit_failure_publishes_independent_failure
+test_terminal_commit_supersession_stays_silent
+test_failure_sequence_compacts_at_recovery_reset
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
 test_unverified_clean_close_exhausts_retries

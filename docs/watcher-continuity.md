@@ -17,6 +17,7 @@ When Claude delivers the Stop hook from its daemon/background-spare tree, the ho
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 Once those gates pass, a recovery-claim failure makes a bounded identity-recorded attempt to serialize an immutable record and episode marker, then uses the monotonic attempt and reset-fence contract in [`turnend-guard.md`](turnend-guard.md#harness-integrations) when that boundary is unavailable.
+An owned terminal outcome that cannot be committed publishes through that same independent failure path, and recovery compacts completed attempt tokens without losing the monotonic high-water fence.
 All normal claim-ledger transitions and positive recovery resets also abandon serialization after a bounded wait when the transition recovery lock remains unavailable.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
 A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
