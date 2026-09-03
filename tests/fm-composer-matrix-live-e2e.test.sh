@@ -139,9 +139,12 @@ done
 # solid rule below the glyph read as a lone separator. Classify the real tmux
 # tail with the cursorless herdr capability profile instead, idle and with a
 # never-submitted probe typed, resolving `need-identity` exactly as an adapter
-# without a live identity would. The ultracode launch can be unavailable on a
-# machine (dynamic workflows off, or xhigh restricted); a launch whose rule
-# carries no label is reported explicitly and not counted, never passed.
+# without a live identity would. The labelled rule is the one shape this step
+# exists to prove, so a launch whose top rule carries no label (the mode is
+# unavailable on this machine, or claude moved the label) fails naming the
+# harness and version instead of passing over it: the plain check alone must
+# never let the guard exit green with the titled rule unread. Run the guard
+# where the mode is available before trusting refreshed evidence.
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 CAPS_CURSORLESS=$'styled=1\ncursor=0\nidentity=1\nrows=20'
@@ -199,7 +202,11 @@ check_claude_cursorless() {  # <label> <want-mode-label:0|1> <launch-cmd...>
   fi
   plain=$(content_tail "$win")
   if [ "$want_label" = 1 ] && ! printf '%s\n' "$plain" | grep -q '─.*ultracode'; then
-    note "claude $label ($version): the ultracode label was not drawn in the composer rule (mode unavailable on this machine); cursorless mode-label case NOT verified"
+    FAILED=1
+    printf 'not ok - claude %s (%s): the ultracode label was not drawn in the composer rule (mode unavailable on this machine, or the shape changed); cursorless mode-label case NOT verified\n' \
+      "$label" "$version" >&2
+    printf '# claude %s pane tail at failure:\n' "$label" >&2
+    printf '%s\n' "$plain" | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
     tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
