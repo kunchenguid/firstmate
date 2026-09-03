@@ -9,7 +9,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE=${1:-}
 
-[ "${COPILOT_CLI:-}" = "1" ] || exit 0
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
+[ "$(fm_hook_actual_host)" = copilot ] || exit 0
 
 case "$MODE" in
   session-start)
