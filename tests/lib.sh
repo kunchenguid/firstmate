@@ -142,6 +142,11 @@ fm_test_sweepable_root() {
 # always succeeds: an unsweepable path, an unreadable process list, or a
 # survivor is left for the next run's fm_test_reap_orphans rather than raised.
 #
+# The KILL pass is not a formality. Half of each leaked pair is the runtime's
+# pane shell, an interactive login shell that ignores SIGTERM - all 99 found on
+# this machine survived TERM and needed KILL - so a TERM-only sweep would still
+# leak one process per spawning case.
+#
 # Re-deriving the pid set from the cwd boundary immediately before each signal
 # is what keeps the sweep scoped across the grace period: a pid that left the
 # subtree - or was recycled by a process outside it - is simply absent from the
