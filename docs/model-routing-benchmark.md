@@ -71,6 +71,9 @@ Each execution binds two structurally distinct frozen records: an `fm-bench-eval
 The evaluator receives only the input path, its stdout must equal the separately frozen expected output, and that expected output must bind the evaluator evidence record byte for byte.
 The two records carry different schemas, live under different frozen roots, and are refused when their bytes coincide, so a program that merely cats or echoes its input cannot clear preflight for any choice of fixture bytes.
 Mutation movement and capture bindings are then derived from the executed result rather than from a detached record.
+Every confined invocation - probes, preflight evaluator executions, and restore-drill replays alike - hands the wrapper the operator's own environment, because the wrapper resolves its container runtime there and a stripped environment loses the endpoint an operator on colima, a remote Docker context, or rootless podman actually uses.
+Nothing is granted by doing so: `bin/fm-bench-confine.sh` scrubs the environment that reaches the confined command down to its own allowlist, so the evaluator sees the same fixed environment either way.
+A wrapper that exits non-zero is reported by its own exit code and a bounded, control-character-free tail of its stderr before any attempt to parse its stdout, so an unresolvable runtime is never disguised as malformed evaluator output.
 
 The restore drill treats archived evaluator bytes as untrusted candidate output.
 It restores, rebinds, and statically validates each sample in a short-lived workspace, then releases that repository and worktree immediately while retaining only the bounded selection's copied tree for later execution.

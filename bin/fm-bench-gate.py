@@ -1274,6 +1274,36 @@ def probe_command(probe: str, target: str) -> list[str]:
     return [str(script_dir / "fm-bench-probe.sh"), probe, target]
 
 
+CONFINEMENT_STDERR_LIMIT = 400
+
+
+def confinement_env(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment the gate hands a confinement wrapper.
+
+    The wrapper resolves its own runtime here, so it needs whatever names that
+    resolution depends on: DOCKER_HOST, DOCKER_CONTEXT, HOME, XDG_RUNTIME_DIR
+    on a host whose endpoint is not the default socket. Nothing is stripped at
+    this boundary because fm-bench-confine.sh scrubs the environment that
+    actually reaches the confined command down to its own allowlist, so the
+    confined process sees the same fixed environment either way.
+    """
+    env = dict(os.environ)
+    env.update(overrides or {})
+    return env
+
+
+def confinement_stderr(stderr: bytes) -> str:
+    """A bounded, control-character-free tail of a wrapper's stderr."""
+    text = stderr.decode("utf-8", "replace")
+    text = "".join(character if character.isprintable() else " " for character in text)
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    if len(text) > CONFINEMENT_STDERR_LIMIT:
+        text = text[:CONFINEMENT_STDERR_LIMIT] + "..."
+    return f": {text}"
+
+
 def run_probe(
     wrapper: list[str],
     probe: str,
@@ -1283,7 +1313,7 @@ def run_probe(
     marker_file: Path | None = None,
 ) -> tuple[str, str]:
     argv = list(wrapper) + probe_command(probe, target)
-    probe_env = dict(env) if env is not None else dict(os.environ)
+    probe_env = dict(env) if env is not None else confinement_env()
     if probe == "process_inspection":
         if marker_file is None:
             return "inconclusive", "process marker material is unavailable"
@@ -1929,17 +1959,24 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=timeout,
-                env={"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+                env=confinement_env(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             report.fail("evaluator.execution", f"content-addressed evaluator could not run: {exc}")
+            return
+        if completed.returncode != 0:
+            report.fail(
+                "evaluator.execution",
+                f"evaluator confinement or execution for {relative_name} exited "
+                f"{completed.returncode}{confinement_stderr(completed.stderr)}",
+            )
             return
         try:
             observed_output = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             report.fail("evaluator.execution", f"evaluator output for {path.name} is invalid: {exc}")
             return
-        if completed.returncode != 0 or observed_output != expected_output:
+        if observed_output != expected_output:
             report.fail(
                 "evaluator.execution",
                 f"content-addressed evaluator did not derive {path.relative_to(base)} from its frozen input",
@@ -3347,6 +3384,7 @@ def rerun_archived_evaluator(
                     stderr=subprocess.PIPE,
                     check=False,
                     timeout=60,
+                    env=confinement_env(),
                 )
                 results[execution_key] = completed
             genuine = results[genuine_key]
@@ -3358,8 +3396,7 @@ def rerun_archived_evaluator(
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, zlib.error) as exc:
         return False, f"archived evaluator could not execute: {exc}", {}
     if genuine.returncode != 0:
-        detail = genuine.stderr.decode("utf-8", "replace").strip()
-        suffix = f": {detail}" if detail else ""
+        suffix = confinement_stderr(genuine.stderr)
         return False, f"archived evaluator confinement or execution exited {genuine.returncode}{suffix}", {}
     actual = sha256_bytes(genuine.stdout)
     if actual != expected:
