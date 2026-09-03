@@ -146,6 +146,10 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 case " $* " in
+  *"state,headRefOid,url,statusCheckRollup"*)
+    printf '%s\t%s\t%s\n' "${FM_TEST_GH_STATE:-OPEN}" \
+      "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" SUCCESS
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
@@ -620,6 +624,59 @@ run_watcher_bounded() {
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+}
+
+# Registration is the one routine path that already consults the forge right
+# after a worker claims done, so it is where verification is armed. Without it
+# `done-unverified` would be every finished task's steady state between claim
+# and cleanup - a signal that is always on, which nobody reacts to. It is
+# advisory: no verifier outcome, including there being nothing to verify, may
+# change what this script registers, arms, or exits with.
+test_registration_arms_claim_verification_without_blocking() {
+  local dir head url other
+  url=https://github.com/o/r/pull/9
+  head=0123456789abcdef0123456789abcdef01234567
+  other=89abcdef0123456789abcdef0123456789abcdef
+
+  dir=$(make_case verify-armed)
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "worktree=$dir/wt" "kind=ship" "mode=direct-PR"
+  printf 'done: pr=%s head=%s - shipped\n' "$url" "$head" > "$dir/home/state/task-a.status"
+  FM_TEST_GH_HEAD=$head run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "registration failed for a task with a conforming claim: $(cat "$dir/stderr")"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "registration did not arm the poll for a task with a conforming claim"
+  assert_present "$dir/home/state/task-a.done-verdict" "registration left no durable verdict record"
+  assert_grep verified "$dir/home/state/task-a.done-verdict" "the durable record did not establish the claim"
+  assert_grep 'claim: verified' "$dir/stdout" "registration did not report the verdict it established"
+  assert_grep "armed: state/task-a.check.sh" "$dir/stdout" "registration stopped reporting what it armed"
+
+  # A claim the forge establishes as FALSE must not stop the registration: the
+  # PR is still registered and the poll is still armed, and only the record and
+  # the printed line carry the contradiction.
+  dir=$(make_case verify-contradicted)
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "worktree=$dir/wt" "kind=ship" "mode=direct-PR"
+  printf 'done: pr=%s head=%s - shipped\n' "$url" "$other" > "$dir/home/state/task-a.status"
+  FM_TEST_GH_HEAD=$head run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a contradicted claim changed the registration's exit status: $(cat "$dir/stderr")"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "a contradicted claim stopped the poll from being armed"
+  assert_grep contradicted "$dir/home/state/task-a.done-verdict" "the contradiction was not recorded durably"
+  assert_grep 'claim: contradicted' "$dir/stdout" "registration did not report the contradiction"
+
+  # The ordinary case at registration time: the worker has not claimed done yet.
+  # Nothing to verify is not an error and prints nothing.
+  dir=$(make_case verify-no-claim)
+  write_task_meta "$dir"
+  FM_TEST_GH_HEAD=$head run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a task with no terminal claim failed registration: $(cat "$dir/stderr")"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "a task with no terminal claim did not get its poll armed"
+  assert_absent "$dir/home/state/task-a.done-verdict" "a task with no claim was given a verdict record"
+  assert_no_grep 'claim:' "$dir/stdout" "a task with no claim printed a verdict line"
+
+  pass "PR registration arms claim verification without ever blocking it"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -2163,6 +2220,7 @@ test_gitlab_merged_poll_retires() {
 }
 
 test_parser_matrix
+test_registration_arms_claim_verification_without_blocking
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed

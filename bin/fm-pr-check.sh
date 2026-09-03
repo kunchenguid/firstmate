@@ -3,6 +3,10 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
+# Registration is also where verification of the task's terminal claim is armed,
+# because this is the one routine path that already consults the forge right
+# after the worker claims done. It is strictly advisory and cannot change what
+# this script registers, arms, or exits with.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -152,4 +156,18 @@ case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
+# Establish the task's terminal claim now, while the forge is already being
+# consulted, so `done-unverified` reads as something unusual rather than as
+# every finished task's steady state between claim and cleanup. Advisory only:
+# the PR is registered and the poll is armed above and stay so whatever the
+# verifier does, including being absent, erroring, or timing out, and its
+# outcome never reaches this script's exit status. A task that has not claimed
+# done yet prints nothing and is not an error.
+if [ -x "$SCRIPT_DIR/fm-verify-done.sh" ]; then
+  VERIFY_LINE=$(FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-}" \
+    "$SCRIPT_DIR/fm-verify-done.sh" "$ID" 2>/dev/null | head -1) || VERIFY_LINE=
+  [ -z "$VERIFY_LINE" ] || printf 'claim: %s\n' "$VERIFY_LINE"
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

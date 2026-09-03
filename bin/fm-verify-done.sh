@@ -36,9 +36,15 @@
 #       same claim as an unrelocated one. A leading `data/` is the home-relative
 #       spelling of that root and names it rather than a directory beneath it.
 #
-# A task whose meta records no mode= reads as no-mistakes, the same default
-# bin/fm-teardown.sh applies, so a task spawned before mode= was recorded cannot
-# skip the validated-commit check below.
+# A task whose meta records no mode= - the population spawned before mode= was
+# recorded - is routed by the shape of its own claim, because an absent record is
+# the absence of evidence and must never produce contradicted: a claim carrying
+# branch= and no pr= takes the local-only arm, one carrying pr= takes the PR arm
+# as no-mistakes so the validated-commit check still runs for it, and one
+# carrying both or neither is unverified, naming the unrecorded mode as the thing
+# that could not be established. bin/fm-teardown.sh keeps its own default; the
+# point is that two owners of the same meta must not disagree in a way that
+# reports a true claim as false.
 #
 # Verdicts, written to state/<id>.done-verdict and printed on stdout:
 #   verified      exit 0
@@ -74,7 +80,9 @@ ID=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --quiet) QUIET=1 ;;
-    -h|--help) sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # The whole leading comment block, found rather than hard-coded, so editing
+    # the header cannot silently truncate the help it is.
+    -h|--help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     -*) echo "fm-verify-done: unknown option $1" >&2; exit 2 ;;
     *) [ -z "$ID" ] || { echo "fm-verify-done: one task id" >&2; exit 2; }; ID=$1 ;;
   esac
@@ -133,10 +141,7 @@ FM_DONE_CLAIM_LINE=$CLAIM
 fm_done_claim_parse "$CLAIM" || { echo "fm-verify-done: $ID has no terminal claim to verify" >&2; exit 2; }
 
 KIND=$(meta_field kind); [ -n "$KIND" ] || KIND=ship
-# An absent mode= is the legacy ship population, which bin/fm-teardown.sh also
-# reads as no-mistakes. Two owners of the same meta must not disagree about it,
-# and reading it as "some other mode" would skip the validated-commit check.
-MODE=$(meta_field mode); [ -n "$MODE" ] || MODE=no-mistakes
+MODE=$(meta_field mode)
 WT=$(meta_field worktree)
 
 if ! fm_done_claim_has_identity; then
@@ -162,6 +167,24 @@ if [ "$KIND" = scout ]; then
     verdict_is contradicted "claimed report is missing or empty: $FM_DONE_CLAIM_REPORT"
   fi
   finish
+fi
+
+# A task spawned before mode= was recorded has none, and no record is the absence
+# of evidence: it may never make a true claim come back contradicted. The claim's
+# own shape decides instead, because it is unambiguous in both common cases - a
+# local-only claim names its branch and no PR, a PR claim names its PR. A claim
+# naming both or neither establishes nothing about the mode, and says so.
+if [ -z "$MODE" ]; then
+  if [ -n "$FM_DONE_CLAIM_BRANCH" ] && [ -z "$FM_DONE_CLAIM_PR" ]; then
+    MODE=local-only
+  elif [ -n "$FM_DONE_CLAIM_PR" ] && [ -z "$FM_DONE_CLAIM_BRANCH" ]; then
+    # Read as no-mistakes so this legacy population still faces the
+    # validated-commit check rather than skipping it.
+    MODE=no-mistakes
+  else
+    verdict_is unverified 'this task records no delivery mode and the claim names neither a branch alone nor a PR alone, so the mode it should be judged against cannot be established'
+    finish
+  fi
 fi
 
 HEAD_CLAIM=$FM_DONE_CLAIM_HEAD

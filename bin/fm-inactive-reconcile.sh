@@ -96,6 +96,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-done-claim-lib.sh
+. "$SCRIPT_DIR/fm-done-claim-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -402,7 +404,7 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status last previous state verb claim note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -427,13 +429,30 @@ report_child_ledger_locked() { # <id> <meta>
   mode=$(clean_field "$(meta_field "$meta" mode)")
   yolo=$(clean_field "$(meta_field "$meta" yolo)")
   data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-  line="$state [key=$outcome_key]: child $id $state: $note"
+  # The same rule report_to_parent applies, at the other delivery path into the
+  # parent channel: a `done` the child only ASSERTED is not a completion the
+  # parent may record as one. It is published as a blocker naming what the claim
+  # actually is, so the parent's durable record cannot say done while the child's
+  # own home says done-unverified. A `failed` line, and a `done` whose verdict IS
+  # verified, are unchanged. The record and its key still carry the ledger's own
+  # state, so dedup is untouched; only the leading verb and one extra field move.
+  verb=$state
+  claim=
+  if [ "$state" = "done" ]; then
+    fm_done_claim_status "$STATE" "$id"
+    case "$FM_DONE_CLAIM_STATE" in
+      verified|none) ;;
+      *) verb=blocked; claim=$FM_DONE_CLAIM_STATE ;;
+    esac
+  fi
+  line="$verb [key=$outcome_key]: child $id $state: $note"
   [ -z "$pr" ] || line="$line pr=$pr"
   [ -z "$mode" ] || line="$line mode=$mode"
   [ -z "$yolo" ] || line="$line yolo=$yolo"
   if [ -f "$data/$id/report.md" ] && [ ! -L "$data/$id/report.md" ]; then
     line="$line report=data/$id/report.md"
   fi
+  [ -z "$claim" ] || line="$line claim=$claim"
   if fm_parent_channel_report "$FM_HOME" "$STATE" "$line"; then
     mark_reported "$RECORD_PENDING" || return 1
     return 0

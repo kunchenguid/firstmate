@@ -39,6 +39,11 @@
 #   (s) a close with no done claim on record does not invent one
 #   (t) a home's configured verb vocabulary is not labelled UNRECOGNISED
 #   (u) the omitted-unrecognised count is never printed without its header
+#   (v) an absent mode= with a local-only-shaped claim is judged as local-only,
+#       never reported as false for naming no PR
+#   (w) an absent mode= the claim's own shape cannot resolve is unverified,
+#       naming the unrecorded mode - absence of evidence is never contradicted
+#   (x) --help prints the whole header it documents itself with
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -577,6 +582,78 @@ test_an_absent_mode_still_checks_the_validated_commit() {
   pass "a task whose meta records no mode still gets the validated-commit check"
 }
 
+# --- (v) an absent mode= with a local-only claim shape ------------------------
+
+# A task spawned before mode= was recorded, whose worker then appended the
+# conforming LOCAL-ONLY claim teardown asked it for. Reading the absent record
+# as a PR mode would report that true claim as `contradicted: claim names no
+# PR`, and teardown would print a stop-and-investigate falsehood. The claim's
+# own shape - a branch and no PR - resolves it.
+test_an_absent_mode_with_a_branch_claim_is_judged_as_local_only() {
+  local dir result shipped
+  dir=$(make_world absent-mode-branch)
+  shipped=$(git -C "$dir/wt" rev-parse HEAD)
+  fm_write_meta "$dir/state/task-v.meta" \
+    "window=fm:fm-task-v" "worktree=$dir/wt" "kind=ship"
+  printf 'done: branch=fm/task-v head=%s - ready\n' "$shipped" > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  case "$result" in
+    *"claim names no PR"*) fail "a true local-only claim with no recorded mode was reported as false: $result" ;;
+  esac
+  [ "${result%%$'\t'*}" = 0 ] \
+    || fail "a true local-only claim with no recorded mode did not verify: $result"
+  pass "an absent mode with a branch-shaped claim is judged as local-only"
+}
+
+# --- (w) an absent mode= the claim shape cannot resolve -----------------------
+
+# Absence of evidence may never manufacture evidence of falsity. When neither
+# the meta nor the claim says which mode to judge against, the honest verdict is
+# unverified naming exactly that, not contradicted.
+test_an_unresolvable_absent_mode_is_unverified_never_contradicted() {
+  local dir result shipped
+  dir=$(make_world absent-mode-ambiguous)
+  shipped=$(git -C "$dir/wt" rev-parse HEAD)
+  fm_write_meta "$dir/state/task-v.meta" \
+    "window=fm:fm-task-v" "worktree=$dir/wt" "kind=ship"
+
+  printf 'done: head=%s - shipped\n' "$shipped" > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "a claim naming neither a branch nor a PR was not unverified: $result"
+  case "$result" in
+    *"no delivery mode"*) ;;
+    *) fail "the verdict did not name the unrecorded mode: $result" ;;
+  esac
+
+  printf 'done: pr=https://github.com/o/r/pull/7 branch=fm/task-v head=%s - shipped\n' "$shipped" \
+    > "$dir/state/task-v.status"
+  result=$(verify "$dir")
+  [ "${result%%$'\t'*}" = 3 ] \
+    || fail "a claim naming both a branch and a PR was not unverified: $result"
+  pass "an absent mode the claim cannot resolve is unverified, never contradicted"
+}
+
+# --- (x) the help is the whole header ----------------------------------------
+
+# The help IS the header comment, so a hard-coded line range silently truncates
+# it the moment the header grows. Asserted on the documented contract the last
+# sentence states, which is the one a range that stops short would drop.
+test_help_prints_the_whole_header() {
+  local out last
+  out=$("$VERIFY" --help) || fail "fm-verify-done.sh --help did not exit 0"
+  last=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)
+  case "$last" in
+    *"invalidates it rather than inheriting its verdict.") ;;
+    *) fail "--help truncated its own header; it ends at: $last" ;;
+  esac
+  case "$out" in
+    *"Verdicts, written to state/"*) ;;
+    *) fail "--help dropped the verdict contract it documents" ;;
+  esac
+  pass "--help prints the whole header it documents itself with"
+}
+
 # --- (r) a relative scout report= follows the configured data root ------------
 
 test_a_relative_scout_report_follows_a_relocated_data_root() {
@@ -738,6 +815,9 @@ test_a_transient_unverified_does_not_downgrade_an_established_record
 test_a_contradiction_still_overwrites_an_established_record
 test_an_absent_mode_still_checks_the_validated_commit
 test_a_relative_scout_report_follows_a_relocated_data_root
+test_an_absent_mode_with_a_branch_claim_is_judged_as_local_only
+test_an_unresolvable_absent_mode_is_unverified_never_contradicted
+test_help_prints_the_whole_header
 test_a_close_does_not_invent_a_done_claim
 test_a_configured_verb_vocabulary_is_not_unrecognised
 test_the_omitted_unrecognised_count_carries_its_header
