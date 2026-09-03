@@ -39,7 +39,29 @@ TMP_ROOT=$(fm_test_tmproot fm-update-tests)
 new_world() {
   local name=$1 w
   w="$TMP_ROOT/$name"
-  mkdir -p "$w/home/state" "$w/home/data"
+  mkdir -p "$w/home/state" "$w/home/data" "$w/fakebin" "$w/fake"
+  : > "$w/fake/windows"
+  cat > "$w/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) cat "$FM_FAKE_DIR/windows" ;;
+  display-message)
+    target=
+    for arg in "$@"; do
+      case "$arg" in main:fm-*) target=$arg ;; esac
+    done
+    case "${*: -1}" in
+      *pane_current_command*)
+        id=${target##*fm-}
+        if [ -e "$FM_FAKE_DIR/dead-$id" ]; then printf 'zsh\n'; else printf 'claude\n'; fi
+        ;;
+      *) printf '\n' ;;
+    esac
+    ;;
+esac
+SH
+  chmod +x "$w/fakebin/tmux"
   # Fresh watcher beacon keeps fm-guard quiet.
   touch "$w/home/state/.last-watcher-beat"
 
@@ -73,11 +95,15 @@ add_sm() {
   git -C "$w/main" worktree add -q --detach "$w/$id" main
   {
     printf 'window=main:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s/%s\n' "$w" "$id"
+    printf 'project=%s/%s\n' "$w" "$id"
     printf 'kind=secondmate\n'
     printf 'harness=%s\n' "$harness"
     [ -z "$backend" ] || printf 'backend=%s\n' "$backend"
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
+  printf 'fm-%s\n' "$id" >> "$w/fake/windows"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
 }
 
@@ -103,7 +129,8 @@ bump_origin() {
 
 run_update() {
   local w=$1
-  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+  PATH="$w/fakebin:$PATH" FM_FAKE_DIR="$w/fake" \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -176,8 +203,8 @@ test_bin_only_advance_never_restarts() {
   pass "T3b a bin/-only advance steers the secondmate instead of restarting it"
 }
 
-# --- T3c: a runtime that cannot prove a restart gets the steer instead ------
-test_unprovable_runtime_is_nudged_not_restarted() {
+# --- T3c: an unverifiable runtime stays out of both action sets -------------
+test_unprovable_runtime_gets_no_action() {
   local w out
   w=$(new_world t3c)
   # zellij has no recovery-grade agent-state classifier, so no restart there can
@@ -188,8 +215,24 @@ test_unprovable_runtime_is_nudged_not_restarted() {
   out=$(run_update "$w")
 
   assert_contains "$out" "restart-secondmates: none" "an unprovable runtime must stay out of the restart set"
-  assert_contains "$out" "nudge-secondmates: fm-sm1" "an unprovable runtime keeps the re-read steer"
-  pass "T3c a secondmate whose runtime cannot prove a restart is steered instead"
+  assert_contains "$out" "nudge-secondmates: none" "a runtime without a positive alive state must not be steered"
+  pass "T3c an unverifiable secondmate stays out of both action sets"
+}
+
+# --- T3d: an already-stopped mate is left to startup recovery ---------------
+test_dead_secondmate_gets_no_action() {
+  local w out
+  w=$(new_world t3d)
+  add_sm "$w" sm1
+  : > "$w/fake/dead-sm1"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: updated " "the stopped mate's safe checkout still advances"
+  assert_contains "$out" "restart-secondmates: none" "a stopped mate must not be sent to restart"
+  assert_contains "$out" "nudge-secondmates: none" "a stopped mate must not receive a queued nudge"
+  pass "T3d an already-stopped secondmate is left to startup recovery"
 }
 
 # --- T4: dirty secondmate is skipped, its edit preserved -------------------
@@ -347,7 +390,8 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_bin_only_advance_never_restarts
-test_unprovable_runtime_is_nudged_not_restarted
+test_unprovable_runtime_gets_no_action
+test_dead_secondmate_gets_no_action
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current

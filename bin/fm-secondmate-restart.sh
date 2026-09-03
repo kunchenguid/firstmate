@@ -26,15 +26,13 @@
 #      restart instead of serializing the fleet behind it.
 #   B. RESTART. Only after that mate's own correlated answer lands on the parent
 #      channel. The gate is that answer, never a wall clock, so a mate that is
-#      mid-turn queues the request behind that turn and is never cut off
-#      mid-thought; the bound below exists to end the wait, not to authorize a
-#      restart without the answer.
+#      mid-turn queues the request behind that turn; the bound below exists to
+#      end the wait, not to authorize a restart without the answer.
 #
-# Anything that leaves the reload unprovable falls back to the ordinary re-read
-# nudge and is REPORTED as a nudge - never as a clean reload. That covers a mate
-# whose persist answer did not arrive, whose runtime cannot prove a restart, whose
-# relaunch was refused, whose replacement did not come up, and whose host could
-# not be reached.
+# A mate whose persist answer did not arrive or whose runtime cannot prove a
+# restart gets the ordinary re-read nudge and is reported as a nudge, never as a
+# clean reload. Once a relaunch is attempted, any failed or ambiguous result is
+# reported as unknown rather than attributing it to either incarnation.
 #
 # Placement changes the transport and nothing else. A local mate is restarted
 # with bin/fm-control.sh <id> relaunch; a remote mate is restarted by running THAT
@@ -55,9 +53,9 @@
 #   FM_SECONDMATE_PERSIST_WAIT  seconds to wait for one mate's persist answer (900)
 #   FM_SECONDMATE_PERSIST_POLL  seconds between checks of that answer (5)
 #
-# Exit status: 0 every named mate restarted; 3 at least one fell back to the
-# nudge and every mate was still accounted for; 1 the input itself is unusable;
-# 2 invalid use.
+# Exit status: 0 every named mate restarted; 3 at least one was nudged or left
+# unreached and every mate was still accounted for; 1 the input itself is
+# unusable; 2 invalid use.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -154,38 +152,15 @@ report_unreached() {  # <id> <reason>
   printf 'unreached: %s: %s\n' "$1" "$2"
 }
 
-snapshot_field() {  # <snapshot> <field>
-  printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -1
-}
-
-local_incarnation_snapshot() {  # <id>
-  local id=$1 state spawn_gen
-  state=unverified
-  if fm_backend_validate_task_endpoint "$STATE/$id.meta" "$id" 2>/dev/null; then
-    state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
-      "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null || printf 'unreadable')
-  fi
-  spawn_gen=$(fm_meta_get "$STATE/$id.meta" spawn_gen)
-  printf 'state=%s\nspawn_gen=%s\n' "$state" "$spawn_gen"
-}
-
-remote_incarnation_snapshot() {  # <id>
-  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$1" \
-    fm-remote-secondmate-control.sh incarnation "$1" < /dev/null 2>/dev/null
-}
-
 restart_mate() {  # <array-index>
   local i=$1 id restart_out restart_rc restart_reason ran_on
-  local before after before_gen after_gen lifecycle_state
   id=${IDS[$i]}
   if [ "${PLACEMENT[i]}" = remote ]; then
-    before=$(remote_incarnation_snapshot "$id" || true)
     restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
       fm-remote-secondmate-control.sh relaunch \
       "$id" "${HARNESS[i]}" "${MODEL[i]:--}" "${EFFORT[i]:--}" < /dev/null 2>&1)
     restart_rc=$?
   else
-    before=$(local_incarnation_snapshot "$id")
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
     restart_rc=$?
@@ -203,32 +178,7 @@ restart_mate() {  # <array-index>
 
   restart_reason=$(first_reported_line "$restart_out")
   [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
-  if [ "${PLACEMENT[i]}" = remote ]; then
-    after=$(remote_incarnation_snapshot "$id" || true)
-  else
-    after=$(local_incarnation_snapshot "$id")
-  fi
-  lifecycle_state=$(snapshot_field "$after" state)
-  before_gen=$(snapshot_field "$before" spawn_gen)
-  after_gen=$(snapshot_field "$after" spawn_gen)
-  if [ "$lifecycle_state" = alive ] && [ -n "$before_gen" ] \
-    && [ -n "$after_gen" ] && [ "$before_gen" != "$after_gen" ]; then
-    if [ "${PLACEMENT[i]}" = remote ]; then
-      printf 'restarted: %s on %s (%s)\n' "$id" "${HOST[i]}" "${HARNESS[i]}"
-    else
-      ran_on=$(fm_meta_get "$STATE/$id.meta" harness)
-      [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
-      printf 'restarted: %s (%s)\n' "$id" "$ran_on"
-    fi
-  elif [ "$lifecycle_state" = alive ] && [ -n "$before_gen" ] \
-    && [ "$before_gen" = "$after_gen" ]; then
-    fall_back_to_nudge "$id" "the restart did not complete: $restart_reason"
-  elif [ "$lifecycle_state" = dead ] || [ "$lifecycle_state" = missing ]; then
-    report_unreached "$id" "the restart did not complete and no agent is running (state: $lifecycle_state): $restart_reason"
-  else
-    [ -n "$lifecycle_state" ] || lifecycle_state=unreadable
-    report_unreached "$id" "the restart did not complete and the agent state is unknown ($lifecycle_state): $restart_reason"
-  fi
+  report_unreached "$id" "the restart outcome is unknown: $restart_reason"
 }
 
 launch_restart() {  # <array-index>

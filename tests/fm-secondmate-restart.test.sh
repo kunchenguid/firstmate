@@ -12,9 +12,9 @@
 #   3. The persist request is the task-subset of /stow: it asks for open records
 #      and task status, and explicitly not for the memory, learnings, or
 #      captain-preference sweeps.
-#   4. Every unsafe case falls back to the nudge and SAYS so - a runtime that
-#      cannot prove a restart, a mate with no durable record, a refused restart,
-#      and an unreachable host - and none of them is reported as a clean reload.
+#   4. Every unsafe case says what is known: pre-restart capability and persist
+#      failures use the nudge path, while a failed relaunch is reported as an
+#      unknown outcome; none is reported as a clean reload.
 #   5. A remote mate restarts by running the SAME local control-plane relaunch on
 #      its host, over the fm-on transport, with the profile resolved from the
 #      PARENT's own pin rather than the remote home's copy of it.
@@ -152,7 +152,6 @@ add_local_mate() {
     echo "yolo=off"
     echo "model=default"
     echo "effort=default"
-    echo "spawn_gen=spawn-$id-old"
     echo "home=$smhome"
     [ -z "$backend" ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
@@ -287,12 +286,14 @@ test_refused_restart_falls_back_without_claiming_a_reload() {
   out=$(run_restart "$dir" sm1); rc=$?
 
   expect_code 3 "$rc" "a refused restart must not be reported as a reload"$'\n'"$out"
-  assert_contains "$out" "the restart did not complete" "the fallback must name the failed restart"
+  assert_contains "$out" "unreached: sm1:" "a failed restart must be reported as unknown"
+  assert_contains "$out" "restart outcome is unknown" "the report must not attribute an ambiguous failure"
+  assert_not_contains "$out" "nudged: sm1" "a failed restart must not claim the old agent was nudged"
   assert_not_contains "$out" "restarted: sm1" "a refused restart must not be reported as restarted"
   [ "$(cat "$dir/fake/command")" = "$before" ] \
     || fail "a refusal before the stop should leave the running agent exactly as it was"
   assert_no_grep '^/exit$' "$dir/fake/literal" "a pre-stop refusal must not have stopped the agent"
-  pass "T5 a refused restart leaves the mate running and is reported as a message, not a reload"
+  pass "T5 a refused restart leaves the mate running and reports an unknown outcome"
 }
 
 # --- T6: a remote mate restarts over the fm-on hop, on the parent's pin -------
@@ -338,10 +339,6 @@ case "${FM_FAKE_SSH_MODE:-ok}" in
   unreachable) exit 255 ;;
 esac
 case "${rargs[1]:-}" in
-  incarnation)
-    printf 'state=alive\nspawn_gen=%s\n' "$(cat "$FM_FAKE_DIR/remote.gen")"
-    ;;
-  state) printf 'alive\n' ;;
   send)
     # Model the live remote mate: act on the instruction and report back on the
     # parent channel, carrying the correlation token the request embedded.
@@ -358,10 +355,6 @@ case "${rargs[1]:-}" in
         /bin/sleep 2
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
-      replaced-ambiguous)
-        printf 'spawn-remote-new\n' > "$FM_FAKE_DIR/remote.gen"
-        exit 255
-        ;;
     esac
     printf 'relaunched %s\n' "${rargs[2]}"
     ;;
@@ -370,7 +363,6 @@ exit 0
 SH
   chmod +x "$fb/fake-ssh"
   : > "$dir/ssh.log"
-  printf 'spawn-remote-old\n' > "$dir/fake/remote.gen"
   export FM_FAKE_SSH_LOG="$dir/ssh.log"
   export FM_FAKE_SSH_MODE="$mode"
   export FM_TEST_SSH_BIN="$fb/fake-ssh"
@@ -500,7 +492,7 @@ test_post_stop_failure_is_reported_unreached() {
 
   expect_code 3 "$rc" "a post-stop relaunch failure must remain accounted for"$'\n'"$out"
   assert_contains "$out" "unreached: sm1:" "a stopped mate must be reported as unreached"
-  assert_contains "$out" "no agent is running" "the report must preserve the lifecycle result"
+  assert_contains "$out" "restart outcome is unknown" "the report must not attribute the failed lifecycle operation"
   assert_not_contains "$out" "nudged: sm1" "a durable enqueue must not masquerade as a running mate's nudge"
   assert_contains "$out" "summary: 0 of 1 restarted, 0 nudged, 1 unreached" \
     "the summary must not claim that a stopped mate remains on older instructions with a message"
@@ -529,24 +521,6 @@ test_relaunches_do_not_block_persist_polling() {
   pass "T12 relaunch waits do not block fleet persistence polling"
 }
 
-# --- T13: a changed live incarnation proves an ambiguous relaunch completed --
-test_changed_incarnation_confirms_ambiguous_remote_relaunch() {
-  local dir out rc
-  dir=$(new_case remote-incarnation)
-  setup_remote_case "$dir" sm1 replaced-ambiguous
-  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
-
-  out=$(run_restart "$dir" sm1); rc=$?
-  unset FM_FAKE_ANSWER_STATUS
-
-  expect_code 0 "$rc" "a live replacement incarnation should prove the restart"$'\n'"$out"
-  assert_contains "$out" "restarted: sm1 on remote-mac (claude)" \
-    "the changed remote incarnation was not classified as the replacement"
-  assert_not_contains "$out" "nudged: sm1" \
-    "the replacement incarnation was mistaken for the old agent"
-  pass "T13 incarnation identity resolves an ambiguous relaunch result"
-}
-
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_unprovable_runtime_falls_back
@@ -559,6 +533,5 @@ test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
 test_post_stop_failure_is_reported_unreached
 test_relaunches_do_not_block_persist_polling
-test_changed_incarnation_confirms_ambiguous_remote_relaunch
 
 echo "# all fm-secondmate-restart tests passed"

@@ -84,10 +84,36 @@ FF_NUDGE_WINDOWS=""
 FF_SEEN_HOMES=""
 FF_RESTART_WINDOWS=""
 
+remove_secondmate_action() {  # <id>
+  local id=$1 selector next=""
+  for selector in $FF_NUDGE_WINDOWS; do
+    [ "$selector" = "fm-$id" ] || next="$next $selector"
+  done
+  FF_NUDGE_WINDOWS=$next
+}
+
+secondmate_agent_is_alive() {  # <id>
+  local id=$1 meta="$STATE/$1.meta" remote_host state
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  if [ -n "$remote_host" ]; then
+    state=$("$SCRIPT_DIR/fm-on.sh" "$id" \
+      fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null) || return 1
+  else
+    fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || return 1
+    state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
+      "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || return 1
+  fi
+  [ "$state" = alive ]
+}
+
 # Classify one advanced local secondmate. bin/fm-ff-lib.sh calls this for each
 # home that advanced with a changed instruction surface and a live endpoint.
 fm_ff_after_instruction_update() {  # <id> <home> <window> <instr>
   local id=$1 instr=$4
+  if ! secondmate_agent_is_alive "$id"; then
+    remove_secondmate_action "$id"
+    return 0
+  fi
   ff_instr_needs_reload "$instr" || return 0
   fm_secondmate_restart_capable "$STATE/$id.meta" || return 0
   FF_RESTART_WINDOWS="$FF_RESTART_WINDOWS fm-$id"
@@ -135,7 +161,8 @@ if [ -f "$SECONDMATES_MD" ]; then
               echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST ($remote_commit)"
             fi
             if [ "$remote_instr_known" -eq 1 ] && [ -n "$remote_instr" ] \
-              && [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
+              && [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta" \
+              && secondmate_agent_is_alive "$id"; then
               if ff_instr_needs_reload "$remote_instr" \
                 && fm_secondmate_restart_capable "$STATE/$id.meta"; then
                 FF_RESTART_WINDOWS="$FF_RESTART_WINDOWS fm-$id"

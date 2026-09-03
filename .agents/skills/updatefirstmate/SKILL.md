@@ -57,6 +57,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    Local and remote mates go in the same list; the command owns the transport, the profile each replacement runs on, and the wait.
 
    It asks every listed mate first to write down the open work it holds only in its conversation, and restarts one only after that mate's own answer comes back.
+   A mate that is mid-turn queues the request behind that turn.
    That is the whole point of the step, so do not work around it: it is what keeps a captain call the mate had formed but never registered from being lost with the conversation.
    Its header owns the request, the bound, and the two knobs that change them.
 
@@ -64,7 +65,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    - `restarted: <id>` - that mate is now genuinely running the new instructions.
    - `nudged: <id>: <reason>` - the restart was not safe, so the mate got the older re-read message instead and is still running the previous instructions.
      Never report one of these as a clean reload.
-   - `unreached: <id>: <reason>` - nothing could be delivered to that mate at all.
+   - `unreached: <id>: <reason>` - no safe running outcome could be confirmed, including an ambiguous relaunch result.
 
 4. **Send the re-read message to the rest.**
    For every target on the `nudge-secondmates:` line (do nothing when it says `none`), send the one-line re-read steer:
@@ -89,6 +90,6 @@ This touches only the firstmate repo and its own worktrees, never anything under
   It is the same sanctioned self-write as the fleet sync.
 - **Nothing with work in it is disrupted.**
   A local or remote second mate gets a tracked-files fast-forward only when its own checkout is safe to advance.
-  A restart replaces that mate's agent in the same home and endpoint after its open work is written down; it is never a teardown, never an interruption of a turn in progress, and never forced.
+  A restart replaces that mate's agent in the same home and endpoint after its open work is written down; it is never a teardown and never forced.
   Its crewmates keep running in their own endpoints, and every durable record - backlog, held captain calls, unread status, unhandled instructions - is re-presented to the replacement at startup.
-  A restart that cannot be proven does not happen: that mate keeps its agent and gets the re-read message, reported as exactly that.
+  A restart refused before it is attempted leaves that mate on the re-read path; once a relaunch is attempted, any failed or ambiguous result is reported as unknown rather than attributed to either incarnation.
