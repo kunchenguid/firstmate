@@ -182,6 +182,27 @@ SH
   done
 }
 
+# fm_test_fake_treehouse <fakebin>
+# Spawn-world treehouse: `get --lease ...` prints the path fm-spawn.sh will
+# treat as the leased copy - FM_FAKE_LEASE_PATH, falling back to the pane path
+# FM_FAKE_PANE_PATH so a suite whose fake pane already "sits" in the worktree
+# needs no second variable. Every invocation is appended to FM_TREEHOUSE_LOG
+# (one argv per line, space-joined) when that variable is set, and every other
+# subcommand (return, prune, ...) exits 0 silently.
+fm_test_fake_treehouse() {
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TREEHOUSE_LOG"
+case "${1:-} ${2:-}" in
+  "get --lease") printf '%s\n' "${FM_FAKE_LEASE_PATH:-${FM_FAKE_PANE_PATH:-}}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

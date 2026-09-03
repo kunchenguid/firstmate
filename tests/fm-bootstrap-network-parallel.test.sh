@@ -184,7 +184,8 @@ test_remote_probe_scheduling_keeps_per_mate_lines() { # <parallel|fallback>
   git -C "$primary" add AGENTS.md bin
   git -C "$primary" commit -qm 'seed primary default branch'
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  fm_test_fake_treehouse "$fakebin"
+  fm_fake_exit0 "$fakebin" gh tmux node
   log="$dir/probe.log"
   : > "$log"
   install_fake_ssh "$fakebin"

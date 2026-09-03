@@ -19,23 +19,28 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit
 
 REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
+REAL_GIT=$(command -v git)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
+LEASED_WORKTREES_LOG="$TMP_ROOT/leased-worktrees.log"
 MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
-mkdir -p "$FAKEBIN"
+REFRESH_CWD_CONTROL="$TMP_ROOT/refresh-cwd-control"
+REFRESH_REF_RACE_CONTROL="$TMP_ROOT/refresh-ref-race-control"
+mkdir -p "$FAKEBIN" "$TMP_ROOT/pane-death-watches"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
+: > "$LEASED_WORKTREES_LOG"
 : > "$MOVE_CALL_LOG"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
-export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
+export REAL_HERDR REAL_TREEHOUSE REAL_GIT REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG LEASED_WORKTREES_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL REFRESH_CWD_CONTROL REFRESH_REF_RACE_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -133,6 +138,10 @@ case "${1:-} ${2:-}" in
   "pane close") mutation=pane-close ;;
   "tab focus") mutation=tab-focus ;;
 esac
+if [ "$mutation" = pane-close ]; then
+  watch_dir="$TMP_ROOT/pane-death-watches/$mutation_target"
+  [ ! -d "$watch_dir" ] || : > "$watch_dir/cancel"
+fi
 refusal_probe=0
 if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
    && [ "$(cat "$ACTIVE_SEEDED_CONTROL/stage" 2>/dev/null || true)" = injected ] \
@@ -142,7 +151,7 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
-if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@" 2>&1); then
   status=0
 else
   status=$?
@@ -183,6 +192,28 @@ if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE
     break
   done
 fi
+if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane process-info" ]; then
+  watched_pane=$(arg_value --pane "$@" || true)
+  watch_dir="$TMP_ROOT/pane-death-watches/$watched_pane"
+  if [ -n "$watched_pane" ] \
+     && printf '%s' "$out" | jq -e --arg pane "$watched_pane" \
+       '.result.type == "pane_process_info" and .result.process_info.pane_id == $pane' >/dev/null 2>&1 \
+     && mkdir "$watch_dir" 2>/dev/null; then
+    focus_snapshot > "$watch_dir/before" || printf '%s\n' ambiguous/ambiguous > "$watch_dir/before"
+  fi
+fi
+if [ "${1:-} ${2:-}" = "pane get" ]; then
+  watched_pane=${3:-}
+  watch_dir="$TMP_ROOT/pane-death-watches/$watched_pane"
+  if [ -f "$watch_dir/before" ] && [ ! -e "$watch_dir/cancel" ] && [ ! -e "$watch_dir/done" ] \
+     && printf '%s' "$out" | jq -e '.error.code == "pane_not_found"' >/dev/null 2>&1; then
+    death_before=$(cat "$watch_dir/before")
+    death_after=$(focus_snapshot || printf ambiguous/ambiguous)
+    printf 'pane-death\t%s\t%s\t%s\n' \
+      "$death_before" "$death_after" "$watched_pane" >> "$FOCUS_AUDIT_LOG"
+    printf '%s\n' done > "$watch_dir/done"
+  fi
+fi
 if [ -n "$mutation" ]; then
   after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "$mutation_target" >> "$FOCUS_AUDIT_LOG"
@@ -191,7 +222,9 @@ if [ "$refusal_probe" -eq 1 ]; then
   refusal_after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf 'seeded-prune-refusal\t%s\t%s\t%s\n' "$refusal_before" "$refusal_after" "${3:-}" >> "$FOCUS_AUDIT_LOG"
 fi
-[ -z "$out" ] || printf '%s\n' "$out"
+[ -z "$out" ] || {
+  if [ "$status" -eq 0 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" >&2; fi
+}
 exit "$status"
 SH
 
@@ -207,10 +240,68 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+# fm-spawn leases the copy from its own process before any pane exists; record
+# every leased path so cleanup can return the ones a deliberately aborted spawn
+# retains for inspection.
+if [ "${1:-} ${2:-}" = "get --lease" ]; then
+  out=$("$REAL_TREEHOUSE" "$@") || exit $?
+  printf '%s\n' "$out" >> "$LEASED_WORKTREES_LOG"
+  printf '%s\n' "$out"
   exit 0
 fi
 exec "$REAL_TREEHOUSE" "$@"
+SH
+
+cat > "$FAKEBIN/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -d "$REFRESH_REF_RACE_CONTROL" ]; then
+  wt=$(cat "$REFRESH_REF_RACE_CONTROL/worktree")
+  has_wt=0
+  has_fetch=0
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = -C ] && [ "$arg" = "$wt" ]; then
+      has_wt=1
+    fi
+    [ "$arg" != fetch ] || has_fetch=1
+    previous=$arg
+  done
+  if [ "$has_wt" = 1 ] && [ "$has_fetch" = 1 ]; then
+    count=0
+    [ ! -f "$REFRESH_REF_RACE_CONTROL/fetch-count" ] || count=$(cat "$REFRESH_REF_RACE_CONTROL/fetch-count")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$REFRESH_REF_RACE_CONTROL/fetch-count"
+    if [ "$count" -eq 2 ]; then
+      origin=$(cat "$REFRESH_REF_RACE_CONTROL/origin")
+      replacement=$(cat "$REFRESH_REF_RACE_CONTROL/replacement")
+      "$REAL_GIT" --git-dir="$origin" update-ref refs/heads/recovery-landed "$replacement" || exit 96
+    fi
+  fi
+fi
+if [ -d "$REFRESH_CWD_CONTROL" ]; then
+  wt=$(cat "$REFRESH_CWD_CONTROL/worktree")
+  pane=$(cat "$REFRESH_CWD_CONTROL/pane")
+  has_wt=0
+  has_reset=0
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = -C ] && [ "$arg" = "$wt" ]; then
+      has_wt=1
+    fi
+    [ "$arg" != reset ] || has_reset=1
+    previous=$arg
+  done
+  if [ "$has_wt" = 1 ] && [ "$has_reset" = 1 ]; then
+    pane_json=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "$pane") || exit 97
+    cwd=$(printf '%s' "$pane_json" | jq -r '.result.pane.foreground_cwd // empty')
+    printf '%s\n' "$cwd" > "$REFRESH_CWD_CONTROL/observed"
+    case "$cwd" in
+      "$wt"|"$wt"/*) exit 98 ;;
+    esac
+  fi
+fi
+exec "$REAL_GIT" "$@"
 SH
 
 cat > "$FAKEBIN/herdr-workspace-mover" <<'SH'
@@ -248,7 +339,7 @@ printf 'workspace-move\t%s\t%s\t%s\n' "$before" "$after" "$2" >> "$FOCUS_AUDIT_L
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$status"
 SH
-chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse"
+chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse" "$FAKEBIN/git"
 chmod +x "$FAKEBIN/herdr-workspace-mover"
 export PATH="$FAKEBIN:$PATH"
 export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
@@ -280,6 +371,7 @@ cleanup_all() {
     "$REAL_TREEHOUSE" return --force "$wt" >/dev/null 2>&1 || true
   done <<EOF
 $RECORDED_WORKTREES
+$(cat "$LEASED_WORKTREES_LOG" 2>/dev/null || true)
 EOF
   if [ "$LAB_READY" -eq 1 ]; then
     PATH="$HERDR_ORIGINAL_PATH" \
@@ -329,6 +421,21 @@ assert_focus_is() {  # <expected> <case-name>
 
 focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
 
+await_pane_removal_audit_since() {  # <line-count> <pane-id>
+  local start=$1 pane=$2 attempt=0 count
+  while [ "$attempt" -lt 200 ]; do
+    count=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane" '
+      ($1 == "pane-close" || $1 == "pane-death") && $4 == pane { count++ }
+      END { print count + 0 }
+    ')
+    [ "$count" -eq 0 ] || break
+    sleep 0.025
+    attempt=$((attempt + 1))
+  done
+  [ "$count" -eq 1 ] \
+    || fail "projected cleanup recorded $count removal events for exact pane $pane"
+}
+
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
   changed=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' '
@@ -345,9 +452,10 @@ assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name
 # a fallback plain close must preserve or immediately restore exact focus.
 assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
   local start=$1 pane_id=$2 expected=$3
+  await_pane_removal_audit_since "$start" "$pane_id"
   sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v expected="$expected" '
-    $1 == "pane-close" && $4 == pane {
-      saw_close = 1
+    ($1 == "pane-close" || $1 == "pane-death") && $4 == pane {
+      saw_close++
       if ($2 != expected) { bad = 1 }
       else if ($3 == expected) { preserved = 1 }
       else { drift = $3 }
@@ -356,7 +464,7 @@ assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
     saw_close && drift != "" && $1 == "tab-focus" && $2 == drift && $3 == expected {
       preserved = 1
     }
-    END { exit(bad || (saw_close && !preserved) ? 1 : 0) }
+    END { exit(bad || saw_close != 1 || !preserved ? 1 : 0) }
   ' || fail "projected pane close did not preserve or restore the exact active workspace and tab"
   if lab pane get "$pane_id" >/dev/null 2>&1; then
     fail "projected cleanup left exact pane $pane_id alive"
@@ -830,7 +938,11 @@ FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F 
 assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
 
+# The copy is leased and refreshed before the pane exists, so the post-create
+# abort is armed on the pane's cwd read instead: the wrapper reports a path
+# that is not the leased copy, and a short settle window keeps the wait bounded.
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
+export FM_SPAWN_SETTLE_POLLS=3
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
 spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
@@ -841,17 +953,20 @@ if wait "$ABORT_A_PID"; then ABORT_A_STATUS=0; else ABORT_A_STATUS=$?; fi
 if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
 finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
 finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
-grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -F "did not yield an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
-  || fail "post-create abort fixture B did not reach the armed validation failure"
+unset FM_SPAWN_SETTLE_POLLS
+grep -F "did not settle in the leased worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture A did not reach the armed settle failure"
+grep -F "did not settle in the leased worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+  || fail "post-create abort fixture B did not reach the armed settle failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
+await_pane_removal_audit_since "$ABORT_FOCUS_START" "$ABORT_A_PANE"
+await_pane_removal_audit_since "$ABORT_FOCUS_START" "$ABORT_B_PANE"
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  ($1 == "pane-close" || $1 == "pane-death") && $4 == a { print "close-a" }
+  ($1 == "pane-close" || $1 == "pane-death") && $4 == b { print "close-b" }
 ')
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
@@ -1189,12 +1304,74 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
     fail "$RESTART_ID restart fixture unexpectedly retained a registered agent"
   fi
+  if [ "$RESTART_ID" = wheelhouse-healing-r1 ]; then
+    RESTART_ORIGIN=$(git -C "$OLD_RESTART_WT" remote get-url origin)
+    RESTART_HEAD=$(git -C "$OLD_RESTART_WT" rev-parse HEAD)
+    git -C "$OLD_RESTART_WT" remote set-url origin "file://$TMP_ROOT/missing-recovery-origin.git"
+    if spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-fetch-refuse.out" 2> "$TMP_ROOT/$RESTART_ID-fetch-refuse.err"; then
+      fail "$RESTART_ID recovery succeeded without refreshing origin refs"
+    fi
+    grep -F "could not fetch and prune origin for prior copy '$OLD_RESTART_WT'" "$TMP_ROOT/$RESTART_ID-fetch-refuse.err" >/dev/null 2>&1 \
+      || fail "$RESTART_ID did not refuse at the recovery ref-refresh gate: $(cat "$TMP_ROOT/$RESTART_ID-fetch-refuse.err")"
+    [ "$(git -C "$OLD_RESTART_WT" rev-parse HEAD)" = "$RESTART_HEAD" ] \
+      || fail "$RESTART_ID moved HEAD after recovery ref refresh failed"
+    git -C "$OLD_RESTART_WT" remote set-url origin "$RESTART_ORIGIN"
+
+    printf 'unlanded recovery work\n' > "$OLD_RESTART_WT/recovery-unlanded.txt"
+    git -C "$OLD_RESTART_WT" add recovery-unlanded.txt
+    git -C "$OLD_RESTART_WT" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm 'unlanded recovery fixture'
+    RESTART_UNLANDED=$(git -C "$OLD_RESTART_WT" rev-parse HEAD)
+    git -C "$OLD_RESTART_WT" update-ref refs/remotes/origin/recovery-stale "$RESTART_UNLANDED"
+    [ -z "$(git -C "$OLD_RESTART_WT" ls-remote origin refs/heads/recovery-stale)" ] \
+      || fail "$RESTART_ID stale-ref fixture unexpectedly exists on origin"
+    [ -z "$(git -C "$OLD_RESTART_WT" log --format=%H --max-count=1 HEAD --not --remotes --)" ] \
+      || fail "$RESTART_ID stale-ref fixture did not mask the unlanded commit before recovery"
+    if spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-unlanded-refuse.out" 2> "$TMP_ROOT/$RESTART_ID-unlanded-refuse.err"; then
+      fail "$RESTART_ID recovery reset a commit hidden by a stale remote-tracking ref"
+    fi
+    grep -F "holds commits not on any remote" "$TMP_ROOT/$RESTART_ID-unlanded-refuse.err" >/dev/null 2>&1 \
+      || fail "$RESTART_ID did not refuse the commit exposed by pruning stale refs: $(cat "$TMP_ROOT/$RESTART_ID-unlanded-refuse.err")"
+    [ "$(git -C "$OLD_RESTART_WT" rev-parse HEAD)" = "$RESTART_UNLANDED" ] \
+      || fail "$RESTART_ID reset the unlanded recovery commit"
+    grep -F 'unlanded recovery work' "$OLD_RESTART_WT/recovery-unlanded.txt" >/dev/null 2>&1 \
+      || fail "$RESTART_ID discarded the unlanded recovery worktree content"
+    lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
+      || fail "$RESTART_ID removed its inspectable recovery pane after refusing unlanded work"
+    git -C "$OLD_RESTART_WT" push --quiet origin HEAD:refs/heads/recovery-landed
+    mkdir -p "$REFRESH_REF_RACE_CONTROL"
+    printf '%s\n' "$OLD_RESTART_WT" > "$REFRESH_REF_RACE_CONTROL/worktree"
+    printf '%s\n' "$PROJECT_DIR.origin.git" > "$REFRESH_REF_RACE_CONTROL/origin"
+    git -C "$OLD_RESTART_WT" rev-parse origin/main > "$REFRESH_REF_RACE_CONTROL/replacement"
+    if spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-ref-race-refuse.out" 2> "$TMP_ROOT/$RESTART_ID-ref-race-refuse.err"; then
+      fail "$RESTART_ID recovery reset HEAD after its remote reachability changed during refresh"
+    fi
+    grep -F "holds commits not on any remote" "$TMP_ROOT/$RESTART_ID-ref-race-refuse.err" >/dev/null 2>&1 \
+      || fail "$RESTART_ID did not recheck remote reachability after the final fetch: $(cat "$TMP_ROOT/$RESTART_ID-ref-race-refuse.err")"
+    [ "$(git -C "$OLD_RESTART_WT" rev-parse HEAD)" = "$RESTART_UNLANDED" ] \
+      || fail "$RESTART_ID reset HEAD after the final fetch invalidated its earlier remote reachability"
+    [ "$(cat "$REFRESH_REF_RACE_CONTROL/fetch-count")" -ge 2 ] \
+      || fail "$RESTART_ID ref-race fixture did not span the precheck and refresh fetches"
+    rm -rf "$REFRESH_REF_RACE_CONTROL"
+    git -C "$OLD_RESTART_WT" push --quiet origin HEAD:refs/heads/recovery-relocated
+  fi
   RECLAIM_FOCUS=$(focus_snapshot)
+  mkdir -p "$REFRESH_CWD_CONTROL"
+  printf '%s\n' "$OLD_RESTART_WT" > "$REFRESH_CWD_CONTROL/worktree"
+  printf '%s\n' "$OLD_RESTART_PANE" > "$REFRESH_CWD_CONTROL/pane"
   spawn_task "$RESTART_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
     || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
+  RECOVERY_REFRESH_CWD=$(cat "$REFRESH_CWD_CONTROL/observed" 2>/dev/null || true)
+  rm -rf "$REFRESH_CWD_CONTROL"
+  [ "$RECOVERY_REFRESH_CWD" = "$(cd "$PROJECT_DIR" && pwd -P)" ] \
+    || fail "$RESTART_ID refreshed while its restored shell was still in '$RECOVERY_REFRESH_CWD'"
   NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  # A reclaim refreshes the record's own copy rather than leasing a second one
+  # (bin/fm-spawn.sh header), so the pool never grows per recovery attempt.
+  [ "$NEW_RESTART_WT" = "$OLD_RESTART_WT" ] \
+    || fail "$RESTART_ID reclaim leased a second copy ($NEW_RESTART_WT) instead of reusing the record's ($OLD_RESTART_WT)"
   [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
     || fail "$RESTART_ID reclaim flattened into a different workspace"
   [ "$NEW_RESTART_PANE" != "$OLD_RESTART_PANE" ] \
@@ -1224,17 +1401,21 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID repeated reclaim changed workspace identity"
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
-    "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+    [ "$NEW_RESTART_WT" = "$PRIOR_RESTART_WT" ] \
+      || fail "$RESTART_ID repeated reclaim leased a second copy instead of reusing the record's"
   fi
 
   teardown_task "$RESTART_ID" "$HOME_DIR" > "$TMP_ROOT/$RESTART_ID-teardown.out" 2> "$TMP_ROOT/$RESTART_ID-teardown.err" \
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
     || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
-  "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
   "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
 done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
+if [ "${FM_HERDR_PRESENTATION_RECOVERY_ONLY:-0}" = 1 ]; then
+  pass "real Herdr lab: recovery-focused validation completed"
+  exit 0
+fi
 
 # A secondmate child binds and reclaims only inside its own home and parent.
 CROSS_RESTART_ID=wheel-child-resume

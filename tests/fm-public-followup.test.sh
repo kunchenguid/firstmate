@@ -112,7 +112,8 @@ make_home() {  # <name> [relay-on|relay-off]
 EOF
   [ "$relay" = relay-off ] || printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
   make_fake_curl "$home" >/dev/null
-  fm_fake_exit0 "$home/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_fake_treehouse "$home/fakebin"
+  fm_fake_exit0 "$home/fakebin" tmux no-mistakes gh gh-axi
   printf '%s\n' "$home"
 }
 
@@ -784,7 +785,8 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_fake_treehouse "$child/fakebin"
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
 
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
 
@@ -821,7 +823,8 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_fake_treehouse "$child/fakebin"
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
@@ -852,7 +855,8 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_fake_treehouse "$child/fakebin"
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   printf 'some_future_field=value\n' >> "$child/.fm-secondmate-parent"
   parent_alias="$TMP_ROOT/teardown-durable-clean-parent-alias"
@@ -887,7 +891,8 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$durable_parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_fake_treehouse "$child/fakebin"
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$durable_parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
@@ -919,7 +924,8 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
       || fail "real secondmate seeding failed for $case_name"
     child=$(cd "$child" && pwd -P)
     make_fake_curl "$child" >/dev/null
-    fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+    fm_test_fake_treehouse "$child/fakebin"
+    fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
     fm_write_meta "$child/state/work-child.meta" \
       "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
       "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
@@ -981,7 +987,8 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_fake_treehouse "$child/fakebin"
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
@@ -1412,7 +1419,8 @@ test_dropped_baton_now_surfaces_open_loop() {
     "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null || fail "seed failed"
   child=$(cd "$child" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_fake_treehouse "$child/fakebin"
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
   log="$TMP_ROOT/curl.log"; : > "$log"
 
   seed_repro_commitment "$parent" public-final-pi-rearm-repro req-pirearm \
@@ -1462,7 +1470,8 @@ test_control_registered_followon_is_guarded() {
     "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null || fail "seed failed"
   child=$(cd "$child" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_fake_treehouse "$child/fakebin"
+  fm_fake_exit0 "$child/fakebin" tmux no-mistakes gh gh-axi
   seed_repro_commitment "$parent" public-final-pi-rearm-ship req-pirearm2 \
     secondmate:mate pi-rearm-loop-fix-r1
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
