@@ -393,7 +393,7 @@ test_ask_user_escalation_format() {
 
   # The DOD's own ask-user paragraph must point back at rule 6's format
   # (one-owner rule) rather than restating or bare-citing it.
-  assert_grep "escalate the whole gate to firstmate using rule 6's ask-user format" "$brief" \
+  assert_grep "escalate to firstmate using rule 6's ask-user format" "$brief" \
     "no-mistakes DOD ask-user paragraph must point at rule 6's format instead of a bare citation"
   assert_no_grep "escalate to firstmate (rule 6) and stop." "$brief" \
     "no-mistakes DOD ask-user paragraph still uses the old bare rule-6 pointer"
