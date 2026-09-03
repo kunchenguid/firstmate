@@ -1477,7 +1477,7 @@ _fm_composer_halfbox_verdict() {  # <screen> <styled> <has-identity> <identity>
     return 0
   fi
   if [ "$has_identity" != 1 ]; then
-    printf 'unknown'
+    printf 'empty'
     return 0
   fi
   if [ -z "$identity" ]; then
