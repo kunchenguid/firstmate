@@ -1256,7 +1256,17 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Two independent controls disable claude's `/bug`/`/feedback` model-drafted
+    # feedback flow (the SendFeedback tool), deliberately layered so a fleet-launched
+    # agent never queues or submits a bug-report draft on the captain's behalf even
+    # under a managed Claude settings policy: CLAUDE_CODE_SEND_FEEDBACK=0 is read
+    # directly and is not subject to managed-settings precedence, while --settings
+    # '{"feedbackDrafts":"off"}' sets the documented settings key (Claude Code
+    # changelog 2.1.247) that a managed policy CAN override back on. Either control
+    # alone disables the feature; keep both so a managed override of one still
+    # leaves the other in force. Both are per-launch, scoped to this invocation only,
+    # and never touch the captain's global ~/.claude/settings.json.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
