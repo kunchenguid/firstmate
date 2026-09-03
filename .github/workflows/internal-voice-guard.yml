@@ -39,4 +39,4 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | bin/fm-voice-guard.sh --text -
+        run: printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | bin/fm-prepush-voice-guard.sh --text -

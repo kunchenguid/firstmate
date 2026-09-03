@@ -19,9 +19,9 @@
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
-# That same default path runs bin/fm-voice-guard.sh, which reads back every
-# commit message not yet on the default branch and refuses firstmate's internal
-# voice before the first push. It lives here because .no-mistakes.yaml pins
+# That same default path runs bin/fm-prepush-voice-guard.sh, which reads back
+# every commit message not yet on the default branch and refuses firstmate's
+# internal voice before the first push. It lives here because .no-mistakes.yaml pins
 # commands.lint to this script and the gate runs lint last before push, so this
 # is the final firstmate-owned code to see the gate's own fix-agent commits.
 #
@@ -164,10 +164,11 @@ fm_lint_run_workflows() {
 # pushed. This step is here rather than in a git hook because the messages that
 # leaked came from the gate's own fix agents, which commit inside the gate's
 # separate repository: lint is the last firstmate-owned code that runs in that
-# repository before the first push. bin/fm-voice-guard.sh owns the rule set.
+# repository before the first push. bin/fm-prepush-voice-guard.sh owns the
+# rule set.
 fm_lint_run_voice_guard() {
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
-  "$SELF_DIR/fm-voice-guard.sh"
+  "$SELF_DIR/fm-prepush-voice-guard.sh"
 }
 
 JOBS=${FM_LINT_JOBS:-2}

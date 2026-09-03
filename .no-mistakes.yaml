@@ -29,7 +29,7 @@ document:
 # Invocation wiring is asserted by `tests/fm-lint.test.sh` and
 # `tests/fm-lint-workflows.test.sh`.
 #
-# This pin is also what puts `bin/fm-voice-guard.sh` in front of the first push.
+# This pin is also what puts `bin/fm-prepush-voice-guard.sh` in front of the first push.
 # Lint runs after the review, test, and document steps have made their own
 # commits, so it is the last step that can read every message about to leave -
 # including the ones this pipeline's own fix agents wrote, which is where the
