@@ -132,8 +132,10 @@ run_copilot_hook_fixture() {  # <fakebin> <dir> <mode> <payload-file> [extra env
 
 make_claude_compat_fixture() {
   local dir=$1
-  mkdir -p "$dir/bin"
-  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/"
+  mkdir -p "$dir/bin" "$dir/.claude"
+  : > "$dir/AGENTS.md"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$ROOT/bin/fm-claude-compat-hook.sh" "$dir/bin/"
+  cp "$ROOT/.claude/settings.json" "$dir/.claude/settings.json"
   cat > "$dir/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -313,8 +315,8 @@ test_claude_compatibility_hooks_stand_down() {
   make_claude_compat_fixture "$dir"
   while IFS= read -r command; do
     count=$((count + 1))
-    out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
-      CLAUDE_PROJECT_DIR="$dir" sh -c "$command" <<'EOF' 2>&1
+    out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+      sh -c "$command" <<'EOF' 2>&1
 {"source":"startup","tool_input":{"command":"echo hi"},"tool_name":"task"}
 EOF
 )
