@@ -586,7 +586,7 @@ test_stalled_transition_holder_cannot_hide_failure() {
   : > "$state/task.meta"
   bash -c '
     . "$1/bin/fm-wake-lib.sh"
-    fm_autoarm_transition_acquire "$1/state" || exit
+    fm_autoarm_failure_transition_acquire "$1/state" || exit
     : > "$2"
     pid=${BASHPID:-$$}
     kill -STOP "$pid"
@@ -616,7 +616,8 @@ test_stalled_transition_steal_holder_falls_back_to_durable_failure() {
   : > "$state/task.meta"
   bash -c '
     . "$1/bin/fm-wake-lib.sh"
-    fm_lock_try_acquire "$1/state/.claude-autoarm-transition.lock.steal" || exit
+    FM_LOCK_REQUIRE_IDENTITY=1 \
+      fm_lock_try_acquire "$1/state/.claude-autoarm-transition.lock.steal" || exit
     : > "$2"
     kill -STOP "${BASHPID:-$$}"
   ' _ "$dir" "$ready" &
@@ -626,13 +627,13 @@ test_stalled_transition_steal_holder_falls_back_to_durable_failure() {
   [ -e "$ready" ] || fail "transition steal holder did not acquire its boundary"
 
   out=$(FM_AUTOARM_FAILURE_TRANSITION_ATTEMPTS=5 run_autoarm "$dir" 2>/dev/null); status=$?
-  kill -0 "$holder" 2>/dev/null || fail "unverified transition steal holder was signalled"
+  kill -0 "$holder" 2>/dev/null || fail "identity-recorded transition steal holder was signalled"
   kill -CONT "$holder" 2>/dev/null || true
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
 
-  expect_code 0 "$status" "a stalled transition steal holder must fall back without wedging the Stop hook"
-  [ -z "$out" ] || fail "fallback failure publication emitted a stale retry: $out"
+  expect_code 2 "$status" "a stalled transition steal holder must publish and continue without wedging the Stop hook"
+  assert_contains "$out" "could not claim recovery" "current fallback failure did not request another Stop-owned turn"
   assert_present "$state/.claude-autoarm-failure-notified" "transition-steal fallback did not write the failure marker"
   [ "$(failure_epoch_outcome "$dir")" = failed ] || fail "transition-steal fallback did not record outcome=failed"
   pass "auto-arm: stalled transition steal owners fall back to durable failure state"

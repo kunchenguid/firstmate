@@ -388,13 +388,15 @@ fm_lock_owner_dir() {
 }
 
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back identity
+  local ownerdir=$1 identity=${2:-} mypid back
   mypid=${BASHPID:-$$}
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ] || return 1
   if [ "${FM_LOCK_REQUIRE_IDENTITY:-0}" = 1 ]; then
-    identity=$(fm_pid_identity "$mypid" 2>/dev/null) || return 1
+    if [ -z "$identity" ]; then
+      identity=$(fm_pid_identity "$mypid" 2>/dev/null) || return 1
+    fi
     [ -n "$identity" ] || return 1
     printf '%s\n' "$identity" > "$ownerdir/pid-identity" 2>/dev/null || return 1
     back=$(cat "$ownerdir/pid-identity" 2>/dev/null || true)
@@ -471,14 +473,14 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} identity=${3:-} ownerdir
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ! fm_lock_prepare_owner "$ownerdir"; then
+  if ! fm_lock_prepare_owner "$ownerdir" "$identity"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -850,12 +852,12 @@ fm_recovery_marker_reopen_announced() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 identity=${2:-} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
 
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_try_create "$lockdir" "" "$identity"; then
     return 0
   fi
 
@@ -872,7 +874,7 @@ fm_lock_try_acquire() {
     # - the hang reproduced by the self-held reclaim regression in
     # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
     fm_lock_remove_path "$lockdir" || true
-    if fm_lock_try_create "$lockdir"; then
+    if fm_lock_try_create "$lockdir" "" "$identity"; then
       return 0
     fi
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -888,7 +890,7 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire "$steal" "$identity"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
@@ -936,7 +938,7 @@ fm_lock_try_acquire() {
   fi
   fm_lock_remove_path "$lockdir" || true
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
+  if fm_lock_try_create "$lockdir" "$steal_owner" "$identity"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
@@ -1107,12 +1109,12 @@ fm_autoarm_transition_try_acquire() {  # <state-dir>
   FM_LOCK_REQUIRE_IDENTITY=1 fm_lock_try_acquire "$lock"
 }
 
-fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace>
-  local state=$1 grace=$2 lock steal owner pid recorded current i revoked_signature revoked_identity
+fm_autoarm_transition_revoke_stalled() {  # <state-dir> <grace> [caller-identity]
+  local state=$1 grace=$2 caller_identity=${3:-} lock steal owner pid recorded current i revoked_signature revoked_identity
   lock="$state/.claude-autoarm-transition.lock"
   steal="$lock.steal"
   [ "$(fm_path_age "$lock")" -ge "$grace" ] || return 1
-  FM_LOCK_REQUIRE_IDENTITY=0 fm_lock_try_acquire "$steal" || return 1
+  FM_LOCK_REQUIRE_IDENTITY=1 fm_lock_try_acquire "$steal" "$caller_identity" || return 1
   owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
   pid=$(cat "$lock/pid" 2>/dev/null || true)
   recorded=$(cat "$lock/pid-identity" 2>/dev/null || true)
@@ -1198,20 +1200,23 @@ fm_autoarm_transition_acquire() {  # <state-dir>
 }
 
 fm_autoarm_failure_transition_acquire() {  # <state-dir>
-  local state=$1 grace=${FM_AUTOARM_TRANSITION_GRACE:-2}
+  local state=$1 grace=${FM_AUTOARM_TRANSITION_GRACE:-2} pid identity
   local attempts=${FM_AUTOARM_FAILURE_TRANSITION_ATTEMPTS:-150} i=0
   FM_AUTOARM_TRANSITION_REVOKED_SIGNATURE=
   FM_AUTOARM_TRANSITION_REVOKED_IDENTITY=
   case "$grace" in ''|*[!0-9]*|0) grace=2 ;; esac
   case "$attempts" in ''|*[!0-9]*|0) attempts=150 ;; esac
   [ "$attempts" -le 250 ] || attempts=250
+  pid=${BASHPID:-$$}
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
   while [ "$i" -lt "$attempts" ]; do
-    if FM_LOCK_REQUIRE_IDENTITY=0 fm_lock_try_acquire \
-      "$state/.claude-autoarm-transition.lock"; then
+    if FM_LOCK_REQUIRE_IDENTITY=1 fm_lock_try_acquire \
+      "$state/.claude-autoarm-transition.lock" "$identity"; then
       return 0
     fi
     if [ "$(fm_path_age "$state/.claude-autoarm-transition.lock")" -ge "$grace" ]; then
-      fm_autoarm_transition_revoke_stalled "$state" "$grace" || true
+      fm_autoarm_transition_revoke_stalled "$state" "$grace" "$identity" || true
     fi
     i=$((i + 1))
     sleep 0.02
@@ -1657,7 +1662,7 @@ _fm_autoarm_claim_failure_publish() {  # <state-dir> <baseline-signature> <outco
 }
 
 fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome> [marker-file]
-  local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition current current_outcome current_identity revoked publish_rc
+  local state=$1 baseline=$2 outcome=$3 marker=${4:-} transition current final current_outcome current_identity revoked publish_rc
   transition="$state/.claude-autoarm-transition.lock"
   case "$outcome" in
     failed|failed-suppressed) ;;
@@ -1667,7 +1672,11 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
     _fm_autoarm_claim_failure_publish "$state" "$baseline" "$outcome" "$marker"
     publish_rc=$?
     case "$publish_rc" in
-      0|3) return 4 ;;
+      0|3)
+        final=$(fm_autoarm_claim_signature "$state")
+        [ "$final" = "$baseline" ] || return 4
+        return "$publish_rc"
+        ;;
       *) return 1 ;;
     esac
   fi
