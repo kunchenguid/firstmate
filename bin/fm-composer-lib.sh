@@ -82,10 +82,12 @@
 # night; tmux's cursor anchoring never asks the staleness question, which is
 # why only the cursorless backends (herdr, zellij, cmux, orca) failed. A
 # titled rule - `─` at both ends, at least 8 consecutive `─`, and a short
-# label with no structural glyph - is a container edge and a pair boundary
-# exactly like a solid rule, but a pair with a titled member is never a pi
-# separator pair: pi draws solid rules only, so such a pair anchors a bare
-# glyph row without an identity read and can never prove a blank region.
+# label (at most 64 bytes, counted the same way in every locale) with no
+# box-drawing, tee, dashed-rule, or edge glyph - is a container edge and a
+# pair boundary exactly like a solid rule, but a pair with a titled member
+# is never a pi separator pair: pi draws solid rules only, so such a pair
+# anchors a bare glyph row without an identity read and can never prove a
+# blank region.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -604,22 +606,29 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 }
 
 # Glyphs a titled rule's label may never contain: a row whose label carries
-# box-drawing or edge glyphs is some other structure (a table row, a boxed
-# banner, a half-block rule) and must not become a pair boundary.
+# a box-drawing side or corner, a tee or cross in any weight, a dashed rule
+# glyph, or a block edge is some other structure (a table row, a boxed
+# banner, a dashed or half-block rule) and must not become a pair boundary.
 FM_COMPOSER_TITLED_RULE_FORBIDDEN_GLYPHS=$(printf '%s\n' \
   '│' '┃' '║' '╭' '╮' '╰' '╯' '┌' '┐' '└' '┘' '╔' '╗' '╚' '╝' '┏' '┓' '┗' '┛' \
-  '━' '═' '▀' '▄' '▁' '▔' '|' '+')
+  '├' '┤' '┬' '┴' '┼' '┣' '┫' '┳' '┻' '╋' '╠' '╣' '╦' '╩' '╬' \
+  '╌' '╍' '┄' '┅' '┈' '┉' \
+  '━' '═' '▀' '▄' '▁' '▔' '▏' '▕' '|' '+')
 
 # _fm_composer_titled_rule_row: a `─` rule carrying a short embedded label
 # (see RULE ROWS AND THE TITLED RULE in the header): `─` at both ends, at
 # least 8 consecutive `─` somewhere in the row (the same floor as the solid
 # separator, and a literal substring test so it is byte-exact in every
 # locale), and a residue - the row with every `─` removed - that is a
-# non-blank label of bounded length carrying no box-drawing or edge glyph.
+# non-blank label of at most 64 BYTES carrying no box-drawing, tee,
+# dashed-rule, or edge glyph. The bound is measured in bytes under LC_ALL=C
+# because `${#label}` counts characters under UTF-8 and bytes under C, and
+# the verdict must not depend on the ambient locale; the subshell runs only
+# for a row that has already passed every cheaper structural test.
 # Claude Code's session-mode label (`──── ultracode ─`) is the verified
 # instance. A solid rule is not a titled rule; test the solid form first.
 _fm_composer_titled_rule_row() {  # <trimmed-row>
-  local row=$1 label glyph
+  local row=$1 label glyph label_bytes
   [ -n "$row" ] || return 1
   case "$row" in
     '─'*'─') ;;
@@ -632,7 +641,8 @@ _fm_composer_titled_rule_row() {  # <trimmed-row>
   label=${row//─/}
   fm_composer_normalize_trim_var label
   [ -n "$label" ] || return 1
-  [ "${#label}" -le 64 ] || return 1
+  label_bytes=$( LC_ALL=C; printf '%s' "${#label}" )
+  [ "$label_bytes" -le 64 ] || return 1
   while IFS= read -r glyph; do
     [ -n "$glyph" ] || continue
     case "$label" in

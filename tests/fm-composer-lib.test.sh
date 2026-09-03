@@ -487,7 +487,45 @@ test_matrix_claude_mode_label_rule() {
   # not a rule, so it can neither open nor close a pair.
   _fm_composer_titled_rule_row "${dashes} │ table │ ${dashes}" \
     && fail "a rule-like row carrying box glyphs must not read as a titled rule"
-  pass "matrix: claude's mode-labelled top rule anchors the bare composer on every cursorless profile; shells and blank regions stay unknown"
+  # Tees and crosses in every weight, dashed rule glyphs, and eighth-block
+  # edges are table rows and box edges too: none is a titled rule, so none is
+  # a pair boundary, and the bare glyph over a lone solid rule beneath such a
+  # row stays stale (unknown) exactly as it does with no row above it at all.
+  local structural
+  for structural in '───────────┬───────────' '──────── ├ x ┤ ────────' \
+      '────────╌╌╌╌────────' '───────────╋───────────' '───────────╬───────────' \
+      '────────┄┄┄┄────────' '────────▏x▕────────'; do
+    _fm_composer_titled_rule_row "$structural" \
+      && fail "'$structural' must not read as a titled rule"
+    assert_screen "structural row '$structural' never anchors a stale glyph row" unknown \
+      "$CAPS_STYLED" $'transcript\n'"${structural}${CR}"$'\n'"❯${NBSP}${CR}"$'\n'"${solid}"$'\n'"${footer}"
+  done
+
+  # LOCALE: the label bound is 64 BYTES in every locale. A label of 32 two-byte
+  # `é` (64 bytes) is a titled rule and 33 (66 bytes) is not, under the
+  # ambient UTF-8 locale and under LC_ALL=C alike; measured in characters the
+  # 33-glyph label would anchor the glyph row under UTF-8 only. The finding's
+  # own case, 40 `é` (80 bytes), is refused by the predicate in both locales.
+  local multi labelled
+  printf -v multi '%*s' 32 ''
+  multi=${multi// /é}
+  labelled="${gray}${dashes} ${ESC}[0m${ESC}[38;2;175;135;255m${multi} ${gray}─${ESC}[0m${CR}"
+  assert_screen "multibyte label at the 64-byte bound" empty "$CAPS_STYLED" \
+    $'transcript\n'"${labelled}"$'\n'"❯${NBSP}${CR}"$'\n'"${solid}"$'\n'"${footer}"
+  labelled="${gray}${dashes} ${ESC}[0m${ESC}[38;2;175;135;255m${multi}é ${gray}─${ESC}[0m${CR}"
+  assert_screen "multibyte label past the 64-byte bound" unknown "$CAPS_STYLED" \
+    $'transcript\n'"${labelled}"$'\n'"❯${NBSP}${CR}"$'\n'"${solid}"$'\n'"${footer}"
+  _fm_composer_titled_rule_row "${dashes} ${multi} ─" \
+    || fail "a 64-byte multibyte label must read as a titled rule"
+  ( LC_ALL=C; _fm_composer_titled_rule_row "${dashes} ${multi} ─" ) \
+    || fail "a 64-byte multibyte label must read as a titled rule under LC_ALL=C"
+  printf -v multi '%*s' 40 ''
+  multi=${multi// /é}
+  _fm_composer_titled_rule_row "${dashes} ${multi} ─" \
+    && fail "an 80-byte multibyte label must not read as a titled rule"
+  ( LC_ALL=C; _fm_composer_titled_rule_row "${dashes} ${multi} ─" ) \
+    && fail "an 80-byte multibyte label must not read as a titled rule under LC_ALL=C"
+  pass "matrix: claude's mode-labelled top rule anchors the bare composer on every cursorless profile; shells, blank regions, structural rows, and over-long labels stay unknown"
 }
 
 test_strict_blank_row_divergence() {
