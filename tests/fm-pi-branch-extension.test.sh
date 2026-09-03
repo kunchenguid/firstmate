@@ -21,6 +21,7 @@ install_pi_branch_extension_fixture() {
   local repo=$1
   mkdir -p \
     "$repo/.pi/extensions/lib" \
+    "$repo/stub-agent-dir/npm/node_modules/pi-openai-codex-compat/extensions" \
     "$repo/node_modules/@earendil-works/pi-coding-agent" \
     "$repo/node_modules/@earendil-works/pi-ai" \
     "$repo/node_modules/@earendil-works/pi-tui" \
@@ -33,14 +34,51 @@ install_pi_branch_extension_fixture() {
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
   chmod +x "$repo/bin/fm-operational-input.sh"
+  cat > "$repo/stub-agent-dir/npm/node_modules/pi-openai-codex-compat/package.json" <<'JSON'
+{
+  "name": "pi-openai-codex-compat",
+  "version": "0.0.9",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.0 <0.85.0"
+  },
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  }
+}
+JSON
+  cat > "$repo/stub-agent-dir/npm/node_modules/pi-openai-codex-compat/extensions/index.ts" <<'TS'
+export default function registerCompat(pi) {
+  pi.on("session_start", () => {
+    globalThis.__fmLifecycle ??= [];
+    globalThis.__fmLifecycle.push("compat-session-start");
+    globalThis.__fmCompatNativeCompactionReady = true;
+    globalThis.__fmCompatProviderRegistered = true;
+    if (globalThis.__fmCompatStartupError) throw new Error(globalThis.__fmCompatStartupError);
+    // Match the real package's attempt to add its Codex-only tools. The SDK
+    // allowlist must keep every one of them outside the supervision branch.
+    pi.setActiveTools([
+      ...pi.getActiveTools(),
+      "apply_patch",
+      "image_gen.imagegen",
+      "web.run",
+      "edit",
+      "write",
+    ]);
+  });
+}
+TS
+  export FM_TEST_AGENT_DIR="$repo/stub-agent-dir"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+export const VERSION = globalThis.__fmPiVersion ?? "0.84.4";
 
 export function getAgentDir() {
-  return "/stub-agent-dir";
+  return process.env.FM_TEST_AGENT_DIR ?? "/stub-agent-dir";
 }
 
 export function getMarkdownTheme() {
@@ -94,13 +132,60 @@ export class ModelRuntime {
     return this.authenticated.has(provider);
   }
 }
+export class SettingsManager {
+  static inMemory(settings = {}, options = {}) {
+    return { settings, options, isProjectTrusted: () => options.projectTrusted === true };
+  }
+}
+export class DefaultPackageManager {
+  constructor(options) {
+    this.options = options;
+    (globalThis.__fmPackageManagers ??= []).push(this);
+  }
+  getInstalledPath(source, scope) {
+    (globalThis.__fmPackageLookups ??= []).push({ source, scope });
+    if (globalThis.__fmCompatAbsent) return undefined;
+    const path = `${this.options.agentDir}/npm/node_modules/pi-openai-codex-compat`;
+    return existsSync(path) ? path : undefined;
+  }
+  async resolveExtensionSources(sources, options) {
+    (globalThis.__fmPackageResolutions ??= []).push({ sources: [...sources], options: options ?? {} });
+    if (globalThis.__fmCompatResolveError) throw new Error(globalThis.__fmCompatResolveError);
+    const root = this.getInstalledPath(sources[0], "user");
+    return {
+      extensions: root
+        ? [{ path: `${root}/extensions/index.ts`, enabled: true, metadata: { source: sources[0], scope: "user", origin: "package", baseDir: root } }]
+        : [],
+      skills: [],
+      prompts: [],
+      themes: [],
+    };
+  }
+}
 export class DefaultResourceLoader {
   constructor(options) {
     this.options = options;
     (globalThis.__fmLoaders ??= []).push(this);
   }
   async reload() {
+    if (globalThis.__fmCompatLoadError && this.options.additionalExtensionPaths?.length) {
+      this.extensionsResult = {
+        extensions: [],
+        errors: [{ path: this.options.additionalExtensionPaths[0], error: globalThis.__fmCompatLoadError }],
+        runtime: {},
+      };
+      this.reloaded = true;
+      return;
+    }
+    this.extensionsResult = {
+      extensions: (this.options.additionalExtensionPaths ?? []).map((path) => ({ path })),
+      errors: [],
+      runtime: {},
+    };
     this.reloaded = true;
+  }
+  getExtensions() {
+    return this.extensionsResult ?? { extensions: [], errors: [], runtime: {} };
   }
 }
 
@@ -172,6 +257,10 @@ export async function createAgentSession(options) {
   const session = {
     options,
     ops: [],
+    streaming: false,
+    get isStreaming() {
+      return session.streaming;
+    },
     get messages() {
       return branchMessages;
     },
@@ -179,18 +268,49 @@ export async function createAgentSession(options) {
       branchMessages = persistMessages(messages);
     },
     disposed: false,
+    async bindExtensions(bindings) {
+      session.bound = true;
+      globalThis.__fmLifecycle ??= [];
+      globalThis.__fmLifecycle.push("bind-extensions");
+      if (globalThis.__fmBindExtensionsError) throw new Error(globalThis.__fmBindExtensionsError);
+      if (options.resourceLoader.options.additionalExtensionPaths?.length) {
+        if (globalThis.__fmCompatStartupError) {
+          bindings.onError?.({
+            extensionPath: options.resourceLoader.options.additionalExtensionPaths[0],
+            event: "session_start",
+            error: globalThis.__fmCompatStartupError,
+          });
+        } else {
+          globalThis.__fmLifecycle.push("compat-session-start");
+          globalThis.__fmCompatNativeCompactionReady = true;
+          globalThis.__fmCompatProviderRegistered = true;
+          session.activeTools = session.activeTools.filter((name) => options.tools.includes(name));
+        }
+      }
+    },
+    getActiveToolNames() {
+      return [...session.activeTools];
+    },
+    activeTools: [...options.tools],
     async prompt(text) {
+      globalThis.__fmLifecycle ??= [];
+      globalThis.__fmLifecycle.push("prompt");
       globalThis.__fmPromptStarted = true;
       globalThis.__fmPromptStarts = (globalThis.__fmPromptStarts ?? 0) + 1;
-      if (globalThis.__fmPromptAction) await globalThis.__fmPromptAction(text);
-      if (globalThis.__fmPromptGate) {
-        await globalThis.__fmPromptGate;
+      session.streaming = true;
+      try {
+        if (globalThis.__fmPromptAction) await globalThis.__fmPromptAction(text);
+        if (globalThis.__fmPromptGate) {
+          await globalThis.__fmPromptGate;
+        }
+        if (globalThis.__fmPromptErrorAfterStart) throw new Error(globalThis.__fmPromptErrorAfterStart);
+        session.ops.push({ kind: "prompt", text });
+        (globalThis.__fmPrompts ??= []).push(text);
+        session.messages.push({ role: "user", content: text });
+        await globalThis.__fmOnBranchPrompt?.({ session, text });
+      } finally {
+        session.streaming = false;
       }
-      if (globalThis.__fmPromptErrorAfterStart) throw new Error(globalThis.__fmPromptErrorAfterStart);
-      session.ops.push({ kind: "prompt", text });
-      (globalThis.__fmPrompts ??= []).push(text);
-      session.messages.push({ role: "user", content: text });
-      await globalThis.__fmOnBranchPrompt?.({ session, text });
     },
     async sendCustomMessage(message, opts) {
       if (globalThis.__fmMirrorGate) {
@@ -199,6 +319,14 @@ export async function createAgentSession(options) {
       }
       session.ops.push({ kind: "custom", message, opts });
       (globalThis.__fmMirrors ??= []).push(message);
+    },
+    async abort() {
+      session.aborted = true;
+      await globalThis.__fmAbortAction?.(session);
+    },
+    async waitForIdle() {
+      session.waitedForIdle = true;
+      while (session.streaming) await new Promise((resolve) => setTimeout(resolve, 1));
     },
     dispose() {
       session.disposed = true;
@@ -2170,6 +2298,263 @@ EOF
   pass "branch session persists across process restarts through the recorded pointer"
 }
 
+test_codex_branch_initializes_only_the_compat_package_before_prompting() {
+  local repo home out status
+  repo="$TMP_ROOT/codex-compat-root"
+  home="$TMP_ROOT/codex-compat-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, home }; })()`);
+const { fire, dispatch, settle, makeCtx, registryModels, home } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+
+registryModels.push(
+  { provider: "anthropic", id: "main-model", api: "anthropic-messages" },
+  { provider: "openai-codex", id: "codex-branch", api: "openai-codex-responses" },
+);
+writeFileSync(`${home}/config/supervision-branch-model`, "openai-codex/codex-branch\n");
+fire("session_start", {}, makeCtx());
+dispatch("signal: codex compat create");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "Codex branch prompt");
+
+const session = globalThis.__fmSessions[0];
+const loader = globalThis.__fmLoaders[0];
+const packagePath = `${process.env.FM_TEST_AGENT_DIR}/npm/node_modules/pi-openai-codex-compat/extensions/index.ts`;
+if (JSON.stringify(loader.options.additionalExtensionPaths) !== JSON.stringify([packagePath])) {
+  throw new Error(`the Codex branch loaded the wrong explicit extension set: ${JSON.stringify(loader.options.additionalExtensionPaths)}`);
+}
+for (const key of ["noExtensions", "noSkills", "noPromptTemplates", "noThemes", "noContextFiles"]) {
+  if (loader.options[key] !== true) throw new Error(`Codex compatibility weakened ${key}`);
+}
+if (!session.bound || !globalThis.__fmCompatNativeCompactionReady || !globalThis.__fmCompatProviderRegistered) {
+  throw new Error("the compatibility extension did not complete session_start");
+}
+if (session.options.settingsManager !== loader.options.settingsManager) {
+  throw new Error("the Codex branch loader and AgentSession did not share the isolated settings manager");
+}
+const lifecycle = globalThis.__fmLifecycle ?? [];
+if (lifecycle.indexOf("compat-session-start") < 0 || lifecycle.indexOf("compat-session-start") > lifecycle.indexOf("prompt")) {
+  throw new Error(`the branch prompted before compatibility initialization: ${JSON.stringify(lifecycle)}`);
+}
+if (JSON.stringify(session.getActiveToolNames()) !== JSON.stringify(["read", "bash", "fm_branch_report"])) {
+  throw new Error(`compatibility startup escaped the branch tool allowlist: ${JSON.stringify(session.getActiveToolNames())}`);
+}
+if (JSON.stringify(globalThis.__fmPackageLookups) !== JSON.stringify([
+  { source: "npm:pi-openai-codex-compat", scope: "user" },
+  { source: "npm:pi-openai-codex-compat", scope: "user" },
+])) {
+  throw new Error(`the branch did not resolve the installed user package exactly: ${JSON.stringify(globalThis.__fmPackageLookups)}`);
+}
+if (JSON.stringify(globalThis.__fmPackageResolutions) !== JSON.stringify([
+  { sources: ["npm:pi-openai-codex-compat"], options: {} },
+])) {
+  throw new Error(`the branch used the wrong package-manager resolution: ${JSON.stringify(globalThis.__fmPackageResolutions)}`);
+}
+
+// A replacement main session reopens the same branch conversation, resolves
+// the package afresh, and initializes it before the reopened prompt too.
+fire("session_shutdown", {});
+fire("session_start", {}, makeCtx());
+dispatch("signal: codex compat reopen");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "reopened Codex branch prompt");
+const reopened = globalThis.__fmSessions[1];
+if (!reopened.options.sessionManager.opened || !reopened.bound) {
+  throw new Error("the reopened Codex branch did not bind compatibility onto its persistent session");
+}
+const secondCompat = (globalThis.__fmLifecycle ?? []).lastIndexOf("compat-session-start");
+const secondPrompt = (globalThis.__fmLifecycle ?? []).lastIndexOf("prompt");
+if (secondCompat < 0 || secondCompat > secondPrompt) {
+  throw new Error(`the reopened branch prompted before compatibility initialization: ${JSON.stringify(globalThis.__fmLifecycle)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "Codex branch compatibility initialization must precede every prompt: $out"
+  pass "Codex branch create and reopen initialize only pi-openai-codex-compat before prompting without widening tools"
+}
+
+test_non_codex_branch_does_not_depend_on_the_compat_package() {
+  local repo home out status
+  repo="$TMP_ROOT/non-codex-root"
+  home="$TMP_ROOT/non-codex-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+globalThis.__fmCompatAbsent = true;
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels }; })()`);
+const { fire, dispatch, settle, makeCtx, registryModels } = globalThis.__t;
+registryModels.push({ provider: "anthropic", id: "main-model", api: "anthropic-messages" });
+fire("session_start", {}, makeCtx());
+dispatch("signal: ordinary branch");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "non-Codex branch prompt");
+if ((globalThis.__fmPackageLookups ?? []).length !== 0 || (globalThis.__fmPackageResolutions ?? []).length !== 0) {
+  throw new Error("a non-Codex branch attempted to resolve the optional compatibility package");
+}
+if (globalThis.__fmSessions[0].bound) throw new Error("non-Codex branch startup behavior changed");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "non-Codex branches must remain independent of the compatibility package: $out"
+  pass "non-Codex branch startup remains unchanged when pi-openai-codex-compat is absent"
+}
+
+test_codex_compat_package_failures_return_the_wake_to_main() {
+  local mode repo home out status
+  for mode in absent malformed incompatible resolve load startup; do
+    repo="$TMP_ROOT/codex-failure-$mode-root"
+    home="$TMP_ROOT/codex-failure-$mode-home"
+    mkdir -p "$home/state" "$home/config"
+    install_pi_branch_extension_fixture "$repo"
+    PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      DRIVER_PRELUDE="$DRIVER_PRELUDE" FAILURE_MODE="$mode" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const mode = process.env.FAILURE_MODE;
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatchThroughWatcher, settle, makeCtx, registryModels, mainUserMessages, home }; })()`);
+const { fire, dispatchThroughWatcher, settle, makeCtx, registryModels, mainUserMessages, home } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+const manifest = `${process.env.FM_TEST_AGENT_DIR}/npm/node_modules/pi-openai-codex-compat/package.json`;
+if (mode === "absent") globalThis.__fmCompatAbsent = true;
+if (mode === "malformed") writeFileSync(manifest, "{not-json\n");
+if (mode === "incompatible") {
+  writeFileSync(manifest, JSON.stringify({
+    name: "pi-openai-codex-compat",
+    version: "0.0.9",
+    peerDependencies: { "@earendil-works/pi-coding-agent": ">=0.85.0 <0.86.0" },
+    pi: { extensions: ["./extensions/index.ts"] },
+  }));
+}
+if (mode === "resolve") globalThis.__fmCompatResolveError = "synthetic resolver failure";
+if (mode === "load") globalThis.__fmCompatLoadError = "synthetic extension load failure";
+if (mode === "startup") globalThis.__fmCompatStartupError = "synthetic session_start failure";
+registryModels.push({ provider: "openai-codex", id: "codex-branch", api: "openai-codex-responses" });
+writeFileSync(`${home}/config/supervision-branch-model`, "openai-codex/codex-branch\n");
+fire("session_start", {}, makeCtx());
+const offer = dispatchThroughWatcher(`signal: ${mode} compatibility failure`);
+if (!offer.accepted) throw new Error(`${mode}: branch did not accept the wake before safe construction fallback`);
+await settle(() => mainUserMessages.length === 1, `${mode} fallback`);
+if (!mainUserMessages[0].content.includes("Supervision branch unavailable, falling back to main:")) {
+  throw new Error(`${mode}: fallback omitted the safe-return reason: ${mainUserMessages[0].content}`);
+}
+if ((globalThis.__fmPromptStarts ?? 0) !== 0) {
+  throw new Error(`${mode}: a Codex branch prompted without a fully initialized compatibility package`);
+}
+if (mode === "startup" && !globalThis.__fmSessions?.[0]?.disposed) {
+  throw new Error("startup: the partially initialized branch session was not disposed");
+}
+process.exit(0);
+EOF
+    status=$?
+    out=$(cat "$TMP_ROOT/node-output")
+    expect_code 0 "$status" "Codex compatibility $mode failure must fail closed: $out"
+  done
+  pass "absent, malformed, incompatible, resolution, load, and startup failures return Codex wakes to main before prompting"
+}
+
+test_supervision_reset_aborts_rotates_and_reanchors_without_touching_main_or_feishu() {
+  local repo home out status
+  repo="$TMP_ROOT/reset-root"
+  home="$TMP_ROOT/reset-home"
+  mkdir -p "$home/state" "$home/config" "$home/data/feishu/bindings"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, commands, registryModels, mainEntries, mainSessionManager, mainUserMessages, notices, home }; })()`);
+const { fire, dispatch, settle, makeCtx, commands, registryModels, mainEntries, mainSessionManager, mainUserMessages, notices, home } = globalThis.__t;
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+
+registryModels.push({ provider: "anthropic", id: "main-model", api: "anthropic-messages" });
+mainEntries.push({ type: "message", message: { role: "user", content: "old mirrored order" } });
+const feishuBinding = `${home}/data/feishu/bindings/active.json`;
+writeFileSync(feishuBinding, '{"binding_id":"must-stay-byte-identical"}\n');
+const feishuBefore = readFileSync(feishuBinding, "utf8");
+const mainBefore = mainSessionManager;
+fire("session_start", {}, makeCtx({ sessionManager: mainSessionManager }));
+
+let releasePrompt;
+globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
+globalThis.__fmAbortAction = () => releasePrompt();
+if (!dispatch("signal: active work reset").accepted) throw new Error("active reset fixture was not accepted");
+await settle(() => globalThis.__fmSessions?.[0]?.isStreaming === true, "active branch prompt");
+const oldSession = globalThis.__fmSessions[0];
+const oldPointer = readFileSync(`${home}/state/.branch-session`, "utf8").trim();
+if (!existsSync(`${home}/state/.branch-eligible-rows`)) throw new Error("active reset fixture has no row grant");
+writeFileSync(`${home}/state/.lease-task-reset`, `branch\t${process.pid}\t123\n`);
+// This line arrived after the old branch's last mirror flush. Reset must
+// re-anchor past it instead of replaying the old oversized conversation.
+mainEntries.push({ type: "message", message: { role: "assistant", content: "old tail before reset" } });
+
+const command = commands.get("supervision-reset");
+if (!command) throw new Error("the supervision-reset command was not registered");
+await command.handler("", makeCtx({ sessionManager: mainSessionManager }));
+if (!oldSession.aborted || !oldSession.waitedForIdle || !oldSession.disposed) {
+  throw new Error("reset did not abort, quiesce, and dispose the active branch session");
+}
+if (existsSync(`${home}/state/.branch-eligible-rows`)) throw new Error("reset retained the active row grant");
+if (existsSync(`${home}/state/.lease-task-reset`)) throw new Error("reset retained a branch task lease");
+if (existsSync(`${home}/state/.branch-session`)) throw new Error("reset retained the old session pointer");
+if (existsSync(oldPointer)) throw new Error("reset did not rotate the old session file");
+const archives = readdirSync(`${home}/state/branch-session`).filter((name) => name.includes(".reset-") && name.endsWith(".archived"));
+if (archives.length !== 1 || !existsSync(`${home}/state/branch-session/${archives[0]}`)) {
+  throw new Error(`reset did not preserve one rotated session archive: ${JSON.stringify(archives)}`);
+}
+const cursor = JSON.parse(readFileSync(`${home}/state/.branch-mirror-cursor`, "utf8"));
+if (cursor.file !== `${home}/main.jsonl` || cursor.index !== mainEntries.length) {
+  throw new Error(`reset did not re-anchor main mirroring: ${JSON.stringify(cursor)}`);
+}
+if (mainSessionManager !== mainBefore || readFileSync(feishuBinding, "utf8") !== feishuBefore) {
+  throw new Error("reset changed the captain's main session or Feishu binding");
+}
+if (!notices.some((notice) => notice.type === "info" && notice.message.includes("next supervision wake"))) {
+  throw new Error(`reset did not report deferred fresh creation: ${JSON.stringify(notices)}`);
+}
+
+// No replacement is created by the command. The next eligible wake creates a
+// new persistent session and receives only dialog after the reset anchor.
+if (globalThis.__fmSessions.length !== 1) throw new Error("reset eagerly created a replacement branch");
+writeFileSync(`${home}/state/.wake-queue`, "");
+delete globalThis.__fmPromptGate;
+delete globalThis.__fmAbortAction;
+globalThis.__fmOnBranchPrompt = async () => {
+  const report = globalThis.__fmSessions[1].options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const result = await report.execute("reset-fresh", {
+    task: "branch-driver", verdict: "routine", summary: "fresh session handled", wake: "signal: fresh work after reset",
+  });
+  if (result.isError) throw new Error(`fresh-session report failed: ${JSON.stringify(result)}`);
+};
+mainEntries.push({ type: "message", message: { role: "user", content: "new order after reset" } });
+fire("turn_end", {}, makeCtx({ sessionManager: mainSessionManager }));
+if (!dispatch("signal: fresh work after reset", undefined, undefined, undefined, 2).accepted) {
+  throw new Error("fresh wake after reset was not accepted");
+}
+await settle(() => globalThis.__fmSessions?.length === 2 && (globalThis.__fmPrompts ?? []).length === 2, "fresh branch prompt");
+const freshSession = globalThis.__fmSessions[1];
+const freshPointer = readFileSync(`${home}/state/.branch-session`, "utf8").trim();
+if (!freshSession.options.sessionManager.created || freshPointer === oldPointer || !existsSync(freshPointer)) {
+  throw new Error("the next wake did not create a fresh persistent branch session");
+}
+const mirrors = freshSession.ops.filter((op) => op.kind === "custom").map((op) => op.message.content);
+if (JSON.stringify(mirrors) !== JSON.stringify(["[captain] new order after reset"])) {
+  throw new Error(`fresh branch replayed pre-reset main history: ${JSON.stringify(mirrors)}`);
+}
+if (mainUserMessages.length !== 1 || !String(mainUserMessages[0].content).includes("signal: active work reset")) {
+  throw new Error(`aborted work did not return safely to main exactly once: ${JSON.stringify(mainUserMessages)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "supervision reset must quiesce, rotate, release ownership, and start fresh without moving main or Feishu: $out"
+  pass "supervision-reset safely aborts active work, rotates history, releases ownership, and re-anchors the next branch"
+}
+
 test_branch_model_pin_applies_and_absent_pin_keeps_the_default() {
   local repo home out status
   repo="$TMP_ROOT/modelpin-root"
@@ -3893,6 +4278,10 @@ test_main_owned_grant_result_falls_back_to_main
 test_accepted_grant_loss_before_prompt_falls_back_once
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
+test_codex_branch_initializes_only_the_compat_package_before_prompting
+test_non_codex_branch_does_not_depend_on_the_compat_package
+test_codex_compat_package_failures_return_the_wake_to_main
+test_supervision_reset_aborts_rotates_and_reanchors_without_touching_main_or_feishu
 test_branch_model_pin_applies_and_absent_pin_keeps_the_default
 test_unpinned_branch_follows_main_model_changes_live
 test_supervision_model_command_persists_and_rebinds_the_live_branch
