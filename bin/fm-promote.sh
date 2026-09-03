@@ -9,7 +9,11 @@
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
-# escalation rule and --yes ban.
+# escalation rule and --yes ban. The instructions also carry `# Task` with
+# `## Captain's intent` and `## Firstmate spec` copied from the scout brief.
+# Firstmate rewrites those subsections to the ship-time ask before promoting:
+# the scout-time ask describes an investigation. Promotion refuses leftover
+# `{TASK}` / `{FIRSTMATE_SPEC}` placeholders (bin/fm-dod-lib.sh).
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
@@ -128,6 +132,20 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
+SCOUT_BRIEF="$DATA/$ID/brief.md"
+if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
+  echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; write the captain's ship-time ask in ## Captain's intent first (the scout-time ask describes an investigation)" >&2
+  exit 1
+fi
+INTENT_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "## Captain's intent")
+SPEC_BODY=$(fm_brief_heading_body "$SCOUT_BRIEF" "## Firstmate spec")
+if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
+  INTENT_BODY="Write the captain's ship-time ask here. The scout-time ask describes an investigation."
+fi
+if [ -z "$(printf '%s' "$SPEC_BODY" | tr -d '[:space:]')" ]; then
+  SPEC_BODY="Write Firstmate's ship-time build constraints here."
+fi
+
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
@@ -149,7 +167,16 @@ Your scout task has been promoted to a ship task, mode=$MODE. Your window, workt
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. These ship instructions supersede the scout delivery rules and report-based Definition of done. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule.
 
+# Task
+## Captain's intent
 EOF
+  printf '%s\n' "$INTENT_BODY"
+  cat <<EOF
+
+## Firstmate spec
+EOF
+  printf '%s\n' "$SPEC_BODY"
+  printf '\n'
   fm_dod_block "$MODE" "$ID"
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
 mv "$TMP" "$INSTRUCTIONS"

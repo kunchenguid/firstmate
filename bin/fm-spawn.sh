@@ -11,9 +11,12 @@
 #   the mode up. A ship spawn additionally reads the brief's recorded
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
 #   instructions and the recorded task delivery cannot drift apart; a brief
-#   scaffolded before that line existed warns once and launches on the flag. When
-#   the explicit mode carries less rigor than the project's standing posture, a
-#   loud one-line deviation notice is printed and the spawn continues.
+#   scaffolded before that line existed warns once and launches on the flag. A
+#   ship or scout spawn also refuses when the brief still contains `{TASK}` or
+#   `{FIRSTMATE_SPEC}` (bin/fm-dod-lib.sh owns that placeholder check and the
+#   `--intent` contract those subsections feed). When the explicit mode carries
+#   less rigor than the project's standing posture, a loud one-line deviation
+#   notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
@@ -299,6 +302,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
@@ -1766,6 +1771,12 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2; exit 1; }
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  if fm_brief_task_placeholders_present "$BRIEF"; then
+    echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
+    exit 1
+  fi
+fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in

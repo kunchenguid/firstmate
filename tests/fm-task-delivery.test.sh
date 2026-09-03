@@ -50,6 +50,14 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   } > "$home/data/$id/brief.md"
 }
 
+fill_brief_subsections() {  # <file> <intent> <spec>
+  local file=$1 intent=$2 spec=$3 content
+  content=$(cat "$file")
+  content=${content//'{TASK}'/$intent}
+  content=${content//'{FIRSTMATE_SPEC}'/$spec}
+  printf '%s\n' "$content" > "$file"
+}
+
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
@@ -336,6 +344,10 @@ STUB
       "$mode: promoted worker was not told to stop for any wrong worktree"
     assert_grep "git checkout -b fm/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
+    assert_grep "## Captain's intent" "$payload" \
+      "$mode: promoted worker did not receive the Captain's intent subsection"
+    assert_grep "## Firstmate spec" "$payload" \
+      "$mode: promoted worker did not receive the Firstmate spec subsection"
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
@@ -408,6 +420,79 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
+# Spawn and promotion refuse leftover Task-subsection placeholders through the
+# public brief/spawn/promote path. Filling both subsections lets the spawn
+# delivery checks proceed (the fake tmux still fails later).
+test_spawn_and_promote_require_filled_task_subsections() {
+  local rec home proj fakebin out status id brief meta
+  rec=$(make_home subsections)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  id=delivery-unfilled-ship
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "unfilled ship brief should still scaffold"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of an unfilled ship brief should exit non-zero"
+  assert_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+    "unfilled ship spawn did not name the leftover placeholders"
+  assert_contains "$out" "## Captain's intent" \
+    "unfilled ship spawn did not name the intent subsection to fill"
+  assert_absent "$home/state/$id.meta" "unfilled ship spawn wrote task metadata"
+
+  id=delivery-filled-ship
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "filled-ship brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "Ship the listed change." "Touch only the named helper."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+    "a filled ship brief was refused for leftover Task placeholders"
+
+  id=delivery-unfilled-scout
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "unfilled scout brief should still scaffold"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn of an unfilled scout brief should exit non-zero"
+  assert_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+    "unfilled scout spawn did not name the leftover placeholders"
+  assert_absent "$home/state/$id.meta" "unfilled scout spawn wrote task metadata"
+
+  id=promote-unfilled-e1
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "unfilled promote scout brief should scaffold"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion of an unfilled scout brief should exit non-zero"
+  assert_contains "$out" "write the captain's ship-time ask" \
+    "unfilled promotion did not tell firstmate to write the ship-time ask"
+  assert_grep 'kind=scout' "$meta" "unfilled promotion still changed the task record"
+
+  id=promote-filled-e2
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "filled promote scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Ship the identity check the captain chose." \
+    "Do not add a classifier."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion of a filled scout brief should succeed"
+  assert_grep 'kind=ship' "$meta" "filled promotion did not restore ship teardown protection"
+  brief="$home/data/$id/ship-instructions.md"
+  assert_grep "Ship the identity check the captain chose." "$brief" \
+    "promotion did not copy the filled Captain's intent into ship instructions"
+  assert_grep "Do not add a classifier." "$brief" \
+    "promotion did not copy the filled Firstmate spec into ship instructions"
+  pass "fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -417,4 +502,5 @@ test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
+test_spawn_and_promote_require_filled_task_subsections
 echo "# all fm-task-delivery tests passed"

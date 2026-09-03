@@ -10,8 +10,36 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
+# This file is the one owner of the no-mistakes `--intent` contract: only the
+# brief's `## Captain's intent` subsection plus later captain words, never
+# `## Firstmate spec` and never the worker's own tradeoffs. bin/fm-brief.sh
+# scaffolds those two `# Task` subsections; bin/fm-spawn.sh and bin/fm-promote.sh
+# refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders through the helpers
+# below. Other mentions of `--intent` point here rather than restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
+
+# Return 0 when a ship/scout brief or promotion instructions still carry an
+# unfilled Task-subsection placeholder. A missing file is treated as not
+# carrying placeholders (legacy fixtures and pre-subsection briefs).
+fm_brief_task_placeholders_present() {  # <file>
+  local file=$1
+  [ -f "$file" ] || return 1
+  grep -q -F '{TASK}' "$file" && return 0
+  grep -q -F '{FIRSTMATE_SPEC}' "$file" && return 0
+  return 1
+}
+
+# Print the body under an exact `## ...` heading until the next `## ` heading.
+fm_brief_heading_body() {  # <file> <heading>
+  local file=$1 heading=$2
+  [ -f "$file" ] || return 0
+  awk -v heading="$heading" '
+    $0 == heading { grab=1; next }
+    grab && /^## / { exit }
+    grab { print }
+  ' "$file"
+}
 
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
@@ -47,7 +75,9 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection plus any later words the captain actually said.
+Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your own decisions and tradeoffs.
+This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
