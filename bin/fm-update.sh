@@ -17,8 +17,8 @@
 # any other worktree's checkout or the shared `main` branch.
 #
 # The fast-forward mechanics live in bin/fm-ff-lib.sh (base_mode "origin" here);
-# the same library drives the local-HEAD secondmate sync used by fm-spawn.sh and
-# fm-bootstrap.sh, so there is one ff implementation, not several.
+# the same library drives local and remote parent-targeted secondmate sync, so
+# there is one ff implementation, not several.
 #
 # It does NOT re-read AGENTS.md or nudge secondmates itself - those are LLM /
 # tmux actions the skill performs. The script's job is the safe git mechanics

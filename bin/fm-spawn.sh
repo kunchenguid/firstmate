@@ -136,8 +136,9 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
-#   Before a secondmate launch, the home is locally fast-forwarded to the primary
-#   default-branch commit when safe; skipped syncs warn and launch unchanged.
+#   Before a secondmate launch, the home is fast-forwarded to the primary's
+#   default-branch commit when safe: directly for a local home, or through the
+#   configured host for a remote home. Skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
@@ -448,7 +449,7 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent
+  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -563,6 +564,21 @@ spawn_remote_secondmate() {
     [ -z "$FM_REMOTE_READINESS_OUT" ] || printf '%s\n' "$FM_REMOTE_READINESS_OUT" >&2
     [ "$rc" -ne 255 ] || return 255
     return 1
+  fi
+  # Pre-launch sync, the remote twin of the local-HEAD sync below: this home
+  # follows THIS primary's default-branch commit, not the Firstmate copy on that
+  # host, so the commit is resolved here and handed over for the host to import
+  # and fast-forward to. A skipped sync warns and launches the home unchanged.
+  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
+    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
+      "$sm_primary_head" < /dev/null 2>&1); then
+      :
+    else
+      sync_rc=$?
+      echo "warning: remote secondmate $id sync skipped before launch: $(remote_sync_failure_reason "$sync_rc" "$sync_out")" >&2
+    fi
+  else
+    echo "warning: remote secondmate $id sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
   remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id")
   if ! fm_lock_acquire_wait "$remote_lock"; then
@@ -1761,7 +1777,13 @@ if [ "$KIND" = secondmate ]; then
   # repo and already holds the commit. ff-only and guarded; a dirty, diverged, or
   # wrong-branch home is left untouched and launches as-is. The agent re-reads
   # AGENTS.md fresh on launch, so no nudge is needed here.
-  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
+  # On a remote host this spawn is the host-local leg of a launch whose parent has
+  # already synced the home to ITS primary commit, and $FM_ROOT here is only that
+  # host's own Firstmate copy; syncing again would target the wrong checkout, so
+  # the caller turns this step off (bin/fm-remote-secondmate-control.sh).
+  if [ "${FM_SKIP_SECONDMATE_SYNC:-0}" = 1 ]; then
+    :
+  elif sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
     sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes 2>&1 || true)
     case "$sm_ff_out" in
       *': skipped:'*)

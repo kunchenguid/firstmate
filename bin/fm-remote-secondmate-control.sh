@@ -9,7 +9,7 @@
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
-#   fm-remote-secondmate-control.sh sync <id>
+#   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
@@ -21,6 +21,16 @@
 # The home's own workers keep their ordinary backend selection.
 # bin/fm-remote-doctor.sh owns that host's readiness for Herdr.
 # docs/remote-secondmates.md owns why.
+#
+# With <parent-commit>, sync follows the PARENT PRIMARY's default-branch commit,
+# which the parent resolves on its own checkout and passes in, so a remote home
+# tracks the primary exactly like a local one instead of stopping at whatever
+# this host's Firstmate copy happens to hold. Omitting <parent-commit> targets
+# this host's own code-root HEAD instead, which is what /updatefirstmate wants
+# after it has refreshed that
+# code root from origin. Because this home is a standalone clone, the target
+# commit is imported here first and the fast-forward itself is the shared one in
+# bin/fm-ff-lib.sh, so the clean, ancestry, and branch guards have a single owner.
 # A private parent-route state directory stores only the remote secondmate
 # agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
@@ -44,6 +54,8 @@ REMOTE_HERDR_SESSION=fm-remote
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
@@ -167,6 +179,10 @@ cmd_launch() {
       *) die "remote endpoint state is $current; refusing duplicate launch" ;;
     esac
   fi
+  # The parent owns both convergence legs before it asks for this launch: it
+  # already fast-forwarded this home to ITS primary commit and pushed inherited
+  # local material, so this spawn must not redo either against this host's own
+  # Firstmate copy, which would target the wrong checkout.
   ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness" --backend "$selected_backend")
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
@@ -174,6 +190,7 @@ cmd_launch() {
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
+    FM_SKIP_SECONDMATE_SYNC=1 \
     "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     die "remote host-local secondmate launch failed"
@@ -256,27 +273,48 @@ cmd_observe() {
   printf '\n'
 }
 
-cmd_sync() {
-  local id=$1 target dirty head current
-  validate_id "$id"
-  validate_home "$id"
-  target=$TARGET_HOME
-  dirty=$(git -C "$target" status --porcelain 2>/dev/null | awk '$0 != "?? .fm-secondmate-home" { print; exit }')
-  [ -z "$dirty" ] || die "remote secondmate checkout is dirty; sync skipped"
-  head=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || die "remote code root HEAD is unreadable"
-  current=$(git -C "$target" rev-parse HEAD 2>/dev/null) || die "remote home HEAD is unreadable"
-  if [ "$current" = "$head" ]; then
-    printf 'current: %s\n' "$head"
+# Make <commit> readable in this home's own object store without moving any other
+# checkout. Ordered by cost: already present, then this host's Firstmate copy (a
+# read-only fetch of that one commit, which never advances that copy's HEAD), then
+# the home's own origin for that one commit. No pack transport beyond those two.
+import_home_commit() { # <home> <commit>
+  local home=$1 commit=$2
+  if git -C "$home" cat-file -e "$commit^{commit}" 2>/dev/null; then return 0; fi
+  if git -C "$home" fetch --quiet --no-tags -- "$FM_ROOT" "$commit" 2>/dev/null \
+    && git -C "$home" cat-file -e "$commit^{commit}" 2>/dev/null; then
     return 0
   fi
-  if ! git -C "$target" cat-file -e "$head^{commit}" 2>/dev/null; then
-    git -C "$target" fetch --quiet --no-tags "$FM_ROOT" "$head" \
-      || die "remote home could not import the code-root commit"
+  if git -C "$home" remote get-url origin >/dev/null 2>&1 \
+    && git -C "$home" fetch --quiet --no-tags -- origin "$commit" 2>/dev/null \
+    && git -C "$home" cat-file -e "$commit^{commit}" 2>/dev/null; then
+    return 0
   fi
-  git -C "$target" cat-file -e "$head^{commit}" 2>/dev/null || die "remote home does not contain the code-root commit"
-  git -C "$target" merge-base --is-ancestor HEAD "$head" || die "remote secondmate checkout is not a fast-forward"
-  git -C "$target" checkout --detach -q "$head" || die "remote secondmate fast-forward failed"
-  printf 'synced: %s\n' "$head"
+  return 1
+}
+
+cmd_sync() {
+  local id=$1 commit report out
+  validate_id "$id"
+  validate_home "$id"
+  if [ "$#" -ge 2 ]; then
+    commit=$2
+    case "$commit" in *[!0-9a-f]*) die "sync target must be a full 40-character commit id" ;; esac
+    [ "${#commit}" -eq 40 ] || die "sync target must be a full 40-character commit id"
+  else
+    commit=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || die "remote code root HEAD is unreadable"
+  fi
+  import_home_commit "$TARGET_HOME" "$commit" \
+    || die "remote home could not import $commit from this host's Firstmate copy or the home's origin; run /updatefirstmate to refresh this host's copy, or push that commit first"
+  # ff_target publishes its verdict in FF_STATUS, so it must run in THIS shell.
+  report=$(mktemp "${TMPDIR:-/tmp}/fm-remote-sync.XXXXXX") || die "cannot stage the sync report"
+  ff_target "$TARGET_HOME" "remote home" "$commit" yes yes > "$report" 2>&1
+  out=$(cat "$report")
+  rm -f "$report"
+  case "$FF_STATUS" in
+    updated) printf 'synced: %s\n' "$commit" ;;
+    current) printf 'current: %s\n' "$commit" ;;
+    *) die "remote secondmate home sync skipped: ${out#remote home: skipped: }" ;;
+  esac
 }
 
 cmd_update() {
@@ -332,7 +370,7 @@ case "${1:-}" in
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
-  sync) shift; [ "$#" -eq 1 ] || usage; cmd_sync "$@" ;;
+  sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;
