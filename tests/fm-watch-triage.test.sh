@@ -2488,6 +2488,51 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
 }
 
+# The 2026-09-03 false-wedge incident: a worker finishes correctly (`done:`)
+# into a known external wait (here, a halted CI service) and appends
+# `paused: <why>` right after it, exactly as bin/fm-brief.sh's status protocol
+# now instructs. Unlike a standalone declared pause (the test above), this
+# exact done-then-paused shape must outrank authoritative "working" run-step
+# state rather than being overridden back into a restarted wedge timer -
+# otherwise the new instruction is advice that does not work.
+test_terminal_then_paused_outranks_authoritative_working() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case terminal-then-paused-outranks-working); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-terminal-paused"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/terminal-paused.meta"
+  {
+    printf 'done: PR https://example.test/owner/repo/pull/1 checks green\n'
+    printf 'paused: awaiting checks - CI halted account-wide\n'
+  } > "$state/terminal-paused.status"
+  sig=$(seen_sig "$state/terminal-paused.status"); printf '%s' "$sig" > "$state/.seen-terminal-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 30 ] && kill -0 "$pid" 2>/dev/null; do
+    [ -e "$state/.paused-$key" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a done-then-paused sequence exited instead of staying absorbed: $(cat "$out")"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "a done-then-paused sequence did not enter paused mode despite authoritative working state"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a done-then-paused sequence started a wedge timer despite its declared wait outranking run-step state"; }
+  sleep 2
+  ! grep -F "possible wedge" "$out" >/dev/null || { reap "$pid"; fail "a done-then-paused sequence was wedge-escalated despite its declared wait"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a done: immediately followed by paused: outranks authoritative working state and never wedge-escalates"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -4063,6 +4108,7 @@ test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
+test_terminal_then_paused_outranks_authoritative_working
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence

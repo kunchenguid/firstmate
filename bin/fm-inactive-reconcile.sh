@@ -349,18 +349,31 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
 
 # The whole terminal line a child's ledger ends in, or non-zero when the ledger
 # is absent, unusable, still being appended (no trailing newline yet), or does
-# not end in a done or failed line.
+# not end in a done or failed line. A trailing declared pause does not hide the
+# terminal line underneath it: a worker that finishes correctly into a known
+# external wait (merge authority, a halted build service, an upstream branch
+# landing) appends `paused: <why>` right after its `done:`/`failed:` line per
+# bin/fm-brief.sh's status protocol, and that terminal result must still reach
+# a secondmate's parent channel rather than being read as merely paused.
 child_terminal_ledger_line() { # <status>
-  local status=$1 snapshot last marker='__FM_LEDGER_SNAPSHOT_END__'
+  local status=$1 snapshot lines n last prior marker='__FM_LEDGER_SNAPSHOT_END__'
   [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
   snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
   case "$snapshot" in *$'\n'"$marker") ;; *) return 1 ;; esac
   snapshot=${snapshot%"$marker"}
-  last=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$' | tail -1)
+  lines=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$') || true
+  n=$(printf '%s\n' "$lines" | grep -c .)
+  last=$(printf '%s\n' "$lines" | tail -1)
   case "$(status_line_verb "$last")" in
-    done|failed) printf '%s\n' "$last" ;;
-    *) return 1 ;;
+    done|failed) printf '%s\n' "$last"; return 0 ;;
   esac
+  if [ "$n" -ge 2 ] && status_is_paused "$last"; then
+    prior=$(printf '%s\n' "$lines" | tail -2 | head -1)
+    case "$(status_line_verb "$prior")" in
+      done|failed) printf '%s\n' "$prior"; return 0 ;;
+    esac
+  fi
+  return 1
 }
 
 # Claim one already-delivered inactive fallback as the delivery of this ledger

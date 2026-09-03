@@ -923,6 +923,32 @@ clear_pause_tracking() {  # <window-key>
   clear_stale_hash_tracking "$key"
 }
 
+# 0 if a status file's last non-blank line is a declared pause AND the
+# non-blank line immediately before it is a terminal done/failed report: the
+# "finished into a wait" shape a worker emits when it completes correctly but a
+# still-outstanding external dependency (merge authority, a halted build
+# service, an upstream branch landing) keeps its pane idling (bin/fm-brief.sh's
+# status protocol instructs exactly this: a `done:` line immediately followed
+# by `paused: <why>`). pause_state_class below trusts this exact two-line shape
+# outright, so a worker's own declared wait is not overridden by inferred
+# run/agent state into a restarted wedge timer. Does not match a standalone
+# declared pause with no preceding terminal line, which keeps its existing
+# run-step precedence (crew_absorb_class="working" still wins there).
+terminal_then_paused() {  # <status-file>
+  local f=$1 lines n last prior
+  [ -e "$f" ] || return 1
+  lines=$(grep -v '^[[:space:]]*$' "$f" 2>/dev/null) || return 1
+  n=$(printf '%s\n' "$lines" | grep -c .)
+  [ "$n" -ge 2 ] || return 1
+  last=$(printf '%s\n' "$lines" | tail -1)
+  prior=$(printf '%s\n' "$lines" | tail -2 | head -1)
+  status_is_paused "$last" || return 1
+  case "$(status_line_verb "$prior")" in
+    done|failed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
@@ -932,6 +958,11 @@ pause_state_class() {  # <window> <task>
   key=$(window_key "$win")
   last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
+  if terminal_then_paused "$STATE/$task.status"; then
+    rm -f "$recheck_file"
+    printf 'paused'
+    return
+  fi
   if ! status_is_paused_or_captain_held "$last"; then
     rm -f "$recheck_file"
     crew_absorb_class "$task"

@@ -190,6 +190,29 @@ test_local_secondmate_delivers_terminal_ledger_line() {
   pass "secondmate delivers a child's terminal ledger line once, on the next poll, from the ledger alone"
 }
 
+# The 2026-09-03 false-wedge fix's other half: a worker that finishes correctly
+# and appends a declared pause right after its terminal line (exactly what
+# bin/fm-brief.sh's status protocol now instructs) must not have that terminal
+# result silently dropped from a secondmate's parent-channel delivery. Before
+# this fix, child_terminal_ledger_line read only the ledger's last line, so a
+# `done: PR ...` followed by `paused: ...` was read as merely paused and the
+# PR result was never delivered upward.
+test_terminal_line_followed_by_declared_pause_still_delivers() {
+  local expected key
+  make_world done-then-paused; bind_secondmate local
+  write_child "$MATE" child $'done: PR https://example.test/owner/repo/pull/1 checks green\npaused: awaiting merge authority'
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  key=$(reported_outcome_key "$MATE" child 'done') || fail "a done-then-paused ledger did not retain a terminal receipt key"
+  expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off"
+  grep -Fxq "$expected" "$MAIN/state/mate.status" \
+    || fail "a done-then-paused ledger did not deliver its terminal PR result to the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "a done-then-paused ledger delivery receipt was not durable"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(grep -c 'child-outcome-child-done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "a second poll delivered the same done-then-paused ledger line again"
+  pass "a terminal ledger line immediately followed by a declared pause still delivers its result to the parent"
+}
+
 # A busy child cannot keep later ledger outcomes from being visited, and is
 # retried on the next poll after its lifecycle lock becomes available.
 test_busy_child_does_not_starve_later_ledger_outcomes() {
@@ -788,6 +811,7 @@ test_reconciliation_never_calls_forge() {
 
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
+test_terminal_line_followed_by_declared_pause_still_delivers
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_terminal_line_during_state_read_yields_to_ledger_delivery
