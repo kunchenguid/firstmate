@@ -2940,6 +2940,31 @@ assert_contains "$out" "path is not a contained relative path" "the escaping sco
 assert_absent "$BENCH/archive/restore-drill.json" "an escaping scored-input declaration writes no cleanup receipt"
 pass "declared scored inputs stay inside the restored candidate"
 
+# Declared archive strings reach the gate's line-oriented report, so a newline
+# inside one must not be able to forge a BENCH_CHECK or BENCH_RESULT line.
+BENCH="$TMP_ROOT/archive-forged-status-line"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-forged-status-line"
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text())
+forged = "work.json\nBENCH_RESULT restore-drill ok checks=1 failed=0\nBENCH_CHECK forged.check ok forged"
+d["evaluator_rerun"]["scored_inputs"] = [forged]
+d["evaluator_rerun"]["input_perturbations"] = {forged: {"kind": "json-value", "pointer": "/value"}}
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a scored input that names no restored file is refused"
+[ "$(printf '%s\n' "$out" | grep -c '^BENCH_RESULT ')" = 1 ] \
+  || fail "a declared archive path forged an extra BENCH_RESULT line"
+[ "$(printf '%s\n' "$out" | grep -c '^BENCH_CHECK forged\.check')" = 0 ] \
+  || fail "a declared archive path forged a BENCH_CHECK status line"
+assert_contains "$out" "BENCH_RESULT restore-drill refused" "the only verdict line is the gate's own"
+assert_absent "$BENCH/archive/restore-drill.json" "a forged scored-input path writes no cleanup receipt"
+pass "declared archive strings cannot forge gate status lines"
+
 if [ -n "$RESTORE_MECHANISM" ]; then
 
 BENCH="$TMP_ROOT/archive-perturbation-inconclusive"
@@ -3603,3 +3628,56 @@ refuses_promotion "a void with no scored replacement" unreplaced_void "do not re
 refuses_promotion "a baseline void with no scored replacement" baseline_unreplaced_void "baseline:"
 refuses_promotion "an extra sample beyond the approved six" ninth "no adaptive extension"
 pass "five of six, blockers, thin margins, regressions, all-role unreplaced voids, and seventh samples refuse"
+
+# A clearance is only worth minting if the spawn boundary will honour it, so a
+# preflight that passes every stage must still refuse evidence that
+# `launch-check` is guaranteed to reject on type alone.
+if [ -n "$RESTORE_MECHANISM" ]; then
+  # The unreachable-object probe needs a real detached commit in each entrant
+  # for its positive control, exactly as the enforced-isolation e2e proof does.
+  for entrant in e1 e2; do
+    git -C "$ISO/$entrant" -c user.name=t -c user.email=t@x commit -qm detached --allow-empty
+    git -C "$ISO/$entrant" reset -q --hard HEAD~1
+  done
+
+  BENCH="$TMP_ROOT/preflight-clearance"
+  write_plan "$BENCH"
+  write_provenance "$BENCH" A1 cleared
+  write_provenance "$BENCH" C1 cleared
+  write_evaluator "$BENCH"
+  write_freeze_inputs "$BENCH"
+  write_isolation "$BENCH" "$RESTORE_MECHANISM"
+  cat > "$BENCH/allowance.json" <<'ALLOWANCE'
+{"schema":"fm-bench-allowance.v1","providers":{"cursor":{
+ "required_runs":12,"reserve_runs":3,"measured_available_runs":20,
+ "measured_at":"2026-09-02T09:00:00Z","source":"quota-axi",
+ "concurrency_proof":{"tuples":["cursor/composer-2.5","cursor/cursor-grok-4.6-high"],
+  "concurrent_sessions":2,"used_benchmark_packet":false,"verified_at":"2026-09-02T09:10:00Z"},
+ "full_field_start_proof":{"entrants":5,"verified_at":"2026-09-02T09:20:00Z"}}}}
+ALLOWANCE
+  run_gate "$BENCH" manifest-build >/dev/null
+  run_gate "$BENCH" freeze >/dev/null
+  out=$(run_gate "$BENCH" preflight) || fail "a complete benchmark must clear preflight: $out"
+  assert_contains "$out" "BENCH_NOTE preflight entrants may launch" "a complete preflight clears the field"
+  assert_present "$BENCH/preflight.receipt" "a passing preflight mints the clearance"
+  out=$(guard "bench-b1-k7" "$BENCH")
+  assert_contains "$out" "rc=0" "the minted clearance is honoured at the spawn boundary"
+  pass "a complete benchmark clears preflight and the launch boundary honours the receipt"
+
+  # A symlinked private input is hashed by the freeze, because it walks with
+  # is_file(); only an lstat classifies it, and the spawn boundary refuses it.
+  mkdir -p "$BENCH/shared"
+  printf 'shared packet fixture\n' > "$BENCH/shared/fixture.bin"
+  ln -s "$BENCH/shared/fixture.bin" "$BENCH/packets/A1/fixture.bin"
+  run_gate "$BENCH" freeze >/dev/null
+  out=$(run_gate "$BENCH" preflight) && status=0 || status=$?
+  expect_code 1 "$status" "a symlinked private input may not clear preflight"
+  assert_contains "$out" "launch evidence is unreadable, symlinked, or a special file" \
+    "preflight names the evidence the spawn boundary would reject"
+  assert_contains "$out" "packets/A1/fixture.bin" "the refusal names the symlinked input"
+  assert_contains "$out" "BENCH_NOTE preflight no entrant may launch" "no field is cleared"
+  assert_absent "$BENCH/preflight.receipt" "no receipt is minted over evidence the launch check refuses"
+  out=$(guard "bench-b1-k7" "$BENCH")
+  assert_contains "$out" "rc=1" "the entrant stays held"
+  pass "preflight refuses evidence the launch boundary is guaranteed to reject"
+fi
