@@ -460,6 +460,30 @@ EOF
   assert_not_contains "$out" "must contain nonempty" \
     "a filled ship brief mentioning placeholder tokens failed content validation"
 
+  id=delivery-legacy-fenced-headings
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+You are a crewmate.
+
+# Task
+Preserve this legacy task containing a format example.
+
+```markdown
+## Captain's intent
+Example intent
+## Firstmate spec
+Example specification
+```
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "must contain nonempty" \
+    "fenced example headings made a filled legacy Task fail validation"
+  assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
+    "fenced example headings made a filled legacy Task look unfilled"
+
   id=delivery-unfilled-scout
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
     || fail "unfilled scout brief should still scaffold"

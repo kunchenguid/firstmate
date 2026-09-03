@@ -31,12 +31,13 @@ fm_brief_task_placeholders_present() {  # <file>
   return 1
 }
 
-# Print an exact ATX heading's body through the next unfenced heading at the
-# same or a higher level. Empty if the heading is missing.
-fm_brief_heading_body() {  # <file> <heading>
-  local file=$1 heading=$2
-  [ -f "$file" ] || return 0
-  awk -v heading="$heading" '
+# Parse an exact ATX heading outside fenced blocks. Body mode prints through
+# the next unfenced heading at the same or a higher level; present mode reports
+# whether the heading exists.
+fm_brief_heading_parse() {  # <file> <heading> <body|present>
+  local file=$1 heading=$2 mode=$3
+  [ -f "$file" ] || { [ "$mode" = body ]; return; }
+  awk -v heading="$heading" -v mode="$mode" '
     BEGIN {
       target_level = 0
       while (substr(heading, target_level + 1, 1) == "#") target_level++
@@ -68,11 +69,13 @@ fm_brief_heading_body() {  # <file> <heading>
         }
       }
 
-      if (!grab && !was_fenced && line == heading) {
+      if (!found && !was_fenced && line == heading) {
+        found = 1
+        if (mode == "present") next
         grab = 1
         next
       }
-      if (!grab) next
+      if (mode == "present" || !grab) next
       if (is_fence || was_fenced) {
         print line
         next
@@ -83,7 +86,18 @@ fm_brief_heading_body() {  # <file> <heading>
       if (level > 0 && level <= target_level && substr(scan, level + 1, 1) ~ /^[[:space:]]?$/) exit
       print line
     }
+    END {
+      if (mode == "present" && !found) exit 1
+    }
   ' "$file"
+}
+
+fm_brief_heading_body() {  # <file> <heading>
+  fm_brief_heading_parse "$1" "$2" body
+}
+
+fm_brief_heading_present() {  # <file> <heading>
+  fm_brief_heading_parse "$1" "$2" present >/dev/null
 }
 
 # Accept the current two-subsection contract only when both bodies have content;
@@ -91,8 +105,8 @@ fm_brief_heading_body() {  # <file> <heading>
 fm_brief_task_content_valid() {  # <file>
   local file=$1 intent spec task has_intent=0 has_spec=0
   [ -f "$file" ] && [ -r "$file" ] || return 1
-  grep -qx -F "## Captain's intent" "$file" && has_intent=1
-  grep -qx -F "## Firstmate spec" "$file" && has_spec=1
+  fm_brief_heading_present "$file" "## Captain's intent" && has_intent=1
+  fm_brief_heading_present "$file" "## Firstmate spec" && has_spec=1
   if [ "$has_intent" -eq 1 ] || [ "$has_spec" -eq 1 ]; then
     [ "$has_intent" -eq 1 ] && [ "$has_spec" -eq 1 ] || return 1
     intent=$(fm_brief_heading_body "$file" "## Captain's intent")
