@@ -264,6 +264,8 @@ autoarm_session_current_or_fail 'authenticated session owner died before generat
 fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID" bound
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
+  autoarm_session_current_or_fail \
+    'authenticated session owner died during generation claim' || exit 0
   [ "$CLAIM_RC" -eq 2 ] && exit 0
   ROLE=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   case "$ROLE" in
@@ -275,8 +277,12 @@ if [ "$CLAIM_RC" -ne 0 ]; then
         autoarm_session_current_or_fail 'authenticated session owner died before recovered generation claim' || exit 0
         fm_autoarm_claim_next "$STATE" "$GRACE" "$FM_ROOT" "$SESSION_OWNER_PID" bound
         CLAIM_RC=$?
-        [ "$CLAIM_RC" -eq 0 ] \
-          || { [ "$CLAIM_RC" -eq 2 ] && exit 0; autoarm_claim_failure 'generation claim failed after releasing abandoned legacy claim'; }
+        if [ "$CLAIM_RC" -ne 0 ]; then
+          autoarm_session_current_or_fail \
+            'authenticated session owner died during recovered generation claim' || exit 0
+          [ "$CLAIM_RC" -eq 2 ] && exit 0
+          autoarm_claim_failure 'generation claim failed after releasing abandoned legacy claim'
+        fi
       elif fm_autoarm_legacy_claim_active "$STATE" "$GRACE"; then
         exit 0
       else

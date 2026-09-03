@@ -1138,6 +1138,71 @@ test_stalled_session_lease_publishes_bound_failure() {
   pass "auto-arm: a stalled session lease yields bounded owner-scoped failure state"
 }
 
+assert_claim_wait_owner_death_failure() {  # <dir> <contended>
+  local dir=$1 contended=$2 owner holder='' hook out status i failure reset
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  pause_session_lease_acquire "$dir"
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  if [ "$contended" -eq 1 ]; then
+    sleep 60 &
+    holder=$!
+    mkdir -p "$dir/state/.lock.acquire"
+    printf '%s\n' "$holder" > "$dir/state/.lock.acquire/pid"
+  fi
+
+  out="$dir/claim-wait-owner-death.out"
+  run_autoarm_from_claude_daemon_bridge "$dir" "$owner" > "$out" 2>&1 &
+  hook=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/state/session-lease-waiting" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$dir/state/session-lease-waiting" ]; then
+    kill "$hook" "$owner" ${holder:+"$holder"} 2>/dev/null || true
+    wait "$hook" "$owner" ${holder:+"$holder"} 2>/dev/null || true
+    fail "generation claim did not reach its session lease wait"
+  fi
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  : > "$dir/state/session-lease-release"
+  wait "$hook"
+  status=$?
+  failure=$(failure_epoch_path "$dir") \
+    || fail "owner death during generation claim left no durable failure record"
+  reset=$(failure_epoch_field "$dir" reset)
+  if [ -n "$holder" ]; then
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+  fi
+
+  expect_code 2 "$status" "owner death during generation claim must fail visibly"
+  [ "$(cat "$dir/state/.lock" 2>/dev/null || true)" = "$owner" ] \
+    || fail "generation-claim failure was not fenced to the unchanged dead owner"
+  [ "$(failure_epoch_field "$dir" session_owner_pid)" = "$owner" ] \
+    || fail "generation-claim failure did not reclassify the dead owner as stale"
+  assert_present "$failure" \
+    "owner death during generation claim did not persist its failed epoch"
+  assert_present "$dir/state/.claude-autoarm-failure-notified/$reset.$owner" \
+    "owner death during generation claim did not persist its owner-scoped notice"
+  assert_contains "$(cat "$out")" "owner died during generation claim" \
+    "owner death during generation claim did not deliver its failure notice"
+  assert_absent "$dir/state/arm-ran" \
+    "hook armed after its session owner died during generation claim"
+}
+
+test_generation_claim_wait_owner_death_publishes_failure() {
+  local released_dir contended_dir
+  released_dir=$(make_primary_dir "$TMP_ROOT/claim-wait-owner-death-release")
+  contended_dir=$(make_primary_dir "$TMP_ROOT/claim-wait-owner-death-contention")
+  assert_claim_wait_owner_death_failure "$released_dir" 0
+  assert_claim_wait_owner_death_failure "$contended_dir" 1
+  pass "auto-arm: generation claim owner death publishes durable failure state"
+}
+
 test_terminal_session_lease_timeout_publishes_failure() {
   local dir out status started elapsed holder failure
   dir=$(make_primary_dir "$TMP_ROOT/stalled-terminal-session-lease")
@@ -3748,6 +3813,7 @@ test_recovered_owner_binding_rejects_successor_transfer
 test_authenticated_daemon_survives_delivery_parent_exit
 test_generation_claim_is_bound_to_serialized_session_owner
 test_stalled_session_lease_publishes_bound_failure
+test_generation_claim_wait_owner_death_publishes_failure
 test_terminal_session_lease_timeout_publishes_failure
 test_reset_session_lease_timeout_publishes_failure
 test_successor_session_gets_own_failure_notice
