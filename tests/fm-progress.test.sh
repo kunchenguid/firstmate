@@ -4,7 +4,9 @@
 # refresh rule, and the Herdr label grammar in bin/backends/herdr.sh.
 #
 # The crew's current state is served by a canned fm-crew-state.sh
-# (FM_CREW_STATE_BIN, exactly the line the real helper prints), the captain
+# (FM_CREW_STATE_BIN, exactly the line the real helper prints; its optional
+# sleep and read log apply only to fm-progress.sh's reads, so the real
+# watcher's own bounded triage read never parks the poll loop), the captain
 # hold by a canned fm-captain-hold.sh (FM_CAPTAIN_HOLD_BIN), and Herdr by a
 # stateful fake `herdr` that answers `workspace get` from a label file and
 # logs every `workspace rename`. Time is fixed through FM_PROGRESS_NOW.
@@ -64,8 +66,17 @@ make_case() {  # <name> -> echoes case dir
   cat > "$fb/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-[ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_CREW_STATE_LOG"
-[ -z "${FM_FAKE_CREW_STATE_SLEEP:-}" ] || sleep "$FM_FAKE_CREW_STATE_SLEEP"
+# Only a read made by fm-progress.sh (the tick or `show`) is logged and may
+# sleep: the watcher's own bounded triage read answers at once and unlogged,
+# so a slow fake parks the tick child under test and never the poll loop that
+# must keep running to reclaim it.
+caller=$(tr '\0' ' ' < "/proc/$PPID/cmdline" 2>/dev/null || ps -o args= -p "$PPID" 2>/dev/null || true)
+case "$caller" in
+  *fm-progress.sh*)
+    [ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$1" >> "$FM_FAKE_CREW_STATE_LOG"
+    [ -z "${FM_FAKE_CREW_STATE_SLEEP:-}" ] || sleep "$FM_FAKE_CREW_STATE_SLEEP"
+    ;;
+esac
 [ -z "${FM_FAKE_CREW_STATE_RM:-}" ] || rm -f -- "$FM_FAKE_CREW_STATE_RM"
 printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
 exit 0
