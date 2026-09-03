@@ -81,9 +81,9 @@ bench.mkdir(parents=True, exist_ok=True)
     "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
     "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
                        "--image", "firstmate-benchmark-runtime@sha256:test",
-                       "--provider-network", "provider-egress-only",
-                       "--provider-proxy", "http://provider-proxy:8080",
-                       "--provider-proxy-container", "provider-proxy",
+                       "--provider-network", "{provider_network}",
+                       "--provider-proxy", "{provider_proxy}",
+                       "--provider-proxy-container", "{provider_proxy_container}",
                        "--allow", "{root}", "--"],
     "leak_marker": "FM_BENCH_",
     "protected_paths": [f"{iso}/sealed"],
@@ -92,7 +92,10 @@ bench.mkdir(parents=True, exist_ok=True)
          "private_object_store": f"{iso}/{name}/objects",
          "private_tmp": f"{iso}/{name}/tmp",
          "private_home": f"{iso}/{name}/home",
-         "private_session": f"{iso}/{name}/session"}
+         "private_session": f"{iso}/{name}/session",
+         "provider_network": f"provider-egress-{label}",
+         "provider_proxy": f"http://provider-proxy-{label}:8080",
+         "provider_proxy_container": f"provider-proxy-{label}"}
         for label, name in (("k7", "e1"), ("r2", "e2"))],
 }, indent=2, sort_keys=True) + "\n")
 PY

@@ -26,11 +26,15 @@ Run the gates in this order, because each one's evidence depends on the last.
 2. `freeze`, before any label is assigned.
    A freeze attempted after `key.json` exists is refused, and that refusal is correct.
 3. `preflight`, which composes plan, freeze, provenance, isolation, evaluator, and manifest, and writes the receipt.
+   The evaluator consumes its frozen content-addressed inputs under network-disabled confinement; an expected output record is never an evaluator input.
 4. Only then spawn entrants, with `FM_BENCH_ROOT` set.
    `bin/fm-spawn.sh` refuses a `bench-` task id that no passing receipt covers.
+   Each concurrent entrant resolves its own preflight-proven internal provider network and dedicated proxy boundary.
 
 After the runs: `archive-verify`, then `promote-evaluate`, then `restore-drill`, then `cleanup-gate`.
 Promotion reads the content-addressed sample evidence, so the archive must verify before any standing-route calculation.
+Archive identities retain stable attempt ids: a void keeps only its central failure and timing evidence, while its terminal scored rerun explicitly supersedes it and alone satisfies planned coverage.
+Promotion computes scored composites only from the frozen normalized deterministic and panel weights on their declared common score scale.
 Cleanup is refused until the drill has really restored every bundle, and the receipt stops covering the archive the moment one archived byte changes.
 
 ## A refusal is a finding

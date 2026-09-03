@@ -15,14 +15,14 @@ A gate that cannot obtain its evidence refuses; an unproven denial is never trea
 
 | Gate | The review finding it closes |
 |---|---|
-| `plan-check` | Three packets run twice are not six independent samples; 5/6 and 4/6-plus-margin have uncalibrated false-promotion rates; candidate-specific judge exclusions make candidates incomparable; every track positively declares its baseline, neutral-capture, and specification capabilities; the capture field produces exactly 30 records; every required specification seat names an author and provides complete independent pre-freeze audits; an inconclusive result is "no standing route", never an adaptive ninth sample. |
+| `plan-check` | Three packets run twice are not six independent samples; 5/6 and 4/6-plus-margin have uncalibrated false-promotion rates; candidate-specific judge exclusions make candidates incomparable; every track positively declares its baseline, neutral-capture, and specification capabilities; the capture field produces exactly 30 records; every required specification seat names an author and provides complete independent pre-freeze audits; the normalized deterministic and panel composite weights plus their common finite score scale are frozen; an inconclusive result is "no standing route", never an adaptive ninth sample. |
 | `freeze` / `freeze-check` | Every planned packet and matching ground-truth input must exist, the scoring and judge-prompt stores must be non-empty, and those inputs plus model tuples, the randomisation seed, and the failure policy are fixed before labels exist. |
 | `provenance-check` | A historical security packet may be replayed only after every original author, reviewer, and judge is either positively identified by task, resolved model id, family, and session or positively declared absent with a reason. "No record found" fails. |
 | `isolation-verify` | Opaque labels and a transcript grep hide metadata but neither prevent nor detect sibling access. The gate accepts evidence only from the trusted launch-capable confinement wrapper with supported arguments, runs the exact bypasses the grep missed, and requires each to be denied. |
 | `evaluator-verify` | A described evaluator is not a reproducible measurement. The environment lock, published score map, zero-weight validity gates, identical dry-runs, finite positive per-dimension mutation calibration, and exactly one bound capture record for every planned candidate head are all required. |
 | `manifest-build` / `manifest-check` | The original run, judge, capture, and cost arithmetic did not add up, and cost and elapsed time were tie-breakers while unmeasurable. Every count is now derived, and cost is low/base/high arithmetic rather than a quoted range. |
-| `promote-evaluate` | Only a six-of-six paired sweep with finite entrant and baseline composites, the predeclared margin, no blocker-class failure, and no regression below the fixed zero mean floor or beyond the declared zero-or-one loss bound is eligible; a retained void is complete only when the same role, candidate, and packet has a scored replacement, and the captain still gives the word. |
-| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup; structured archive identities must exactly cover the planned scored outputs; sample roots and entries must be real directories or regular files; each evidence group must carry its distinct role-specific artifacts; every evidence file except its sample's own top-level manifest is content-addressed beneath its sample directory, including the executable evaluator; every restored sample must carry a valid evaluator declaration and scored-input set, while bounded execution reruns a deterministic sample in an opaque confinement that must reproduce the genuine result and prove dependence on at least one scored input through a gate-owned pure-data perturbation; cleanup is authorised only while the archive verifies both before and after the rerun. |
+| `promote-evaluate` | Only a six-of-six paired sweep computed with the frozen composite weights on the common score scale, the predeclared margin, no blocker-class failure, and no regression below the fixed zero mean floor or beyond the declared zero-or-one loss bound is eligible; a void carries only central failure and timing facts and is complete only when a scored attempt explicitly supersedes it; the captain still gives the word. |
+| `archive-verify` / `restore-drill` / `cleanup-gate` | A git bundle alone cannot be rejudged after cleanup; structured archive identities preserve a stable attempt id, exactly one terminal scored attempt must cover each planned output, and linked prior void attempts remain auditable through their content-addressed failure and timing evidence; scored sample roots and entries must be real directories or regular files; each scored evidence group must carry its distinct role-specific artifacts; every evidence file except its sample's own top-level manifest is content-addressed beneath its sample directory, including the executable evaluator; every restored scored sample must carry a valid evaluator declaration and scored-input set, while bounded execution reruns a deterministic sample in an opaque confinement that must reproduce the genuine result and prove dependence on at least one scored input through a gate-owned pure-data perturbation; cleanup is authorised only while the archive verifies both before and after the rerun. |
 | `preflight` | Composes every pre-launch gate and writes the receipt that the launch refusal reads. A preflight that refuses or stops for the captain also revokes any receipt already on disk, so evidence degrading outside the plan cannot leave a stale clearance standing. |
 
 An omitted capability is never an exemption.
@@ -45,7 +45,8 @@ This mirrors the chokepoint pattern in `bin/fm-gate-refuse-lib.sh`, including it
 
 `bin/fm-bench-confine.sh` is the control and `bin/fm-bench-probe.sh` is the attack.
 `isolation-verify` pins the network-disabled replay `exec_wrapper` and the entrant-only `launch_wrapper` to that executable and their supported `{root}` contracts, so a probe-specific wrapper cannot earn evidence that the real launch would not enforce.
-The entrant wrapper requires a pinned runtime container on a Docker-internal network whose inspected membership contains only the credential-holding provider proxy, while the replay wrapper keeps networking disabled.
+The entrant wrapper requires a pinned runtime container and resolves a distinct Docker-internal network plus dedicated credential-holding provider proxy from each preflight-proven entrant record, while the replay wrapper keeps networking disabled.
+Because no two entrants may declare the same network or proxy container, a complete concurrent field cannot reach sibling entrants over its provider-egress path.
 Provider credentials stay at the proxy boundary and are never copied into the entrant environment.
 The gate never trusts the mechanism name: it runs each probe unconfined first as a positive control, and only a probe that demonstrably reaches its target can then prove anything by being denied.
 A mechanism this host cannot enforce therefore surfaces as a refused launch naming the concrete unmet requirement, never as a silent downgrade to cooperative isolation.
@@ -65,8 +66,8 @@ An alternate is a second object database bound into the clone, so an entrant who
 The process probe reads its marker from material written inside the entrant's permitted private session path.
 The marker value never crosses a gate-created process argv, including the confinement wrapper, while the positive control still reports a genuinely visible sibling marker process as a leak.
 
-Preflight executes the content-addressed evaluator from frozen `scoring/` bytes under the network-disabled wrapper and requires those executions to reproduce every golden, mutation, and capture record.
-Mutation movement and capture bindings are then evaluated from those reproduced outputs, so detached record files cannot clear preflight by themselves.
+Preflight executes the content-addressed evaluator from frozen `scoring/` bytes under the network-disabled wrapper and gives each execution a separate content-addressed input under frozen `ground-truth/`, never the expected record it must reproduce.
+Mutation movement and capture bindings are derived from those reproduced outputs, so a program that merely cats or echoes its input cannot clear preflight.
 
 The restore drill treats archived evaluator bytes as untrusted candidate output.
 It restores, rebinds, and statically validates each sample in a short-lived workspace, then releases that repository and worktree immediately while retaining only the bounded selection's copied tree for later execution.
@@ -91,8 +92,9 @@ Exit code 3 is reserved for a new fact the captain must rule on, and neither may
 
 Everything else is either a pass or an ordinary refusal naming the correction that is not yet met.
 
-Promotion treats each result file as an archive locator, not a score authority.
-It recomputes the composite and blocker state from content-addressed sample evidence after matching the planned neutral panel, candidate tree, evaluator output, capture hash, timing intervals, and failure status.
+Promotion treats each result file as an archive-attempt locator, not a score authority.
+For scored attempts it recomputes the composite and blocker state from content-addressed sample evidence after matching the planned neutral panel, candidate tree, evaluator output, capture hash, timing intervals, and failure status.
+For void attempts it requires only the approved central failure class and both timing intervals, then requires a terminal scored attempt to name that void's stable attempt id as the attempt it supersedes.
 For that reason `archive-verify` precedes `promote-evaluate` in the post-run gate order.
 Cost arithmetic likewise requires every referenced run and auxiliary class to carry finite, nonnegative ordered bounds, and the approved class itself must be finite and positive.
 
