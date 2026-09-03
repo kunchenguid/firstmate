@@ -351,7 +351,10 @@ recorded_decision_digest() {  # <task-body>
 
 # How many resolution records the shown body carries, in either record format.
 resolution_record_count() {  # <task-body>
-  printf '%s' "$1" | grep -oE 'Resolution recorded by fm-(captain|decision)-hold\.' | wc -l | tr -d ' '
+  local body
+  body=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$body" \
+    | grep -Ec '^Resolution recorded by fm-(captain|decision)-hold\.$' || true
 }
 
 # The newest record's `Resolution mode:` value; empty for a record predating it.

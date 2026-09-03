@@ -655,6 +655,14 @@ EOF
   channel="$parent/state/channel-mate.status"
   decision="$mate/decision.txt"
 
+  tasks_in "$mate" add quoted-record-call "Choose quoted record handling" --kind ship --repo sample \
+    --body 'Documentation quote: Resolution recorded by fm-captain-hold.' >/dev/null \
+    || fail "could not create quoted-record captain call"
+  run_captain "$mate" hold quoted-record-call --reason "quoted record choice pending" >/dev/null \
+    || fail "quoted-record hold failed"
+  assert_grep 'needs-decision [key=captain-hold-quoted-record-call-1]: captain hold quoted-record-call: quoted record choice pending' \
+    "$channel" "body prose was incorrectly counted as a resolution record"
+
   run_captain "$mate" hold mate-call --title "Choose the mate release" \
     --reason "release choice pending" --repo sample >/dev/null \
     || fail "mate hold failed"

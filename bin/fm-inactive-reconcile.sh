@@ -304,11 +304,15 @@ meta_incarnation() { # <meta>
   printf 'legacy-%s\n' "$(sha256_text "$identity")"
 }
 
-pr_for_task() { # <meta> <status>
-  local pr=$1 status=$2 value
-  value=$(meta_field "$pr" pr)
+pr_for_task() { # <meta> <status> [preferred-line]
+  local meta=$1 status=$2 preferred=${3:-} value
+  value=$(meta_field "$meta" pr)
+  if [ -z "$value" ] && [ -n "$preferred" ]; then
+    value=$(printf '%s\n' "$preferred" \
+      | grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' | head -1 || true)
+  fi
   if [ -z "$value" ] && [ -f "$status" ]; then
-    value=$(grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$status" 2>/dev/null | head -1 || true)
+    value=$(grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$status" 2>/dev/null | tail -1 || true)
   fi
   clean_field "$value"
 }
@@ -359,7 +363,7 @@ report_child_ledger_locked() { # <id> <meta>
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
-  pr=$(pr_for_task "$meta" "$status")
+  pr=$(pr_for_task "$meta" "$status" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   outcome_key="child-outcome-$id-$state"
@@ -397,6 +401,11 @@ ledger_pass() {
     [ "$(meta_field "$meta" kind)" != secondmate ] || continue
     lock=$(fm_meta_lock_path "$meta") || continue
     fm_lock_try_acquire "$lock" || continue
+    if [ ! -f "$meta" ] || [ -L "$meta" ] \
+      || [ "$(meta_field "$meta" kind)" = secondmate ]; then
+      fm_lock_release "$lock"
+      continue
+    fi
     report_child_ledger_locked "$id" "$meta" || true
     fm_lock_release "$lock"
   done
