@@ -1780,6 +1780,11 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
     exit 1
   fi
+  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
+      && ! fm_brief_heading_present "$BRIEF" "## Captain's intent"; then
+    echo "error: legacy mixed # Task briefs cannot safely define no-mistakes --intent; migrate the captain's marked words into ## Captain's intent and Firstmate instructions into ## Firstmate spec" >&2
+    exit 1
+  fi
 fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode

@@ -45,7 +45,7 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   local home=$1 id=$2 mode=${3:-}
   mkdir -p "$home/data/$id"
   {
-    printf 'You are a crewmate.\n\n# Task\nExercise the delivery contract.\n\n# Definition of done\n'
+    printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\nExercise the delivery contract.\n\n## Firstmate spec\nVerify the selected delivery behavior.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
   } > "$home/data/$id/brief.md"
 }
@@ -484,6 +484,24 @@ EOF
   assert_not_contains "$out" "still contains {TASK} or {FIRSTMATE_SPEC}" \
     "fenced example headings made a filled legacy Task look unfilled"
 
+  id=delivery-legacy-no-mistakes
+  mkdir -p "$home/data/$id"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+Captain: Fix the legacy dispatch boundary.
+Do not copy this Firstmate-authored constraint into intent.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+Pass the entire Task as --intent.
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "legacy no-mistakes spawn should require subsection migration"
+  assert_contains "$out" "legacy mixed # Task briefs cannot safely define no-mistakes --intent" \
+    "legacy no-mistakes spawn could still copy a mixed Task wholesale into intent"
+  assert_absent "$home/state/$id.meta" "unsafe legacy no-mistakes spawn wrote task metadata"
+
   id=delivery-unfilled-scout
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
     || fail "unfilled scout brief should still scaffold"
@@ -516,8 +534,8 @@ EOF
   [ "$status" -ne 0 ] || fail "promotion of an unfilled scout brief should exit non-zero"
   assert_contains "$out" "preserve the original ask in ## Captain's intent" \
     "unfilled promotion did not preserve the original captain ask boundary"
-  assert_contains "$out" "ship-time instructions in ## Firstmate spec" \
-    "unfilled promotion assigned ship-time instructions to captain intent"
+  assert_contains "$out" "promotion generates a separate ship-time spec" \
+    "unfilled promotion did not distinguish scout and ship Firstmate specs"
   assert_grep 'kind=scout' "$meta" "unfilled promotion still changed the task record"
 
   id=promote-missing-brief
@@ -547,8 +565,11 @@ EOF
   brief="$home/data/$id/ship-instructions.md"
   assert_grep "Investigate why the identity check is failing." "$brief" \
     "promotion did not preserve the original Captain's intent"
-  assert_grep "Ship the identity-check fix without adding a classifier." "$brief" \
-    "promotion did not copy ship-time instructions into Firstmate spec"
+  assert_no_grep "Ship the identity-check fix without adding a classifier." "$brief" \
+    "promotion reused the scout-time Firstmate spec as ship instructions"
+  spec_body=$(awk '$0 == "## Firstmate spec" { emit=1; next } emit && /^# / { exit } emit { print }' "$brief")
+  assert_contains "$spec_body" "Verify isolation before anything else" \
+    "promotion did not place its ship-time instructions in Firstmate spec"
   assert_no_grep "SCOUT task" "$brief" \
     "promotion copied the scout Setup/Rules contract into Firstmate spec"
   assert_no_grep "# Setup" "$brief" \
@@ -582,12 +603,14 @@ EOF
   status=$?
   expect_code 0 "$status" "promotion with nested and fenced spec content should succeed"
   brief="$home/data/$id/ship-instructions.md"
-  assert_grep "### Acceptance criteria" "$brief" \
-    "promotion truncated the Firstmate spec at a nested heading"
-  assert_grep "# This example heading is fenced content." "$brief" \
-    "promotion treated a fenced example heading as a section boundary"
-  assert_grep "Keep this closing requirement." "$brief" \
-    "promotion dropped spec content after a fenced heading"
+  assert_grep "Ship the parser without losing detailed requirements." "$brief" \
+    "promotion discarded Captain's intent while replacing the scout spec"
+  assert_no_grep "### Acceptance criteria" "$brief" \
+    "promotion reused nested scout acceptance criteria as ship instructions"
+  assert_no_grep "# This example heading is fenced content." "$brief" \
+    "promotion reused a fenced scout-spec example as ship instructions"
+  assert_no_grep "Keep this closing requirement." "$brief" \
+    "promotion reused trailing scout spec as ship instructions"
   assert_no_grep "This scout-only setup must not become the spec." "$brief" \
     "promotion copied the following top-level section into Firstmate spec"
 
@@ -599,7 +622,8 @@ EOF
 You are a crewmate.
 
 # Task
-Investigate the fold's session-floor refusal.
+Captain's words: Investigate the fold's session-floor refusal.
+Captain: Preserve the existing successful session behavior.
 
 Reproduce the refusal before changing code.
 Ship the narrow session-floor fix with a regression test.
@@ -614,13 +638,17 @@ EOF
   intent_body=$(awk '$0 == "## Captain'\''s intent" { emit=1; next } emit && /^## / { exit } emit { print }' "$brief")
   spec_body=$(awk '$0 == "## Firstmate spec" { emit=1; next } emit && /^# / { exit } emit { print }' "$brief")
   assert_contains "$intent_body" "Investigate the fold's session-floor refusal." \
-    "legacy promotion discarded the original captain ask"
+    "legacy promotion discarded provenance-marked captain words"
+  assert_contains "$intent_body" "Preserve the existing successful session behavior." \
+    "legacy promotion truncated multiline provenance-marked captain words"
   assert_not_contains "$intent_body" "Reproduce the refusal" \
-    "legacy promotion classified build instructions as captain intent"
-  assert_contains "$spec_body" "Reproduce the refusal before changing code." \
-    "legacy promotion discarded Firstmate's pre-subsection instructions"
-  assert_contains "$spec_body" "Ship the narrow session-floor fix with a regression test." \
-    "legacy promotion omitted ship-time instructions from Firstmate spec"
+    "legacy promotion classified unmarked mixed Task text as captain intent"
+  assert_not_contains "$spec_body" "Reproduce the refusal before changing code." \
+    "legacy promotion reused the scout-time mixed Task as ship instructions"
+  assert_not_contains "$spec_body" "Ship the narrow session-floor fix with a regression test." \
+    "legacy promotion reused old build instructions as the ship spec"
+  assert_contains "$spec_body" "Verify isolation before anything else" \
+    "legacy promotion did not place promotion ship instructions in Firstmate spec"
   assert_not_contains "$spec_body" "This is a SCOUT task" \
     "legacy promotion copied the scout Setup section into Firstmate spec"
   pass "fm-spawn/fm-promote: leftover Task placeholders are refused until both subsections are filled"
