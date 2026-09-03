@@ -333,7 +333,8 @@ autoarm_owns_recovery() {
   # cover a claim that finished moments ago, so a genuine handoff is not
   # duplicated, while a stale one now reaches the block.
   if fm_autoarm_claim_open "$STATE" "$GRACE"; then
-    failure_episode_current && budget_account_current_epoch || true
+    { failure_episode_current || [ -f "$BUDGET_FILE" ]; } \
+      && budget_account_current_epoch || true
     return 0
   fi
   # Legacy shim: a pre-generation build's claim holds the owner lock with the
@@ -341,7 +342,8 @@ autoarm_owns_recovery() {
   # proof so an upgrade mid-session cannot double-arm.
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if [ "$role" = autoarm ] && fm_autoarm_legacy_claim_active "$STATE" "$GRACE"; then
-    failure_episode_current && budget_account_current_epoch || true
+    { failure_episode_current || [ -f "$BUDGET_FILE" ]; } \
+      && budget_account_current_epoch || true
     return 0
   fi
   epoch_path="$STATE/.claude-autoarm-epoch"
