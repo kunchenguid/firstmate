@@ -39,6 +39,9 @@
 #   (ac) a successful merge in a secondmate home reports the landed PR upward
 #       once, on the route its parent binding names, and a repeat merge of the
 #       same PR does not duplicate that line
+#   (ax) a fallback home with secondmate markers cannot write merge outcomes
+#       outside FM_STATE_OVERRIDE, and a production merge without those
+#       overrides still reports into its parent home
 #   (ad) a refused or failed merge reports nothing
 #   (ae) a successful merge in a main home leaves a durable wake naming the PR
 #   (af) a secondmate home with no usable parent binding says so loudly instead
@@ -471,6 +474,70 @@ run_pr_merge() {
     echo 'error: PR URL must match https://github.com/<owner>/<repo>/pull/<number>' >&2
     return 1
   fi
+  return "$rc"
+}
+
+# Drive the merge entrypoint with FM_HOME unset so it falls back to
+# FM_ROOT_OVERRIDE, matching a test that ran inside a secondmate checkout.
+run_pr_merge_unset_home() {
+  local case_dir=$1 root_override=$2 rc
+  shift 2
+  env -u FM_HOME \
+  FM_ROOT_OVERRIDE="$root_override" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
+  FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
+  FM_TEST_GH_RULES="$case_dir/github-rules" \
+  FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
+  FM_TEST_REAL_MV="$REAL_MV" \
+  PATH="$case_dir/policybin:$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" "$@"
+  rc=$?
+  return "$rc"
+}
+
+# Ordinary production merge: FM_HOME is the isolated home, and the state/data
+# overrides are unset so STATE is $FM_HOME/state.
+run_pr_merge_without_overrides() {
+  local case_dir=$1 rc
+  shift
+  env -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$case_dir/home" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
+  FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
+  FM_TEST_GH_RULES="$case_dir/github-rules" \
+  FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
+  FM_TEST_REAL_MV="$REAL_MV" \
+  PATH="$case_dir/policybin:$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" "$@"
+  rc=$?
+  return "$rc"
+}
+
+# Data-only isolation: FM_DATA_OVERRIDE names an isolated data dir while
+# FM_STATE_OVERRIDE stays unset, so STATE falls back to $FM_HOME/state.
+run_pr_merge_data_override_only() {
+  local case_dir=$1 home=$2 data=$3 rc
+  shift 3
+  env -u FM_STATE_OVERRIDE \
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$home" \
+  FM_DATA_OVERRIDE="$data" \
+  FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_AXI_DELEGATE="$case_dir/fakebin/gh-axi" \
+  FM_TEST_GH_LOG="$case_dir/gh.log" \
+  FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
+  FM_TEST_GH_RULES="$case_dir/github-rules" \
+  FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
+  FM_TEST_REAL_MV="$REAL_MV" \
+  PATH="$case_dir/policybin:$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" "$@"
+  rc=$?
   return "$rc"
 }
 
@@ -1847,8 +1914,10 @@ test_gitlab_missing_tool_refuses_before_recording() {
     PATH="$case_dir/no$tool" command -v "$other" >/dev/null 2>&1 \
       || fail "gitlab-no-$tool: the $tool-free search path lost the $other mock as well"
 
+    mkdir -p "$case_dir/home"
     set +e
     FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$case_dir/home" \
     FM_STATE_OVERRIDE="$case_dir/state" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
     FM_TEST_GLAB_LOG="$case_dir/glab.log" \
@@ -1963,11 +2032,11 @@ test_secondmate_merge_reports_upward_once() {
 test_secondmate_merge_reports_on_the_local_route() {
   local case_dir parent_status url
   url=https://github.com/example/repo/pull/62
-  case_dir=$(make_home_case secondmate-merge-local local "$TMP_ROOT/secondmate-merge-local/parent")
-  mkdir -p "$TMP_ROOT/secondmate-merge-local/parent/state"
+  case_dir=$(make_home_case secondmate-merge-local local "$TMP_ROOT/secondmate-merge-local/state/parent-home")
+  mkdir -p "$TMP_ROOT/secondmate-merge-local/state/parent-home/state"
   add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
   : >"$case_dir/gh-axi.log"
-  parent_status="$TMP_ROOT/secondmate-merge-local/parent/state/mate-x.status"
+  parent_status="$TMP_ROOT/secondmate-merge-local/state/parent-home/state/mate-x.status"
 
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "secondmate-merge-local: merge failed"
@@ -1979,77 +2048,144 @@ test_secondmate_merge_reports_on_the_local_route() {
   pass "a locally routed secondmate home reports the landed PR into its parent's own channel"
 }
 
-# Regression: run_pr_merge's FM_HOME fallback pointed at the repository checkout,
-# so a worktree carrying secondmate identity markers (.fm-secondmate-home plus a
-# route=local parent record) routed landed-merge outcome lines into that marker's
-# live parent home - false merge events against a real fleet home. The fallback
-# home must stay inside the case scratch so no ambient marker can redirect an
-# outcome write outside it.
+# Regression: when FM_HOME is unset, the merge entrypoint falls back to
+# FM_ROOT_OVERRIDE (the checkout). A checkout carrying secondmate identity
+# markers then routes the landed-merge line into that marker's parent_home,
+# which can be a live fleet home. The case must never read or write the
+# repository checkout's own markers; the fixture checkout lives inside the
+# case directory, and the simulated parent sits outside FM_STATE_OVERRIDE.
 test_fallback_home_never_routes_outcomes_through_ambient_markers() {
-  local case_dir url marker parent_record parent_home ambient_status before_tmp rc created_identity
+  local case_dir url fallback_home live_parent leaked_status
   url=https://github.com/example/repo/pull/78
   case_dir=$(make_case fallback-home-isolation)
   add_gh_mocks "$case_dir" 7878787878787878787878787878787878787878
   : >"$case_dir/gh-axi.log"
 
-  marker="$ROOT/.fm-secondmate-home"
-  parent_record="$ROOT/.fm-secondmate-parent"
-  created_identity=0
-  if [ ! -e "$marker" ] && [ ! -L "$marker" ] && [ ! -e "$parent_record" ] && [ ! -L "$parent_record" ]; then
-    parent_home="$case_dir/ambient-parent"
-    mkdir -p "$parent_home/state"
-    printf '%s\n' fallback-home-test > "$marker"
-    {
-      printf 'schema=fm-secondmate-parent.v1\n'
-      printf 'route=local\n'
-      printf 'parent_home=%s\n' "$parent_home"
-    } > "$parent_record"
-    created_identity=1
-  elif [ ! -f "$marker" ] || [ ! -f "$parent_record" ] || ! grep -q '^route=local$' "$parent_record"; then
-    fail "fallback-home-isolation: cannot establish a safe local-route identity fixture at the test root"
-  fi
-  ambient_status=
-  before_tmp=
-  parent_home=$(sed -n 's/^parent_home=//p' "$parent_record" | tail -1)
-  if [ -n "$parent_home" ]; then
-    ambient_status="$parent_home/state/$(cat "$marker").status"
-    before_tmp=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-ambient.XXXXXX")
-    if [ -f "$ambient_status" ]; then
-      cp "$ambient_status" "$before_tmp"
-    else
-      : > "$before_tmp"
-    fi
-  fi
+  live_parent="$case_dir/live-parent"
+  mkdir -p "$live_parent/state"
+  fallback_home="$case_dir/fallback-checkout"
+  mkdir -p "$fallback_home"
+  git init --quiet "$fallback_home"
+  ln -s "$ROOT/bin" "$fallback_home/bin"
+  printf '%s\n' mate-leak > "$fallback_home/.fm-secondmate-home"
+  {
+    printf 'schema=fm-secondmate-parent.v1\n'
+    printf 'route=local\n'
+    printf 'parent_home=%s\n' "$live_parent"
+  } > "$fallback_home/.fm-secondmate-parent"
+  leaked_status="$live_parent/state/mate-leak.status"
 
-  # FM_TEST_HOME deliberately unset: this is the fallback-home path the defect used.
-  run_pr_merge "$case_dir" task-x1 "$url" \
+  run_pr_merge_unset_home "$case_dir" "$fallback_home" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" \
-    || {
-      [ "$created_identity" -eq 1 ] && rm -f "$marker" "$parent_record"
-      fail "fallback-home-isolation: merge failed"
-    }
+    || fail "fallback-home-isolation: merge failed"
 
-  if [ -n "$ambient_status" ]; then
-    leaked=0
-    if [ -e "$ambient_status" ]; then
-      cmp -s "$before_tmp" "$ambient_status" 2>/dev/null || leaked=1
-    elif [ -s "$before_tmp" ]; then
-      leaked=1
-    fi
-    if [ "$leaked" -eq 1 ]; then
-      # Restore the ambient home byte-for-byte so a red run leaves no fleet pollution.
-      cp "$before_tmp" "$ambient_status"
-      [ -s "$ambient_status" ] || rm -f "$ambient_status"
-      rm -f "$before_tmp"
-      [ "$created_identity" -eq 1 ] && rm -f "$marker" "$parent_record"
-      fail "fallback-home-isolation: the fallback home's ambient secondmate markers routed a landed-merge outcome into $ambient_status"
-    fi
-    rm -f "$before_tmp"
-  fi
-  [ "$created_identity" -eq 1 ] && rm -f "$marker" "$parent_record"
-  assert_grep "$url" "$case_dir/state/.wake-queue" \
-    "fallback-home-isolation: the fallback home's outcome did not stay inside the case scratch"
+  assert_absent "$leaked_status" \
+    "fallback-home-isolation: the fallback home routed a landed-merge outcome outside FM_STATE_OVERRIDE"
+  assert_grep 'refusing a test-time write outside FM_STATE_OVERRIDE/FM_DATA_OVERRIDE' \
+    "$case_dir/stderr" \
+    "fallback-home-isolation: the outside write was not refused"
   pass "the merge entrypoint's fallback home never reports outcomes through ambient identity markers"
+}
+
+test_fallback_home_never_escapes_the_override_through_dot_components() {
+  local case_dir url fallback_home live_parent leaked_status
+  url=https://github.com/example/repo/pull/80
+  case_dir=$(make_case dot-component-escape)
+  add_gh_mocks "$case_dir" 8080808080808080808080808080808080808080
+  : >"$case_dir/gh-axi.log"
+
+  live_parent="$case_dir/live-parent"
+  mkdir -p "$live_parent/state"
+  fallback_home="$case_dir/fallback-checkout"
+  mkdir -p "$fallback_home"
+  git init --quiet "$fallback_home"
+  ln -s "$ROOT/bin" "$fallback_home/bin"
+  printf '%s\n' mate-dots > "$fallback_home/.fm-secondmate-home"
+  # parent_home reaches the live parent by walking back out of the override, so
+  # the destination is lexically inside FM_STATE_OVERRIDE but resolves outside.
+  {
+    printf 'schema=fm-secondmate-parent.v1\n'
+    printf 'route=local\n'
+    printf 'parent_home=%s\n' "$case_dir/state/missing/../../live-parent"
+  } > "$fallback_home/.fm-secondmate-parent"
+  leaked_status="$live_parent/state/mate-dots.status"
+
+  run_pr_merge_unset_home "$case_dir" "$fallback_home" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "dot-component-escape: merge failed"
+
+  assert_absent "$leaked_status" \
+    "dot-component-escape: a dot-component path routed a landed-merge outcome outside FM_STATE_OVERRIDE"
+  assert_absent "$case_dir/state/missing" \
+    "dot-component-escape: the refused write still created directories inside the override"
+  assert_grep 'refusing a test-time write outside FM_STATE_OVERRIDE/FM_DATA_OVERRIDE' \
+    "$case_dir/stderr" \
+    "dot-component-escape: the escaping write was not refused"
+  pass "an unresolved dot component cannot carry a landed-merge outcome outside the override"
+}
+
+test_data_only_override_never_writes_into_the_live_home_state() {
+  local case_dir live_home url rc
+  url=https://github.com/example/repo/pull/81
+  case_dir=$(make_case data-only-override)
+  add_gh_mocks "$case_dir" 8181818181818181818181818181818181818181
+  : >"$case_dir/gh-axi.log"
+
+  # FM_STATE_OVERRIDE is unset, so STATE falls back to this home's state dir.
+  # It stands in for the live primary home: nothing in this flow may write there.
+  live_home="$case_dir/live-home"
+  mkdir -p "$live_home/state" "$case_dir/isolated-data"
+  cp "$case_dir/state/task-x1.meta" "$live_home/state/task-x1.meta"
+
+  set +e
+  run_pr_merge_data_override_only "$case_dir" "$live_home" "$case_dir/isolated-data" \
+    task-x1 "$url" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  # The merge itself landed, so the entrypoint still exits 0 and reports the
+  # unrecorded outcome loudly; only the writes must stay out of the live home.
+  expect_code 0 "$rc" "data-only-override: a landed merge should still exit 0"
+  assert_grep 'refusing a test-time write outside FM_STATE_OVERRIDE/FM_DATA_OVERRIDE' \
+    "$case_dir/stderr" \
+    "data-only-override: the outside state write was not refused"
+  assert_grep "actionable: merged $url but could not record the outcome for supervision" \
+    "$case_dir/stderr" \
+    "data-only-override: the refused record was not reported loudly"
+  assert_absent "$live_home/state/.wake-queue" \
+    "data-only-override: a fabricated merge wake landed in the live home"
+  assert_absent "$live_home/state/.wake-queue.seq" \
+    "data-only-override: a wake sequence file landed in the live home"
+  assert_absent "$live_home/state/.watcher-down" \
+    "data-only-override: a watcher recovery marker landed in the live home"
+  assert_absent "$live_home/state/task-x1.pr-poll-merge-notified" \
+    "data-only-override: a merge notification marker landed in the live home"
+  pass "FM_DATA_OVERRIDE alone never lets the merge report write into the live home state"
+}
+
+test_local_route_parent_write_without_overrides_still_lands() {
+  local case_dir parent_status url
+  url=https://github.com/example/repo/pull/79
+  case_dir=$(make_case production-parent-write)
+  add_gh_mocks "$case_dir" 7979797979797979797979797979797979797979
+  : >"$case_dir/gh-axi.log"
+  mkdir -p "$case_dir/home/state" "$case_dir/parent/state"
+  mv "$case_dir/state/task-x1.meta" "$case_dir/home/state/task-x1.meta"
+  printf '%s\n' mate-x > "$case_dir/home/.fm-secondmate-home"
+  {
+    printf 'schema=fm-secondmate-parent.v1\n'
+    printf 'route=local\n'
+    printf 'parent_home=%s\n' "$case_dir/parent"
+  } > "$case_dir/home/.fm-secondmate-parent"
+  parent_status="$case_dir/parent/state/mate-x.status"
+
+  run_pr_merge_without_overrides "$case_dir" task-x1 "$url" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "production-parent-write: merge failed"
+
+  assert_grep "done [key=merged-task-x1]: merged task-x1 $url" "$parent_status" \
+    "production-parent-write: a production merge did not report into the parent home"
+  pass "a merge without state/data overrides still reports into the parent home"
 }
 
 test_failed_merge_reports_nothing() {
@@ -2765,6 +2901,9 @@ test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
 test_fallback_home_never_routes_outcomes_through_ambient_markers
+test_fallback_home_never_escapes_the_override_through_dot_components
+test_data_only_override_never_writes_into_the_live_home_state
+test_local_route_parent_write_without_overrides_still_lands
 test_gitlab_merge_reports_upward
 test_queued_gitlab_merge_leaves_the_poll_armed
 test_gitlab_post_merge_confirmation_failures_leave_poll_armed

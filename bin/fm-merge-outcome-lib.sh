@@ -25,6 +25,12 @@
 #
 # Sourced by bin/fm-pr-merge.sh, bin/fm-watch.sh, and tests. No side effects on
 # source beyond its sourced libraries.
+#
+# When FM_STATE_OVERRIDE and/or FM_DATA_OVERRIDE are set, every outcome write
+# must stay inside those directories: the routed status destination, and the
+# state directory holding the lock, wake queue, and notification marker alike.
+# That is the test isolation contract; production callers leave both unset, so
+# ordinary parent-home writes are unchanged.
 
 _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -49,11 +55,79 @@ fm_merge_outcome_home_id() {  # <home>
   printf '%s\n' "$id"
 }
 
+# Canonicalize <path>, including a destination that does not exist yet, by
+# resolving the nearest existing ancestor with pwd -P and appending the rest.
+# Only the existing ancestor is truly resolved, so a `.` or `..` left in the
+# unresolved remainder would survive into a containment comparison it can then
+# walk back out of. Such a component fails instead of being guessed at.
+fm_merge_outcome_canonical_path() {  # <path>
+  local path=$1 parent suffix='' base parent_dir component
+  case "$path" in
+    /*) ;;
+    *) path="${PWD%/}/$path" ;;
+  esac
+  parent=$path
+  while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
+    if [ "$parent" = / ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+    component=${parent##*/}
+    case "$component" in
+      .|..) return 1 ;;
+    esac
+    suffix="/$component$suffix"
+    parent=${parent%/*}
+    [ -n "$parent" ] || parent=/
+  done
+  if [ -d "$parent" ]; then
+    parent=$(CDPATH='' cd -- "$parent" && pwd -P) || return 1
+  else
+    base=${parent##*/}
+    parent_dir=${parent%/*}
+    [ -n "$parent_dir" ] || parent_dir=/
+    parent_dir=$(CDPATH='' cd -- "$parent_dir" && pwd -P) || return 1
+    parent="$parent_dir/$base"
+  fi
+  printf '%s%s\n' "$parent" "$suffix"
+}
+
+fm_merge_outcome_refuse_test_write() {
+  echo "error: refusing a test-time write outside FM_STATE_OVERRIDE/FM_DATA_OVERRIDE" >&2
+  return 1
+}
+
+# Production callers leave both overrides unset. Tests that set either one may
+# only write inside the directories those variables name.
+fm_merge_outcome_test_write_allowed() {  # <path>
+  local dest=$1 dest_real allowed_real
+  if [ -z "${FM_STATE_OVERRIDE:-}" ] && [ -z "${FM_DATA_OVERRIDE:-}" ]; then
+    return 0
+  fi
+  dest_real=$(fm_merge_outcome_canonical_path "$dest") || fm_merge_outcome_refuse_test_write || return 1
+  if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    allowed_real=$(fm_merge_outcome_canonical_path "$FM_STATE_OVERRIDE") \
+      || fm_merge_outcome_refuse_test_write || return 1
+    case "$dest_real" in
+      "$allowed_real"|"$allowed_real"/*) return 0 ;;
+    esac
+  fi
+  if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+    allowed_real=$(fm_merge_outcome_canonical_path "$FM_DATA_OVERRIDE") \
+      || fm_merge_outcome_refuse_test_write || return 1
+    case "$dest_real" in
+      "$allowed_real"|"$allowed_real"/*) return 0 ;;
+    esac
+  fi
+  fm_merge_outcome_refuse_test_write
+}
+
 # Append <line> to <path> unless that exact line is already there, so a repeat
 # report of the same merge cannot duplicate it.
 fm_merge_outcome_append_once() {  # <path> <line>
   local path=$1 line=$2
   [ ! -L "$path" ] || return 1
+  fm_merge_outcome_test_write_allowed "$path" || return 1
   mkdir -p "$(dirname "$path")" || return 1
   if grep -Fqx -- "$line" "$path" 2>/dev/null; then
     return 0
@@ -92,6 +166,11 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   path=$FM_PR_PATH
   number=$FM_PR_NUMBER
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  # The lock, the wake queue and its sequence and recovery markers, and the
+  # notification marker all land in <state>. Clearing the whole directory once
+  # here covers every one of them, so an isolated run cannot reach a live home's
+  # state through a data-only override.
+  fm_merge_outcome_test_write_allowed "$state" || return 1
 
   if self=$(fm_merge_outcome_home_id "$home"); then
     fm_secondmate_parent_record_parse "$home/.fm-secondmate-parent" || return 3

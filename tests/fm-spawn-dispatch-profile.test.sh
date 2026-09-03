@@ -158,6 +158,19 @@ exit 0
 SH
   chmod +x "$fakebin/treehouse"
   fm_fake_exit0 "$fakebin" cursor-agent pi-signed no-mistakes gh-axi gh tasks-axi
+  # fm-spawn probes the resolved pi executable's help before threading
+  # --tui-mode regular, so the fixture owns pi with a help surface that
+  # advertises it. A host-installed pi would otherwise decide these launch
+  # assertions.
+  cat > "$fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --help ]; then
+  printf 'Usage: pi [options]\n  --tui-mode <mode>\n'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/pi"
   cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -1066,7 +1079,7 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  pi_bin=$(command -v pi)
+  pi_bin=$FAKEBIN_DIR/pi
   assert_contains "$launch" "FM_PI_HARNESS=pi '$pi_bin' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not thread its preflighted executable, regular TUI mode, requested model, and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
