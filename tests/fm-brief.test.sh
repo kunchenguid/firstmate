@@ -717,8 +717,31 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       "$kind brief did not require durable resolution when a blocker clears"
     assert_grep 'even when the answer is what started that work' "$brief" \
       "$kind brief did not warn that an answer-started done/working never closes a decision"
+    if [ "$kind" = ship ]; then
+      # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+      assert_grep 'append `awaiting: waiting on no-mistakes pipeline step`' "$brief" \
+        "ship brief's no-mistakes DOD did not use the configured pause verb for a pipeline-step wait"
+      # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+      assert_no_grep 'append `paused: waiting on no-mistakes pipeline step`' "$brief" \
+        "ship brief's no-mistakes DOD still used the default pause verb for a pipeline-step wait"
+    fi
   done
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
+}
+
+test_no_mistakes_dod_instructs_pause_before_pipeline_step() {
+  local home id brief
+  home="$TMP_ROOT/no-mistakes-pause-home"
+  mkdir -p "$home/data"
+  id="brief-nm-pause-b7"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep 'append `paused: waiting on no-mistakes pipeline step` to the status file right before starting or resuming a run' "$brief" \
+    "no-mistakes DOD did not instruct pausing before a pipeline run"
+  assert_grep 'as soon as control returns to you' "$brief" \
+    "no-mistakes DOD did not instruct clearing the pause once control returns"
+  pass "fm-brief.sh: no-mistakes DOD instructs pausing across a pipeline step"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {
@@ -781,5 +804,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_no_mistakes_dod_instructs_pause_before_pipeline_step
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
