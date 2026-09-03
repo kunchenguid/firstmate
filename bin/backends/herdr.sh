@@ -3060,10 +3060,10 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # neither can be trusted alone. A stale `working` makes bin/fm-busy-lib.sh's
 # record-free fallthrough print `busy herdr-native` on every poll and suppress
 # watcher stale-pane escalation, and makes bin/fm-supervise-daemon.sh's
-# pane_is_busy defer away-mode injection forever. A stale `idle` is taken by
-# fm_pending_reply_backend_observation (bin/fm-pending-reply-lib.sh), which
-# short-circuits on it without consulting anything else and stamps a secondmate
-# turn completed for an endpoint whose harness is gone.
+# pane_is_busy defer away-mode injection forever. A stale `idle` is taken
+# directly by fm_pending_reply_backend_observation
+# (bin/fm-pending-reply-lib.sh), which short-circuits on it without consulting
+# anything else.
 #
 # The corroboration is positive-only and identical in shape to the classifier's:
 # only a pane that positively proves a lone bare idle shell loses its verdict,
@@ -3071,10 +3071,21 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # unreadable inventory, and an inventory answering about a different pane all
 # leave the verdict exactly as before.
 #
-# A proved-agent-free pane resolves to `unknown`, never to `idle`: a pane with
-# no agent has no native agent state at all, and `unknown` is every consumer's
-# documented cue to fall back to its own evidence, so no caller gains a
-# fabricated positive from a registration that outlived its agent.
+# A proved-agent-free pane resolves to `unknown`, never to `busy` or `idle`: a
+# pane with no agent has no native agent state at all. What that buys is not
+# the same for every consumer, and the difference is worth stating exactly:
+#   - bin/fm-busy-lib.sh and bin/fm-supervise-daemon.sh act on `busy` alone, so
+#     `unknown` ends the wedge outright. The pane surfaces for stale-pane
+#     escalation instead of being suppressed, and away-mode injection stops
+#     deferring.
+#   - bin/fm-pending-reply-lib.sh is re-routed, not stopped. Losing the native
+#     short-circuit sends its observation to the rendered capture, where a dead
+#     pane matches no busy signature and yields `fallback-idle`; that becomes
+#     `idle` at once when the turn was already observed busy, and only after
+#     the grace window when it never was. So a secondmate delivery confirmation
+#     can still reach a completed turn, later and on independent evidence
+#     rather than instantly on a fabricated native positive. Closing that
+#     residual belongs to the observation contract in that file, not here.
 #
 # An already-`unknown` verdict skips the inventory read, which cannot change it.
 # The submit-confirmation loop does not come through here at all: it polls

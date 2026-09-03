@@ -713,7 +713,8 @@ This is the command that refreshes this record; run it after every harness upgra
 `fm_backend_herdr_busy_state` corroborates every reported agent state against the pane's own `pane process-info` inventory.
 `bin/backends/herdr.sh` owns that contract and [`herdr-backend.md`](../herdr-backend.md#current-transport-behavior) states it; this record measures what it costs.
 Busy state is read on watcher and away-mode ticks, so the added read was measured rather than assumed.
-The last row runs the same read without the corroboration, so the added cost is derivable from this output rather than asserted beside it.
+Each reported branch is measured twice, once through the shipped function and once through the same read without the corroboration, so the added cost is derivable from this output rather than asserted beside it.
+The agent is registered before the first row, so every read priced here is a registered read rather than the `agent_not_found` path, which short-circuits before jq.
 Measured 2026-09-02 on Darwin arm64, Herdr 0.8.2, in an isolated `fm-lab-` session, 50 calls per row:
 
 ```sh
@@ -749,9 +750,9 @@ bench() {  # <label> <calls> <command...>
 }
 
 printf '%s | %s\n' "$(uname -sm)" "$(herdr --version)"
+report working
 bench 'agent get (the existing per-poll read)' 50 fm_backend_herdr_agent_status_raw "$SESSION" "$PANE"
 bench 'pane process-info (the added read)' 50 fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE"
-report working
 verdict 'working registration over a bare idle shell'
 bench 'busy_state, working over a bare idle shell' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
 report idle
@@ -761,10 +762,11 @@ herdr_pane_run_foreground "$SESSION" "$PANE" 'sleep 600'
 report working
 verdict 'working registration over a live foreground process'
 bench 'busy_state, working over a live process' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
+bench 'the same read uncorroborated, working' 50 uncorroborated "$SESSION:$PANE"
 report idle
 verdict 'idle registration over a live foreground process'
 bench 'busy_state, idle over a live process' 50 fm_backend_herdr_busy_state "$SESSION:$PANE"
-bench 'the same read uncorroborated, live process' 50 uncorroborated "$SESSION:$PANE"
+bench 'the same read uncorroborated, idle' 50 uncorroborated "$SESSION:$PANE"
 fm_herdr_lab_teardown "$SESSION"
 ```
 
@@ -772,30 +774,31 @@ Observed output:
 
 ```text
 Darwin arm64 | herdr 0.8.2
-agent get (the existing per-poll read)                 19.2 ms/call (0.961 s / 50 calls)
-pane process-info (the added read)                     14.0 ms/call (0.702 s / 50 calls)
+agent get (the existing per-poll read)                 11.8 ms/call (0.590 s / 50 calls)
+pane process-info (the added read)                      7.1 ms/call (0.353 s / 50 calls)
 working registration over a bare idle shell          -> unknown
-busy_state, working over a bare idle shell            154.8 ms/call (7.741 s / 50 calls)
+busy_state, working over a bare idle shell             97.0 ms/call (4.848 s / 50 calls)
 idle registration over a bare idle shell             -> unknown
-busy_state, idle over a bare idle shell               148.5 ms/call (7.426 s / 50 calls)
+busy_state, idle over a bare idle shell               111.8 ms/call (5.589 s / 50 calls)
 working registration over a live foreground process  -> busy
-busy_state, working over a live process                71.5 ms/call (3.574 s / 50 calls)
+busy_state, working over a live process                56.8 ms/call (2.841 s / 50 calls)
+the same read uncorroborated, working                  26.3 ms/call (1.313 s / 50 calls)
 idle registration over a live foreground process     -> idle
-busy_state, idle over a live process                   77.3 ms/call (3.867 s / 50 calls)
-the same read uncorroborated, live process             39.1 ms/call (1.954 s / 50 calls)
+busy_state, idle over a live process                   54.0 ms/call (2.699 s / 50 calls)
+the same read uncorroborated, idle                     31.0 ms/call (1.549 s / 50 calls)
 ```
 
-On the healthy path, a pane running a real foreground process, the corroboration costs about 30 ms per call: 77.3 ms against the 39.1 ms the same read costs uncorroborated.
-The inventory read itself is 14.0 ms of that, and the rest is parsing it; the sample ends as soon as the foreground process group turns out not to be the shell, before the operating-system process table is scanned.
-Both reported states now pay it, `busy` and `idle` alike, because both are acted on positively by a consumer.
+Both reported branches do identical added work, and this run prices it at 30.5 ms on the `working` branch (56.8 against 26.3) and 23.0 ms on the `idle` branch (54.0 against 31.0).
+The spread between those two is machine load across the run, not a difference between the branches; the added `pane process-info` read alone is 7.1 ms here and the rest is parsing it.
+The sample ends as soon as the foreground process group turns out not to be the shell, before the operating-system process table is scanned.
 An already-`unknown` verdict pays nothing, since no inventory reading can change it.
 
-Only a pane that really is a lone bare idle shell runs the proof to the end, around 150 ms per call, since that is the one shape whose foreground process group is the shell and therefore reaches the process-table scan.
+Only a pane that really is a lone bare idle shell runs the proof to the end, around 100 ms per call, since that is the one shape whose foreground process group is the shell and therefore reaches the process-table scan.
 That pane is the husk this exists to catch, and it is read once per watcher tick rather than in a loop.
 The verdict rows show it resolving to `unknown` from both a stale `working` and a stale `idle`, which is the behavior this record exists to price.
 
 The tight submit-confirmation loops pay nothing at all, because they never call this function.
-`fm_backend_herdr_wait_for_working`, `fm_backend_herdr_send_text_submit`, and `fm_backend_herdr_queued_enter_busy` each poll `fm_backend_herdr_agent_status_raw` directly, measured unchanged at 19.2 ms per call above, and it deliberately skips even the server-ensure round trip that `fm_backend_herdr_busy_state` pays.
+`fm_backend_herdr_wait_for_working`, `fm_backend_herdr_send_text_submit`, and `fm_backend_herdr_queued_enter_busy` each poll `fm_backend_herdr_agent_status_raw` directly, measured unchanged at 11.8 ms per call above on the same registered pane, and it deliberately skips even the server-ensure round trip that `fm_backend_herdr_busy_state` pays.
 The consumers that do read busy state are `bin/fm-busy-lib.sh`, `bin/fm-supervise-daemon.sh`, and `bin/fm-pending-reply-lib.sh`, all once per tick.
 
 Per-call figures move with machine load, so each row prints the raw elapsed seconds and call count it divided, and the verdict rows show which branch each measurement actually took.

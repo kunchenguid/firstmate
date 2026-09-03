@@ -241,9 +241,12 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 
 Every reported agent state, `busy` and `idle` alike, is corroborated against the pane's own process inventory, through the same idle-shell proof the liveness classifier uses, so the two verdicts always agree about what the pane is.
 A registration is not withdrawn when the process that made it goes away, so a harness that dies mid-turn keeps reporting its last state forever, with nothing that could ever clear it.
-Both reported states are acted on positively by a consumer, which is why neither is trusted alone: a stale `working` suppresses this task's stale-pane escalation and defers away-mode injection indefinitely, and a stale `idle` is read as a completed turn when a secondmate delivery is confirmed.
+Both reported states are acted on positively by a consumer, which is why neither is trusted alone: a stale `working` suppresses this task's stale-pane escalation and defers away-mode injection indefinitely, and a stale `idle` is taken directly as evidence when a secondmate delivery is confirmed.
 The corroboration is positive-only: a live process, an extra foreground process, a shell with a child, an unreadable inventory, and an inventory answering about a different pane all leave the reported verdict standing.
-A pane the inventory positively proves to be a lone bare idle shell reads `unknown` rather than `busy` or `idle`, because a pane with no agent has no native agent state at all, and `unknown` is every consumer's cue to fall back to its own evidence.
+A pane the inventory positively proves to be a lone bare idle shell reads `unknown` rather than `busy` or `idle`, because a pane with no agent has no native agent state at all.
+For the watcher and the away-mode daemon that ends the problem, since both act on `busy` alone: the pane surfaces for stale-pane escalation instead of being suppressed, and injection stops deferring.
+For the secondmate delivery confirmation it narrows and delays the outcome rather than eliminating it: `unknown` costs that path its native short-circuit and sends it to independent rendered evidence, where a dead pane still reaches idle, at once if the turn was already observed busy and after the grace window if it was not.
+Closing that residual belongs to the pending-reply observation contract, not to this adapter.
 The submit-confirmation path never reads busy state at all, so no tight loop pays for the corroboration.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#native-busy-state-corroboration-cost) records the measured per-poll cost.
 
