@@ -48,6 +48,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATUS_PAGE_SCRIPT="${FM_STATUS_PAGE_SCRIPT:-$SCRIPT_DIR/fm-status-page.sh}"
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
@@ -67,6 +69,58 @@ fail() {
 }
 
 board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
+
+publish_journal_path() { printf '%s/.bearings-status-page-publish.json\n' "$DATA"; }
+
+recover_interrupted_publish() {
+  local journal board page board_backup page_backup board_had page_had page_tmp restore_board restore_page
+  journal=$(publish_journal_path)
+  [ -e "$journal" ] || return 0
+  [ -f "$journal" ] && [ ! -L "$journal" ] || fail "interrupted publish journal is invalid"
+  board=$(jq -r '.board // empty' "$journal")
+  page=$(jq -r '.page // empty' "$journal")
+  board_backup=$(jq -r '.board_backup // empty' "$journal")
+  page_backup=$(jq -r '.page_backup // empty' "$journal")
+  page_tmp=$(jq -r '.page_tmp // empty' "$journal")
+  board_had=$(jq -r '.board_had // empty' "$journal")
+  page_had=$(jq -r '.page_had // empty' "$journal")
+  if ! { [ "$board" = "$(board_path)" ] && [ "$page" = "$DATA/status-page.html" ] \
+    && [ "$board_backup" = "${board%/*}/.bearings-status-page.board-backup" ] \
+    && [ "$page_backup" = "$DATA/.bearings-status-page.page-backup" ] \
+    && [ "$page_tmp" = "$DATA/.bearings-status-page.staged" ] \
+    && { [ "$board_had" = true ] || [ "$board_had" = false ]; } \
+    && { [ "$page_had" = true ] || [ "$page_had" = false ]; }; }; then
+    fail "interrupted publish journal is malformed"
+  fi
+  if [ "$board_had" = true ]; then
+    [ -f "$board_backup" ] || fail "cannot restore the board after an interrupted publish"
+  fi
+  if [ "$page_had" = true ]; then
+    [ -f "$page_backup" ] || fail "cannot restore the static status page after an interrupted publish"
+  fi
+  if [ "$board_had" = true ]; then
+    restore_board=$(umask 077; mktemp "${board%/*}/.bearings-status-page.restore.XXXXXX") \
+      || fail "cannot stage board recovery"
+    cp "$board_backup" "$restore_board" || { rm -f -- "$restore_board"; fail "cannot stage board recovery"; }
+  fi
+  if [ "$page_had" = true ]; then
+    restore_page=$(umask 077; mktemp "$DATA/.bearings-status-page.restore.XXXXXX") \
+      || { rm -f -- "${restore_board:-}"; fail "cannot stage static status page recovery"; }
+    cp "$page_backup" "$restore_page" \
+      || { rm -f -- "${restore_board:-}" "$restore_page"; fail "cannot stage static status page recovery"; }
+  fi
+  if [ "$board_had" = true ]; then
+    mv -f -- "$restore_board" "$board" || fail "cannot restore the board after an interrupted publish"
+  else
+    rm -f -- "$board"
+  fi
+  if [ "$page_had" = true ]; then
+    mv -f -- "$restore_page" "$page" || fail "cannot restore the static status page after an interrupted publish"
+  else
+    rm -f -- "$page"
+  fi
+  rm -f -- "$page_tmp" "$journal" "$board_backup" "$page_backup"
+}
 
 validate_payload() {  # <data.json>
   jq -e --arg schema "$BOARD_SCHEMA" '
@@ -137,9 +191,10 @@ validate_payload() {  # <data.json>
 }
 
 command_build() {
-  local data=${1-} board json tmp sid extracted
+  local data=${1-} board json tmp sid extracted page page_tmp board_backup page_backup journal journal_tmp board_had=false page_had=false
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || fail "jq is required"
+  recover_interrupted_publish
   [ -f "$data" ] || fail "board data does not exist: $data"
   jq empty "$data" 2>/dev/null || fail "board data is not valid JSON: $data"
   validate_payload "$data" || fail "board data does not satisfy $BOARD_SCHEMA: $data"
@@ -171,10 +226,49 @@ command_build() {
     rm -f -- "$tmp"
     fail "the built board does not carry a readable $BOARD_SCHEMA payload"
   fi
+  (umask 077; mkdir -p "$DATA") || { rm -f -- "$tmp"; fail "cannot create $DATA"; }
+  page="$DATA/status-page.html"
+  page_tmp="$DATA/.bearings-status-page.staged"
+  rm -f -- "$page_tmp"
+  (umask 077; : > "$page_tmp") \
+    || { rm -f -- "$tmp"; fail "cannot stage the static status page"; }
+  if ! FM_STATUS_PAGE_OUTPUT="$page_tmp" "$STATUS_PAGE_SCRIPT" >/dev/null; then
+    rm -f -- "$tmp" "$page_tmp"
+    fail "cannot refresh the static status page"
+  fi
+
+  board_backup="${board%/*}/.bearings-status-page.board-backup"
+  page_backup="$DATA/.bearings-status-page.page-backup"
+  rm -f -- "$board_backup" "$page_backup"
+  if [ -e "$board" ]; then
+    cp "$board" "$board_backup" || { rm -f -- "$tmp" "$page_tmp" "$board_backup" "$page_backup"; fail "cannot back up the board"; }
+    board_had=true
+  fi
+  if [ -e "$page" ]; then
+    cp "$page" "$page_backup" || { rm -f -- "$tmp" "$page_tmp" "$board_backup" "$page_backup"; fail "cannot back up the static status page"; }
+    page_had=true
+  fi
+  journal=$(publish_journal_path)
+  journal_tmp=$(umask 077; mktemp "$DATA/.bearings-status-page.journal.XXXXXX") \
+    || { rm -f -- "$tmp" "$page_tmp" "$board_backup" "$page_backup"; fail "cannot stage the publish journal"; }
+  jq -n --arg board "$board" --arg page "$page" --arg board_backup "$board_backup" \
+    --arg page_backup "$page_backup" --arg page_tmp "$page_tmp" \
+    --argjson board_had "$board_had" --argjson page_had "$page_had" \
+    '{board:$board,page:$page,board_backup:$board_backup,page_backup:$page_backup,page_tmp:$page_tmp,board_had:$board_had,page_had:$page_had}' \
+    > "$journal_tmp" || { rm -f -- "$tmp" "$page_tmp" "$board_backup" "$page_backup" "$journal_tmp"; fail "cannot write the publish journal"; }
+  mv -f -- "$journal_tmp" "$journal" || { rm -f -- "$tmp" "$page_tmp" "$board_backup" "$page_backup" "$journal_tmp"; fail "cannot publish the transaction journal"; }
   if ! { chmod 0600 "$tmp" && mv -f -- "$tmp" "$board"; }; then
-    rm -f -- "$tmp"
+    recover_interrupted_publish
     fail "cannot publish the board"
   fi
+  if [ "${FM_BEARINGS_BOARD_TEST_ABORT_AFTER_BOARD_PUBLISH:-0}" = 1 ]; then
+    exit 93
+  fi
+  if ! mv -f -- "$page_tmp" "$page"; then
+    recover_interrupted_publish
+    fail "cannot publish the static status page"
+  fi
+  rm -f -- "$journal" "$board_backup" "$page_backup"
   printf 'board: %s\n' "$board"
 
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"

@@ -106,6 +106,7 @@ EOF
     "worktree=$home/projects/alpha-worktree" \
     "project=alpha" \
     "harness=claude" \
+    "model=claude-sonnet" \
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
@@ -186,10 +187,12 @@ test_fixture_snapshot_json() {
     .tasks[] | select(.id == "ship-task")
     | .current_state.state == "working"
       and .current_state.source == "pane"
+      and .model == "claude-sonnet"
       and .pr.url == "https://github.com/kunchenguid/firstmate/pull/9"
       and .backlog.body_excerpt == "Preserve this detail for bearings."
       and .hints.pending_decision == false
       and .paths.status_log.kind == "event_history"
+      and (.paths.status_log.mtime_epoch | type == "number")
   ' >/dev/null || fail "ship task state, PR, body, and stale event hints wrong"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "scout-task")

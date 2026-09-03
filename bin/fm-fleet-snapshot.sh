@@ -289,12 +289,14 @@ local_task_runtime_json() {  # <meta-file> <id>
 }
 
 status_event_json() {  # <status-log>
-  local log=$1 present=0 raw='' verb='' note='' payload_dir rc
+  local log=$1 present=0 raw='' verb='' note='' mtime_epoch=null payload_dir rc
   if [ -f "$log" ]; then
     present=1
     raw=$(last_nonempty_line "$log" || true)
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
+    mtime_epoch=$(file_mtime_epoch "$log")
+    case "$mtime_epoch" in ''|*[!0-9]*) mtime_epoch=null ;; esac
   fi
   payload_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.status-event.XXXXXX") || return 1
   if ! printf '%s' "$raw" > "$payload_dir/raw" ||
@@ -308,8 +310,9 @@ status_event_json() {  # <status-log>
     --rawfile raw "$payload_dir/raw" \
     --rawfile verb "$payload_dir/verb" \
     --rawfile note "$payload_dir/note" \
+    --argjson mtime_epoch "$mtime_epoch" \
     --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
+    '{path:$path,present:$present,kind:"event_history",mtime_epoch:$mtime_epoch,last_event:{state:$verb,note:$note,raw:$raw}}'
   rc=$?
   rm -rf "$payload_dir"
   return "$rc"
@@ -476,7 +479,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
+  local meta id kind harness model mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json report_json worktree_json home_json
   local current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -514,6 +517,7 @@ task_json_lines() {
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
+    model=$(meta_value "$meta" model)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -630,6 +634,7 @@ task_json_lines() {
       --arg id "$id" \
       --rawfile kind <(printf '%s' "$kind") \
       --rawfile harness <(printf '%s' "$harness") \
+      --rawfile model <(printf '%s' "$model") \
       --rawfile mode <(printf '%s' "$mode") \
       --rawfile yolo <(printf '%s' "$yolo") \
       --rawfile project <(printf '%s' "$project") \
@@ -660,6 +665,7 @@ task_json_lines() {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
+        model:($model | if . == "" then null else . end),
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),

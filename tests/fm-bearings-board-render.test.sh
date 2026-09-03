@@ -37,6 +37,8 @@ render() {  # <home> <charted-json> [charted_more] [charted_warning_more]
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  [ -f "$home/data/status-page.html" ] \
+    || fail "the board build did not refresh the static status page"
   node "$HARNESS" "$home/.lavish/bearings-board.html" \
     || fail "the built board could not be rendered"
 }
@@ -64,6 +66,118 @@ test_a_warning_row_reads_as_a_repair_not_as_queued_work() {
         and .pickable == false)
   ' >/dev/null || fail "a warning row did not read differently from queued work: $out"
   pass "a warning row badges needs repair while queued work keeps waiting"
+}
+
+test_a_failed_status_refresh_advances_neither_view() {
+  local home data before_board before_page after_board after_page
+  home=$(make_home refresh-rollback)
+  data="$home/payload.json"
+  jq -n '{schema:"fm-bearings-board.v1",home:"render-home",generated:"2026-08-26T00:00Z",prs_live:false,captains_call:[],underway:[],landed:[],charted:[],charted_more:0,charted_warning_more:0}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" "$BOARD" build "$data" >/dev/null \
+    || fail "initial board build failed"
+  before_board=$(<"$home/.lavish/bearings-board.html")
+  before_page=$(<"$home/data/status-page.html")
+  cat > "$home/fail-status-page.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fail-status-page.sh"
+  if PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" FM_STATUS_PAGE_SCRIPT="$home/fail-status-page.sh" \
+    "$BOARD" build "$data" >/dev/null 2>&1; then
+    fail "board build succeeded after the staged status-page renderer failed"
+  fi
+  after_board=$(<"$home/.lavish/bearings-board.html")
+  after_page=$(<"$home/data/status-page.html")
+  [ "$after_board" = "$before_board" ] || fail "failed refresh advanced the board"
+  [ "$after_page" = "$before_page" ] || fail "failed refresh advanced the status page"
+  pass "a failed status refresh advances neither view"
+}
+
+test_interrupted_publish_recovers_the_prior_pair() {
+  local home data before_board before_page after_board after_page
+  home=$(make_home interrupted-publish)
+  data="$home/payload.json"
+  jq -n '{schema:"fm-bearings-board.v1",home:"render-home",generated:"2026-08-26T00:00Z",prs_live:false,captains_call:[],underway:[],landed:[],charted:[],charted_more:0,charted_warning_more:0}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" "$BOARD" build "$data" >/dev/null \
+    || fail "initial board build failed"
+  before_board=$(<"$home/.lavish/bearings-board.html")
+  before_page=$(<"$home/data/status-page.html")
+  jq -n '{schema:"fm-bearings-board.v1",home:"render-home",generated:"2026-08-26T01:00Z",prs_live:false,captains_call:[],underway:[],landed:[],charted:[],charted_more:0,charted_warning_more:0}' > "$data"
+  if PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" FM_BEARINGS_BOARD_TEST_ABORT_AFTER_BOARD_PUBLISH=1 \
+    "$BOARD" build "$data" >/dev/null 2>&1; then
+    fail "the injected interruption completed the board publish"
+  fi
+  [ "$(<"$home/.lavish/bearings-board.html")" != "$before_board" ] \
+    || fail "the injected interruption did not occur after board publication"
+  [ "$(<"$home/data/status-page.html")" = "$before_page" ] \
+    || fail "the injected interruption unexpectedly advanced the status page"
+  cat > "$home/fail-status-page.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fail-status-page.sh"
+  if PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" FM_STATUS_PAGE_SCRIPT="$home/fail-status-page.sh" \
+    "$BOARD" build "$data" >/dev/null 2>&1; then
+    fail "the recovery build succeeded after the staged status-page renderer failed"
+  fi
+  after_board=$(<"$home/.lavish/bearings-board.html")
+  after_page=$(<"$home/data/status-page.html")
+  [ "$after_board" = "$before_board" ] || fail "recovery did not restore the previous board"
+  [ "$after_page" = "$before_page" ] || fail "recovery did not retain the previous status page"
+  [ ! -e "$home/data/.bearings-status-page-publish.json" ] \
+    || fail "recovery left its durable publish journal behind"
+  pass "an interrupted publish recovers the previous pair before another refresh"
+}
+
+test_recovery_retry_keeps_both_backups_until_the_pair_is_restored() {
+  local home data before_board before_page board_backup page_backup journal after_board after_page
+  home=$(make_home recovery-retry)
+  data="$home/payload.json"
+  jq -n '{schema:"fm-bearings-board.v1",home:"render-home",generated:"2026-08-26T00:00Z",prs_live:false,captains_call:[],underway:[],landed:[],charted:[],charted_more:0,charted_warning_more:0}' > "$data"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" "$BOARD" build "$data" >/dev/null \
+    || fail "initial board build failed"
+  before_board=$(<"$home/.lavish/bearings-board.html")
+  before_page=$(<"$home/data/status-page.html")
+  jq -n '{schema:"fm-bearings-board.v1",home:"render-home",generated:"2026-08-26T01:00Z",prs_live:false,captains_call:[],underway:[],landed:[],charted:[],charted_more:0,charted_warning_more:0}' > "$data"
+  if PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" FM_BEARINGS_BOARD_TEST_ABORT_AFTER_BOARD_PUBLISH=1 \
+    "$BOARD" build "$data" >/dev/null 2>&1; then
+    fail "the injected interruption completed the board publish"
+  fi
+  board_backup="$home/.lavish/.bearings-status-page.board-backup"
+  page_backup="$home/data/.bearings-status-page.page-backup"
+  journal="$home/data/.bearings-status-page-publish.json"
+  rm -f "$page_backup"
+  cat > "$home/fail-status-page.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fail-status-page.sh"
+  if PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" FM_STATUS_PAGE_SCRIPT="$home/fail-status-page.sh" \
+    "$BOARD" build "$data" >/dev/null 2>&1; then
+    fail "recovery succeeded without the static status page backup"
+  fi
+  [ -f "$board_backup" ] || fail "failed recovery consumed the board backup"
+  [ -e "$journal" ] || fail "failed recovery removed its durable journal"
+  printf '%s' "$before_page" > "$page_backup"
+  if PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" FM_STATUS_PAGE_SCRIPT="$home/fail-status-page.sh" \
+    "$BOARD" build "$data" >/dev/null 2>&1; then
+    fail "recovery retry succeeded after the staged status-page renderer failed"
+  fi
+  after_board=$(<"$home/.lavish/bearings-board.html")
+  after_page=$(<"$home/data/status-page.html")
+  [ "$after_board" = "$before_board" ] || fail "recovery retry did not restore the board"
+  [ "$after_page" = "$before_page" ] || fail "recovery retry did not restore the static status page"
+  [ ! -e "$journal" ] || fail "successful recovery retry left its journal behind"
+  pass "recovery retries without consuming either backup"
 }
 
 test_warnings_are_excluded_from_the_charted_next_count() {
@@ -129,6 +243,9 @@ test_an_omitted_kind_keeps_the_existing_queued_rendering() {
 }
 
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
+test_a_failed_status_refresh_advances_neither_view
+test_interrupted_publish_recovers_the_prior_pair
+test_recovery_retry_keeps_both_backups_until_the_pair_is_restored
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
