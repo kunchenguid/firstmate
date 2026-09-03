@@ -63,6 +63,9 @@ case "${1:-}" in
         *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
         'Firstmate instruction waiting: list '*)
           printf 'doorbell\n' >> "$D/rings"
+          if [ -x "$D/on-doorbell" ]; then
+            "$D/on-doorbell" "$payload"
+          fi
           if [ -f "$D/answer-inbox" ]; then
             # Model the mate: read the newest instruction it was handed and
             # report back on the parent channel, carrying the correlation token
@@ -107,6 +110,7 @@ SH
 new_case() {
   local dir="$TMP_ROOT/$1-$RANDOM"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/fake"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   : > "$dir/fake/rings"
@@ -203,7 +207,7 @@ test_persist_precedes_restart() {
 
   expect_code 0 "$rc" "a confirmed persist should restart the mate"$'\n'"$out"
   assert_contains "$out" "restarted: sm1 (claude)" "the mate should be restarted on its pinned runtime"
-  assert_contains "$out" "summary: 1 of 1 restarted, 0 left" "the summary should report the reload"
+  assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" "the summary should report the reload"
   # The pane transcript orders the two phases: the instruction doorbell first,
   # the harness exit command only after it.
   doorbell_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
@@ -254,7 +258,7 @@ test_unknown_mate_is_accounted_for() {
   assert_contains "$out" "restarted: sm1" "the known mate should still be restarted"
   assert_contains "$out" "ghost:" "the unknown mate must be accounted for by name"
   assert_contains "$out" "no durable record" "the unknown mate's reason must be concrete"
-  assert_contains "$out" "summary: 1 of 2 restarted, 1 left" "the summary must count both mates"
+  assert_contains "$out" "summary: 1 of 2 restarted, 0 nudged, 1 unreached" "the summary must count both mates"
   pass "T4 every named mate is accounted for, including one this home does not know"
 }
 
@@ -403,6 +407,77 @@ test_local_restart_uses_the_home_pin_and_reports_what_ran() {
   pass "T8 a local restart re-resolves this home's pin and reports the runtime that came up"
 }
 
+# --- T9: an unrelated concurrent reply cannot release the persist gate -------
+test_concurrent_reply_cannot_release_persist_gate() {
+  local dir out rc state corr rec
+  dir=$(new_case correlation)
+  add_local_mate "$dir" sm1
+  state="$dir/home/state"
+  corr=ffffffffffffffff
+  rec="$state/pending-replies/$corr"
+  cat > "$dir/fake/on-doorbell" <<SH
+#!/usr/bin/env bash
+[ ! -e "$dir/fake/concurrent-created" ] || exit 0
+: > "$dir/fake/concurrent-created"
+mkdir -p "$state/pending-replies"
+cat > "$rec" <<EOF
+phase=awaiting_report
+task_id=sm1
+parent_status=$state/sm1.status
+parent_status_scan_signature=
+delivered_epoch=1
+resolved_epoch=
+resolved_via=
+EOF
+printf 'done [corr=$corr]: unrelated request answered\n' >> "$state/sm1.status"
+SH
+  chmod +x "$dir/fake/on-doorbell"
+
+  FM_TEST_PERSIST_WAIT=0 out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 3 "$rc" "an unrelated concurrent answer must not release the persist gate"$'\n'"$out"
+  assert_not_contains "$out" "restarted: sm1" "the unrelated answer authorized a restart"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "the unrelated answer stopped the mate"
+  pass "T9 the persist gate retains its explicitly allocated correlation"
+}
+
+# --- T10: one unanswered mate does not hold a confirmed mate behind it -------
+test_persist_waits_are_polled_together() {
+  local dir out rc restarted_line nudged_line
+  dir=$(new_case concurrent-waits)
+  add_local_mate "$dir" sm1
+  add_local_mate "$dir" sm2
+  arm_answer "$dir" sm2
+
+  FM_TEST_PERSIST_WAIT=3 out=$(run_restart "$dir" sm1 sm2); rc=$?
+
+  expect_code 3 "$rc" "the unanswered mate should fall back after the confirmed mate restarts"$'\n'"$out"
+  restarted_line=$(printf '%s\n' "$out" | grep -n '^restarted: sm2' | cut -d: -f1)
+  nudged_line=$(printf '%s\n' "$out" | grep -n '^nudged: sm1' | cut -d: -f1)
+  [ -n "$restarted_line" ] && [ -n "$nudged_line" ] && [ "$restarted_line" -lt "$nudged_line" ] \
+    || fail "the first mate's timeout held the confirmed second mate behind it: $out"
+  pass "T10 pending persist answers are polled as one fleet"
+}
+
+# --- T11: a failed post-stop relaunch is not described as a nudge ------------
+test_post_stop_failure_is_reported_unreached() {
+  local dir out rc
+  dir=$(new_case post-stop)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  printf 'zsh' > "$dir/fake/becomes"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 3 "$rc" "a post-stop relaunch failure must remain accounted for"$'\n'"$out"
+  assert_contains "$out" "unreached: sm1:" "a stopped mate must be reported as unreached"
+  assert_contains "$out" "no agent is running" "the report must preserve the lifecycle result"
+  assert_not_contains "$out" "nudged: sm1" "a durable enqueue must not masquerade as a running mate's nudge"
+  assert_contains "$out" "summary: 0 of 1 restarted, 0 nudged, 1 unreached" \
+    "the summary must not claim that a stopped mate remains on older instructions with a message"
+  pass "T11 post-stop restart failure is never misreported as a nudge"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_unprovable_runtime_falls_back
@@ -411,5 +486,8 @@ test_refused_restart_falls_back_without_claiming_a_reload
 test_local_restart_uses_the_home_pin_and_reports_what_ran
 test_remote_mate_restarts_over_the_transport_hop
 test_unreachable_host_is_reported_unknown
+test_concurrent_reply_cannot_release_persist_gate
+test_persist_waits_are_polled_together
+test_post_stop_failure_is_reported_unreached
 
 echo "# all fm-secondmate-restart tests passed"

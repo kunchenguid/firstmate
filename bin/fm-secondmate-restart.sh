@@ -114,6 +114,7 @@ done
 PLAN=()
 REASON=()
 CORR=()
+DEADLINE=()
 PLACEMENT=()
 HOST=()
 HARNESS=()
@@ -122,6 +123,7 @@ EFFORT=()
 
 restarted_count=0
 nudged_count=0
+unreached_count=0
 
 # The first line of a command's output that carries anything, flattened to one
 # readable line with its "error: " prefix dropped. A refusal's own words are the
@@ -130,31 +132,85 @@ first_reported_line() {  # <text>
   printf '%s\n' "$1" | sed -n '/./{s/^error: //;s/[[:space:]]\{1,\}/ /g;p;q;}'
 }
 
-# The correlation ids of this task's still-open reply expectations, one per line.
-open_corrs_for() {  # <task-id>
-  local task=$1 dir rec
-  dir=$(fm_pending_reply_dir "$STATE") || return 0
-  [ -d "$dir" ] || return 0
-  for rec in "$dir"/*; do
-    [ -f "$rec" ] || continue
-    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task" ] || continue
-    [ "$(fm_pending_reply_get "$rec" phase)" != resolved ] || continue
-    printf '%s\n' "${rec##*/}"
-  done
-}
-
 # Send the ordinary re-read steer to a mate this pass will not restart, and say
 # plainly which it was. A nudge is a partial reload and is never reported as more.
 fall_back_to_nudge() {  # <id> <reason>
   local id=$1 reason=$2 out
-  nudged_count=$((nudged_count + 1))
   if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+    nudged_count=$((nudged_count + 1))
     printf 'nudged: %s: %s\n' "$id" "$reason"
   else
+    unreached_count=$((unreached_count + 1))
     printf 'unreached: %s: %s; the re-read message could not be delivered either: %s\n' \
       "$id" "$reason" "$(first_reported_line "$out")"
   fi
+}
+
+report_unreached() {  # <id> <reason>
+  unreached_count=$((unreached_count + 1))
+  printf 'unreached: %s: %s\n' "$1" "$2"
+}
+
+local_agent_state() {  # <id>
+  local id=$1
+  if ! fm_backend_validate_task_endpoint "$STATE/$id.meta" "$id" 2>/dev/null; then
+    printf 'unverified\n'
+    return
+  fi
+  fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
+    "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null || printf 'unreadable\n'
+}
+
+restart_mate() {  # <array-index>
+  local i=$1 id restart_out restart_rc restart_reason ran_on lifecycle_state state_rc
+  id=${IDS[$i]}
+  if [ "${PLACEMENT[i]}" = remote ]; then
+    restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
+      fm-remote-secondmate-control.sh relaunch \
+      "$id" "${HARNESS[i]}" "${MODEL[i]:--}" "${EFFORT[i]:--}" < /dev/null 2>&1)
+    restart_rc=$?
+  else
+    restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
+    restart_rc=$?
+  fi
+  if [ "$restart_rc" -eq 0 ]; then
+    restarted_count=$((restarted_count + 1))
+    ran_on=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* harness=\([^ ]*\).*/\1/p' | tail -1)
+    [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
+    if [ "${PLACEMENT[i]}" = remote ]; then
+      printf 'restarted: %s on %s (%s)\n' "$id" "${HOST[i]}" "$ran_on"
+    else
+      printf 'restarted: %s (%s)\n' "$id" "$ran_on"
+    fi
+    PLAN[i]=done
+    return
+  fi
+
+  restart_reason=$(first_reported_line "$restart_out")
+  [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
+  lifecycle_state=unreadable
+  if [ "${PLACEMENT[i]}" = remote ]; then
+    state_rc=0
+    lifecycle_state=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
+      fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null) || state_rc=$?
+    [ "$state_rc" -eq 0 ] && [ -n "$lifecycle_state" ] || lifecycle_state=unreadable
+  else
+    lifecycle_state=$(local_agent_state "$id")
+  fi
+  case "$lifecycle_state" in
+    alive)
+      fall_back_to_nudge "$id" "the restart did not complete: $restart_reason"
+      ;;
+    dead|missing)
+      report_unreached "$id" "the restart did not complete and no agent is running (state: $lifecycle_state): $restart_reason"
+      ;;
+    *)
+      report_unreached "$id" "the restart did not complete and the agent state is unknown ($lifecycle_state): $restart_reason"
+      ;;
+  esac
+  PLAN[i]=done
 }
 
 # --- phase A: persist ------------------------------------------------------
@@ -167,6 +223,7 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
   PLAN[i]="fallback"
   REASON[i]=""
   CORR[i]=""
+  DEADLINE[i]=""
   PLACEMENT[i]=""
   HOST[i]=""
   HARNESS[i]=""
@@ -197,101 +254,71 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     esac
   fi
 
-  before=$(open_corrs_for "$id")
-  if ! send_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECONDMATE_PERSIST_REQUEST" 2>&1); then
-    REASON[i]="the request to write down its open work could not be delivered: $(first_reported_line "$send_out")"
-    i=$((i + 1))
-    continue
-  fi
-  corr=""
-  while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
-    case "$(printf '%s\n' "$before")" in
-      *"$candidate"*) continue ;;
-    esac
-    corr=$candidate
-  done <<EOF
-$(open_corrs_for "$id")
-EOF
-  if [ -z "$corr" ]; then
-    # Delivery succeeded but nothing is tracking the answer, so no arrival can
-    # ever be proven for it. That is exactly the case this gate exists for.
+  request_epoch=$(date +%s)
+  if ! corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$id" \
+    "$FM_SECONDMATE_PERSIST_REQUEST"); then
     REASON[i]="its answer about the open work cannot be tracked, so a clean reload could not be proven"
     i=$((i + 1))
     continue
   fi
+  if ! send_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+    "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECONDMATE_PERSIST_REQUEST" 2>&1); then
+    fm_pending_reply_discard_undelivered "$STATE" "$corr" >/dev/null 2>&1 || true
+    REASON[i]="the request to write down its open work could not be delivered: $(first_reported_line "$send_out")"
+    i=$((i + 1))
+    continue
+  fi
   CORR[i]=$corr
+  DEADLINE[i]=$((request_epoch + PERSIST_WAIT))
   PLAN[i]="persisted-pending"
   i=$((i + 1))
 done
 
 # --- phase B: restart ------------------------------------------------------
 
+pending_count=0
 i=0
 while [ "$i" -lt "${#IDS[@]}" ]; do
-  id=${IDS[$i]}
-  if [ "${PLAN[i]}" != persisted-pending ]; then
-    fall_back_to_nudge "$id" "${REASON[i]}"
-    i=$((i + 1))
-    continue
-  fi
-  waited=0
-  persisted=0
-  while :; do
-    if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
-      persisted=1
-      break
-    fi
-    [ "$waited" -lt "$PERSIST_WAIT" ] || break
-    sleep "$PERSIST_POLL"
-    waited=$((waited + PERSIST_POLL))
-  done
-  if [ "$persisted" -ne 1 ]; then
-    fall_back_to_nudge "$id" \
-      "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
-    i=$((i + 1))
-    continue
-  fi
-
-  if [ "${PLACEMENT[i]}" = remote ]; then
-    restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
-      fm-remote-secondmate-control.sh relaunch \
-      "$id" "${HARNESS[i]}" "${MODEL[i]:--}" "${EFFORT[i]:--}" < /dev/null 2>&1)
-    restart_rc=$?
+  if [ "${PLAN[i]}" = persisted-pending ]; then
+    pending_count=$((pending_count + 1))
   else
-    restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
-    restart_rc=$?
+    fall_back_to_nudge "${IDS[$i]}" "${REASON[i]}"
+    PLAN[i]=done
   fi
-  if [ "$restart_rc" -eq 0 ]; then
-    restarted_count=$((restarted_count + 1))
-    # Report the runtime the replacement ACTUALLY came up on, as the control
-    # plane names it, rather than the one this pass intended.
-    ran_on=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* harness=\([^ ]*\).*/\1/p' | tail -1)
-    [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
-    if [ "${PLACEMENT[i]}" = remote ]; then
-      printf 'restarted: %s on %s (%s)\n' "$id" "${HOST[i]}" "$ran_on"
+  i=$((i + 1))
+done
+
+while [ "$pending_count" -gt 0 ]; do
+  now=$(date +%s)
+  next_wait=$PERSIST_POLL
+  i=0
+  while [ "$i" -lt "${#IDS[@]}" ]; do
+    if [ "${PLAN[i]}" != persisted-pending ]; then
+      i=$((i + 1))
+      continue
+    fi
+    if fm_pending_reply_try_resolve "$STATE" "${CORR[i]}"; then
+      PLAN[i]=persisted
+      pending_count=$((pending_count - 1))
+      restart_mate "$i"
+    elif [ "$now" -ge "${DEADLINE[i]}" ]; then
+      fall_back_to_nudge "${IDS[$i]}" \
+        "it did not confirm within ${PERSIST_WAIT}s that its open work is written down, so its conversation was not spent"
+      PLAN[i]=done
+      pending_count=$((pending_count - 1))
     else
-      printf 'restarted: %s (%s)\n' "$id" "$ran_on"
+      remaining=$((DEADLINE[i] - now))
+      [ "$remaining" -ge "$next_wait" ] || next_wait=$remaining
     fi
     i=$((i + 1))
-    continue
-  fi
-  restart_reason=$(first_reported_line "$restart_out")
-  [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
-  if [ "$restart_rc" -eq 255 ] && [ "${PLACEMENT[i]}" = remote ]; then
-    # ssh could not complete: whether the restart ran on that host is unknown, so
-    # claiming either outcome would be a guess. Preserve the route and say so.
-    restart_reason="its host could not be reached, so whether the restart happened there is unknown"
-  fi
-  fall_back_to_nudge "$id" "the restart did not complete: $restart_reason"
-  i=$((i + 1))
+  done
+  [ "$pending_count" -eq 0 ] || sleep "$next_wait"
 done
 
 # --- summary ---------------------------------------------------------------
 
-printf 'summary: %d of %d restarted, %d left on the older instructions with a re-read message\n' \
-  "$restarted_count" "${#IDS[@]}" "$nudged_count"
-[ "$nudged_count" -eq 0 ] || exit 3
+printf 'summary: %d of %d restarted, %d nudged, %d unreached\n' \
+  "$restarted_count" "${#IDS[@]}" "$nudged_count" "$unreached_count"
+[ "$((nudged_count + unreached_count))" -eq 0 ] || exit 3
 exit 0
