@@ -44,6 +44,13 @@
 #                     allowance, and low/base/high cost arithmetic from the plan
 #   preflight         all of the above; writes preflight.receipt on a pass
 #
+# Launch boundary, which bin/fm-bench-launch-lib.sh runs on every `bench-` spawn:
+#   launch-check      recompute every launch artifact the receipt cleared and
+#                     refuse a clearance whose evidence has since been changed,
+#                     deleted, substituted, symlinked, or made unreadable
+#   evidence-digest   print that same canonical evidence digest, so preflight
+#                     and the launch boundary share one owner for it
+#
 # Post-run gates:
 #   promote-evaluate  recompute scored-attempt evidence through the plan-owned
 #                     composite, accept void-specific failure/timing evidence,

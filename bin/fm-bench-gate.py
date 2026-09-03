@@ -1861,20 +1861,24 @@ def fixture_scalar_pointers(fixture: Any) -> list[str]:
     return pointers
 
 
-def perturb_frozen_fixture(original: bytes, entropy: bytes) -> bytes:
-    """A gate-owned, form- and length-preserving edit of one fixture scalar.
+def frozen_fixture_perturbations(original: bytes, entropy: bytes) -> list[tuple[str, bytes]]:
+    """One gate-owned, form- and length-preserving edit per eligible scalar.
 
-    The gate chooses the edit, so an archive cannot steer the probe at a value
-    its evaluator ignores, and the edit stays inside the fixture payload so the
-    input keeps its frozen schema.
+    The gate chooses every edit and offers them in a stable pointer order, so
+    an archive can neither steer the probe at a value its evaluator ignores nor
+    be failed because the gate happened to pick such a value. Each edit stays
+    inside the fixture payload, so the input keeps its frozen schema.
     """
     document = json.loads(original.decode("utf-8"))
+    variants: list[tuple[str, bytes]] = []
     for pointer in fixture_scalar_pointers(document.get("fixture")):
         try:
-            return perturb_json_bytes(original, pointer, entropy)[0]
+            variants.append((pointer, perturb_json_bytes(original, pointer, entropy)[0]))
         except ValueError:
             continue
-    raise ValueError("no frozen evaluator input scalar carries a form-preserving perturbation")
+    if not variants:
+        raise ValueError("no frozen evaluator input scalar carries a form-preserving perturbation")
+    return variants
 
 
 def blinded_evaluator_run(
@@ -2136,29 +2140,35 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
             f"byte-identical {EVALUATOR_DEPENDENCE_RECORD} input reproduced byte-identical output through two opaque paths",
         )
         try:
-            perturbed_input = perturb_frozen_fixture(dependence_input, uuid.uuid4().bytes)
+            variants = frozen_fixture_perturbations(dependence_input, uuid.uuid4().bytes)
         except (ValueError, json.JSONDecodeError, UnicodeError) as exc:
             report.fail("evaluator.input_dependence", f"the frozen golden input cannot be perturbed: {exc}")
             return
-        try:
-            perturbed = blinded_evaluator_run(
-                wrapper, program, root, workspace, perturbed_input, timeout
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            report.fail("evaluator.input_dependence", f"the perturbed execution could not run: {exc}")
-            return
-        if perturbed.returncode != 0:
-            report.fail(
-                "evaluator.input_dependence",
-                f"the perturbed golden execution exited {perturbed.returncode}"
-                f"{confinement_stderr(perturbed.stderr)}",
-            )
-            return
+        moved_by = ""
+        for pointer, perturbed_input in variants:
+            try:
+                perturbed = blinded_evaluator_run(
+                    wrapper, program, root, workspace, perturbed_input, timeout
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                report.fail("evaluator.input_dependence", f"the perturbed execution could not run: {exc}")
+                return
+            if perturbed.returncode != 0:
+                report.fail(
+                    "evaluator.input_dependence",
+                    f"the perturbed golden execution for {pointer} exited {perturbed.returncode}"
+                    f"{confinement_stderr(perturbed.stderr)}",
+                )
+                return
+            if perturbed.stdout != dependence_stdout:
+                moved_by = pointer
+                break
         report.require(
-            perturbed.stdout != dependence_stdout,
+            bool(moved_by),
             "evaluator.input_dependence",
-            f"a gate-owned form-preserving edit of {EVALUATOR_DEPENDENCE_RECORD} moved the evaluator's output",
-            f"the frozen evaluator ignored its input: a gate-owned edit of {EVALUATOR_DEPENDENCE_RECORD} left the output unchanged",
+            f"a gate-owned form-preserving edit of {moved_by} in {EVALUATOR_DEPENDENCE_RECORD} moved the evaluator's output",
+            f"the frozen evaluator ignored its input: no gate-owned edit of any of the "
+            f"{len(variants)} perturbable {EVALUATOR_DEPENDENCE_RECORD} scalars changed the output",
         )
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
@@ -3946,6 +3956,12 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             for judge in ((track or {}).get("judges") or [])
             if isinstance(judge, dict)
         ]
+        if not expected_panel:
+            report.fail(
+                "promote.panel",
+                f"{path.name} names track '{track_name}', whose plan declares no judge panel to score against",
+            )
+            continue
         judging = evidence_parts["judging.json"]
         evaluator = evidence_parts["capture.json"]
         panel = judging.get("panel")
@@ -4292,7 +4308,12 @@ def evidence_entries(root: Path) -> list[tuple[str, str, int, str]]:
         elif stat.S_ISDIR(mode):
             entries.append((relative, "directory", stat.S_IMODE(mode), ""))
         elif stat.S_ISREG(mode):
-            entries.append((relative, "file", stat.S_IMODE(mode), sha256_file(path)))
+            try:
+                digest = sha256_file(path)
+            except OSError:
+                entries.append((relative, "unreadable", stat.S_IMODE(mode), ""))
+                return
+            entries.append((relative, "file", stat.S_IMODE(mode), digest))
         else:
             entries.append((relative, "special", stat.S_IMODE(mode), ""))
 
@@ -4340,12 +4361,14 @@ def check_launch_evidence(root: Path, report: Report) -> None:
         return
     entries = evidence_entries(root)
     unusable = sorted(
-        relative for relative, kind, _mode, _digest in entries if kind in ("symlink", "special")
+        relative
+        for relative, kind, _mode, _digest in entries
+        if kind in ("symlink", "special", "unreadable")
     )
     if unusable:
         report.fail(
             "launch.evidence",
-            "launch evidence is symlinked or a special file: " + ", ".join(unusable),
+            "launch evidence is unreadable, symlinked, or a special file: " + ", ".join(unusable),
         )
         return
     payload = "\n".join(
@@ -4480,6 +4503,18 @@ def preflight(root: Path, plan: dict[str, Any], report: Report, timeout: int) ->
         else:
             print("BENCH_NOTE preflight no entrant may launch")
     else:
+        entries = evidence_entries(root)
+        unreadable = sorted(
+            relative for relative, kind, _mode, _digest in entries if kind == "unreadable"
+        )
+        if unreadable:
+            report.fail(
+                "launch.evidence",
+                "launch evidence cannot be read, so no clearance can bind it: " + ", ".join(unreadable),
+            )
+            receipt.unlink(missing_ok=True)
+            print("BENCH_NOTE preflight no entrant may launch")
+            return
         write_json(
             receipt,
             {
