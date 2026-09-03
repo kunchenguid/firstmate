@@ -350,6 +350,36 @@ test_sweep_refuses_unmarked_and_non_tmpdir_roots() {
   pass "the sweep skips roots that are unmarked or outside TMPDIR instead of signalling into them"
 }
 
+test_sweep_never_reaches_a_registered_repo_checkout_dir() {
+  local repo_dir pid
+  # Not hypothetical: tests/fm-lint.test.sh registers a cleanup dir created by
+  # `mktemp -d "$ROOT/.fm-lint-parity.XXXXXX"` - inside the repo checkout - and
+  # tests/fm-arm-pretool-check.test.sh registers a bare mktemp root with no
+  # fixture marker. A sweep driven off the registry alone would signal into the
+  # checkout, so both conditions are checked against that real shape here, with
+  # a marker planted to prove the TMPDIR condition carries it on its own.
+  repo_dir=$(mktemp -d "$ROOT/.fm-test-sweep-repo-guard.XXXXXX") \
+    || fail "could not create the repo-internal directory this case is about"
+  pid=$(start_cwd_sleeper "$repo_dir") || {
+    rm -rf "$repo_dir"
+    fail "the repo-internal sleeper never started"
+  }
+  track_sleeper "$pid"
+
+  fm_test_sweepable_root "$repo_dir" \
+    && fail "a directory inside the repo checkout was accepted as sweepable"
+  : > "$repo_dir/.fm-test-fixture"
+  fm_test_sweepable_root "$repo_dir" \
+    && fail "a marker file alone made a repo-checkout directory sweepable"
+  fm_test_sweep_leaked_processes "$repo_dir" \
+    || fail "the sweep failed rather than skipping a repo-checkout directory"
+
+  kill -0 "$pid" 2>/dev/null || fail "the sweep signalled a process inside the repo checkout"
+  reap_sleeper "$pid"
+  rm -rf "$repo_dir"
+  pass "the sweep never reaches a registered directory inside the repo checkout"
+}
+
 test_sweep_never_signals_the_sweeping_shell() {
   local harness root rc=0
   harness=$(fm_test_tmproot fm-test-cleanup-sweep-self)
@@ -408,5 +438,6 @@ test_orphan_sweep_reaps_read_only_package_tree
 test_cleanup_sweeps_processes_leaked_in_its_own_root
 test_sweep_cannot_reach_outside_its_own_root
 test_sweep_refuses_unmarked_and_non_tmpdir_roots
+test_sweep_never_reaches_a_registered_repo_checkout_dir
 test_sweep_never_signals_the_sweeping_shell
 test_orphan_sweep_reaps_processes_left_in_a_stale_root
