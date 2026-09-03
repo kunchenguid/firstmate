@@ -1053,6 +1053,57 @@ test_lockless_failure_publication_cannot_cross_recovery_reset() {
   pass "auto-arm: lockless failure publication cannot cross a recovery reset"
 }
 
+test_failure_allocation_cannot_adopt_later_reset_fence() {
+  local dir state ready release publisher rc i
+  dir=$(make_primary_dir "$TMP_ROOT/failure-allocation-reset-fence")
+  state="$dir/state"
+  ready="$state/failure-allocation-ready"
+  release="$state/failure-allocation-release"
+  printf 'epoch=17 owner_pid=700 outcome=rewake updated_at=%s\n' \
+    "$(date +%s)" > "$state/.claude-autoarm-epoch"
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    state=$1/state
+    ready=$2
+    release=$3
+    fm_autoarm_failure_sequence_next() {
+      local sequence epoch=123456
+      sequence="$state/.claude-autoarm-failure-sequence"
+      mkdir -p "$sequence" || return
+      mkdir "$sequence/$epoch" || return
+      : > "$ready"
+      while [ ! -e "$release" ]; do sleep 0.01; done
+      printf "%s\n" "$epoch"
+    }
+    fm_autoarm_failure_transition_acquire() { return 1; }
+    fm_autoarm_claim_failure_commit "$state" 17:700:rewake failed \
+      "$state/.claude-autoarm-failure-notified"
+    printf "%s\n" "$?" > "$state/failure-allocation-rc"
+  ' _ "$dir" "$ready" "$release" &
+  publisher=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$ready" ]; then
+    kill "$publisher" 2>/dev/null || true
+    wait "$publisher" 2>/dev/null || true
+    fail "failure publisher did not pause during epoch allocation"
+  fi
+
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_failure_episode_reset "$1/state"
+  ' _ "$dir" || fail "recovery reset could not advance during failure allocation"
+  : > "$release"
+  wait "$publisher" || fail "failure allocation fixture exited unexpectedly"
+  rc=$(cat "$state/failure-allocation-rc")
+
+  expect_code 4 "$rc" "a pre-reset failure allocation must retain its sampled fence"
+  assert_absent "$state/.claude-autoarm-failure-epochs" "pre-reset allocation recreated failure state after recovery"
+  assert_absent "$state/.claude-autoarm-failure-notified" "pre-reset allocation recreated the failure notice after recovery"
+  pass "auto-arm: failure allocation cannot adopt a later recovery fence"
+}
+
 test_lockless_failure_notice_is_released_after_ledger_advance() {
   local dir state ready release publisher rc notice_rc i
   dir=$(make_primary_dir "$TMP_ROOT/lockless-ledger-advance")
@@ -2019,6 +2070,7 @@ test_concurrent_claim_failures_publish_one_notice_atomically
 test_stale_failure_publisher_cannot_emit_after_success
 test_recovery_reset_cannot_be_followed_by_stalled_failure_publication
 test_lockless_failure_publication_cannot_cross_recovery_reset
+test_failure_allocation_cannot_adopt_later_reset_fence
 test_lockless_failure_notice_is_released_after_ledger_advance
 test_failure_reader_rejects_record_superseded_during_selection
 test_terminal_commit_failure_publishes_independent_failure

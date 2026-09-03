@@ -1921,8 +1921,10 @@ fm_autoarm_claim_failure_commit() {  # <state-dir> <baseline-signature> <outcome
     failed|failed-suppressed) ;;
     *) return 1 ;;
   esac
-  failure_epoch=$(fm_autoarm_failure_sequence_next "$state") || return 1
   reset=$(fm_autoarm_failure_reset_fence "$state") || return 1
+  failure_epoch=$(fm_autoarm_failure_sequence_next "$state") || return 1
+  final_reset=$(fm_autoarm_failure_reset_fence "$state") || return 1
+  [ "$final_reset" = "$reset" ] || return 4
   if ! fm_autoarm_failure_transition_acquire "$state"; then
     _fm_autoarm_claim_failure_publish \
       "$state" "$baseline" "$outcome" "$failure_epoch" "$reset" "$marker"
