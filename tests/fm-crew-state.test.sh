@@ -1316,8 +1316,9 @@ test_usage_error() {
 }
 
 # Head-binding: same branch name with a rewritten/diverged worktree tip must not
-# attribute a historical no-mistakes run (multi-stage branch reuse incident).
-test_historical_same_branch_rewritten_head_not_current() {
+# attribute a historical TERMINAL no-mistakes run (multi-stage branch reuse
+# incident). Active exact-branch runs have stronger precedence below.
+test_historical_terminal_same_branch_rewritten_head_not_current() {
   reset_fakes
   local d old_head new_head out
   d=$(new_case rewritten-head)
@@ -1334,12 +1335,12 @@ test_historical_same_branch_rewritten_head_not_current() {
   printf 'working: stage 2 setup complete rebased onto merged #76\n' > "$d/state/wishlist.status"
   # Historical run still reports the pre-rewrite head on the reused branch.
   FM_FAKE_RUN_HEAD="$old_head"
-  FM_FAKE_AXI_STATUS="$(run_parked fm/todo-flag)"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/todo-flag)"
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" wishlist
   out=$(run_crew_state "$d" wishlist)
   assert_not_contains "$out" "source: run-step" "historical rewritten head must not use run-step"
-  assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
+  assert_not_contains "$out" "state: done" "historical passed run must not mask current state"
   assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
   assert_contains "$out" "state: working" "status-log working: remains current"
   pass "historical same-branch rewritten head is not attributed as current"
@@ -1367,8 +1368,9 @@ test_active_run_descendant_fix_head_remains_current() {
   pass "active run with valid descendant fix head remains current"
 }
 
-# Head-binding: local work that advanced past the run head invalidates the run.
-test_local_advanced_past_run_head_invalidates() {
+# Head-binding: local work that advanced past a terminal run head invalidates
+# that historical run. Active exact-branch runs remain authoritative.
+test_local_advanced_past_terminal_run_head_invalidates() {
   reset_fakes
   local d run_head out
   d=$(new_case local-advanced)
@@ -1379,22 +1381,21 @@ test_local_advanced_past_run_head_invalidates() {
   fm_write_meta "$d/state/adv.meta" "window=fm:fm-adv" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'working: stage 2 implementation in progress\n' > "$d/state/adv.status"
   FM_FAKE_RUN_HEAD="$run_head"
-  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-adv)"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-adv)"
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" adv
   out=$(run_crew_state "$d" adv)
-  assert_not_contains "$out" "source: run-step" "local-advanced tip must not use historical run"
+  assert_not_contains "$out" "source: run-step" "local-advanced tip must not use historical terminal run"
   assert_contains "$out" "source: status-log" "falls back after local advanced past run"
   assert_contains "$out" "state: working" "status-log working: is current"
   pass "local work advanced past run head invalidates attribution"
 }
 
-# --- Run-attribution precedence for pipeline-owned lane heads ----------------
-# A live run whose pipeline OWNS the branch (branch_sync.state=pipeline_owned)
-# can report a lane head that is not a git object in the task worktree.
-# Every fixture head is deliberately unresolvable so only the top-level
-# branch_sync exemption - never an accidental nested-field match - attributes
-# the run.
+# --- Exact-branch active run precedence --------------------------------------
+# A live run can report a lane head that is not a git object in the task
+# worktree because pipeline fixes commit in the gate clone. Every fixture head
+# here is deliberately unresolvable so only active exact-branch precedence,
+# never an accidental head match, attributes the run.
 run_running_pipeline_owned() {  # <branch> <head> [<sync-state>]
   cat <<EOF
 run:
@@ -1442,6 +1443,41 @@ EOF
   pass "pipeline-owned active run binds without head equality and beats the failed row"
 }
 
+# A pipeline fix commit lives only in the gate clone, so its head is genuinely
+# ahead of the crew worktree but not resolvable from that worktree. The exact-
+# branch active run is still current and must outrank both the older failed run
+# row and the stale failed status event.
+test_active_fix_run_with_gate_clone_head_beats_older_failure() {
+  reset_fakes
+  local d worktree_short fix_head out
+  d=$(new_case active-gate-clone-head)
+  make_repo_on_branch "$d/wt" fm/feat-gate-fix
+  worktree_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git clone -q "$d/wt" "$d/gate-clone"
+  git -C "$d/gate-clone" commit -q --allow-empty -m 'pipeline fix commit'
+  fix_head=$(git -C "$d/gate-clone" rev-parse HEAD)
+  if git -C "$d/wt" rev-parse --verify --quiet "${fix_head}^{commit}" >/dev/null; then
+    fail "gate-clone fix head unexpectedly resolves in the crew worktree"
+  fi
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/gate-fix.meta" "window=fm:fm-gate-fix" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'failed: previous validation run failed\n' > "$d/state/gate-fix.status"
+  FM_FAKE_RUN_HEAD="$fix_head"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-gate-fix)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-gate-fix ${fix_head:0:8}  2026-08-27 13:53
+  failed     fm/feat-gate-fix ${worktree_short}  2026-08-27 12:09
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" gate-fix
+  out=$(run_crew_state "$d" gate-fix)
+  assert_contains "$out" "state: working" "exact-branch active fix run -> working"
+  assert_contains "$out" "source: run-step" "exact-branch active fix run -> run-step source"
+  assert_not_contains "$out" "state: failed" "older failure must not surface over the active fix run"
+  pass "exact-branch active fix run outranks an older failure despite its gate-clone-only head"
+}
+
 # T1 direction 2: a genuinely-failed run with NO later run on the branch still
 # surfaces as failed - hiding real failures is equally wrong.
 test_failed_run_with_no_later_run_still_surfaces() {
@@ -1459,11 +1495,10 @@ test_failed_run_with_no_later_run_still_surfaces() {
   pass "a genuinely failed run with no later run is not hidden"
 }
 
-# The coarse runs-list scan: an ACTIVE row for this branch at an unresolvable
-# head is unknown attribution and must STOP the scan, never fall through onto
-# the older failed row (axi status answers another branch here, so attribution
-# can only go through the coarse list).
-test_coarse_unresolvable_active_row_never_falls_to_older_row() {
+# The coarse runs-list scan must attribute an ACTIVE exact-branch row regardless
+# of its head, never fall through onto the older failed row. `axi status`
+# answers another branch here, so attribution can only use the coarse list.
+test_coarse_active_row_beats_older_failed_row_despite_unresolvable_head() {
   reset_fakes
   local d short; d=$(new_case f10-coarse-guard)
   make_repo_on_branch "$d/wt" fm/feat-f10c
@@ -1482,30 +1517,30 @@ EOF
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-f10c busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" feat-f10c)
-  assert_not_contains "$out" "state: failed" "an unresolvable active row must not fall to the older failed row"
-  assert_not_contains "$out" "source: run-step" "unknown attribution must not bind a run"
-  assert_contains "$out" "state: working" "the busy crew still reads working through the pane fallback"
-  assert_contains "$out" "source: pane" "unknown attribution falls to the pane, not an older row"
-  pass "coarse scan stops on an unresolvable active row instead of binding an older one"
+  assert_contains "$out" "state: working" "coarse active row remains working"
+  assert_contains "$out" "source: run-step" "coarse active row binds regardless of head"
+  assert_not_contains "$out" "state: failed" "active row must not fall to the older failed row"
+  pass "coarse active exact-branch row beats an older failure regardless of head"
 }
 
-# Negative control: the exemption is gated on pipeline_owned specifically - any
-# other branch_sync state keeps the strict head rule.
-test_non_pipeline_owned_unresolvable_head_not_attributed() {
+# Active attribution depends on the exact branch and active status already
+# exposed by the CLI, not on an optional branch_sync state.
+test_active_run_does_not_require_pipeline_owned_branch_sync() {
   reset_fakes
   local d; d=$(new_case f10-not-owned)
   make_repo_on_branch "$d/wt" fm/feat-f10d
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-f10d.meta" "window=fm:fm-feat-f10d" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: implementing\n' > "$d/state/feat-f10d.status"
+  printf 'failed: older validation failed\n' > "$d/state/feat-f10d.status"
   FM_FAKE_AXI_STATUS="$(run_running_pipeline_owned fm/feat-f10d f0f0f0f0 synced)"
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-f10d
   local out; out=$(run_crew_state "$d" feat-f10d)
-  assert_not_contains "$out" "source: run-step" "a non-pipeline-owned unresolvable head must not bind"
-  assert_contains "$out" "source: status-log" "falls back to the status log without the exemption"
-  pass "the exemption requires branch_sync.state=pipeline_owned"
+  assert_contains "$out" "state: working" "exact-branch active run remains working without pipeline_owned"
+  assert_contains "$out" "source: run-step" "exact-branch active run binds without pipeline_owned"
+  assert_not_contains "$out" "state: failed" "stale failure does not override the active run"
+  pass "active exact-branch attribution does not depend on branch_sync state"
 }
 
 # Negative control: the exemption also requires an ACTIVE run - a terminal run
@@ -1529,7 +1564,7 @@ outcome: failed"
   pass "the exemption never applies to a terminal run"
 }
 
-test_missing_run_head_falls_back_to_current_state() {
+test_active_run_with_missing_head_remains_current() {
   reset_fakes
   local d out
   d=$(new_case missing-run-head)
@@ -1542,10 +1577,9 @@ test_missing_run_head_falls_back_to_current_state() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" no-head
   out=$(run_crew_state "$d" no-head)
-  assert_not_contains "$out" "source: run-step" "missing run head must not permit branch-only attribution"
-  assert_contains "$out" "source: status-log" "missing run head falls back to current state sources"
-  assert_contains "$out" "state: working" "status-log remains current after missing run head"
-  pass "missing run head falls back instead of matching by branch"
+  assert_contains "$out" "source: run-step" "active exact-branch run binds despite a missing head"
+  assert_contains "$out" "state: parked" "active parked run remains current despite a missing head"
+  pass "active exact-branch run does not require a head field"
 }
 
 test_active_run_is_authoritative
@@ -1597,14 +1631,15 @@ test_missing_meta
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error
-test_historical_same_branch_rewritten_head_not_current
+test_historical_terminal_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
-test_local_advanced_past_run_head_invalidates
+test_local_advanced_past_terminal_run_head_invalidates
 test_pipeline_owned_active_run_beats_superseded_failed_row
+test_active_fix_run_with_gate_clone_head_beats_older_failure
 test_failed_run_with_no_later_run_still_surfaces
-test_coarse_unresolvable_active_row_never_falls_to_older_row
-test_non_pipeline_owned_unresolvable_head_not_attributed
+test_coarse_active_row_beats_older_failed_row_despite_unresolvable_head
+test_active_run_does_not_require_pipeline_owned_branch_sync
 test_pipeline_owned_terminal_run_not_exempt
-test_missing_run_head_falls_back_to_current_state
+test_active_run_with_missing_head_remains_current
 
 echo "all fm-crew-state tests passed"

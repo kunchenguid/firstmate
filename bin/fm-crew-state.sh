@@ -26,8 +26,11 @@
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
-#   2. Attribute an active or terminal no-mistakes run under the branch, head,
-#      pipeline-custody, and newest-first rules owned by bin/fm-nm-run-lib.sh.
+#   2. Attribute an active or terminal no-mistakes run under the branch, active-
+#      run precedence, head, and newest-first rules owned by
+#      bin/fm-nm-run-lib.sh. An exact-branch active run is current regardless of
+#      head match because pipeline fix commits advance in the gate clone, not
+#      this worktree. Terminal runs still require matching code identity.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -372,10 +375,12 @@ nm_ci_checks_state() {
 # oriented text - no run id, no JSON/TOON, newest-first, columns
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
-# is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is exact) - but branch + coarse status is exactly what this predicate needs.
+# An active row for this branch wins regardless of head because its head may
+# exist only in the gate clone. A terminal row still requires matching code
+# identity. Echoes the first attributable matching row's status word
+# (running/completed/cancelled/failed), or empty when the branch has no run
+# within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -391,8 +396,13 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
+      if [ "$st" = running ]; then
+        printf '%s' "$st"
+        return 0
+      fi
       # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
+      # terminal short-sha does not match this worktree (rewritten or
+      # advanced tip).
       if ! nm_coarse_head_matches_worktree "$sha"; then
         # An UNRESOLVABLE head is unknown attribution, not a proven
         # mismatch. Stop instead of surfacing an older, superseded row;
@@ -440,12 +450,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    # Head equality, or the pipeline-owned-active exemption: while the
-    # pipeline owns this branch, the daemon's own branch attribution is
-    # authoritative and the lane head need not be a git object here
-    # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
+    # An exact-branch active run is authoritative regardless of head match:
+    # pipeline-owned fix commits advance in the gate clone and routinely do
+    # not exist in this worktree. Terminal runs retain strict head identity so
+    # a historical run on a reused branch cannot bind by name alone.
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
-      && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
+      && { fm_nm_run_is_active "$RUN_OUT" || nm_run_head_matches_worktree; }; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or its same-branch
