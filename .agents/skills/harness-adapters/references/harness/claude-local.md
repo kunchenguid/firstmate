@@ -58,7 +58,7 @@ LM Studio unloads an idle model on its own TTL and auto-evict settings, so the m
 Both are silent to the worker - Claude Code retries rather than exiting, and was observed sitting in a multi-minute retry backoff with no request reaching the server at all.
 `bin/fm-spawn.sh` automatically arms `bin/fm-local-model.sh check <model>` as the task's registered custom watcher check and teardown retires it through `bin/fm-check-unregister.sh`.
 It prints one actionable line for a stopped server and a different one for an evicted model, and nothing while the runtime is healthy.
-The check is silent once the task's recorded endpoint reads confidently dead, so an idle unload after the worker has finished is not a wake, while a live or unreadable endpoint keeps the alarm loud.
+The check is silent only once the task's recorded endpoint is gone or the agent process has exited, so a finished worker still sitting at its prompt is not silenced, and a live or unreadable endpoint keeps the alarm loud.
 `state/<id>.check.sh` is a single slot, so `bin/fm-pr-check.sh` on a claude-local task refuses until `bin/fm-check-unregister.sh <id>` hands the slot over, after which the worker runs without eviction detection.
 
 ## Latency

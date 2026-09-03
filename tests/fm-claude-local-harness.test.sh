@@ -409,6 +409,50 @@ test_eviction_check_is_gated_on_worker_liveness() {
   pass "the eviction check is silent only for a confidently dead worker and loud for alive and unknown"
 }
 
+# The watcher is provisional until the dispatch is committed. A fresh dispatch
+# whose backlog commit fails rolls its record back and tells the operator to
+# re-run the spawn, so the watcher must go with the record: left behind, it
+# keeps running against a task nothing owns, and the prescribed re-run is
+# refused because the slot is still taken.
+test_fresh_dispatch_rollback_retires_the_eviction_check() {
+  local home fakebin endpoint case_dir project worktree id out status real_tasks_axi
+  read -r home fakebin endpoint case_dir <<<"$(make_world rollback)"
+  id="cl-rollback-x1"
+  project="$case_dir/project"
+  worktree="$case_dir/worktree"
+  fm_test_spawn_brief "$home" "$id" "tiny brief"
+  fm_git_worktree "$project" "$worktree" "fm/$id"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  tasks-axi add "$id" "rollback fixture" --kind scout --file "$home/data/backlog.md" >/dev/null \
+    || fail "fixture: the backlog row could not be added"
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ]; then
+  echo 'error: "start refused"' >&2
+  exit 1
+fi
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$fakebin/tasks-axi"
+
+  status=0
+  FM_FAKE_PANE_PATH="$worktree" run_spawn "$home" "$fakebin" "$endpoint" \
+    "$id" "$project" --scout --harness claude-local --model local-coder || status=$?
+  out=$(cat "$RUN_OUT")
+  [ "$status" -ne 0 ] || fail "a dispatch whose backlog commit failed reported success: $out"
+  case "$out" in
+    *"could not be moved to In flight"*) : ;;
+    *) fail "the fixture did not reach the backlog-commit rollback: $out" ;;
+  esac
+  [ ! -e "$home/state/$id.meta" ] \
+    || fail "the failed dispatch left its task record behind"
+  [ ! -e "$home/state/$id.check.sh" ] && [ ! -e "$home/state/$id.check-trust" ] \
+    || fail "the failed dispatch left its eviction watcher registered with no record behind it"
+
+  pass "a fresh dispatch whose backlog commit fails retires its eviction watcher with the record"
+}
+
 test_home_default_cannot_select_it
 test_secondmate_is_refused_in_both_planes
 test_no_mistakes_mode_is_refused
@@ -418,3 +462,4 @@ test_it_uses_claudes_shared_busy_signature
 test_spawn_arms_an_executable_eviction_check
 test_raw_claude_local_command_is_refused
 test_eviction_check_is_gated_on_worker_liveness
+test_fresh_dispatch_rollback_retires_the_eviction_check
