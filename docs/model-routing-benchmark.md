@@ -44,7 +44,9 @@ This mirrors the chokepoint pattern in `bin/fm-gate-refuse-lib.sh`, including it
 ## Isolation is proven, not declared
 
 `bin/fm-bench-confine.sh` is the control and `bin/fm-bench-probe.sh` is the attack.
-`isolation-verify` first pins `exec_wrapper` to that executable and its supported `{root}` argument contract, so a probe-specific wrapper cannot earn evidence that the real entrant launch would not enforce.
+`isolation-verify` pins the network-disabled replay `exec_wrapper` and the entrant-only `launch_wrapper` to that executable and their supported `{root}` contracts, so a probe-specific wrapper cannot earn evidence that the real launch would not enforce.
+The entrant wrapper requires a pinned runtime container on a Docker-internal network whose inspected membership contains only the credential-holding provider proxy, while the replay wrapper keeps networking disabled.
+Provider credentials stay at the proxy boundary and are never copied into the entrant environment.
 The gate never trusts the mechanism name: it runs each probe unconfined first as a positive control, and only a probe that demonstrably reaches its target can then prove anything by being denied.
 A mechanism this host cannot enforce therefore surfaces as a refused launch naming the concrete unmet requirement, never as a silent downgrade to cooperative isolation.
 
@@ -62,6 +64,9 @@ An alternate is a second object database bound into the clone, so an entrant who
 
 The process probe reads its marker from material written inside the entrant's permitted private session path.
 The marker value never crosses a gate-created process argv, including the confinement wrapper, while the positive control still reports a genuinely visible sibling marker process as a leak.
+
+Preflight executes the content-addressed evaluator from frozen `scoring/` bytes under the network-disabled wrapper and requires those executions to reproduce every golden, mutation, and capture record.
+Mutation movement and capture bindings are then evaluated from those reproduced outputs, so detached record files cannot clear preflight by themselves.
 
 The restore drill treats archived evaluator bytes as untrusted candidate output.
 It restores, rebinds, and statically validates each sample in a short-lived workspace, then releases that repository and worktree immediately while retaining only the bounded selection's copied tree for later execution.
@@ -85,6 +90,11 @@ Exit code 3 is reserved for a new fact the captain must rule on, and neither may
 - the measured high-cost case exceeds the approved cost class.
 
 Everything else is either a pass or an ordinary refusal naming the correction that is not yet met.
+
+Promotion treats each result file as an archive locator, not a score authority.
+It recomputes the composite and blocker state from content-addressed sample evidence after matching the planned neutral panel, candidate tree, evaluator output, capture hash, timing intervals, and failure status.
+For that reason `archive-verify` precedes `promote-evaluate` in the post-run gate order.
+Cost arithmetic likewise requires every referenced run and auxiliary class to carry finite, nonnegative ordered bounds, and the approved class itself must be finite and positive.
 
 ## Extending this
 

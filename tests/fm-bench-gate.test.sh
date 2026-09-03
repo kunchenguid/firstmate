@@ -519,6 +519,20 @@ expect_code 3 "$status" "a high case above the approved class is a captain call"
 assert_contains "$out" "never a silent budget expansion" "the budget may not quietly expand"
 pass "a measured high cost above the approved class stops for the captain"
 
+BENCH="$TMP_ROOT/cost-incomplete"
+write_plan "$BENCH" 'plan["cost_model"]["job_classes"].pop("planning_run")'
+out=$(run_gate "$BENCH" manifest-build) && status=0 || status=$?
+expect_code 1 "$status" "an unpriced referenced run class is refused"
+assert_contains "$out" "referenced job classes are absent: planning_run" "missing run prices cannot become zero cost"
+pass "every referenced run and auxiliary cost class must be complete"
+
+BENCH="$TMP_ROOT/cost-nonfinite"
+write_plan "$BENCH" 'plan["cost_model"]["job_classes"]["judge_call"]["high"] = float("inf")'
+out=$(run_gate "$BENCH" manifest-build) && status=0 || status=$?
+expect_code 1 "$status" "a non-finite unit price is refused"
+assert_contains "$out" "lack ordered low/base/high unit costs: judge_call" "non-finite arithmetic cannot enter the manifest"
+pass "cost bounds and the approved class must be finite"
+
 BENCH="$TMP_ROOT/manifest-stale"
 write_plan "$BENCH"
 run_gate "$BENCH" manifest-build >/dev/null
@@ -532,7 +546,20 @@ pass "a manifest built from a different plan is refused"
 
 write_evaluator() {  # <bench-dir> [captures]
   local bench=$1 captures=${2:-30} e="$1/evaluator"
-  mkdir -p "$e/determinism" "$e/mutations" "$e/captures"
+  mkdir -p "$e/determinism" "$e/mutations" "$e/captures" "$bench/scoring"
+  cat > "$bench/scoring/evaluator.sh" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = --evaluate ] && [ -f "${2:-}" ] || exit 2
+exec cat "$2"
+EOF
+  chmod +x "$bench/scoring/evaluator.sh"
+  python3 - "$e/execution.json" "$bench/scoring/evaluator.sh" <<'PY'
+import hashlib, json, sys
+path, program = sys.argv[1:]
+json.dump({"program": "scoring/evaluator.sh",
+           "sha256": hashlib.sha256(open(program, "rb").read()).hexdigest()},
+          open(path, "w"), indent=2, sort_keys=True)
+PY
   cat > "$e/lock.json" <<'EOF'
 {"browser":"chromium","browser_version":"141.0.7390.54","playwright_version":"1.58.2",
  "fonts":["Inter 4.0"],"locale":"en-CA","timezone":"UTC",
@@ -567,7 +594,10 @@ names = ["fidelity", "pixel_accuracy", "responsive", "zoom_200", "accessibility"
          "interaction_states", "behavioural_correctness"]
 deltas = {name: 0.0 for name in names}
 deltas[dim] = -6.0
-json.dump({"dimension": dim, "movement_threshold": 1.0, "dimension_deltas": deltas},
+before = {name: 10.0 for name in names}
+after = dict(before); after[dim] = 4.0
+json.dump({"dimension": dim, "movement_threshold": 1.0, "dimension_deltas": deltas,
+           "scores_before": before, "scores_after": after},
           open(path, "w"), indent=2, sort_keys=True)
 PY
   done
@@ -584,13 +614,15 @@ for entrant in entrants:
         seed = f"{entrant}-B{index}".encode()
         tree = hashlib.sha1(seed).hexdigest()
         slug = entrant.lower().replace(" ", "-").replace(".", "-")
-        (out / f"{slug}-b{index}.json").write_text(json.dumps({
+        record = {
             "entrant": entrant, "packet": f"B{index}",
             "original_sha": hashlib.sha1(seed + b"o").hexdigest(), "original_tree": tree,
             "neutral_sha": hashlib.sha1(seed + b"n").hexdigest(), "neutral_tree": tree,
             "base_tree": hashlib.sha1(b"base").hexdigest(),
-            "patch_hash": hashlib.sha256(seed).hexdigest(),
-            "result_hash": hashlib.sha256(seed + b"r").hexdigest()}, indent=2, sort_keys=True) + "\n")
+            "patch_hash": hashlib.sha256(seed).hexdigest()}
+        payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        record["result_hash"] = hashlib.sha256(payload).hexdigest()
+        (out / f"{slug}-b{index}.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
         written += 1
 PY
 }
@@ -772,6 +804,7 @@ bench, confine, entrant = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
 (bench / "isolation.json").write_text(json.dumps({
     "schema": "fm-bench-isolation.v1",
     "exec_wrapper": [confine, "--mechanism", "none", "--allow", "{root}", "--"],
+    "launch_wrapper": [confine, "--mechanism", "none", "--allow", "{root}", "--"],
     "entrants": [{"id": "bench-b1-k7", "root": str(entrant),
                   "private_object_store": str(entrant / "objects"),
                   "private_tmp": str(entrant / "tmp"),
@@ -811,7 +844,7 @@ assert_contains "$out" "does not cover the current isolation layout" "the prefli
 python3 - "$BENCH/isolation.json" <<'PY'
 import json, sys
 p = sys.argv[1]; d = json.load(open(p))
-d["exec_wrapper"][0] = "/missing/benchmark-wrapper"
+d["launch_wrapper"][0] = "/missing/benchmark-wrapper"
 json.dump(d, open(p, "w"), indent=2, sort_keys=True)
 PY
 python3 - "$BENCH" <<'PY'
@@ -830,6 +863,27 @@ out=$(FM_BENCH_ROOT="$BENCH" bash -c '
 expect_code 1 "$status" "a benchmark launch with no verified wrapper is refused"
 assert_contains "$out" "cannot use its preflight-proven confinement" "the launch refuses rather than falling back unconfined"
 pass "benchmark launches bind the preflight-proven confinement while ordinary launches stay unchanged"
+
+FAKE_RUNTIME_BIN="$TMP_ROOT/provider-runtime-bin"
+mkdir -p "$FAKE_RUNTIME_BIN"
+cat > "$FAKE_RUNTIME_BIN/docker" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+  "info ") exit 0 ;;
+  "network inspect") printf '%s\n' "${BENCH_TEST_NETWORK_TOPOLOGY:?}"; exit 0 ;;
+  *) exit 9 ;;
+esac
+EOF
+chmod +x "$FAKE_RUNTIME_BIN/docker"
+out=$(PATH="$FAKE_RUNTIME_BIN:$PATH" BENCH_TEST_NETWORK_TOPOLOGY="false provider-proxy " \
+  "$ROOT/bin/fm-bench-confine.sh" --purpose entrant --mechanism container \
+  --image runtime@sha256:test --provider-network provider-only \
+  --provider-proxy http://provider-proxy:8080 --provider-proxy-container provider-proxy \
+  --allow "$ENTRY_ROOT" -- /bin/true 2>&1) && status=0 || status=$?
+expect_code 2 "$status" "an internet-routed provider network is refused"
+assert_contains "$out" "must be internal and contain only provider-proxy" \
+  "the launch wrapper verifies the provider-egress topology"
+pass "entrant egress refuses a network that exposes more than the provider proxy"
 
 out=$(bash -c '
   . "$1/bin/fm-bench-launch-lib.sh"
@@ -964,6 +1018,12 @@ path, confine, mechanism, iso = sys.argv[1:5]
 json.dump({
     "schema": "fm-bench-isolation.v1",
     "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
+    "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
+                       "--image", "firstmate-benchmark-runtime@sha256:test",
+                       "--provider-network", "provider-egress-only",
+                       "--provider-proxy", "http://provider-proxy:8080",
+                       "--provider-proxy-container", "provider-proxy",
+                       "--allow", "{root}", "--"],
     "leak_marker": "FM_BENCH_",
     "protected_paths": [f"{iso}/sealed"],
     "entrants": [
@@ -995,6 +1055,46 @@ for private in objects tmp home session; do
     "the sibling's declared private $private is a probe target"
 done
 pass "all seven sibling-access probes detect a real leak when nothing confines the entrant"
+
+if [ -n "$RESTORE_MECHANISM" ]; then
+  BENCH="$TMP_ROOT/evaluator-execution"
+  write_plan "$BENCH"
+  write_evaluator "$BENCH"
+  write_isolation "$BENCH" "$RESTORE_MECHANISM"
+  out=$(run_gate "$BENCH" evaluator-execute-verify) \
+    || fail "the content-addressed evaluator must reproduce its records: $out"
+  assert_contains "$out" "generated all 39 golden, mutation, and capture records" \
+    "the evaluator is executed rather than inferred from record presence"
+  python3 - "$BENCH/evaluator/mutations/fidelity.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1]); record = json.loads(path.read_text())
+record["dimension_deltas"]["fidelity"] = -2.0
+path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+  out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
+  expect_code 1 "$status" "self-reported mutation deltas cannot replace executed score movement"
+  assert_contains "$out" "declared deltas differ from executed score vectors" \
+    "the gate derives calibration deltas from evaluator execution"
+  write_evaluator "$BENCH"
+  python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+program = bench / "scoring" / "evaluator.sh"
+program.write_text("#!/bin/sh\nprintf '{}\\n'\n")
+program.chmod(0o755)
+contract = bench / "evaluator" / "execution.json"
+record = json.loads(contract.read_text())
+record["sha256"] = hashlib.sha256(program.read_bytes()).hexdigest()
+contract.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+  out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
+  expect_code 1 "$status" "a content-addressed evaluator that does not reproduce evidence is refused"
+  assert_contains "$out" "did not reproduce determinism/run-1.json" \
+    "preflight derives evaluator evidence from execution"
+  pass "preflight evaluator evidence is generated by the frozen executable"
+fi
 
 BENCH="$TMP_ROOT/iso-conditional-wrapper"
 write_plan "$BENCH"
@@ -1360,7 +1460,9 @@ for track_name, role, candidate, packet in work:
     put("ground-truth.md", "sealed truth\n")
     put("projection.diff", f"neutral projection for {slug}\n")
     put("transcript.md", "redacted transcript\n")
-    put("capture.json", '{"pixel":0.003}\n')
+    capture_hash = hashlib.sha256((slug + "-capture").encode()).hexdigest()
+    put("capture.json", json.dumps({"deterministic": 8.0, "tree": tree,
+                                     "capture_hash": capture_hash}, sort_keys=True) + "\n")
     scoring = f"""#!/bin/sh
 if [ -r {shlex.quote(str(operator_secret))} ] || [ -r {shlex.quote(str(repo_root / 'bin' / 'fm-bench-gate.py'))} ]; then
   printf 'unconfined host access\\n'
@@ -1381,8 +1483,12 @@ printf '%s\n' "$value"
 """
     put("scoring.py", scoring)
     (out / "scoring.py").chmod(0o755)
-    put("judging.json", '{"raw":[8,9],"order":["k7","r2"]}\n')
-    put("timing.json", '{"operational_s":1200,"session_s":1100}\n')
+    panel = [judge["name"] for judge in track["judges"]]
+    put("judging.json", json.dumps({"panel": panel, "scores": [8.0 for _ in panel]}, sort_keys=True) + "\n")
+    put("timing.json", json.dumps({"intervals": {
+        "dispatch_accepted_to_first_valid_final_commit": 1200,
+        "first_assistant_event_to_first_valid_final_commit": 1100},
+        "failure": {"status": "scored", "blocker_class": False, "class": "none"}}, sort_keys=True) + "\n")
     put("verdict.md", "label K7 -> candidate\n")
     binding = {"original_sha": sha, "original_tree": tree, "neutral_sha": sha,
                "neutral_tree": tree, "base_tree": base_tree,
@@ -1460,6 +1566,20 @@ expect_code 1 "$status" "a symlinked archive sample root is refused"
 assert_contains "$out" "archive.storage fail" "archive storage validates roots without following links"
 assert_contains "$out" "sample roots are symlinks or special files" "the unsafe root type is named"
 pass "archive sample roots must be self-contained real directories"
+
+ARCHIVE_LINK_BENCH="$TMP_ROOT/archive-directory-link"
+write_plan "$ARCHIVE_LINK_BENCH"
+python3 - "$BENCH/archive" "$ARCHIVE_LINK_BENCH" <<'PY'
+import sys
+from pathlib import Path
+source, bench = Path(sys.argv[1]), Path(sys.argv[2])
+(bench / "archive").symlink_to(source, target_is_directory=True)
+PY
+out=$(run_gate "$ARCHIVE_LINK_BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a symlinked archive directory cannot receive a drill receipt"
+assert_contains "$out" "restore.archive_root fail" "the restore checks archive custody before writing"
+assert_absent "$BENCH/archive/restore-drill.json" "the external archive receives no receipt through the symlink"
+pass "the archive directory itself must remain inside the benchmark"
 
 GROUP_BENCH="$TMP_ROOT/archive-group-roles"
 copy_archive_fixture "$BENCH" "$GROUP_BENCH"
@@ -2423,19 +2543,50 @@ from pathlib import Path
 bench, mode = Path(sys.argv[1]), sys.argv[2]
 plan = json.loads((bench / "benchmark.json").read_text())
 out = bench / "results"
+archive = bench / "archive"
 if out.is_dir():
     for stale in out.glob("*.json"):
         stale.unlink()
 out.mkdir(exist_ok=True)
+if archive.is_dir():
+    import shutil
+    shutil.rmtree(archive)
+archive.mkdir()
 winners = {"A": "Fable 5 High", "B": "Terra 5.6 High", "C": "GPT 5.6 Sol High"}
 
 def write(track, packet, candidate, role, composite, status="scored", blocker=False, suffix=""):
     slug = f"{track}-{packet}-{candidate}{suffix}".lower().replace(" ", "-").replace(".", "-")
+    sample = archive / slug
+    sample.mkdir()
+    tree = __import__("hashlib").sha1(slug.encode()).hexdigest()
+    judges = [judge["name"] for judge in plan["tracks"][track]["judges"]]
+    evidence = {
+        "judging.json": {"panel": judges, "scores": [composite for _ in judges]},
+        "capture.json": {
+            "deterministic": composite,
+            "tree": tree,
+            "capture_hash": __import__("hashlib").sha256((slug + "-capture").encode()).hexdigest(),
+        },
+        "timing.json": {"intervals": {
+            "dispatch_accepted_to_first_valid_final_commit": 1200,
+            "first_assistant_event_to_first_valid_final_commit": 1100,
+        }, "failure": {"status": status, "blocker_class": blocker,
+                        "class": "none" if status == "scored" else "provider_outage"}},
+    }
+    files = {}
+    for name, document in evidence.items():
+        payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
+        (sample / name).write_bytes(payload)
+        files[name] = __import__("hashlib").sha256(payload).hexdigest()
+    (sample / "manifest.json").write_text(json.dumps({
+        "schema": "fm-bench-archive.v1", "sample": slug,
+        "identity": {"track": track, "packet": packet, "candidate": candidate, "role": role},
+        "files": files,
+        "tree_binding": {"original_tree": tree},
+    }, indent=2, sort_keys=True) + "\n")
     (out / f"{slug}.json").write_text(json.dumps({
-        "schema": "fm-bench-result.v1", "track": track, "packet": packet,
-        "candidate": candidate, "role": role, "status": status,
-        "blocker_class": blocker, "composite": composite,
-        "deterministic": composite - 0.5}, indent=2, sort_keys=True) + "\n")
+        "schema": "fm-bench-result.v1", "archive_sample": slug,
+    }, indent=2, sort_keys=True) + "\n")
 
 for name in sorted(plan["tracks"]):
     track = plan["tracks"][name]
@@ -2499,6 +2650,28 @@ assert_contains "$out" "standing route eligible" "a sweep with margin is eligibl
 assert_contains "$out" "subject to the captain's explicit word" "promotion still needs the captain"
 assert_contains "$out" "no benchmark candidate ships directly" "the no-direct-ship rule is restated at the verdict"
 pass "a six-of-six sweep with margin and no regression is the only promotable result"
+
+BENCH="$TMP_ROOT/promote-panel-tamper"
+write_plan "$BENCH"
+write_results "$BENCH" sweep
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+sample = sorted((bench / "archive").iterdir())[0]
+evidence_path = sample / "judging.json"
+evidence = json.loads(evidence_path.read_text())
+evidence["panel"] = ["candidate-selected judge"]
+payload = (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode()
+evidence_path.write_bytes(payload)
+manifest = json.loads((sample / "manifest.json").read_text())
+manifest["files"]["judging.json"] = hashlib.sha256(payload).hexdigest()
+(sample / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "a content-addressed but candidate-specific panel is refused"
+assert_contains "$out" "does not bind the common panel" "promotion recomputes the panel from archived evidence"
+pass "promotion is bound to the planned neutral panel and archived sample evidence"
 
 BENCH="$TMP_ROOT/promote-nonfinite"
 write_plan "$BENCH"

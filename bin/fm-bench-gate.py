@@ -326,7 +326,10 @@ def check_plan(plan: dict[str, Any], report: Report) -> None:
     )
     approved = plan.get("approved_cost_class_usd")
     report.require(
-        isinstance(approved, (int, float)) and not isinstance(approved, bool) and approved > 0,
+        isinstance(approved, (int, float))
+        and not isinstance(approved, bool)
+        and math.isfinite(float(approved))
+        and approved > 0,
         "plan.approved_cost_class_usd",
         f"approved cost class {approved}",
         "approved_cost_class_usd must be a positive number",
@@ -1033,7 +1036,10 @@ def check_cost_model(plan: dict[str, Any], report: Report) -> None:
         for name, unit in sorted(classes.items())
         if not isinstance(unit, dict)
         or not all(
-            isinstance(unit.get(bound), (int, float)) and not isinstance(unit.get(bound), bool)
+            isinstance(unit.get(bound), (int, float))
+            and not isinstance(unit.get(bound), bool)
+            and math.isfinite(float(unit.get(bound)))
+            and float(unit.get(bound)) >= 0
             for bound in ("low", "base", "high")
         )
         or not unit["low"] <= unit["base"] <= unit["high"]
@@ -1043,6 +1049,36 @@ def check_cost_model(plan: dict[str, Any], report: Report) -> None:
         "manifest.cost_model",
         f"{len(classes)} job classes carry ordered low/base/high unit costs",
         f"job classes lack ordered low/base/high unit costs: {', '.join(bad)}",
+    )
+    required: set[str] = set()
+    for track in (plan.get("tracks") or {}).values():
+        if not isinstance(track, dict):
+            continue
+        candidates = track_candidates(track)
+        if any(not nonempty_str(candidate.get("metered_provider")) for candidate in candidates):
+            required.add(str(track.get("run_cost_class", "")))
+        if track_requires_specification(track):
+            required.add("spec_authoring")
+        if track.get("judges"):
+            required.add("judge_call")
+        if track.get("capture_required") is True:
+            required.add("capture_job")
+    missing = sorted(name for name in required if not name or name not in classes)
+    report.require(
+        not missing,
+        "manifest.cost_classes",
+        f"all {len(required)} referenced job classes are priced",
+        "referenced job classes are absent: " + ", ".join(missing),
+    )
+    approved = plan.get("approved_cost_class_usd")
+    report.require(
+        isinstance(approved, (int, float))
+        and not isinstance(approved, bool)
+        and math.isfinite(float(approved))
+        and float(approved) > 0,
+        "manifest.approved_cost_class",
+        f"approved cost class {approved} is finite and positive",
+        "approved_cost_class_usd must be finite and positive",
     )
 
 
@@ -1250,6 +1286,7 @@ def validate_confinement_wrapper(
     wrapper: Any,
     *,
     require_enforcing: bool,
+    purpose: str = "replay",
 ) -> tuple[str | None, str]:
     if not isinstance(wrapper, list) or not wrapper or not all(
         isinstance(item, str) and item for item in wrapper
@@ -1263,11 +1300,15 @@ def validate_confinement_wrapper(
         return None, "confinement wrapper must end with --"
     mechanism = "auto"
     allow_values: list[str] = []
+    values: dict[str, str] = {}
     seen_singletons: set[str] = set()
     index = 0
     while index < len(options) - 1:
         option = options[index]
-        if option not in ("--allow", "--mechanism", "--image") or index + 1 >= len(options) - 1:
+        if option not in (
+            "--allow", "--mechanism", "--image", "--purpose", "--provider-network", "--provider-proxy",
+            "--provider-proxy-container"
+        ) or index + 1 >= len(options) - 1:
             return None, f"confinement wrapper has unsupported option: {option}"
         value = options[index + 1]
         if not value:
@@ -1280,6 +1321,7 @@ def validate_confinement_wrapper(
             seen_singletons.add(option)
             if option == "--mechanism":
                 mechanism = value
+            values[option] = value
         index += 2
     if allow_values != ["{root}"]:
         return None, "confinement wrapper must expose exactly its opaque entrant root"
@@ -1287,6 +1329,21 @@ def validate_confinement_wrapper(
         return None, f"confinement wrapper names an unsupported mechanism: {mechanism}"
     if require_enforcing and mechanism == "none":
         return None, "restore drill requires an enforcing confinement mechanism, not none"
+    declared_purpose = values.get("--purpose", "replay")
+    if declared_purpose != purpose:
+        return None, f"confinement wrapper purpose must be {purpose}"
+    if purpose == "replay" and any(key in values for key in ("--provider-network", "--provider-proxy")):
+        return None, "replay confinement must remain network-disabled"
+    if purpose == "entrant":
+        if mechanism != "container":
+            return None, "entrant confinement requires a runtime container with provider-only egress"
+        missing = [
+            option
+            for option in ("--image", "--provider-network", "--provider-proxy", "--provider-proxy-container")
+            if not nonempty_str(values.get(option))
+        ]
+        if missing:
+            return None, "entrant confinement is missing: " + ", ".join(missing)
     return mechanism, "trusted confinement wrapper and supported arguments verified"
 
 
@@ -1346,6 +1403,19 @@ def check_isolation(root: Path, report: Report, timeout: int) -> None:
         report.fail("isolation.exec_wrapper", wrapper_detail)
     else:
         report.ok("isolation.exec_wrapper", wrapper_detail)
+    launch_wrapper = record.get("launch_wrapper")
+    launch_mechanism, launch_detail = validate_confinement_wrapper(
+        launch_wrapper,
+        require_enforcing=True,
+        purpose="entrant",
+    )
+    if launch_mechanism is None:
+        report.fail("isolation.launch_wrapper", launch_detail)
+    else:
+        report.ok(
+            "isolation.launch_wrapper",
+            "launch-capable runtime container uses credential-free provider-proxy egress",
+        )
     entrants = record.get("entrants")
     if not isinstance(entrants, list) or not entrants:
         report.fail("isolation.entrants", "entrants must be a non-empty list of provisioned per-entrant roots")
@@ -1606,7 +1676,14 @@ def probe_entrants(
 # --------------------------------------------------------------------------
 
 
-def check_evaluator(root: Path, plan: dict[str, Any], report: Report) -> None:
+def check_evaluator(
+    root: Path,
+    plan: dict[str, Any],
+    report: Report,
+    *,
+    execute: bool = False,
+    timeout: int = 60,
+) -> None:
     tracks = plan.get("tracks")
     if not isinstance(tracks, dict) or not tracks:
         report.fail("evaluator.scope", "tracks must be a non-empty object with explicit capture declarations")
@@ -1636,6 +1713,114 @@ def check_evaluator(root: Path, plan: dict[str, Any], report: Report) -> None:
     check_evaluator_determinism(base, report)
     check_evaluator_mutations(base, weights, report)
     check_evaluator_captures(base, plan, expected_captures, report)
+    if execute:
+        check_evaluator_execution(root, base, report, timeout)
+
+
+def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: int) -> None:
+    try:
+        contract = load_json(base / "execution.json")
+        isolation = load_json(root / "isolation.json", ISOLATION_SCHEMA)
+    except GateError as exc:
+        report.fail("evaluator.execution", str(exc))
+        return
+    program_name = contract.get("program")
+    expected_hash = contract.get("sha256")
+    if not nonempty_str(program_name) or not nonempty_str(expected_hash):
+        report.fail("evaluator.execution", "execution.json must content-address one evaluator program")
+        return
+    program = (root / str(program_name)).resolve()
+    if (
+        not is_within(program, (root / "scoring").resolve())
+        or not program.is_file()
+        or not os.access(program, os.X_OK)
+        or sha256_file(program) != expected_hash
+    ):
+        report.fail("evaluator.execution", "the executable evaluator is absent, mutable, or outside frozen scoring")
+        return
+    wrapper = isolation.get("exec_wrapper")
+    mechanism, detail = validate_confinement_wrapper(wrapper, require_enforcing=True, purpose="replay")
+    if mechanism is None:
+        report.fail("evaluator.execution", detail)
+        return
+    evidence = [
+        base / "determinism" / "run-1.json",
+        base / "determinism" / "run-2.json",
+        *sorted((base / "mutations").glob("*.json")),
+        *sorted((base / "captures").glob("*.json")),
+    ]
+    generated = 0
+    for path in evidence:
+        argv = [
+            *(str(root) if item == "{root}" else item for item in wrapper),
+            str(program),
+            "--evaluate",
+            str(path),
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                env={"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            report.fail("evaluator.execution", f"content-addressed evaluator could not run: {exc}")
+            return
+        try:
+            observed = json.loads(completed.stdout)
+            recorded = load_json(path)
+        except (json.JSONDecodeError, GateError) as exc:
+            report.fail("evaluator.execution", f"evaluator output for {path.name} is invalid: {exc}")
+            return
+        if completed.returncode != 0 or observed != recorded:
+            report.fail(
+                "evaluator.execution",
+                f"content-addressed evaluator did not reproduce {path.relative_to(base)} from frozen input",
+            )
+            return
+        relative = path.relative_to(base)
+        if relative.parts[0] == "mutations":
+            before = observed.get("scores_before") if isinstance(observed, dict) else None
+            after = observed.get("scores_after") if isinstance(observed, dict) else None
+            declared = observed.get("dimension_deltas") if isinstance(observed, dict) else None
+            if not isinstance(before, dict) or not isinstance(after, dict) or not isinstance(declared, dict):
+                report.fail("evaluator.execution", f"{relative} has no executable before-and-after score vectors")
+                return
+            dimensions = set(before) | set(after)
+            try:
+                derived = {name: float(after[name]) - float(before[name]) for name in dimensions}
+            except (KeyError, TypeError, ValueError):
+                report.fail("evaluator.execution", f"{relative} score vectors are incomplete or non-numeric")
+                return
+            if any(
+                not math.isfinite(value)
+                or not isinstance(declared.get(name), (int, float))
+                or isinstance(declared.get(name), bool)
+                or abs(float(declared[name]) - value) > 1e-9
+                for name, value in derived.items()
+            ):
+                report.fail("evaluator.execution", f"{relative} declared deltas differ from executed score vectors")
+                return
+        elif relative.parts[0] == "captures":
+            if not isinstance(observed, dict):
+                report.fail("evaluator.execution", f"{relative} did not produce a capture object")
+                return
+            payload = dict(observed)
+            claimed_hash = payload.pop("result_hash", None)
+            derived_hash = sha256_bytes(
+                (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            )
+            if claimed_hash != derived_hash:
+                report.fail("evaluator.execution", f"{relative} capture result hash was not derived from execution")
+                return
+        generated += 1
+    report.ok(
+        "evaluator.execution",
+        f"content-addressed evaluator generated all {generated} golden, mutation, and capture records under network-disabled confinement",
+    )
 
 
 def check_evaluator_lock(base: Path, report: Report) -> None:
@@ -1907,7 +2092,11 @@ def check_evaluator_captures(base: Path, plan: dict[str, Any], expected: int, re
 
 def archive_samples(root: Path) -> list[Path]:
     directory = root / "archive"
-    if not directory.is_dir():
+    try:
+        mode = directory.lstat().st_mode
+    except OSError:
+        return []
+    if not stat.S_ISDIR(mode) or not is_within(directory.resolve(), root.resolve()):
         return []
     samples: list[Path] = []
     for path in directory.iterdir():
@@ -1985,7 +2174,18 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
     """Verify every sample archive by recomputing its content addresses."""
     archive_root = root / "archive"
     invalid_roots: list[str] = []
-    if archive_root.is_dir():
+    try:
+        archive_mode = archive_root.lstat().st_mode
+    except OSError:
+        archive_mode = 0
+    archive_root_ok = stat.S_ISDIR(archive_mode) and is_within(archive_root.resolve(), root.resolve())
+    ok = report.require(
+        archive_root_ok,
+        "archive.root",
+        "archive root is a real directory contained by the benchmark",
+        "archive root is absent, symlinked, special, or outside the benchmark",
+    )
+    if archive_root_ok:
         for entry in archive_root.iterdir():
             if entry.name == "restore-drill.json":
                 continue
@@ -1999,7 +2199,7 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
         "archive.storage",
         "every sample root is a real directory inside the archive",
         "archive sample roots are symlinks or special files: " + ", ".join(sorted(invalid_roots)),
-    )
+    ) and ok
     samples = archive_samples(root)
     expected_identities = planned_sample_identities(plan)
     ok = report.require(
@@ -2335,7 +2535,8 @@ def randomized_string_like(value: str, entropy: bytes) -> str:
         else:
             output.append(character)
             continue
-        replacement = alphabet[(alphabet.index(character) + 1 + entropy[index % len(entropy)]) % len(alphabet)]
+        shift = 1 + entropy[index % len(entropy)] % (len(alphabet) - 1)
+        replacement = alphabet[(alphabet.index(character) + shift) % len(alphabet)]
         output.append(replacement)
         changed = changed or replacement != character
     if not changed:
@@ -2857,7 +3058,15 @@ def rerun_archived_evaluator(
 
 def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
     """Restore each candidate bundle into a fresh repository and rebind its tree."""
-    receipt = root / "archive" / "restore-drill.json"
+    archive_root = root / "archive"
+    try:
+        root_mode = archive_root.lstat().st_mode
+    except OSError:
+        root_mode = 0
+    if not stat.S_ISDIR(root_mode) or not is_within(archive_root.resolve(), root.resolve()):
+        report.fail("restore.archive_root", "archive root is absent, symlinked, special, or outside the benchmark")
+        return
+    receipt = archive_root / "restore-drill.json"
     receipt.unlink(missing_ok=True)
     archive_ok, archive_digest = check_archive(root, plan, report)
     if shutil.which("git") is None:
@@ -3059,7 +3268,15 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
 
 
 def cleanup_gate(root: Path, plan: dict[str, Any], report: Report) -> None:
-    path = root / "archive" / "restore-drill.json"
+    archive_root = root / "archive"
+    try:
+        root_mode = archive_root.lstat().st_mode
+    except OSError:
+        root_mode = 0
+    if not stat.S_ISDIR(root_mode) or not is_within(archive_root.resolve(), root.resolve()):
+        report.fail("cleanup.archive_root", "archive root is absent, symlinked, special, or outside the benchmark")
+        return
+    path = archive_root / "restore-drill.json"
     if not path.is_file():
         report.fail("cleanup.drill", "no restore drill receipt; candidate and snapshot cleanup stays refused")
         return
@@ -3095,15 +3312,118 @@ def cleanup_gate(root: Path, plan: dict[str, Any], report: Report) -> None:
 # --------------------------------------------------------------------------
 
 
-def load_results(root: Path) -> list[dict[str, Any]]:
+def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[str, Any]]:
     directory = root / "results"
     records: list[dict[str, Any]] = []
     if not directory.is_dir():
         return records
+    archive_root = root / "archive"
+    try:
+        archive_mode = archive_root.lstat().st_mode
+    except OSError:
+        archive_mode = 0
+    if not stat.S_ISDIR(archive_mode) or not is_within(archive_root.resolve(), root.resolve()):
+        report.fail("promote.evidence", "archive root is absent, symlinked, special, or outside the benchmark")
+        return records
     for path in sorted(directory.glob("*.json")):
         record = load_json(path, RESULT_SCHEMA)
-        record["_path"] = path.name
-        records.append(record)
+        sample_name = record.get("archive_sample")
+        if not nonempty_str(sample_name) or Path(str(sample_name)).name != sample_name:
+            report.fail("promote.evidence", f"{path.name} does not name one contained archive sample")
+            continue
+        sample = root / "archive" / str(sample_name)
+        try:
+            manifest = load_json(sample / "manifest.json", ARCHIVE_SCHEMA)
+            identity = manifest["identity"]
+            files = manifest["files"]
+            if not isinstance(identity, dict) or not isinstance(files, dict):
+                raise GateError("archive manifest has no identity or files map")
+            evidence_parts: dict[str, dict[str, Any]] = {}
+            for evidence_name in ("judging.json", "capture.json", "timing.json"):
+                if evidence_name not in files:
+                    raise GateError(f"{evidence_name} is not content-addressed")
+                evidence_path = sample / evidence_name
+                if not is_within(evidence_path.resolve(), sample.resolve()):
+                    raise GateError(f"{evidence_name} escapes its archive sample")
+                if sha256_file(evidence_path) != files[evidence_name]:
+                    raise GateError(f"{evidence_name} content address does not match")
+                evidence_parts[evidence_name] = load_json(evidence_path)
+        except (GateError, KeyError, OSError) as exc:
+            report.fail("promote.evidence", f"{path.name} has no valid content-addressed archive evidence: {exc}")
+            continue
+        track_name = str(identity.get("track", ""))
+        track = (plan.get("tracks") or {}).get(track_name)
+        expected_panel = [
+            str(judge.get("name", ""))
+            for judge in ((track or {}).get("judges") or [])
+            if isinstance(judge, dict)
+        ]
+        judging = evidence_parts["judging.json"]
+        evaluator = evidence_parts["capture.json"]
+        timing = evidence_parts["timing.json"]
+        panel = judging.get("panel")
+        scores = judging.get("scores")
+        failure = timing.get("failure")
+        valid_scores = (
+            isinstance(scores, list)
+            and len(scores) == len(expected_panel)
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                for value in scores
+            )
+        )
+        intervals = timing.get("intervals") if isinstance(timing, dict) else None
+        timing_ok = isinstance(intervals, dict) and all(
+            isinstance(intervals.get(name), (int, float))
+            and not isinstance(intervals.get(name), bool)
+            and math.isfinite(float(intervals.get(name)))
+            and float(intervals.get(name)) >= 0
+            for name in REQUIRED_TIMING_INTERVALS
+        )
+        deterministic = evaluator.get("deterministic") if isinstance(evaluator, dict) else None
+        tree = evaluator.get("tree") if isinstance(evaluator, dict) else None
+        capture_hash = evaluator.get("capture_hash") if isinstance(evaluator, dict) else None
+        binding = manifest.get("tree_binding") or {}
+        status = failure.get("status") if isinstance(failure, dict) else None
+        if (
+            not isinstance(deterministic, (int, float))
+            or isinstance(deterministic, bool)
+            or not math.isfinite(float(deterministic))
+            or not valid_scores
+        ):
+            report.fail("promote.composite", f"{path.name} has no finite numeric composite")
+            continue
+        valid = (
+            panel == expected_panel
+            and valid_scores
+            and timing_ok
+            and nonempty_str(tree)
+            and tree == binding.get("original_tree")
+            and nonempty_str(capture_hash)
+            and status in ("scored", "void")
+        )
+        if not valid:
+            report.fail(
+                "promote.evidence",
+                f"{path.name} archive evidence does not bind the common panel, tree, evaluator, capture, timing, and failure facts",
+            )
+            continue
+        composite = (float(deterministic) + sum(float(value) for value in scores) / len(scores)) / 2
+        records.append(
+            {
+                "_path": path.name,
+                "track": track_name,
+                "role": str(identity.get("role", "")),
+                "candidate": str(identity.get("candidate", "")),
+                "packet": str(identity.get("packet", "")),
+                "status": status,
+                "blocker_class": failure.get("blocker_class") is True,
+                "deterministic": float(deterministic),
+                "composite": composite,
+            }
+        )
     return records
 
 
@@ -3113,9 +3433,12 @@ def promote_evaluate(root: Path, plan: dict[str, Any], report: Report) -> None:
     baseline_samples = int(plan.get("samples_per_baseline") or 0)
     margin_bar = float(rule.get("practical_margin") or 0)
     try:
-        results = load_results(root)
+        results = load_results(root, plan, report)
     except GateError as exc:
         report.fail("promote.results", str(exc))
+        return
+    if report.failed:
+        report.fail("promote.verdict", "no standing route: a composite is not finite or archive evidence is invalid")
         return
     if not results:
         report.fail("promote.results", "no recorded results; a benchmark with no samples promotes nothing")
@@ -3473,7 +3796,7 @@ def preflight(root: Path, plan: dict[str, Any], report: Report, timeout: int) ->
     check_freeze(root, plan, report)
     check_provenance(root, plan, report)
     check_isolation(root, report, timeout)
-    check_evaluator(root, plan, report)
+    check_evaluator(root, plan, report, execute=True, timeout=timeout)
     check_manifest(root, plan, report)
     receipt = root / "preflight.receipt"
     if report.captain_stop or report.failed:
@@ -3525,7 +3848,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Benchmark directory layout: benchmark.json (the frozen plan), packets/, ground-truth/, "
             "scoring/, judge-prompts/, provenance/<packet>.json, isolation.json, allowance.json, "
-            "evaluator/{lock.json,score-map.json,determinism/,mutations/,captures/}, manifest.json, "
+            "evaluator/{lock.json,score-map.json,execution.json,determinism/,mutations/,captures/}, manifest.json, "
             "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with a structured sample identity, "
             "the eight role-specific evidence groups, evaluator_rerun.scored_inputs, and at least one pure-data "
             "evaluator_rerun.input_perturbations entry, and the generated preflight.receipt and "
@@ -3546,6 +3869,7 @@ def build_parser() -> argparse.ArgumentParser:
             "provenance-check",
             "isolation-verify",
             "evaluator-verify",
+            "evaluator-execute-verify",
             "manifest-build",
             "manifest-check",
             "freeze",
@@ -3580,7 +3904,12 @@ def main(argv: list[str]) -> int:
             check_isolation(root, report, args.probe_timeout)
         elif args.subcommand == "evaluator-verify":
             check_evaluator(root, plan, report)
+        elif args.subcommand == "evaluator-execute-verify":
+            check_evaluator(root, plan, report, execute=True, timeout=args.probe_timeout)
         elif args.subcommand == "manifest-build":
+            check_cost_model(plan, report)
+            if report.failed:
+                return report.finish()
             manifest = build_manifest(plan)
             manifest["plan_sha256"] = sha256_file(root / "benchmark.json")
             write_json(root / "manifest.json", manifest)

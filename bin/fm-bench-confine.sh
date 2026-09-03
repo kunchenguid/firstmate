@@ -11,7 +11,10 @@
 #
 # Usage:
 #   fm-bench-confine.sh --allow <dir> [--allow <dir>]... [--mechanism <name>]
-#                       [--image <ref>] -- <command> [args...]
+#                       [--purpose replay|entrant] [--image <ref>]
+#                       [--provider-network <name> --provider-proxy <url>]
+#                       [--provider-proxy-container <name>]
+#                       -- <command> [args...]
 #   fm-bench-confine.sh --list-mechanisms
 #   fm-bench-confine.sh --help
 #
@@ -30,7 +33,11 @@ set -u
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MECHANISM=auto
+PURPOSE=replay
 IMAGE=${FM_BENCH_CONFINE_IMAGE:-debian:stable-slim}
+PROVIDER_NETWORK=
+PROVIDER_PROXY=
+PROVIDER_PROXY_CONTAINER=
 ALLOW=()
 CMD=()
 EXPOSE_SELF_DIR=0
@@ -45,6 +52,14 @@ while [ "$#" -gt 0 ]; do
       MECHANISM=$2; shift 2 ;;
     --image) [ "$#" -gt 1 ] || { echo "error: --image requires a reference" >&2; exit 2; }
       IMAGE=$2; shift 2 ;;
+    --purpose) [ "$#" -gt 1 ] || { echo "error: --purpose requires replay or entrant" >&2; exit 2; }
+      PURPOSE=$2; shift 2 ;;
+    --provider-network) [ "$#" -gt 1 ] || { echo "error: --provider-network requires a name" >&2; exit 2; }
+      PROVIDER_NETWORK=$2; shift 2 ;;
+    --provider-proxy) [ "$#" -gt 1 ] || { echo "error: --provider-proxy requires a URL" >&2; exit 2; }
+      PROVIDER_PROXY=$2; shift 2 ;;
+    --provider-proxy-container) [ "$#" -gt 1 ] || { echo "error: --provider-proxy-container requires a name" >&2; exit 2; }
+      PROVIDER_PROXY_CONTAINER=$2; shift 2 ;;
     --list-mechanisms) printf '%s\n' container bwrap none; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; CMD=("$@"); break ;;
@@ -54,6 +69,11 @@ done
 
 [ "${#CMD[@]}" -gt 0 ] || { echo "error: no command after --" >&2; exit 2; }
 [ "${#ALLOW[@]}" -gt 0 ] || { echo "error: at least one --allow directory is required" >&2; exit 2; }
+case "$PURPOSE" in
+  replay) [ -z "$PROVIDER_NETWORK$PROVIDER_PROXY" ] || { echo "error: replay confinement cannot enable provider egress" >&2; exit 2; } ;;
+  entrant) [ -n "$PROVIDER_NETWORK" ] && [ -n "$PROVIDER_PROXY" ] && [ -n "$PROVIDER_PROXY_CONTAINER" ] || { echo "error: entrant confinement requires provider network and credential-free proxy container" >&2; exit 2; } ;;
+  *) echo "error: unknown purpose $PURPOSE" >&2; exit 2 ;;
+esac
 
 case "${CMD[0]}" in
   "$SELF_DIR"|"$SELF_DIR"/*) EXPOSE_SELF_DIR=1 ;;
@@ -106,7 +126,16 @@ case "$MECHANISM" in
     runtime=$(resolve_container_runtime) || { echo "error: no usable container runtime" >&2; exit 2; }
     # A container gets its own PID namespace by default, which is what denies
     # the process-inspection probe.
-    args=(run --rm --network none)
+    if [ "$PURPOSE" = entrant ]; then
+      [ "$runtime" = docker ] || { echo "error: provider-only entrant egress requires Docker network inspection" >&2; exit 2; }
+      topology=$(docker network inspect "$PROVIDER_NETWORK" --format '{{.Internal}} {{range .Containers}}{{.Name}} {{end}}' 2>/dev/null) \
+        || { echo "error: provider-only network is unavailable" >&2; exit 2; }
+      [ "$topology" = "true $PROVIDER_PROXY_CONTAINER " ] \
+        || { echo "error: provider-only network must be internal and contain only $PROVIDER_PROXY_CONTAINER" >&2; exit 2; }
+      args=(run --rm --network "$PROVIDER_NETWORK")
+    else
+      args=(run --rm --network none)
+    fi
     # Run as the invoking user so an entrant's own writes stay owned by the
     # operator instead of arriving root-owned in the entrant's private clone.
     args+=(--user "$(id -u):$(id -g)")
@@ -117,10 +146,14 @@ case "$MECHANISM" in
     while IFS= read -r pair; do
       args+=(--env "$pair")
     done < <(scrubbed_env)
+    if [ "$PURPOSE" = entrant ]; then
+      args+=(--env "HTTP_PROXY=$PROVIDER_PROXY" --env "HTTPS_PROXY=$PROVIDER_PROXY" --env "ALL_PROXY=$PROVIDER_PROXY")
+    fi
     args+=(--workdir "${ALLOW[0]}" "$IMAGE")
     exec "$runtime" "${args[@]}" "${CMD[@]}"
     ;;
   bwrap)
+    [ "$PURPOSE" = replay ] || { echo "error: bwrap cannot enforce provider-only entrant egress" >&2; exit 2; }
     command -v bwrap >/dev/null 2>&1 || { echo "error: bwrap is not installed" >&2; exit 2; }
     args=(--unshare-pid --unshare-net --die-with-parent --proc /proc --dev /dev)
     for dir in /usr /bin /sbin /lib /lib64 /etc; do
