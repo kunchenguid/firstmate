@@ -47,6 +47,7 @@
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
 #                          wait or verified captain-held transfer uses the long
+<<<<<<< HEAD
 #                          pause recheck cadence (under afk it is instead handed
 #                          to the daemon as this plain reason, once per
 #                          declaration; busy_turn_bound_check owns that handoff);
@@ -55,7 +56,13 @@
 #                          escalation count, and demand-deep-inspection marker,
 #                          for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
-#                          tool process.
+#                          tool process. Past FM_WEDGE_MAX_ESCALATIONS
+#                          consecutive wedge escalations on the same (window, hash),
+#                          the watcher emits one terminal "PERMANENTLY-WEDGED"
+#                          wake and writes STATE/.wedge-permanent-<key>-<hash12>;
+#                          subsequent polls for that hash short-circuit until
+#                          FM_CAP_HORIZON_SECS elapse, the pane hash changes, or
+#                          the operator manually removes the marker.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -783,9 +790,11 @@ clear_write_tracking() {  # <window-key>
 # a stale-hash to prevent LLM-supervised unattended loops from hammering paid
 # API quotas when the demand-deep-inspection marker is read but not acted on.
 # Once the count reaches this threshold, wedge_timer_check emits ONE terminal
-# wake ("PERMANENTLY-WEDGED") and writes STATE/.wedge-permanent-<key>, then
-# stops sending further wakes for this hash until the pane's state resets to
-# genuinely active (same rm-on-reset sites below). Default 10 escalations is
+# wake ("PERMANENTLY-WEDGED") and writes STATE/.wedge-permanent-<key>-<hash12>,
+# then stops sending further wakes for THIS (window, hash) until one of three
+# exit conditions: FM_CAP_HORIZON_SECS elapses since the marker timestamp, the
+# pane hash changes (different key naturally invalidates the marker), or the
+# operator manually removes the marker. Default 10 escalations is
 # roughly 10 * STALE_ESCALATE_SECS (default 240s) = ~40 minutes of unattended
 # signaling before the cap kicks in - enough for any human or smart supervisor
 # to act, short enough to bound the burn. Tracked for revert: see
@@ -832,7 +841,7 @@ esac
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason permanent_marker
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason permanent_marker marker_ts
   # LOCAL PATCH (2026-08-19, v9 2026-08-25): if this hash was already capped,
   # stop firing wakes for it UNTIL the cap horizon (FM_CAP_HORIZON_SECS, default
   # 24h) passes. The marker is keyed on (window, hash) and stores its fire
@@ -852,7 +861,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     triage_log "wedge_timer_check: missing hash parameter, falling back to window-scoped marker for $win"
     permanent_marker="$STATE/.wedge-permanent-$(window_key "$win")"
     if [ -e "$permanent_marker" ]; then
-      return 0
+      marker_ts=$(cat "$permanent_marker" 2>/dev/null || true)
+      case "$marker_ts" in
+        ''|*[!0-9]*) marker_ts=0 ;;
+      esac
+      if [ $(( $(date +%s) - marker_ts )) -lt "$FM_CAP_HORIZON_SECS" ]; then
+        return 0
+      fi
     fi
   else
     permanent_marker="$STATE/.wedge-permanent-$(window_key "$win")-${hash:0:12}"
@@ -899,14 +914,6 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # stop. Durable STATE/.wedge-permanent-<key>-<hash12> marker so subsequent
         # polls for the SAME stale hash short-circuit (see return at top of
         # function) without silencing fresh stale hashes in the same window.
-        # ORDERING INVARIANT: write the marker AFTER `fm_wake_append` succeeds
-        # but BEFORE `wake` runs. wake() is sourced from fm-push-transition-lib
-        # and `exit 0`s at the end (this watcher only emits one wake per cycle),
-        # so a marker written after `wake` would be dead code and the cap would
-        # never persist. Writing after fm_wake_append (not before) means a fs
-        # failure during wake-append leaves no marker, so the next poll retries
-        # - the only durable state we depend on is the wake queue record, not
-        # the marker.
         # v4 (2026-08-25): the v3 marker write was unchecked and `wake` `exit 0`s
         # mid-script, so a fs failure on the marker write persisted nothing and
         # the cap kept firing every ~STALE_ESCALATE_SECS. v4 writes the marker
@@ -917,11 +924,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # entry durable before `wake` runs.
         if [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this (window, hash) until FM_CAP_HORIZON_SECS (default 86400s) elapses, the pane hash changes, or operator manually removes STATE/.wedge-permanent-<key>-<hash12>; local patch 2026-08-19)"
-          if [ -n "$permanent_marker" ]; then
-            if ! date +%s > "$permanent_marker" 2>/dev/null; then
-              triage_log "wedge permanent marker write FAILED: $permanent_marker - aborting cap without firing terminal wake (next poll will retry)"
-              exit 1
-            fi
+          if ! date +%s > "$permanent_marker" 2>/dev/null; then
+            triage_log "wedge permanent marker write FAILED: $permanent_marker - aborting cap without firing terminal wake (next poll will retry)"
+            exit 1
           fi
           if ! fm_wake_append stale "$win" "$reason"; then
             rm -f "$permanent_marker"
@@ -2183,12 +2188,11 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
+      rm -f "$ssf" "$ewf"
+      clear_write_tracking "$key"
       paused_bound=1
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
-      else
-        rm -f "$ssf" "$ewf"
-        clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
