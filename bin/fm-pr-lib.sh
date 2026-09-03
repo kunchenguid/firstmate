@@ -988,11 +988,12 @@ fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path
 }
 
 # The terminal outcomes bin/fm-pr-poll.sh may report, and the outcomes a
-# retirement receipt may record. Both retire the poll, because a poll exists to
-# OBSERVE a terminal outcome and has nothing left to do once that outcome is on
-# record: `merged` on the report, `closed-unmerged` once its contradiction is
-# durably recorded (bin/fm-watch.sh owns that distinction). A close that could
-# not be recorded keeps its poll armed, which is what brings it back.
+# retirement receipt may record. Both retire the poll on the same condition,
+# because a poll exists to OBSERVE a terminal outcome and has nothing left to do
+# once that outcome is on record: the emitter reporting it. A close with no
+# standing claim, or with a claim about a different PR, writes no verdict and is
+# still fully recorded; an outcome that could not be recorded keeps its poll
+# armed, which is what brings it back.
 fm_pr_poll_outcome_valid() {  # <outcome>
   case "${1:-}" in merged|closed-unmerged) return 0 ;; esac
   return 1

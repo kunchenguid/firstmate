@@ -1229,6 +1229,44 @@ test_only_the_task_itself_may_withdraw_its_claim() {
   pass "only the task speaking for itself withdraws its claim, never a sub-event"
 }
 
+# The same authority rule in the ASSERTING direction, which is the half a rule
+# written only about retraction leaves open. A sub-event may no more speak a
+# task's terminal claim than withdraw one, and both shapes below are written by
+# code: bin/fm-brief.sh instructs workers to close routed phases with
+# `done [key=<work-slug>]`, and report_child_ledger_locked publishes a child's
+# verified outcome as `done [key=child-outcome-<id>-...]` into the PARENT's
+# status - carrying another task's `report=`, which the verifier would then
+# record as contradicted against a parent that never claimed it.
+test_only_the_task_itself_may_assert_its_claim() {
+  local dir state line
+  for line in \
+    'done [key=docs-pass]: that routed phase landed' \
+    'done [key=child-outcome-task-c-done-abc123]: child task-c done: closed out report=data/task-c/report.md' \
+    'done corr=0123456789abcdef: the answered request landed'; do
+    dir="$TMP_ROOT/claim-assert-subevent-$RANDOM"
+    state="$dir/state"
+    mkdir -p "$state"
+    printf 'done: pr=%s head=%s - shipped\n' "$PR_A" "$HEAD_A" > "$state/task-v.status"
+    printf '%s\n' "$line" >> "$state/task-v.status"
+    fm_done_claim_status "$state" task-v
+    case "$FM_DONE_CLAIM_LINE" in
+      *shipped*) ;;
+      *) fail "a sub-event became the task's own terminal claim: $FM_DONE_CLAIM_LINE" ;;
+    esac
+  done
+
+  # A sub-event may not assert a claim where the task has made none either.
+  dir="$TMP_ROOT/claim-assert-subevent-only"
+  state="$dir/state"
+  mkdir -p "$state"
+  printf 'done [key=child-outcome-task-c-done-abc123]: child task-c done: closed out report=data/task-c/report.md\n' \
+    > "$state/task-v.status"
+  fm_done_claim_status "$state" task-v
+  [ "$FM_DONE_CLAIM_STATE" = none ] \
+    || fail "a sub-event alone gave a task the claim state $FM_DONE_CLAIM_STATE"
+  pass "only the task speaking for itself asserts its claim, never a sub-event"
+}
+
 # Deliberately narrow: only `failed:` retracts. A task that is merely stuck is
 # still making its claim, and must stay held to it.
 test_only_a_failed_line_withdraws_the_claim() {
@@ -1329,6 +1367,24 @@ test_a_close_contradicts_an_established_claim_in_the_record() {
     *) fail "the contradiction did not name the close: $FM_DONE_CLAIM_REASON" ;;
   esac
   pass "a close records a contradiction over a claim established while the PR was open"
+}
+
+# `contradicted` is positive evidence of falsity and is unoverwritable short of a
+# fresh `verified`, so it may only be recorded against a claim about the very PR
+# whose close was observed. A task reused for a second PR still stands on its
+# established claim about the first, and the forge falsified nothing about that.
+test_a_close_contradicts_only_a_claim_about_the_pr_that_closed() {
+  local claim dir other
+  claim="done: pr=$PR_A head=$HEAD_A - shipped"
+  other=https://github.com/o/r/pull/8
+  dir=$(make_claim_world close-other-pr "$claim" verified "the PR is open at the claimed head") \
+    || fail "the established-claim fixture failed"
+  fm_merge_outcome_report "$dir" "$dir/state" task-v "$other" poll closed-unmerged \
+    || fail "the close outcome could not be published"
+  fm_done_claim_status "$dir/state" task-v
+  [ "$FM_DONE_CLAIM_STATE" = verified ] \
+    || fail "a close of another PR left the established claim reported as $FM_DONE_CLAIM_STATE"
+  pass "a close contradicts only a claim about the PR that actually closed"
 }
 
 # Neither arm may invent a verdict for a task that has asserted nothing. The
@@ -1668,8 +1724,10 @@ test_a_scout_claim_on_another_tasks_report_is_not_verified
 test_a_later_failed_line_withdraws_the_claim
 test_only_a_failed_line_withdraws_the_claim
 test_only_the_task_itself_may_withdraw_its_claim
+test_only_the_task_itself_may_assert_its_claim
 test_a_merge_marks_an_established_claim_stale
 test_a_close_contradicts_an_established_claim_in_the_record
+test_a_close_contradicts_only_a_claim_about_the_pr_that_closed
 test_a_terminal_outcome_invents_no_verdict_without_a_claim
 test_a_failed_verdict_write_still_publishes_the_outcome
 test_verdict_write_precedence_keeps_the_stronger_statement

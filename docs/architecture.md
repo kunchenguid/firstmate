@@ -26,7 +26,8 @@ Once that row reaches `FM_SECONDMATE_WAKE_STALL_SECS`, the primary appends one k
 Endpointless registered mates remain outside this scan because startup secondmate-liveness owns dead or missing endpoint recovery, and remote homes retain their host-local supervision boundary.
 `tests/fm-wake-queue.test.sh` pins the notification, idempotence, quiet-queue, and byte-for-byte foreign-row preservation guarantees.
 When a canonical validated PR poll returns a terminal outcome, the watcher routes it through the shared merge-outcome emitter before retiring the poll.
-`merged` retires on successful publication; `closed-unmerged` retires only once the emitter has durably recorded its contradiction against the task's standing claim, so a close nothing has corrected keeps its poll armed.
+Both outcomes retire on the same condition, the emitter recording the outcome, because a poll exists to observe a terminal outcome and has nothing left to do once that outcome is on record.
+A close with no standing claim, or with a claim about a different PR, writes no verdict and is still fully recorded, while an outcome the emitter could not record keeps its poll armed and brings it back.
 [`bin/fm-merge-outcome-lib.sh`](../bin/fm-merge-outcome-lib.sh)'s header owns role routing, PR-specific wake identity, marker-locked normal deduplication, and the at-least-once ordering that prefers a rare duplicate over silence.
 After successful outcome publication, the watcher immediately delivers the emitter's local actionable poll row and publishes a private retirement receipt bound to the poll's registration, bytes, file identities, metadata, provider, URL, and task ID.
 The retirement receipt makes poll cleanup safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves task metadata including `pr=` and `pr_head=`.

@@ -76,7 +76,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   local home=$1 state=$2 id=$3 url=$4 origin=$5 outcome=${6:-merged}
   local self_rc=0 destination='' line lock status=0 wake_note claimed=0
   local provider host path number claim_state='' claim_probe='' claim_hash=''
-  local claim_verdict='' claim_reason=''
+  local claim_rest='' claim_pr='' claim_verdict='' claim_reason=''
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -100,12 +100,23 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   # record to contradict. Asserting one would make this publication itself the
   # unfounded claim the whole verdict path exists to stop. Read in a subshell so
   # the claim globals a caller may be holding are left alone.
+  #
+  # The same probe also reports WHICH PR the standing claim is about, normalised
+  # to the same identity this observation carries, because a task may be reused
+  # for a second PR and re-registered while an established claim about the first
+  # still stands.
   claim_probe=$(fm_done_claim_status "$state" "$id" >/dev/null 2>&1 \
-    && printf '%s\t%s' "$FM_DONE_CLAIM_STATE" \
-      "$(fm_done_claim_hash "$FM_DONE_CLAIM_LINE" 2>/dev/null || true)")
+    && printf '%s\t%s\t%s' "$FM_DONE_CLAIM_STATE" \
+      "$(fm_done_claim_hash "$FM_DONE_CLAIM_LINE" 2>/dev/null || true)" \
+      "$(fm_pr_url_parse "$FM_DONE_CLAIM_PR" >/dev/null 2>&1 \
+        && printf '%s %s %s %s' \
+          "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER")")
   claim_state=${claim_probe%%$'\t'*}
-  claim_hash=${claim_probe#*$'\t'}
-  [ "$claim_hash" != "$claim_probe" ] || claim_hash=
+  claim_rest=${claim_probe#*$'\t'}
+  [ "$claim_rest" != "$claim_probe" ] || claim_rest=
+  claim_hash=${claim_rest%%$'\t'*}
+  claim_pr=${claim_rest#*$'\t'}
+  [ "$claim_pr" != "$claim_rest" ] || claim_pr=
   # An unreadable claim state is treated as no claim: the weaker wording is
   # true either way, while the stronger one would not be.
   case "$claim_state" in ''|none) ;; *) claimed=1 ;; esac
@@ -130,10 +141,22 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [<outc
   # armed at PR registration, long before any claim, so inventing a verdict for
   # a task that has asserted nothing would make this publication itself the
   # unfounded claim the whole verdict path exists to stop.
+  #
+  # The close arm carries one further condition the merge arm does not need, and
+  # the asymmetry is deliberate rather than an oversight. `contradicted` is
+  # positive evidence of falsity and is unoverwritable short of a fresh
+  # `verified`, so it may only be recorded against a claim about the very PR
+  # whose close was observed. A task reused for a second PR still standing on an
+  # established claim about the first would otherwise have that claim marked
+  # false by an observation about a different object. `stale` needs no such test:
+  # it only asks the next gate to re-verify against the world that now exists,
+  # which is harmless whichever claim is standing.
   if [ "$claimed" -eq 1 ] && [ -n "$claim_hash" ]; then
     if [ "$outcome" != merged ]; then
-      claim_verdict=contradicted
-      claim_reason="$FM_PR_URL was closed without merging, so this task is not done"
+      if [ "$claim_pr" = "$provider $host $path $number" ]; then
+        claim_verdict=contradicted
+        claim_reason="$FM_PR_URL was closed without merging, so this task is not done"
+      fi
     elif [ "$claim_state" = verified ]; then
       claim_verdict=stale
       claim_reason="$FM_PR_URL merged after this claim was established, so what was established no longer describes the world; re-run bin/fm-verify-done.sh $id"

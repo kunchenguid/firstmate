@@ -147,28 +147,47 @@ fm_done_claim_has_identity() {
   [ -n "$FM_DONE_CLAIM_REPORT" ]
 }
 
-# The task's STANDING terminal claim, or empty when it has none. A status log is
-# an append-only event log, so the newest `done:` is the one under test; earlier
-# claims were superseded by whatever the worker did next.
+# AUTHORITY over a task's terminal claim is a SINGLE SPEAKER TEST, and it governs
+# BOTH directions equally: asserting a claim and retracting one are the same
+# question, because both CHANGE what claim stands. Only the task speaking for
+# itself may do either.
 #
-# A later `failed:` line WITHDRAWS the claim, and the task then has none. Two
-# things have to be true of that line, and the second is an AUTHORITY rule, not a
-# formatting one.
+# A line carrying a correlation token or a routed `[key=...]` is a SUB-EVENT -
+# one routed phase, or one child's outcome - speaking about part of the work, not
+# the task speaking about itself. It may neither assert nor retract.
+#
+# This is an authority rule, not a formatting rule about verbs, so do not
+# "simplify" it into one. `status_line_verb` deliberately reads THROUGH a
+# `[key=...]` and through a correlation token, which is right for classification
+# and wrong for authority, so the test is made on the undecorated prefix instead.
+# It is written by code, not only by prose: bin/fm-brief.sh instructs workers to
+# close routed phases with `done [key=<work-slug>]`, and
+# report_child_ledger_locked publishes both `done [key=child-outcome-...]` and
+# `failed [key=child-outcome-...]` into a PARENT home's status through
+# bin/fm-parent-channel-lib.sh. Without the rule a child's outcome would become,
+# or withdraw, its mate task's own terminal claim - and on a scout-kind task the
+# child shape carries another task's `report=`, which the verifier would then
+# record as `contradicted`. One predicate, called from both arms below, so a
+# future author cannot close one direction and leave the other open.
+fm_done_claim_own_voice() {  # <trimmed-line> <bare-verb>
+  local head=${1%%:*}
+  head=${head%"${head##*[![:space:]]}"}
+  [ "$head" = "${2:-}" ]
+}
+
+# The task's STANDING terminal claim, or empty when it has none. A status log is
+# an append-only event log, so the newest `done:` the task itself spoke is the one
+# under test; earlier claims were superseded by whatever the worker did next.
+#
+# A later `failed:` line WITHDRAWS the claim, and the task then has none.
 #
 # WHAT may retract: only `failed:`. `blocked:` and `needs-decision:` must not,
 # because they say the work is ongoing, not that the assertion is withdrawn, and
 # a task sitting on a claim it still makes should stay refused while it is merely
 # stuck.
 #
-# WHO may retract: only the task speaking for itself, which means the line must
-# carry no correlation token and no routed `[key=...]`. A decorated line is a
-# SUB-EVENT - one routed phase, or one child's outcome - and a sub-event has no
-# authority over the task's own terminal assertion. This is not hypothetical
-# tidiness: bin/fm-brief.sh instructs workers to close routed phases with keyed
-# lines, and report_child_ledger_locked publishes `failed [key=child-outcome-...]`
-# into a PARENT home's status through bin/fm-parent-channel-lib.sh, so without
-# this a child's failure would retract its mate task's own claim. Do not
-# "simplify" this back to any-failed-line: the point is who is speaking.
+# WHO may assert or retract: fm_done_claim_own_voice above owns that, in both
+# directions.
 #
 # Why the rule exists at all, so it is not "simplified" back: without it a task
 # whose PR was abandoned is held forever to an assertion it has already
@@ -181,13 +200,11 @@ fm_done_claim_has_identity() {
 # withdrawing it and people withdraw it; make it force and they learn to reach
 # for force.
 #
-# This runs per task on every current-state read and every session-start digest,
-# so the leading-verb test is only paid for by lines that could possibly carry
-# one of the two verbs. `status_line_verb` costs a fork per call, and a line
+# This runs per task on every current-state read and every session-start digest.
+# The speaker test is fork-free and exact rather than an approximation: a line
 # whose verb is `done` or `failed` always begins with that word after its leading
-# whitespace - a correlation token or a `[key=...]` only ever follows the verb
-# word - so the fork-free prefix test below is exact, not an approximation, and
-# skips it for every other line.
+# whitespace, and a correlation token or a `[key=...]` only ever follows the verb
+# word, so an undecorated prefix is the task's own voice and nothing else is.
 fm_done_claim_last() {  # <status-file>
   local f=${1:-} line trimmed last=
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
@@ -195,15 +212,11 @@ fm_done_claim_last() {  # <status-file>
     trimmed=${line#"${line%%[![:space:]]*}"}
     case "$trimmed" in
       done*)
-        [ "$(status_line_verb "$line")" = "done" ] || continue
+        fm_done_claim_own_voice "$trimmed" 'done' || continue
         last=$line
         ;;
       failed*)
-        # Compared BEFORE any decoration is stripped, which is the authority test
-        # itself: status_line_verb reads through a `[key=...]` and through a
-        # correlation token, so a sub-event's verb is `failed` too. Only a line
-        # whose whole prefix is the bare verb is the task speaking for itself.
-        [ "${trimmed%%:*}" = "failed" ] || continue
+        fm_done_claim_own_voice "$trimmed" 'failed' || continue
         last=
         ;;
     esac
