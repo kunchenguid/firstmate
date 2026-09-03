@@ -34,16 +34,22 @@ Captain-facing start (production home, after `gh auth login` and clone) is one o
 
 ```sh
 claude
+codex
 grok --trust
+opencode
 pi
 cursor-agent --trust
 ```
 
-Grok needs `--trust` once per clone so project hooks load.
+Grok needs `--trust` once per clone so project hooks load, and its session-start hook is fail-open because Grok discards hook stdout from model context.
 
 Cursor Agent CLI also needs `--trust`, or none of its project hooks load.
 
-The harness session-open hook then runs `bin/fm-session-start.sh`.
+Run-tier session-open hooks (Codex, Cursor, and Pi) run `bin/fm-session-start.sh` themselves.
+
+Nudge-tier hooks (Claude and OpenCode) ask the agent to run that script once; Claude supports native stdout context injection, while OpenCode delivers the nudge through its interactive TUI.
+
+Grok requires an explicit manual `bin/fm-session-start.sh` run after startup because its hook is fail-open.
 
 Ready signal on stdout: a banner `SESSION START - <home>` and a lock line `lock acquired: harness pid <n>`.
 
@@ -136,7 +142,7 @@ Observables:
 - `schema` is `fm-bearings.v1`.
 - `home` is the last two path components of `$FM_HOME` (for `/tmp/verify-firstmate-home-<id>` that is `tmp/verify-firstmate-home-<id>`).
 - `prs` is `not_requested (run: /bearings include PRs)` when live PRs were not asked.
-- Seeded in-flight work appears under `in_flight` only when `data/backlog.md` and matching `state/<id>.meta` both exist.
+- Seeded in-flight work appears under `in_flight` when matching `state/<id>.meta` exists; a backlog row without metadata is an inventory gap.
 
 Do not pass `--include-prs` unless the captain asked to include PRs and `gh` auth is valid.
 
@@ -145,6 +151,8 @@ Chat composition of the four sections is agent judgment over that snapshot; the 
 `/ahoy` is session-history-only after helm is taken and cannot be driven by a script.
 
 Inbox and watcher recipes are in their feature files.
+
+A Firstmate primary follows the arm recipe in `features/watcher.md`; inline env, redirection, and bundled lists are denied.
 
 ## Evidence
 

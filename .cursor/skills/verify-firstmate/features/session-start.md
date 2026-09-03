@@ -5,13 +5,15 @@ The captain's Firstmate session takes the helm by running one ordered digest: it
 ## Sub-features
 
 - `lock` - acquire or refuse the per-home session lock before any mutating sweep
-- `digest` - print the `SESSION START - <home>` banner plus lock, bootstrap, wake, fleet, and context sections
+- `digest` - print the `SESSION START - <home>` banner plus lock, bootstrap, wake, supervision, fleet, network, and context sections
 - `reemit` - reprint the digest after a clear or compact without re-running startup sweeps
-- `completion` - write `state/.session-start-complete` with the lock pid when this session owns the lock
+- `completion` - write `state/.session-start-complete` with the lock pid on a locked full startup, not on `--reemit`
 
 ## How to get to it (user POV)
 
-- Launch `claude`, `grok --trust`, `pi`, or `cursor-agent --trust` inside the clone so the session-open hook runs the digest
+- Launch `cursor-agent --trust`, `codex`, or `pi` inside the clone so the session-open hook runs the digest
+- Launch `claude` or `opencode` and run `bin/fm-session-start.sh` once when the hook nudges rather than auto-running the digest
+- Launch `grok --trust` and run `bin/fm-session-start.sh` once after startup; Grok's hook is fail-open and does not deliver that instruction
 - Ask Firstmate to take the helm, or run `bin/fm-session-start.sh` once at the start of a session that has no digest yet
 - After `/clear` or compaction, run `bin/fm-session-start.sh --reemit` when the same session still owns the lock
 

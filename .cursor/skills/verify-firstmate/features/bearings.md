@@ -18,7 +18,7 @@ The captain asks Firstmate where the fleet stands and gets a four-section digest
 
 ## Driving it with bin/fm-bearings-snapshot.sh
 
-Preconditions: scratch home launched and doctor-passed; `FM_HOME` exported to that home; `jq` on `PATH` for `--json`.
+Preconditions: scratch home launched and doctor-passed; `FM_HOME` exported to that home; `jq` on `PATH` for `--json`; no pending away-return catch-up on that home (`bin/fm-afk-return.sh guard` must pass).
 
 - Gather the local snapshot: run `bin/fm-bearings-snapshot.sh --json` and observe `"schema": "fm-bearings.v1"` and `"home"` equal to the last two path components of `$FM_HOME`.
 - Confirm local-only: observe `"prs": "not_requested (run: /bearings include PRs)"` and that no `candidate_prs` object is present.
@@ -32,6 +32,10 @@ The chat digest is agent-composed from this snapshot; do not invent a second fle
 
 `--include-prs` is the only GitHub path; skip it unless auth is valid and the captain asked for PRs.
 
+The snapshot refuses while away-mode return catch-up is pending; that is `bin/fm-afk-return.sh guard`, not a broken gather.
+
 An in-flight backlog row without matching `state/<id>.meta` is an inventory gap, not Underway.
+
+A minimal `kind=ship` meta still appears under `in_flight`; without a worktree the row may say `doing` `worktree gone (torn down?)`.
 
 `/bearings lavish` needs `lavish-axi` and is not the primary prove path.

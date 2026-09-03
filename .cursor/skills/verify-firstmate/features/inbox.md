@@ -21,10 +21,11 @@ The captain queues a note for Firstmate while Firstmate is mid-turn, then later 
 
 Preconditions: scratch home launched and doctor-passed; `FM_HOME` exported to that home; no inbox AWS config required for `note`, `list`, `status`, or `drain`.
 
-- Queue a note: run `bin/fm-inbox.sh note verify-firstmate seeded note` and observe `queued <id>` plus `firstmate will pick this up at its next check.`
+- Queue a note: run `bin/fm-inbox.sh note verify-firstmate seeded note` and observe `queued <id>`, an indented one-line summary, and `  firstmate will pick this up at its next check.`
 - See the record: run `bin/fm-inbox.sh list` and observe that `<id>` and the body `verify-firstmate seeded note`.
-- See the side effect: run `bin/fm-inbox.sh status` and observe `inbox    1 note(s) waiting for firstmate` and `home` equal to `$FM_HOME`.
+- See the side effect: run `bin/fm-inbox.sh status` and observe the read-only banner, `home     $FM_HOME`, and `inbox    1 note(s) waiting for firstmate`.
 - Confirm the wake stayed in this home: `test -f "$FM_HOME/state/inbox/<id>.note"` and that the live code-root `state/inbox/` was not created.
+- Acknowledge it: run `bin/fm-inbox.sh drain --ack <id>` and observe `acked <id>` plus the note now at `$FM_HOME/state/inbox/handled/<id>.note`.
 
 ## Gotchas
 
