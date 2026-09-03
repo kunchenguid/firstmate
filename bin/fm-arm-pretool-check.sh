@@ -46,11 +46,12 @@ CMD=""
 CMD_SET=0
 BACKGROUND=""
 CLAUDE_MODE=0
+COPILOT_MODE=0
 CURSOR_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--copilot|--cursor]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Copilot
 toolArgs.command, Grok toolInput.command, or Claude/Codex/Cursor tool_input.command).
@@ -89,6 +90,10 @@ while [ "$#" -gt 0 ]; do
       CLAUDE_MODE=1
       shift
       ;;
+    --copilot)
+      COPILOT_MODE=1
+      shift
+      ;;
     --cursor)
       CURSOR_MODE=1
       shift
@@ -114,7 +119,8 @@ if [ "$CMD_SET" -eq 0 ]; then
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
-  if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  if [ "$CURSOR_MODE" -eq 0 ] && [ "$COPILOT_MODE" -eq 0 ] \
+     && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
   CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolArgs.command // .toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
@@ -196,5 +202,7 @@ if [ "$CURSOR_MODE" -eq 1 ]; then
   exit 0
 fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$COPILOT_MODE" -eq 0 ]; then
+  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+fi
 exit 2

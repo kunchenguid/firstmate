@@ -26,10 +26,14 @@ SH
 }
 
 test_environment_marker_wins() {
-  local out
-  out=$(COPILOT_CLI=1 CLAUDECODE=1 "$HARNESS")
+  local fakebin out
+  fakebin="$TMP_ROOT/env-marker"
+  make_ps "$fakebin"
+  out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT PATH="$fakebin:$PATH" \
+    FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' COPILOT_CLI=1 CLAUDECODE=1 "$HARNESS")
   [ "$out" = copilot ] || fail "COPILOT_CLI marker detected as '$out'"
-  out=$(COPILOT_CLI=1 CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
+  out=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT PATH="$fakebin:$PATH" \
+    FM_FAKE_PS_COMM=bash FM_FAKE_PS_ARGS='bash' COPILOT_CLI=1 CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent "$HARNESS")
   [ "$out" = copilot ] || fail "COPILOT_CLI marker lost to inherited Cursor markers: '$out'"
   pass "Copilot's verified environment marker identifies the current harness"
 }
@@ -47,6 +51,20 @@ test_process_shapes_are_anchored() {
     PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=node FM_FAKE_PS_ARGS='node runner.js copilot' "$HARNESS")
   [ "$out" = unknown ] || fail "an unrelated later copilot argument detected as '$out'"
   pass "Copilot process detection accepts argv zero and rejects later-argument false positives"
+}
+
+test_actual_host_overrides_inherited_markers() {
+  local fakebin out
+  fakebin="$TMP_ROOT/ancestry-over-marker"
+  make_ps "$fakebin"
+
+  out=$(COPILOT_CLI=1 PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=claude FM_FAKE_PS_ARGS='claude --dangerously-skip-permissions' "$HARNESS")
+  [ "$out" = claude ] || fail "real Claude ancestry lost to inherited Copilot markers: '$out'"
+
+  out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PATH="$fakebin:$PATH" \
+    FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='/opt/copilot/bin/copilot --allow-all' "$HARNESS")
+  [ "$out" = copilot ] || fail "real Copilot ancestry lost to inherited foreign markers: '$out'"
+  pass "Actual Claude and Copilot ancestry outrank inherited foreign markers"
 }
 
 test_session_lock_identity_matches_copilot() {
@@ -70,15 +88,40 @@ make_hook_fixture() {
   cat > "$dir/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
 cat > "$FM_TEST_PAYLOAD"
+[ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
 printf 'digest line one\ndigest line two\n'
 SH
   cat > "$dir/bin/fm-turnend-guard.sh" <<SH
 #!/usr/bin/env bash
 cat > "\$FM_TEST_PAYLOAD"
+[ -z "\${FM_TEST_ARGS:-}" ] || printf '%s\n' "\$*" > "\$FM_TEST_ARGS"
 printf '%s\n' 'restore Firstmate supervision' >&2
 exit $guard_status
 SH
-  chmod +x "$dir/bin/fm-sessionstart-run.sh" "$dir/bin/fm-turnend-guard.sh"
+  cat > "$dir/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+cat > "$FM_TEST_PAYLOAD"
+[ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
+printf '%s\n' 'arm denied' >&2
+exit 2
+SH
+  cat > "$dir/bin/fm-cd-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+cat > "$FM_TEST_PAYLOAD"
+[ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
+printf '%s\n' 'cd denied' >&2
+exit 2
+SH
+  cat > "$dir/bin/fm-subagent-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+cat > "$FM_TEST_PAYLOAD"
+[ -z "${FM_TEST_ARGS:-}" ] || printf '%s\n' "$*" > "$FM_TEST_ARGS"
+printf '%s\n' 'subagent denied' >&2
+exit 2
+SH
+  chmod +x "$dir/bin/fm-sessionstart-run.sh" "$dir/bin/fm-turnend-guard.sh" \
+    "$dir/bin/fm-arm-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh" \
+    "$dir/bin/fm-subagent-pretool-check.sh"
 }
 
 run_copilot_hook_fixture() {  # <fakebin> <dir> <mode> <payload-file> [extra env...]
@@ -151,10 +194,11 @@ test_session_start_translates_context() {
   make_ps "$fakebin"
   printf '%s' '{"source":"startup"}' > "$dir/in.json"
   out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
-    FM_TEST_PAYLOAD="$payload" "$dir/bin/fm-copilot-hook.sh" session-start < "$dir/in.json")
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" session-start < "$dir/in.json")
   printf '%s' "$out" | jq -e '.additionalContext == "digest line one\ndigest line two\n"' >/dev/null \
     || fail "sessionStart adapter returned invalid context: $out"
   [ "$(cat "$payload")" = '{"source":"startup"}' ] || fail "sessionStart payload was not forwarded"
+  [ "$(cat "$dir/args.txt")" = --copilot ] || fail "Copilot sessionStart did not use the native invocation mode"
   pass "Copilot sessionStart returns the full digest as additionalContext"
 }
 
@@ -173,6 +217,49 @@ test_agent_stop_translates_block() {
   [ "$(cat "$payload")" = '{"sessionId":"s1","stop_hook_active":false}' ] \
     || fail "agentStop payload was not forwarded"
   pass "Copilot agentStop translates the shared guard refusal into a native block"
+}
+
+test_copilot_native_policies_bypass_compatibility_stand_down() {
+  local dir fakebin payload out rc args
+  dir="$TMP_ROOT/native-copilot-policies"
+  fakebin="$dir/fakebin"
+  payload="$dir/payload.json"
+  make_hook_fixture "$dir" 2
+  make_ps "$fakebin"
+
+  printf '%s' '{"toolArgs":{"command":"bin/fm-watch-arm.sh &"}}' > "$dir/arm.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-arm < "$dir/arm.json" 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "Copilot pretool-arm should preserve deny exit 2, got $rc: $out"
+  [ -z "${out##*arm denied*}" ] || fail "Copilot pretool-arm lost the underlying deny reason: $out"
+  [ "$(cat "$payload")" = '{"toolArgs":{"command":"bin/fm-watch-arm.sh &"}}' ] || fail "Copilot pretool-arm did not forward the payload"
+  args=$(cat "$dir/args.txt")
+  [ "$args" = --copilot ] || fail "Copilot pretool-arm did not use the native invocation mode: $args"
+
+  printf '%s' '{"toolArgs":{"command":"cd projects/demo"}}' > "$dir/cd.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-cd < "$dir/cd.json" 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "Copilot pretool-cd should preserve deny exit 2, got $rc: $out"
+  args=$(cat "$dir/args.txt")
+  [ "$args" = --copilot ] || fail "Copilot pretool-cd did not use the native invocation mode: $args"
+
+  printf '%s' '{"toolName":"task"}' > "$dir/subagent.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" pretool-subagent < "$dir/subagent.json" 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "Copilot pretool-subagent should preserve deny exit 2, got $rc: $out"
+  args=$(cat "$dir/args.txt")
+  [ "$args" = --copilot ] || fail "Copilot pretool-subagent did not use the native invocation mode: $args"
+
+  printf '%s' '{"sessionId":"s1","stop_hook_active":false}' > "$dir/stop.json"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PS_COMM=MainThread FM_FAKE_PS_ARGS='copilot --allow-all' \
+    FM_TEST_PAYLOAD="$payload" FM_TEST_ARGS="$dir/args.txt" "$dir/bin/fm-copilot-hook.sh" agent-stop < "$dir/stop.json")
+  printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null || fail "Copilot agent-stop lost block translation: $out"
+  args=$(cat "$dir/args.txt")
+  [ "$args" = --copilot ] || fail "Copilot agent-stop did not use the native invocation mode: $args"
+  pass "Copilot native hooks bypass only the compatibility stand-down"
 }
 
 test_agent_stop_allows_clean_stop() {
@@ -262,9 +349,11 @@ EOF
 
 test_environment_marker_wins
 test_process_shapes_are_anchored
+test_actual_host_overrides_inherited_markers
 test_session_lock_identity_matches_copilot
 test_session_start_translates_context
 test_agent_stop_translates_block
+test_copilot_native_policies_bypass_compatibility_stand_down
 test_agent_stop_allows_clean_stop
 test_primary_hook_registration
 test_non_cli_hook_surface_stands_down
