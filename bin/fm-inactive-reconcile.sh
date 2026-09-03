@@ -13,7 +13,7 @@
 # ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
 # so that line is published on the parent channel at once through
 # bin/fm-parent-channel-lib.sh as
-#   <state> [key=child-outcome-<child>-<state>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
+#   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
 # report pointer, without consulting fm-crew-state.sh and without waiting for
 # the inactive cadence. A line still being appended (no trailing newline yet)
@@ -366,7 +366,7 @@ report_child_ledger_locked() { # <id> <meta>
   pr=$(pr_for_task "$meta" "$status" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
-  outcome_key="child-outcome-$id-$state"
+  outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
   note=$(clean_field "$(status_line_note "$last")")

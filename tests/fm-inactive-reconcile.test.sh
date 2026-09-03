@@ -122,6 +122,20 @@ outcome_count() { # <home> <suffix>
   find "$1/state/terminal-outcomes" -type f -name "*.$2" 2>/dev/null | wc -l | tr -d ' '
 }
 
+reported_outcome_key() { # <home> <id> <state>
+  local home=$1 id=$2 state=$3 record key
+  for record in "$home/state/terminal-outcomes"/*.reported; do
+    [ -f "$record" ] || continue
+    grep -Fxq "task_id=$id" "$record" || continue
+    grep -Fxq "state=$state" "$record" || continue
+    key=$(sed -n 's/^outcome_key=//p' "$record")
+    case "$key" in
+      "child-outcome-$id-$state-"[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) printf '%s\n' "$key"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 prime_seen() { # <state> <status>
   FM_STATE_OVERRIDE="$1" bash -c '
     . "$1"
@@ -157,11 +171,12 @@ test_main_direct_terminal_presentation_receipt() {
 # and takes the outcome away from the inactive path so it is never reported
 # twice.
 test_local_secondmate_delivers_terminal_ledger_line() {
-  local expected
+  local expected key
   make_world local; bind_secondmate local
   write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
-  expected='done [key=child-outcome-child-done]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off'
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  key=$(reported_outcome_key "$MATE" child done) || fail "ledger receipt did not retain its collision-resistant key"
+  expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off"
   grep -Fxq "$expected" "$MAIN/state/mate.status" \
     || fail "secondmate did not deliver the child's ledger line on a plain poll: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
   [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "ledger delivery receipt was not durable"
@@ -212,6 +227,7 @@ test_busy_child_does_not_starve_later_ledger_outcomes() {
 # under the failed verb, and a later terminal line after recovery is a new
 # delivery rather than a suppressed duplicate.
 test_secondmate_ledger_delivery_carries_report_and_failure() {
+  local scout_key boom_key replaced_key
   make_world ledger-shapes; bind_secondmate local
   write_child "$MATE" scout 'done: report written'
   mkdir -p "$MATE/data/scout"
@@ -221,15 +237,19 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   awk '$0 !~ /^pr=/' "$MATE/state/replaced-pr.meta" > "$MATE/state/replaced-pr.meta.tmp"
   mv "$MATE/state/replaced-pr.meta.tmp" "$MATE/state/replaced-pr.meta"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
-  grep -Fxq 'done [key=child-outcome-scout-done]: child scout done: report written pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off report=data/scout/report.md' \
+  scout_key=$(reported_outcome_key "$MATE" scout done) || fail "scout receipt key missing"
+  boom_key=$(reported_outcome_key "$MATE" boom failed) || fail "failed receipt key missing"
+  replaced_key=$(reported_outcome_key "$MATE" replaced-pr done) || fail "replacement PR receipt key missing"
+  grep -Fxq "done [key=$scout_key]: child scout done: report written pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off report=data/scout/report.md" \
     "$MAIN/state/mate.status" || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
-  grep -Fxq 'failed [key=child-outcome-boom-failed]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off' \
+  grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     "$MAIN/state/mate.status" || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
-  grep -Fxq 'done [key=child-outcome-replaced-pr-done]: child replaced-pr done: replacement PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off' \
+  grep -Fxq "done [key=$replaced_key]: child replaced-pr done: replacement PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
     "$MAIN/state/mate.status" || fail "ledger fallback did not prefer the terminal line PR: $(cat "$MAIN/state/mate.status")"
   printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
-  grep -Fq 'done [key=child-outcome-boom-done]: child boom done: fixed on retry' "$MAIN/state/mate.status" \
+  boom_key=$(reported_outcome_key "$MATE" boom done) || fail "recovered receipt key missing"
+  grep -Fq "done [key=$boom_key]: child boom done: fixed on retry" "$MAIN/state/mate.status" \
     || fail "a new terminal line after recovery was not delivered"
   [ "$(grep -c 'child-outcome-boom-' "$MAIN/state/mate.status")" = 2 ] \
     || fail "recovery delivered the wrong number of lines: $(cat "$MAIN/state/mate.status")"
@@ -248,11 +268,14 @@ test_long_terminal_lines_have_distinct_receipts() {
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   [ "$(outcome_count "$MATE" reported)" = 2 ] \
     || fail "distinct complete ledger lines collided in the receipt store"
+  [ "$(grep -c 'child-outcome-child-failed-' "$MAIN/state/mate.status")" = 2 ] \
+    || fail "distinct complete ledger lines collapsed into one parent delivery"
   pass "complete long ledger lines retain distinct receipt identities"
 }
 
 # A line still being appended has no trailing newline yet and must wait.
 test_secondmate_partial_ledger_line_waits_for_newline() {
+  local key
   make_world partial; bind_secondmate local
   write_child "$MATE" child 'working: nearly there'
   printf 'done: half writ' >> "$MATE/state/child.status"
@@ -261,7 +284,8 @@ test_secondmate_partial_ledger_line_waits_for_newline() {
     || fail "an unterminated ledger line was delivered: $(cat "$MAIN/state/mate.status")"
   printf 'ten\n' >> "$MATE/state/child.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
-  grep -Fq 'done [key=child-outcome-child-done]: child child done: half written' "$MAIN/state/mate.status" \
+  key=$(reported_outcome_key "$MATE" child done) || fail "completed ledger receipt key missing"
+  grep -Fq "done [key=$key]: child child done: half written" "$MAIN/state/mate.status" \
     || fail "the completed line was not delivered once its newline landed"
   pass "a ledger line still being appended waits for its newline"
 }
@@ -281,11 +305,12 @@ test_secondmate_remote_route_ledger_delivery() {
 # `report <child>` is the teardown-side delivery: it delivers or says nothing
 # is owed with 0, and returns non-zero only when the channel cannot be written.
 test_report_subcommand_delivers_and_refuses() {
-  local rc
+  local rc key
   make_world report; bind_secondmate local
   write_child "$MATE" child 'done: final word'
   run_report "$MATE" child || fail "report refused a deliverable ledger line"
-  grep -Fq 'done [key=child-outcome-child-done]: child child done: final word' "$MAIN/state/mate.status" \
+  key=$(reported_outcome_key "$MATE" child done) || fail "report receipt key missing"
+  grep -Fq "done [key=$key]: child child done: final word" "$MAIN/state/mate.status" \
     || fail "report did not deliver the child's final line"
   run_report "$MATE" child || fail "report did not treat an already delivered line as owed nothing"
   write_child "$MATE" quiet 'working: nothing terminal'
@@ -560,7 +585,7 @@ test_watcher_hook_and_idle_secondmate_exemption() {
 # line to the parent channel on its first cycle, with no line appended by the
 # mate and no wake needed in the mate home for it.
 test_watcher_poll_delivers_child_ledger_line_to_parent() {
-  local pid i
+  local pid i key
   make_world watcher-ledger; bind_secondmate local
   write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   prime_seen "$MATE/state" "$MATE/state/child.status"
@@ -578,7 +603,8 @@ test_watcher_poll_delivers_child_ledger_line_to_parent() {
     i=$((i + 1))
   done
   reap "$pid"
-  grep -Fxq 'done [key=child-outcome-child-done]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off' \
+  key=$(reported_outcome_key "$MATE" child done) || fail "watcher ledger receipt key missing"
+  grep -Fxq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     "$MAIN/state/mate.status" \
     || fail "the watcher poll did not deliver the child's ledger line to the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null; cat "$WORLD/mate-watch.out")"
   [ ! -s "$WORLD/forge.log" ] || fail "ledger delivery invoked a forge command"

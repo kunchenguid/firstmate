@@ -616,8 +616,9 @@ EOF
   run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
     || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
   tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
-  assert_grep "done [key=child-outcome-$origin-done]: child $origin done: report and visual review complete mode=scout report=data/$origin/report.md" \
-    "$parent/state/sample-mate.status" "the scout's final line did not reach the parent at teardown"
+  grep -Eq "^done \\[key=child-outcome-$origin-done-[0-9a-f]{8}\\]: child $origin done: report and visual review complete mode=scout report=data/$origin/report.md$" \
+    "$parent/state/sample-mate.status" \
+    || fail "the scout's final line did not reach the parent at teardown"
 
   json=$(run_bearings "$parent") || fail "parent Bearings could not read the secondmate captain call"
   printf '%s' "$json" | jq -e '
@@ -658,8 +659,8 @@ EOF
   tasks_in "$mate" add quoted-record-call "Choose quoted record handling" --kind ship --repo sample \
     --body 'Documentation quote: Resolution recorded by fm-captain-hold.' >/dev/null \
     || fail "could not create quoted-record captain call"
-  run_captain "$mate" hold quoted-record-call --reason "quoted record choice pending" >/dev/null \
-    || fail "quoted-record hold failed"
+  run_captain "$mate" hold quoted-record-call --reason "quoted record choice pending" \
+    --origin quoted-origin >/dev/null || fail "quoted-record hold failed"
   assert_grep 'needs-decision [key=captain-hold-quoted-record-call-1]: captain hold quoted-record-call: quoted record choice pending' \
     "$channel" "body prose was incorrectly counted as a resolution record"
 

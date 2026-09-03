@@ -1386,8 +1386,7 @@ test_secondmate_pr_registration_publishes_ready_line() {
 # every record) while the parent channel cannot be written; a rerun after the
 # repair delivers and completes.
 test_secondmate_home_teardown_delivers_final_line_or_refuses() {
-  local case_dir rc channel wt_head expected
-  expected='done [key=child-outcome-task-x1-done]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green pr=https://github.com/example/repo/pull/9 mode=local-only'
+  local case_dir rc channel wt_head
 
   case_dir=$(make_case mate-teardown-delivers)
   configure_secondmate_home "$case_dir" local "$case_dir/parent"
@@ -1404,7 +1403,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   rc=$?
   set -e
   expect_code 0 "$rc" "mate-teardown-delivers: teardown should succeed: $(cat "$case_dir/stderr")"
-  grep -Fxq "$expected" "$channel" \
+  grep -Eq '^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green pr=https://github.com/example/repo/pull/9 mode=local-only$' "$channel" \
     || fail "mate-teardown-delivers: the final ledger line did not reach the parent: $(cat "$channel" 2>/dev/null)"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "mate-teardown-delivers: teardown left the task record"
 
@@ -1433,7 +1432,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   rc=$?
   set -e
   expect_code 0 "$rc" "mate-teardown-refuses: rerun after repair should succeed: $(cat "$case_dir/stderr2")"
-  grep -Fq 'done [key=child-outcome-task-x1-done]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green' "$channel" \
+  grep -Eq '^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green' "$channel" \
     || fail "mate-teardown-refuses: the rerun did not deliver the final line"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "mate-teardown-refuses: rerun left the task record"
   pass "a secondmate home's teardown delivers the child's final line or refuses until it can"

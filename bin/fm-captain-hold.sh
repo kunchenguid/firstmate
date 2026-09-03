@@ -476,11 +476,7 @@ command_hold() {
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-  if [ -n "$origin" ]; then
-    publish_parent_hold "$id" "$occurrence" needs-decision "$reason (origin $origin)"
-  else
-    publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
-  fi
+  publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
 
