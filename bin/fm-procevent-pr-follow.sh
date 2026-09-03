@@ -53,10 +53,13 @@
 # classify   Print the captured document class: events, backfill, error, or
 #            unknown.
 # terminal   Always refuses (exit 1): the home scheduler never ends by itself.
-# retire     The one explicit, auditable retirement command. It stops the
-#            runner through the generic retirement path, then removes the
-#            cursor while retaining per-sequence receipts for queued replay. Refuses while unhandled captured
-#            results exist unless --force. Never invoked by a merge.
+# retire     The one explicit, auditable retirement command for one PR. It
+#            drops that PR's cursor and durable state records (and any legacy
+#            per-PR registration) while retaining per-sequence receipts for
+#            queued replay, and retires the shared scheduler through the
+#            generic path only once the roster is empty. Refuses while
+#            unhandled captured results exist unless --force, leaving the
+#            tracking untouched. Never invoked by a merge.
 #
 # Detection contract (per poll, for the current head unless stated):
 #   new issue/PR comments; new inline review comments and replies; new review

@@ -154,10 +154,10 @@ case "$READY_RC" in
 esac
 # Arm durable lifecycle follow-through for this PR before the armed line and
 # with its registration output suppressed, so this script keeps its exact
-# single-line success contract: one persistent process-event source per PR
-# identity that survives task cleanup, merge, and restart, and follows the PR
-# for new comments, reviews, head moves, and check changes for its whole
-# retained lifetime. Refusing here leaves the standing follow-through
+# single-line success contract: a durable per-PR cursor under one home-level
+# process-event scheduler, which survives task cleanup, merge, and restart, and
+# follows the PR for new comments, reviews, head moves, and check changes for
+# its whole retained lifetime. Refusing here leaves the standing follow-through
 # instruction unenforced, so the failure is fatal and rerunning this script is
 # idempotent.
 if [ -n "$PR_HEAD" ]; then
