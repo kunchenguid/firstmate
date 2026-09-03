@@ -485,6 +485,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "skills/scroll-story/SKILL.md",
+      "audience": "public-product"
+    },
+    {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
     }

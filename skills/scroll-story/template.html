@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>One request, one durable event</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f3f0e8;
+      --page-grid: rgba(20, 47, 43, 0.055);
+      --panel: #fffdf7;
+      --panel-raised: #ffffff;
+      --text: #142a27;
+      --muted: #5f716d;
+      --faint: #d7ddd8;
+      --line: #c8d1cc;
+      --accent: #0c7489;
+      --accent-soft: rgba(12, 116, 137, 0.14);
+      --accent-glow: rgba(12, 116, 137, 0.28);
+      --success: #18794e;
+      --added: rgba(24, 121, 78, 0.13);
+      --added-glow: rgba(43, 177, 111, 0.22);
+      --warm: #d87731;
+      --schema-highlight: rgba(216, 119, 49, 0.13);
+      --shadow: 0 24px 70px rgba(31, 47, 44, 0.14);
+      --stage-height: min(68vh, 42rem);
+      --radius: 1.4rem;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --page: #0b1515;
+        --page-grid: rgba(198, 232, 225, 0.045);
+        --panel: #101f1f;
+        --panel-raised: #152827;
+        --text: #edf6f3;
+        --muted: #a1b7b1;
+        --faint: #2c403d;
+        --line: #38504c;
+        --accent: #67d5ee;
+        --accent-soft: rgba(103, 213, 238, 0.14);
+        --accent-glow: rgba(103, 213, 238, 0.28);
+        --success: #71e0a5;
+        --added: rgba(55, 184, 118, 0.14);
+        --added-glow: rgba(113, 224, 165, 0.2);
+        --warm: #f1a568;
+        --schema-highlight: rgba(241, 165, 104, 0.14);
+        --shadow: 0 26px 80px rgba(0, 0, 0, 0.38);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      overflow-x: hidden;
+      color: var(--text);
+      background-color: var(--page);
+      background-image:
+        linear-gradient(var(--page-grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--page-grid) 1px, transparent 1px);
+      background-size: 32px 32px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    .hero,
+    .outro {
+      width: min(76rem, calc(100% - 2rem));
+      margin-inline: auto;
+    }
+
+    .hero {
+      min-height: 72vh;
+      display: grid;
+      align-content: end;
+      padding-block: 10vh 12vh;
+    }
+
+    .kicker {
+      margin: 0 0 1rem;
+      color: var(--accent);
+      font: 700 0.76rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 12ch;
+      margin-bottom: 1.5rem;
+      font-size: clamp(3rem, 8vw, 7.6rem);
+      font-weight: 650;
+      line-height: 0.94;
+      letter-spacing: -0.065em;
+    }
+
+    .dek {
+      max-width: 44rem;
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: clamp(1.08rem, 2vw, 1.38rem);
+    }
+
+    .scrolly {
+      position: relative;
+      width: min(88rem, calc(100% - 2rem));
+      margin-inline: auto;
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(18rem, 0.75fr);
+      gap: clamp(2rem, 6vw, 6rem);
+      align-items: stretch;
+    }
+
+    .stage-column {
+      min-width: 0;
+      align-self: stretch;
+    }
+
+    .stage {
+      position: sticky;
+      top: 50vh;
+      transform: translateY(-50%);
+      height: var(--stage-height);
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .stage-header {
+      position: absolute;
+      z-index: 5;
+      inset: 0 0 auto;
+      height: 4.3rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0 1.25rem;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--panel) 93%, transparent);
+    }
+
+    .stage-header strong {
+      font-size: 0.9rem;
+      letter-spacing: -0.01em;
+    }
+
+    .stage-header span {
+      color: var(--muted);
+      font: 650 0.68rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .stage-body {
+      position: relative;
+      height: 100%;
+      min-width: 0;
+      padding-top: 4.3rem;
+    }
+
+    .stage-layer {
+      position: absolute;
+      inset: 4.3rem 0 0;
+      min-width: 0;
+      overflow: hidden;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 240ms ease, visibility 0s linear 240ms;
+    }
+
+    .stage-layer.is-active {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transition-delay: 0s;
+    }
+
+    .architecture {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .architecture .node {
+      opacity: 0.2;
+      transition: opacity 280ms ease, filter 280ms ease;
+    }
+
+    .architecture .node rect {
+      fill: var(--panel-raised);
+      stroke: var(--line);
+      stroke-width: 2;
+    }
+
+    .architecture .node text {
+      fill: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+
+    .architecture .node .node-label {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .architecture .node .node-kind {
+      fill: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .architecture .node.is-active {
+      opacity: 1;
+      filter: drop-shadow(0 0 11px var(--accent-glow));
+    }
+
+    .architecture .node.is-active rect {
+      stroke: var(--accent);
+    }
+
+    .architecture .edge {
+      fill: none;
+      stroke: var(--accent);
+      stroke-width: 3;
+      stroke-linecap: round;
+      stroke-dasharray: 1;
+      stroke-dashoffset: 1;
+      opacity: 0.13;
+      marker-end: url(#arrowhead);
+      transition: stroke-dashoffset 650ms ease, opacity 220ms ease;
+    }
+
+    .architecture .edge.is-drawn {
+      stroke-dashoffset: 0;
+      opacity: 1;
+    }
+
+    .code-wrap {
+      height: 100%;
+      display: grid;
+      align-content: center;
+      padding: clamp(1rem, 3vw, 2rem);
+      background:
+        radial-gradient(circle at 12% 12%, var(--accent-soft), transparent 34%),
+        var(--panel);
+    }
+
+    .file-label {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      margin: 0 0 0.8rem;
+      color: var(--muted);
+      font: 650 0.72rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .file-label::before {
+      content: "";
+      width: 0.62rem;
+      height: 0.62rem;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 0 0.3rem var(--added);
+    }
+
+    .code-panel {
+      width: 100%;
+      margin: 0;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: color-mix(in srgb, var(--panel-raised) 92%, var(--accent) 8%);
+      color: var(--text);
+      font: 500 clamp(0.68rem, 1.22vw, 0.9rem)/1.72 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      counter-reset: line;
+    }
+
+    .code-line {
+      display: block;
+      min-width: max-content;
+      padding: 0.08rem 1rem 0.08rem 0;
+      border-left: 3px solid transparent;
+      opacity: 0.38;
+      counter-increment: line;
+      transition: opacity 220ms ease, background 220ms ease, box-shadow 220ms ease;
+    }
+
+    .code-line::before {
+      content: counter(line);
+      display: inline-block;
+      width: 2.65rem;
+      margin-right: 0.75rem;
+      color: var(--muted);
+      text-align: right;
+    }
+
+    .code-line.added {
+      background: color-mix(in srgb, var(--added) 55%, transparent);
+    }
+
+    .code-line.added::before {
+      content: "+ " counter(line);
+      color: var(--success);
+    }
+
+    .code-line.is-active {
+      opacity: 1;
+      border-left-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .code-line.added.is-active {
+      background: var(--added);
+      box-shadow: inset 0 0 1.5rem var(--added-glow);
+    }
+
+    .schema-wrap {
+      height: 100%;
+      display: grid;
+      align-content: center;
+      gap: 1rem;
+      padding: clamp(1rem, 3vw, 2rem);
+      background:
+        radial-gradient(circle at 88% 18%, var(--schema-highlight), transparent 38%),
+        var(--panel);
+    }
+
+    .schema-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .schema-table {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: var(--panel-raised);
+      opacity: 0.28;
+      transition: opacity 280ms ease, border-color 280ms ease, box-shadow 280ms ease;
+    }
+
+    .schema-table.is-active {
+      border-color: var(--warm);
+      opacity: 1;
+      box-shadow: 0 0 0 1px var(--warm), 0 16px 34px var(--schema-highlight);
+    }
+
+    .schema-table h3 {
+      margin: 0;
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid var(--line);
+      font: 700 0.84rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .schema-column {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.75rem;
+      padding: 0.62rem 1rem;
+      border-bottom: 1px solid var(--faint);
+      color: var(--muted);
+      font-size: 0.77rem;
+      transition: color 220ms ease, background 220ms ease;
+    }
+
+    .schema-column:last-child {
+      border-bottom: 0;
+    }
+
+    .schema-column code {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      color: inherit;
+    }
+
+    .schema-column.is-active {
+      color: var(--text);
+      background: var(--schema-highlight);
+      font-weight: 700;
+    }
+
+    .relationship {
+      margin: 0;
+      color: var(--muted);
+      font: 600 0.72rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-align: center;
+    }
+
+    .steps {
+      min-width: 0;
+      display: grid;
+      gap: 38vh;
+      padding-block: 34vh 54vh;
+    }
+
+    .step {
+      min-height: 32vh;
+      padding: 1.5rem;
+      border: 1px solid transparent;
+      border-radius: 1.25rem;
+      background: color-mix(in srgb, var(--panel) 74%, transparent);
+      color: var(--muted);
+      opacity: 0.5;
+      transition: color 240ms ease, opacity 240ms ease, border-color 240ms ease, transform 240ms ease;
+    }
+
+    .step.is-active {
+      border-color: var(--line);
+      color: var(--text);
+      opacity: 1;
+      transform: translateX(-0.35rem);
+    }
+
+    .step-number {
+      display: block;
+      margin-bottom: 1.1rem;
+      color: var(--accent);
+      font: 700 0.7rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .step h2 {
+      margin-bottom: 0.75rem;
+      color: inherit;
+      font-size: clamp(1.65rem, 3vw, 2.35rem);
+      line-height: 1.05;
+      letter-spacing: -0.035em;
+    }
+
+    .step p:last-child {
+      margin-bottom: 0;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .outro {
+      min-height: 72vh;
+      display: grid;
+      place-content: center;
+      padding-block: 12vh;
+    }
+
+    .outro-card {
+      max-width: 48rem;
+      padding: clamp(1.5rem, 5vw, 4rem);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .outro h2 {
+      margin-bottom: 1rem;
+      font-size: clamp(2rem, 5vw, 4rem);
+      line-height: 1;
+      letter-spacing: -0.045em;
+    }
+
+    .outro p {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
+
+    @media (max-width: 50rem) {
+      :root {
+        --stage-height: min(70vh, 32rem);
+      }
+
+      .hero {
+        min-height: 62vh;
+      }
+
+      .scrolly {
+        display: block;
+        width: min(42rem, calc(100% - 1rem));
+      }
+
+      .stage-column {
+        height: auto;
+      }
+
+      .stage {
+        position: relative;
+        top: auto;
+        transform: none;
+        height: var(--stage-height);
+        margin-bottom: 1rem;
+      }
+
+      .steps {
+        gap: 1rem;
+        padding-block: 1rem 5rem;
+      }
+
+      .step {
+        min-height: auto;
+        opacity: 1;
+      }
+
+      .step.is-active {
+        transform: none;
+      }
+
+      .schema-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 31rem) {
+      .stage-header span {
+        display: none;
+      }
+
+      .code-wrap,
+      .schema-wrap {
+        padding: 0.75rem;
+      }
+
+      .code-panel {
+        font-size: 0.58rem;
+      }
+
+      .architecture .node-label {
+        font-size: 15px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+
+      .architecture .edge {
+        stroke-dashoffset: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <p class="kicker">Technical walkthrough / durable writes</p>
+    <h1>One request, one durable event.</h1>
+    <p class="dek">Follow a new order from the HTTP boundary to the database and out through an event, without losing the side effect if publishing fails.</p>
+  </header>
+
+  <main class="scrolly" id="story">
+    <div class="stage-column">
+      <aside class="stage" aria-hidden="true">
+        <div class="stage-header">
+          <strong>Create order transaction</strong>
+          <span>Scroll to trace</span>
+        </div>
+
+        <div class="stage-body">
+          <div class="stage-layer is-active" data-layer="architecture">
+            <svg class="architecture" viewBox="0 0 800 500" preserveAspectRatio="xMidYMid meet">
+              <defs>
+                <marker id="arrowhead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"></path>
+                </marker>
+              </defs>
+
+              <path id="edge-endpoint-service" class="edge" pathLength="1" d="M 220 235 C 260 235 274 235 320 235"></path>
+              <path id="edge-service-orders" class="edge" pathLength="1" d="M 470 220 C 520 190 536 145 600 130"></path>
+              <path id="edge-service-outbox" class="edge" pathLength="1" d="M 470 250 C 520 270 540 280 600 280"></path>
+              <path id="edge-outbox-broker" class="edge" pathLength="1" d="M 675 325 C 675 345 675 350 675 370"></path>
+
+              <g id="endpoint" class="node" data-focusable>
+                <rect x="65" y="190" width="155" height="90" rx="18"></rect>
+                <text class="node-kind" x="88" y="220">HTTP</text>
+                <text class="node-label" x="88" y="250">POST /orders</text>
+              </g>
+
+              <g id="service" class="node" data-focusable>
+                <rect x="320" y="190" width="150" height="90" rx="18"></rect>
+                <text class="node-kind" x="343" y="220">SERVICE</text>
+                <text class="node-label" x="343" y="250">OrderService</text>
+              </g>
+
+              <g id="orders" class="node" data-focusable>
+                <rect x="600" y="85" width="150" height="90" rx="18"></rect>
+                <text class="node-kind" x="623" y="115">POSTGRES</text>
+                <text class="node-label" x="623" y="145">orders</text>
+              </g>
+
+              <g id="outbox" class="node" data-focusable>
+                <rect x="600" y="235" width="150" height="90" rx="18"></rect>
+                <text class="node-kind" x="623" y="265">POSTGRES</text>
+                <text class="node-label" x="623" y="295">outbox_events</text>
+              </g>
+
+              <g id="broker" class="node" data-focusable>
+                <rect x="600" y="370" width="150" height="90" rx="18"></rect>
+                <text class="node-kind" x="623" y="400">BROKER</text>
+                <text class="node-label" x="623" y="430">orders.created</text>
+              </g>
+            </svg>
+          </div>
+
+          <div class="stage-layer" data-layer="code">
+            <div class="code-wrap">
+              <p class="file-label">order-service.ts / new transaction boundary</p>
+              <pre class="code-panel"><code><span class="code-line" data-line="1">async create(input: CreateOrder) {</span>
+<span class="code-line" data-line="2">  return this.db.transaction(async (tx) =&gt; {</span>
+<span class="code-line added" data-line="3">    const order = await tx.orders.insert({</span>
+<span class="code-line added" data-line="4">      ...input, status: "pending"</span>
+<span class="code-line added" data-line="5">    });</span>
+<span class="code-line added" data-line="6">    await tx.outbox.insert({</span>
+<span class="code-line added" data-line="7">      topic: "orders.created", payload: order</span>
+<span class="code-line added" data-line="8">    });</span>
+<span class="code-line" data-line="9">    return order;</span>
+<span class="code-line" data-line="10">  });</span>
+<span class="code-line" data-line="11">}</span></code></pre>
+            </div>
+          </div>
+
+          <div class="stage-layer" data-layer="schema">
+            <div class="schema-wrap">
+              <div class="schema-grid">
+                <section id="schema-orders" class="schema-table">
+                  <h3>orders</h3>
+                  <div class="schema-column" data-column="orders.id"><code>id</code><span>uuid PK</span></div>
+                  <div class="schema-column" data-column="orders.customer_id"><code>customer_id</code><span>uuid</span></div>
+                  <div class="schema-column" data-column="orders.status"><code>status</code><span>text</span></div>
+                  <div class="schema-column" data-column="orders.created_at"><code>created_at</code><span>timestamptz</span></div>
+                </section>
+
+                <section id="schema-outbox" class="schema-table">
+                  <h3>outbox_events</h3>
+                  <div class="schema-column" data-column="outbox.id"><code>id</code><span>uuid PK</span></div>
+                  <div class="schema-column" data-column="outbox.topic"><code>topic</code><span>text</span></div>
+                  <div class="schema-column" data-column="outbox.payload"><code>payload</code><span>jsonb</span></div>
+                  <div class="schema-column" data-column="outbox.published_at"><code>published_at</code><span>timestamptz?</span></div>
+                </section>
+              </div>
+              <p class="relationship">Both rows commit together; the publisher reads the outbox later.</p>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <section class="steps" aria-label="Order creation walkthrough">
+      <article class="step is-active" data-step="entry">
+        <span class="step-number">01 / Entry point</span>
+        <h2>The request enters once.</h2>
+        <p><code>POST /orders</code> validates the payload and calls <code>OrderService.create</code>. The endpoint does not publish an event itself.</p>
+      </article>
+
+      <article class="step" data-step="flow">
+        <span class="step-number">02 / Call flow</span>
+        <h2>Control moves into the service.</h2>
+        <p>The controller delegates one unit of work to <code>OrderService</code>, which owns the transaction and coordinates both repository writes.</p>
+      </article>
+
+      <article class="step" data-step="code">
+        <span class="step-number">03 / New code</span>
+        <h2>The transaction gains an outbox write.</h2>
+        <p>The added lines insert the order and its <code>orders.created</code> payload inside the same database transaction, so neither row can commit alone.</p>
+      </article>
+
+      <article class="step" data-step="write-order">
+        <span class="step-number">04 / Primary write</span>
+        <h2>The order row lands first.</h2>
+        <p>The service inserts a pending order into <code>orders</code>. This is the business record returned to the caller after the transaction commits.</p>
+      </article>
+
+      <article class="step" data-step="write-outbox">
+        <span class="step-number">05 / Durable handoff</span>
+        <h2>The event intent lands beside it.</h2>
+        <p>The service inserts a second row into <code>outbox_events</code> in the same transaction. A later publisher can retry delivery without recreating the order.</p>
+      </article>
+
+      <article class="step" data-step="schema">
+        <span class="step-number">06 / Data layer</span>
+        <h2>Three columns carry the change.</h2>
+        <p><code>orders.status</code> records the initial lifecycle state, while <code>outbox_events.topic</code> and <code>outbox_events.payload</code> describe the message to publish.</p>
+      </article>
+
+      <article class="step" data-step="event">
+        <span class="step-number">07 / Side effect</span>
+        <h2>Publishing is now recoverable.</h2>
+        <p>After commit, an outbox worker publishes <code>orders.created</code>. If the broker is unavailable, the durable outbox row remains available for retry and downstream consumers see no phantom order.</p>
+      </article>
+    </section>
+  </main>
+
+  <footer class="outro">
+    <div class="outro-card">
+      <p class="kicker">Result</p>
+      <h2>Atomic locally, reliable downstream.</h2>
+      <p>The request now creates its record and its event intent as one commit, separating database consistency from eventual message delivery.</p>
+    </div>
+  </footer>
+
+  <script>
+    (() => {
+      const steps = [...document.querySelectorAll("[data-step]")];
+      const layers = [...document.querySelectorAll("[data-layer]")];
+      const nodes = [...document.querySelectorAll(".architecture [data-focusable]")];
+      const edges = [...document.querySelectorAll(".architecture .edge")];
+      const codeLines = [...document.querySelectorAll(".code-line")];
+      const tables = [...document.querySelectorAll(".schema-table")];
+      const columns = [...document.querySelectorAll(".schema-column")];
+
+      const states = {
+        entry: {
+          layer: "architecture",
+          nodes: ["endpoint"]
+        },
+        flow: {
+          layer: "architecture",
+          nodes: ["endpoint", "service"],
+          edge: "edge-endpoint-service"
+        },
+        code: {
+          layer: "code",
+          lines: [3, 4, 5, 6, 7, 8]
+        },
+        "write-order": {
+          layer: "architecture",
+          nodes: ["service", "orders"],
+          edge: "edge-service-orders"
+        },
+        "write-outbox": {
+          layer: "architecture",
+          nodes: ["service", "outbox"],
+          edge: "edge-service-outbox"
+        },
+        schema: {
+          layer: "schema",
+          tables: ["schema-orders", "schema-outbox"],
+          columns: ["orders.status", "outbox.topic", "outbox.payload"]
+        },
+        event: {
+          layer: "architecture",
+          nodes: ["outbox", "broker"],
+          edge: "edge-outbox-broker"
+        }
+      };
+
+      function render(stepId) {
+        const state = states[stepId];
+        if (!state) return;
+
+        document.documentElement.dataset.activeStep = stepId;
+        steps.forEach((step) => {
+          step.classList.toggle("is-active", step.dataset.step === stepId);
+        });
+        layers.forEach((layer) => {
+          layer.classList.toggle("is-active", layer.dataset.layer === state.layer);
+        });
+        nodes.forEach((node) => {
+          node.classList.toggle("is-active", (state.nodes || []).includes(node.id));
+        });
+        edges.forEach((edge) => {
+          edge.classList.toggle("is-drawn", state.edge === edge.id);
+        });
+        codeLines.forEach((line) => {
+          line.classList.toggle("is-active", (state.lines || []).includes(Number(line.dataset.line)));
+        });
+        tables.forEach((table) => {
+          table.classList.toggle("is-active", (state.tables || []).includes(table.id));
+        });
+        columns.forEach((column) => {
+          column.classList.toggle("is-active", (state.columns || []).includes(column.dataset.column));
+        });
+      }
+
+      const observer = new IntersectionObserver((entries) => {
+        const crossing = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => {
+            const readingLine = window.innerHeight * 0.5;
+            return Math.abs(a.boundingClientRect.top - readingLine)
+              - Math.abs(b.boundingClientRect.top - readingLine);
+          });
+
+        if (crossing[0]) render(crossing[0].target.dataset.step);
+      }, {
+        rootMargin: "-46% 0px -46% 0px",
+        threshold: 0
+      });
+
+      steps.forEach((step) => observer.observe(step));
+      render(steps[0].dataset.step);
+    })();
+  </script>
+</body>
+</html>
