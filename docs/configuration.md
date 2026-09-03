@@ -318,6 +318,11 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 Changing this pin affects the next secondmate spawn or control-plane relaunch; the relaunch profile rules are owned by [`docs/agent-control.md`](agent-control.md#transactional-relaunch).
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
+OMP is a narrower provisional exception rather than a configured harness.
+Until the live personal-and-Salesforce evidence in [`docs/verification/runtime-backends.md`](verification/runtime-backends.md#omp-profile-adapter-candidate) is recorded, it is available only for a supervised invocation that explicitly supplies `--harness omp --profile personal|sf --backend herdr` and `FM_OMP_HERDR_EXPERIMENTAL=1`.
+The adapter calls Mist's installed `omp` or `ompp` zsh wrapper, records `profile=`, and refuses Firstmate model, effort, config, alias, environment, and raw-launch overrides.
+An omitted explicit harness, profile, or Herdr backend is refused before endpoint creation even when environment or local config would otherwise select those values.
+Raw launch commands rooted at `omp` or `ompp` stay outside that boundary and are recorded as `harness=raw-omp`.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.

@@ -302,6 +302,22 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### OMP profile adapter candidate
+
+OMP-on-Herdr remains provisional because no successful live personal-and-Salesforce profile run is recorded yet.
+The adapter deliberately reuses Mist's installed `omp` and `ompp` zsh wrappers and does not inspect authentication, sessions, providers, model configuration, or secrets.
+Hermetic fixtures cover the fixed wrapper argv, native readiness and prompt path, prompt injection resistance, closed recovery, unconfirmed cancellation capability, structured exit mechanics, and same-pane relaunch transaction.
+The opt-in live fixture prints the Herdr and both wrapper-reported OMP versions before it creates a private named lab session.
+Run it only from a captain-supervised workstation where both Mist profiles are already usable:
+
+```sh
+FM_OMP_HERDR_LIVE_E2E=1 \
+  TMPDIR=/private/tmp \
+  tests/fm-omp-herdr-live-e2e.test.sh
+```
+
+Until that command passes both profiles and its output is recorded here, ordinary OMP dispatch remains refused and only an explicit `FM_OMP_HERDR_EXPERIMENTAL=1` trial is available.
+
 ### Submit confirmation
 
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.

@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse, plus the provisional OMP trial boundary.
 user-invocable: false
 metadata:
   internal: true
@@ -25,6 +25,9 @@ Operational paths keep the context named by their owner: `config/` and active-ho
 ## Non-negotiable safety
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
+OMP is not an exception for ordinary dispatch.
+Its sole provisional path is a captain-supervised trial that explicitly names `--harness omp --profile personal|sf --backend herdr` and sets `FM_OMP_HERDR_EXPERIMENTAL=1` for that invocation.
+Do not select OMP from static config, a dispatch profile, fallback, or raw-command execution.
 If `config/crew-harness` or `config/secondmate-harness` names one, tell the captain under `../../../AGENTS.md` section 9 that the requested worker runtime is not verified, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime for future work.
 Do not pause current work for that choice.
 
@@ -89,7 +92,8 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "grok": "references/harness/grok.md",
     "kimi": "references/harness/kimi.md",
     "cursor": "references/harness/cursor.md",
-    "muse": "references/harness/muse.md"
+    "muse": "references/harness/muse.md",
+    "omp": "references/harness/omp.md"
   }
 }
 ```

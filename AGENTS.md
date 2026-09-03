@@ -199,6 +199,8 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
 The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `cursor`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
+OMP remains unverified until the checked-in personal-and-Salesforce Herdr trial records live evidence.
+The only exception is a captain-supervised, explicit `--harness omp --profile personal|sf --backend herdr` trial with `FM_OMP_HERDR_EXPERIMENTAL=1`; never select OMP from config, dispatch rules, fallback, or ordinary fleet work while it is experimental.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and fail-closed validation.
