@@ -110,17 +110,24 @@ for a in "$@"; do
   fi
 done
 serve() { jq -r "${filter:-.}" "$1" 2>/dev/null || exit 9; }
-if [ "$1" = pr ]; then
-  [ "$2" = view ] || { echo "unexpected gh pr subcommand: $*" >&2; exit 9; }
-  [ -n "${GH_TEST_POLL_LOG:-}" ] && printf 'view\n' >> "$GH_TEST_POLL_LOG"
-  serve "$fix/pr.json"
-  exit 0
-fi
 if [ "$1" = api ]; then
   case "$2" in
-    graphql)                        serve "$fix/reviews.json" ;;
+    *pulls/*/reviews*)
+      total=$(cat "$fix/reviews.total-pages" 2>/dev/null || printf '1')
+      page=$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9][0-9]*\).*/\1/p')
+      page=${page:-1}
+      if [[ " $* " = *" --include "* ]]; then
+        printf 'HTTP/2.0 200 OK\n'
+        if [ "$total" -gt 1 ]; then
+          printf 'Link: <https://api.github.test/reviews?per_page=100&page=%s>; rel="last"\n' "$total"
+        fi
+        printf '\n'
+      fi
+      [ -f "$fix/reviews.page.$page" ] && serve "$fix/reviews.page.$page" || serve "$fix/reviews.json"
+      ;;
     *issues/*/comments*)            serve "$fix/comments.json" ;;
     *pulls/*/comments*)             serve "$fix/rc.json" ;;
+    repos/*/pulls/*)                [ -n "${GH_TEST_POLL_LOG:-}" ] && printf 'view\n' >> "$GH_TEST_POLL_LOG"; serve "$fix/pr.json" ;;
     *check-runs*)                   serve "$fix/checks.json" ;;
     *) echo "unexpected gh api path: $2" >&2; exit 9 ;;
   esac
@@ -138,7 +145,16 @@ cat > "$FAKEBIN/glab" <<'STUB'
 fix=${GL_FIX:?GL_FIX must name the fixture directory}
 file() { [ -f "$fix/$1" ] && cat "$fix/$1" || printf ''; }
 case "$2" in
-  projects/*/merge_requests/*/discussions*) file discussions ;;
+  projects/*/merge_requests/*/discussions*)
+    total=$(file discussions.total-pages)
+    total=${total:-1}
+    page=$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9][0-9]*\).*/\1/p')
+    page=${page:-1}
+    if [[ " $* " = *" --include "* ]]; then
+      printf 'HTTP/2.0 200 OK\nX-Total-Pages: %s\n\n' "$total"
+    fi
+    [ -f "$fix/discussions.page.$page" ] && file "discussions.page.$page" || file discussions
+    ;;
   projects/*/merge_requests/*/pipelines*) file pipelines ;;
   projects/*/merge_requests/*/approvals) file approvals ;;
   projects/*/merge_requests/*)
@@ -153,13 +169,14 @@ chmod +x "$FAKEBIN/glab"
 export PATH="$FAKEBIN:$PATH"
 
 # gh fixtures: a stable open PR with one historical comment. Every file is a
-# representative REST/GraphQL payload; the adapter's projections derive rows.
+# representative REST payload; the adapter's projections derive rows.
 gh_fix_default() {
   mkdir -p "$GH_FIX"
-  printf '{"state":"OPEN","headRefOid":"%s","author":{"login":"alice"}}\n' "$GH_SHA1" > "$GH_FIX/pr.json"
+  rm -f "$GH_FIX"/reviews.page.* "$GH_FIX/reviews.total-pages"
+  printf '{"state":"open","merged_at":null,"head":{"sha":"%s"},"user":{"login":"alice"}}\n' "$GH_SHA1" > "$GH_FIX/pr.json"
   printf '[{"id":5,"user":{"login":"bob"}}]\n' > "$GH_FIX/comments.json"
   printf '[]\n' > "$GH_FIX/rc.json"
-  printf '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}}}\n' > "$GH_FIX/reviews.json"
+  printf '[]\n' > "$GH_FIX/reviews.json"
   printf '{"check_runs":[]}\n' > "$GH_FIX/checks.json"
 }
 GH_FIX="$TMP_ROOT/gh"
@@ -168,8 +185,15 @@ gh_fix_default
 
 # gh_state <OPEN|CLOSED|MERGED|<anything>> [sha]: rewrite the core payload.
 gh_state() {
-  printf '{"state":"%s","headRefOid":"%s","author":{"login":"alice"}}\n' \
-    "${1:-OPEN}" "${2:-$GH_SHA1}" > "$GH_FIX/pr.json"
+  local state=${1:-OPEN} api_state merged=null
+  case "$state" in
+    OPEN) api_state=open ;;
+    CLOSED) api_state=closed ;;
+    MERGED) api_state=closed; merged='"2026-09-01T00:00:00Z"' ;;
+    *) api_state=$state ;;
+  esac
+  printf '{"state":"%s","merged_at":%s,"head":{"sha":"%s"},"user":{"login":"alice"}}\n' \
+    "$api_state" "$merged" "${2:-$GH_SHA1}" > "$GH_FIX/pr.json"
 }
 
 # gh_checks_json <json-array>: rewrite the check-run payload.
@@ -373,13 +397,13 @@ gh_fix_default
 arm_gh "$H" >/dev/null
 pe "$H" reconcile >/dev/null
 wait_for_baseline "$H" "$sid" || fail "the baseline never completed"
-printf '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"databaseId":30,"state":"APPROVED","author":{"login":"carol"}}]}}}}}\n' > "$GH_FIX/reviews.json"
+printf '[{"id":30,"state":"APPROVED","user":{"login":"carol"}}]\n' > "$GH_FIX/reviews.json"
 wait_for_result "$H" "$sid" || fail "a new review produced no result"
 RESULT=$(first_result "$H" "$sid")
 assert_grep 'event: review id=30 state=APPROVED author=carol' "$RESULT" "the review submission is announced"
 ack "$H" "$sid" 1 "$RESULT"
 restart_runner "$H"
-printf '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"databaseId":30,"state":"DISMISSED","author":{"login":"carol"}}]}}}}}\n' > "$GH_FIX/reviews.json"
+printf '[{"id":30,"state":"DISMISSED","user":{"login":"carol"}}]\n' > "$GH_FIX/reviews.json"
 wait_for_result_count "$H" "$sid" 2 || fail "a review state change produced no result"
 RESULT=$(latest_result "$H" "$sid")
 assert_grep 'event: review-state id=30 state=DISMISSED' "$RESULT" "the dismissal is announced as a state change"
@@ -537,7 +561,7 @@ gh_fix_default
 arm_gh "$H" >/dev/null
 pe "$H" reconcile >/dev/null
 wait_for_baseline "$H" "$sid" || fail "the baseline never completed"
-printf '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"databaseId":31,"state":"SPEEDY_FUTURE_STATE","author":{"login":"carol"}}]}}}}}\n' > "$GH_FIX/reviews.json"
+printf '[{"id":31,"state":"SPEEDY_FUTURE_STATE","user":{"login":"carol"}}]\n' > "$GH_FIX/reviews.json"
 wait_for_result "$H" "$sid" || fail "an unknown review state produced no result"
 RESULT=$(first_result "$H" "$sid")
 assert_grep 'event: review id=31 state=unknown author=carol' "$RESULT" \
@@ -546,7 +570,7 @@ ack "$H" "$sid" 1 "$RESULT"
 assert_contains "$(cursor_field "$H" "$sid" reviews)" "31:unknown" \
   "the unknown review state is stored and readable"
 restart_runner "$H"
-printf '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"databaseId":31,"state":"APPROVED","author":{"login":"carol"}}]}}}}}\n' > "$GH_FIX/reviews.json"
+printf '[{"id":31,"state":"APPROVED","user":{"login":"carol"}}]\n' > "$GH_FIX/reviews.json"
 wait_for_result_count "$H" "$sid" 2 || fail "the later approval produced no result"
 RESULT=$(latest_result "$H" "$sid")
 assert_grep 'event: review-state id=31 state=APPROVED' "$RESULT" "the transition from unknown is announced"
@@ -665,7 +689,9 @@ pass "restart recomputes safely and replay is receipt-deduplicated"
 # --- bounded API failure records diagnostics and later recovers --------------
 cat > "$FAKEBIN/gh-flaky" <<'STUB'
 #!/usr/bin/env bash
-if [ "$1" = pr ] && [ -e "$FLAKY_DOWN" ]; then
+if [ "$1" = api ] \
+   && [[ "$2" =~ ^repos/[^/]+/[^/]+/pulls/[0-9]+$ ]] \
+   && [ -e "$FLAKY_DOWN" ]; then
   echo "gh: server error" >&2
   exit 1
 fi
@@ -890,6 +916,7 @@ assert_contains "$out" "retired: $sid" "retirement is idempotent"
 pe "$H" reconcile >/dev/null
 sleep 0.3
 [ "$(result_count "$H" "$sid")" = 1 ] || fail "a retired source produced further results"
+assert_absent "$H/state/pr-follow/$sid.cursor" "an in-flight poll recreated the retired cursor"
 pass "explicit retirement is the one auditable off switch"
 
 # --- backfill surfaces currently unanswered threads ---------------------------
@@ -1139,19 +1166,66 @@ new_section prereview
 gh_fix_default
 # The migration case the backfill sweep exists for: a PR already carrying a
 # review when monitoring is armed.
-printf '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"databaseId":100,"state":"APPROVED","author":{"login":"carol"}}]}}}}}\n' > "$GH_FIX/reviews.json"
+printf '[{"id":100,"state":"APPROVED","user":{"login":"carol"}}]\n' > "$GH_FIX/reviews.json"
 arm_gh "$H" task-pre >/dev/null
 pe "$H" reconcile >/dev/null
 wait_for_baseline "$H" "$sid" || fail "the pre-existing-review baseline never completed"
 assert_contains "$(cursor_field "$H" "$sid" reviews)" "100:APPROVED" \
   "a review that predates the baseline never entered the durable map"
-printf '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[{"databaseId":100,"state":"DISMISSED","author":{"login":"carol"}}]}}}}}\n' > "$GH_FIX/reviews.json"
+printf '[{"id":100,"state":"DISMISSED","user":{"login":"carol"}}]\n' > "$GH_FIX/reviews.json"
 wait_for_result "$H" "$sid" || fail "the dismissal of a pre-existing review produced no result"
 RESULT=$(first_result "$H" "$sid")
 assert_grep 'event: review-state id=100 state=DISMISSED' "$RESULT" \
   "the dismissal of a review that predates the baseline is announced"
 ack "$H" "$sid" 1 "$RESULT"
 pass "reviews that predate the baseline keep their state tracked"
+
+# --- GET-only review pagination starts at the newest bounded pages -----------
+new_section reviewpaging
+gh_fix_default
+printf '6\n' > "$GH_FIX/reviews.total-pages"
+printf '[]\n' > "$GH_FIX/reviews.page.1"
+printf '[{"id":500,"state":"APPROVED","user":{"login":"erin"}}]\n' > "$GH_FIX/reviews.page.5"
+printf '[{"id":600,"state":"COMMENTED","user":{"login":"frank"}}]\n' > "$GH_FIX/reviews.page.6"
+FM_PR_FOLLOW_MAX_PAGES=2 prf "$H" arm task-rp "$GH_URL" >/dev/null
+FM_PR_FOLLOW_MAX_PAGES=2 pe "$H" reconcile >/dev/null
+wait_for_baseline "$H" "$sid" || fail "the paged REST review baseline never completed"
+assert_contains "$(cursor_field "$H" "$sid" reviews)" "600:COMMENTED" \
+  "the newest review page beyond the old five-page head was not baselined"
+assert_contains "$(cursor_field "$H" "$sid" reviews)" "500:APPROVED" \
+  "the second-newest bounded review page was not baselined"
+pass "GET-only review pagination reads the newest bounded pages"
+
+# --- opaque GitLab thread state survives map eviction and page rotation ------
+new_section gitlabpaging
+gh_fix_default
+mkdir -p "$GL_FIX"
+printf '{"state":"opened","sha":"2222222222222222222222222222222222222222","author":{"username":"alice"}}' > "$GL_FIX/mr"
+printf '[]' > "$GL_FIX/discussions"
+printf '6\n' > "$GL_FIX/discussions.total-pages"
+printf '[]' > "$GL_FIX/discussions.page.1"
+printf '[]' > "$GL_FIX/discussions.page.5"
+printf '[{"id":"opaqueA","resolved":false,"notes":[{"id":901,"author":{"username":"erin"},"type":"DiffNote","position":{"new_path":"src/a.py","new_line":3}}]},{"id":"opaqueB","resolved":false,"notes":[{"id":902,"author":{"username":"frank"},"type":"DiffNote","position":{"new_path":"src/b.py","new_line":4}}]}]' > "$GL_FIX/discussions.page.6"
+printf '[]' > "$GL_FIX/pipelines"
+printf '{"approved_by":[]}' > "$GL_FIX/approvals"
+FM_PR_FOLLOW_MAP_LIMIT=1 FM_PR_FOLLOW_MAX_PAGES=5 prf "$H" arm task-gp "$GL_URL" >/dev/null
+FM_PR_FOLLOW_MAP_LIMIT=1 FM_PR_FOLLOW_MAX_PAGES=5 pe "$H" reconcile >/dev/null
+wait_for_baseline "$H" "$glsid" || fail "the rotating GitLab baseline never completed"
+printf '[{"id":"opaqueA","resolved":true,"notes":[{"id":901,"author":{"username":"erin"},"type":"DiffNote","position":{"new_path":"src/a.py","new_line":3}}]},{"id":"opaqueB","resolved":true,"notes":[{"id":902,"author":{"username":"frank"},"type":"DiffNote","position":{"new_path":"src/b.py","new_line":4}}]}]' > "$GL_FIX/discussions.page.6"
+wait_for_result "$H" "$glsid" || fail "the rotated GitLab thread transitions produced no result"
+RESULT=$(first_result "$H" "$glsid")
+assert_grep 'event: thread id=opaqueA state=resolved' "$RESULT" \
+  "the first opaque thread transition was lost after map eviction"
+assert_grep 'event: thread id=opaqueB state=resolved' "$RESULT" \
+  "the second opaque thread transition was lost after map eviction"
+ack "$H" "$glsid" 1 "$RESULT"
+before=$(result_count "$H" "$glsid")
+restart_runner "$H"
+sleep 3
+[ "$(result_count "$H" "$glsid")" = "$before" ] \
+  || fail "an applied opaque thread transition repeated after eviction"
+pass "GitLab paging and opaque thread state remain replay-safe"
+rm -f "$GL_FIX"/discussions.page.* "$GL_FIX/discussions.total-pages"
 
 # --- a bounded approval set never repeats what it cannot record --------------
 new_section approvalbound

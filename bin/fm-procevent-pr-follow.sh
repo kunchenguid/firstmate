@@ -117,26 +117,29 @@
 # Merge authority: this tracker notifies and records only. It never approves,
 #   merges, closes, reopens, comments, pushes, dismisses, or otherwise modifies
 #   a PR; no such capability exists in this script.
-# Bounded polling: one no-change poll costs one core fetch plus one page per
-#   collection that still has entries above the cursor, each page capped at 100
-#   rows and FM_PR_FOLLOW_MAX_PAGES pages per collection; state maps keep the
-#   FM_PR_FOLLOW_MAP_LIMIT highest ids, and the durable per-collection maximum
+# Bounded polling: one poll costs one core fetch plus at most
+#   FM_PR_FOLLOW_MAX_PAGES 100-row data pages per collection and one metadata
+#   request for collections that need newest-first or rotating pagination; numeric state maps
+#   keep the FM_PR_FOLLOW_MAP_LIMIT highest ids, and the durable per-collection maximum
 #   keeps an id the bound evicted from reading back as one nobody announced;
 #   one document carries at most
 #   FM_PR_FOLLOW_MAX_EVENTS events plus the head and pr-state lines, which are
 #   exempt because their cursor advance is not re-announced, and per-collection
 #   maxima advance only to what was announced, so an overflowed poll
-#   re-announces its remainder next poll instead of losing it. GitHub reviews come from one fixed GraphQL
-#   last-100 query, so more than 100 reviews between two polls can only be
-#   partially observed; the announced-only maximum keeps the remainder bounded
-#   to that same shape.
+#   re-announces its remainder next poll instead of losing it. GitLab's
+#   oldest-first discussion pages rotate newest-first through a durable page
+#   cursor, so the newest page is observed immediately and every older page is
+#   revisited within ceil(total-pages / MAX_PAGES) polls. Opaque GitLab thread
+#   states live in bounded individual records instead of the numeric maps, so
+#   map eviction cannot hide a later resolve or reopen transition. GitHub
+#   reviews use the GET-only REST endpoint and its newest bounded pages.
 # Aggregate bound (rotation): tracked PRs poll through a deterministic modular
 #   rotation, never one hot loop per PR. Time is divided into
 #   FM_PR_FOLLOW_ROTATION_SLOT-second slots; the sorted roster of registered
 #   pr-follow sources assigns slot t to roster index (t mod N), so at most one
 #   source polls per slot regardless of how many PRs are tracked and no source
 #   can be starved: every source owns exactly one slot per N-slot cycle.
-#   Worst case at the defaults (slot 300 s, a full 13-fetch burst): 156 forge
+#   Worst case at the defaults (slot 300 s, a full 18-fetch burst): 216 forge
 #   requests per hour for the whole home, independent of the tracked count;
 #   per-PR poll interval is at most N x slot while open and N x slot x
 #   FM_PR_FOLLOW_SETTLED_EVERY once merged or closed, because settled sources
@@ -162,7 +165,8 @@
 #   events: <count>
 #   event: <type> <key>=<value>...
 #   cursor:                    (absent on error documents)
-#   <key>=<value> lines the handle step merges into the durable cursor
+#   <key>=<value> lines the handle step merges into the durable cursor,
+#   including bounded thread_updates plus GitLab discussion-page progress
 #
 # Environment: FM_PR_FOLLOW_INTERVAL (minimum pause in seconds between
 #   diagnostic documents and quarantine re-checks, default 300),
@@ -172,7 +176,7 @@
 #   default 5), FM_PR_FOLLOW_MAX_EVENTS (per-document event bound, default 60,
 #   at most 198 so a document plus its two exempt lifecycle lines stays inside
 #   the 200-event document limit the reader enforces),
-#   FM_PR_FOLLOW_MAP_LIMIT (bounded review/check/thread map size, default 40,
+#   FM_PR_FOLLOW_MAP_LIMIT (bounded review/check and thread-cache map size, default 40,
 #   at most 2048; a map is trimmed to the reader's 8192-character limit too),
 #   FM_PR_FOLLOW_ROTATION_SLOT (rotation slot seconds, default 300),
 #   FM_PR_FOLLOW_SETTLED_EVERY (settled sources poll every N-th duty visit,
@@ -212,6 +216,7 @@ DOC_EXEMPT_EVENTS=2
 MAP_CHARS_LIMIT=8192
 MAP_MIN_ENTRY_CHARS=4
 APPROVAL_SET_CHARS_LIMIT=4096
+THREAD_UPDATES_CHARS_LIMIT=$((DOC_EVENT_LIMIT * 80))
 
 INTERVAL=${FM_PR_FOLLOW_INTERVAL:-300}
 FETCH_TIMEOUT=${FM_PR_FOLLOW_FETCH_TIMEOUT:-60}
@@ -427,10 +432,10 @@ prf_review_map_valid() {
 }
 
 # GitLab discussion ids are forge-opaque strings, not integers.
-prf_thread_map_valid() {
-  local map=${1-} rest entry id state
+prf_thread_entries_valid() {
+  local map=${1-} limit=$2 rest entry id state
   [ -n "$map" ] || return 0
-  [ "${#map}" -le "$MAP_CHARS_LIMIT" ] || return 1
+  [ "${#map}" -le "$limit" ] || return 1
   rest=$map
   while [ -n "$rest" ]; do
     entry=${rest%%,*}
@@ -448,6 +453,10 @@ prf_thread_map_valid() {
     prf_thread_state_word_valid "$state" || return 1
   done
   return 0
+}
+
+prf_thread_map_valid() {
+  prf_thread_entries_valid "${1-}" "$MAP_CHARS_LIMIT"
 }
 
 prf_approval_set_valid() {
@@ -501,6 +510,22 @@ max_map_entries() {
       }'
 }
 
+max_thread_map_entries() {
+  [ -n "$1" ] || return 0
+  printf '%s' "$1" | tr ',' '\n' | tail -n "$2" \
+    | awk -v budget="$MAP_CHARS_LIMIT" '{
+        need = length($0) + (used == 0 ? 0 : 1)
+        if (used + need > budget) next
+        printf "%s%s", sep, $0
+        sep = ","
+        used += need
+      }'
+}
+
+prf_thread_updates_valid() {
+  prf_thread_entries_valid "${1-}" "$THREAD_UPDATES_CHARS_LIMIT"
+}
+
 # max_check_id <check rows> <floor>: the highest validated id in the rows,
 # never below the floor. The check map is bounded, so this watermark is what
 # keeps an evicted id from reading back as a check nobody has announced yet.
@@ -536,8 +561,11 @@ SN_THREAD_ROWS=
 SN_NOTE_ROWS=
 SN_APPROVAL_ROWS=
 SN_APPROVALS_OK=0
+SN_GL_DISCUSSION_PAGE=0
+SN_GL_DISCUSSION_LAST=0
 SN_FETCH_ERROR=
 GH_OUT=
+GH_TOTAL_PAGES=1
 
 sn_reset() {
   SN_STATE=unknown
@@ -551,7 +579,43 @@ sn_reset() {
   SN_NOTE_ROWS=''
   SN_APPROVAL_ROWS=''
   SN_APPROVALS_OK=0
+  SN_GL_DISCUSSION_PAGE=0
+  SN_GL_DISCUSSION_LAST=0
   SN_FETCH_ERROR=
+}
+
+gh_included_rows() {
+  local filter=$1 path=$2 out rc link last body
+  out=$(fm_run_timed "$FETCH_TIMEOUT" gh api "$path" --include --jq "$filter" 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] || { fetch_fail "gh api" "$rc"; return 1; }
+  link=$(printf '%s\n' "$out" | sed -n 's/^[Ll]ink: //p' | tr -d '\r')
+  last=$(printf '%s\n' "$link" | sed -n 's/.*[?&]page=\([0-9][0-9]*\)>; rel="last".*/\1/p')
+  [ -n "$last" ] || last=1
+  positive_int "$last" || { fetch_fail "gh pagination headers" 1; return 1; }
+  body=$(printf '%s\n' "$out" | awk 'body { print } /^\r?$/ { body=1 }')
+  GH_OUT=$body
+  GH_TOTAL_PAGES=$last
+}
+
+gh_rest_newest_pages() {
+  local filter=$1 base=$2 outvar=$3 page count first_rows lines out=
+  gh_included_rows "$filter" "${base}?per_page=100&page=1" || return 1
+  first_rows=$GH_OUT
+  page=$GH_TOTAL_PAGES
+  count=0
+  while [ "$page" -ge 1 ] && [ "$count" -lt "$MAX_PAGES" ]; do
+    if [ "$page" -eq 1 ]; then
+      lines=$first_rows
+    else
+      gh_rows "$filter" api "${base}?per_page=100&page=${page}" || return 1
+      lines=$GH_OUT
+    fi
+    out+=$lines$'\n'
+    page=$((page - 1))
+    count=$((count + 1))
+  done
+  printf -v "$outvar" '%s' "$out"
 }
 
 fetch_fail() {  # <fixed step label> <exit code>: records a fixed diagnostic
@@ -603,30 +667,20 @@ gh_descending_pages() {
 }
 
 poll_github() {
-  local url=$1 owner=$2 repo=$3 number=$4
-  local out rc state head author login filter
+  local owner=$2 repo=$3 number=$4
+  local state head author login filter
   local gh_status_test gh_conclusion_test gh_review_test
   sn_reset
   gh_status_test=$(prf_jq_membership "$PRF_GH_STATUS_WORDS")
   gh_conclusion_test=$(prf_jq_membership "$PRF_GH_CONCLUSION_WORDS")
   gh_review_test=$(prf_jq_membership "$PRF_GH_REVIEW_STATES")
-  out=$(fm_run_timed "$FETCH_TIMEOUT" gh pr view "$url" --json state,headRefOid,author \
-        -q '[.state, (.headRefOid // ""), (.author.login // "ghost")] | @tsv' 2>/dev/null)
-  rc=$?
-  [ "$rc" -eq 0 ] || { fetch_fail "gh pr view" "$rc"; return 1; }
-  state=$(printf '%s' "$out" | cut -f1)
-  head=$(printf '%s' "$out" | cut -f2)
-  author=$(printf '%s' "$out" | cut -f3)
-  # An unrecognized lifecycle word is ordinary forge evolution, not a fetch
-  # failure: it normalizes to the "unknown" catch-all and round-trips through
-  # the whole production path (vocabulary contract).
-  case "$state" in
-    OPEN) SN_STATE=open ;;
-    CLOSED) SN_STATE=closed ;;
-    MERGED) SN_STATE=merged ;;
-    *) SN_STATE=unknown ;;
-  esac
-  prf_head_valid "$head" || { fetch_fail "gh pr view head" 1; return 1; }
+  gh_rows '[if .merged_at != null then "merged" elif .state == "open" then "open" elif .state == "closed" then "closed" else "unknown" end, (.head.sha // ""), (.user.login // "ghost")] | @tsv' \
+    api "repos/$owner/$repo/pulls/$number" || return 1
+  state=$(printf '%s' "$GH_OUT" | cut -f1)
+  head=$(printf '%s' "$GH_OUT" | cut -f2)
+  author=$(printf '%s' "$GH_OUT" | cut -f3)
+  SN_STATE=$state
+  prf_head_valid "$head" || { fetch_fail "gh pull head" 1; return 1; }
   SN_HEAD=$head
   login=$(printf '%s' "$author" | prf_sanitize 60)
   prf_login_valid "$login" || login=invalid
@@ -642,13 +696,8 @@ poll_github() {
   # The normalization tests below are generated from the same shared lists the
   # validators read (vocabulary contract), so only a token the cursor accepts
   # can ever be stored.
-  filter=".data.repository.pullRequest.reviews.nodes[] | [.databaseId, ((.state // \"unknown\") | if $gh_review_test then . else \"unknown\" end), (.author.login // \"ghost\")] | @tsv"
-  # shellcheck disable=SC2016 # The GraphQL query is fixed text; its $ arguments are gh variables.
-  gh_rows "$filter" \
-    api graphql \
-    -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviews(last:100){nodes{databaseId state author{login}}}}}}' \
-    -F "owner=$owner" -F "name=$repo" -F "number=$number" || return 1
-  SN_REVIEW_ROWS=$GH_OUT
+  filter=".[] | [.id, ((.state // \"unknown\") | if $gh_review_test then . else \"unknown\" end), (.user.login // \"ghost\")] | @tsv"
+  gh_rest_newest_pages "$filter" "repos/$owner/$repo/pulls/$number/reviews" SN_REVIEW_ROWS || return 1
 
   filter=".check_runs[] | [.id, (((.status // \"unknown\") | if $gh_status_test then . else \"unknown\" end) + \":\" + ((.conclusion // \"none\") | if $gh_conclusion_test then . else \"unknown\" end)), (.name // \"check\")] | @tsv"
   gh_rows "$filter" \
@@ -668,6 +717,22 @@ glab_rows() {
   [ "$rc" -eq 0 ] || { fetch_fail "glab api ${path%%\?*}" "$rc"; return 1; }
   GH_OUT=$out
   return 0
+}
+
+glab_included_rows() {
+  local path=$1 program=$2 raw rc total body out
+  raw=$(fm_run_timed "$FETCH_TIMEOUT" env GITLAB_HOST="$GL_HOST" glab api "$path" --include 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] || { fetch_fail "glab api ${path%%\?*}" "$rc"; return 1; }
+  total=$(printf '%s\n' "$raw" | sed -n 's/^[Xx]-[Tt]otal-[Pp]ages: *\([0-9][0-9]*\)\r*$/\1/p')
+  positive_int "$total" || { fetch_fail "glab pagination headers" 1; return 1; }
+  [ "$total" -le 1000000 ] || { fetch_fail "glab pagination headers" 1; return 1; }
+  body=$(printf '%s\n' "$raw" | awk 'body { print } /^\r?$/ { body=1 }')
+  out=$(printf '%s\n' "$body" | perl -MJSON::PP -e "$program")
+  rc=$?
+  [ "$rc" -eq 0 ] || { fetch_fail "glab api ${path%%\?*}" "$rc"; return 1; }
+  GH_OUT=$out
+  GH_TOTAL_PAGES=$total
 }
 
 # shellcheck disable=SC2016 # Perl owns every $ expression in this program.
@@ -706,7 +771,7 @@ for my $disc (@$d) {
 
 poll_gitlab() {
   local host=$1 path=$2 number=$3
-  local enc state head author page rows n note_rows thread_rows
+  local enc state head author page rows note_rows thread_rows first_rows last count
   GL_HOST=$host
   sn_reset
   enc=${path//\//%2F}
@@ -733,24 +798,38 @@ poll_gitlab() {
   SN_HEAD=$head
   SN_AUTHOR=$author
 
-  page=1
+  glab_included_rows "projects/$enc/merge_requests/$number/discussions?per_page=100&page=1" \
+    "$GL_DISCUSSIONS_PROGRAM" || return 1
+  first_rows=$GH_OUT
+  last=$GH_TOTAL_PAGES
+  if [ "$last" -gt "$CUR_GL_DISCUSSION_LAST" ] \
+     || [ "$CUR_GL_DISCUSSION_PAGE" -lt 1 ] \
+     || [ "$CUR_GL_DISCUSSION_PAGE" -gt "$last" ]; then
+    page=$last
+  else
+    page=$CUR_GL_DISCUSSION_PAGE
+  fi
   note_rows=
   thread_rows=
-  while [ "$page" -le "$MAX_PAGES" ]; do
-    glab_rows "projects/$enc/merge_requests/$number/discussions?per_page=100&page=$page" \
-      "$GL_DISCUSSIONS_PROGRAM" || return 1
-    rows=$GH_OUT
-    if [ -z "$rows" ]; then
-      break
+  count=0
+  while [ "$count" -lt "$MAX_PAGES" ] && [ "$count" -lt "$last" ]; do
+    if [ "$page" -eq 1 ]; then
+      rows=$first_rows
+    else
+      glab_rows "projects/$enc/merge_requests/$number/discussions?per_page=100&page=$page" \
+        "$GL_DISCUSSIONS_PROGRAM" || return 1
+      rows=$GH_OUT
     fi
     note_rows+=$(printf '%s\n' "$rows" | awk -F '\t' '$1 != "T"')$'\n'
     thread_rows+=$(printf '%s\n' "$rows" | awk -F '\t' '$1 == "T" {print $2 "\t" $3}')$'\n'
-    n=$(printf '%s\n' "$rows" | awk -F '\t' '$1 == "T"' | grep -c .)
-    [ "$n" -eq 100 ] || break
-    page=$((page + 1))
+    page=$((page - 1))
+    [ "$page" -ge 1 ] || page=$last
+    count=$((count + 1))
   done
   SN_NOTE_ROWS=$note_rows
   SN_THREAD_ROWS=$thread_rows
+  SN_GL_DISCUSSION_PAGE=$page
+  SN_GL_DISCUSSION_LAST=$last
 
   # shellcheck disable=SC2016 # Perl owns every $ expression in this program.
   glab_rows "projects/$enc/merge_requests/$number/pipelines?per_page=100" '
@@ -821,7 +900,10 @@ NEW_MAX_CHECK=''
 NEW_REVIEWS=''
 NEW_CHECKS=''
 NEW_THREADS=''
+NEW_THREAD_UPDATES=''
 NEW_APPROVALS=''
+NEW_GL_DISCUSSION_PAGE=0
+NEW_GL_DISCUSSION_LAST=0
 CHECKS_REBASELINED=0
 EVENTS_DROPPED=0
 
@@ -901,7 +983,10 @@ delta_common_start() {
   NEW_REVIEWS=$CUR_REVIEWS
   NEW_CHECKS=$CUR_CHECKS
   NEW_THREADS=$CUR_THREADS
+  NEW_THREAD_UPDATES=''
   NEW_APPROVALS=$CUR_APPROVALS
+  NEW_GL_DISCUSSION_PAGE=$CUR_GL_DISCUSSION_PAGE
+  NEW_GL_DISCUSSION_LAST=$CUR_GL_DISCUSSION_LAST
   CHECKS_REBASELINED=0
   EVENTS_DROPPED=0
 }
@@ -952,6 +1037,77 @@ approval_set_insert() {
 
 approval_set_add() {  # <user>
   approval_set_insert NEW_APPROVALS "$1"
+}
+
+thread_state_dir() { printf '%s/%s.threads\n' "$FOLLOW_DIR" "$1"; }
+thread_state_path() { printf '%s/%s\n' "$(thread_state_dir "$1")" "$2"; }
+
+thread_state_dir_ready() {
+  local dir
+  dir=$(thread_state_dir "$1")
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  else
+    mkdir "$dir" || return 1
+  fi
+  chmod 0700 "$dir" 2>/dev/null || true
+  [ "$(fm_pr_file_mode "$dir")" = 700 ]
+}
+
+thread_state_get() {
+  local file state
+  file=$(thread_state_path "$SID" "$1")
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  state=$(sed -n 's/^state=//p' "$file")
+  prf_thread_state_word_valid "$state" || return 1
+  printf '%s\n' "$state"
+}
+
+thread_state_store() {
+  local id=$1 state=$2 dir file tmp
+  case "$id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  [ "${#id}" -le 64 ] || return 1
+  prf_thread_state_word_valid "$state" || return 1
+  dir=$(thread_state_dir "$SID")
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  file=$(thread_state_path "$SID" "$id")
+  tmp=$(mktemp "$dir/.thread.XXXXXX") || return 1
+  if ! printf 'state=%s\n' "$state" > "$tmp" \
+     || ! chmod 0600 "$tmp" \
+     || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+thread_updates_apply() {
+  local rest=$1 entry id state
+  while [ -n "$rest" ]; do
+    entry=${rest%%,*}
+    case "$rest" in
+      *,*) rest=${rest#*,} ;;
+      *) rest= ;;
+    esac
+    id=${entry%%:*}
+    state=${entry#*:}
+    thread_state_store "$id" "$state" || return 1
+  done
+}
+
+thread_states_migrate_cursor() {
+  local rest=$CUR_THREADS entry id state
+  while [ -n "$rest" ]; do
+    entry=${rest%%,*}
+    case "$rest" in
+      *,*) rest=${rest#*,} ;;
+      *) rest= ;;
+    esac
+    id=${entry%%:*}
+    state=${entry#*:}
+    if ! thread_state_get "$id" >/dev/null 2>&1; then
+      thread_state_store "$id" "$state" || return 1
+    fi
+  done
 }
 
 approval_set_del() {  # <user>
@@ -1037,12 +1193,13 @@ advance_from_surviving() {
         ev_state=${ev_state%% *}
         [ -n "$ev_id" ] && [ -n "$ev_state" ] || continue
         NEW_THREADS=$(map_put "$NEW_THREADS" "$ev_id" "$ev_state")
+        NEW_THREAD_UPDATES=$(map_put "$NEW_THREAD_UPDATES" "$ev_id" "$ev_state")
         ;;
     esac
   done <<< "$EV_LINES"
   NEW_CHECKS=$(max_map_entries "$NEW_CHECKS" "$MAP_LIMIT")
   NEW_REVIEWS=$(max_map_entries "$NEW_REVIEWS" "$MAP_LIMIT")
-  NEW_THREADS=$(max_map_entries "$NEW_THREADS" "$MAP_LIMIT")
+  NEW_THREADS=$(max_thread_map_entries "$NEW_THREADS" "$MAP_LIMIT")
 }
 
 compute_delta_github() {
@@ -1223,7 +1380,7 @@ compute_delta_gitlab() {
     [ -n "$thread_id" ] || continue
     case "$thread_state" in resolved|unresolved) ;; *) continue ;; esac
     case "$thread_id" in *[!A-Za-z0-9_-]*) continue ;; esac
-    old=$(map_get "$CUR_THREADS" "$thread_id")
+    old=$(thread_state_get "$thread_id" 2>/dev/null || map_get "$CUR_THREADS" "$thread_id")
     if [ -z "$old" ]; then
       thread_seeds+="$thread_id"$'\t'"$thread_state"$'\n'
     elif [ "$old" != "$thread_state" ]; then
@@ -1300,10 +1457,12 @@ compute_delta_gitlab() {
   advance_from_surviving
   while IFS=$'\t' read -r thread_id thread_state; do
     [ -n "$thread_id" ] || continue
-    [ -z "$(map_get "$NEW_THREADS" "$thread_id")" ] || continue
+    thread_state_store "$thread_id" "$thread_state" || return 1
     NEW_THREADS=$(map_put "$NEW_THREADS" "$thread_id" "$thread_state")
   done <<< "$thread_seeds"
-  NEW_THREADS=$(max_map_entries "$NEW_THREADS" "$MAP_LIMIT")
+  NEW_THREADS=$(max_thread_map_entries "$NEW_THREADS" "$MAP_LIMIT")
+  NEW_GL_DISCUSSION_PAGE=$SN_GL_DISCUSSION_PAGE
+  NEW_GL_DISCUSSION_LAST=$SN_GL_DISCUSSION_LAST
   return 0
 }
 
@@ -1393,7 +1552,10 @@ emit_doc() {  # <status> <head> <state>
   printf 'reviews=%s\n' "$NEW_REVIEWS"
   printf 'checks=%s\n' "$NEW_CHECKS"
   printf 'threads=%s\n' "$NEW_THREADS"
+  printf 'thread_updates=%s\n' "$NEW_THREAD_UPDATES"
   printf 'approvals=%s\n' "$NEW_APPROVALS"
+  printf 'gl_discussion_page=%s\n' "$NEW_GL_DISCUSSION_PAGE"
+  printf 'gl_discussion_last=%s\n' "$NEW_GL_DISCUSSION_LAST"
   local doc_backfill=$CUR_BACKFILL
   if [ "$status" = backfill ]; then
     doc_backfill="done"
@@ -1433,6 +1595,7 @@ cursor_load() {
   CUR_CHECKS=''
   CUR_THREADS=''
   CUR_APPROVALS=''
+  CUR_GL_DISCUSSION_PAGE=0 CUR_GL_DISCUSSION_LAST=0
   CUR_BASELINE=pending CUR_BACKFILL=off CUR_GENERATION=0 CUR_ERROR_STREAK=0
   CURSOR_PRESENT=1
   file=$(cursor_file "$sid")
@@ -1463,6 +1626,8 @@ cursor_load() {
       checks)      CUR_CHECKS=$value ;;
       threads)     CUR_THREADS=$value ;;
       approvals)   CUR_APPROVALS=$value ;;
+      gl_discussion_page) CUR_GL_DISCUSSION_PAGE=$value ;;
+      gl_discussion_last) CUR_GL_DISCUSSION_LAST=$value ;;
       baseline)    CUR_BASELINE=$value ;;
       backfill)    CUR_BACKFILL=$value ;;
       generation)  CUR_GENERATION=$value ;;
@@ -1485,6 +1650,8 @@ cursor_load() {
   prf_review_map_valid "$CUR_REVIEWS" || return 1
   prf_thread_map_valid "$CUR_THREADS" || return 1
   prf_approval_set_valid "$CUR_APPROVALS" || return 1
+  nonnegative_int "$CUR_GL_DISCUSSION_PAGE" || return 1
+  nonnegative_int "$CUR_GL_DISCUSSION_LAST" || return 1
   case "$CUR_BASELINE" in pending|done) ;; *) return 1 ;; esac
   case "$CUR_BACKFILL" in on|off|done) ;; *) return 1 ;; esac
   nonnegative_int "$CUR_GENERATION" || return 1
@@ -1502,7 +1669,15 @@ prf_bigint_valid_cursor() {
 # cursor_store: atomically rewrite the cursor from CUR_*. The caller holds the
 # lifecycle lock.
 cursor_store() {
-  local file tmp
+  local file tmp sid_check
+  [ -n "$CUR_PROVIDER" ] && [ -n "$CUR_URL" ] || return 1
+  fm_pr_url_parse "$CUR_URL" || return 1
+  [ "$CUR_PROVIDER" = "$FM_PR_PROVIDER" ] || return 1
+  [ "$CUR_HOST" = "$FM_PR_HOST" ] || return 1
+  [ "$CUR_PATH" = "$FM_PR_PATH" ] || return 1
+  [ "$CUR_NUMBER" = "$FM_PR_NUMBER" ] || return 1
+  sid_check=$(prf_source_id "$CUR_PROVIDER" "$CUR_HOST" "$CUR_PATH" "$CUR_NUMBER") || return 1
+  [ "$sid_check" = "$SID" ] || return 1
   file=$(cursor_file "$SID")
   tmp=$(mktemp "$FOLLOW_DIR/.cursor.XXXXXX") || return 1
   {
@@ -1522,6 +1697,8 @@ cursor_store() {
     printf 'checks=%s\n' "$CUR_CHECKS"
     printf 'threads=%s\n' "$CUR_THREADS"
     printf 'approvals=%s\n' "$CUR_APPROVALS"
+    printf 'gl_discussion_page=%s\n' "$CUR_GL_DISCUSSION_PAGE"
+    printf 'gl_discussion_last=%s\n' "$CUR_GL_DISCUSSION_LAST"
     printf 'baseline=%s\n' "$CUR_BASELINE"
     printf 'backfill=%s\n' "$CUR_BACKFILL"
     printf 'generation=%s\n' "$CUR_GENERATION"
@@ -1692,6 +1869,10 @@ error_tick() {
   local streak
   fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || return 1
   cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; return 1; }
+  if [ "$CURSOR_PRESENT" -ne 1 ]; then
+    fm_lock_release "$(lifecycle_lock_path "$SID")"
+    exit 0
+  fi
   streak=$(( CUR_ERROR_STREAK + 1 ))
   if [ "$streak" -ge "$ERROR_BUDGET" ]; then
     CUR_ERROR_STREAK=0
@@ -1705,6 +1886,26 @@ error_tick() {
   cursor_store || { fm_lock_release "$(lifecycle_lock_path "$SID")"; return 1; }
   fm_lock_release "$(lifecycle_lock_path "$SID")"
   return 0
+}
+
+persist_gitlab_scan_progress() {
+  local expected_generation=$1
+  [ "$CUR_PROVIDER" = gitlab ] || return 0
+  [ "$NEW_GL_DISCUSSION_PAGE" != "$CUR_GL_DISCUSSION_PAGE" ] \
+    || [ "$NEW_GL_DISCUSSION_LAST" != "$CUR_GL_DISCUSSION_LAST" ] \
+    || return 0
+  fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || return 1
+  cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; return 1; }
+  if [ "$CURSOR_PRESENT" -ne 1 ]; then
+    fm_lock_release "$(lifecycle_lock_path "$SID")"
+    exit 0
+  fi
+  if [ "$CUR_GENERATION" = "$expected_generation" ]; then
+    CUR_GL_DISCUSSION_PAGE=$NEW_GL_DISCUSSION_PAGE
+    CUR_GL_DISCUSSION_LAST=$NEW_GL_DISCUSSION_LAST
+    cursor_store || { fm_lock_release "$(lifecycle_lock_path "$SID")"; return 1; }
+  fi
+  fm_lock_release "$(lifecycle_lock_path "$SID")"
 }
 
 baseline_write() {
@@ -1755,8 +1956,11 @@ baseline_write() {
       case "$thread_id" in *[!A-Za-z0-9_-]*) continue ;; esac
       case "$thread_state" in resolved|unresolved) ;; *) continue ;; esac
       CUR_THREADS=$(map_put "$CUR_THREADS" "$thread_id" "$thread_state")
+      thread_state_store "$thread_id" "$thread_state" || return 1
     done <<< "$SN_THREAD_ROWS"
-    CUR_THREADS=$(max_map_entries "$CUR_THREADS" "$MAP_LIMIT")
+    CUR_THREADS=$(max_thread_map_entries "$CUR_THREADS" "$MAP_LIMIT")
+    CUR_GL_DISCUSSION_PAGE=$SN_GL_DISCUSSION_PAGE
+    CUR_GL_DISCUSSION_LAST=$SN_GL_DISCUSSION_LAST
     CUR_MAX_REVIEW_COMMENT=0
     while IFS=$'\t' read -r n_id _; do
       [ -n "$n_id" ] || continue
@@ -1785,6 +1989,8 @@ cmd_run() {
   cursor_load "$SID" || die "cursor is unreadable or tampered: $SID"
   [ "$CURSOR_PRESENT" -eq 1 ] || die "cursor seed is missing: $SID (arm first)"
   [ -n "$CUR_PROVIDER" ] || die "cursor identity is incomplete: $SID"
+  thread_state_dir_ready "$SID" || die "thread state directory is unavailable: $SID"
+  thread_states_migrate_cursor || die "thread state migration failed: $SID"
   [ -f "$REG_DIR/$SID.source" ] \
     || die "source is not registered: $SID"
 
@@ -1806,6 +2012,7 @@ cmd_run() {
       if poll_once; then
         fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
         cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cursor is unreadable: $SID"; }
+        [ "$CURSOR_PRESENT" -eq 1 ] || { fm_lock_release "$(lifecycle_lock_path "$SID")"; exit 0; }
         if [ "$CUR_BASELINE" != "done" ]; then
           baseline_write || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cannot store the baseline"; }
         fi
@@ -1824,6 +2031,7 @@ cmd_run() {
       if [ "$CUR_ERROR_STREAK" != 0 ]; then
         fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
         cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cursor is unreadable: $SID"; }
+        [ "$CURSOR_PRESENT" -eq 1 ] || { fm_lock_release "$(lifecycle_lock_path "$SID")"; exit 0; }
         if [ "$CUR_ERROR_STREAK" != 0 ]; then
           CUR_ERROR_STREAK=0
           cursor_store || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cannot store the cursor"; }
@@ -1833,14 +2041,14 @@ cmd_run() {
       if [ "$CUR_PROVIDER" = github ]; then
         compute_delta_github
       else
-        compute_delta_gitlab
+        compute_delta_gitlab || die "cannot update GitLab thread state"
       fi
       events=0
       if [ -n "$EV_LINES" ]; then
         events=$(printf '%s\n' "$EV_LINES" | grep -c . || true)
       fi
       if [ "$events" -eq 0 ] && [ "$EVENTS_DROPPED" -eq 0 ]; then
-        : # fall through to the scheduled-backfill check below
+        persist_gitlab_scan_progress "$gen_seen" || die "cannot store GitLab scan progress"
       else
         # A concurrent apply advanced the cursor while this poll ran; recompute
         # against the fresh cursor so already-announced events are not repeated.
@@ -1874,7 +2082,10 @@ cmd_run() {
         NEW_REVIEWS=$CUR_REVIEWS
         NEW_CHECKS=$CUR_CHECKS
         NEW_THREADS=$CUR_THREADS
+        NEW_THREAD_UPDATES=''
         NEW_APPROVALS=$CUR_APPROVALS
+        NEW_GL_DISCUSSION_PAGE=$CUR_GL_DISCUSSION_PAGE
+        NEW_GL_DISCUSSION_LAST=$CUR_GL_DISCUSSION_LAST
         gen_now=$(sed -n 's/^generation=//p' "$(cursor_file "$SID")" 2>/dev/null || printf '%s' "$gen_seen")
         if [ "$gen_now" != "$gen_seen" ]; then
           cursor_load "$SID" || die "cursor is unreadable or tampered: $SID"
@@ -1919,7 +2130,10 @@ parse_apply_doc() {
   DOC_C_REVIEWS=''
   DOC_C_CHECKS=''
   DOC_C_THREADS=''
+  DOC_C_THREAD_UPDATES=''
   DOC_C_APPROVALS=''
+  DOC_C_GL_DISCUSSION_PAGE=0
+  DOC_C_GL_DISCUSSION_LAST=0
   DOC_C_BACKFILL=''
   [ "$(doc_header_field "$file" 'schema:')" = "$DOC_SCHEMA" ] || return 1
   [ "$(doc_header_field "$file" 'source:')" = "$SID" ] || return 1
@@ -1958,7 +2172,10 @@ parse_apply_doc() {
       reviews)            prf_review_map_valid "$value" || return 1; DOC_C_REVIEWS=$value ;;
       checks)             prf_map_valid "$value" || return 1; DOC_C_CHECKS=$value ;;
       threads)            prf_thread_map_valid "$value" || return 1; DOC_C_THREADS=$value ;;
+      thread_updates)     prf_thread_updates_valid "$value" || return 1; DOC_C_THREAD_UPDATES=$value ;;
       approvals)          prf_approval_set_valid "$value" || return 1; DOC_C_APPROVALS=$value ;;
+      gl_discussion_page) nonnegative_int "$value" || return 1; DOC_C_GL_DISCUSSION_PAGE=$value ;;
+      gl_discussion_last) nonnegative_int "$value" || return 1; DOC_C_GL_DISCUSSION_LAST=$value ;;
       backfill)           case "$value" in on|off|done) ;; *) return 1 ;; esac; DOC_C_BACKFILL=$value ;;
       generation)         nonnegative_int "$value" || return 1; DOC_C_GENERATION=$value ;;
       *) return 1 ;;
@@ -2012,8 +2229,11 @@ apply_doc_cursor() {
     CUR_CHECKS=$(map_merge_entries "$CUR_CHECKS" "$DOC_C_CHECKS")
     CUR_CHECKS=$(max_map_entries "$CUR_CHECKS" "$MAP_LIMIT")
     CUR_THREADS=$(map_merge_entries "$CUR_THREADS" "$DOC_C_THREADS")
-    CUR_THREADS=$(max_map_entries "$CUR_THREADS" "$MAP_LIMIT")
+    CUR_THREADS=$(max_thread_map_entries "$CUR_THREADS" "$MAP_LIMIT")
+    thread_updates_apply "$DOC_C_THREAD_UPDATES" || return 1
     CUR_APPROVALS=$DOC_C_APPROVALS
+    CUR_GL_DISCUSSION_PAGE=$DOC_C_GL_DISCUSSION_PAGE
+    CUR_GL_DISCUSSION_LAST=$DOC_C_GL_DISCUSSION_LAST
   fi
   [ "$DOC_C_MAXI" -gt "$CUR_MAX_ISSUE_COMMENT" ] && CUR_MAX_ISSUE_COMMENT=$DOC_C_MAXI
   [ "$DOC_C_MAXR" -gt "$CUR_MAX_REVIEW" ] && CUR_MAX_REVIEW=$DOC_C_MAXR
@@ -2053,6 +2273,10 @@ cmd_apply() {  # <source-id> <sequence> <result-file>
   fi
   if cursor_load "$sid" && [ "$CURSOR_PRESENT" -eq 1 ]; then
     if [ "$already" -eq 0 ]; then
+      if [ "$CUR_PROVIDER" = gitlab ]; then
+        thread_state_dir_ready "$sid" \
+          || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "thread state directory is unavailable: $sid"; }
+      fi
       if parse_apply_doc "$result"; then
         apply_doc_cursor
         if cursor_store; then
@@ -2145,7 +2369,9 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
   fm_pr_url_parse "$url" || die "invalid PR url: $url"
   sid=$(prf_source_id "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER") \
     || die "cannot derive the source id"
+  SID=$sid
   follow_dir_ready || die "follow directory is unavailable"
+  thread_state_dir_ready "$sid" || die "thread state directory is unavailable: $sid"
   fm_procevent_source_lock_acquire "$sid" || die "cannot lock the source"
   reg_file="$REG_DIR/$sid.source"
   if [ -f "$reg_file" ] && [ ! -L "$reg_file" ]; then
@@ -2197,11 +2423,12 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
   CUR_CHECKS=
   CUR_THREADS=
   CUR_APPROVALS=
+  CUR_GL_DISCUSSION_PAGE=0
+  CUR_GL_DISCUSSION_LAST=0
   CUR_BASELINE=pending
   CUR_BACKFILL=$backfill
   CUR_GENERATION=1
   CUR_ERROR_STREAK=0
-  SID=$sid
   if ! cursor_store; then
     fm_procevent_source_lock_release "$sid"
     die "cannot write the cursor seed: $sid"
@@ -2209,6 +2436,7 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
   if ! fm_procevent_registration_publish_locked "$STATE" pr-follow "$sid" \
       "$SCRIPT_DIR/fm-procevent-pr-follow.sh" run "$sid"; then
     rm -f -- "$(cursor_file "$sid")"
+    rmdir "$(thread_state_dir "$sid")" 2>/dev/null || true
     fm_procevent_source_lock_release "$sid"
     die "cannot register the source: $sid"
   fi
@@ -2261,7 +2489,7 @@ cmd_backfill() {
 }
 
 cmd_retire() {  # <source-id> [--force]
-  local sid=$1 force=${2-} pending receipt
+  local sid=$1 force=${2-} pending receipt thread_file thread_dir
   prf_source_id_valid "$sid" || die "invalid source id: $sid"
   [ -z "$force" ] || [ "$force" = --force ] || die "invalid retirement option: $force"
   # The refusal has to precede every destructive step: deregistering first
@@ -2271,12 +2499,26 @@ cmd_retire() {  # <source-id> [--force]
     die "$sid has $pending unhandled captured result(s); resolve or acknowledge them, or retire again with --force"
   fi
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" >/dev/null 2>&1 || true
+  fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || die "cannot lock the cursor"
   rm -f -- "$(cursor_file "$sid")"
   rm -f -- "$(quarantine_file "$sid")"
   for receipt in "$FOLLOW_DIR/$sid".*.applied; do
     [ -e "$receipt" ] || continue
     rm -f -- "$receipt" || die "cannot remove applied receipt: $receipt"
   done
+  thread_dir=$(thread_state_dir "$sid")
+  if [ -d "$thread_dir" ] && [ ! -L "$thread_dir" ]; then
+    for thread_file in "$thread_dir"/*; do
+      [ -e "$thread_file" ] || continue
+      [ -f "$thread_file" ] && [ ! -L "$thread_file" ] \
+        || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "thread state is unsafe: $thread_file"; }
+      rm -f -- "$thread_file" \
+        || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot remove thread state: $thread_file"; }
+    done
+    rmdir "$thread_dir" \
+      || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot remove thread state directory: $thread_dir"; }
+  fi
+  fm_lock_release "$(lifecycle_lock_path "$sid")"
   printf 'retired: %s\n' "$sid"
 }
 
