@@ -38,8 +38,8 @@ export interface UnreadWakeScope {
    * its status-log key, a stale row through the task metadata recording that
    * endpoint). The branch may report only these tasks while it handles the
    * wake; `fleet` or a task it merely remembers is refused (docs/
-   * pi-supervision-branch.md "Autonomy"). Empty for a heartbeat, which is
-   * not scoped by task.
+   * pi-supervision-branch.md "Components and their owners"). Empty for a
+   * heartbeat, which is not scoped by task.
    */
   eligibleTasks: string[];
   /**

@@ -1616,10 +1616,10 @@ EOF
 # The report tool refuses a task the wake being handled never named: the
 # refused-ack loop's ghost reports were typed from memory about a task whose
 # records teardown had already removed, while the prompt was a stale row for
-# another pane. A signal or stale wake may report only the task its rows
-# resolve to (or fleet); a heartbeat review may report any task with a live
-# record. The wake's own task and fleet still go through, and nothing refused
-# ever reaches the durable store.
+# another pane. A signal or stale wake may report only the tasks its rows
+# resolve to, with fleet refused too; a heartbeat review is unscoped and
+# refuses nothing by task id. The wake's own task still goes through, and
+# nothing refused ever reaches the durable store.
 test_branch_report_refuses_a_task_the_wake_did_not_name() {
   local repo home out status
   repo="$TMP_ROOT/ghost-report-root"
