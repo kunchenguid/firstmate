@@ -488,6 +488,49 @@ test_stale_recovery_session_lease_timeout_publishes_failure() {
   pass "auto-arm: stalled stale recovery publishes bounded owner-scoped failure state"
 }
 
+test_zombie_session_owner_recovery_failure_is_visible() {
+  local dir state fakeproc owner successor holder out status failure
+  dir=$(make_primary_dir "$TMP_ROOT/zombie-session-owner")
+  state="$dir/state"
+  fakeproc="$dir/fakeproc"
+  : > "$state/task.meta"
+  write_arm_fixture "$dir" actionable
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  owner=$!
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  successor=$!
+  printf '%s\n' "$owner" > "$state/.lock"
+  mkdir -p "$fakeproc/$owner"
+  printf '%s (claude) Z 1\n' "$owner" > "$fakeproc/$owner/stat"
+  : > "$fakeproc/$owner/cmdline"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$state/.claude-autoarm.lock"
+  printf '%s\n' "$holder" > "$state/.claude-autoarm.lock/pid"
+
+  out=$(FM_PROC_ROOT_OVERRIDE="$fakeproc" \
+    run_autoarm_from_claude_daemon_bridge "$dir" "$successor" 2>/dev/null); status=$?
+  failure=$(failure_epoch_path "$dir") \
+    || fail "zombie-owner recovery failure left no durable failure record"
+  kill "$holder" "$successor" "$owner" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+
+  expect_code 2 "$status" "a zombie session owner must not silence successor recovery failure"
+  [ "$(cat "$state/.lock" 2>/dev/null || true)" != "$owner" ] \
+    || fail "the zombie-shaped session owner was not reclaimed"
+  assert_contains "$out" "could not claim recovery" \
+    "the successor did not report its post-recovery claim failure"
+  assert_present "$failure" \
+    "the successor did not persist its post-recovery failure epoch"
+  assert_present "$state/.claude-autoarm-failure-notified" \
+    "the successor did not persist its post-recovery failure marker"
+  assert_absent "$state/arm-ran" \
+    "the successor armed after its generation claim failed"
+  pass "auto-arm: zombie session owners cannot hide successor recovery failures"
+}
+
 test_inert_when_lock_held_by_other_harness() {
   local dir other out status owner_after
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
@@ -3117,6 +3160,7 @@ test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_stale_recovery_session_lease_timeout_publishes_failure
+test_zombie_session_owner_recovery_failure_is_visible
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates

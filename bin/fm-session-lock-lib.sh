@@ -326,10 +326,28 @@ EOF
   return 1
 }
 
-# True if $1 is a live process that looks like a verified harness.
+fm_harness_pid_zombie() {  # <pid>
+  local pid=$1 proc_root stat_line state
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${stat_fields[0]:-}" = Z ]
+    return
+  fi
+  state=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
+  state=${state#"${state%%[![:space:]]*}"}
+  case "$state" in Z*) return 0 ;; esac
+  return 1
+}
+
+# True if $1 is a live, non-zombie process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
   kill -0 "$pid" 2>/dev/null || return 1
+  fm_harness_pid_zombie "$pid" && return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args"
