@@ -37,10 +37,17 @@
 # The same position-not-vocabulary test admits the two session-pointer rules. A
 # link to the working session is internal material leaving the machine exactly
 # as an address is, and three such trailers are already in merged history, so it
-# is refused here rather than by a second mechanism. What is refused is the
-# POINTER shape - a trailer key with a URL or opaque id, or a session path in a
-# link - never the word: 333 legitimate merged lines use "session" in its
-# ordinary technical sense and all of them still pass.
+# is refused here rather than by a second mechanism. A trailer key may contain a
+# session-bearing token surrounded by letters or hyphens, but its value must
+# still be a URL or opaque id. That token-shaped rule catches Codex-Session and
+# Session-Link without enumerating worker runtimes and has zero false positives
+# against Discussion, Regression, or prose-valued session configuration.
+#
+# The bare-link evidence is weaker because merged history contains only four
+# URLs. That rule therefore requires an http(s) URL with a path segment beginning
+# /session, optionally continued by slash, underscore, or hyphen, rather than
+# matching any URL that merely mentions the word. The 333 legitimate merged
+# lines using "session" in its ordinary technical sense still pass.
 #
 # The private work-document rule likewise keys on a path shape, not a word. A
 # path with a subdirectory under data/, data/<id>/<file>, is the per-task brief
@@ -59,8 +66,10 @@
 #   - Bare nautical words (ahoy, shipshape, avast). This repo ships an /ahoy
 #     skill and a "Captain, shipshape." acknowledgement rule; 13 legitimate
 #     merged commits mention them. Banned as an ADDRESS instead (captain-greeting).
-#   - "captain" followed by a spaced dash. One legitimate merged line reads
-#     "so the pane still reaches the captain - once per PAUSE_RESURFACE_SECS".
+#   - An unscoped "captain" followed by a spaced dash. One legitimate merged
+#     line reads "so the pane still reaches the captain - once per
+#     PAUSE_RESURFACE_SECS". The admitted position-scoped dash and period forms
+#     each have zero matches in merged history.
 #   - Bare "uncommitted". Six legitimate merged lines describe this repo's own
 #     uncommitted-work refusals. The real leak, "Changes remain uncommitted for
 #     the outer executor", is caught by delivery-machinery-handoff instead.
@@ -83,8 +92,8 @@
 # is no case that needs an override. The refusal names the rule, the exact text
 # that matched, and the command that rewords it.
 #
-# Exit codes: 0 clean, 1 internal voice found, 2 usage error, 3 the commit range
-# could not be determined (fail closed - an unknown range is not a clean range).
+# Exit codes: 0 clean, 1 internal voice found, 2 usage error, 3 the scan or
+# commit range could not be completed (fail closed - unknown is not clean).
 #
 # Usage:
 #   fm-prepush-voice-guard.sh                  check every commit not yet on the
@@ -101,7 +110,11 @@
 # main is only a fallback, so an ahead local main cannot hide unpushed commits.
 set -u
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_DIR=
+if ! SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); then
+  printf 'fm-prepush-voice-guard.sh: cannot resolve its script directory. The scan did not complete.\n' >&2
+  exit 3
+fi
 SELF="$SELF_DIR/fm-prepush-voice-guard.sh"
 TAB=$(printf '\t')
 
@@ -122,14 +135,15 @@ FM_VOICE_RULES=()
 # An address to the captain that opens the message's prose: after a conventional
 # commit "type(scope): " prefix, after a "* " or "- " bullet (the shape a squash
 # merge body gives every branch commit), or after a sentence boundary. All 219
-# leaked lines in merged history have this shape.
-FM_VOICE_RULES+=("captain-address-opening${TAB}i${TAB}(^[*-][[:space:]]+|[.!?][[:space:]]+|:[[:space:]]+)captain[,:!?]${TAB}A commit message describes a change to the repository; it never addresses a person. Drop the address and state the change.")
+# leaked lines in merged history have this shape. Spaced dash and period forms
+# had zero matches in merged history at these positions.
+FM_VOICE_RULES+=("captain-address-opening${TAB}i${TAB}(^[*-][[:space:]]+|[.!?][[:space:]]+|:[[:space:]]+)captain([,:!?.]|[[:space:]]+-)${TAB}A commit message describes a change to the repository; it never addresses a person. Drop the address and state the change.")
 
 # The same address opening a line of its own. Capital-only on purpose: a wrapped
 # body line can legitimately begin with a lowercase "captain," carried over from
 # the middle of a sentence, while a deliberate vocative at the start of a
 # paragraph is capitalized.
-FM_VOICE_RULES+=("captain-address-line${TAB}s${TAB}^Captain[,:!?]${TAB}A commit message describes a change to the repository; it never addresses a person. Drop the address and state the change.")
+FM_VOICE_RULES+=("captain-address-line${TAB}s${TAB}^Captain([,:!?.]|[[:space:]]+-)${TAB}A commit message describes a change to the repository; it never addresses a person. Drop the address and state the change.")
 
 # The trailing form, which the opening rules miss: "…, captain" at the end of a
 # line. Six leaked lines in merged history have only this shape.
@@ -147,26 +161,22 @@ FM_VOICE_RULES+=("delivery-machinery-handoff${TAB}i${TAB}(^|[^[:alnum:]_])outer[
 
 # A pointer at the working session that produced the change, as a trailer whose
 # value is a URL or an opaque id. Three such trailers are already in merged
-# history, so this is a recurring leak rather than a hypothetical one. The value
-# shape is required: it separates a pointer from prose or configuration that
-# merely begins with one of these words.
-FM_VOICE_RULES+=("internal-session-pointer${TAB}i${TAB}^[[:space:]]*(claude-session|session|conversation|transcript|chat|thread)[[:space:]]*:[[:space:]]*(https?://|[A-Za-z0-9_-]{16,})${TAB}Published history must not link the working session that produced the change. Delete the trailer.")
+# history, so this is a recurring leak rather than a hypothetical one. Requiring
+# both a session-bearing key token and the value shape separates a pointer from
+# ordinary prose or configuration.
+FM_VOICE_RULES+=("internal-session-pointer${TAB}i${TAB}^[[:space:]]*[[:alpha:]-]*(session|conversation|transcript|chat|thread)[[:alpha:]-]*[[:space:]]*:[[:space:]]*(https?://|[A-Za-z0-9_-]{16,})${TAB}Published history must not link the working session that produced the change. Delete the trailer.")
 
 # The same pointer as a bare link, which survives being moved out of a trailer
 # and into a sentence in a pull request description. Matched on the session path
 # segment rather than on the host, so it does not become a list of vendors, and
-# ordinary links such as a forge issue URL stay legitimate.
-FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}(claude\.ai/code/session|/session_[A-Za-z0-9]{10,})${TAB}Published history must not link the working session that produced the change. Remove the link.")
+# URLs that mention session outside their path stay legitimate.
+FM_VOICE_RULES+=("internal-session-link${TAB}i${TAB}https?://[^[:space:]?#]*/session([/_-][^[:space:]?#]+)?([^[:alnum:]_-]|\$)${TAB}Published history must not link the working session that produced the change. Remove the link.")
 
 # A private per-task work document has exactly this repository-owned path shape:
 # data/<id>/<file>. Requiring both components excludes the named flat data files
 # that legitimate commit messages discuss, while spelling the component and
 # outer boundaries avoids GNU-only \b.
 FM_VOICE_RULES+=("private-task-work-document${TAB}i${TAB}(^|[^[:alnum:]_])data/[[:alnum:]_.-]+/[[:alnum:]_.-]+([^[:alnum:]_/.-]|\$)${TAB}Published history must not reference a private per-task work document. Remove the data/<id>/<file> path and describe the durable outcome.")
-
-fm_voice_rule_field() {  # <rule> <field-index>
-  printf '%s' "$1" | cut -d"$TAB" -f"$2"
-}
 
 fm_voice_list_patterns() {
   local rule
@@ -176,22 +186,54 @@ fm_voice_list_patterns() {
   done
 }
 
+# Every read that can affect a clean verdict is checked below. Rule parsing and
+# line lookup use shell builtins; scanner, text, commit, and report I/O failures
+# return 3. Constant metadata substitutions are either builtins or status-checked.
+fm_voice_read_line() {  # <line-number> <path>
+  local wanted=$1 path=$2 current=0 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    current=$((current + 1))
+    if [ "$current" -eq "$wanted" ]; then
+      printf '%s' "$line"
+      return 0
+    fi
+  done < "$path"
+  return 1
+}
+
 # fm_voice_scan_file <label> <path>: print every rule match found in the text at
-# <path>, prefixed by <label>. Returns 1 when anything matched.
+# <path>, prefixed by <label>. Returns 0 clean, 1 matched, or 3 scanner error.
 fm_voice_scan_file() {
   local label=$1 path=$2
-  local rule id case_flag regex hint hits hit line_no matched line found=0
+  local rule id case_flag regex hint hits hit line_no matched line found=0 grep_rc
 
   for rule in "${FM_VOICE_RULES[@]}"; do
-    id=$(fm_voice_rule_field "$rule" 1)
-    case_flag=$(fm_voice_rule_field "$rule" 2)
-    regex=$(fm_voice_rule_field "$rule" 3)
-    hint=$(fm_voice_rule_field "$rule" 4)
+    if ! IFS="$TAB" read -r id case_flag regex hint <<< "$rule"; then
+      printf 'fm-prepush-voice-guard.sh: cannot parse a voice rule. The scan did not complete.\n' >&2
+      return 3
+    fi
+    if [ -z "$id" ] || [ -z "$regex" ] || [ -z "$hint" ]; then
+      printf 'fm-prepush-voice-guard.sh: voice rule %s is incomplete. The scan did not complete.\n' \
+        "${id:-<unknown>}" >&2
+      return 3
+    fi
 
-    if [ "$case_flag" = i ]; then
-      hits=$(grep -n -o -i -E -e "$regex" -- "$path" 2>/dev/null) || hits=
-    else
-      hits=$(grep -n -o -E -e "$regex" -- "$path" 2>/dev/null) || hits=
+    grep_rc=0
+    case "$case_flag" in
+      i) hits=$(grep -n -o -i -E -e "$regex" -- "$path" 2>/dev/null) || grep_rc=$? ;;
+      s) hits=$(grep -n -o -E -e "$regex" -- "$path" 2>/dev/null) || grep_rc=$? ;;
+      *)
+        printf 'fm-prepush-voice-guard.sh: voice rule %s has invalid case flag %s. The scan did not complete.\n' \
+          "$id" "$case_flag" >&2
+        return 3
+        ;;
+    esac
+    if [ "$grep_rc" -eq 1 ]; then
+      continue
+    elif [ "$grep_rc" -ne 0 ]; then
+      printf 'fm-prepush-voice-guard.sh: scanner failed for rule %s (grep exit %s). The scan did not complete.\n' \
+        "$id" "$grep_rc" >&2
+      return 3
     fi
     [ -n "$hits" ] || continue
 
@@ -203,7 +245,11 @@ fm_voice_scan_file() {
       [ -n "$hit" ] || continue
       line_no=${hit%%:*}
       matched=${hit#*:}
-      line=$(sed -n "${line_no}p" "$path")
+      if ! line=$(fm_voice_read_line "$line_no" "$path"); then
+        printf 'fm-prepush-voice-guard.sh: cannot read matched line %s for rule %s. The scan did not complete.\n' \
+          "$line_no" "$id" >&2
+        return 3
+      fi
       printf '    line %s matched %s\n' "$line_no" "$id"
       printf '      in:      %s\n' "$line"
       printf '      matched: %s\n' "$matched"
@@ -214,6 +260,25 @@ EOF
   done
 
   [ "$found" -eq 0 ]
+}
+
+fm_voice_append_scan() {  # <label> <path> <report>
+  local label=$1 path=$2 report=$3 scan_output scan_rc=0
+  scan_output=$(fm_voice_scan_file "$label" "$path") || scan_rc=$?
+  case "$scan_rc" in
+    0|1) ;;
+    3) return 3 ;;
+    *)
+      printf 'fm-prepush-voice-guard.sh: scanner returned unexpected status %s. The scan did not complete.\n' \
+        "$scan_rc" >&2
+      return 3
+      ;;
+  esac
+  if [ -n "$scan_output" ] && ! printf '%s\n' "$scan_output" >> "$report"; then
+    printf 'fm-prepush-voice-guard.sh: cannot write the refusal report. The scan did not complete.\n' >&2
+    return 3
+  fi
+  return "$scan_rc"
 }
 
 # The default-branch ref, probed the same way bin/fm-lint.sh's own
@@ -299,29 +364,44 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-prepush-voice-guard.XXXXXX") || exit 2
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-prepush-voice-guard.XXXXXX") || {
+  printf 'fm-prepush-voice-guard.sh: cannot create temporary scan storage. The scan did not complete.\n' >&2
+  exit 3
+}
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 MESSAGE_FILE="$TMP_ROOT/message"
 REPORT="$TMP_ROOT/report"
-: > "$REPORT"
+if ! : > "$REPORT"; then
+  printf 'fm-prepush-voice-guard.sh: cannot create the refusal report. The scan did not complete.\n' >&2
+  exit 3
+fi
 SUBJECT_LABEL=
 
 if [ "$MODE" = text ]; then
   if [ "$TEXT_PATH" = - ]; then
-    cat > "$MESSAGE_FILE"
+    if ! cat > "$MESSAGE_FILE"; then
+      printf 'fm-prepush-voice-guard.sh: cannot read text from stdin. The scan did not complete.\n' >&2
+      exit 3
+    fi
   elif [ -f "$TEXT_PATH" ]; then
-    cat -- "$TEXT_PATH" > "$MESSAGE_FILE"
+    if ! cat -- "$TEXT_PATH" > "$MESSAGE_FILE"; then
+      printf 'fm-prepush-voice-guard.sh: cannot read text file: %s. The scan did not complete.\n' \
+        "$TEXT_PATH" >&2
+      exit 3
+    fi
   else
     printf 'fm-prepush-voice-guard.sh: no such text file: %s\n' "$TEXT_PATH" >&2
     exit 2
   fi
   SUBJECT_LABEL='the supplied text'
-  if ! fm_voice_scan_file "text" "$MESSAGE_FILE" >> "$REPORT"; then
-    FOUND=1
-  else
-    FOUND=0
-  fi
+  scan_rc=0
+  fm_voice_append_scan "text" "$MESSAGE_FILE" "$REPORT" || scan_rc=$?
+  case "$scan_rc" in
+    0) FOUND=0 ;;
+    1) FOUND=1 ;;
+    *) exit 3 ;;
+  esac
 else
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
     printf 'fm-prepush-voice-guard.sh: not inside a git work tree.\n' >&2
@@ -351,11 +431,23 @@ else
   FOUND=0
   while IFS= read -r sha; do
     [ -n "$sha" ] || continue
-    git log -1 --format=%B "$sha" > "$MESSAGE_FILE" 2>/dev/null || continue
-    subject=$(git log -1 --format=%s "$sha" 2>/dev/null)
-    if ! fm_voice_scan_file "commit $(printf '%.12s' "$sha") - $subject" "$MESSAGE_FILE" >> "$REPORT"; then
-      FOUND=1
+    if ! git log -1 --format=%B "$sha" > "$MESSAGE_FILE" 2>/dev/null; then
+      printf 'fm-prepush-voice-guard.sh: cannot read commit message for %.12s. The scan did not complete.\n' \
+        "$sha" >&2
+      exit 3
     fi
+    if ! IFS= read -r subject < "$MESSAGE_FILE"; then
+      printf 'fm-prepush-voice-guard.sh: cannot read commit subject for %.12s. The scan did not complete.\n' \
+        "$sha" >&2
+      exit 3
+    fi
+    scan_rc=0
+    fm_voice_append_scan "commit $(printf '%.12s' "$sha") - $subject" "$MESSAGE_FILE" "$REPORT" || scan_rc=$?
+    case "$scan_rc" in
+      0) ;;
+      1) FOUND=1 ;;
+      *) exit 3 ;;
+    esac
   done < "$COMMITS_FILE"
 fi
 
@@ -366,7 +458,10 @@ fi
 {
   printf 'fm-prepush-voice-guard.sh: REFUSING - firstmate internal voice found in %s.\n' "$SUBJECT_LABEL"
   printf 'This text would become permanent public history under the repository owner'"'"'s name.\n'
-  cat "$REPORT"
+  if ! cat "$REPORT"; then
+    printf 'fm-prepush-voice-guard.sh: cannot read the refusal report. The scan did not complete.\n' >&2
+    exit 3
+  fi
   printf '\n  How to clear this refusal:\n'
   if [ "$MODE" = text ]; then
     printf '    Reword the text above, then re-run this check.\n'
