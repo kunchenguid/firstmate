@@ -260,10 +260,15 @@ DESCENDANT_TASK_HOMES=()
 # contract). The scan phase writes one task-scoped row file here and the append
 # phase reads it back after this teardown's fail-closed refusals have passed.
 # The layout is one mktemp directory per teardown, $TMPDIR/fm-usage-stage.XXXXXX,
-# holding one <task-id>.row file per task this run harvests: the main task, or
-# every child of a forced secondmate cleanup. The directory is private to this
-# run and the exit trap removes it on every path, including an aborted
-# teardown, so a retry can never read a row measured by an earlier attempt.
+# holding one <state-dir-digest>.<task-id>.row file per task this run harvests:
+# the main task, or every child of a forced secondmate cleanup. The digest is
+# part of the name because a task id is unique only within its own home's state
+# directory, while one staging directory serves every home a single teardown
+# recurses through, so an id alone would let a nested home's grandchild
+# overwrite an outer child's staged row between that child's scan and append.
+# The directory is private to this run and the exit trap removes it on every
+# path, including an aborted teardown, so a retry can never read a row measured
+# by an earlier attempt.
 # usage_stage_dir creates it and must be called UNSUBSTITUTED, because an
 # assignment made inside $(...) cannot reach this shell; usage_stage_path only
 # formats a path, so it is safe to call in a substitution.
@@ -272,9 +277,10 @@ usage_stage_dir() {  # create this run's staging directory once
   [ -z "$USAGE_STAGE_DIR" ] || return 0
   USAGE_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-usage-stage.XXXXXX") || return 1
 }
-usage_stage_path() {  # <task-id> : print this run's staging path for that task
+usage_stage_path() {  # <state-dir> <task-id> : this run's staging path for it
   [ -n "$USAGE_STAGE_DIR" ] || return 1
-  printf '%s/%s.row\n' "$USAGE_STAGE_DIR" "$1"
+  printf '%s/%s.%s.row\n' "$USAGE_STAGE_DIR" \
+    "$(printf '%s' "$1" | cksum | cut -d' ' -f1)" "$2"
 }
 teardown_release_locks() {
   local status=$? i
@@ -2592,7 +2598,7 @@ cleanup_firstmate_home_children() {
     # changes this cleanup's own outcome.
     child_usage_stage=
     if usage_stage_dir; then
-      child_usage_stage=$(usage_stage_path "$child_id" 2>/dev/null || true)
+      child_usage_stage=$(usage_stage_path "$sub_state" "$child_id" 2>/dev/null || true)
     fi
     if [ -n "$child_usage_stage" ]; then
       FM_STATE_OVERRIDE="$sub_state" FM_DATA_OVERRIDE="$DATA" \
@@ -2866,7 +2872,7 @@ fi
 # teardown or the worktree return.
 USAGE_STAGE_MAIN=
 if usage_stage_dir; then
-  USAGE_STAGE_MAIN=$(usage_stage_path "$ID" 2>/dev/null || true)
+  USAGE_STAGE_MAIN=$(usage_stage_path "$STATE" "$ID" 2>/dev/null || true)
 fi
 if [ -n "$USAGE_STAGE_MAIN" ]; then
   "$FM_ROOT/bin/fm-usage-harvest.sh" --scan-to "$USAGE_STAGE_MAIN" "$ID" >/dev/null \
@@ -3023,11 +3029,18 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-# Append phase of the harvest: every fail-closed refusal is behind us, so this
-# teardown is committed and the staged row can become permanent. It still
-# precedes the status retirement below, and it stays best effort. It runs only
-# when the scan actually staged a row, so one failed scan warns once here
-# rather than warning again for a staging file it already reported.
+# Append phase of the harvest: every refusal that would retain this task's
+# worktree and its status log is behind us, so a row appended here can no
+# longer freeze numbers a rerun would measure differently. Three fail-closed
+# exits do still follow, and each is harmless for a different reason. The
+# status retirement immediately below exits 1 without touching the status log,
+# so a rerun re-measures the same file and the (task, spawn_gen) guard
+# recognizes the identical row instead of duplicating it. The two backlog
+# failures further down exit after that log is gone, where a rerun could only
+# measure a degraded zero-turn row, so having appended already is what protects
+# the real numbers. The append stays best effort, and it runs only when the
+# scan actually staged a row, so one failed scan warns once here rather than
+# warning again for a staging file it already reported.
 if [ -n "${USAGE_STAGE_MAIN:-}" ] && [ -s "$USAGE_STAGE_MAIN" ]; then
   "$FM_ROOT/bin/fm-usage-harvest.sh" --append-from "$USAGE_STAGE_MAIN" "$ID" >/dev/null \
     || echo "warning: usage harvest for $ID failed; continuing teardown" >&2

@@ -862,8 +862,8 @@ report_no_harness_case() {
 
   out=$(FM_DATA_OVERRIDE="$home/data" "$REPORT" 2>&1)
   expect_code 0 "$?" "report of a harness-less row should succeed"$'\n'"$out"
-  fields=$(printf '%s\n' "$out" | awk -v t="$id" '$1 == t {print NF"|"$2"|"$3"|"$NF}')
-  [ "$fields" = "10|-|nohar-model|unavailable" ] \
+  fields=$(printf '%s\n' "$out" | awk -v t="$id" '$1 == t {print NF"|"$3"|"$4"|"$NF}')
+  [ "$fields" = "11|-|nohar-model|unavailable" ] \
     || fail "report shifted the harness-less row's columns: [$fields]"
   pass "usage report: an absent harness renders as a placeholder without shifting columns"
 }
@@ -929,9 +929,11 @@ JSON
   # A reused task id is two incarnations, so it is two rows: the per-task
   # section lists both and the per-model section sums both rather than
   # collapsing them onto one id.
+  # The LATER incarnation is written first, so a report that merely echoed
+  # append order would list the runs backwards.
   cat > "$ledger" <<'JSON'
-{"task":"agg9","spawn_gen":"s1000000001.1.1","harness":"claude","model":"reuse-model","effort":null,"spawned_at":null,"completed_at":null,"wall_secs":10,"turns":1,"input_tokens":3,"cached_input_tokens":4,"output_tokens":5,"reasoning_tokens":6,"source":"claude-projects"}
-{"task":"agg9","spawn_gen":"s1000000999.2.2","harness":"claude","model":"reuse-model","effort":null,"spawned_at":null,"completed_at":null,"wall_secs":20,"turns":2,"input_tokens":30,"cached_input_tokens":40,"output_tokens":50,"reasoning_tokens":60,"source":"claude-projects"}
+{"task":"agg9","spawn_gen":"s1000000999.2.2","harness":"claude","model":"reuse-model","effort":null,"spawned_at":"2026-02-02T02:02:02Z","completed_at":null,"wall_secs":20,"turns":2,"input_tokens":30,"cached_input_tokens":40,"output_tokens":50,"reasoning_tokens":60,"source":"claude-projects"}
+{"task":"agg9","spawn_gen":"s1000000001.1.1","harness":"claude","model":"reuse-model","effort":null,"spawned_at":"2026-01-01T01:01:01Z","completed_at":null,"wall_secs":10,"turns":1,"input_tokens":3,"cached_input_tokens":4,"output_tokens":5,"reasoning_tokens":6,"source":"claude-projects"}
 JSON
   out=$(FM_DATA_OVERRIDE="$home/data" "$REPORT" 2>&1)
   expect_code 0 "$?" "report of a reused task id should succeed"$'\n'"$out"
@@ -940,6 +942,13 @@ JSON
     || fail "per-model totals collapsed or mis-summed a reused id: [$fields]"
   [ "$(printf '%s\n' "$out" | awk '$1 == "agg9"' | wc -l | tr -d ' ')" = 2 ] \
     || fail "the per-task section did not list both incarnations of a reused id"$'\n'"$out"
+  # Each run is told apart by when it started, earliest first.
+  fields=$(printf '%s\n' "$out" | awk '$1 == "agg9" {print $2}' | tr '\n' ' ')
+  [ "$fields" = "2026-01-01T01:01:01Z 2026-02-02T02:02:02Z " ] \
+    || fail "the reused id's runs are indistinguishable or out of order: [$fields]"
+  fields=$(printf '%s\n' "$out" | awk '$1 == "agg9" {print $6}' | tr '\n' ' ')
+  [ "$fields" = "3 30 " ] \
+    || fail "the reused id's rows do not carry each run's own usage: [$fields]"
   pass "usage report: per-model rows group on the model and sum each column"
 }
 
