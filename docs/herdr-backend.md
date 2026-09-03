@@ -249,7 +249,7 @@ Identity stays a lazy second read, consulted only when a separator pair could ch
 
 Claude draws its bare `❯` composer between two `─` rules, and while a session mode such as ultracode is active it writes that mode's label into the top rule, identically under the classic and fullscreen renderers and with focus view on or off.
 Because Herdr's read has no cursor row, the classifier proves that composer from its rules, and a labelled top rule is a titled rule that pairs with the solid rule below exactly like a solid one; a pair with a titled member is never Pi's, so it anchors the glyph row without an identity read and never proves a blank region.
-Before titled rules were recognised, the solid rule under the glyph read as a lone separator, every read of such a pane returned `unknown`, and the away-mode daemon deferred its digest for a whole night on 2026-09-02; `tests/fm-composer-lib.test.sh` pins the captured rows and the live guard's cursorless step refreshes the proof.
+Without that recognition the solid rule under the glyph reads as a lone separator and every cursorless read of such a pane returns `unknown`, which defers away-mode delivery until the captain returns; `tests/fm-composer-lib.test.sh` pins the captured rows, and the cursorless step of the live guard recorded under [`verification/runtime-backends.md`](verification/runtime-backends.md#composer-classification-matrix) refreshes the proof after a Claude upgrade.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
