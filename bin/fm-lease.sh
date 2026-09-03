@@ -30,6 +30,14 @@
 #       (a lease held by a dead actor is cleared at session start); safe to
 #       run any time - a live lease is never touched.
 #
+# Release and release-actor also retry any durable cross-task handoff waiting
+# on an ownership conflict for each affected task. Sweep retries every
+# pending handoff, including one whose sender or a prior release crashed after
+# recording it but before scheduling a target-specific retry. The retry runs
+# only after this command drops the lease-command lock; the handoff then
+# re-arbitrates ownership and either reaches the target inbox exactly once or
+# remains durably retryable (bin/fm-task-handoff.sh).
+#
 # The default actor is $FM_SUPERVISION_ACTOR (else main); when --actor is
 # supplied for a mutation, it must name that calling actor. Exit codes: 0 ok,
 # 1 check-miss, 2 usage, 6 refused (other actor holds or actor mismatch).
@@ -47,7 +55,22 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 mkdir -p "$STATE"
 LEASE_COMMAND_LOCK="$STATE/.fm-lease-command.lock"
 fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
-trap 'fm_lock_release "$LEASE_COMMAND_LOCK"' EXIT
+LEASE_COMMAND_LOCK_HELD=1
+RETRY_HANDOFF_TASKS=
+RETRY_ALL_HANDOFFS=0
+lease_command_lock_release() {
+  [ "$LEASE_COMMAND_LOCK_HELD" -eq 1 ] || return 0
+  LEASE_COMMAND_LOCK_HELD=0
+  fm_lock_release "$LEASE_COMMAND_LOCK"
+}
+trap 'lease_command_lock_release' EXIT
+
+lease_retry_handoffs_later() {  # <task>
+  case " $RETRY_HANDOFF_TASKS " in
+    *" $1 "*) ;;
+    *) RETRY_HANDOFF_TASKS="${RETRY_HANDOFF_TASKS}${RETRY_HANDOFF_TASKS:+ }$1" ;;
+  esac
+}
 
 usage() {
   echo "usage: fm-lease.sh claim|release <task> [--actor main|branch] | release-actor --actor main|branch | check <task> | sweep" >&2
@@ -154,6 +177,7 @@ case "$CMD" in
     fi
     if fm_lease_read "$TASK" && { [ "$FM_LEASE_ACTOR" = "$ACTOR" ] || [ -z "$FM_LEASE_ACTOR" ]; }; then
       rm -f -- "$(fm_lease_path "$TASK")"
+      lease_retry_handoffs_later "$TASK"
     fi
     ;;
   check)
@@ -174,16 +198,47 @@ case "$CMD" in
       fm_lease_valid_id "$TASK" || continue
       if fm_lease_read "$TASK" && [ "$FM_LEASE_ACTOR" = "$ACTOR" ]; then
         rm -f -- "$LEASE"
+        lease_retry_handoffs_later "$TASK"
       fi
     done
     ;;
   sweep)
+    RETRY_ALL_HANDOFFS=1
     for LEASE in "$STATE"/.lease-*; do
       [ -e "$LEASE" ] || continue
       case "$LEASE" in *.lock) continue ;; esac
       TASK=${LEASE##*/.lease-}
       fm_lease_valid_id "$TASK" || continue
-      fm_lease_clear_stale "$TASK"
+      if ! fm_lease_live "$TASK"; then
+        fm_lease_clear_stale "$TASK"
+        lease_retry_handoffs_later "$TASK"
+      fi
     done
     ;;
 esac
+
+# The handoff helper takes this same non-reentrant lock, so finish the lease
+# transaction first. Retry is best-effort here: every failure state is durable
+# and inspectable, while changing a successful claim/release result would make
+# callers retry the lease mutation and obscure which part actually failed.
+lease_command_lock_release
+trap - EXIT
+if [ "$RETRY_ALL_HANDOFFS" -eq 1 ]; then
+  HANDOFF_RC=0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-task-handoff.sh" retry-all || HANDOFF_RC=$?
+  case "$HANDOFF_RC" in
+    0) ;;
+    6) echo "notice: a durable cross-task handoff is still waiting on its current supervision owner" >&2 ;;
+    *) echo "warning: a cross-task handoff retry did not complete; inspect with FM_HOME='$FM_HOME' $SCRIPT_DIR/fm-task-handoff.sh inspect <handoff-id>" >&2 ;;
+  esac
+else
+  for TASK in $RETRY_HANDOFF_TASKS; do
+    HANDOFF_RC=0
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-task-handoff.sh" retry-task "$TASK" || HANDOFF_RC=$?
+    case "$HANDOFF_RC" in
+      0) ;;
+      6) echo "notice: a durable cross-task handoff for '$TASK' is still waiting on the current supervision owner" >&2 ;;
+      *) echo "warning: cross-task handoff retry for '$TASK' did not complete; inspect with FM_HOME='$FM_HOME' $SCRIPT_DIR/fm-task-handoff.sh retry-task '$TASK'" >&2 ;;
+    esac
+  done
+fi
