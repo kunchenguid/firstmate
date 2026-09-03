@@ -540,6 +540,9 @@ EOF
   assert_grep "plus any later words the captain actually supplied" \
     "$home/data/$id/launch-brief.md" \
     "migrated launch contract excluded later captain clarifications"
+  assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
+    "$home/data/$id/launch-brief.md" \
+    "migrated launch contract's overlay dropped the self-sufficiency pointer"
 
   id=delivery-legacy-unmarked-no-mistakes
   mkdir -p "$home/data/$id"

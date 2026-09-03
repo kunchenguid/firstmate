@@ -351,6 +351,13 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep worker tradeoffs out of --intent"
   assert_grep "This replaces the no-mistakes skill's advice to enrich \`--intent\`" "$brief" \
     "no-mistakes DOD must override the external skill's enrich-with-decisions guidance"
+  # The passed string must be self-sufficient (PR #3604 shipped with an intent that
+  # was only "do 1, 2, 3, 7 from the report"), so the rendered DOD states the rule
+  # and tells the worker to resolve referenced material into its substance.
+  assert_grep "The \`--intent\` string you pass must be self-sufficient" "$brief" \
+    "no-mistakes DOD must require a self-sufficient --intent string"
+  assert_grep "write the substance of the referenced items into \`--intent\`" "$brief" \
+    "no-mistakes DOD must tell the worker to resolve report, decision, and PR references into substance"
 
   # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
   # claim an enforcement the tool does not provide: this is instruction only.
