@@ -181,15 +181,24 @@ meta_traceparent() { sed -n 's/^traceparent=//p' "$1"; }
 injected_traceparent() { sed -n 's/^export TRACEPARENT=//p' "$1"; }
 
 assert_launch_clears_traceparent() {
-  local launch=$1 fakebin=$2 env_log=$3 shell shell_output
+  local launch=$1 fakebin=$2 env_log=$3 shell shell_output cmd
   local -a shell_args
+  cmd="export PATH='$fakebin:$PATH'; $launch"
   for shell in bash zsh fish; do
-    command -v "$shell" >/dev/null 2>&1 || continue
-    shell_args=(-c "$launch")
-    [ "$shell" != fish ] || shell_args=(--no-config -c "$launch")
+    if ! command -v "$shell" >/dev/null 2>&1; then
+      printf 'skip: %s not installed, relaunch coverage for it not exercised\n' \
+        "$shell" >&2
+      continue
+    fi
+    case $shell in
+      bash) shell_args=(--noprofile --norc -c "$cmd") ;;
+      zsh) shell_args=(-f -c "$cmd") ;;
+      *) shell_args=(--no-config -c "$cmd") ;;
+    esac
     : > "$env_log"
-    shell_output=$(env TRACEPARENT=ambient FM_FAKE_TRACE_ENV_LOG="$env_log" \
-      PATH="$fakebin:$PATH" "$shell" "${shell_args[@]}" 2>&1) \
+    shell_output=$(env -u BASH_ENV -u ENV -u ZDOTDIR \
+      TRACEPARENT=ambient FM_FAKE_TRACE_ENV_LOG="$env_log" \
+      "$shell" "${shell_args[@]}" 2>&1) \
       || fail "$shell could not execute the relaunch command"
     [ -z "$shell_output" ] || fail "$shell printed a relaunch diagnostic: $shell_output"
     [ "$(cat "$env_log")" = unset ] \
