@@ -51,7 +51,7 @@ Never infer that a renderer owns a caller-provided figure merely because it muta
 Search notebook code and Markdown through structured extraction, for example:
 
 ```sh
-jq -r '.cells[] | select(.cell_type == "code" or .cell_type == "markdown") | .source[]' example.ipynb | rg -n 'plot|show|savefig|Axes'
+jq -r '.cells[] | select(.cell_type == "code" or .cell_type == "markdown") | .source | if type == "array" then .[] else . end' example.ipynb | rg -n 'plot|show|savefig|Axes'
 ```
 
 Adjust the targeted terms to the project and inspect only the relevant extracted cells.

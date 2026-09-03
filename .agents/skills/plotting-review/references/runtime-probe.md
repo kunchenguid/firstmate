@@ -13,6 +13,7 @@ The snapshot must not create a figure merely to ask what is current.
 Call `gcf()` and `gca()` only when `get_fignums()` proves that a managed figure already exists.
 
 ```python
+from copy import deepcopy
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -30,7 +31,7 @@ def snapshot():
         "figure_numbers": figure_numbers,
         "current_figure": current_figure,
         "current_axes": current_axes,
-        "rc_params": mpl.rcParams.copy(),
+        "rc_params": deepcopy(dict(mpl.rcParams)),
         "axes_by_figure": {
             number: tuple(Gcf.figs[number].canvas.figure.axes)
             for number in figure_numbers
@@ -40,7 +41,10 @@ def snapshot():
 
 def probe(render_call):
     before = snapshot()
-    calls = {name: [] for name in ("show", "savefig", "figure_savefig", "close")}
+    calls = {
+        name: []
+        for name in ("show", "figure_show", "savefig", "figure_savefig", "close")
+    }
 
     def record(name):
         def recorder(*args, **kwargs):
@@ -49,6 +53,7 @@ def probe(render_call):
 
     with ExitStack() as stack:
         stack.enter_context(patch.object(plt, "show", record("show")))
+        stack.enter_context(patch.object(Figure, "show", record("figure_show")))
         stack.enter_context(patch.object(plt, "savefig", record("savefig")))
         stack.enter_context(patch.object(Figure, "savefig", record("figure_savefig")))
         stack.enter_context(patch.object(plt, "close", record("close")))
@@ -67,12 +72,21 @@ def probe(render_call):
         "calls": calls,
         "changed_rc": changed_rc,
     }
+
+
+def probe_lifecycle(render_call):
+    before = snapshot()
+    returned = render_call()
+    after = snapshot()
+    return {"before": before, "after": after, "returned": returned}
 ```
 
-Patch both `pyplot.savefig` and `Figure.savefig` because libraries may use either ownership model.
+Patch both pyplot and figure methods for show and save because libraries may use either ownership model.
 The probe uses Matplotlib's internal figure-manager registry only to inspect already-managed figures without changing which figure is current.
 If the code imported plotting functions into its own module namespace, patch the name looked up by that module as well as, or instead of, the original provider.
 Record arguments rather than delegating to show, save, or close during the observation pass so the probe does not destroy the state it needs to inspect.
+Treat the observation pass's `after` snapshot as counterfactual whenever intercepted lifecycle calls occurred.
+Run `probe_lifecycle` separately with lifecycle methods unpatched and controlled destinations to verify which figures actually remain managed.
 Run a separate real save smoke test to `io.BytesIO` when saving is part of the contract, and assert that the buffer is nonempty.
 
 Compare identities with `is` for a caller-provided axes, its figure, and a returned axes or figure.
