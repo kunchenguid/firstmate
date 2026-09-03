@@ -102,6 +102,10 @@ plan = {
     },
     "promotion_rule": {
         "type": "paired-sweep",
+        "composite": {
+            "weights": {"deterministic": 0.5, "panel": 0.5},
+            "score_scale": {"min": 0.0, "max": 10.0},
+        },
         "required_wins": 6,
         "of_samples": 6,
         "practical_margin": 1.0,
@@ -274,6 +278,18 @@ refuses "an adaptive ninth sample" \
 refuses "an optional-stopping extension key" \
   'plan["promotion_rule"]["adaptive_extension_runs"] = 3' \
   "optional-stopping keys"
+refuses "missing composite weights" \
+  'plan["promotion_rule"].pop("composite")' \
+  "promotion_rule.composite must declare"
+refuses "non-finite composite weights" \
+  'plan["promotion_rule"]["composite"]["weights"]["panel"] = float("inf")' \
+  "promotion_rule.composite must declare"
+refuses "negative composite weights" \
+  'plan["promotion_rule"]["composite"]["weights"] = {"deterministic": 1.1, "panel": -0.1}' \
+  "promotion_rule.composite must declare"
+refuses "unnormalized composite weights" \
+  'plan["promotion_rule"]["composite"]["weights"] = {"deterministic": 0.6, "panel": 0.6}' \
+  "promotion_rule.composite must declare"
 refuses "a baseline treated as a competing peer" \
   'plan["promotion_rule"]["baseline_role"] = "competitor"' \
   "regression_veto"
@@ -550,16 +566,9 @@ write_evaluator() {  # <bench-dir> [captures]
   cat > "$bench/scoring/evaluator.sh" <<'EOF'
 #!/bin/sh
 [ "${1:-}" = --evaluate ] && [ -f "${2:-}" ] || exit 2
-exec cat "$2"
+sed '1d' "$2"
 EOF
   chmod +x "$bench/scoring/evaluator.sh"
-  python3 - "$e/execution.json" "$bench/scoring/evaluator.sh" <<'PY'
-import hashlib, json, sys
-path, program = sys.argv[1:]
-json.dump({"program": "scoring/evaluator.sh",
-           "sha256": hashlib.sha256(open(program, "rb").read()).hexdigest()},
-          open(path, "w"), indent=2, sort_keys=True)
-PY
   cat > "$e/lock.json" <<'EOF'
 {"browser":"chromium","browser_version":"141.0.7390.54","playwright_version":"1.58.2",
  "fonts":["Inter 4.0"],"locale":"en-CA","timezone":"UTC",
@@ -624,6 +633,32 @@ for entrant in entrants:
         record["result_hash"] = hashlib.sha256(payload).hexdigest()
         (out / f"{slug}-b{index}.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
         written += 1
+PY
+  python3 - "$bench" "$e/execution.json" "$bench/scoring/evaluator.sh" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+bench, path, program = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+evaluator = bench / "evaluator"
+inputs = {}
+for record in [
+    evaluator / "determinism" / "run-1.json",
+    evaluator / "determinism" / "run-2.json",
+    *sorted((evaluator / "mutations").glob("*.json")),
+    *sorted((evaluator / "captures").glob("*.json")),
+]:
+    relative = record.relative_to(evaluator)
+    frozen = bench / "ground-truth" / "evaluator-inputs" / relative
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_bytes(b"FM_BENCH_EVALUATOR_INPUT\n" + record.read_bytes())
+    inputs[relative.as_posix()] = {
+        "path": frozen.relative_to(bench).as_posix(),
+        "sha256": hashlib.sha256(frozen.read_bytes()).hexdigest(),
+    }
+json.dump({
+    "program": "scoring/evaluator.sh",
+    "sha256": hashlib.sha256(program.read_bytes()).hexdigest(),
+    "inputs": inputs,
+}, path.open("w"), indent=2, sort_keys=True)
 PY
 }
 
@@ -809,7 +844,10 @@ bench, confine, entrant = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
                   "private_object_store": str(entrant / "objects"),
                   "private_tmp": str(entrant / "tmp"),
                   "private_home": str(entrant / "home with space"),
-                  "private_session": str(entrant / "session")}],
+                  "private_session": str(entrant / "session"),
+                  "provider_network": "provider-egress-k7",
+                  "provider_proxy": "http://provider-proxy-k7:8080",
+                  "provider_proxy_container": "provider-proxy-k7"}],
 }, indent=2, sort_keys=True) + "\n")
 digest = hashlib.sha256((bench / "benchmark.json").read_bytes()).hexdigest()
 isolation_digest = hashlib.sha256((bench / "isolation.json").read_bytes()).hexdigest()
@@ -870,7 +908,16 @@ cat > "$FAKE_RUNTIME_BIN/docker" <<'EOF'
 #!/bin/sh
 case "$1 $2" in
   "info ") exit 0 ;;
-  "network inspect") printf '%s\n' "${BENCH_TEST_NETWORK_TOPOLOGY:?}"; exit 0 ;;
+  "network inspect")
+    if [ -n "${BENCH_TEST_NETWORK_TOPOLOGY:-}" ]; then
+      printf '%s\n' "$BENCH_TEST_NETWORK_TOPOLOGY"
+    else
+      suffix=${3##*-}
+      printf 'true provider-proxy-%s \n' "$suffix"
+    fi
+    exit 0
+    ;;
+  "run --rm") printf '%s\n' "$*"; sleep 1; exit 0 ;;
   *) exit 9 ;;
 esac
 EOF
@@ -884,6 +931,24 @@ expect_code 2 "$status" "an internet-routed provider network is refused"
 assert_contains "$out" "must be internal and contain only provider-proxy" \
   "the launch wrapper verifies the provider-egress topology"
 pass "entrant egress refuses a network that exposes more than the provider proxy"
+
+PATH="$FAKE_RUNTIME_BIN:$PATH" "$CONFINE" --purpose entrant --mechanism container \
+  --image runtime@sha256:test --provider-network provider-egress-k7 \
+  --provider-proxy http://provider-proxy-k7:8080 --provider-proxy-container provider-proxy-k7 \
+  --allow "$ENTRY_ROOT" -- /bin/true >"$TMP_ROOT/k7-launch" 2>&1 &
+k7_pid=$!
+PATH="$FAKE_RUNTIME_BIN:$PATH" "$CONFINE" --purpose entrant --mechanism container \
+  --image runtime@sha256:test --provider-network provider-egress-r2 \
+  --provider-proxy http://provider-proxy-r2:8080 --provider-proxy-container provider-proxy-r2 \
+  --allow "$ENTRY_ROOT" -- /bin/true >"$TMP_ROOT/r2-launch" 2>&1 &
+r2_pid=$!
+wait "$k7_pid" || fail "the first dedicated entrant network must launch"
+wait "$r2_pid" || fail "the second dedicated entrant network must launch concurrently"
+assert_contains "$(cat "$TMP_ROOT/k7-launch")" "--network provider-egress-k7" \
+  "the first entrant stays on its own internal network"
+assert_contains "$(cat "$TMP_ROOT/r2-launch")" "--network provider-egress-r2" \
+  "the second entrant stays on a different internal network"
+pass "two entrants can launch concurrently without sharing a network or proxy boundary"
 
 out=$(bash -c '
   . "$1/bin/fm-bench-launch-lib.sh"
@@ -1020,9 +1085,9 @@ json.dump({
     "exec_wrapper": [confine, "--mechanism", mechanism, "--allow", "{root}", "--"],
     "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
                        "--image", "firstmate-benchmark-runtime@sha256:test",
-                       "--provider-network", "provider-egress-only",
-                       "--provider-proxy", "http://provider-proxy:8080",
-                       "--provider-proxy-container", "provider-proxy",
+                       "--provider-network", "{provider_network}",
+                       "--provider-proxy", "{provider_proxy}",
+                       "--provider-proxy-container", "{provider_proxy_container}",
                        "--allow", "{root}", "--"],
     "leak_marker": "FM_BENCH_",
     "protected_paths": [f"{iso}/sealed"],
@@ -1031,7 +1096,10 @@ json.dump({
          "private_object_store": f"{iso}/{name}/objects",
          "private_tmp": f"{iso}/{name}/tmp",
          "private_home": f"{iso}/{name}/home",
-         "private_session": f"{iso}/{name}/session"}
+         "private_session": f"{iso}/{name}/session",
+         "provider_network": f"provider-egress-{label}",
+         "provider_proxy": f"http://provider-proxy-{label}:8080",
+         "provider_proxy_container": f"provider-proxy-{label}"}
         for label, name in (("k7", "e1"), ("r2", "e2"))],
 }, open(path, "w"), indent=2, sort_keys=True)
 PY
@@ -1056,22 +1124,50 @@ for private in objects tmp home session; do
 done
 pass "all seven sibling-access probes detect a real leak when nothing confines the entrant"
 
+BENCH="$TMP_ROOT/iso-shared-provider-boundary"
+write_plan "$BENCH"
+write_isolation "$BENCH" none
+python3 - "$BENCH/isolation.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+record = json.load(open(path))
+record["entrants"][1]["provider_network"] = record["entrants"][0]["provider_network"]
+record["entrants"][1]["provider_proxy_container"] = record["entrants"][0]["provider_proxy_container"]
+json.dump(record, open(path, "w"), indent=2, sort_keys=True)
+PY
+out=$(run_gate "$BENCH" isolation-verify) && status=0 || status=$?
+expect_code 1 "$status" "two entrants may not share one provider-egress boundary"
+assert_contains "$out" "isolation.provider_boundaries fail" \
+  "sibling entrants cannot reach each other through a shared internal network"
+pass "each concurrent entrant requires its own provider network and proxy"
+
 if [ -n "$RESTORE_MECHANISM" ]; then
   BENCH="$TMP_ROOT/evaluator-execution"
   write_plan "$BENCH"
   write_evaluator "$BENCH"
+  write_freeze_inputs "$BENCH"
+  run_gate "$BENCH" freeze >/dev/null
   write_isolation "$BENCH" "$RESTORE_MECHANISM"
   out=$(run_gate "$BENCH" evaluator-execute-verify) \
     || fail "the content-addressed evaluator must reproduce its records: $out"
   assert_contains "$out" "generated all 39 golden, mutation, and capture records" \
     "the evaluator is executed rather than inferred from record presence"
-  python3 - "$BENCH/evaluator/mutations/fidelity.json" <<'PY'
-import json, sys
+  python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
 from pathlib import Path
-path = Path(sys.argv[1]); record = json.loads(path.read_text())
+bench = Path(sys.argv[1])
+path = bench / "evaluator" / "mutations" / "fidelity.json"
+record = json.loads(path.read_text())
 record["dimension_deltas"]["fidelity"] = -2.0
 path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+input_path = bench / "ground-truth" / "evaluator-inputs" / "mutations" / "fidelity.json"
+input_path.write_bytes(b"FM_BENCH_EVALUATOR_INPUT\n" + path.read_bytes())
+contract_path = bench / "evaluator" / "execution.json"
+contract = json.loads(contract_path.read_text())
+contract["inputs"]["mutations/fidelity.json"]["sha256"] = hashlib.sha256(input_path.read_bytes()).hexdigest()
+contract_path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
 PY
+  run_gate "$BENCH" freeze >/dev/null
   out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
   expect_code 1 "$status" "self-reported mutation deltas cannot replace executed score movement"
   assert_contains "$out" "declared deltas differ from executed score vectors" \
@@ -1082,17 +1178,18 @@ import hashlib, json, sys
 from pathlib import Path
 bench = Path(sys.argv[1])
 program = bench / "scoring" / "evaluator.sh"
-program.write_text("#!/bin/sh\nprintf '{}\\n'\n")
+program.write_text("#!/bin/sh\nexec cat \"$2\"\n")
 program.chmod(0o755)
 contract = bench / "evaluator" / "execution.json"
 record = json.loads(contract.read_text())
 record["sha256"] = hashlib.sha256(program.read_bytes()).hexdigest()
 contract.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
+  run_gate "$BENCH" freeze >/dev/null
   out=$(run_gate "$BENCH" evaluator-execute-verify) && status=0 || status=$?
-  expect_code 1 "$status" "a content-addressed evaluator that does not reproduce evidence is refused"
-  assert_contains "$out" "did not reproduce determinism/run-1.json" \
-    "preflight derives evaluator evidence from execution"
+  expect_code 1 "$status" "a content-addressed cat evaluator that echoes frozen input is refused"
+  assert_contains "$out" "evaluator output for run-1.json is invalid" \
+    "expected records cannot be supplied as evaluator inputs"
   pass "preflight evaluator evidence is generated by the frozen executable"
 fi
 
@@ -1271,15 +1368,21 @@ pass "an object store reachable through git alternates is caught rather than mis
 # earns credit for exactly one probe and still fails the gate.
 BENCH="$TMP_ROOT/iso-partial"
 write_plan "$BENCH"
-python3 - "$BENCH/isolation.json" "$TMP_ROOT/env-only.sh" "$ISO" <<'PY'
+python3 - "$BENCH/isolation.json" "$TMP_ROOT/env-only.sh" "$ISO" "$ROOT/bin/fm-bench-confine.sh" <<'PY'
 import json, os, stat, sys
-path, wrapper, iso = sys.argv[1:4]
+path, wrapper, iso, confine = sys.argv[1:5]
 with open(wrapper, "w") as handle:
     handle.write('#!/usr/bin/env bash\nexec env -i PATH="$PATH" HOME="$HOME" "$@"\n')
 os.chmod(wrapper, os.stat(wrapper).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 json.dump({
     "schema": "fm-bench-isolation.v1",
     "exec_wrapper": [wrapper],
+    "launch_wrapper": [confine, "--purpose", "entrant", "--mechanism", "container",
+                       "--image", "firstmate-benchmark-runtime@sha256:test",
+                       "--provider-network", "{provider_network}",
+                       "--provider-proxy", "{provider_proxy}",
+                       "--provider-proxy-container", "{provider_proxy_container}",
+                       "--allow", "{root}", "--"],
     "leak_marker": "FM_BENCH_",
     "protected_paths": [f"{iso}/sealed"],
     "entrants": [
@@ -1287,7 +1390,10 @@ json.dump({
          "private_object_store": f"{iso}/{name}/objects",
          "private_tmp": f"{iso}/{name}/tmp",
          "private_home": f"{iso}/{name}/home",
-         "private_session": f"{iso}/{name}/session"}
+         "private_session": f"{iso}/{name}/session",
+         "provider_network": f"provider-egress-{label}",
+         "provider_proxy": f"http://provider-proxy-{label}:8080",
+         "provider_proxy_container": f"provider-proxy-{label}"}
         for label, name in (("k7", "e1"), ("r2", "e2"))],
 }, open(path, "w"), indent=2, sort_keys=True)
 PY
@@ -1498,6 +1604,7 @@ printf '%s\n' "$value"
     (out / "manifest.json").write_text(json.dumps({
         "schema": "fm-bench-archive.v1", "sample": slug,
         "identity": {"track": track_name, "role": role, "candidate": candidate, "packet": packet},
+        "attempt": {"id": "attempt-1", "status": "scored", "supersedes": None},
         "groups": {
             "packet_and_ground_truth": ["packet.md", "ground-truth.md"],
             "candidate_bundle_and_projection": ["candidate.bundle", "projection.diff"],
@@ -1521,6 +1628,65 @@ write_archive "$BENCH" "$TMP_ROOT/srcrepo"
 out=$(run_gate "$BENCH" archive-verify) || fail "the complete archive must verify: $out"
 assert_contains "$out" "8 evidence groups" "every archive carries all eight evidence groups"
 pass "one content-addressed archive per scored output verifies against its stored bytes"
+
+ATTEMPT_BENCH="$TMP_ROOT/archive-attempts"
+write_plan "$ATTEMPT_BENCH"
+python3 - "$BENCH/archive" "$ATTEMPT_BENCH/archive" <<'PY'
+import hashlib, json, shutil, sys
+from pathlib import Path
+source, target = Path(sys.argv[1]), Path(sys.argv[2])
+shutil.copytree(source, target)
+terminal = sorted(path for path in target.iterdir() if path.is_dir())[0]
+manifest_path = terminal / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["attempt"]["supersedes"] = "attempt-void"
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+void = target / f"{terminal.name}-void"
+void.mkdir()
+timing = {
+    "intervals": {
+        "dispatch_accepted_to_first_valid_final_commit": 1200,
+        "first_assistant_event_to_first_valid_final_commit": 1100,
+    },
+    "failure": {"status": "void", "blocker_class": False, "class": "provider_outage"},
+}
+payload = (json.dumps(timing, indent=2, sort_keys=True) + "\n").encode()
+(void / "timing.json").write_bytes(payload)
+(void / "manifest.json").write_text(json.dumps({
+    "schema": "fm-bench-archive.v1",
+    "sample": void.name,
+    "identity": manifest["identity"],
+    "attempt": {"id": "attempt-void", "status": "void", "supersedes": None},
+    "groups": {"failure_and_timing": ["timing.json"]},
+    "files": {"timing.json": hashlib.sha256(payload).hexdigest()},
+    "tree_binding": {},
+}, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$ATTEMPT_BENCH" archive-verify) \
+  || fail "a retained void plus its linked terminal rerun must verify: $out"
+assert_contains "$out" "void attempt preserves only content-addressed failure and timing evidence" \
+  "void attempts require no fabricated judging or capture facts"
+assert_contains "$out" "one terminal scored attempt" \
+  "prior void attempts do not inflate planned sample coverage"
+pass "archive identity preserves linked void and rerun attempts separately"
+
+UNLINKED_ATTEMPT_BENCH="$TMP_ROOT/archive-unlinked-attempt"
+write_plan "$UNLINKED_ATTEMPT_BENCH"
+python3 - "$ATTEMPT_BENCH/archive" "$UNLINKED_ATTEMPT_BENCH/archive" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+source, target = Path(sys.argv[1]), Path(sys.argv[2])
+shutil.copytree(source, target)
+terminal = sorted(path for path in target.iterdir() if path.is_dir() and not path.name.endswith("-void"))[0]
+manifest_path = terminal / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["attempt"]["supersedes"] = None
+manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$UNLINKED_ATTEMPT_BENCH" archive-verify) && status=0 || status=$?
+expect_code 1 "$status" "a retained void without an explicit rerun link is refused"
+assert_contains "$out" "unlinked void attempts" "the unlinked attempt is named"
+pass "every retained void must be linked to its scored rerun"
 
 copy_archive_fixture() {  # <source-bench> <target-bench>
   local source=$1 target=$2
@@ -2554,25 +2720,28 @@ if archive.is_dir():
 archive.mkdir()
 winners = {"A": "Fable 5 High", "B": "Terra 5.6 High", "C": "GPT 5.6 Sol High"}
 
-def write(track, packet, candidate, role, composite, status="scored", blocker=False, suffix=""):
+def write(track, packet, candidate, role, composite, status="scored", blocker=False, suffix="", supersedes=None):
     slug = f"{track}-{packet}-{candidate}{suffix}".lower().replace(" ", "-").replace(".", "-")
     sample = archive / slug
     sample.mkdir()
     tree = __import__("hashlib").sha1(slug.encode()).hexdigest()
     judges = [judge["name"] for judge in plan["tracks"][track]["judges"]]
     evidence = {
-        "judging.json": {"panel": judges, "scores": [composite for _ in judges]},
-        "capture.json": {
-            "deterministic": composite,
-            "tree": tree,
-            "capture_hash": __import__("hashlib").sha256((slug + "-capture").encode()).hexdigest(),
-        },
         "timing.json": {"intervals": {
             "dispatch_accepted_to_first_valid_final_commit": 1200,
             "first_assistant_event_to_first_valid_final_commit": 1100,
         }, "failure": {"status": status, "blocker_class": blocker,
                         "class": "none" if status == "scored" else "provider_outage"}},
     }
+    if status == "scored":
+        evidence.update({
+            "judging.json": {"panel": judges, "scores": [composite for _ in judges]},
+            "capture.json": {
+                "deterministic": composite,
+                "tree": tree,
+                "capture_hash": __import__("hashlib").sha256((slug + "-capture").encode()).hexdigest(),
+            },
+        })
     files = {}
     for name, document in evidence.items():
         payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
@@ -2581,8 +2750,11 @@ def write(track, packet, candidate, role, composite, status="scored", blocker=Fa
     (sample / "manifest.json").write_text(json.dumps({
         "schema": "fm-bench-archive.v1", "sample": slug,
         "identity": {"track": track, "packet": packet, "candidate": candidate, "role": role},
+        "attempt": {"id": "attempt-void" if status == "void" else "attempt-1",
+                    "status": status, "supersedes": supersedes},
+        "groups": {"failure_and_timing": ["timing.json"]} if status == "void" else {},
         "files": files,
-        "tree_binding": {"original_tree": tree},
+        "tree_binding": {"original_tree": tree} if status == "scored" else {},
     }, indent=2, sort_keys=True) + "\n")
     (out / f"{slug}.json").write_text(json.dumps({
         "schema": "fm-bench-result.v1", "archive_sample": slug,
@@ -2607,7 +2779,10 @@ for name in sorted(plan["tracks"]):
                 score = 7.5
             if win and mode == "nonfinite":
                 score = float("inf")
-            write(name, packet, entrant["name"], "entrant", score, blocker=blocker)
+            if win and mode == "outofscale":
+                score = 11.0
+            supersedes = "attempt-void" if win and mode == "void" and index == 0 else None
+            write(name, packet, entrant["name"], "entrant", score, blocker=blocker, supersedes=supersedes)
         if win and mode == "void":
             write(name, ids[0], entrant["name"], "entrant", 0.0, status="void", suffix="-void")
         if win and mode == "ninth":
@@ -2627,7 +2802,8 @@ for name in sorted(plan["tracks"]):
             if mode == "baseline_unreplaced_void" and index == 0:
                 write(name, packet, track["baseline"]["name"], "baseline", 0.0, status="void")
                 continue
-            write(name, packet, track["baseline"]["name"], "baseline", base)
+            supersedes = "attempt-void" if mode == "baseline_void" and index == 0 else None
+            write(name, packet, track["baseline"]["name"], "baseline", base, supersedes=supersedes)
         if mode == "baseline_void":
             write(
                 name,
@@ -2673,6 +2849,56 @@ expect_code 1 "$status" "a content-addressed but candidate-specific panel is ref
 assert_contains "$out" "does not bind the common panel" "promotion recomputes the panel from archived evidence"
 pass "promotion is bound to the planned neutral panel and archived sample evidence"
 
+BENCH="$TMP_ROOT/promote-unplanned-track"
+write_plan "$BENCH"
+write_results "$BENCH" sweep
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+path = sample / "manifest.json"
+manifest = json.loads(path.read_text())
+manifest["identity"]["track"] = "retired-track"
+path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "an unplanned archived track is a named refusal"
+assert_contains "$out" "names unplanned track 'retired-track'" \
+  "stale track identity cannot reach empty-panel arithmetic"
+pass "promotion refuses an unplanned track without a traceback"
+
+BENCH="$TMP_ROOT/promote-sample-link"
+write_plan "$BENCH"
+write_results "$BENCH" sweep
+python3 - "$BENCH" <<'PY'
+import sys
+from pathlib import Path
+bench = Path(sys.argv[1])
+sample = sorted((bench / "archive").iterdir())[0]
+outside = bench / "external-promotion-evidence"
+sample.rename(outside)
+sample.symlink_to(outside, target_is_directory=True)
+PY
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "promotion refuses a symlinked archive sample root"
+assert_contains "$out" "sample root is symlinked" "promotion validates its sample root before evidence"
+pass "promotion reads evidence only through real contained sample roots"
+
+BENCH="$TMP_ROOT/promote-composite-contract"
+write_plan "$BENCH" 'plan["promotion_rule"]["composite"]["weights"] = {"deterministic": 1.0, "panel": -0.0}'
+write_results "$BENCH" sweep
+python3 - "$BENCH/benchmark.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+plan = json.load(open(path))
+plan["promotion_rule"]["composite"]["weights"]["panel"] = -1
+json.dump(plan, open(path, "w"), indent=2, sort_keys=True)
+PY
+out=$(run_gate "$BENCH" promote-evaluate) && status=0 || status=$?
+expect_code 1 "$status" "promotion independently refuses invalid frozen composite weights"
+assert_contains "$out" "promote.composite_rule fail" "promotion reads the plan-owned blend"
+pass "promotion cannot invent or bypass the frozen composite blend"
+
 BENCH="$TMP_ROOT/promote-nonfinite"
 write_plan "$BENCH"
 write_results "$BENCH" nonfinite
@@ -2695,8 +2921,8 @@ BENCH="$TMP_ROOT/promote-replaced-void"
 write_plan "$BENCH"
 write_results "$BENCH" void
 out=$(run_gate "$BENCH" promote-evaluate) || fail "a void with a scored replacement must remain promotable: $out"
-assert_contains "$out" "all 1 voided samples have scored replacements with the same role, candidate, and packet" \
-  "the scored rerun reconciles its void"
+assert_contains "$out" "all 1 voided attempts have explicitly linked scored replacements" \
+  "the scored rerun names the void attempt it supersedes"
 assert_contains "$out" "standing route eligible" "a replaced void does not make the field permanently incomplete"
 pass "a void is retained as evidence and credited when its rerun scores"
 
@@ -2704,7 +2930,7 @@ BENCH="$TMP_ROOT/promote-replaced-baseline-void"
 write_plan "$BENCH"
 write_results "$BENCH" baseline_void
 out=$(run_gate "$BENCH" promote-evaluate) || fail "a baseline void with a scored replacement must remain promotable: $out"
-assert_contains "$out" "same role, candidate, and packet" \
+assert_contains "$out" "explicitly linked scored replacements" \
   "the baseline rerun reconciles its retained void"
 assert_contains "$out" "standing route eligible" "a replaced baseline void does not make the field incomplete"
 pass "baseline void evidence is credited when the same baseline sample reruns"
@@ -2757,6 +2983,7 @@ refuses_promotion() {  # <label> <mode> <expected>
 refuses_promotion "five of six wins" split "no standing route"
 refuses_promotion "a blocker-class failure" blocker "carries a blocker-class failure"
 refuses_promotion "a margin under the predeclared bar" thin "below the predeclared bar"
+refuses_promotion "a score outside the frozen common scale" outofscale "has no finite numeric composite"
 refuses_promotion "a baseline regression" veto "regression veto fired"
 refuses_promotion "a negative baseline mean" negative_mean "below the declared floor 0.000"
 refuses_promotion "a void with no scored replacement" unreplaced_void "without scored replacements"

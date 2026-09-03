@@ -136,7 +136,15 @@ for key in ("private_object_store", "private_tmp", "private_home", "private_sess
     except ValueError:
         raise SystemExit(f"entrant {entrant_id} private path escapes its proven root: {key}")
     private[key] = str(target)
-argv = [item.replace("{root}", str(declared_root)) for item in wrapper]
+dynamic = {
+    "{root}": str(declared_root),
+    "{provider_network}": str(entrant.get("provider_network", "")),
+    "{provider_proxy}": str(entrant.get("provider_proxy", "")),
+    "{provider_proxy_container}": str(entrant.get("provider_proxy_container", "")),
+}
+if any(not value for value in dynamic.values()):
+    raise SystemExit(f"entrant {entrant_id} has no dedicated provider boundary")
+argv = [dynamic.get(item, item.replace("{root}", str(declared_root))) for item in wrapper]
 launcher = argv[0]
 if "/" in launcher:
     if not Path(launcher).is_file() or not os.access(launcher, os.X_OK):

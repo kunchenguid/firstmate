@@ -12,7 +12,7 @@
 # Usage:
 #   fm-bench-confine.sh --allow <dir> [--allow <dir>]... [--mechanism <name>]
 #                       [--purpose replay|entrant] [--image <ref>]
-#                       [--provider-network <name> --provider-proxy <url>]
+#                       [--provider-network <per-entrant-name> --provider-proxy <url>]
 #                       [--provider-proxy-container <name>]
 #                       -- <command> [args...]
 #   fm-bench-confine.sh --list-mechanisms

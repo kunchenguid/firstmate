@@ -391,6 +391,37 @@ def check_promotion_rule(plan: dict[str, Any], report: Report) -> None:
         "paired directional sweep rule",
         f"promotion_rule.type must be 'paired-sweep', got {rule.get('type')!r}",
     )
+    composite = rule.get("composite")
+    weights = composite.get("weights") if isinstance(composite, dict) else None
+    scale = composite.get("score_scale") if isinstance(composite, dict) else None
+    valid_weights = (
+        isinstance(weights, dict)
+        and set(weights) == {"deterministic", "panel"}
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and float(value) >= 0
+            for value in weights.values()
+        )
+        and math.isclose(sum(float(value) for value in weights.values()), 1.0, abs_tol=1e-12)
+    )
+    valid_scale = (
+        isinstance(scale, dict)
+        and isinstance(scale.get("min"), (int, float))
+        and not isinstance(scale.get("min"), bool)
+        and isinstance(scale.get("max"), (int, float))
+        and not isinstance(scale.get("max"), bool)
+        and math.isfinite(float(scale["min"]))
+        and math.isfinite(float(scale["max"]))
+        and float(scale["min"]) < float(scale["max"])
+    )
+    report.require(
+        valid_weights and valid_scale,
+        "promotion.composite",
+        "the frozen plan owns a normalized deterministic and panel blend on one finite score scale",
+        "promotion_rule.composite must declare nonnegative finite deterministic and panel weights summing to 1 and a finite increasing score_scale",
+    )
     report.require(
         rule.get("required_wins") == samples and rule.get("of_samples") == samples,
         "promotion.sweep",
@@ -1344,6 +1375,14 @@ def validate_confinement_wrapper(
         ]
         if missing:
             return None, "entrant confinement is missing: " + ", ".join(missing)
+        expected_dynamic = {
+            "--provider-network": "{provider_network}",
+            "--provider-proxy": "{provider_proxy}",
+            "--provider-proxy-container": "{provider_proxy_container}",
+        }
+        wrong = [option for option, value in expected_dynamic.items() if values.get(option) != value]
+        if wrong:
+            return None, "entrant confinement must resolve per-entrant provider boundaries: " + ", ".join(wrong)
     return mechanism, "trusted confinement wrapper and supported arguments verified"
 
 
@@ -1420,6 +1459,39 @@ def check_isolation(root: Path, report: Report, timeout: int) -> None:
     if not isinstance(entrants, list) or not entrants:
         report.fail("isolation.entrants", "entrants must be a non-empty list of provisioned per-entrant roots")
         return
+
+    network_fields = ("provider_network", "provider_proxy", "provider_proxy_container")
+    incomplete_networks = [
+        str(entrant.get("id", "<unnamed>"))
+        for entrant in entrants
+        if not isinstance(entrant, dict)
+        or any(not nonempty_str(entrant.get(key)) for key in network_fields)
+    ]
+    networks = [str(entrant.get("provider_network")) for entrant in entrants if isinstance(entrant, dict)]
+    proxies = [str(entrant.get("provider_proxy_container")) for entrant in entrants if isinstance(entrant, dict)]
+    proxy_urls = [str(entrant.get("provider_proxy")) for entrant in entrants if isinstance(entrant, dict)]
+    mismatched_proxies = [
+        str(entrant.get("id", "<unnamed>"))
+        for entrant in entrants
+        if isinstance(entrant, dict)
+        and nonempty_str(entrant.get("provider_proxy"))
+        and nonempty_str(entrant.get("provider_proxy_container"))
+        and re.fullmatch(
+            rf"https?://{re.escape(str(entrant['provider_proxy_container']))}:[0-9]+",
+            str(entrant["provider_proxy"]),
+        ) is None
+    ]
+    report.require(
+        not incomplete_networks
+        and not mismatched_proxies
+        and len(networks) == len(set(networks))
+        and len(proxies) == len(set(proxies))
+        and len(proxy_urls) == len(set(proxy_urls)),
+        "isolation.provider_boundaries",
+        f"{len(entrants)} entrants have distinct internal provider networks and proxy boundaries",
+        "each entrant must declare a complete, unique provider_network and provider_proxy_container boundary: "
+        + ", ".join(incomplete_networks + mismatched_proxies),
+    )
 
     protected = [str(item) for item in (record.get("protected_paths") or [])]
     controls = ProbeControls(str(record.get("leak_marker", "FM_BENCH_")))
@@ -1558,7 +1630,10 @@ def probe_entrants(
         entrant_id = str(entrant.get("id", ""))
         missing = [
             key
-            for key in ("id", "root", *PRIVATE_STORAGE_KEYS)
+            for key in (
+                "id", "root", *PRIVATE_STORAGE_KEYS,
+                "provider_network", "provider_proxy", "provider_proxy_container",
+            )
             if not nonempty_str(entrant.get(key))
         ]
         if missing:
@@ -1721,13 +1796,21 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
     try:
         contract = load_json(base / "execution.json")
         isolation = load_json(root / "isolation.json", ISOLATION_SCHEMA)
+        freeze_record = load_json(root / "freeze.json", FREEZE_SCHEMA)
     except GateError as exc:
         report.fail("evaluator.execution", str(exc))
         return
     program_name = contract.get("program")
     expected_hash = contract.get("sha256")
-    if not nonempty_str(program_name) or not nonempty_str(expected_hash):
-        report.fail("evaluator.execution", "execution.json must content-address one evaluator program")
+    inputs = contract.get("inputs")
+    frozen_hashes = freeze_record.get("hashes")
+    if (
+        not nonempty_str(program_name)
+        or not nonempty_str(expected_hash)
+        or not isinstance(inputs, dict)
+        or not isinstance(frozen_hashes, dict)
+    ):
+        report.fail("evaluator.execution", "execution.json must content-address one evaluator program and its frozen inputs")
         return
     program = (root / str(program_name)).resolve()
     if (
@@ -1735,6 +1818,7 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
         or not program.is_file()
         or not os.access(program, os.X_OK)
         or sha256_file(program) != expected_hash
+        or frozen_hashes.get(str(program_name)) != expected_hash
     ):
         report.fail("evaluator.execution", "the executable evaluator is absent, mutable, or outside frozen scoring")
         return
@@ -1749,13 +1833,49 @@ def check_evaluator_execution(root: Path, base: Path, report: Report, timeout: i
         *sorted((base / "mutations").glob("*.json")),
         *sorted((base / "captures").glob("*.json")),
     ]
+    expected_names = {path.relative_to(base).as_posix() for path in evidence}
+    if set(inputs) != expected_names:
+        missing = sorted(expected_names - set(inputs))
+        unexpected = sorted(set(inputs) - expected_names)
+        report.fail(
+            "evaluator.execution",
+            "execution inputs do not exactly cover evaluator records: "
+            + "; ".join(
+                part
+                for part in (
+                    "missing " + ", ".join(missing) if missing else "",
+                    "unexpected " + ", ".join(unexpected) if unexpected else "",
+                )
+                if part
+            ),
+        )
+        return
     generated = 0
     for path in evidence:
+        relative_name = path.relative_to(base).as_posix()
+        input_record = inputs.get(relative_name)
+        if not isinstance(input_record, dict):
+            report.fail("evaluator.execution", f"{relative_name} has no frozen evaluator input")
+            return
+        input_name = input_record.get("path")
+        input_hash = input_record.get("sha256")
+        if not nonempty_str(input_name) or not nonempty_str(input_hash):
+            report.fail("evaluator.execution", f"{relative_name} input is not content-addressed")
+            return
+        input_path = (root / str(input_name)).resolve()
+        if (
+            not is_within(input_path, (root / "ground-truth").resolve())
+            or not input_path.is_file()
+            or sha256_file(input_path) != input_hash
+            or frozen_hashes.get(str(input_name)) != input_hash
+        ):
+            report.fail("evaluator.execution", f"{relative_name} input is absent, mutable, or outside frozen ground truth")
+            return
         argv = [
             *(str(root) if item == "{root}" else item for item in wrapper),
             str(program),
             "--evaluate",
-            str(path),
+            str(input_path),
         ]
         try:
             completed = subprocess.run(
@@ -2202,15 +2322,13 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
     ) and ok
     samples = archive_samples(root)
     expected_identities = planned_sample_identities(plan)
-    ok = report.require(
-        len(samples) == len(expected_identities),
-        "archive.coverage",
-        f"{len(samples)} sample archives, one per scored output",
-        f"expected {len(expected_identities)} sample archives, found {len(samples)}",
-    ) and ok
     digests: list[str] = []
-    seen_identities: set[tuple[str, str, str, str]] = set()
-    duplicate_identities: set[tuple[str, str, str, str]] = set()
+    seen_attempts: set[tuple[str, str, str, str, str]] = set()
+    duplicate_attempts: set[tuple[str, str, str, str, str]] = set()
+    scored_identities: set[tuple[str, str, str, str]] = set()
+    duplicate_scored: set[tuple[str, str, str, str]] = set()
+    void_attempts: dict[tuple[str, str, str, str], set[str]] = {}
+    superseded_attempts: dict[tuple[str, str, str, str], set[str]] = {}
     for sample in samples:
         check = f"archive.{sample.name}"
         try:
@@ -2223,13 +2341,15 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
         files = record.get("files")
         binding = record.get("tree_binding")
         identity = record.get("identity")
+        attempt = record.get("attempt")
         if (
             not isinstance(groups, dict)
             or not isinstance(files, dict)
             or not isinstance(binding, dict)
             or not isinstance(identity, dict)
+            or not isinstance(attempt, dict)
         ):
-            report.fail(check, "an archive manifest needs identity, groups, files, and tree_binding objects")
+            report.fail(check, "an archive manifest needs identity, attempt, groups, files, and tree_binding objects")
             ok = False
             continue
         if record.get("sample") != sample.name:
@@ -2241,9 +2361,80 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             report.fail(check, "sample identity must name track, role, candidate, and packet")
             ok = False
             continue
-        if sample_identity in seen_identities:
-            duplicate_identities.add(sample_identity)
-        seen_identities.add(sample_identity)
+        attempt_id = attempt.get("id")
+        attempt_status = attempt.get("status")
+        supersedes = attempt.get("supersedes")
+        if (
+            not nonempty_str(attempt_id)
+            or attempt_status not in ("scored", "void")
+            or (supersedes is not None and not nonempty_str(supersedes))
+            or supersedes == attempt_id
+        ):
+            report.fail(check, "attempt must carry a stable id, scored or void status, and an optional distinct supersedes id")
+            ok = False
+            continue
+        attempt_identity = (*sample_identity, str(attempt_id))
+        if attempt_identity in seen_attempts:
+            duplicate_attempts.add(attempt_identity)
+        seen_attempts.add(attempt_identity)
+        if nonempty_str(supersedes):
+            superseded_attempts.setdefault(sample_identity, set()).add(str(supersedes))
+        if attempt_status == "void":
+            void_attempts.setdefault(sample_identity, set()).add(str(attempt_id))
+            if groups != {"failure_and_timing": ["timing.json"]} or set(files) != {"timing.json"}:
+                report.fail(check, "a void attempt must contain only its content-addressed failure and timing evidence")
+                ok = False
+                continue
+            timing_path = sample / "timing.json"
+            try:
+                timing_mode = timing_path.lstat().st_mode
+                timing = load_json(timing_path)
+            except (OSError, GateError) as exc:
+                report.fail(check, f"void failure and timing evidence is invalid: {exc}")
+                ok = False
+                continue
+            intervals = timing.get("intervals")
+            failure = timing.get("failure")
+            valid_intervals = isinstance(intervals, dict) and all(
+                isinstance(intervals.get(name), (int, float))
+                and not isinstance(intervals.get(name), bool)
+                and math.isfinite(float(intervals[name]))
+                and float(intervals[name]) >= 0
+                for name in REQUIRED_TIMING_INTERVALS
+            )
+            valid_failure = (
+                isinstance(failure, dict)
+                and failure.get("status") == "void"
+                and failure.get("class") in ("evaluator_infrastructure", "provider_outage", "quota_exhaustion")
+                and failure.get("blocker_class") is False
+            )
+            if (
+                not stat.S_ISREG(timing_mode)
+                or sha256_file(timing_path) != files.get("timing.json")
+                or not valid_intervals
+                or not valid_failure
+            ):
+                report.fail(check, "void attempt does not carry valid centrally recorded failure class and timing")
+                ok = False
+                continue
+            stored, invalid_entries = archived_regular_files(sample)
+            if invalid_entries or stored != {"timing.json"}:
+                report.fail(check, "void attempt contains unaddressed or non-regular evidence")
+                ok = False
+                continue
+            digests.append(
+                sha256_bytes(
+                    json.dumps(
+                        {"sample": sample.name, "files": files, "manifest_sha256": sha256_file(sample / "manifest.json")},
+                        sort_keys=True,
+                    ).encode("utf-8")
+                )
+            )
+            report.ok(check, "void attempt preserves only content-addressed failure and timing evidence")
+            continue
+        if sample_identity in scored_identities:
+            duplicate_scored.add(sample_identity)
+        scored_identities.add(sample_identity)
         missing_groups = sorted(set(REQUIRED_ARCHIVE_GROUPS) - set(groups))
         unexpected_groups = sorted(set(groups) - set(REQUIRED_ARCHIVE_GROUPS))
         if missing_groups or unexpected_groups:
@@ -2349,6 +2540,17 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             report.fail(check, "content addresses do not match stored bytes: " + "; ".join(bad))
             ok = False
             continue
+        try:
+            timing = load_json(sample / "timing.json")
+        except GateError as exc:
+            report.fail(check, f"scored attempt timing evidence is invalid: {exc}")
+            ok = False
+            continue
+        failure = timing.get("failure")
+        if not isinstance(failure, dict) or failure.get("status") != "scored":
+            report.fail(check, "terminal attempt status is not proven by its content-addressed timing evidence")
+            ok = False
+            continue
         digests.append(
             sha256_bytes(
                 json.dumps(
@@ -2358,20 +2560,46 @@ def check_archive(root: Path, plan: dict[str, Any], report: Report) -> tuple[boo
             )
         )
         report.ok(check, f"{len(files)} files verified across {len(REQUIRED_ARCHIVE_GROUPS)} evidence groups")
-    missing_identities = sorted(expected_identities - seen_identities)
-    unexpected_identities = sorted(seen_identities - expected_identities)
+    all_identities = scored_identities | set(void_attempts)
+    missing_identities = sorted(expected_identities - scored_identities)
+    unexpected_identities = sorted(all_identities - expected_identities)
+    unlinked_voids = sorted(
+        (*identity, attempt_id)
+        for identity, attempts in void_attempts.items()
+        for attempt_id in attempts - superseded_attempts.get(identity, set())
+    )
+    dangling_links = sorted(
+        (*identity, attempt_id)
+        for identity, attempts in superseded_attempts.items()
+        for attempt_id in attempts - void_attempts.get(identity, set())
+    )
     identity_detail = []
     if missing_identities:
         identity_detail.append("missing " + ", ".join(render_sample_identity(item) for item in missing_identities))
     if unexpected_identities:
         identity_detail.append("unexpected " + ", ".join(render_sample_identity(item) for item in unexpected_identities))
-    if duplicate_identities:
-        identity_detail.append("duplicate " + ", ".join(render_sample_identity(item) for item in sorted(duplicate_identities)))
+    if duplicate_scored:
+        identity_detail.append("duplicate terminal " + ", ".join(render_sample_identity(item) for item in sorted(duplicate_scored)))
+    if duplicate_attempts:
+        identity_detail.append(
+            "duplicate attempts "
+            + ", ".join(f"{render_sample_identity(item[:4])}#{item[4]}" for item in sorted(duplicate_attempts))
+        )
+    if unlinked_voids:
+        identity_detail.append(
+            "unlinked void attempts "
+            + ", ".join(f"{render_sample_identity(item[:4])}#{item[4]}" for item in unlinked_voids)
+        )
+    if dangling_links:
+        identity_detail.append(
+            "reruns linked to absent void attempts "
+            + ", ".join(f"{render_sample_identity(item[:4])}#{item[4]}" for item in dangling_links)
+        )
     identity_ok = report.require(
         not identity_detail,
         "archive.identity_coverage",
-        f"archive identities exactly cover all {len(expected_identities)} planned scored outputs",
-        "archive identities do not match the planned scored outputs: " + "; ".join(identity_detail),
+        f"archive retains {len(samples)} attempts with one terminal scored attempt for each of {len(expected_identities)} planned outputs",
+        "archive attempts do not provide one linked terminal result per planned output: " + "; ".join(identity_detail),
     )
     ok = ok and identity_ok
     return ok, sha256_bytes("".join(sorted(digests)).encode("utf-8"))
@@ -3059,6 +3287,13 @@ def rerun_archived_evaluator(
 def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
     """Restore each candidate bundle into a fresh repository and rebind its tree."""
     archive_root = root / "archive"
+    receipt = archive_root / "restore-drill.json"
+    try:
+        archive_mode = archive_root.lstat().st_mode
+    except OSError:
+        archive_mode = 0
+    if stat.S_ISDIR(archive_mode) and is_within(archive_root.resolve(), root.resolve()):
+        receipt.unlink(missing_ok=True)
     try:
         root_mode = archive_root.lstat().st_mode
     except OSError:
@@ -3066,16 +3301,19 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
     if not stat.S_ISDIR(root_mode) or not is_within(archive_root.resolve(), root.resolve()):
         report.fail("restore.archive_root", "archive root is absent, symlinked, special, or outside the benchmark")
         return
-    receipt = archive_root / "restore-drill.json"
-    receipt.unlink(missing_ok=True)
     archive_ok, archive_digest = check_archive(root, plan, report)
     if shutil.which("git") is None:
         report.fail("restore.git", "git is required to restore and verify candidate bundles")
         return
-    samples = archive_samples(root)
-    drill_ok = archive_ok and bool(samples)
     if not archive_ok:
         return
+    all_samples = archive_samples(root)
+    samples = [
+        sample
+        for sample in all_samples
+        if load_json(sample / "manifest.json", ARCHIVE_SCHEMA).get("attempt", {}).get("status") == "scored"
+    ]
+    drill_ok = archive_ok and bool(samples)
     if not samples:
         report.fail("restore.scope", "no sample archive to restore")
     selected_samples = samples[:RESTORE_EVALUATOR_SAMPLE_LIMIT]
@@ -3257,7 +3495,7 @@ def restore_drill(root: Path, plan: dict[str, Any], report: Report) -> None:
                 "schema": DRILL_SCHEMA,
                 "verdict": "pass",
                 "archive_digest": archive_digest,
-                "samples": len(samples),
+                "samples": len(all_samples),
                 "evaluator_samples": sorted(selected_names),
                 "evaluator_dependence": dict(sorted(dependence.items())),
             },
@@ -3317,6 +3555,38 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
     records: list[dict[str, Any]] = []
     if not directory.is_dir():
         return records
+    rule = plan.get("promotion_rule")
+    composite_rule = rule.get("composite") if isinstance(rule, dict) else None
+    weights = composite_rule.get("weights") if isinstance(composite_rule, dict) else None
+    scale = composite_rule.get("score_scale") if isinstance(composite_rule, dict) else None
+    valid_composite_rule = (
+        isinstance(weights, dict)
+        and set(weights) == {"deterministic", "panel"}
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and float(value) >= 0
+            for value in weights.values()
+        )
+        and math.isclose(sum(float(value) for value in weights.values()), 1.0, abs_tol=1e-12)
+        and isinstance(scale, dict)
+        and isinstance(scale.get("min"), (int, float))
+        and not isinstance(scale.get("min"), bool)
+        and isinstance(scale.get("max"), (int, float))
+        and not isinstance(scale.get("max"), bool)
+        and math.isfinite(float(scale["min"]))
+        and math.isfinite(float(scale["max"]))
+        and float(scale["min"]) < float(scale["max"])
+    )
+    if not valid_composite_rule:
+        report.fail(
+            "promote.composite_rule",
+            "the frozen plan must declare finite nonnegative normalized deterministic and panel weights on one finite score scale",
+        )
+        return records
+    score_min = float(scale["min"])
+    score_max = float(scale["max"])
     archive_root = root / "archive"
     try:
         archive_mode = archive_root.lstat().st_mode
@@ -3333,13 +3603,28 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             continue
         sample = root / "archive" / str(sample_name)
         try:
+            sample_mode = sample.lstat().st_mode
+            if not stat.S_ISDIR(sample_mode) or not is_within(sample.resolve(), archive_root.resolve()):
+                raise GateError("archive sample root is symlinked, special, or outside the benchmark archive")
             manifest = load_json(sample / "manifest.json", ARCHIVE_SCHEMA)
             identity = manifest["identity"]
             files = manifest["files"]
-            if not isinstance(identity, dict) or not isinstance(files, dict):
-                raise GateError("archive manifest has no identity or files map")
+            groups = manifest.get("groups")
+            attempt = manifest["attempt"]
+            if not isinstance(identity, dict) or not isinstance(files, dict) or not isinstance(attempt, dict):
+                raise GateError("archive manifest has no identity, attempt, or files map")
+            attempt_id = attempt.get("id")
+            status = attempt.get("status")
+            supersedes = attempt.get("supersedes")
+            if not nonempty_str(attempt_id) or status not in ("scored", "void"):
+                raise GateError("archive attempt has no stable id or valid status")
+            if status == "void" and (
+                groups != {"failure_and_timing": ["timing.json"]} or set(files) != {"timing.json"}
+            ):
+                raise GateError("void attempt must contain only failure and timing evidence")
             evidence_parts: dict[str, dict[str, Any]] = {}
-            for evidence_name in ("judging.json", "capture.json", "timing.json"):
+            evidence_names = ("timing.json",) if status == "void" else ("judging.json", "capture.json", "timing.json")
+            for evidence_name in evidence_names:
                 if evidence_name not in files:
                     raise GateError(f"{evidence_name} is not content-addressed")
                 evidence_path = sample / evidence_name
@@ -3353,27 +3638,11 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             continue
         track_name = str(identity.get("track", ""))
         track = (plan.get("tracks") or {}).get(track_name)
-        expected_panel = [
-            str(judge.get("name", ""))
-            for judge in ((track or {}).get("judges") or [])
-            if isinstance(judge, dict)
-        ]
-        judging = evidence_parts["judging.json"]
-        evaluator = evidence_parts["capture.json"]
+        if not isinstance(track, dict):
+            report.fail("promote.evidence", f"{path.name} archive identity names unplanned track {track_name!r}")
+            continue
         timing = evidence_parts["timing.json"]
-        panel = judging.get("panel")
-        scores = judging.get("scores")
-        failure = timing.get("failure")
-        valid_scores = (
-            isinstance(scores, list)
-            and len(scores) == len(expected_panel)
-            and all(
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and math.isfinite(float(value))
-                for value in scores
-            )
-        )
+        failure = timing.get("failure") if isinstance(timing, dict) else None
         intervals = timing.get("intervals") if isinstance(timing, dict) else None
         timing_ok = isinstance(intervals, dict) and all(
             isinstance(intervals.get(name), (int, float))
@@ -3381,6 +3650,49 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             and math.isfinite(float(intervals.get(name)))
             and float(intervals.get(name)) >= 0
             for name in REQUIRED_TIMING_INTERVALS
+        )
+        if not timing_ok or not isinstance(failure, dict) or failure.get("status") != status:
+            report.fail("promote.evidence", f"{path.name} has no valid centrally recorded attempt status and timing")
+            continue
+        common = {
+            "_path": path.name,
+            "track": track_name,
+            "role": str(identity.get("role", "")),
+            "candidate": str(identity.get("candidate", "")),
+            "packet": str(identity.get("packet", "")),
+            "attempt": str(attempt_id),
+            "supersedes": str(supersedes) if nonempty_str(supersedes) else None,
+            "status": status,
+            "blocker_class": failure.get("blocker_class") is True,
+        }
+        if status == "void":
+            if (
+                failure.get("class") not in ("evaluator_infrastructure", "provider_outage", "quota_exhaustion")
+                or failure.get("blocker_class") is not False
+            ):
+                report.fail("promote.evidence", f"{path.name} void lacks an approved centrally recorded failure class")
+                continue
+            records.append(common)
+            continue
+        expected_panel = [
+            str(judge.get("name", ""))
+            for judge in ((track or {}).get("judges") or [])
+            if isinstance(judge, dict)
+        ]
+        judging = evidence_parts["judging.json"]
+        evaluator = evidence_parts["capture.json"]
+        panel = judging.get("panel")
+        scores = judging.get("scores")
+        valid_scores = (
+            isinstance(scores, list)
+            and len(scores) == len(expected_panel)
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and score_min <= float(value) <= score_max
+                for value in scores
+            )
         )
         deterministic = evaluator.get("deterministic") if isinstance(evaluator, dict) else None
         tree = evaluator.get("tree") if isinstance(evaluator, dict) else None
@@ -3391,9 +3703,10 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             not isinstance(deterministic, (int, float))
             or isinstance(deterministic, bool)
             or not math.isfinite(float(deterministic))
+            or not score_min <= float(deterministic) <= score_max
             or not valid_scores
         ):
-            report.fail("promote.composite", f"{path.name} has no finite numeric composite")
+            report.fail("promote.composite", f"{path.name} has no finite numeric composite on the declared score scale")
             continue
         valid = (
             panel == expected_panel
@@ -3402,7 +3715,7 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
             and nonempty_str(tree)
             and tree == binding.get("original_tree")
             and nonempty_str(capture_hash)
-            and status in ("scored", "void")
+            and status == "scored"
         )
         if not valid:
             report.fail(
@@ -3410,20 +3723,9 @@ def load_results(root: Path, plan: dict[str, Any], report: Report) -> list[dict[
                 f"{path.name} archive evidence does not bind the common panel, tree, evaluator, capture, timing, and failure facts",
             )
             continue
-        composite = (float(deterministic) + sum(float(value) for value in scores) / len(scores)) / 2
-        records.append(
-            {
-                "_path": path.name,
-                "track": track_name,
-                "role": str(identity.get("role", "")),
-                "candidate": str(identity.get("candidate", "")),
-                "packet": str(identity.get("packet", "")),
-                "status": status,
-                "blocker_class": failure.get("blocker_class") is True,
-                "deterministic": float(deterministic),
-                "composite": composite,
-            }
-        )
+        panel_score = sum(float(value) for value in scores) / len(scores)
+        composite = float(weights["deterministic"]) * float(deterministic) + float(weights["panel"]) * panel_score
+        records.append({**common, "deterministic": float(deterministic), "composite": composite})
     return records
 
 
@@ -3472,19 +3774,16 @@ def promote_track(
     track_results = [record for record in results if str(record.get("track")) == name]
     scored = [record for record in track_results if record.get("status") == "scored"]
     voided = [record for record in track_results if record.get("status") == "void"]
-    scored_pairs = {
-        (str(record.get("role")), str(record.get("candidate")), str(record.get("packet")))
-        for record in scored
-    }
     unreplaced_voids = [
         record
         for record in voided
-        if (
-            str(record.get("role")),
-            str(record.get("candidate")),
-            str(record.get("packet")),
+        if not any(
+            scored_record.get("role") == record.get("role")
+            and scored_record.get("candidate") == record.get("candidate")
+            and scored_record.get("packet") == record.get("packet")
+            and scored_record.get("supersedes") == record.get("attempt")
+            for scored_record in scored
         )
-        not in scored_pairs
     ]
     if unreplaced_voids:
         missing = sorted(
@@ -3497,7 +3796,7 @@ def promote_track(
     else:
         report.ok(
             f"{prefix}.voids",
-            f"all {len(voided)} voided samples have scored replacements with the same role, candidate, and packet",
+            f"all {len(voided)} voided attempts have explicitly linked scored replacements",
         )
 
     complete = True
@@ -3849,7 +4148,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Benchmark directory layout: benchmark.json (the frozen plan), packets/, ground-truth/, "
             "scoring/, judge-prompts/, provenance/<packet>.json, isolation.json, allowance.json, "
             "evaluator/{lock.json,score-map.json,execution.json,determinism/,mutations/,captures/}, manifest.json, "
-            "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with a structured sample identity, "
+            "freeze.json, results/<sample>.json, archive/<sample>/manifest.json with structured sample and attempt identities, "
             "the eight role-specific evidence groups, evaluator_rerun.scored_inputs, and at least one pure-data "
             "evaluator_rerun.input_perturbations entry, and the generated preflight.receipt and "
             "archive/restore-drill.json."

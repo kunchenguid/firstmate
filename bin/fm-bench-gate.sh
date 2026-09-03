@@ -35,7 +35,8 @@
 #                     probe is denied
 #   evaluator-verify  environment lock, published score map, zero-weight
 #                     validity gates, confined content-addressed executions,
-#                     mutation calibration, and one capture per planned head
+#                     frozen content-addressed inputs, derived mutation
+#                     calibration, and one capture per planned head
 #   evaluator-execute-verify
 #                     run the evaluator proof used by preflight directly
 #   manifest-build / manifest-check
@@ -44,12 +45,12 @@
 #   preflight         all of the above; writes preflight.receipt on a pass
 #
 # Post-run gates:
-#   promote-evaluate  recompute content-addressed panel, tree, evaluator,
-#                     capture, timing, and failure evidence, then apply the
-#                     sweep, margin, and baseline veto
-#   archive-verify    require the exact planned sample identities, regular
-#                     self-contained files, role-specific evidence groups, and
-#                     recomputed content addresses
+#   promote-evaluate  recompute scored-attempt evidence through the plan-owned
+#                     composite, accept void-specific failure/timing evidence,
+#                     then apply the sweep, margin, and baseline veto
+#   archive-verify    require one terminal scored attempt per planned identity,
+#                     retain linked prior void attempts, and verify regular
+#                     self-contained content-addressed evidence
 #   restore-drill     restore each bundle into a fresh repository, rebind its
 #                     tree, then rerun a deterministic archived evaluator twice
 #                     with its declared structured perturbation in confined,
