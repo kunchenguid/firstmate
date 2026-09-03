@@ -89,10 +89,10 @@ Two rules the commands cannot enforce for you:
   Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
   `pr-follow` is the same kind of adapter: a captured PR lifecycle document is applied - cursor merge, backfill latch, and handled acknowledgement - only by
   ```sh
-  bin/fm-procevent-pr-follow.sh handle <source-id> <sequence> <result-file>
+  bin/fm-procevent-pr-follow.sh handle <scheduler-id> <sequence> <result-file>
   ```
-  Read the document's `event:` lines as findings to act on under the ordinary review and merge owners, then run `handle`; never acknowledge a `pr-follow` wake through the generic command, because only the adapter advances the durable cursor.
-  A `pr-follow` source never retires itself - not after merge, not after close - so tracking runs until someone deliberately runs `bin/fm-procevent-pr-follow.sh retire <source-id>`, which refuses while unhandled captured results exist unless `--force`.
+  Read the document's validated `target:` field for the PR tracking id and its `event:` lines as findings to act on under the ordinary review and merge owners, then run `handle`; never acknowledge a `pr-follow` wake through the generic command, because only the adapter advances the target's durable cursor.
+  The home-level scheduler id comes from `bin/fm-procevent-pr-follow.sh scheduler-id` and never retires itself after merge or close. Each PR remains in its cursor roster until someone deliberately runs `bin/fm-procevent-pr-follow.sh retire <tracking-id>`, which refuses while an unhandled scheduler capture targets that PR unless `--force`.
   A `handle` refusal names its class: "tampered or foreign" means the captured document was modified or does not claim this source and stays refused until an operator inspects and resolves it, while "adapter-produced document failed its own validation contract" means the adapter emitted bytes its own validator rejects; that class is bounded, and past its bound the source is quarantined with one monitoring-loss document naming the pause.
   When a monitoring-loss document arrives, read the private quarantine record it names, update or repair firstmate so the adapter no longer emits unapplicable documents, then resume tracking by re-running `bin/fm-procevent-pr-follow.sh arm <task-id> <pr-url>`, which clears the quarantine; never delete the record to hide the loss.
   Use the generic path below only after fully handling a result whose adapter has no applying command.

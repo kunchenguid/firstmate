@@ -60,6 +60,7 @@ new_section() {
   PREV_HOME=$H
   sid=$(prf "$H" source-id "$GH_URL")
   glsid=$(prf "$H" source-id "$GL_URL")
+  scheduler_id=$(prf "$H" scheduler-id)
 }
 
 new_home() { mkdir -p "$1/state"; HOMES+=("$1"); }
@@ -84,6 +85,7 @@ GH_URL=
 GL_URL=
 sid=
 glsid=
+scheduler_id=
 GL_FIX="$TMP_ROOT/gl"
 export GL_FIX
 GH_SHA1=1111111111111111111111111111111111111111
@@ -110,25 +112,41 @@ for a in "$@"; do
   fi
 done
 serve() { jq -r "${filter:-.}" "$1" 2>/dev/null || exit 9; }
+included() {
+  local total=$1
+  if [[ " $* " = *" --include "* ]]; then
+    printf 'HTTP/2.0 200 OK\n'
+    if [ "$total" -gt 1 ]; then
+      printf 'Link: <https://api.github.test/items?per_page=100&page=%s>; rel="last"\n' "$total"
+    fi
+    printf '\n'
+  fi
+}
 if [ "$1" = api ]; then
   case "$2" in
     *pulls/*/reviews*)
       total=$(cat "$fix/reviews.total-pages" 2>/dev/null || printf '1')
       page=$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9][0-9]*\).*/\1/p')
       page=${page:-1}
-      if [[ " $* " = *" --include "* ]]; then
-        printf 'HTTP/2.0 200 OK\n'
-        if [ "$total" -gt 1 ]; then
-          printf 'Link: <https://api.github.test/reviews?per_page=100&page=%s>; rel="last"\n' "$total"
-        fi
-        printf '\n'
-      fi
+      included "$total" "$@"
       [ -f "$fix/reviews.page.$page" ] && serve "$fix/reviews.page.$page" || serve "$fix/reviews.json"
       ;;
-    *issues/*/comments*)            serve "$fix/comments.json" ;;
-    *pulls/*/comments*)             serve "$fix/rc.json" ;;
+    *issues/*/comments*)
+      total=$(cat "$fix/comments.total-pages" 2>/dev/null || printf '1')
+      page=$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9][0-9]*\).*/\1/p'); page=${page:-1}
+      included "$total" "$@"
+      [ -f "$fix/comments.page.$page" ] && serve "$fix/comments.page.$page" || serve "$fix/comments.json" ;;
+    *pulls/*/comments*)
+      total=$(cat "$fix/rc.total-pages" 2>/dev/null || printf '1')
+      page=$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9][0-9]*\).*/\1/p'); page=${page:-1}
+      included "$total" "$@"
+      [ -f "$fix/rc.page.$page" ] && serve "$fix/rc.page.$page" || serve "$fix/rc.json" ;;
     repos/*/pulls/*)                [ -n "${GH_TEST_POLL_LOG:-}" ] && printf 'view\n' >> "$GH_TEST_POLL_LOG"; serve "$fix/pr.json" ;;
-    *check-runs*)                   serve "$fix/checks.json" ;;
+    *check-runs*)
+      total=$(cat "$fix/checks.total-pages" 2>/dev/null || printf '1')
+      page=$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9][0-9]*\).*/\1/p'); page=${page:-1}
+      included "$total" "$@"
+      [ -f "$fix/checks.page.$page" ] && serve "$fix/checks.page.$page" || serve "$fix/checks.json" ;;
     *) echo "unexpected gh api path: $2" >&2; exit 9 ;;
   esac
   exit 0
@@ -155,7 +173,13 @@ case "$2" in
     fi
     [ -f "$fix/discussions.page.$page" ] && file "discussions.page.$page" || file discussions
     ;;
-  projects/*/merge_requests/*/pipelines*) file pipelines ;;
+  projects/*/merge_requests/*/pipelines*)
+    total=$(file pipelines.total-pages); total=${total:-1}
+    page=$(printf '%s' "$2" | sed -n 's/.*[?&]page=\([0-9][0-9]*\).*/\1/p'); page=${page:-1}
+    if [[ " $* " = *" --include "* ]]; then
+      printf 'HTTP/2.0 200 OK\nX-Total-Pages: %s\n\n' "$total"
+    fi
+    [ -f "$fix/pipelines.page.$page" ] && file "pipelines.page.$page" || file pipelines ;;
   projects/*/merge_requests/*/approvals) file approvals ;;
   projects/*/merge_requests/*)
     j=$(file mr)
@@ -172,7 +196,7 @@ export PATH="$FAKEBIN:$PATH"
 # representative REST payload; the adapter's projections derive rows.
 gh_fix_default() {
   mkdir -p "$GH_FIX"
-  rm -f "$GH_FIX"/reviews.page.* "$GH_FIX/reviews.total-pages"
+  rm -f "$GH_FIX"/*.page.* "$GH_FIX"/*.total-pages
   printf '{"state":"open","merged_at":null,"head":{"sha":"%s"},"user":{"login":"alice"}}\n' "$GH_SHA1" > "$GH_FIX/pr.json"
   printf '[{"id":5,"user":{"login":"bob"}}]\n' > "$GH_FIX/comments.json"
   printf '[]\n' > "$GH_FIX/rc.json"
@@ -204,9 +228,16 @@ gh_checks() {
 wake_payloads() { awk -F '\t' '{print $5}' "$1/state/.wake-queue" 2>/dev/null; }
 
 first_result() {  # <home> <source-id>
-  local g
+  local g scheduler
+  scheduler=$(prf "$1" scheduler-id)
   for g in "$1/state/procevent-inbox/$2".*.result; do
     [ -e "$g" ] || continue
+    printf '%s\n' "$g"
+    return 0
+  done
+  for g in "$1/state/procevent-inbox/$scheduler".*.result; do
+    [ -e "$g" ] || continue
+    [ "$(sed -n 's/^target: //p' "$g")" = "$2" ] || continue
     printf '%s\n' "$g"
     return 0
   done
@@ -214,9 +245,15 @@ first_result() {  # <home> <source-id>
 }
 
 result_count() {
-  local n=0 g
+  local n=0 g scheduler
+  scheduler=$(prf "$1" scheduler-id)
   for g in "$1/state/procevent-inbox/$2".*.result; do
     [ -e "$g" ] || continue
+    n=$((n + 1))
+  done
+  for g in "$1/state/procevent-inbox/$scheduler".*.result; do
+    [ -e "$g" ] || continue
+    [ "$(sed -n 's/^target: //p' "$g")" = "$2" ] || continue
     n=$((n + 1))
   done
   printf '%s\n' "$n"
@@ -224,9 +261,15 @@ result_count() {
 
 # Latest_result <home> <source-id>: the highest-sequence captured result.
 latest_result() {
-  local g best=""
+  local g best="" scheduler
+  scheduler=$(prf "$1" scheduler-id)
   for g in "$1/state/procevent-inbox/$2".*.result; do
     [ -e "$g" ] || continue
+    best=$g
+  done
+  for g in "$1/state/procevent-inbox/$scheduler".*.result; do
+    [ -e "$g" ] || continue
+    [ "$(sed -n 's/^target: //p' "$g")" = "$2" ] || continue
     best=$g
   done
   [ -n "$best" ] || return 1
@@ -279,7 +322,17 @@ wait_for_wake() {  # <home> <payload-substring> [tries]
 }
 
 ack() {  # <home> <sid> <sequence> <result-file>: the adapter-owned apply+ack
-  prf "$1" handle "$2" "$3" "$4" >/dev/null
+  local capture seq
+  capture=$(sed -n 's/^source: //p' "$4")
+  seq=${4%.result}
+  seq=${seq##*.}
+  prf "$1" handle "$capture" "$seq" "$4" >/dev/null
+}
+
+handle_result() {
+  local capture
+  capture=$(sed -n 's/^source: //p' "$3")
+  prf "$1" handle "$capture" "$2" "$3"
 }
 
 cursor_field() {  # <home> <sid> <key>
@@ -322,7 +375,8 @@ fi
 out=$(arm_gh "$H")
 assert_contains "$out" "armed: $sid" "arm reports the canonical source id"
 assert_present "$H/state/pr-follow/$sid.cursor" "arm writes the private cursor seed"
-assert_present "$H/state/procevent/$sid.source" "arm registers the process-event source"
+assert_present "$H/state/procevent/$scheduler_id.source" "arm registers one home scheduler"
+assert_absent "$H/state/procevent/$sid.source" "arm does not register a resident process per PR"
 mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$H/state/pr-follow/$sid.cursor")
 assert_contains "$mode" 600 "the cursor is private"
@@ -359,9 +413,9 @@ wait_for_result "$H" "$sid" || fail "a new open PR comment produced no captured 
 RESULT=$(first_result "$H" "$sid")
 assert_grep 'event: comment id=9 author=carol' "$RESULT" "the new comment is announced with its forge id"
 assert_grep 'status: events' "$RESULT" "the document classifies as events"
-wait_for_wake "$H" "procevent pr-follow $sid 1" || fail "the event never reached the durable wake queue"
+wait_for_wake "$H" "procevent pr-follow $scheduler_id 1" || fail "the event never reached the durable wake queue"
 payload=$(wake_payloads "$H")
-assert_contains "$payload" "procevent pr-follow $sid 1" "the wake names the stable source and sequence"
+assert_contains "$payload" "procevent pr-follow $scheduler_id 1" "the wake names the scheduler and sequence"
 assert_not_contains "$payload" "carol" "remote author text never reaches the event line"
 pass "an open PR comment is announced once through the durable queue"
 
@@ -417,10 +471,10 @@ new_section head
 arm_gh "$H" >/dev/null
 pe "$H" reconcile >/dev/null
 wait_for_baseline "$H" "$sid" || fail "the baseline never completed"
-pkill -STOP -f "fm-procevent-pr-follow.sh run $sid" 2>/dev/null || true
+pkill -STOP -f "fm-procevent-pr-follow.sh run $scheduler_id" 2>/dev/null || true
 sleep 0.3
-pkill -KILL -f "fm-procevent-pr-follow.sh run $sid" 2>/dev/null || true
-pkill -f "fm-procevent.sh _start pr-follow $sid" 2>/dev/null || true
+pkill -KILL -f "fm-procevent-pr-follow.sh run $scheduler_id" 2>/dev/null || true
+pkill -f "fm-procevent.sh _start $scheduler_id" 2>/dev/null || true
 sleep 0.3
 gh_checks '[{"id":70,"status":"completed","conclusion":"success","name":"ci/linux"},{"id":72,"status":"completed","conclusion":"failure","name":"ci/linux"}]'
 gh_state OPEN "$GH_SHA2"
@@ -506,8 +560,8 @@ assert_grep 'event: check id=92 name=linux change=none->pending status=in_progre
 assert_grep 'event: check id=93 name=deploy change=none->pending status=waiting:none' "$RESULT" "a waiting check round-trips"
 assert_grep 'event: check id=94 name=deploy change=none->pending status=requested:none' "$RESULT" "a requested check round-trips"
 assert_grep 'event: check id=95 name=windows change=none->pending status=pending:none' "$RESULT" "a pending check round-trips"
-out=$(prf "$H" handle "$sid" 1 "$RESULT")
-assert_contains "$out" "applied: $sid 1" "the live-states document applies cleanly"
+out=$(handle_result "$H" 1 "$RESULT")
+assert_contains "$out" "applied: $scheduler_id 1" "the live-states document applies cleanly"
 stored=$(cursor_field "$H" "$sid" checks)
 for token in 91:queued:none 92:in_progress:none 93:waiting:none 94:requested:none 95:pending:none; do
   assert_contains "$stored" "$token" "the cursor stores $token"
@@ -524,8 +578,8 @@ RESULT=$(latest_result "$H" "$sid")
 count=$(grep -c 'change=pending->green' "$RESULT" || true)
 assert_contains "$count" 5 "every live-state check announces its completion"
 ack "$H" "$sid" 2 "$RESULT"
-out=$(prf "$H" handle "$sid" 2 "$RESULT")
-assert_contains "$out" "already-applied: $sid 2" "a byte-identical replay is receipt-deduplicated"
+out=$(handle_result "$H" 2 "$RESULT")
+assert_contains "$out" "already-applied: $scheduler_id 2" "a byte-identical replay is receipt-deduplicated"
 before=$(result_count "$H" "$sid")
 pe "$H" reconcile >/dev/null
 sleep 1
@@ -609,7 +663,7 @@ gh_state MERGED
 wait_for_result "$H" "$sid" || fail "the merge produced no result"
 RESULT=$(first_result "$H" "$sid")
 assert_grep 'event: pr-state from=open state=merged' "$RESULT" "the merge is announced"
-assert_present "$H/state/procevent/$sid.source" "a merged PR keeps its lifecycle registration"
+assert_present "$H/state/procevent/$scheduler_id.source" "a merged PR stays on the scheduler roster"
 ack "$H" "$sid" 1 "$RESULT"
 restart_runner "$H"
 printf '[{"id":5,"user":{"login":"bob"}},{"id":13,"user":{"login":"dave"}}]\n' > "$GH_FIX/comments.json"
@@ -663,7 +717,8 @@ wait_for_baseline "$H" "$sid" || fail "the baseline never completed"
 # again before any apply happened.
 printf '[{"id":5,"user":{"login":"bob"}},{"id":9,"user":{"login":"carol"}}]\n' > "$GH_FIX/comments.json"
 wait_for_result "$H" "$sid" || fail "no result before the restart"
-first="$H/state/procevent-inbox/$sid.1.result"
+first=$(first_result "$H" "$sid")
+capture=$(sed -n 's/^source: //p' "$first")
 cp "$first" "$TMP_ROOT/restart-copy"
 before=$(result_count "$H" "$sid")
 out=$(FM_HOME="$H" perl -e 'alarm 1; exec @ARGV' \
@@ -672,16 +727,16 @@ after=$(result_count "$H" "$sid")
 [ "$after" = "$before" ] \
   || fail "a recomputed poll after an unapplied capture added a second document while the cursor held"
 # The applied cursor advance makes the same poll silent.
-FM_HOME="$H" "$ROOT/bin/fm-procevent-pr-follow.sh" autohandle "$sid" 1 "$first" >/dev/null
+FM_HOME="$H" "$ROOT/bin/fm-procevent-pr-follow.sh" autohandle "$capture" 1 "$first" >/dev/null
 out=$(FM_HOME="$H" perl -e 'alarm 1; exec @ARGV' \
   "$ROOT/bin/fm-procevent-pr-follow.sh" run "$sid" 2>/dev/null || true)
 [ -z "$out" ] || fail "the applied cursor advance left the same remote state noisy: $out"
 # Byte-identical replay of one generation acknowledges exactly once.
-out=$(FM_HOME="$H" "$ROOT/bin/fm-procevent-pr-follow.sh" handle "$sid" 1 "$first")
-assert_contains "$out" "already-applied: $sid 1" "a byte-identical replay reports already-applied"
+out=$(FM_HOME="$H" "$ROOT/bin/fm-procevent-pr-follow.sh" handle "$capture" 1 "$first")
+assert_contains "$out" "already-applied: $capture 1" "a byte-identical replay reports already-applied"
 cp "$first" "$TMP_ROOT/tampered"
 printf 'x' >> "$TMP_ROOT/tampered"
-if FM_HOME="$H" "$ROOT/bin/fm-procevent-pr-follow.sh" handle "$sid" 1 "$TMP_ROOT/tampered" >/dev/null 2>&1; then
+if FM_HOME="$H" "$ROOT/bin/fm-procevent-pr-follow.sh" handle "$capture" 1 "$TMP_ROOT/tampered" >/dev/null 2>&1; then
   fail "a conflicting generation under one sequence must be refused"
 fi
 pass "restart recomputes safely and replay is receipt-deduplicated"
@@ -861,8 +916,7 @@ restart_runner "$H"
 printf '[{"id":5,"user":{"login":"bob"}},{"id":21,"user":{"login":"erin"}}]\n' > "$GH_FIX/comments.json"
 wait_for_result_count "$H" "$sid" 3 || fail "tracking did not resume after re-arm"
 RESULT=$(latest_result "$H" "$sid")
-seqn=${RESULT##*/}
-seqn=${seqn#"$sid".}
+seqn=${RESULT##*/"$scheduler_id".}
 seqn=${seqn%.result}
 assert_grep 'event: comment id=21 author=erin' "$RESULT" "resumed tracking announces new events"
 ack "$H" "$sid" "$seqn" "$RESULT"
@@ -884,7 +938,7 @@ arm_gh "$H" task-live >/dev/null
 # cleanup does, while lifecycle state lives elsewhere.
 rm -f "$H/state/task-live.check.sh" "$H/state/task-live.pr-poll" \
   "$H/state/task-live.pr-poll-registration" "$H/state/task-live.pr-poll-retirement"
-assert_present "$H/state/procevent/$sid.source" "cleanup leaves the lifecycle registration"
+assert_present "$H/state/procevent/$scheduler_id.source" "cleanup leaves the lifecycle scheduler"
 assert_present "$H/state/pr-follow/$sid.cursor" "cleanup leaves the lifecycle cursor"
 pe "$H" reconcile >/dev/null
 wait_for_baseline "$H" "$sid" || fail "tracking stopped after task cleanup"
@@ -903,13 +957,13 @@ wait_for_result "$H" "$sid" || fail "no result before retirement"
 if prf "$H" retire "$sid" >/dev/null 2>&1; then
   fail "retirement must refuse while unhandled captured results exist"
 fi
-assert_present "$H/state/procevent/$sid.source" \
-  "a refused retirement still deregistered the source"
+assert_present "$H/state/procevent/$scheduler_id.source" \
+  "a refused retirement keeps the scheduler"
 assert_present "$H/state/pr-follow/$sid.cursor" \
   "a refused retirement still discarded the durable cursor"
 out=$(prf "$H" retire "$sid" --force)
 assert_contains "$out" "retired: $sid" "the explicit retirement reports what it retired"
-assert_absent "$H/state/procevent/$sid.source" "retirement drops the registration"
+assert_absent "$H/state/procevent/$scheduler_id.source" "retirement drops the empty scheduler"
 assert_absent "$H/state/pr-follow/$sid.cursor" "retirement removes the cursor"
 out=$(prf "$H" retire "$sid" --force)
 assert_contains "$out" "retired: $sid" "retirement is idempotent"
@@ -926,7 +980,7 @@ gh_fix_default
 # newest first, as the descending API pages deliver them.
 printf '[{"id":8,"in_reply_to_id":null,"user":{"login":"codex"},"path":"src/y.py","line":20},{"id":7,"in_reply_to_id":6,"user":{"login":"alice"},"path":"src/x.py","line":10},{"id":6,"in_reply_to_id":null,"user":{"login":"codex"},"path":"src/x.py","line":10}]\n' > "$GH_FIX/rc.json"
 arm_gh "$H" task-old --backfill >/dev/null
-out=$(FM_HOME="$H" perl -e 'alarm 10; exec @ARGV' "$ROOT/bin/fm-procevent.sh" start "$sid" 2>&1)
+out=$(FM_HOME="$H" perl -e 'alarm 10; exec @ARGV' "$ROOT/bin/fm-procevent.sh" start "$scheduler_id" 2>&1)
 printf '%s\n' "$out" > "$TMP_ROOT/bf-start"
 assert_grep 'captured:' "$TMP_ROOT/bf-start" "the runner captured the backfill document"
 RESULT=$(first_result "$H" "$sid")
@@ -970,6 +1024,22 @@ assert_grep 'backfill summary: scanned=3 armed=0 already=2 skipped=0 capped=0' "
   "the sweep is idempotent"
 pass "the guarded migration sweep arms every recorded PR exactly once"
 
+new_section sweep-resume
+gh_fix_default
+for n in 1 2 3; do
+  printf 'task=resume-%s\npr=https://github.com/octo/app/pull/%s\n' "$n" "$((700 + n))" \
+    > "$H/state/resume-$n.meta"
+done
+for _ in 1 2 3; do
+  FM_PR_FOLLOW_BACKFILL_SCAN_CAP=1 prf "$H" backfill >/dev/null
+done
+for n in 1 2 3; do
+  rsid=$(prf "$H" source-id "https://github.com/octo/app/pull/$((700 + n))")
+  assert_present "$H/state/pr-follow/$rsid.cursor" "resumable sweep reached PR $n"
+done
+assert_absent "$H/state/pr-follow/backfill.scan" "completed sweep clears its progress cursor"
+pass "the capped migration sweep resumes beyond its first batch"
+
 # --- GitLab lifecycle events through the real JSON parser ---------------------
 new_section gitlab
 gh_fix_default
@@ -1004,8 +1074,8 @@ assert_grep 'event: review id=approval-erin state=APPROVED author=erin' "$RESULT
 assert_no_grep 'state=DISMISSED' "$RESULT" "a second approver never revokes the first"
 ack "$H" "$glsid" 2 "$RESULT"
 assert_contains "$(cursor_field "$H" "$glsid" approvals)" "dave,erin" "both approvals are durable"
-assert_contains "$(cursor_field "$H" "$glsid" threads)" "D2:unresolved" \
-  "a discussion opened after the baseline is tracked from its first sighting"
+assert_grep 'state=unresolved' "$H/state/pr-follow/$glsid.threads/D2" \
+  "a discussion opened after the baseline is durably tracked from its first sighting"
 # An approvals endpoint that stops answering is not evidence that anybody
 # withdrew an approval, so the poll that carries an unrelated event must
 # neither announce a revocation nor drop the durable set.
@@ -1040,7 +1110,7 @@ RESULT=$(latest_result "$H" "$glsid")
 assert_grep 'event: thread id=D1 state=resolved' "$RESULT" "the thread resolution is announced"
 assert_grep 'event: pr-state from=open state=merged' "$RESULT" "the GitLab merge is announced"
 ack "$H" "$glsid" 5 "$RESULT"
-assert_present "$H/state/procevent/$glsid.source" "a merged GitLab MR keeps its registration"
+assert_present "$H/state/procevent/$scheduler_id.source" "a merged GitLab MR stays scheduled"
 pass "GitLab comments, pipelines, approvals, threads, and merge are tracked"
 
 # --- live and unknown GitLab pipeline states round-trip ------------------------
@@ -1065,8 +1135,8 @@ assert_grep 'event: check id=11 change=pending->green status=success' "$RESULT" 
 assert_grep 'event: check id=12 change=pending->red status=failed' "$RESULT" "preparing->failed is announced"
 assert_grep 'event: check id=13 change=pending->green status=success' "$RESULT" "running->success is announced"
 ack "$H" "$glsid" 1 "$RESULT"
-out=$(prf "$H" handle "$glsid" 1 "$RESULT")
-assert_contains "$out" "already-applied: $glsid 1" "the GitLab transitions replay safely"
+out=$(handle_result "$H" 1 "$RESULT")
+assert_contains "$out" "already-applied: $scheduler_id 1" "the GitLab transitions replay safely"
 restart_runner "$H"
 printf '[{"id":11,"sha":"2222222222222222222222222222222222222222","status":"success"},{"id":12,"sha":"2222222222222222222222222222222222222222","status":"failed"},{"id":13,"sha":"2222222222222222222222222222222222222222","status":"success"},{"id":14,"sha":"2222222222222222222222222222222222222222","status":"manual"}]' > "$GL_FIX/pipelines"
 wait_for_result_count "$H" "$glsid" 2 || fail "the unknown pipeline word produced no result"
@@ -1184,17 +1254,23 @@ pass "reviews that predate the baseline keep their state tracked"
 new_section reviewpaging
 gh_fix_default
 printf '6\n' > "$GH_FIX/reviews.total-pages"
-printf '[]\n' > "$GH_FIX/reviews.page.1"
+printf '[{"id":100,"state":"APPROVED","user":{"login":"dana"}}]\n' > "$GH_FIX/reviews.page.1"
 printf '[{"id":500,"state":"APPROVED","user":{"login":"erin"}}]\n' > "$GH_FIX/reviews.page.5"
 printf '[{"id":600,"state":"COMMENTED","user":{"login":"frank"}}]\n' > "$GH_FIX/reviews.page.6"
-FM_PR_FOLLOW_MAX_PAGES=2 prf "$H" arm task-rp "$GH_URL" >/dev/null
-FM_PR_FOLLOW_MAX_PAGES=2 pe "$H" reconcile >/dev/null
+FM_PR_FOLLOW_MAX_PAGES=2 FM_PR_FOLLOW_MAP_LIMIT=2 prf "$H" arm task-rp "$GH_URL" >/dev/null
+FM_PR_FOLLOW_MAX_PAGES=2 FM_PR_FOLLOW_MAP_LIMIT=2 pe "$H" reconcile >/dev/null
 wait_for_baseline "$H" "$sid" || fail "the paged REST review baseline never completed"
 assert_contains "$(cursor_field "$H" "$sid" reviews)" "600:COMMENTED" \
   "the newest review page beyond the old five-page head was not baselined"
 assert_contains "$(cursor_field "$H" "$sid" reviews)" "500:APPROVED" \
   "the second-newest bounded review page was not baselined"
-pass "GET-only review pagination reads the newest bounded pages"
+printf '[{"id":100,"state":"CHANGES_REQUESTED","user":{"login":"dana"}}]\n' > "$GH_FIX/reviews.page.1"
+wait_for_result "$H" "$sid" 200 || fail "an older paged review transition was never revisited"
+RESULT=$(first_result "$H" "$sid")
+assert_grep 'event: review-state id=100 state=CHANGES_REQUESTED author=dana' "$RESULT" \
+  "review state was lost after compatibility-map eviction"
+ack "$H" "$sid" 1 "$RESULT"
+pass "GET-only pagination revisits evicted review state"
 
 # --- opaque GitLab thread state survives map eviction and page rotation ------
 new_section gitlabpaging
@@ -1206,18 +1282,24 @@ printf '6\n' > "$GL_FIX/discussions.total-pages"
 printf '[]' > "$GL_FIX/discussions.page.1"
 printf '[]' > "$GL_FIX/discussions.page.5"
 printf '[{"id":"opaqueA","resolved":false,"notes":[{"id":901,"author":{"username":"erin"},"type":"DiffNote","position":{"new_path":"src/a.py","new_line":3}}]},{"id":"opaqueB","resolved":false,"notes":[{"id":902,"author":{"username":"frank"},"type":"DiffNote","position":{"new_path":"src/b.py","new_line":4}}]}]' > "$GL_FIX/discussions.page.6"
+printf '6\n' > "$GL_FIX/pipelines.total-pages"
+printf '[{"id":80,"sha":"2222222222222222222222222222222222222222","status":"running"}]' > "$GL_FIX/pipelines.page.1"
+printf '[{"id":7,"sha":"2222222222222222222222222222222222222222","status":"running"}]' > "$GL_FIX/pipelines.page.6"
 printf '[]' > "$GL_FIX/pipelines"
 printf '{"approved_by":[]}' > "$GL_FIX/approvals"
 FM_PR_FOLLOW_MAP_LIMIT=1 FM_PR_FOLLOW_MAX_PAGES=5 prf "$H" arm task-gp "$GL_URL" >/dev/null
 FM_PR_FOLLOW_MAP_LIMIT=1 FM_PR_FOLLOW_MAX_PAGES=5 pe "$H" reconcile >/dev/null
 wait_for_baseline "$H" "$glsid" || fail "the rotating GitLab baseline never completed"
 printf '[{"id":"opaqueA","resolved":true,"notes":[{"id":901,"author":{"username":"erin"},"type":"DiffNote","position":{"new_path":"src/a.py","new_line":3}}]},{"id":"opaqueB","resolved":true,"notes":[{"id":902,"author":{"username":"frank"},"type":"DiffNote","position":{"new_path":"src/b.py","new_line":4}}]}]' > "$GL_FIX/discussions.page.6"
+printf '[{"id":7,"sha":"2222222222222222222222222222222222222222","status":"success"}]' > "$GL_FIX/pipelines.page.6"
 wait_for_result "$H" "$glsid" || fail "the rotated GitLab thread transitions produced no result"
 RESULT=$(first_result "$H" "$glsid")
 assert_grep 'event: thread id=opaqueA state=resolved' "$RESULT" \
   "the first opaque thread transition was lost after map eviction"
 assert_grep 'event: thread id=opaqueB state=resolved' "$RESULT" \
   "the second opaque thread transition was lost after map eviction"
+assert_grep 'event: check id=7 change=pending->green status=success' "$RESULT" \
+  "an older pipeline transition was lost after map eviction"
 ack "$H" "$glsid" 1 "$RESULT"
 before=$(result_count "$H" "$glsid")
 restart_runner "$H"
@@ -1225,9 +1307,10 @@ sleep 3
 [ "$(result_count "$H" "$glsid")" = "$before" ] \
   || fail "an applied opaque thread transition repeated after eviction"
 pass "GitLab paging and opaque thread state remain replay-safe"
-rm -f "$GL_FIX"/discussions.page.* "$GL_FIX/discussions.total-pages"
+rm -f "$GL_FIX"/discussions.page.* "$GL_FIX/discussions.total-pages" \
+  "$GL_FIX"/pipelines.page.* "$GL_FIX/pipelines.total-pages"
 
-# --- a bounded approval set never repeats what it cannot record --------------
+# --- approval state survives the compatibility-map bound ---------------------
 new_section approvalbound
 gh_fix_default
 mkdir -p "$GL_FIX"
@@ -1254,14 +1337,14 @@ assert_grep 'event: check id=7 change=pending->green status=success' "$RESULT" \
   "the poll that could not record every approver still announced its other events"
 assert_no_grep 'state=APPROVED' "$RESULT" \
   "an approver the set bound refused was announced as a fresh grant"
-assert_grep 'dropped: 1' "$RESULT" \
-  "the document does not mark that a bound truncated this poll"
+assert_grep 'dropped: 0' "$RESULT" \
+  "the durable approval records are not truncated with the compatibility map"
 ack "$H" "$glsid" 1 "$RESULT"
 restart_runner "$H"
 sleep 2
 [ "$(result_count "$H" "$glsid")" = 1 ] \
   || fail "the refused approvers kept producing a fresh document on later polls"
-pass "a bounded approval set never repeats what it cannot record"
+pass "approval state survives the bounded compatibility map"
 
 # --- deterministic rotation bounds aggregate load without starvation ----------
 new_section rotation
@@ -1284,6 +1367,12 @@ done
 # boundary the window may straddle) instead of one per tracked PR.
 rot_start=$(date +%s)
 pe "$H" reconcile >/dev/null
+sleep 0.2
+resident=$(pgrep -f "fm-procevent-pr-follow.sh run pr-follow-scheduler" 2>/dev/null | wc -l | tr -d ' ')
+[ "$resident" -le 1 ] || fail "rotation started $resident resident schedulers"
+if pgrep -f 'fm-procevent-pr-follow.sh run prf-(gh|gl)-' >/dev/null 2>&1; then
+  fail "rotation left a resident process per tracked PR"
+fi
 for s in "${sids[@]}"; do
   wait_for_baseline "$H" "$s" 200 || fail "rotation starved $s of its baseline poll"
 done

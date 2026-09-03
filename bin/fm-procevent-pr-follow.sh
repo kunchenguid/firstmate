@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pull-request lifecycle follow-through adapter for the generic process-event
-# runner: register one persistent source per PR Firstmate raised, poll the forge
+# runner: retain every PR Firstmate raised behind one home-level scheduler, poll the forge
 # for new review activity on a quiet cadence, and publish every detected change
 # as one durable wake that survives task cleanup, merge, and restart.
 #
@@ -14,6 +14,7 @@
 #   fm-procevent-pr-follow.sh terminal <result-file>
 #   fm-procevent-pr-follow.sh self-announcing
 #   fm-procevent-pr-follow.sh source-id <pr-url>
+#   fm-procevent-pr-follow.sh scheduler-id
 #   fm-procevent-pr-follow.sh retire <source-id> [--force]
 #
 # arm        Register lifecycle tracking for one PR identity (the same
@@ -21,8 +22,8 @@
 #            canonical source id is "prf-gh-<hash12>" or "prf-gl-<hash12>",
 #            where hash12 is the first 12 hex digits of the SHA-256 over
 #            "<host>/<path>#<number>" (GitHub) or "<host>/<path>!<number>"
-#            (GitLab). Registration persists in state/procevent/ independent of
-#            any task; the private cursor seed is written under state/pr-follow/.
+#            (GitLab). One scheduler persists in state/procevent/; private PR
+#            cursors persist independently under state/pr-follow/.
 #            --backfill additionally makes the next poll surface currently
 #            unanswered inline review threads (see the backfill contract below)
 #            instead of only baselining silently. Re-running arm for an already
@@ -31,7 +32,7 @@
 #            home (state/*.meta with a validated pr= identity) that has no
 #            lifecycle registration yet, each with --backfill. Bounded, local
 #            only, and idempotent; it never talks to a forge.
-# run        The blocking child the generic runner executes; never run it in a
+# run        The blocking home scheduler the generic runner executes; never run it in a
 #            conversational turn. It loads the durable cursor, polls the forge
 #            through gh (GitHub) or glab (GitLab) with fixed argv plus
 #            structural field selection, and on the first new event prints one
@@ -46,9 +47,7 @@
 #            depends on a handler remembering.
 # classify   Print the captured document class: events, backfill, error, or
 #            unknown.
-# terminal   Always refuses (exit 1): tracking never ends by itself. A merged,
-#            closed, or long-dead PR keeps its registration until the explicit
-#            retire below; the runner therefore never auto-retires this source.
+# terminal   Always refuses (exit 1): the home scheduler never ends by itself.
 # retire     The one explicit, auditable retirement command. It stops the
 #            runner through the generic retirement path, then removes the
 #            cursor and per-sequence receipts. Refuses while unhandled captured
@@ -66,8 +65,8 @@
 #
 # Cursor contract: every event is identified by its stable forge id (comment,
 #   review, check-run, pipeline, thread, or approval identity) plus, where
-#   meaningful, the head SHA and PR state it belongs to; per-collection maxima
-#   plus bounded state maps form one durable cursor per PR. Restart, duplicate
+#   meaningful, the head SHA and PR state it belongs to; rotating page cursors
+#   plus individual item records form one durable state set per PR. Restart, duplicate
 #   API pages, and retried polls recompute the same delta from the same cursor,
 #   so nothing is lost and nothing already announced is re-announced; a
 #   document whose cursor merge was interrupted stays announced until a
@@ -93,8 +92,8 @@
 #   or foreign input and is refused loudly every time without a latch, because
 #   only an operator can resolve it; re-arm with arm clears a quarantine and
 #   resumes tracking once the adapter is repaired.
-# Baseline contract: arm writes a pending-baseline seed; the first poll stores
-#   the PR's current maxima and maps silently and emits nothing, so registering
+# Baseline contract: arm writes a pending-baseline seed; bounded rotating polls
+#   store every existing item silently and emit nothing, so registering
 #   a brand-new PR replays no creation noise. --backfill instead surfaces each
 #   currently unanswered inline thread (a thread whose chronologically last
 #   comment author is not the PR author and which GitLab does not mark
@@ -119,42 +118,33 @@
 #   a PR; no such capability exists in this script.
 # Bounded polling: one poll costs one core fetch plus at most
 #   FM_PR_FOLLOW_MAX_PAGES 100-row data pages per collection and one metadata
-#   request for collections that need newest-first or rotating pagination; numeric state maps
-#   keep the FM_PR_FOLLOW_MAP_LIMIT highest ids, and the durable per-collection maximum
-#   keeps an id the bound evicted from reading back as one nobody announced;
+#   request for rotating pagination; bounded maps are compatibility caches while
+#   individual records retain every observed identity and transition state;
 #   one document carries at most
 #   FM_PR_FOLLOW_MAX_EVENTS events plus the head and pr-state lines, which are
 #   exempt because their cursor advance is not re-announced, and per-collection
 #   maxima advance only to what was announced, so an overflowed poll
-#   re-announces its remainder next poll instead of losing it. GitLab's
-#   oldest-first discussion pages rotate newest-first through a durable page
-#   cursor, so the newest page is observed immediately and every older page is
-#   revisited within ceil(total-pages / MAX_PAGES) polls. Opaque GitLab thread
-#   states live in bounded individual records instead of the numeric maps, so
-#   map eviction cannot hide a later resolve or reopen transition. GitHub
-#   reviews use the GET-only REST endpoint and its newest bounded pages.
-# Aggregate bound (rotation): tracked PRs poll through a deterministic modular
-#   rotation, never one hot loop per PR. Time is divided into
-#   FM_PR_FOLLOW_ROTATION_SLOT-second slots; the sorted roster of registered
-#   pr-follow sources assigns slot t to roster index (t mod N), so at most one
-#   source polls per slot regardless of how many PRs are tracked and no source
-#   can be starved: every source owns exactly one slot per N-slot cycle.
-#   Worst case at the defaults (slot 300 s, a full 18-fetch burst): 216 forge
+#   re-announces its remainder on later rotations instead of losing it. Every
+#   paged collection rotates newest-first through its own durable page cursor.
+# Aggregate bound (rotation): one resident home scheduler polls tracked PRs
+#   through a deterministic modular rotation. Time is divided into
+#   FM_PR_FOLLOW_ROTATION_SLOT-second slots; the sorted cursor roster assigns
+#   slot t to roster index (t mod N), so at most one PR polls per slot.
+#   Worst case at the defaults (slot 300 s, a full 25-fetch burst): 300 forge
 #   requests per hour for the whole home, independent of the tracked count;
 #   per-PR poll interval is at most N x slot while open and N x slot x
-#   FM_PR_FOLLOW_SETTLED_EVERY once merged or closed, because settled sources
+#   FM_PR_FOLLOW_SETTLED_EVERY once merged or closed, because settled PRs
 #   poll only every SETTLED_EVERY-th visit of their slot. A child's first poll
-#   waits for its own slot too, so restarting or reconciling the whole roster
-#   at once cannot burst past the bound; it is exempt only from the settled
-#   throttle, so a baseline or a post-restart verification lands within one
-#   roster cycle. Roster churn re-derives every duty assignment from the
+#   still waits for the assigned slot, so restarting the scheduler cannot burst
+#   past the bound. Roster churn re-derives every duty assignment from the
 #   current roster on each wake, costing at most one extra cycle.
 #   Registration is never capped: every open, closed-unmerged, merged, and
 #   post-merge PR stays tracked until the explicit retire.
 #
 # Result document (the captured result named by the wake):
 #   schema: fm-pr-follow-event-v1
-#   source: <sid>
+#   source: pr-follow-scheduler-<home hash12>
+#   target: <PR tracking id>
 #   provider: <github|gitlab>
 #   url: <validated PR url>
 #   number: <n>
@@ -206,6 +196,7 @@ FOLLOW_DIR="$STATE/pr-follow"
 REG_DIR=$(fm_procevent_registry_dir "$STATE")
 CURSOR_SCHEMA=fm-pr-follow-cursor-v1
 DOC_SCHEMA=fm-pr-follow-event-v1
+SCHEDULER_ID=
 
 # The reader's hard limits on one captured document and on one stored map or
 # set. They own both halves of the writer-versus-reader boundary: the
@@ -217,6 +208,7 @@ MAP_CHARS_LIMIT=8192
 MAP_MIN_ENTRY_CHARS=4
 APPROVAL_SET_CHARS_LIMIT=4096
 THREAD_UPDATES_CHARS_LIMIT=$((DOC_EVENT_LIMIT * 80))
+ITEM_UPDATES_CHARS_LIMIT=$((DOC_EVENT_LIMIT * 120))
 
 INTERVAL=${FM_PR_FOLLOW_INTERVAL:-300}
 FETCH_TIMEOUT=${FM_PR_FOLLOW_FETCH_TIMEOUT:-60}
@@ -318,6 +310,16 @@ sha256_string() {
     return 1
   fi
 }
+
+scheduler_source_id() {
+  local state_path hash rest
+  state_path=$(CDPATH='' cd -P -- "$STATE" 2>/dev/null && pwd -P) || return 1
+  hash=$(sha256_string "$state_path") || return 1
+  rest=${hash#????????????}
+  printf 'pr-follow-scheduler-%s\n' "${hash%"$rest"}"
+}
+
+SCHEDULER_ID=$(scheduler_source_id) || die "cannot derive the home scheduler id"
 
 # prf_source_id <provider> <host> <path> <number>: the canonical, bounded,
 # stable source id for one validated PR identity.
@@ -526,6 +528,34 @@ prf_thread_updates_valid() {
   prf_thread_entries_valid "${1-}" "$THREAD_UPDATES_CHARS_LIMIT"
 }
 
+prf_item_updates_valid() {
+  local updates=${1-} rest entry kind id value
+  [ -n "$updates" ] || return 0
+  [ "${#updates}" -le "$ITEM_UPDATES_CHARS_LIMIT" ] || return 1
+  rest=$updates
+  while [ -n "$rest" ]; do
+    entry=${rest%%,*}
+    case "$rest" in *,*) rest=${rest#*,} ;; *) rest= ;; esac
+    kind=${entry%%:*}
+    entry=${entry#*:}
+    id=${entry%%:*}
+    value=${entry#*:}
+    [ "$value" != "$entry" ] || return 1
+    case "$kind" in
+      issue|review-comment|review|check) nonnegative_int "$id" || return 1 ;;
+      backfill) case "$id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac ;;
+      approval) prf_login_valid "$id" || return 1 ;;
+      *) return 1 ;;
+    esac
+    case "$kind:$value" in
+      issue:seen|review-comment:seen|backfill:seen|approval:approved|approval:dismissed) ;;
+      review:*) prf_review_state_word_valid "$value" || return 1 ;;
+      check:*) prf_check_token_valid "$value" || return 1 ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
 # max_check_id <check rows> <floor>: the highest validated id in the rows,
 # never below the floor. The check map is bounded, so this watermark is what
 # keeps an evicted id from reading back as a check nobody has announced yet.
@@ -563,6 +593,12 @@ SN_APPROVAL_ROWS=
 SN_APPROVALS_OK=0
 SN_GL_DISCUSSION_PAGE=0
 SN_GL_DISCUSSION_LAST=0
+SN_GH_ISSUE_PAGE=0 SN_GH_ISSUE_LAST=0 SN_GH_ISSUE_COMPLETE=0
+SN_GH_RC_PAGE=0 SN_GH_RC_LAST=0 SN_GH_RC_COMPLETE=0
+SN_GH_REVIEW_PAGE=0 SN_GH_REVIEW_LAST=0 SN_GH_REVIEW_COMPLETE=0
+SN_GH_CHECK_PAGE=0 SN_GH_CHECK_LAST=0 SN_GH_CHECK_COMPLETE=0
+SN_GL_DISCUSSION_COMPLETE=0 SN_GL_PIPELINE_PAGE=0 SN_GL_PIPELINE_LAST=0 SN_GL_PIPELINE_COMPLETE=0
+SN_BACKFILL_PAGES=0 SN_GH_RC_PAGES=0 SN_GL_DISCUSSION_PAGES=0
 SN_FETCH_ERROR=
 GH_OUT=
 GH_TOTAL_PAGES=1
@@ -581,6 +617,12 @@ sn_reset() {
   SN_APPROVALS_OK=0
   SN_GL_DISCUSSION_PAGE=0
   SN_GL_DISCUSSION_LAST=0
+  SN_GH_ISSUE_PAGE=0 SN_GH_ISSUE_LAST=0 SN_GH_ISSUE_COMPLETE=0
+  SN_GH_RC_PAGE=0 SN_GH_RC_LAST=0 SN_GH_RC_COMPLETE=0
+  SN_GH_REVIEW_PAGE=0 SN_GH_REVIEW_LAST=0 SN_GH_REVIEW_COMPLETE=0
+  SN_GH_CHECK_PAGE=0 SN_GH_CHECK_LAST=0 SN_GH_CHECK_COMPLETE=0
+  SN_GL_DISCUSSION_COMPLETE=0 SN_GL_PIPELINE_PAGE=0 SN_GL_PIPELINE_LAST=0 SN_GL_PIPELINE_COMPLETE=0
+  SN_BACKFILL_PAGES=0 SN_GH_RC_PAGES=0 SN_GL_DISCUSSION_PAGES=0
   SN_FETCH_ERROR=
 }
 
@@ -598,13 +640,19 @@ gh_included_rows() {
   GH_TOTAL_PAGES=$last
 }
 
-gh_rest_newest_pages() {
-  local filter=$1 base=$2 outvar=$3 page count first_rows lines out=
+gh_rotating_pages() {
+  local filter=$1 base=$2 cur_page=$3 cur_last=$4 outvar=$5 pagevar=$6 lastvar=$7 completevar=$8
+  local page count first_rows lines out='' complete=0 last
   gh_included_rows "$filter" "${base}?per_page=100&page=1" || return 1
   first_rows=$GH_OUT
-  page=$GH_TOTAL_PAGES
+  last=$GH_TOTAL_PAGES
+  if [ "$last" -gt "$cur_last" ] || [ "$cur_page" -lt 1 ] || [ "$cur_page" -gt "$last" ]; then
+    page=$last
+  else
+    page=$cur_page
+  fi
   count=0
-  while [ "$page" -ge 1 ] && [ "$count" -lt "$MAX_PAGES" ]; do
+  while [ "$count" -lt "$MAX_PAGES" ] && [ "$count" -lt "$last" ]; do
     if [ "$page" -eq 1 ]; then
       lines=$first_rows
     else
@@ -613,9 +661,17 @@ gh_rest_newest_pages() {
     fi
     out+=$lines$'\n'
     page=$((page - 1))
+    if [ "$page" -lt 1 ]; then
+      page=$last
+      complete=1
+    fi
     count=$((count + 1))
   done
   printf -v "$outvar" '%s' "$out"
+  printf -v "$pagevar" '%s' "$page"
+  printf -v "$lastvar" '%s' "$last"
+  printf -v "$completevar" '%s' "$complete"
+  SN_BACKFILL_PAGES=$count
 }
 
 fetch_fail() {  # <fixed step label> <exit code>: records a fixed diagnostic
@@ -686,23 +742,30 @@ poll_github() {
   prf_login_valid "$login" || login=invalid
   SN_AUTHOR=$login
 
-  gh_descending_pages '.[] | [.id, (.user.login // "ghost")] | @tsv' \
-    "repos/$owner/$repo/issues/$number/comments" "$CUR_MAX_ISSUE_COMMENT" SN_ROWS || return 1
+  gh_rotating_pages '.[] | [.id, (.user.login // "ghost")] | @tsv' \
+    "repos/$owner/$repo/issues/$number/comments" \
+    "$CUR_GH_ISSUE_PAGE" "$CUR_GH_ISSUE_LAST" SN_ROWS \
+    SN_GH_ISSUE_PAGE SN_GH_ISSUE_LAST SN_GH_ISSUE_COMPLETE || return 1
 
-  gh_descending_pages \
+  gh_rotating_pages \
     '.[] | [.id, (.in_reply_to_id // 0), (.user.login // "ghost"), (.path // ""), ((.line // .original_line) // 0)] | @tsv' \
-    "repos/$owner/$repo/pulls/$number/comments" "$CUR_MAX_REVIEW_COMMENT" SN_RC_ROWS || return 1
+    "repos/$owner/$repo/pulls/$number/comments" \
+    "$CUR_GH_RC_PAGE" "$CUR_GH_RC_LAST" SN_RC_ROWS \
+    SN_GH_RC_PAGE SN_GH_RC_LAST SN_GH_RC_COMPLETE || return 1
+  SN_GH_RC_PAGES=$SN_BACKFILL_PAGES
 
   # The normalization tests below are generated from the same shared lists the
   # validators read (vocabulary contract), so only a token the cursor accepts
   # can ever be stored.
   filter=".[] | [.id, ((.state // \"unknown\") | if $gh_review_test then . else \"unknown\" end), (.user.login // \"ghost\")] | @tsv"
-  gh_rest_newest_pages "$filter" "repos/$owner/$repo/pulls/$number/reviews" SN_REVIEW_ROWS || return 1
+  gh_rotating_pages "$filter" "repos/$owner/$repo/pulls/$number/reviews" \
+    "$CUR_GH_REVIEW_PAGE" "$CUR_GH_REVIEW_LAST" SN_REVIEW_ROWS \
+    SN_GH_REVIEW_PAGE SN_GH_REVIEW_LAST SN_GH_REVIEW_COMPLETE || return 1
 
   filter=".check_runs[] | [.id, (((.status // \"unknown\") | if $gh_status_test then . else \"unknown\" end) + \":\" + ((.conclusion // \"none\") | if $gh_conclusion_test then . else \"unknown\" end)), (.name // \"check\")] | @tsv"
-  gh_rows "$filter" \
-    api "repos/$owner/$repo/commits/$SN_HEAD/check-runs?per_page=100" || return 1
-  SN_CHECK_ROWS=$GH_OUT
+  gh_rotating_pages "$filter" "repos/$owner/$repo/commits/$SN_HEAD/check-runs" \
+    "$CUR_GH_CHECK_PAGE" "$CUR_GH_CHECK_LAST" SN_CHECK_ROWS \
+    SN_GH_CHECK_PAGE SN_GH_CHECK_LAST SN_GH_CHECK_COMPLETE || return 1
   return 0
 }
 
@@ -733,6 +796,38 @@ glab_included_rows() {
   [ "$rc" -eq 0 ] || { fetch_fail "glab api ${path%%\?*}" "$rc"; return 1; }
   GH_OUT=$out
   GH_TOTAL_PAGES=$total
+}
+
+glab_rotating_pages() {
+  local base=$1 program=$2 cur_page=$3 cur_last=$4 outvar=$5 pagevar=$6 lastvar=$7 completevar=$8
+  local first_rows last page count=0 rows out='' complete=0
+  glab_included_rows "${base}?per_page=100&page=1" "$program" || return 1
+  first_rows=$GH_OUT
+  last=$GH_TOTAL_PAGES
+  if [ "$last" -gt "$cur_last" ] || [ "$cur_page" -lt 1 ] || [ "$cur_page" -gt "$last" ]; then
+    page=$last
+  else
+    page=$cur_page
+  fi
+  while [ "$count" -lt "$MAX_PAGES" ] && [ "$count" -lt "$last" ]; do
+    if [ "$page" -eq 1 ]; then
+      rows=$first_rows
+    else
+      glab_rows "${base}?per_page=100&page=$page" "$program" || return 1
+      rows=$GH_OUT
+    fi
+    out+=$rows$'\n'
+    page=$((page - 1))
+    if [ "$page" -lt 1 ]; then
+      page=$last
+      complete=1
+    fi
+    count=$((count + 1))
+  done
+  printf -v "$outvar" '%s' "$out"
+  printf -v "$pagevar" '%s' "$page"
+  printf -v "$lastvar" '%s' "$last"
+  printf -v "$completevar" '%s' "$complete"
 }
 
 # shellcheck disable=SC2016 # Perl owns every $ expression in this program.
@@ -769,9 +864,24 @@ for my $disc (@$d) {
 }
 '
 
+# shellcheck disable=SC2016 # Perl owns every $ expression in this program.
+GL_PIPELINES_PROGRAM='
+use strict; use warnings;
+my $d = eval { local $/; decode_json(scalar <STDIN>) };
+exit 3 unless $d && ref $d eq "ARRAY";
+my $re = qr/^(?:$ENV{GL_PIPELINE_RE})\z/;
+for my $p (@$d) {
+  next unless ref $p eq "HASH";
+  my $id = $p->{id} // ""; my $status = $p->{status} // ""; my $sha = $p->{sha} // "";
+  next unless $id =~ /^[0-9]+\z/ && $sha =~ /^[0-9a-f]{40,64}\z/;
+  $status = "unknown" unless $status =~ $re;
+  print join("\t", $id, $sha, $status), "\n";
+}
+'
+
 poll_gitlab() {
   local host=$1 path=$2 number=$3
-  local enc state head author page rows note_rows thread_rows first_rows last count
+  local enc state head author discussion_all note_rows thread_rows pipeline_all
   GL_HOST=$host
   sn_reset
   enc=${path//\//%2F}
@@ -798,55 +908,19 @@ poll_gitlab() {
   SN_HEAD=$head
   SN_AUTHOR=$author
 
-  glab_included_rows "projects/$enc/merge_requests/$number/discussions?per_page=100&page=1" \
-    "$GL_DISCUSSIONS_PROGRAM" || return 1
-  first_rows=$GH_OUT
-  last=$GH_TOTAL_PAGES
-  if [ "$last" -gt "$CUR_GL_DISCUSSION_LAST" ] \
-     || [ "$CUR_GL_DISCUSSION_PAGE" -lt 1 ] \
-     || [ "$CUR_GL_DISCUSSION_PAGE" -gt "$last" ]; then
-    page=$last
-  else
-    page=$CUR_GL_DISCUSSION_PAGE
-  fi
-  note_rows=
-  thread_rows=
-  count=0
-  while [ "$count" -lt "$MAX_PAGES" ] && [ "$count" -lt "$last" ]; do
-    if [ "$page" -eq 1 ]; then
-      rows=$first_rows
-    else
-      glab_rows "projects/$enc/merge_requests/$number/discussions?per_page=100&page=$page" \
-        "$GL_DISCUSSIONS_PROGRAM" || return 1
-      rows=$GH_OUT
-    fi
-    note_rows+=$(printf '%s\n' "$rows" | awk -F '\t' '$1 != "T"')$'\n'
-    thread_rows+=$(printf '%s\n' "$rows" | awk -F '\t' '$1 == "T" {print $2 "\t" $3}')$'\n'
-    page=$((page - 1))
-    [ "$page" -ge 1 ] || page=$last
-    count=$((count + 1))
-  done
+  glab_rotating_pages "projects/$enc/merge_requests/$number/discussions" \
+    "$GL_DISCUSSIONS_PROGRAM" "$CUR_GL_DISCUSSION_PAGE" "$CUR_GL_DISCUSSION_LAST" \
+    discussion_all SN_GL_DISCUSSION_PAGE SN_GL_DISCUSSION_LAST SN_GL_DISCUSSION_COMPLETE || return 1
+  note_rows=$(printf '%s\n' "$discussion_all" | awk -F '\t' '$1 != "T"')
+  thread_rows=$(printf '%s\n' "$discussion_all" | awk -F '\t' '$1 == "T" {print $2 "\t" $3}')
   SN_NOTE_ROWS=$note_rows
   SN_THREAD_ROWS=$thread_rows
-  SN_GL_DISCUSSION_PAGE=$page
-  SN_GL_DISCUSSION_LAST=$last
+  SN_GL_DISCUSSION_PAGES=$(( SN_GL_DISCUSSION_LAST < MAX_PAGES ? SN_GL_DISCUSSION_LAST : MAX_PAGES ))
 
   # shellcheck disable=SC2016 # Perl owns every $ expression in this program.
-  glab_rows "projects/$enc/merge_requests/$number/pipelines?per_page=100" '
-    use strict; use warnings;
-    my $d = eval { local $/; decode_json(scalar <STDIN>) };
-    exit 3 unless $d && ref $d eq "ARRAY";
-    # GL_PIPELINE_RE is generated from the same shared list the validators
-    # read, with "unknown" as the catch-all (vocabulary contract).
-    my $re = qr/^(?:$ENV{GL_PIPELINE_RE})\z/;
-    for my $p (@$d) {
-      next unless ref $p eq "HASH";
-      my $id = $p->{id} // ""; my $status = $p->{status} // ""; my $sha = $p->{sha} // "";
-      next unless $id =~ /^[0-9]+\z/ && $sha =~ /^[0-9a-f]{40,64}\z/;
-      $status = "unknown" unless $status =~ $re;
-      print join("\t", $id, $sha, $status), "\n";
-    }
-  ' || return 1
+  glab_rotating_pages "projects/$enc/merge_requests/$number/pipelines" \
+    "$GL_PIPELINES_PROGRAM" "$CUR_GL_PIPELINE_PAGE" "$CUR_GL_PIPELINE_LAST" \
+    pipeline_all SN_GL_PIPELINE_PAGE SN_GL_PIPELINE_LAST SN_GL_PIPELINE_COMPLETE || return 1
   # Keep the check map provider-shaped: only the current head's pipelines,
   # reduced to the same two-field id/status rows the GitHub engine produces.
   local pipeline_id pipeline_sha pipeline_status pipeline_rows=''
@@ -855,7 +929,7 @@ poll_gitlab() {
     nonnegative_int "$pipeline_id" || continue
     [ "$pipeline_sha" = "$SN_HEAD" ] || continue
     pipeline_rows+="$pipeline_id"$'\t'"$pipeline_status"$'\n'
-  done <<< "$GH_OUT"
+  done <<< "$pipeline_all"
   SN_CHECK_ROWS=$pipeline_rows
 
   # Approvals are GitLab's review-submission surface. A project without the
@@ -901,9 +975,17 @@ NEW_REVIEWS=''
 NEW_CHECKS=''
 NEW_THREADS=''
 NEW_THREAD_UPDATES=''
+NEW_ITEM_UPDATES=''
 NEW_APPROVALS=''
 NEW_GL_DISCUSSION_PAGE=0
 NEW_GL_DISCUSSION_LAST=0
+NEW_GH_ISSUE_PAGE=0 NEW_GH_ISSUE_LAST=0
+NEW_GH_RC_PAGE=0 NEW_GH_RC_LAST=0
+NEW_GH_REVIEW_PAGE=0 NEW_GH_REVIEW_LAST=0
+NEW_GH_CHECK_PAGE=0 NEW_GH_CHECK_LAST=0
+NEW_GL_PIPELINE_PAGE=0 NEW_GL_PIPELINE_LAST=0
+NEW_APPROVAL_READY=0
+NEW_BACKFILL_REMAINING=0
 CHECKS_REBASELINED=0
 EVENTS_DROPPED=0
 
@@ -984,9 +1066,17 @@ delta_common_start() {
   NEW_CHECKS=$CUR_CHECKS
   NEW_THREADS=$CUR_THREADS
   NEW_THREAD_UPDATES=''
+  NEW_ITEM_UPDATES=''
   NEW_APPROVALS=$CUR_APPROVALS
   NEW_GL_DISCUSSION_PAGE=$CUR_GL_DISCUSSION_PAGE
   NEW_GL_DISCUSSION_LAST=$CUR_GL_DISCUSSION_LAST
+  NEW_GH_ISSUE_PAGE=$SN_GH_ISSUE_PAGE NEW_GH_ISSUE_LAST=$SN_GH_ISSUE_LAST
+  NEW_GH_RC_PAGE=$SN_GH_RC_PAGE NEW_GH_RC_LAST=$SN_GH_RC_LAST
+  NEW_GH_REVIEW_PAGE=$SN_GH_REVIEW_PAGE NEW_GH_REVIEW_LAST=$SN_GH_REVIEW_LAST
+  NEW_GH_CHECK_PAGE=$SN_GH_CHECK_PAGE NEW_GH_CHECK_LAST=$SN_GH_CHECK_LAST
+  NEW_GL_PIPELINE_PAGE=$SN_GL_PIPELINE_PAGE NEW_GL_PIPELINE_LAST=$SN_GL_PIPELINE_LAST
+  NEW_APPROVAL_READY=$CUR_APPROVAL_READY
+  NEW_BACKFILL_REMAINING=$CUR_BACKFILL_REMAINING
   CHECKS_REBASELINED=0
   EVENTS_DROPPED=0
 }
@@ -1013,6 +1103,7 @@ delta_head_and_state() {
     [ -n "$check_id" ] || continue
     nonnegative_int "$check_id" || continue
     NEW_CHECKS=$(map_put "$NEW_CHECKS" "$check_id" "$check_sc")
+    item_state_store check "$check_id" "$check_sc" || return 1
   done <<< "$SN_CHECK_ROWS"
   NEW_CHECKS=$(max_map_entries "$NEW_CHECKS" "$MAP_LIMIT")
   NEW_MAX_CHECK=$(max_check_id "$SN_CHECK_ROWS" "$NEW_MAX_CHECK")
@@ -1041,6 +1132,95 @@ approval_set_add() {  # <user>
 
 thread_state_dir() { printf '%s/%s.threads\n' "$FOLLOW_DIR" "$1"; }
 thread_state_path() { printf '%s/%s\n' "$(thread_state_dir "$1")" "$2"; }
+item_state_dir() { printf '%s/%s.items\n' "$FOLLOW_DIR" "$1"; }
+item_state_path() { printf '%s/%s-%s\n' "$(item_state_dir "$1")" "$2" "$3"; }
+
+item_state_dir_ready() {
+  local dir
+  dir=$(item_state_dir "$1")
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  else
+    mkdir "$dir" || return 1
+  fi
+  chmod 0700 "$dir" 2>/dev/null || true
+  [ "$(fm_pr_file_mode "$dir")" = 700 ]
+}
+
+item_identity_valid() {
+  case "$1" in
+    issue|review-comment|review|check) nonnegative_int "$2" ;;
+    backfill) case "$2" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac ;;
+    approval) prf_login_valid "$2" ;;
+    *) return 1 ;;
+  esac
+}
+
+item_value_valid() {
+  case "$1" in
+    issue|review-comment|backfill) [ "$2" = seen ] ;;
+    review) prf_review_state_word_valid "$2" ;;
+    check) prf_check_token_valid "$2" ;;
+    approval) [ "$2" = approved ] ;;
+    *) return 1 ;;
+  esac
+}
+
+item_state_get() {
+  local kind=$1 id=$2 file value
+  item_identity_valid "$kind" "$id" || return 1
+  file=$(item_state_path "$SID" "$kind" "$id")
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  value=$(sed -n 's/^value=//p' "$file")
+  item_value_valid "$kind" "$value" || return 1
+  printf '%s\n' "$value"
+}
+
+item_state_store() {
+  local kind=$1 id=$2 value=$3 dir file tmp
+  item_identity_valid "$kind" "$id" || return 1
+  item_value_valid "$kind" "$value" || return 1
+  dir=$(item_state_dir "$SID")
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  file=$(item_state_path "$SID" "$kind" "$id")
+  tmp=$(mktemp "$dir/.item.XXXXXX") || return 1
+  if ! printf 'value=%s\n' "$value" > "$tmp" \
+     || ! chmod 0600 "$tmp" \
+     || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+item_state_delete() {
+  item_identity_valid "$1" "$2" || return 1
+  rm -f -- "$(item_state_path "$SID" "$1" "$2")"
+}
+
+item_update_add() {
+  local entry candidate
+  entry="$1:$2:$3"
+  candidate="${NEW_ITEM_UPDATES:+$NEW_ITEM_UPDATES,}$entry"
+  [ "${#candidate}" -le "$ITEM_UPDATES_CHARS_LIMIT" ] || return 1
+  NEW_ITEM_UPDATES=$candidate
+}
+
+item_updates_apply() {
+  local rest=$1 entry kind id value
+  while [ -n "$rest" ]; do
+    entry=${rest%%,*}
+    case "$rest" in *,*) rest=${rest#*,} ;; *) rest= ;; esac
+    kind=${entry%%:*}
+    entry=${entry#*:}
+    id=${entry%%:*}
+    value=${entry#*:}
+    if [ "$kind" = approval ] && [ "$value" = dismissed ]; then
+      item_state_delete "$kind" "$id" || return 1
+    else
+      item_state_store "$kind" "$id" "$value" || return 1
+    fi
+  done
+}
 
 thread_state_dir_ready() {
   local dir
@@ -1141,13 +1321,15 @@ advance_from_surviving() {
       'event: comment '*|'event: review-comment '*)
         ev_id=${line#*id=}
         ev_id=${ev_id%% *}
-        nonnegative_int "$ev_id" || continue
+        case "$ev_id" in ''|*[!A-Za-z0-9_-]*) continue ;; esac
         case "$line" in
           'event: comment '*)
             [ "$ev_id" -gt "$NEW_MAX_ISSUE_COMMENT" ] && NEW_MAX_ISSUE_COMMENT=$ev_id
+            item_update_add issue "$ev_id" seen || return 1
             ;;
           *)
             [ "$ev_id" -gt "$NEW_MAX_REVIEW_COMMENT" ] && NEW_MAX_REVIEW_COMMENT=$ev_id
+            item_update_add review-comment "$ev_id" seen || return 1
             ;;
         esac
         ;;
@@ -1155,8 +1337,8 @@ advance_from_surviving() {
         ev_user=${line#event: review id=approval-}
         ev_user=${ev_user%% *}
         case "$line" in
-          *' state=APPROVED'*) approval_set_add "$ev_user" ;;
-          *' state=DISMISSED'*) approval_set_del "$ev_user" ;;
+          *' state=APPROVED'*) approval_set_add "$ev_user"; item_update_add approval "$ev_user" approved || return 1 ;;
+          *' state=DISMISSED'*) approval_set_del "$ev_user"; item_update_add approval "$ev_user" dismissed || return 1 ;;
         esac
         ;;
       'event: review '*)
@@ -1166,6 +1348,7 @@ advance_from_surviving() {
         ev_state=${ev_state%% *}
         nonnegative_int "$ev_id" || continue
         NEW_REVIEWS=$(map_put "$NEW_REVIEWS" "$ev_id" "$ev_state")
+        item_update_add review "$ev_id" "$ev_state" || return 1
         [ "$ev_id" -gt "$NEW_MAX_REVIEW" ] && NEW_MAX_REVIEW=$ev_id
         ;;
       'event: review-state '*)
@@ -1175,6 +1358,7 @@ advance_from_surviving() {
         ev_state=${ev_state%% *}
         nonnegative_int "$ev_id" || continue
         NEW_REVIEWS=$(map_put "$NEW_REVIEWS" "$ev_id" "$ev_state")
+        item_update_add review "$ev_id" "$ev_state" || return 1
         ;;
       'event: check '*)
         [ "$CHECKS_REBASELINED" -eq 1 ] && continue
@@ -1184,6 +1368,7 @@ advance_from_surviving() {
         nonnegative_int "$ev_id" || continue
         [ -n "$ev_status" ] || continue
         NEW_CHECKS=$(map_put "$NEW_CHECKS" "$ev_id" "$ev_status")
+        item_update_add check "$ev_id" "$ev_status" || return 1
         [ "$ev_id" -gt "$NEW_MAX_CHECK" ] && NEW_MAX_CHECK=$ev_id
         ;;
       'event: thread '*)
@@ -1194,6 +1379,12 @@ advance_from_surviving() {
         [ -n "$ev_id" ] && [ -n "$ev_state" ] || continue
         NEW_THREADS=$(map_put "$NEW_THREADS" "$ev_id" "$ev_state")
         NEW_THREAD_UPDATES=$(map_put "$NEW_THREAD_UPDATES" "$ev_id" "$ev_state")
+        ;;
+      'event: backfill-thread '*)
+        ev_id=${line#event: backfill-thread id=}
+        ev_id=${ev_id%% *}
+        case "$ev_id" in ''|*[!A-Za-z0-9_-]*) continue ;; esac
+        item_update_add backfill "$ev_id" seen || return 1
         ;;
     esac
   done <<< "$EV_LINES"
@@ -1211,10 +1402,12 @@ compute_delta_github() {
       [ -n "$check_id" ] || continue
       nonnegative_int "$check_id" || continue
       key_v=$(check_key "$check_sc")
-      old=$(map_get "$CUR_CHECKS" "$check_id")
+      old=$(item_state_get check "$check_id" 2>/dev/null || map_get "$CUR_CHECKS" "$check_id")
       if [ -z "$old" ]; then
         if [ "$check_id" -gt "$CUR_MAX_CHECK" ]; then
           ev_add "$check_id	event: check id=$check_id name=$(printf '%s' "$check_name" | prf_sanitize 80) change=none->$key_v status=$check_sc"
+        else
+          ev_add "$check_id	event: check id=$check_id name=$(printf '%s' "$check_name" | prf_sanitize 80) change=unknown->$key_v status=$check_sc"
         fi
       else
         oldkey=$(check_key "$old")
@@ -1228,21 +1421,21 @@ compute_delta_github() {
   # Reviews: new submissions and state changes. The projection normalizes
   # unrecognized states to "unknown", which round-trips through the map and
   # announces instead of silently dropping the event (vocabulary contract).
-  local review_id review_state review_author old review_seeds=''
+  local review_id review_state review_author old
   while IFS=$'\t' read -r review_id review_state review_author; do
     [ -n "$review_id" ] || continue
     nonnegative_int "$review_id" || continue
     prf_review_state_word_valid "$review_state" || review_state=unknown
     review_author=$(printf '%s' "$review_author" | prf_sanitize 60)
     prf_login_valid "$review_author" || review_author=invalid
-    old=$(map_get "$CUR_REVIEWS" "$review_id")
+    old=$(item_state_get review "$review_id" 2>/dev/null || map_get "$CUR_REVIEWS" "$review_id")
     seen_add SEEN_REVIEW "$review_id"
     [ "$SEEN_HIT" -eq 0 ] || continue
     if [ -z "$old" ]; then
       if [ "$review_id" -gt "$CUR_MAX_REVIEW" ]; then
         ev_add "$review_id	event: review id=$review_id state=$review_state author=$review_author"
       else
-        review_seeds+="$review_id"$'\t'"$review_state"$'\n'
+        ev_add "$review_id	event: review-state id=$review_id state=$review_state author=$review_author"
       fi
     elif [ "$old" != "$review_state" ]; then
       ev_add "$review_id	event: review-state id=$review_id state=$review_state author=$review_author"
@@ -1259,10 +1452,12 @@ compute_delta_github() {
     prf_login_valid "$rc_author" || rc_author=invalid
     rc_path=$(printf '%s' "$rc_path" | prf_sanitize 120)
     nonnegative_int "$rc_line" || rc_line=0
-    if [ "$rc_id" -gt "$CUR_MAX_REVIEW_COMMENT" ]; then
-      seen_add SEEN_RC "$rc_id"
-      if [ "$SEEN_HIT" -eq 0 ]; then
+    seen_add SEEN_RC "$rc_id"
+    if [ "$SEEN_HIT" -eq 0 ] && ! item_state_get review-comment "$rc_id" >/dev/null 2>&1; then
+      if [ "$rc_id" -gt "$CUR_MAX_REVIEW_COMMENT" ]; then
         ev_add "$rc_id	event: review-comment id=$rc_id author=$rc_author$( [ "$rc_replyto" -gt 0 ] && printf ' reply-to=%s' "$rc_replyto") path=$rc_path line=$rc_line"
+      else
+        item_state_store review-comment "$rc_id" seen || return 1
       fi
     fi
   done <<< "$SN_RC_ROWS"
@@ -1274,19 +1469,18 @@ compute_delta_github() {
     nonnegative_int "$c_id" || continue
     c_author=$(printf '%s' "$c_author" | prf_sanitize 60)
     prf_login_valid "$c_author" || c_author=invalid
-    if [ "$c_id" -gt "$CUR_MAX_ISSUE_COMMENT" ]; then
-      seen_add SEEN_ISSUE "$c_id"
-      [ "$SEEN_HIT" -eq 0 ] && ev_add "$c_id	event: comment id=$c_id author=$c_author"
+    seen_add SEEN_ISSUE "$c_id"
+    if [ "$SEEN_HIT" -eq 0 ] && ! item_state_get issue "$c_id" >/dev/null 2>&1; then
+      if [ "$c_id" -gt "$CUR_MAX_ISSUE_COMMENT" ]; then
+        ev_add "$c_id	event: comment id=$c_id author=$c_author"
+      else
+        item_state_store issue "$c_id" seen || return 1
+      fi
     fi
   done <<< "$SN_ROWS"
 
   ev_sort_and_cap
-  advance_from_surviving
-  while IFS=$'\t' read -r review_id review_state; do
-    [ -n "$review_id" ] || continue
-    [ -z "$(map_get "$NEW_REVIEWS" "$review_id")" ] || continue
-    NEW_REVIEWS=$(map_put "$NEW_REVIEWS" "$review_id" "$review_state")
-  done <<< "$review_seeds"
+  advance_from_surviving || return 1
   NEW_REVIEWS=$(max_map_entries "$NEW_REVIEWS" "$MAP_LIMIT")
   return 0
 }
@@ -1307,15 +1501,6 @@ compute_backfill_github() {
     nonnegative_int "$rc_line" || rc_line=0
     if [ "$rc_replyto" -gt 0 ]; then
       root=$rc_replyto
-      found=0
-      for ((i = 0; i < root_n; i++)); do
-        [ "${root_ids[$i]}" = "$root" ] && { found=1; break; }
-      done
-      if [ "$found" -eq 0 ]; then
-        # The parent is not among the fetched rows; root the chain here so it
-        # is still surfaced.
-        root=$rc_id
-      fi
     else
       root=$rc_id
     fi
@@ -1338,10 +1523,11 @@ compute_backfill_github() {
       thread_count+=(1)
       root_n=$((root_n + 1))
     fi
-  done <<< "$(reverse_rows "$SN_RC_ROWS")"
+  done <<< "$(printf '%s\n' "$SN_RC_ROWS" | sort -n -k1,1)"
   EV_LINES=
   for ((i = 0; i < root_n; i++)); do
-    if [ "${last_author[$i]}" != "$SN_AUTHOR" ]; then
+    if [ "${last_author[$i]}" != "$SN_AUTHOR" ] \
+       && ! item_state_get backfill "${root_ids[$i]}" >/dev/null 2>&1; then
       ev_add "0	event: backfill-thread id=${root_ids[$i]} last-author=${last_author[$i]} comments=${thread_count[$i]} path=${last_path[$i]} line=${last_line[$i]}"
     fi
   done
@@ -1358,10 +1544,12 @@ compute_delta_gitlab() {
       [ -n "$check_id" ] || continue
       nonnegative_int "$check_id" || continue
       key_v=$(check_key "$check_status")
-      old=$(map_get "$CUR_CHECKS" "$check_id")
+      old=$(item_state_get check "$check_id" 2>/dev/null || map_get "$CUR_CHECKS" "$check_id")
       if [ -z "$old" ]; then
         if [ -n "$CUR_HEAD" ] && [ "$check_id" -gt "$CUR_MAX_CHECK" ]; then
           ev_add "$check_id	event: check id=$check_id change=none->$key_v status=$check_status"
+        else
+          ev_add "$check_id	event: check id=$check_id change=unknown->$key_v status=$check_status"
         fi
       else
         oldkey=$(check_key "$old")
@@ -1391,42 +1579,33 @@ compute_delta_gitlab() {
   # Approvals: grants and revocations against the durable set, compared only
   # against an approval list this poll actually read, and only for grants the
   # bounded set can still record.
-  local user found u approvals_truncated=0
+  local user found u approval_file approval_name
   # shellcheck disable=SC2034 # Written through the approval_set_insert indirection.
-  local projected=$CUR_APPROVALS
   local -a users_now=()
-  local rest
   if [ "$SN_APPROVALS_OK" -eq 1 ]; then
     while IFS= read -r user; do
       [ -n "$user" ] || continue
       prf_login_valid "$user" || continue
       users_now+=("$user")
-      case ",$CUR_APPROVALS," in
-        *",$user,"*) ;;
-        *)
-          if approval_set_insert projected "$user"; then
-            ev_add "0	event: review id=approval-$user state=APPROVED author=$user"
-          else
-            approvals_truncated=1
-          fi
-          ;;
-      esac
+      if [ "$CUR_APPROVAL_READY" -eq 0 ]; then
+        item_state_store approval "$user" approved || return 1
+      elif ! item_state_get approval "$user" >/dev/null 2>&1; then
+        ev_add "0	event: review id=approval-$user state=APPROVED author=$user"
+      fi
     done <<< "$SN_APPROVAL_ROWS"
-    rest=$CUR_APPROVALS
-    while [ -n "$rest" ]; do
-      user=${rest%%,*}
-      case "$rest" in
-        *,*) rest=${rest#*,} ;;
-        *) rest= ;;
-      esac
+    for approval_file in "$(item_state_dir "$SID")"/approval-*; do
+      [ -f "$approval_file" ] && [ ! -L "$approval_file" ] || continue
+      approval_name=${approval_file##*/approval-}
+      prf_login_valid "$approval_name" || return 1
       found=0
       for u in ${users_now[@]+"${users_now[@]}"}; do
-        [ "$u" = "$user" ] && found=1
+        [ "$u" = "$approval_name" ] && found=1
       done
-      if [ "$found" -eq 0 ]; then
-        ev_add "0	event: review id=approval-$user state=DISMISSED author=$user"
+      if [ "$CUR_APPROVAL_READY" -eq 1 ] && [ "$found" -eq 0 ]; then
+        ev_add "0	event: review id=approval-$approval_name state=DISMISSED author=$approval_name"
       fi
     done
+    NEW_APPROVAL_READY=1
   fi
 
   # Notes (plain comments, inline diff notes, and replies).
@@ -1439,9 +1618,12 @@ compute_delta_gitlab() {
     prf_login_valid "$n_author" || n_author=invalid
     n_path=$(printf '%s' "$n_path" | prf_sanitize 120)
     nonnegative_int "$n_line" || n_line=0
-    if [ "$n_id" -gt "$CUR_MAX_REVIEW_COMMENT" ]; then
-      seen_add SEEN_NOTE "$n_id"
-      [ "$SEEN_HIT" -eq 1 ] && continue
+    seen_add SEEN_NOTE "$n_id"
+    if [ "$SEEN_HIT" -eq 0 ] && ! item_state_get review-comment "$n_id" >/dev/null 2>&1; then
+      if [ "$n_id" -le "$CUR_MAX_REVIEW_COMMENT" ]; then
+        item_state_store review-comment "$n_id" seen || return 1
+        continue
+      fi
       if [ "$n_kind" = inline ]; then
         ev_add "$n_id	event: review-comment id=$n_id author=$n_author$( [ "$n_first" = 0 ] && printf ' reply-to=%s' "$n_thread") path=$n_path line=$n_line"
       else
@@ -1451,10 +1633,7 @@ compute_delta_gitlab() {
   done <<< "$SN_NOTE_ROWS"
 
   ev_sort_and_cap
-  if [ "$approvals_truncated" -eq 1 ] && [ -n "$EV_LINES" ]; then
-    EVENTS_DROPPED=1
-  fi
-  advance_from_surviving
+  advance_from_surviving || return 1
   while IFS=$'\t' read -r thread_id thread_state; do
     [ -n "$thread_id" ] || continue
     thread_state_store "$thread_id" "$thread_state" || return 1
@@ -1501,7 +1680,7 @@ compute_backfill_gitlab() {
       thread_resolved+=(unresolved)
       root_n=$((root_n + 1))
     fi
-  done <<< "$(reverse_rows "$SN_NOTE_ROWS")"
+  done <<< "$(printf '%s\n' "$SN_NOTE_ROWS" | sort -n -k1,1)"
   while IFS=$'\t' read -r thread_id thread_state; do
     [ -n "$thread_id" ] || continue
     for ((i = 0; i < root_n; i++)); do
@@ -1510,7 +1689,9 @@ compute_backfill_gitlab() {
   done <<< "$SN_THREAD_ROWS"
   EV_LINES=
   for ((i = 0; i < root_n; i++)); do
-    if [ "${last_author[$i]}" != "$SN_AUTHOR" ] && [ "${thread_resolved[$i]}" != resolved ]; then
+    if [ "${last_author[$i]}" != "$SN_AUTHOR" ] \
+       && [ "${thread_resolved[$i]}" != resolved ] \
+       && ! item_state_get backfill "${root_ids[$i]}" >/dev/null 2>&1; then
       ev_add "0	event: backfill-thread id=${root_ids[$i]} last-author=${last_author[$i]} comments=${thread_count[$i]} path=${last_path[$i]} line=${last_line[$i]}"
     fi
   done
@@ -1523,7 +1704,8 @@ compute_backfill_gitlab() {
 emit_doc() {  # <status> <head> <state>
   local status=$1 head=$2 doc_state=$3 count=0 line
   printf 'schema: %s\n' "$DOC_SCHEMA"
-  printf 'source: %s\n' "$SID"
+  printf 'source: %s\n' "$CAPTURE_SID"
+  printf 'target: %s\n' "$SID"
   printf 'provider: %s\n' "$CUR_PROVIDER"
   printf 'url: %s\n' "$CUR_URL"
   printf 'number: %s\n' "$CUR_NUMBER"
@@ -1553,11 +1735,24 @@ emit_doc() {  # <status> <head> <state>
   printf 'checks=%s\n' "$NEW_CHECKS"
   printf 'threads=%s\n' "$NEW_THREADS"
   printf 'thread_updates=%s\n' "$NEW_THREAD_UPDATES"
+  printf 'item_updates=%s\n' "$NEW_ITEM_UPDATES"
   printf 'approvals=%s\n' "$NEW_APPROVALS"
   printf 'gl_discussion_page=%s\n' "$NEW_GL_DISCUSSION_PAGE"
   printf 'gl_discussion_last=%s\n' "$NEW_GL_DISCUSSION_LAST"
+  printf 'gh_issue_page=%s\n' "$NEW_GH_ISSUE_PAGE"
+  printf 'gh_issue_last=%s\n' "$NEW_GH_ISSUE_LAST"
+  printf 'gh_rc_page=%s\n' "$NEW_GH_RC_PAGE"
+  printf 'gh_rc_last=%s\n' "$NEW_GH_RC_LAST"
+  printf 'gh_review_page=%s\n' "$NEW_GH_REVIEW_PAGE"
+  printf 'gh_review_last=%s\n' "$NEW_GH_REVIEW_LAST"
+  printf 'gh_check_page=%s\n' "$NEW_GH_CHECK_PAGE"
+  printf 'gh_check_last=%s\n' "$NEW_GH_CHECK_LAST"
+  printf 'gl_pipeline_page=%s\n' "$NEW_GL_PIPELINE_PAGE"
+  printf 'gl_pipeline_last=%s\n' "$NEW_GL_PIPELINE_LAST"
+  printf 'approval_ready=%s\n' "$NEW_APPROVAL_READY"
+  printf 'backfill_remaining=%s\n' "$NEW_BACKFILL_REMAINING"
   local doc_backfill=$CUR_BACKFILL
-  if [ "$status" = backfill ]; then
+  if [ "$status" = backfill ] && [ "$NEW_BACKFILL_REMAINING" -eq 0 ]; then
     doc_backfill="done"
   fi
   printf 'backfill=%s\n' "$doc_backfill"
@@ -1566,7 +1761,8 @@ emit_doc() {  # <status> <head> <state>
 
 emit_error_doc() {  # <detail>
   printf 'schema: %s\n' "$DOC_SCHEMA"
-  printf 'source: %s\n' "$SID"
+  printf 'source: %s\n' "$CAPTURE_SID"
+  printf 'target: %s\n' "$SID"
   printf 'provider: %s\n' "$CUR_PROVIDER"
   printf 'url: %s\n' "$CUR_URL"
   printf 'number: %s\n' "$CUR_NUMBER"
@@ -1596,6 +1792,12 @@ cursor_load() {
   CUR_THREADS=''
   CUR_APPROVALS=''
   CUR_GL_DISCUSSION_PAGE=0 CUR_GL_DISCUSSION_LAST=0
+  CUR_GH_ISSUE_PAGE=0 CUR_GH_ISSUE_LAST=0 CUR_SCAN_ISSUE_DONE=0
+  CUR_GH_RC_PAGE=0 CUR_GH_RC_LAST=0 CUR_SCAN_RC_DONE=0
+  CUR_GH_REVIEW_PAGE=0 CUR_GH_REVIEW_LAST=0 CUR_SCAN_REVIEW_DONE=0
+  CUR_GH_CHECK_PAGE=0 CUR_GH_CHECK_LAST=0 CUR_SCAN_CHECK_DONE=0
+  CUR_SCAN_DISCUSSION_DONE=0 CUR_GL_PIPELINE_PAGE=0 CUR_GL_PIPELINE_LAST=0 CUR_SCAN_PIPELINE_DONE=0
+  CUR_APPROVAL_READY=0 CUR_BACKFILL_REMAINING=0
   CUR_BASELINE=pending CUR_BACKFILL=off CUR_GENERATION=0 CUR_ERROR_STREAK=0
   CURSOR_PRESENT=1
   file=$(cursor_file "$sid")
@@ -1628,6 +1830,24 @@ cursor_load() {
       approvals)   CUR_APPROVALS=$value ;;
       gl_discussion_page) CUR_GL_DISCUSSION_PAGE=$value ;;
       gl_discussion_last) CUR_GL_DISCUSSION_LAST=$value ;;
+      gh_issue_page) CUR_GH_ISSUE_PAGE=$value ;;
+      gh_issue_last) CUR_GH_ISSUE_LAST=$value ;;
+      scan_issue_done) CUR_SCAN_ISSUE_DONE=$value ;;
+      gh_rc_page) CUR_GH_RC_PAGE=$value ;;
+      gh_rc_last) CUR_GH_RC_LAST=$value ;;
+      scan_rc_done) CUR_SCAN_RC_DONE=$value ;;
+      gh_review_page) CUR_GH_REVIEW_PAGE=$value ;;
+      gh_review_last) CUR_GH_REVIEW_LAST=$value ;;
+      scan_review_done) CUR_SCAN_REVIEW_DONE=$value ;;
+      gh_check_page) CUR_GH_CHECK_PAGE=$value ;;
+      gh_check_last) CUR_GH_CHECK_LAST=$value ;;
+      scan_check_done) CUR_SCAN_CHECK_DONE=$value ;;
+      scan_discussion_done) CUR_SCAN_DISCUSSION_DONE=$value ;;
+      gl_pipeline_page) CUR_GL_PIPELINE_PAGE=$value ;;
+      gl_pipeline_last) CUR_GL_PIPELINE_LAST=$value ;;
+      scan_pipeline_done) CUR_SCAN_PIPELINE_DONE=$value ;;
+      approval_ready) CUR_APPROVAL_READY=$value ;;
+      backfill_remaining) CUR_BACKFILL_REMAINING=$value ;;
       baseline)    CUR_BASELINE=$value ;;
       backfill)    CUR_BACKFILL=$value ;;
       generation)  CUR_GENERATION=$value ;;
@@ -1652,6 +1872,16 @@ cursor_load() {
   prf_approval_set_valid "$CUR_APPROVALS" || return 1
   nonnegative_int "$CUR_GL_DISCUSSION_PAGE" || return 1
   nonnegative_int "$CUR_GL_DISCUSSION_LAST" || return 1
+  local scan_value
+  for scan_value in "$CUR_GH_ISSUE_PAGE" "$CUR_GH_ISSUE_LAST" "$CUR_GH_RC_PAGE" "$CUR_GH_RC_LAST" \
+    "$CUR_GH_REVIEW_PAGE" "$CUR_GH_REVIEW_LAST" "$CUR_GH_CHECK_PAGE" "$CUR_GH_CHECK_LAST" \
+    "$CUR_GL_PIPELINE_PAGE" "$CUR_GL_PIPELINE_LAST" "$CUR_BACKFILL_REMAINING"; do
+    nonnegative_int "$scan_value" || return 1
+  done
+  for scan_value in "$CUR_SCAN_ISSUE_DONE" "$CUR_SCAN_RC_DONE" "$CUR_SCAN_REVIEW_DONE" \
+    "$CUR_SCAN_CHECK_DONE" "$CUR_SCAN_DISCUSSION_DONE" "$CUR_SCAN_PIPELINE_DONE" "$CUR_APPROVAL_READY"; do
+    case "$scan_value" in 0|1) ;; *) return 1 ;; esac
+  done
   case "$CUR_BASELINE" in pending|done) ;; *) return 1 ;; esac
   case "$CUR_BACKFILL" in on|off|done) ;; *) return 1 ;; esac
   nonnegative_int "$CUR_GENERATION" || return 1
@@ -1699,6 +1929,24 @@ cursor_store() {
     printf 'approvals=%s\n' "$CUR_APPROVALS"
     printf 'gl_discussion_page=%s\n' "$CUR_GL_DISCUSSION_PAGE"
     printf 'gl_discussion_last=%s\n' "$CUR_GL_DISCUSSION_LAST"
+    printf 'gh_issue_page=%s\n' "$CUR_GH_ISSUE_PAGE"
+    printf 'gh_issue_last=%s\n' "$CUR_GH_ISSUE_LAST"
+    printf 'scan_issue_done=%s\n' "$CUR_SCAN_ISSUE_DONE"
+    printf 'gh_rc_page=%s\n' "$CUR_GH_RC_PAGE"
+    printf 'gh_rc_last=%s\n' "$CUR_GH_RC_LAST"
+    printf 'scan_rc_done=%s\n' "$CUR_SCAN_RC_DONE"
+    printf 'gh_review_page=%s\n' "$CUR_GH_REVIEW_PAGE"
+    printf 'gh_review_last=%s\n' "$CUR_GH_REVIEW_LAST"
+    printf 'scan_review_done=%s\n' "$CUR_SCAN_REVIEW_DONE"
+    printf 'gh_check_page=%s\n' "$CUR_GH_CHECK_PAGE"
+    printf 'gh_check_last=%s\n' "$CUR_GH_CHECK_LAST"
+    printf 'scan_check_done=%s\n' "$CUR_SCAN_CHECK_DONE"
+    printf 'scan_discussion_done=%s\n' "$CUR_SCAN_DISCUSSION_DONE"
+    printf 'gl_pipeline_page=%s\n' "$CUR_GL_PIPELINE_PAGE"
+    printf 'gl_pipeline_last=%s\n' "$CUR_GL_PIPELINE_LAST"
+    printf 'scan_pipeline_done=%s\n' "$CUR_SCAN_PIPELINE_DONE"
+    printf 'approval_ready=%s\n' "$CUR_APPROVAL_READY"
+    printf 'backfill_remaining=%s\n' "$CUR_BACKFILL_REMAINING"
     printf 'baseline=%s\n' "$CUR_BASELINE"
     printf 'backfill=%s\n' "$CUR_BACKFILL"
     printf 'generation=%s\n' "$CUR_GENERATION"
@@ -1776,33 +2024,53 @@ quarantine_active() {
 # surfaced latch flips only when that document is applied, so a lost capture
 # re-emits it (at least once, never indefinitely).
 prf_quarantine_gate() {
-  while :; do
-    fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
-    if quarantine_active "$SID"; then
-      if [ "$QUAR_SURFACED" -eq 0 ]; then
-        fm_lock_release "$(lifecycle_lock_path "$SID")"
-        emit_error_doc "monitoring loss: source $SID paused after $QUAR_COUNT unapplicable captures; inspect the captured result and state/pr-follow/$SID.quarantine; rerun arm to resume after the adapter is repaired"
-        sleep "$INTERVAL"
-        exit 0
-      fi
+  fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
+  if quarantine_active "$SID"; then
+    if [ "$QUAR_SURFACED" -eq 0 ]; then
       fm_lock_release "$(lifecycle_lock_path "$SID")"
-      sleep "$INTERVAL"
-      continue
+      emit_error_doc "monitoring loss: source $SID paused after $QUAR_COUNT unapplicable captures; inspect the captured result and state/pr-follow/$SID.quarantine; rerun arm to resume after the adapter is repaired"
+      return 2
     fi
     fm_lock_release "$(lifecycle_lock_path "$SID")"
-    return 0
-  done
+    return 1
+  fi
+  fm_lock_release "$(lifecycle_lock_path "$SID")"
+  return 0
 }
 
 # --- deterministic rotation (aggregate bound) --------------------------------
 
 rotation_roster() {
   local f id
-  for f in "$REG_DIR"/prf-gh-????????????.source "$REG_DIR"/prf-gl-????????????.source; do
+  for f in "$FOLLOW_DIR"/prf-gh-????????????.cursor "$FOLLOW_DIR"/prf-gl-????????????.cursor; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
     id=${f##*/}
-    printf '%s\n' "${id%.source}"
+    printf '%s\n' "${id%.cursor}"
   done | LC_ALL=C sort
+}
+
+rotation_target() {
+  local now slot total=0 index=0 s
+  ROT_TARGET=
+  now=$(date +%s) || return 1
+  slot=$((now / ROTATION_SLOT))
+  ROT_WAIT=$(((slot + 1) * ROTATION_SLOT - now + 1))
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    total=$((total + 1))
+  done < <(rotation_roster)
+  [ "$total" -gt 0 ] || return 1
+  index=$((slot % total))
+  total=0
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    if [ "$total" -eq "$index" ]; then
+      ROT_TARGET=$s
+      return 0
+    fi
+    total=$((total + 1))
+  done < <(rotation_roster)
+  return 1
 }
 
 # rotation_eval <sid> <cursor-state> [startup]: ROT_ON_DUTY=1 when this source
@@ -1888,12 +2156,8 @@ error_tick() {
   return 0
 }
 
-persist_gitlab_scan_progress() {
+persist_scan_progress() {
   local expected_generation=$1
-  [ "$CUR_PROVIDER" = gitlab ] || return 0
-  [ "$NEW_GL_DISCUSSION_PAGE" != "$CUR_GL_DISCUSSION_PAGE" ] \
-    || [ "$NEW_GL_DISCUSSION_LAST" != "$CUR_GL_DISCUSSION_LAST" ] \
-    || return 0
   fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || return 1
   cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; return 1; }
   if [ "$CURSOR_PRESENT" -ne 1 ]; then
@@ -1901,36 +2165,40 @@ persist_gitlab_scan_progress() {
     exit 0
   fi
   if [ "$CUR_GENERATION" = "$expected_generation" ]; then
+    CUR_GH_ISSUE_PAGE=$NEW_GH_ISSUE_PAGE
+    CUR_GH_ISSUE_LAST=$NEW_GH_ISSUE_LAST
+    CUR_GH_RC_PAGE=$NEW_GH_RC_PAGE
+    CUR_GH_RC_LAST=$NEW_GH_RC_LAST
+    CUR_GH_REVIEW_PAGE=$NEW_GH_REVIEW_PAGE
+    CUR_GH_REVIEW_LAST=$NEW_GH_REVIEW_LAST
+    CUR_GH_CHECK_PAGE=$NEW_GH_CHECK_PAGE
+    CUR_GH_CHECK_LAST=$NEW_GH_CHECK_LAST
     CUR_GL_DISCUSSION_PAGE=$NEW_GL_DISCUSSION_PAGE
     CUR_GL_DISCUSSION_LAST=$NEW_GL_DISCUSSION_LAST
+    CUR_GL_PIPELINE_PAGE=$NEW_GL_PIPELINE_PAGE
+    CUR_GL_PIPELINE_LAST=$NEW_GL_PIPELINE_LAST
+    CUR_APPROVAL_READY=$NEW_APPROVAL_READY
+    CUR_BACKFILL_REMAINING=$NEW_BACKFILL_REMAINING
     cursor_store || { fm_lock_release "$(lifecycle_lock_path "$SID")"; return 1; }
   fi
   fm_lock_release "$(lifecycle_lock_path "$SID")"
 }
 
 baseline_write() {
-  # Store the first poll silently: current maxima, maps, head, and state. The
-  # caller holds the lifecycle lock and the snapshot is fresh.
   CUR_HEAD=$SN_HEAD
   CUR_STATE=$SN_STATE
-  CUR_MAX_ISSUE_COMMENT=0
-  CUR_MAX_REVIEW=0
-  CUR_MAX_REVIEW_COMMENT=0
-  CUR_MAX_CHECK=0
-  CUR_REVIEWS=
-  CUR_CHECKS=
-  CUR_THREADS=
-  CUR_APPROVALS=
   local id rest
   while IFS=$'\t' read -r id rest; do
     [ -n "$id" ] || continue
     nonnegative_int "$id" || continue
     CUR_MAX_ISSUE_COMMENT=$(( id > CUR_MAX_ISSUE_COMMENT ? id : CUR_MAX_ISSUE_COMMENT ))
+    item_state_store issue "$id" seen || return 1
   done <<< "$SN_ROWS"
   while IFS=$'\t' read -r id rest; do
     [ -n "$id" ] || continue
     nonnegative_int "$id" || continue
     CUR_MAX_REVIEW_COMMENT=$(( id > CUR_MAX_REVIEW_COMMENT ? id : CUR_MAX_REVIEW_COMMENT ))
+    item_state_store review-comment "$id" seen || return 1
   done <<< "$SN_RC_ROWS"
   local review_state
   while IFS=$'\t' read -r id review_state rest; do
@@ -1939,6 +2207,7 @@ baseline_write() {
     CUR_MAX_REVIEW=$(( id > CUR_MAX_REVIEW ? id : CUR_MAX_REVIEW ))
     prf_review_state_word_valid "$review_state" || review_state=unknown
     CUR_REVIEWS=$(map_put "$CUR_REVIEWS" "$id" "$review_state")
+    item_state_store review "$id" "$review_state" || return 1
   done <<< "$SN_REVIEW_ROWS"
   CUR_REVIEWS=$(max_map_entries "$CUR_REVIEWS" "$MAP_LIMIT")
   local check_id check_sc check_name
@@ -1946,6 +2215,7 @@ baseline_write() {
     [ -n "$check_id" ] || continue
     nonnegative_int "$check_id" || continue
     CUR_CHECKS=$(map_put "$CUR_CHECKS" "$check_id" "$check_sc")
+    item_state_store check "$check_id" "$check_sc" || return 1
   done <<< "$SN_CHECK_ROWS"
   CUR_CHECKS=$(max_map_entries "$CUR_CHECKS" "$MAP_LIMIT")
   CUR_MAX_CHECK=$(max_check_id "$SN_CHECK_ROWS" 0)
@@ -1966,6 +2236,7 @@ baseline_write() {
       [ -n "$n_id" ] || continue
       nonnegative_int "$n_id" || continue
       CUR_MAX_REVIEW_COMMENT=$(( n_id > CUR_MAX_REVIEW_COMMENT ? n_id : CUR_MAX_REVIEW_COMMENT ))
+      item_state_store review-comment "$n_id" seen || return 1
     done <<< "$SN_NOTE_ROWS"
     local user
     if [ "$SN_APPROVALS_OK" -eq 1 ]; then
@@ -1973,34 +2244,84 @@ baseline_write() {
         [ -n "$user" ] || continue
         prf_login_valid "$user" || continue
         approval_set_insert CUR_APPROVALS "$user"
+        item_state_store approval "$user" approved || return 1
       done <<< "$SN_APPROVAL_ROWS"
+      CUR_APPROVAL_READY=1
+    fi
+    CUR_GL_DISCUSSION_PAGE=$SN_GL_DISCUSSION_PAGE
+    CUR_GL_DISCUSSION_LAST=$SN_GL_DISCUSSION_LAST
+    CUR_GL_PIPELINE_PAGE=$SN_GL_PIPELINE_PAGE
+    CUR_GL_PIPELINE_LAST=$SN_GL_PIPELINE_LAST
+    [ "$SN_GL_DISCUSSION_COMPLETE" -eq 1 ] && CUR_SCAN_DISCUSSION_DONE=1
+    [ "$SN_GL_PIPELINE_COMPLETE" -eq 1 ] && CUR_SCAN_PIPELINE_DONE=1
+    if [ "$CUR_SCAN_DISCUSSION_DONE" -eq 1 ] && [ "$CUR_SCAN_PIPELINE_DONE" -eq 1 ]; then
+      CUR_BASELINE='done'
+    fi
+  else
+    CUR_GH_ISSUE_PAGE=$SN_GH_ISSUE_PAGE
+    CUR_GH_ISSUE_LAST=$SN_GH_ISSUE_LAST
+    CUR_GH_RC_PAGE=$SN_GH_RC_PAGE
+    CUR_GH_RC_LAST=$SN_GH_RC_LAST
+    CUR_GH_REVIEW_PAGE=$SN_GH_REVIEW_PAGE
+    CUR_GH_REVIEW_LAST=$SN_GH_REVIEW_LAST
+    CUR_GH_CHECK_PAGE=$SN_GH_CHECK_PAGE
+    CUR_GH_CHECK_LAST=$SN_GH_CHECK_LAST
+    [ "$SN_GH_ISSUE_COMPLETE" -eq 1 ] && CUR_SCAN_ISSUE_DONE=1
+    [ "$SN_GH_RC_COMPLETE" -eq 1 ] && CUR_SCAN_RC_DONE=1
+    [ "$SN_GH_REVIEW_COMPLETE" -eq 1 ] && CUR_SCAN_REVIEW_DONE=1
+    [ "$SN_GH_CHECK_COMPLETE" -eq 1 ] && CUR_SCAN_CHECK_DONE=1
+    if [ "$CUR_SCAN_ISSUE_DONE" -eq 1 ] && [ "$CUR_SCAN_RC_DONE" -eq 1 ] \
+       && [ "$CUR_SCAN_REVIEW_DONE" -eq 1 ] && [ "$CUR_SCAN_CHECK_DONE" -eq 1 ]; then
+      CUR_BASELINE='done'
     fi
   fi
-  CUR_BASELINE="done"
   cursor_store
 }
 
 cmd_run() {
-  local sid=${1-} gen_seen gen_now events first_poll=1
-  prf_source_id_valid "$sid" || die "invalid source id: $sid"
-  SID=$sid
+  local requested=${1-} gen_seen gen_now events first_poll=1 gate remaining total_pages
+  if [ "$requested" != "$SCHEDULER_ID" ]; then
+    prf_source_id_valid "$requested" || die "invalid source id: $requested"
+  fi
+  CAPTURE_SID=$requested
   env_bounds_valid || die "FM_PR_FOLLOW_* environment bounds are invalid"
   [ -d "$FOLLOW_DIR" ] && [ ! -L "$FOLLOW_DIR" ] || die "follow directory is unavailable"
-  cursor_load "$SID" || die "cursor is unreadable or tampered: $SID"
-  [ "$CURSOR_PRESENT" -eq 1 ] || die "cursor seed is missing: $SID (arm first)"
-  [ -n "$CUR_PROVIDER" ] || die "cursor identity is incomplete: $SID"
-  thread_state_dir_ready "$SID" || die "thread state directory is unavailable: $SID"
-  thread_states_migrate_cursor || die "thread state migration failed: $SID"
-  [ -f "$REG_DIR/$SID.source" ] \
-    || die "source is not registered: $SID"
+  if [ "$requested" != "$SCHEDULER_ID" ] \
+     && [ -f "$REG_DIR/$requested.source" ] && [ ! -L "$REG_DIR/$requested.source" ]; then
+    ensure_scheduler || die "cannot register the PR follow scheduler"
+    exit 0
+  fi
+  if [ "$requested" = "$SCHEDULER_ID" ]; then
+    [ -f "$REG_DIR/$SCHEDULER_ID.source" ] && [ ! -L "$REG_DIR/$SCHEDULER_ID.source" ] \
+      || die "scheduler is not registered"
+  fi
 
   while :; do
-    prf_quarantine_gate || continue
-    # Every poll, the first one included, waits for this source's rotation
-    # slot, which bounds the aggregate request rate even when a reconcile
-    # starts the whole retained roster at once (header). A child's first poll
-    # is exempt only from the settled throttle, so a baseline or a
-    # post-restart verification still lands within one roster cycle.
+    if [ "$requested" = "$SCHEDULER_ID" ]; then
+      if ! rotation_target; then
+        sleep "$ROTATION_SLOT"
+        continue
+      fi
+      SID=$ROT_TARGET
+      first_poll=0
+    else
+      SID=$requested
+    fi
+    cursor_load "$SID" || die "cursor is unreadable or tampered: $SID"
+    if [ "$CURSOR_PRESENT" -ne 1 ]; then
+      [ "$requested" = "$SCHEDULER_ID" ] && { rotation_sleep_to_next_slot; continue; }
+      die "cursor seed is missing: $SID (arm first)"
+    fi
+    item_state_dir_ready "$SID" || die "item state directory is unavailable: $SID"
+    thread_state_dir_ready "$SID" || die "thread state directory is unavailable: $SID"
+    thread_states_migrate_cursor || die "thread state migration failed: $SID"
+    gate=0
+    prf_quarantine_gate || gate=$?
+    [ "$gate" -ne 2 ] || exit 0
+    if [ "$gate" -ne 0 ]; then
+      rotation_sleep_to_next_slot
+      continue
+    fi
     rotation_eval "$SID" "$CUR_STATE" "$first_poll"
     if [ "$ROT_ON_DUTY" -ne 1 ]; then
       sleep "$ROT_WAIT"
@@ -2039,16 +2360,16 @@ cmd_run() {
         fm_lock_release "$(lifecycle_lock_path "$SID")"
       fi
       if [ "$CUR_PROVIDER" = github ]; then
-        compute_delta_github
+        compute_delta_github || die "cannot update GitHub item state"
       else
-        compute_delta_gitlab || die "cannot update GitLab thread state"
+        compute_delta_gitlab || die "cannot update GitLab item state"
       fi
       events=0
       if [ -n "$EV_LINES" ]; then
         events=$(printf '%s\n' "$EV_LINES" | grep -c . || true)
       fi
       if [ "$events" -eq 0 ] && [ "$EVENTS_DROPPED" -eq 0 ]; then
-        persist_gitlab_scan_progress "$gen_seen" || die "cannot store GitLab scan progress"
+        persist_scan_progress "$gen_seen" || die "cannot store scan progress"
       else
         # A concurrent apply advanced the cursor while this poll ran; recompute
         # against the fresh cursor so already-announced events are not repeated.
@@ -2064,28 +2385,26 @@ cmd_run() {
 
     # A scheduled backfill surfaces on the first poll that can see unanswered
     # threads, whether or not the baseline landed in the same poll.
-    if [ "$CUR_BACKFILL" = on ]; then
-      EV_LINES=''
-      EVENTS_DROPPED=0
+    if [ "$CUR_BASELINE" = 'done' ] && [ "$CUR_BACKFILL" = on ]; then
+      delta_common_start
       if [ "$CUR_PROVIDER" = github ]; then
         compute_backfill_github
+        total_pages=$SN_GH_RC_LAST
+        SN_BACKFILL_PAGES=$SN_GH_RC_PAGES
       else
         compute_backfill_gitlab
+        total_pages=$SN_GL_DISCUSSION_LAST
+        SN_BACKFILL_PAGES=$SN_GL_DISCUSSION_PAGES
       fi
+      remaining=$CUR_BACKFILL_REMAINING
+      [ "$remaining" -gt 0 ] || remaining=$total_pages
+      remaining=$((remaining > SN_BACKFILL_PAGES ? remaining - SN_BACKFILL_PAGES : 0))
+      if [ "$EVENTS_DROPPED" -eq 1 ] && [ "$remaining" -lt "$total_pages" ]; then
+        remaining=$total_pages
+      fi
+      NEW_BACKFILL_REMAINING=$remaining
+      advance_from_surviving || die "cannot prepare backfill state"
       if [ -n "$EV_LINES" ]; then
-        NEW_HEAD=$CUR_HEAD
-        NEW_STATE=$CUR_STATE
-        NEW_MAX_ISSUE_COMMENT=$CUR_MAX_ISSUE_COMMENT
-        NEW_MAX_REVIEW=$CUR_MAX_REVIEW
-        NEW_MAX_REVIEW_COMMENT=$CUR_MAX_REVIEW_COMMENT
-        NEW_MAX_CHECK=$CUR_MAX_CHECK
-        NEW_REVIEWS=$CUR_REVIEWS
-        NEW_CHECKS=$CUR_CHECKS
-        NEW_THREADS=$CUR_THREADS
-        NEW_THREAD_UPDATES=''
-        NEW_APPROVALS=$CUR_APPROVALS
-        NEW_GL_DISCUSSION_PAGE=$CUR_GL_DISCUSSION_PAGE
-        NEW_GL_DISCUSSION_LAST=$CUR_GL_DISCUSSION_LAST
         gen_now=$(sed -n 's/^generation=//p' "$(cursor_file "$SID")" 2>/dev/null || printf '%s' "$gen_seen")
         if [ "$gen_now" != "$gen_seen" ]; then
           cursor_load "$SID" || die "cursor is unreadable or tampered: $SID"
@@ -2093,6 +2412,18 @@ cmd_run() {
         fi
         emit_doc backfill "$CUR_HEAD" "$CUR_STATE"
         exit 0
+      else
+        persist_scan_progress "$gen_seen" || die "cannot store backfill progress"
+        if [ "$remaining" -eq 0 ]; then
+          fm_lock_acquire_wait "$(lifecycle_lock_path "$SID")" || die "cannot lock the cursor"
+          cursor_load "$SID" || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cursor is unreadable: $SID"; }
+          if [ "$CURSOR_PRESENT" -eq 1 ] && [ "$CUR_BACKFILL" = on ]; then
+            CUR_BACKFILL='done'
+            CUR_BACKFILL_REMAINING=0
+            cursor_store || { fm_lock_release "$(lifecycle_lock_path "$SID")"; die "cannot complete backfill"; }
+          fi
+          fm_lock_release "$(lifecycle_lock_path "$SID")"
+        fi
       fi
     fi
     rotation_sleep_to_next_slot
@@ -2115,7 +2446,7 @@ doc_header_field() {
 # into DOC_* variables. Every value is validated before use; a document that
 # carries invalid cursor values is refused whole, never partially merged.
 parse_apply_doc() {
-  local file=$1 line key value in_cursor=0 found_cursor=0
+  local file=$1 line key value target in_cursor=0 found_cursor=0
   DOC_STATUS=''
   DOC_HEAD=''
   DOC_STATE=''
@@ -2131,12 +2462,25 @@ parse_apply_doc() {
   DOC_C_CHECKS=''
   DOC_C_THREADS=''
   DOC_C_THREAD_UPDATES=''
+  DOC_C_ITEM_UPDATES=''
   DOC_C_APPROVALS=''
   DOC_C_GL_DISCUSSION_PAGE=0
   DOC_C_GL_DISCUSSION_LAST=0
+  DOC_C_GH_ISSUE_PAGE=0 DOC_C_GH_ISSUE_LAST=0
+  DOC_C_GH_RC_PAGE=0 DOC_C_GH_RC_LAST=0
+  DOC_C_GH_REVIEW_PAGE=0 DOC_C_GH_REVIEW_LAST=0
+  DOC_C_GH_CHECK_PAGE=0 DOC_C_GH_CHECK_LAST=0
+  DOC_C_GL_PIPELINE_PAGE=0 DOC_C_GL_PIPELINE_LAST=0
+  DOC_C_APPROVAL_READY=0 DOC_C_BACKFILL_REMAINING=0
   DOC_C_BACKFILL=''
   [ "$(doc_header_field "$file" 'schema:')" = "$DOC_SCHEMA" ] || return 1
-  [ "$(doc_header_field "$file" 'source:')" = "$SID" ] || return 1
+  [ "$(doc_header_field "$file" 'source:')" = "$CAPTURE_SID" ] || return 1
+  target=$(doc_header_field "$file" 'target:' 2>/dev/null || true)
+  if [ "$CAPTURE_SID" = "$SCHEDULER_ID" ]; then
+    [ "$target" = "$SID" ] || return 1
+  else
+    [ -z "$target" ] || [ "$target" = "$SID" ] || return 1
+  fi
   [ "$(doc_header_field "$file" 'provider:')" = "$CUR_PROVIDER" ] || return 1
   [ "$(doc_header_field "$file" 'url:')" = "$CUR_URL" ] || return 1
   [ "$(doc_header_field "$file" 'number:')" = "$CUR_NUMBER" ] || return 1
@@ -2173,9 +2517,22 @@ parse_apply_doc() {
       checks)             prf_map_valid "$value" || return 1; DOC_C_CHECKS=$value ;;
       threads)            prf_thread_map_valid "$value" || return 1; DOC_C_THREADS=$value ;;
       thread_updates)     prf_thread_updates_valid "$value" || return 1; DOC_C_THREAD_UPDATES=$value ;;
+      item_updates)       prf_item_updates_valid "$value" || return 1; DOC_C_ITEM_UPDATES=$value ;;
       approvals)          prf_approval_set_valid "$value" || return 1; DOC_C_APPROVALS=$value ;;
       gl_discussion_page) nonnegative_int "$value" || return 1; DOC_C_GL_DISCUSSION_PAGE=$value ;;
       gl_discussion_last) nonnegative_int "$value" || return 1; DOC_C_GL_DISCUSSION_LAST=$value ;;
+      gh_issue_page)      nonnegative_int "$value" || return 1; DOC_C_GH_ISSUE_PAGE=$value ;;
+      gh_issue_last)      nonnegative_int "$value" || return 1; DOC_C_GH_ISSUE_LAST=$value ;;
+      gh_rc_page)         nonnegative_int "$value" || return 1; DOC_C_GH_RC_PAGE=$value ;;
+      gh_rc_last)         nonnegative_int "$value" || return 1; DOC_C_GH_RC_LAST=$value ;;
+      gh_review_page)     nonnegative_int "$value" || return 1; DOC_C_GH_REVIEW_PAGE=$value ;;
+      gh_review_last)     nonnegative_int "$value" || return 1; DOC_C_GH_REVIEW_LAST=$value ;;
+      gh_check_page)      nonnegative_int "$value" || return 1; DOC_C_GH_CHECK_PAGE=$value ;;
+      gh_check_last)      nonnegative_int "$value" || return 1; DOC_C_GH_CHECK_LAST=$value ;;
+      gl_pipeline_page)   nonnegative_int "$value" || return 1; DOC_C_GL_PIPELINE_PAGE=$value ;;
+      gl_pipeline_last)   nonnegative_int "$value" || return 1; DOC_C_GL_PIPELINE_LAST=$value ;;
+      approval_ready)     case "$value" in 0|1) ;; *) return 1 ;; esac; DOC_C_APPROVAL_READY=$value ;;
+      backfill_remaining) nonnegative_int "$value" || return 1; DOC_C_BACKFILL_REMAINING=$value ;;
       backfill)           case "$value" in on|off|done) ;; *) return 1 ;; esac; DOC_C_BACKFILL=$value ;;
       generation)         nonnegative_int "$value" || return 1; DOC_C_GENERATION=$value ;;
       *) return 1 ;;
@@ -2231,29 +2588,55 @@ apply_doc_cursor() {
     CUR_THREADS=$(map_merge_entries "$CUR_THREADS" "$DOC_C_THREADS")
     CUR_THREADS=$(max_thread_map_entries "$CUR_THREADS" "$MAP_LIMIT")
     thread_updates_apply "$DOC_C_THREAD_UPDATES" || return 1
+    item_updates_apply "$DOC_C_ITEM_UPDATES" || return 1
     CUR_APPROVALS=$DOC_C_APPROVALS
     CUR_GL_DISCUSSION_PAGE=$DOC_C_GL_DISCUSSION_PAGE
     CUR_GL_DISCUSSION_LAST=$DOC_C_GL_DISCUSSION_LAST
+    CUR_GH_ISSUE_PAGE=$DOC_C_GH_ISSUE_PAGE
+    CUR_GH_ISSUE_LAST=$DOC_C_GH_ISSUE_LAST
+    CUR_GH_RC_PAGE=$DOC_C_GH_RC_PAGE
+    CUR_GH_RC_LAST=$DOC_C_GH_RC_LAST
+    CUR_GH_REVIEW_PAGE=$DOC_C_GH_REVIEW_PAGE
+    CUR_GH_REVIEW_LAST=$DOC_C_GH_REVIEW_LAST
+    CUR_GH_CHECK_PAGE=$DOC_C_GH_CHECK_PAGE
+    CUR_GH_CHECK_LAST=$DOC_C_GH_CHECK_LAST
+    CUR_GL_PIPELINE_PAGE=$DOC_C_GL_PIPELINE_PAGE
+    CUR_GL_PIPELINE_LAST=$DOC_C_GL_PIPELINE_LAST
+    CUR_APPROVAL_READY=$DOC_C_APPROVAL_READY
+    CUR_BACKFILL_REMAINING=$DOC_C_BACKFILL_REMAINING
   fi
   [ "$DOC_C_MAXI" -gt "$CUR_MAX_ISSUE_COMMENT" ] && CUR_MAX_ISSUE_COMMENT=$DOC_C_MAXI
   [ "$DOC_C_MAXR" -gt "$CUR_MAX_REVIEW" ] && CUR_MAX_REVIEW=$DOC_C_MAXR
   [ "$DOC_C_MAXRC" -gt "$CUR_MAX_REVIEW_COMMENT" ] && CUR_MAX_REVIEW_COMMENT=$DOC_C_MAXRC
   [ "$DOC_C_MAXCHK" -gt "$CUR_MAX_CHECK" ] && CUR_MAX_CHECK=$DOC_C_MAXCHK
-  if [ "$DOC_STATUS" = backfill ] || [ "$DOC_C_BACKFILL" = "done" ]; then
+  if [ "$DOC_C_BACKFILL" = "done" ]; then
     CUR_BACKFILL="done"
   fi
   CUR_GENERATION=$(( CUR_GENERATION + 1 ))
 }
 
 cmd_apply() {  # <source-id> <sequence> <result-file>
-  local sid=$1 seq=$2 result=$3 receipt stored actual already=0
-  prf_source_id_valid "$sid" || die "invalid source id: $sid"
+  local capture_sid=$1 seq=$2 result=$3 sid receipt stored actual already=0
+  if [ "$capture_sid" != "$SCHEDULER_ID" ]; then
+    prf_source_id_valid "$capture_sid" || die "invalid source id: $capture_sid"
+  fi
   nonnegative_int "$seq" || die "invalid sequence: $seq"
   [ -n "$result" ] && [ -f "$result" ] && [ ! -L "$result" ] \
     || die "result file is unavailable: $result"
   [ -d "$FOLLOW_DIR" ] && [ ! -L "$FOLLOW_DIR" ] || die "follow directory is unavailable"
+  CAPTURE_SID=$capture_sid
+  if [ "$capture_sid" = "$SCHEDULER_ID" ]; then
+    sid=$(doc_header_field "$result" 'target:' 2>/dev/null) || die "captured scheduler document has no target"
+    prf_source_id_valid "$sid" || die "captured scheduler document has an invalid target"
+  else
+    sid=$capture_sid
+  fi
   SID=$sid
-  receipt=$(applied_file "$sid" "$seq")
+  if [ "$capture_sid" = "$sid" ]; then
+    receipt=$(applied_file "$sid" "$seq")
+  else
+    receipt="$FOLLOW_DIR/$sid.$capture_sid.$seq.applied"
+  fi
   actual=$(fm_pr_sha256 "$result") \
     || die "cannot hash the captured result"
   fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || die "cannot lock the cursor"
@@ -2273,13 +2656,14 @@ cmd_apply() {  # <source-id> <sequence> <result-file>
   fi
   if cursor_load "$sid" && [ "$CURSOR_PRESENT" -eq 1 ]; then
     if [ "$already" -eq 0 ]; then
+      item_state_dir_ready "$sid" \
+        || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "item state directory is unavailable: $sid"; }
       if [ "$CUR_PROVIDER" = gitlab ]; then
         thread_state_dir_ready "$sid" \
           || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "thread state directory is unavailable: $sid"; }
       fi
       if parse_apply_doc "$result"; then
-        apply_doc_cursor
-        if cursor_store; then
+        if apply_doc_cursor && cursor_store; then
           local tmp
           tmp=$(mktemp "$FOLLOW_DIR/.applied.XXXXXX") || tmp=
           if [ -n "$tmp" ] \
@@ -2294,7 +2678,7 @@ cmd_apply() {  # <source-id> <sequence> <result-file>
           fi
         else
           fm_lock_release "$(lifecycle_lock_path "$sid")"
-          die "cannot store the cursor: $sid"
+          die "cannot apply or store the cursor: $sid"
         fi
         # Applying a quarantined source's monitoring-loss document is what
         # latches it surfaced, so the bounded surface cannot repeat.
@@ -2305,7 +2689,7 @@ cmd_apply() {  # <source-id> <sequence> <result-file>
         fi
       else
         fm_lock_release "$(lifecycle_lock_path "$sid")"
-        prf_apply_refusal "$sid" "$seq" "$result"
+        prf_apply_refusal "$capture_sid" "$sid" "$seq" "$result"
       fi
     fi
   else
@@ -2316,12 +2700,12 @@ cmd_apply() {  # <source-id> <sequence> <result-file>
     # An already-applied generation survives cursor loss; acknowledge only.
   fi
   fm_lock_release "$(lifecycle_lock_path "$sid")"
-  "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" >/dev/null 2>&1 \
-    || die "cannot record the handled acknowledgement: $sid $seq"
+  "$SCRIPT_DIR/fm-procevent.sh" handled "$capture_sid" "$seq" >/dev/null 2>&1 \
+    || die "cannot record the handled acknowledgement: $capture_sid $seq"
   if [ "$already" -eq 1 ]; then
-    printf 'already-applied: %s %s\n' "$sid" "$seq"
+    printf 'already-applied: %s %s\n' "$capture_sid" "$seq"
   else
-    printf 'applied: %s %s\n' "$sid" "$seq"
+    printf 'applied: %s %s\n' "$capture_sid" "$seq"
   fi
 }
 
@@ -2329,11 +2713,11 @@ cmd_apply() {  # <source-id> <sequence> <result-file>
 # keep the failure bounded (monitoring-loss contract in the header). Never
 # returns on the tampered path; exits 0 after acknowledging at the bound.
 prf_apply_refusal() {
-  local sid=$1 seq=$2 result=$3 claims_schema claims_source count
+  local capture_sid=$1 sid=$2 seq=$3 result=$4 claims_schema claims_source count
   claims_schema=$(doc_header_field "$result" 'schema:' 2>/dev/null || true)
   claims_source=$(doc_header_field "$result" 'source:' 2>/dev/null || true)
-  if [ "$claims_schema" != "$DOC_SCHEMA" ] || [ "$claims_source" != "$sid" ]; then
-    die "captured document is tampered or foreign: refusing to apply: $sid $seq"
+  if [ "$claims_schema" != "$DOC_SCHEMA" ] || [ "$claims_source" != "$capture_sid" ]; then
+    die "captured document is tampered or foreign: refusing to apply: $capture_sid $seq"
   fi
   # The document claims this adapter's schema and source, so this adapter
   # produced bytes its own validator refuses: an adapter defect, not tampering.
@@ -2352,8 +2736,8 @@ prf_apply_refusal() {
   fi
   # At the bound the re-announcement loop stops: acknowledge the capture,
   # leave the quarantine latch pausing the source, and surface the loss once.
-  "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" >/dev/null 2>&1 \
-    || die "cannot record the handled acknowledgement: $sid $seq"
+  "$SCRIPT_DIR/fm-procevent.sh" handled "$capture_sid" "$seq" >/dev/null 2>&1 \
+    || die "cannot record the handled acknowledgement: $capture_sid $seq"
   printf 'monitoring-loss: %s paused after %s unapplicable captures; inspect the captured result and state/pr-follow/%s.quarantine; rerun arm to resume after the adapter is repaired\n' \
     "$sid" "$count" "$sid"
   exit 0
@@ -2361,8 +2745,32 @@ prf_apply_refusal() {
 
 # --- arm, backfill, retire ---------------------------------------------------
 
+ensure_scheduler() {
+  fm_procevent_source_lock_acquire "$SCHEDULER_ID" || return 1
+  if [ -e "$REG_DIR/$SCHEDULER_ID.source" ] || [ -L "$REG_DIR/$SCHEDULER_ID.source" ]; then
+    if fm_procevent_registration_matches_locked "$STATE" pr-follow "$SCHEDULER_ID" \
+      "$SCRIPT_DIR/fm-procevent-pr-follow.sh" run "$SCHEDULER_ID"; then
+      fm_procevent_source_lock_release "$SCHEDULER_ID"
+      return 0
+    fi
+    fm_procevent_source_lock_release "$SCHEDULER_ID"
+    return 1
+  fi
+  if ! fm_procevent_registration_publish_locked "$STATE" pr-follow "$SCHEDULER_ID" \
+      "$SCRIPT_DIR/fm-procevent-pr-follow.sh" run "$SCHEDULER_ID"; then
+    fm_procevent_source_lock_release "$SCHEDULER_ID"
+    return 1
+  fi
+  fm_procevent_source_lock_release "$SCHEDULER_ID"
+}
+
+retire_legacy_registration() {
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$1" --if-matches pr-follow -- \
+    "$SCRIPT_DIR/fm-procevent-pr-follow.sh" run "$1" >/dev/null 2>&1 || true
+}
+
 cmd_arm() {  # <task-id> <pr-url> [--backfill]
-  local id=$1 url=$2 flag=${3-} sid reg_file backfill=off
+  local id=$1 url=$2 flag=${3-} sid backfill=off
   [ "$flag" = '' ] || [ "$flag" = --backfill ] || usage
   [ "$flag" = --backfill ] && backfill=on
   fm_pr_task_id_valid "$id" || die "invalid task id: $id"
@@ -2372,10 +2780,14 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
   SID=$sid
   follow_dir_ready || die "follow directory is unavailable"
   thread_state_dir_ready "$sid" || die "thread state directory is unavailable: $sid"
+  item_state_dir_ready "$sid" || die "item state directory is unavailable: $sid"
+  ensure_scheduler || die "cannot register the PR follow scheduler"
   fm_procevent_source_lock_acquire "$sid" || die "cannot lock the source"
-  reg_file="$REG_DIR/$sid.source"
-  if [ -f "$reg_file" ] && [ ! -L "$reg_file" ]; then
-    if cursor_load "$sid" && [ "$CURSOR_PRESENT" -eq 1 ]; then
+  if ! cursor_load "$sid"; then
+    fm_procevent_source_lock_release "$sid"
+    die "cursor is unreadable or tampered: $sid"
+  fi
+  if [ "$CURSOR_PRESENT" -eq 1 ]; then
       # Re-arming is the documented resume after a quarantine: clear the
       # latch so the run child polls again once the adapter is repaired.
       fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || die "cannot lock the cursor"
@@ -2402,11 +2814,9 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
         fm_lock_release "$(lifecycle_lock_path "$sid")"
       fi
       fm_procevent_source_lock_release "$sid"
+      retire_legacy_registration "$sid"
       printf 'already armed: %s\n' "$sid"
       return 0
-    fi
-    fm_procevent_source_lock_release "$sid"
-    die "registration exists without a valid cursor seed: $sid"
   fi
   CUR_PROVIDER=$FM_PR_PROVIDER
   CUR_URL=$FM_PR_URL
@@ -2425,6 +2835,12 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
   CUR_APPROVALS=
   CUR_GL_DISCUSSION_PAGE=0
   CUR_GL_DISCUSSION_LAST=0
+  CUR_GH_ISSUE_PAGE=0 CUR_GH_ISSUE_LAST=0 CUR_SCAN_ISSUE_DONE=0
+  CUR_GH_RC_PAGE=0 CUR_GH_RC_LAST=0 CUR_SCAN_RC_DONE=0
+  CUR_GH_REVIEW_PAGE=0 CUR_GH_REVIEW_LAST=0 CUR_SCAN_REVIEW_DONE=0
+  CUR_GH_CHECK_PAGE=0 CUR_GH_CHECK_LAST=0 CUR_SCAN_CHECK_DONE=0
+  CUR_SCAN_DISCUSSION_DONE=0 CUR_GL_PIPELINE_PAGE=0 CUR_GL_PIPELINE_LAST=0 CUR_SCAN_PIPELINE_DONE=0
+  CUR_APPROVAL_READY=0 CUR_BACKFILL_REMAINING=0
   CUR_BASELINE=pending
   CUR_BACKFILL=$backfill
   CUR_GENERATION=1
@@ -2433,32 +2849,57 @@ cmd_arm() {  # <task-id> <pr-url> [--backfill]
     fm_procevent_source_lock_release "$sid"
     die "cannot write the cursor seed: $sid"
   fi
-  if ! fm_procevent_registration_publish_locked "$STATE" pr-follow "$sid" \
-      "$SCRIPT_DIR/fm-procevent-pr-follow.sh" run "$sid"; then
-    rm -f -- "$(cursor_file "$sid")"
-    rmdir "$(thread_state_dir "$sid")" 2>/dev/null || true
-    fm_procevent_source_lock_release "$sid"
-    die "cannot register the source: $sid"
-  fi
   fm_procevent_source_lock_release "$sid"
+  retire_legacy_registration "$sid"
   printf 'armed: %s\n' "$sid"
   printf 'starts on the watcher'"'"'s next cycle; or run: bin/fm-procevent.sh reconcile\n'
 }
 
-FOLLOW_BACKFILL_SCAN_CAP=500
+FOLLOW_BACKFILL_SCAN_CAP=${FM_PR_FOLLOW_BACKFILL_SCAN_CAP:-500}
+backfill_scan_file() { printf '%s/backfill.scan\n' "$FOLLOW_DIR"; }
+
+backfill_scan_store() {
+  local value=$1 file tmp
+  file=$(backfill_scan_file)
+  tmp=$(mktemp "$FOLLOW_DIR/.backfill-scan.XXXXXX") || return 1
+  if ! printf '%s\n' "$value" > "$tmp" || ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
 
 cmd_backfill() {
-  local meta id sid out scanned=0 armed=0 already=0 skipped=0 capped=0
+  local meta name id sid out cursor after='' last='' scanned=0 armed=0 already=0 skipped=0 capped=0
+  local LC_ALL=C
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
+  positive_int "$FOLLOW_BACKFILL_SCAN_CAP" || die "FM_PR_FOLLOW_BACKFILL_SCAN_CAP must be a positive integer"
   follow_dir_ready || die "follow directory is unavailable"
+  for cursor in "$FOLLOW_DIR"/prf-gh-????????????.cursor "$FOLLOW_DIR"/prf-gl-????????????.cursor; do
+    [ -f "$cursor" ] && [ ! -L "$cursor" ] || continue
+    sid=${cursor##*/}
+    sid=${sid%.cursor}
+    ensure_scheduler || die "cannot register the PR follow scheduler"
+    retire_legacy_registration "$sid"
+  done
+  if [ -e "$(backfill_scan_file)" ] || [ -L "$(backfill_scan_file)" ]; then
+    [ -f "$(backfill_scan_file)" ] && [ ! -L "$(backfill_scan_file)" ] \
+      || die "backfill scan cursor is unsafe"
+    after=$(sed -n '1p' "$(backfill_scan_file)")
+    case "$after" in ''|*/*|*'..'*) die "backfill scan cursor is malformed" ;; esac
+  fi
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    name=${meta##*/}
+    if [ -n "$after" ] && [[ "$name" < "$after" || "$name" = "$after" ]]; then
+      continue
+    fi
     scanned=$((scanned + 1))
     if [ "$scanned" -gt "$FOLLOW_BACKFILL_SCAN_CAP" ]; then
       capped=1
       break
     fi
-    id=${meta##*/}
+    last=$name
+    id=$name
     id=${id%.meta}
     fm_pr_task_id_valid "$id" || { skipped=$((skipped + 1)); continue; }
     grep -q '^pr=' "$meta" || continue
@@ -2469,8 +2910,9 @@ cmd_backfill() {
     fi
     sid=$(prf_source_id "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER") \
       || { skipped=$((skipped + 1)); continue; }
-    if [ -f "$REG_DIR/$sid.source" ] \
-      && [ ! -L "$REG_DIR/$sid.source" ]; then
+    if [ -f "$(cursor_file "$sid")" ] && [ ! -L "$(cursor_file "$sid")" ]; then
+      cmd_arm "$id" "$FM_PR_META_URL" --backfill >/dev/null 2>&1 \
+        || { skipped=$((skipped + 1)); continue; }
       already=$((already + 1))
       continue
     fi
@@ -2482,6 +2924,15 @@ cmd_backfill() {
       printf 'backfill: refused %s: %s\n' "$id" "$out" >&2
     fi
   done
+  if [ "$capped" -eq 1 ]; then
+    if [ -n "$last" ]; then
+      backfill_scan_store "$last" || die "cannot store backfill scan progress"
+    else
+      die "cannot store backfill scan progress"
+    fi
+  else
+    rm -f -- "$(backfill_scan_file)" || die "cannot clear backfill scan progress"
+  fi
   printf 'backfill summary: scanned=%s armed=%s already=%s skipped=%s capped=%s\n' \
     "$scanned" "$armed" "$already" "$skipped" "$capped"
   [ "$capped" -eq 0 ] || printf 'backfill: the scan cap of %s metadata records was reached; rerun after the armed PRs are handled\n' "$FOLLOW_BACKFILL_SCAN_CAP" >&2
@@ -2489,16 +2940,34 @@ cmd_backfill() {
 }
 
 cmd_retire() {  # <source-id> [--force]
-  local sid=$1 force=${2-} pending receipt thread_file thread_dir
+  local sid=$1 force=${2-} pending=0 receipt state_file state_dir result target capture_id capture_seq pending_results=
   prf_source_id_valid "$sid" || die "invalid source id: $sid"
   [ -z "$force" ] || [ "$force" = --force ] || die "invalid retirement option: $force"
   # The refusal has to precede every destructive step: deregistering first
   # would stop monitoring the PR while telling the operator it refused to.
-  pending=$(fm_procevent_pending "$STATE" | grep -c "/$sid\." || true)
+  while IFS= read -r result; do
+    [ -n "$result" ] || continue
+    case "$result" in
+      *"/$sid."*.result) pending=$((pending + 1)); pending_results+="$result"$'\n'; continue ;;
+    esac
+    target=$(doc_header_field "$result" 'target:' 2>/dev/null || true)
+    if [ "$target" = "$sid" ]; then
+      pending=$((pending + 1))
+      pending_results+="$result"$'\n'
+    fi
+  done < <(fm_procevent_pending "$STATE")
   if [ "$pending" -gt 0 ] && [ "$force" != --force ]; then
     die "$sid has $pending unhandled captured result(s); resolve or acknowledge them, or retire again with --force"
   fi
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" >/dev/null 2>&1 || true
+  if [ "$force" = --force ]; then
+    while IFS= read -r result; do
+      [ -n "$result" ] || continue
+      capture_id=$(fm_procevent_result_source_id "$result") || continue
+      capture_seq=$(fm_procevent_result_sequence "$result") || continue
+      "$SCRIPT_DIR/fm-procevent.sh" handled "$capture_id" "$capture_seq" >/dev/null 2>&1 || true
+    done <<< "$pending_results"
+  fi
+  retire_legacy_registration "$sid"
   fm_lock_acquire_wait "$(lifecycle_lock_path "$sid")" || die "cannot lock the cursor"
   rm -f -- "$(cursor_file "$sid")"
   rm -f -- "$(quarantine_file "$sid")"
@@ -2506,19 +2975,26 @@ cmd_retire() {  # <source-id> [--force]
     [ -e "$receipt" ] || continue
     rm -f -- "$receipt" || die "cannot remove applied receipt: $receipt"
   done
-  thread_dir=$(thread_state_dir "$sid")
-  if [ -d "$thread_dir" ] && [ ! -L "$thread_dir" ]; then
-    for thread_file in "$thread_dir"/*; do
-      [ -e "$thread_file" ] || continue
-      [ -f "$thread_file" ] && [ ! -L "$thread_file" ] \
-        || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "thread state is unsafe: $thread_file"; }
-      rm -f -- "$thread_file" \
-        || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot remove thread state: $thread_file"; }
-    done
-    rmdir "$thread_dir" \
-      || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot remove thread state directory: $thread_dir"; }
-  fi
+  for state_dir in "$(thread_state_dir "$sid")" "$(item_state_dir "$sid")"; do
+    if [ -d "$state_dir" ] && [ ! -L "$state_dir" ]; then
+      for state_file in "$state_dir"/*; do
+        [ -e "$state_file" ] || continue
+        [ -f "$state_file" ] && [ ! -L "$state_file" ] \
+          || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "state record is unsafe: $state_file"; }
+        rm -f -- "$state_file" \
+          || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot remove state record: $state_file"; }
+      done
+      rmdir "$state_dir" \
+        || { fm_lock_release "$(lifecycle_lock_path "$sid")"; die "cannot remove state directory: $state_dir"; }
+    elif [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
+      fm_lock_release "$(lifecycle_lock_path "$sid")"
+      die "state directory is unsafe: $state_dir"
+    fi
+  done
   fm_lock_release "$(lifecycle_lock_path "$sid")"
+  if ! rotation_roster | grep -q .; then
+    "$SCRIPT_DIR/fm-procevent.sh" retire "$SCHEDULER_ID" >/dev/null 2>&1 || true
+  fi
   printf 'retired: %s\n' "$sid"
 }
 
@@ -2543,6 +3019,7 @@ case "${1-}" in
              fm_pr_url_parse "${1-}" || die "invalid PR url: ${1-}"
              prf_source_id "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
                || die "cannot derive the source id" ;;
+  scheduler-id) shift; [ "$#" -eq 0 ] || usage; printf '%s\n' "$SCHEDULER_ID" ;;
   retire)    shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
