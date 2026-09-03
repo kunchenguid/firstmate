@@ -107,7 +107,8 @@ SH
 # Run the verifier in <dir> and echo "<exit>\t<line>". <data-root> defaults to
 # the home's own data dir; a case that relocates it passes its own.
 verify() {  # <dir> [data-root]
-  local dir=$1 data=${2:-$dir/data} out rc=0
+  local dir=$1
+  local data=${2:-$dir/data} out rc=0
   out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
     FM_DATA_OVERRIDE="$data" "$VERIFY" task-v 2>&1) || rc=$?
   printf '%s\t%s\n' "$rc" "$out"
@@ -673,6 +674,8 @@ test_a_close_does_not_invent_a_done_claim() {
 test_a_configured_verb_vocabulary_is_not_unrecognised() {
   # A home may replace the whole captain-relevant verb set. Its own states must
   # not then be labelled as matching no status verb.
+  # Read by the sourced classifier, not by this file.
+  # shellcheck disable=SC2034
   FM_CAPTAIN_RE='escalate:|shipped:'
   status_line_is_unrecognized "escalate: the migration needs a decision" \
     && fail "a verb this home configured as a real state was called unrecognised"
