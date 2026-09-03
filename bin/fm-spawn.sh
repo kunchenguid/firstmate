@@ -138,6 +138,11 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   A repository with no origin remote configured instead skips the fetch,
+#   resolves its local default branch, resets the slot to that branch's tip, and
+#   prints a notice naming the local branch and commit it launched from.
+#   That stand-aside is keyed on the absence of an origin remote only, so a
+#   configured origin that cannot be fetched still refuses exactly as before.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
