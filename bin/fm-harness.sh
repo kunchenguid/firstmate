@@ -59,7 +59,7 @@ detect_own() {
       *grok*) ancestry=grok; break ;;
       kimi) ancestry=kimi; break ;;
       muse|muse-bin-*) ancestry=muse; break ;;
-      pi-signed) ancestry=pi; break ;;
+      pi-signed) ancestry=pi-signed; break ;;
       pi) ancestry=pi; break ;;
       node*|python*)
         args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -85,11 +85,20 @@ detect_own() {
         ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
+    case "$pid" in ''|*[!0-9]*) break ;; esac
+    if [ "$pid" -le 1 ]; then
       break
     fi
   done
-  [ -z "$ancestry" ] || { echo "$ancestry"; return; }
+  if [ -n "$ancestry" ]; then
+    if [ "$ancestry" = pi ] && [ "${PI_CODING_AGENT:-}" = "true" ] \
+       && [ "${FM_PI_HARNESS:-}" = pi-signed ]; then
+      echo pi-signed
+    else
+      echo "$ancestry"
+    fi
+    return
+  fi
 
   [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
