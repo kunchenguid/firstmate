@@ -40,7 +40,7 @@ A duplicate line is harmless and a missed one is not, so the mate may still appe
 
 - No mirror of the mate's chat: every firstmate turn contains captain-facing text by mandate, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
 - No threshold escalation of a child's open decision or blocker: a decision the mate escalates is a captain hold, which is published; a decision the mate neither answers nor escalates is a supervision-quality question, separable from channel delivery.
-- No second scanner: the ledger delivery lives in the inactive-outcome scan that already walks every child on every poll with a budget, a cursor, receipts, and the upstream append.
+- No second watcher or standalone scanner: a lightweight ledger pass runs inside the existing inactive-outcome command on every watcher poll and reuses its receipts and upstream append.
 - No orphan lifecycle: teardown refuses instead of removing an undelivered outcome, the same way it refuses on other unlanded conditions.
 
 ## Regression coverage

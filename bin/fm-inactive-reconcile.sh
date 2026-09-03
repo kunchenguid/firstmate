@@ -56,15 +56,17 @@
 # receipt is durable.
 # In a secondmate home, that receipt is an idempotent parent-channel append
 # through bin/fm-parent-channel-lib.sh; the ledger-first path and the inactive
-# path share the same receipt store and fingerprint shape.
+# path share the same receipt store.
 # In a main home, a presentation-stage record is acknowledged by fm-wake-drain
 # only after its corresponding inactive-outcome wake is handled.
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
 # incarnation, state, outcome_key, origin, phase, pr, created_epoch, and
-# notice_emitted; the fingerprint binds the spawn incarnation, task id, terminal
-# state, PR text, and sanitized last status.
+# notice_emitted. The inactive-path fingerprint binds the spawn incarnation,
+# task id, terminal state, PR text, and sanitized last status; the ledger-path
+# fingerprint instead binds the incarnation, task id, terminal state, literal
+# `ledger` origin, and complete terminal ledger line.
 # Pending atomically becomes reported after parent append or presented after
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
