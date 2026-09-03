@@ -17,6 +17,8 @@
 #   (h) comment-valued or non-plain-scalar frontmatter values are REFUSED
 #   (i) the body pointer must be a URL or an existing path; a slash-bearing
 #       token that resolves nowhere is REFUSED, while a URL body lands
+#   (j) a file:// URL must resolve to an existing file like a path token;
+#       a file:// URL that resolves nowhere is REFUSED
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -80,6 +82,41 @@ test_lands_when_body_is_url() {
 
   expect_code 0 "$rc" "body-url: a body with a URL source pointer should be accepted"
   pass "fm-merge-local accepts a URL body pointer"
+}
+
+test_refuses_when_file_url_resolves_nowhere() {
+  local case_dir rc
+  case_dir=$(make_case body-fake-file-url lia-mascot)
+  printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' "Source: file://$case_dir/home/data/projects/no-such-evidence.md" \
+    > "$case_dir/home/data/projects/lia-mascot.md"
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "body-fake-file-url: a file:// URL that resolves nowhere should be refused"
+  assert_grep 'invalid frontmatter/detail record' "$case_dir/stderr" \
+    "body-fake-file-url: refusal did not identify the invalid record"
+  pass "fm-merge-local refuses a file:// URL that resolves to no existing file"
+}
+
+test_lands_when_file_url_exists() {
+  local case_dir rc
+  case_dir=$(make_case body-file-url lia-mascot)
+  printf 'notes\n' > "$case_dir/home/data/projects/evidence.md"
+  printf '%s\n' '---' 'milestone: m1' 'focus: things' 'blocker: none' 'next_move: ship' '---' "Source: file://$case_dir/home/data/projects/evidence.md" \
+    > "$case_dir/home/data/projects/lia-mascot.md"
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "body-file-url: a file:// URL pointing at an existing file should be accepted"
+  [ "$(git -C "$case_dir/lia-mascot" rev-parse main)" = "$(git -C "$case_dir/lia-mascot" rev-parse fm/task-x1)" ] \
+    || fail "body-file-url: main was not fast-forwarded to the branch"
+  pass "fm-merge-local accepts a file:// URL that resolves to an existing file"
 }
 
 test_refuses_when_body_token_resolves_nowhere() {
@@ -398,6 +435,8 @@ test_docs_only_diff_needs_no_record
 test_refuses_malformed_record_shapes
 test_refuses_when_body_is_not_source_pointer
 test_lands_when_body_is_url
+test_refuses_when_file_url_resolves_nowhere
+test_lands_when_file_url_exists
 test_refuses_when_body_token_resolves_nowhere
 test_lands_when_body_path_exists_in_repo
 test_non_code_only_diff_needs_no_record

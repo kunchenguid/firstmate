@@ -18,7 +18,9 @@
 # scalars, then one body line carrying an authoritative source pointer - a
 # URL (http/https/file) or a path token that resolves to an existing file
 # (relative candidates are checked under the record dir, FM_HOME, and the
-# project repo); otherwise the landing is REFUSED. Non-code assets (README,
+# project repo). http/https URLs are accepted on shape; file URLs must
+# resolve to an existing file like path tokens do; otherwise the landing
+# is REFUSED. Non-code assets (README,
 # docs, LICENSE, metadata dotfiles, lockfiles, images) do not count as
 # project-code touches. The record lives in FM_HOME, outside the project repo, so it can
 # never appear in the branch diff itself: the worker refreshes that record
@@ -178,14 +180,15 @@ detail_record_is_current() {
   detail_body_has_source "$detail_file"
 }
 
-# The body line must carry an authoritative source pointer: a URL (http,
-# https, or file), or a path token that resolves to an existing file -
-# relative candidates are checked under the detail dir, FM_HOME, and the
-# project repo, so a slash-bearing token alone is not accepted.
+# The body line must carry an authoritative source pointer: an http/https
+# URL (accepted on shape), or a file URL or path token that resolves to an
+# existing file - relative path candidates are checked under the detail
+# dir, FM_HOME, and the project repo, so a slash-bearing token alone is
+# not accepted.
 detail_body_has_source() {
   local detail_file=$1 body candidates token found=1 had_glob_off=0
   body=$(awk 'NR==7{print; exit}' "$detail_file")
-  if printf '%s\n' "$body" | grep -Eq '(^|[[:space:]])(https?|file)://[^[:space:]]+'; then
+  if printf '%s\n' "$body" | grep -Eq '(^|[[:space:]])https?://[^[:space:]]+'; then
     return 0
   fi
   candidates=$(printf '%s\n' "$body" | awk -v sq="'" -v dq='"' '
@@ -207,7 +210,17 @@ detail_body_has_source() {
   case $- in *f*) ;; *) had_glob_off=1; set -f ;; esac
   while IFS= read -r token; do
     [ -n "$token" ] || continue
-    case $token in "~"/*) token="$HOME${token#~}" ;; esac
+    case $token in
+      "~"/*) token="$HOME${token#~}" ;;
+      file://*)
+        token=${token#file://}
+        case $token in
+          /*) ;;
+          */*) token=/${token#*/} ;;
+          *) continue ;;
+        esac
+        ;;
+    esac
     if [ -e "$token" ] || [ -e "$DETAIL_DIR/$token" ] || [ -e "$FM_HOME/$token" ] || [ -e "$PROJ/$token" ]; then
       found=0
       break
