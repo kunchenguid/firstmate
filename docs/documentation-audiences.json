@@ -217,6 +217,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/plotting-review/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/plotting-review/references/runtime-probe.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/project-management/SKILL.md",
       "audience": "agent-runtime"
     },
