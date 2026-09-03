@@ -68,8 +68,8 @@ mkdir -p "$LAB/wt"
 . "$ROOT/bin/fm-cursor-lib.sh"
 # The single resolver both real-harness drift guards launch through, so neither
 # can measure a different binary than the other or than a real spawn.
-# shellcheck source=tests/harness-binary.sh
-. "$ROOT/tests/harness-binary.sh"
+# shellcheck source=tests/harness-binary-helpers.sh
+. "$ROOT/tests/harness-binary-helpers.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$LAB/wt") || fail "container_ensure failed"
@@ -86,14 +86,24 @@ foreground_names() {  # <pane>
     | jq -r '[.result.process_info.foreground_processes[]? | "\(.name)/\(.argv0 // .argv[0] // "")"] | join(" ")' 2>/dev/null
 }
 
-foreground_pids() {  # <pane>
-  fm_backend_herdr_cli "$SESSION" pane process-info --pane "$1" 2>/dev/null \
-    | jq -r '.result.process_info.foreground_processes[]?.pid | select(type == "number") | floor' 2>/dev/null
-}
-
-pane_shell_pid() {  # <pane>
-  fm_backend_herdr_cli "$SESSION" pane process-info --pane "$1" 2>/dev/null \
-    | jq -r '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null
+# pane_process_info: ONE `pane process-info` read for <pane>, echoed raw.
+#
+# Returns 1 when herdr did not answer, answered something this guard cannot
+# parse, or answered about a different pane. Cleanup has to tell "herdr says
+# the pane holds only its shell" apart from "herdr did not say", so readability
+# is a separate outcome here rather than an empty result that reads like an
+# empty inventory.
+pane_process_info() {  # <pane>
+  local info
+  info=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$1" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$1" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.shell_pid | type) == "number"
+    and .result.process_info.shell_pid > 1
+    and (.result.process_info.foreground_processes | type) == "array"
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$info"
 }
 
 # harness_pids: every foreground pid in <pane> EXCEPT the pane's own shell.
@@ -107,13 +117,16 @@ pane_shell_pid() {  # <pane>
 # from destroying the lab and turning every remaining verdict into "could not
 # create a lab tab".
 #
-# An inventory that cannot be read names no shell, so nothing is signalled: this
-# never guesses which pid is safe to kill.
+# Exit 0 with no pids is a POSITIVE reading that the pane holds nothing but its
+# shell. Exit 2 means the inventory could not be read at all, which is not the
+# same thing and must never be reported as a clean pane; one read backs both, so
+# the shell and the foreground list can never come from different samples.
 harness_pids() {  # <pane>
-  local shell_pid pid
-  shell_pid=$(pane_shell_pid "$1")
-  [ -n "$shell_pid" ] || return 0
-  for pid in $(foreground_pids "$1"); do
+  local info shell_pid pid
+  info=$(pane_process_info "$1") || return 2
+  shell_pid=$(printf '%s' "$info" | jq -r '.result.process_info.shell_pid | floor')
+  for pid in $(printf '%s' "$info" \
+    | jq -r '.result.process_info.foreground_processes[]?.pid | select(type == "number") | floor'); do
     [ "$pid" = "$shell_pid" ] && continue
     printf '%s\n' "$pid"
   done
@@ -123,21 +136,26 @@ harness_pids() {  # <pane>
 # leaving the pane, its shell, and its tab in place. Closing the pane instead
 # would remove the workspace's last tab and destroy the container the next
 # harness needs.
+#
+# Every outcome except a proven-clean pane fails loudly: an unreadable
+# inventory, and a foreground this guard could not clear, both leave the next
+# harness measured in a pane whose state is unknown.
 end_harness() {  # <harness> <pane>
-  local pid
-  for pid in $(harness_pids "$2"); do
-    kill -TERM "$pid" 2>/dev/null || true
-  done
-  for _ in $(seq 1 100); do
-    [ -z "$(harness_pids "$2")" ] && return 0
-    sleep 0.1
-  done
-  for pid in $(harness_pids "$2"); do
-    kill -KILL "$pid" 2>/dev/null || true
-  done
-  for _ in $(seq 1 50); do
-    [ -z "$(harness_pids "$2")" ] && return 0
-    sleep 0.1
+  local pid pids rc signal unreadable
+  unreadable="$1: herdr's pane process-info for $2 could not be read or parsed during cleanup, so this pane cannot be reported clean and the harness this guard launched may still be running"
+  for signal in TERM KILL; do
+    pids=$(harness_pids "$2"); rc=$?
+    [ "$rc" -eq 0 ] || fail "$unreadable"
+    [ -n "$pids" ] || return 0
+    for pid in $pids; do
+      kill -"$signal" "$pid" 2>/dev/null || true
+    done
+    for _ in $(seq 1 100); do
+      pids=$(harness_pids "$2"); rc=$?
+      [ "$rc" -eq 0 ] || fail "$unreadable"
+      [ -n "$pids" ] || return 0
+      sleep 0.1
+    done
   done
   fail "$1: could not clear the lab pane's foreground after TERM and KILL (still [$(foreground_names "$2")]), so the next harness would be measured in a pane that is not clean"
 }

@@ -683,23 +683,28 @@ Observed output:
 
 ```text
 # herdr: herdr 0.8.2
-# claude 2.1.258 (Claude Code): foreground=[2.1.258/claude] state=alive
-ok - herdr agent-free proof: claude 2.1.258 (Claude Code) running in a Herdr pane never proves a bare idle shell
+# claude 2.1.259 (Claude Code): foreground=[security/security 2.1.259/claude] state=alive
+ok - herdr agent-free proof: claude 2.1.259 (Claude Code) running in a Herdr pane never proves a bare idle shell
 # codex codex-cli 0.152.1: foreground=[codex/codex] state=alive
 ok - herdr agent-free proof: codex codex-cli 0.152.1 running in a Herdr pane never proves a bare idle shell
 # opencode 1.17.11: foreground=[opencode/opencode] state=alive
 ok - herdr agent-free proof: opencode 1.17.11 running in a Herdr pane never proves a bare idle shell
 # pi 0.84.4: foreground=[node/pi] state=alive
 ok - herdr agent-free proof: pi 0.84.4 running in a Herdr pane never proves a bare idle shell
+# skip: pi-signed is not installed on this machine, so its Herdr classification is unverified here
+# skip: grok is not installed on this machine, so its Herdr classification is unverified here
+# skip: kimi is not installed on this machine, so its Herdr classification is unverified here
 # cursor 2026.08.31-4057e58: foreground=[node/cursor-agent] state=alive
 ok - herdr agent-free proof: cursor 2026.08.31-4057e58 running in a Herdr pane never proves a bare idle shell
+# skip: muse is not installed on this machine, so its Herdr classification is unverified here
 # unverified on this machine (not installed): pi-signed grok kimi muse
 # checked 5 installed harness(es) on herdr herdr 0.8.2 in workspace w1
 ```
 
-Both guards resolve the harness binary through one shared helper (`tests/harness-binary.sh`), which is also what `tests/fm-harness-liveness-drift-live-e2e.test.sh` launches through, so neither guard can measure a different binary than the other or than a real spawn.
+Both guards resolve the harness binary through one shared helper (`tests/harness-binary-helpers.sh`), which is also what `tests/fm-harness-liveness-drift-live-e2e.test.sh` launches through, so neither guard can measure a different binary than the other or than a real spawn.
 
-Every installed harness owns the pane's foreground under its own argv0, so none can satisfy the shell-only proof, and Herdr registered each of them within the guard's wait.
+No installed harness leaves the pane holding one lone bare shell, so none can satisfy the proof, and Herdr registered each of them within the guard's wait.
+Each owns the pane's foreground under its own argv0, and claude 2.1.259 additionally keeps a `security` helper in that foreground, which is a second process rather than a shell and so refuses the proof twice over.
 `pi-signed`, `grok`, `kimi`, and `muse` were not installed on that machine and remain unverified here; the guard reports them explicitly and refuses a pass that checked nothing.
 This is the command that refreshes this record; run it after every harness upgrade.
 

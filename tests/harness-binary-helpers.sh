@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/harness-binary.sh - the single harness-binary resolver for the opt-in
+# tests/harness-binary-helpers.sh - the single harness-binary resolver for the opt-in
 # real-harness drift guards.
 #
 # Both guards launch every INSTALLED harness for real and fail naming the

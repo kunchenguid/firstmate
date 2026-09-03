@@ -60,8 +60,8 @@ export PATH
 . "$ROOT/bin/fm-cursor-lib.sh"
 # The single resolver both real-harness drift guards launch through, so neither
 # can measure a different binary than the other or than a real spawn.
-# shellcheck source=tests/harness-binary.sh
-. "$ROOT/tests/harness-binary.sh"
+# shellcheck source=tests/harness-binary-helpers.sh
+. "$ROOT/tests/harness-binary-helpers.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$LAB/wt" \
