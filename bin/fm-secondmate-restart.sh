@@ -161,7 +161,7 @@ restart_mate() {  # <array-index>
   if [ "${PLACEMENT[i]}" = remote ]; then
     restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
       fm-remote-secondmate-control.sh relaunch \
-      "$id" "${HARNESS[i]}" "${MODEL[i]:--}" "${EFFORT[i]:--}" < /dev/null 2>&1)
+      "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" < /dev/null 2>&1)
     restart_rc=$?
   else
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
@@ -218,7 +218,11 @@ harvest_restarts() {
         esac
       fi
       wait "${RESTART_PID[i]}" 2>/dev/null || true
-      out="unreached: ${IDS[$i]}: the restart worker exited before publishing an outcome"
+      if [ -f "${RESTART_RESULT[i]}" ]; then
+        out=$(cat "${RESTART_RESULT[i]}")
+      else
+        out="unreached: ${IDS[$i]}: the restart worker exited before publishing an outcome"
+      fi
     fi
     printf '%s\n' "$out"
     case "$out" in

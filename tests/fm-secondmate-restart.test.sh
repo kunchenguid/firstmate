@@ -534,6 +534,8 @@ test_relaunches_do_not_block_persist_polling() {
     "the slow first relaunch blocked lifecycle progress for the second mate"
   assert_contains "$out" "summary: 2 of 2 restarted, 0 nudged, 0 unreached" \
     "parallel relaunches were not both accounted for"
+  assert_grep 'fm-remote-secondmate-control.sh relaunch sm1 claude default default' "$dir/ssh.log" \
+    "an absent remote model and effort pin were not expressed as explicit defaults"
   pass "T12 relaunch waits do not block fleet persistence polling"
 }
 
@@ -579,6 +581,41 @@ test_unpublished_worker_result_is_accounted_for() {
   pass "T13 a dead restart worker cannot hang the parent"
 }
 
+# --- T14: result publication after the first probe remains authoritative -----
+test_result_published_while_reaping_is_honored() {
+  local dir out rc
+  dir=$(new_case result-race)
+  setup_remote_case "$dir" sm1 slow-relaunch
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm1.status"
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ -e "$FM_FAKE_DIR/remote-relaunch-start" ] && [ ! -e "$FM_FAKE_DIR/result-race-injected" ]; then
+  result=$(find "$FM_HOME/state" -maxdepth 2 -name '0.result' -print -quit)
+  if [ -z "$result" ]; then
+    result_dir=$(find "$FM_HOME/state" -maxdepth 1 -type d -name '.secondmate-restart.*' -print -quit)
+    if [ -n "$result_dir" ]; then
+      printf 'restarted: sm1 on remote-mac (claude)\n' > "$result_dir/0.result"
+      : > "$FM_FAKE_DIR/result-race-injected"
+      printf 'Z\n'
+      exit 0
+    fi
+  fi
+fi
+exec /bin/ps "$@"
+SH
+  chmod +x "$dir/fakebin/ps"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "a result published while the worker is reaped must remain authoritative"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 on remote-mac (claude)" \
+    "the result published during the reap window was replaced with a worker failure"
+  assert_not_contains "$out" "exited before publishing" \
+    "the parent failed to recheck the worker result after wait"
+  pass "T14 a result published during reaping is honored"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -593,5 +630,6 @@ test_persist_waits_are_polled_together
 test_post_stop_failure_is_reported_unreached
 test_relaunches_do_not_block_persist_polling
 test_unpublished_worker_result_is_accounted_for
+test_result_published_while_reaping_is_honored
 
 echo "# all fm-secondmate-restart tests passed"

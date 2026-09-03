@@ -246,8 +246,8 @@ fi
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
 case "$NEW_EFFORT" in
-  ''|low|medium|high|xhigh|max) ;;
-  *) die "--effort must be one of low, medium, high, xhigh, max" ;;
+  ''|default|low|medium|high|xhigh|max) ;;
+  *) die "--effort must be one of default, low, medium, high, xhigh, max" ;;
 esac
 
 # --- exact task-id resolution ----------------------------------------------

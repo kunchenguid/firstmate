@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
-#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|-> <effort|->
+#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
@@ -218,9 +218,8 @@ cmd_launch() {
 # harness/model/effort come from the PARENT and are passed explicitly, because
 # config/secondmate-harness is deliberately not inherited into a secondmate home:
 # the copy on this host is a different home's file, so letting the control plane
-# re-resolve it here would silently drift the mate onto another runtime. `-`
-# means "the parent named no override", and the control plane then keeps what the
-# task already records.
+# re-resolve it here would silently drift the mate onto another runtime. `default`
+# explicitly clears an absent parent pin; `-` remains its compatibility spelling.
 cmd_relaunch() {
   local id=$1 harness=$2 model=$3 effort=$4
   local -a control_args
@@ -231,12 +230,12 @@ cmd_relaunch() {
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
-  case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$effort" in -|default|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
   case "$model" in *[[:space:]]*) die "invalid remote secondmate model: $model" ;; esac
   remote_endpoint_require "$id"
-  control_args=("$id" relaunch --harness "$harness")
-  [ "$model" = - ] || control_args+=(--model "$model")
-  [ "$effort" = - ] || control_args+=(--effort "$effort")
+  [ "$model" != - ] || model=default
+  [ "$effort" != - ] || effort=default
+  control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
   # The same launch-boundary facts cmd_launch establishes: the endpoint lives in
   # the dedicated fm-remote session, and the parent already owns both convergence
   # legs, so the host-local spawn must not re-sync or re-inherit against this
