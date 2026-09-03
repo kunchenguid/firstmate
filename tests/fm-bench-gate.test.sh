@@ -1218,13 +1218,13 @@ isolation.write_text(json.dumps({
 PY
 }
 
-write_archive() {  # <bench-dir> <src-repo>
-  local bench=$1 src=$2
-  python3 - "$bench" "$src" "$ROOT" <<'PY'
+write_archive() {  # <bench-dir> <src-repo> [png-mode]
+  local bench=$1 src=$2 png_mode=${3:-normal}
+  python3 - "$bench" "$src" "$ROOT" "$png_mode" <<'PY'
 import hashlib, json, shlex, shutil, struct, subprocess, sys, zlib
 from pathlib import Path
 
-bench, src, repo_root = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+bench, src, repo_root, png_mode = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
 plan = json.loads((bench / "benchmark.json").read_text())
 operator_secret = bench / "operator-secret.txt"
 operator_secret.write_text("not evaluator input\n")
@@ -1258,14 +1258,26 @@ shutil.rmtree(root, ignore_errors=True)
 for track_name, candidate, packet in work:
     slug = f"{track_name}-{packet}-{candidate}".lower().replace(" ", "-").replace(".", "-")
     (src / ".ignored-by-evaluator").write_text("not scored\n")
+    (src / "work-empty.json").write_text('{"value":""}\n')
     (src / "work.json").write_text(json.dumps({"value": slug}, indent=2, sort_keys=True) + "\n")
     (src / "work.ts").write_text(f'export default "{slug}";\n')
     (src / "work.css").write_text(f'.sample::after {{ content: "{slug}"; }}\n')
     (src / "work.html").write_text(f'<main data-sample="{slug}">candidate</main>\n')
+    link = src / "work-link.json"
+    link.unlink(missing_ok=True)
+    link.symlink_to("work.json")
+    empty_link = src / "work-empty-link.json"
+    empty_link.unlink(missing_ok=True)
+    empty_link.symlink_to("work-empty.json")
+    width = height = 20_000 if png_mode == "oversized" else 1
+    pixels = b"\x00" if png_mode == "oversized" else b"\x00\x20\x40\x60"
+    compressed = zlib.compress(pixels)
+    split = max(1, len(compressed) // 2)
     png_chunks = []
     for kind, payload in (
-        (b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)),
-        (b"IDAT", zlib.compress(b"\x00\x20\x40\x60")),
+        (b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)),
+        (b"IDAT", compressed[:split]),
+        (b"IDAT", compressed[split:]),
         (b"IEND", b""),
     ):
         png_chunks.append(
@@ -1354,8 +1366,8 @@ out=$(run_gate "$BENCH" restore-drill) || fail "the restore drill must pass: $ou
 assert_contains "$out" "restored into a fresh repository, and rebound to its archived tree" \
   "each bundle is really restored and rebound"
 assert_present "$BENCH/archive/restore-drill.json" "the drill writes its receipt"
-assert_contains "$out" "genuine copy retained its archived bytes" \
-  "the genuine replay scores the archived input while the strict evaluator accepts the minimal edit"
+assert_contains "$out" "shared one preparation pipeline" \
+  "the genuine and perturbed replays expose only the declared input difference"
 assert_contains "$out" "evaluator_dependence ok proven" \
   "the evaluator responds to its declared scored subset rather than the first restored file"
 python3 - "$BENCH" <<'PY' || fail "the receipt must record its bounded deterministic evaluator sample"
@@ -1637,6 +1649,96 @@ PY
 out=$(run_gate "$BENCH" cleanup-gate) || fail "mixed proven and unproven inputs must preserve cleanup proofs: $out"
 pass "TypeScript, CSS, HTML, and PNG prove dependence through pure-data declarations"
 
+BENCH="$TMP_ROOT/archive-metadata-evaluator"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-metadata-evaluator"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text("""#!/bin/sh
+if find "$1" -type f -newer "$1/work.json" -print -quit | grep -q .; then
+  printf 'metadata\n'
+else
+  printf 'perturbed\n'
+fi
+""")
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"metadata\n").hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "candidate metadata cannot reveal which differential input was perturbed"
+assert_contains "$out" "ignored declared scored input work.json" \
+  "identical prepared-tree metadata makes a content-blind evaluator input-invariant"
+assert_absent "$BENCH/archive/restore-drill.json" "a metadata-only evaluator writes no cleanup receipt"
+pass "differential evaluator trees expose identical normalized metadata"
+
+BENCH="$TMP_ROOT/archive-png-encoding-evaluator"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-png-encoding-evaluator"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text("""#!/bin/sh
+count=$(grep -ao IDAT "$1/work.png" | wc -l | tr -d ' ')
+if [ "$count" = 2 ]; then
+  printf 'genuine\n'
+else
+  printf 'perturbed\n'
+fi
+""")
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["scored_inputs"] = ["work.png"]
+record["evaluator_rerun"]["input_perturbations"] = {
+    "work.png": {"kind": "png-pixel", "x": 0, "y": 0, "channel": 0}
+}
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b"genuine\n").hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "PNG chunk layout cannot identify the differential role"
+assert_contains "$out" "does not match" \
+  "the genuine hash is measured over the same deterministic PNG encoding as its perturbation"
+assert_absent "$BENCH/archive/restore-drill.json" "a PNG-encoding classifier writes no cleanup receipt"
+pass "PNG differential copies share one deterministic encoding pipeline"
+
+BENCH="$TMP_ROOT/archive-overbroad-perturbation"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-overbroad-perturbation"
+python3 - "$BENCH" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+sample = sorted((Path(sys.argv[1]) / "archive").iterdir())[0]
+scoring = sample / "scoring.py"
+scoring.write_text('#!/bin/sh\ncat "$1/work-empty-link.json"\n')
+scoring.chmod(0o755)
+manifest = sample / "manifest.json"
+record = json.loads(manifest.read_text())
+record["files"]["scoring.py"] = hashlib.sha256(scoring.read_bytes()).hexdigest()
+record["evaluator_rerun"]["scored_inputs"] = ["work-empty-link.json"]
+record["evaluator_rerun"]["input_perturbations"] = {
+    "work-empty-link.json": {"kind": "json-value", "pointer": "/value"}
+}
+record["evaluator_rerun"]["result_hash"] = hashlib.sha256(b'{"value":""}\n').hexdigest()
+manifest.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "a perturbation that changes a path outside its declaration is refused"
+assert_contains "$out" "different sizes outside the declared perturbation" \
+  "the complete prepared-root metadata invariant catches a symlink-amplified write"
+assert_absent "$BENCH/archive/restore-drill.json" "an over-broad perturbation writes no cleanup receipt"
+pass "the prepared-tree byte and metadata invariant can fail closed"
+
 BENCH="$TMP_ROOT/archive-stateful-evaluator"
 write_plan "$BENCH"
 write_archive "$BENCH" "$TMP_ROOT/srcrepo-stateful-evaluator"
@@ -1800,6 +1902,26 @@ assert_contains "$out" "scored input perturbation is invalid for work.json" \
   "the gate proves the declared mutation applies to the restored input"
 assert_absent "$BENCH/archive/restore-drill.json" "an invalid perturbation pointer writes no cleanup receipt"
 pass "scored-input perturbation pointers are validated against restored content"
+
+BENCH="$TMP_ROOT/archive-oversized-png"
+write_plan "$BENCH"
+write_archive "$BENCH" "$TMP_ROOT/srcrepo-oversized-png" oversized
+python3 - "$BENCH" <<'PY'
+import json, sys
+from pathlib import Path
+p = sorted((Path(sys.argv[1]) / "archive").glob("*/manifest.json"))[0]
+d = json.loads(p.read_text())
+d["evaluator_rerun"]["scored_inputs"] = ["work.png"]
+d["evaluator_rerun"]["input_perturbations"] = {
+    "work.png": {"kind": "png-pixel", "x": 0, "y": 0, "channel": 0}
+}
+p.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+PY
+out=$(run_gate "$BENCH" restore-drill) && status=0 || status=$?
+expect_code 1 "$status" "an oversized PNG is refused before its compressed raster is allocated"
+assert_contains "$out" "safe decompression limit" "the bounded PNG refusal names its resource limit"
+assert_absent "$BENCH/archive/restore-drill.json" "an oversized PNG writes no cleanup receipt"
+pass "untrusted PNG scored inputs are bounded before decompression"
 
 BENCH="$TMP_ROOT/archive-executable-perturbation"
 write_plan "$BENCH"

@@ -46,7 +46,8 @@
 #   restore-drill     restore each bundle into a fresh repository, rebind its
 #                     tree, then rerun a deterministic archived evaluator twice
 #                     with its declared structured perturbation in confined,
-#                     independent, blinded scratch copies
+#                     independent scratch copies whose content and settable
+#                     metadata differ only at the declared input
 #   cleanup-gate      authorise candidate and snapshot cleanup only from a
 #                     passing drill still bound to the archive as it stands
 #
