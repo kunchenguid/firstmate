@@ -20,7 +20,10 @@ command -v node >/dev/null 2>&1 || { echo "skip: node not found"; exit 0; }
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
-  mkdir -p "$home/state" "$home/data"
+  # The board arms itself as a process-event source, which fails closed unless
+  # the state root is private; create it 0700 rather than at the caller's umask.
+  (umask 077; mkdir -p "$home/state") || fail "the home state root was not created"
+  mkdir -p "$home/data"
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" lavish-axi
   printf '%s\n' "$home"

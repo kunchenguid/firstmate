@@ -204,6 +204,17 @@ PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
 
+# Snapshot-sized JSON reaches jq on stdin rather than in argv, so `jq -s`
+# slurping is what validates it: an empty input is dropped silently and would
+# shift every later positional binding one slot. Prefix every slurping filter
+# with this guard so a missing, empty, or null input fails nonzero.
+jq_slurp_guard() {  # <expected-count>
+  printf 'if (length != %s) or any(.[]; . == null) then
+      error("fm-bearings-snapshot: expected %s non-null assembled json inputs, got \\(length) [\\([.[] | type] | join(","))]")
+    else . end | ' "$1" "$1"
+}
+JQ_SLURP_2=$(jq_slurp_guard 2)
+
 # Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
 repo_slug() {  # <url>
   printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
@@ -269,7 +280,7 @@ EOF
       cnt=$(printf '%s' "$repo_rows" | jq 'length')
       [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
       npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+      rows=$(printf '%s\n' "$rows" "$repo_rows" | jq -s "$JQ_SLURP_2"'.[0] + .[1]')
     done
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
@@ -293,7 +304,7 @@ case "$BEARINGS_TODAY" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
   *) BEARINGS_TODAY=$(date -u +%Y-%m-%d) ;;
 esac
-MODEL=$(printf '%s' "$SNAP" | jq \
+MODEL=$(printf '%s\n' "$SNAP" "$CANDIDATE_PRS" | jq -s \
   --arg home "$HOME_LABEL" \
   --arg now "$NOW" \
   --arg today "$BEARINGS_TODAY" \
@@ -320,9 +331,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_total "$PR_REPOS_TOTAL" \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
-  --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
-  def trunc($n): if . == null then null else
+  --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" "$JQ_SLURP_2"'
+  .[0] as $snapshot
+  | .[1] as $candidate_prs
+  | $snapshot
+  | def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def round_robin_landed($n):
     . as $groups

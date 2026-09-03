@@ -7,6 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
+BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
@@ -195,6 +196,170 @@ test_fixture_snapshot_json() {
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
+}
+
+# Large parsed backlog JSON must cross jq process boundaries through stdin, not
+# argv, whose per-argument limit is commonly 128 KiB on Linux.
+test_large_backlog_bypasses_argv_limit() {
+  local home out summary bearings
+  home=$(make_home large-backlog)
+  {
+    printf '## In flight\n\n## Queued\n'
+    printf '%s' '- [ ] huge-task - Large body (repo: firstmate) (kind: ship)'
+    printf '\n  '
+    head -c 300000 /dev/zero | tr '\0' x
+    printf '\n\n## Done\n'
+  } > "$home/data/backlog.md"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot rejected a backlog larger than the argv limit"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+      and .backlog.records[0].id == "huge-task"
+      and (.backlog.records[0].body_lines[0] | length) == 300000
+  ' >/dev/null || fail "large-backlog snapshot was not valid, complete JSON"
+
+  summary=$(FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "home summary rejected a backlog larger than the argv limit"
+  printf '%s' "$summary" | jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .valid == true
+      and .queued[0].id == "huge-task"
+  ' >/dev/null || fail "large-backlog home summary was not valid JSON"
+
+  bearings=$(FM_HOME="$home" "$BEARINGS" --json) \
+    || fail "bearings rejected a backlog larger than the argv limit"
+  printf '%s' "$bearings" | jq -e '.schema == "fm-bearings.v1"' >/dev/null \
+    || fail "large-backlog bearings output was not valid JSON"
+  pass "fleet and bearings snapshots accept backlog JSON larger than the argv limit"
+}
+
+# Agents append uncapped status lines, so the last event text is unbounded and
+# must reach jq on stdin like every other assembled payload. A status line past
+# the platform's per-argument limit must still produce one complete task record
+# whose fields are each bound to their own input.
+test_oversized_status_line_keeps_the_snapshot_whole() {
+  local home out big
+  home=$(make_home oversized-status-line)
+  mkdir -p "$home/projects/alpha-worktree"
+  fm_write_meta "$home/state/big-event.meta" \
+    "window=firstmate:fm-big-event" \
+    "worktree=$home/projects/alpha-worktree" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  big=$(head -c 300000 /dev/zero | tr '\0' x)
+  printf 'needs-decision: %s\n' "$big" > "$home/state/big-event.status"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a status line larger than the argv limit"
+  printf '%s' "$out" | jq -e --arg log "$home/state/big-event.status" '
+    .schema == "fm-fleet-snapshot.v1"
+      and (.tasks | length) == 1
+      and .tasks[0].paths.status_log.path == $log
+      and .tasks[0].paths.status_log.kind == "event_history"
+      and .tasks[0].paths.status_log.last_event.state == "needs-decision"
+      and (.tasks[0].paths.status_log.last_event.note | length) == 300000
+      and (.tasks[0].paths.status_log.last_event.note | startswith("xxx"))
+      and (.tasks[0].paths.status_log.last_event.raw | length) == 300016
+      and .tasks[0].paths.home == {path:null,present:false}
+      and .tasks[0].paths.report.present == false
+      and .tasks[0].current_state.source == "none"
+      and .tasks[0].hints.pending_decision == true
+      and (.tasks[0].hints.open_decisions | length) == 1
+      and .tasks[0].hints.open_decisions[0].verb == "needs-decision"
+      and (.tasks[0].hints.last_event_text | length) == 300016
+  ' >/dev/null || fail "an oversized status line shifted, truncated, or dropped task fields"
+  pass "an oversized status line still yields one complete, correctly bound task record"
+}
+
+# A secondmate publishes its own home summary, so the parent treats that file as
+# foreign input bounded only by FM_SNAPSHOT_SECONDMATE_MAX_BYTES (256 KiB), twice
+# the platform's per-argument limit. Its reason, state, and generated fields are
+# the strings that schema never truncates, so each has to reach jq on stdin.
+test_oversized_home_summary_fields_keep_the_snapshot_whole() {
+  local home mate out field
+  home=$(make_home oversized-summary-fields)
+  mate=$TMP_ROOT/oversized-summary-fields-mate
+  mkdir -p "$mate/state" "$mate/data" "$mate/projects" "$mate/config" "$mate/bin"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  printf 'mate\n' > "$mate/.fm-secondmate-home"
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] orphan-task - Orphan (repo: alpha) (kind: ship)\n'
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  printf -- '- mate - fixture domain (home: %s; scope: fixture; projects: sample; added 2026-08-26)\n' \
+    "$mate" > "$home/data/secondmates.md"
+  fm_write_meta "$home/state/mate.meta" \
+    "window=firstmate:fm-mate" \
+    "kind=secondmate" \
+    "harness=claude" \
+    "backend=tmux" \
+    "spawn_gen=spawn-mate" \
+    "home=$mate" \
+    "worktree=$mate"
+
+  FM_HOME="$mate" "$SNAPSHOT" --secondmate-home-summary > "$mate/state/published.json" \
+    || fail "could not publish the secondmate home-summary fixture"
+
+  # One field at a time: 200 KB each keeps every fixture inside the 256 KiB cap
+  # the parent enforces before it will read a published summary at all.
+  for field in reason state generated; do
+    jq -c --arg f "$field" '.[$f] = ("x" * 200000)' \
+      "$mate/state/published.json" > "$mate/state/home-summary.json" \
+      || fail "could not widen the published $field"
+
+    out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+      || fail "snapshot must survive a home-summary $field larger than the argv limit"
+    printf '%s' "$out" | jq -e --arg home "$mate" --arg f "$field" '
+      .secondmate_current.records[0] as $r
+      | (if $f == "reason" then ($r.current.reason | ltrimstr("structured home state invalid: "))
+         elif $f == "state" then $r.current.state
+         else $r.freshness.observed_at end) as $widened
+      | .schema == "fm-fleet-snapshot.v1"
+        and (.secondmate_current.records | length) == 1
+        and $r.home == $home
+        and $r.provenance.selected == "structured-home"
+        and $r.invalidity.kind == "orphan_in_flight"
+        and ($widened | length) == 200000
+        and ($widened | startswith("xxx"))
+        and (.secondmate_landed | type) == "object"
+    ' >/dev/null || fail "an oversized published $field shifted, truncated, or dropped secondmate fields"
+  done
+  pass "oversized published home-summary strings still yield a complete secondmate record"
+}
+
+# A task's PR url is discovered by scanning its status log, so its length is
+# bounded only by the longest unbroken non-whitespace run an agent ever appends.
+# The discovered url is user-visible, so it must survive whole.
+test_oversized_status_pr_url_keeps_the_snapshot_whole() {
+  local home out pad
+  home=$(make_home oversized-pr-url)
+  mkdir -p "$home/projects/alpha-worktree"
+  fm_write_meta "$home/state/pr-task.meta" \
+    "window=firstmate:fm-pr-task" \
+    "worktree=$home/projects/alpha-worktree" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship"
+  pad=$(head -c 200000 /dev/zero | tr '\0' x)
+  printf 'done: https://github.com/kunchenguid/%s/pull/7 shipped\n' "$pad" > "$home/state/pr-task.status"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a status-log PR url larger than the argv limit"
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 1
+      and .tasks[0].id == "pr-task"
+      and .tasks[0].pr.source == "status_event"
+      and (.tasks[0].pr.url
+           | ltrimstr("https://github.com/kunchenguid/") | rtrimstr("/pull/7") | length) == 200000
+      and .tasks[0].paths.status_log.last_event.state == "done"
+      and .tasks[0].paths.home == {path:null,present:false}
+  ' >/dev/null || fail "an oversized status-log PR url shifted, truncated, or dropped task fields"
+  pass "an oversized status-log PR url still yields a complete task record"
 }
 
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
@@ -899,6 +1064,10 @@ EOF
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
+test_large_backlog_bypasses_argv_limit
+test_oversized_home_summary_fields_keep_the_snapshot_whole
+test_oversized_status_line_keeps_the_snapshot_whole
+test_oversized_status_pr_url_keeps_the_snapshot_whole
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
