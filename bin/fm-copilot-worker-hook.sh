@@ -50,6 +50,13 @@ copilot_worker_binding_matches() {
   [ "$COPILOT_WORKER_BINDING_SESSION" = "$session" ]
 }
 
+copilot_worker_clear_binding() {
+  local path=$1
+  copilot_worker_read_binding "$path" || return 0
+  [ "$COPILOT_WORKER_BINDING_GEN" = "$GEN" ] || return 0
+  rm -f -- "$path"
+}
+
 copilot_worker_bind_session() {
   local path=$1 session=$2 tmp
   if copilot_worker_binding_matches "$path" "$session"; then
@@ -79,12 +86,12 @@ copilot_worker_bind_session() {
 
 copilot_worker_apply_busy() {
   "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE_DIR" "$ID" busy \
-    --gen "$GEN" --source copilot-hook --event "$EVENT" >/dev/null 2>&1 || true
+    --gen "$GEN" --source copilot-hook --event "$EVENT" >/dev/null 2>&1
 }
 
 copilot_worker_apply_idle() {
   "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE_DIR" "$ID" idle \
-    --gen "$GEN" --source copilot-hook --event "$EVENT" >/dev/null 2>&1 || true
+    --gen "$GEN" --source copilot-hook --event "$EVENT" >/dev/null 2>&1
 }
 
 payload=$(cat 2>/dev/null || true)
@@ -97,16 +104,20 @@ binding=$(copilot_worker_binding_path) || exit 0
 case "$EVENT" in
   user-prompt-submitted)
     copilot_worker_bind_session "$binding" "$session" || exit 0
-    copilot_worker_apply_busy
+    copilot_worker_apply_busy || exit 0
     ;;
   agent-stop)
     copilot_worker_binding_matches "$binding" "$session" || exit 0
-    [ -n "$TURNEND" ] && touch "$TURNEND" 2>/dev/null || true
-    copilot_worker_apply_idle
+    copilot_worker_apply_idle || exit 0
+    if [ -n "$TURNEND" ] && ! touch "$TURNEND" 2>/dev/null; then
+      exit 0
+    fi
+    copilot_worker_clear_binding "$binding" || exit 0
     ;;
   session-end)
     copilot_worker_binding_matches "$binding" "$session" || exit 0
-    copilot_worker_apply_idle
+    copilot_worker_apply_idle || exit 0
+    copilot_worker_clear_binding "$binding" || exit 0
     ;;
   *) exit 2 ;;
 esac
